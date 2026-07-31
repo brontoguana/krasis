@@ -36,6 +36,247 @@ __device__ __forceinline__ void apply_swiglu_limit(float &silu_gate, float &up, 
     }
 }
 
+// ── CPU-layout INT4 -> Marlin repack ─────────────────────────────────
+//
+// Genuine layout conversion used by the synthetic cache-format cost probe.
+// The canonical input is packed [N, K/8] (eight unsigned INT4 values/u32);
+// the output is Marlin packed [K/16, 2*N].  Each block converts two adjacent
+// 16-wide K tiles for one 64-row N tile.  Sixty-four 16-byte loads bring the
+// source tile into shared memory and 128 coalesced stores write each Marlin
+// tile.  The implementation uses only Ampere-safe integer operations.
+
+extern "C" __global__ void cpu_int4_to_marlin_repack_batched(
+    const unsigned long long* __restrict__ input_ptrs,
+    unsigned char* __restrict__ output,
+    int batch,
+    int n,
+    int k,
+    unsigned long long output_stride
+) {
+    int expert = (int)blockIdx.z;
+    if (expert >= batch || n <= 0 || k <= 0) return;
+
+    int k_pair = (int)blockIdx.x;
+    int n_chunk = (int)blockIdx.y;
+    int k0 = k_pair * 32;
+    int n0 = n_chunk * 64;
+    if (k0 >= k || n0 >= n) return;
+
+    const unsigned int* input =
+        reinterpret_cast<const unsigned int*>(input_ptrs[expert]);
+    unsigned int* out = reinterpret_cast<unsigned int*>(
+        output + (unsigned long long)expert * output_stride);
+    int packed_k = k >> 3;
+
+    __shared__ uint4 source_rows[64];
+    int tid = (int)threadIdx.x;
+    if (tid < 64) {
+        const uint4* row_src = reinterpret_cast<const uint4*>(
+            input + (n0 + tid) * packed_k + (k0 >> 3));
+        source_rows[tid] = *row_src;
+    }
+    __syncthreads();
+
+    if (tid >= 128) return;
+    int out_cols = 2 * n;
+    // The inverse Marlin permutation has a fixed algebraic structure for one
+    // output word. Its eight nibbles come from two canonical N rows (separated
+    // by 8) and two adjacent K positions in each of the low/high groups of 8.
+    // Computing these four words once removes eight general permutation/index
+    // calculations and all dynamic shared-memory gathers per output.
+    int canonical_n0 = (tid & 3) * 16 + (tid >> 4);
+    int canonical_n1 = canonical_n0 + 8;
+    int nibble_shift = ((tid >> 2) & 3) * 8;
+    const unsigned int* row0 =
+        reinterpret_cast<const unsigned int*>(&source_rows[canonical_n0]);
+    const unsigned int* row1 =
+        reinterpret_cast<const unsigned int*>(&source_rows[canonical_n1]);
+    #pragma unroll
+    for (int half = 0; half < 2; ++half) {
+        int kt = k_pair * 2 + half;
+        if (kt * 16 >= k) continue;
+        int word_idx = half * 2;
+        unsigned int r0_lo = row0[word_idx];
+        unsigned int r0_hi = row0[word_idx + 1];
+        unsigned int r1_lo = row1[word_idx];
+        unsigned int r1_hi = row1[word_idx + 1];
+        unsigned int even_mask = 0xFu << nibble_shift;
+        unsigned int odd_shift = nibble_shift + 4;
+        unsigned int word =
+            ((r0_lo & even_mask) >> nibble_shift)
+            | (((r0_hi & even_mask) >> nibble_shift) << 4)
+            | (((r1_lo & even_mask) >> nibble_shift) << 8)
+            | (((r1_hi & even_mask) >> nibble_shift) << 12)
+            | (((r0_lo >> odd_shift) & 0xFu) << 16)
+            | (((r0_hi >> odd_shift) & 0xFu) << 20)
+            | (((r1_lo >> odd_shift) & 0xFu) << 24)
+            | (((r1_hi >> odd_shift) & 0xFu) << 28);
+        out[kt * out_cols + n_chunk * 128 + tid] = word;
+    }
+}
+
+extern "C" __global__ void cpu_bf16_scales_to_marlin_repack_batched(
+    const unsigned long long* __restrict__ input_ptrs,
+    unsigned char* __restrict__ output,
+    int batch,
+    int n,
+    int groups,
+    int grouped,
+    unsigned long long output_stride
+) {
+    int expert = (int)blockIdx.y;
+    if (expert >= batch || n <= 0 || groups <= 0) return;
+    const unsigned short* input =
+        reinterpret_cast<const unsigned short*>(input_ptrs[expert]);
+    unsigned short* out = reinterpret_cast<unsigned short*>(
+        output + (unsigned long long)expert * output_stride);
+    int total = n * groups;
+    int base = ((int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x) * 8;
+    int perm_len = grouped ? 64 : 32;
+    #pragma unroll
+    for (int lane = 0; lane < 8; ++lane) {
+        int dst = base + lane;
+        if (dst >= total) continue;
+        int local = dst % perm_len;
+        int source_local;
+        if (grouped) {
+            source_local = (local >> 3) + 8 * (local & 7);
+        } else {
+            const int offsets[8] = {0, 1, 8, 9, 16, 17, 24, 25};
+            source_local = 2 * (local >> 3) + offsets[local & 7];
+        }
+        int transposed = dst - local + source_local;
+        int group = transposed / n;
+        int row = transposed - group * n;
+        out[dst] = input[row * groups + group];
+    }
+}
+
+// Launch-fused expert repack. One grid converts both expert matrices and both
+// scale arrays. This avoids four launches for the one/two-expert cold batches
+// produced by high HCS coverage.
+extern "C" __global__ void cpu_expert_to_marlin_repack_batched(
+    const unsigned long long* __restrict__ w13_ptrs,
+    const unsigned long long* __restrict__ w13s_ptrs,
+    const unsigned long long* __restrict__ w2_ptrs,
+    const unsigned long long* __restrict__ w2s_ptrs,
+    unsigned char* __restrict__ output,
+    int batch,
+    int w13_n,
+    int w13_k,
+    int w2_n,
+    int w2_k,
+    int group_size,
+    unsigned long long output_stride,
+    unsigned long long w13s_offset,
+    unsigned long long w2_offset,
+    unsigned long long w2s_offset
+) {
+    int expert = (int)blockIdx.y;
+    if (expert >= batch || group_size <= 0) return;
+
+    int w13_n_chunks = w13_n >> 6;
+    int w13_blocks = w13_n_chunks * (w13_k >> 5);
+    int w2_n_chunks = w2_n >> 6;
+    int w2_blocks = w2_n_chunks * (w2_k >> 5);
+    int linear_block = (int)blockIdx.x;
+    if (linear_block >= w13_blocks + w2_blocks) return;
+
+    bool use_w2 = linear_block >= w13_blocks;
+    int matrix_block = use_w2 ? linear_block - w13_blocks : linear_block;
+    int n_chunks = use_w2 ? w2_n_chunks : w13_n_chunks;
+    int n = use_w2 ? w2_n : w13_n;
+    int k = use_w2 ? w2_k : w13_k;
+    int k_pair = matrix_block / n_chunks;
+    int n_chunk = matrix_block - k_pair * n_chunks;
+    int k0 = k_pair * 32;
+    int n0 = n_chunk * 64;
+
+    const unsigned long long* weight_ptrs = use_w2 ? w2_ptrs : w13_ptrs;
+    const unsigned int* input =
+        reinterpret_cast<const unsigned int*>(weight_ptrs[expert]);
+    unsigned long long matrix_offset = use_w2 ? w2_offset : 0;
+    unsigned int* out = reinterpret_cast<unsigned int*>(
+        output + (unsigned long long)expert * output_stride + matrix_offset);
+    int packed_k = k >> 3;
+
+    __shared__ uint4 source_rows[64];
+    int tid = (int)threadIdx.x;
+    if (tid < 64) {
+        const uint4* row_src = reinterpret_cast<const uint4*>(
+            input + (n0 + tid) * packed_k + (k0 >> 3));
+        source_rows[tid] = *row_src;
+    }
+    __syncthreads();
+
+    if (tid < 128) {
+        int canonical_n0 = (tid & 3) * 16 + (tid >> 4);
+        int canonical_n1 = canonical_n0 + 8;
+        int nibble_shift = ((tid >> 2) & 3) * 8;
+        const unsigned int* row0 =
+            reinterpret_cast<const unsigned int*>(&source_rows[canonical_n0]);
+        const unsigned int* row1 =
+            reinterpret_cast<const unsigned int*>(&source_rows[canonical_n1]);
+        #pragma unroll
+        for (int half = 0; half < 2; ++half) {
+            int kt = k_pair * 2 + half;
+            int word_idx = half * 2;
+            unsigned int r0_lo = row0[word_idx];
+            unsigned int r0_hi = row0[word_idx + 1];
+            unsigned int r1_lo = row1[word_idx];
+            unsigned int r1_hi = row1[word_idx + 1];
+            unsigned int even_mask = 0xFu << nibble_shift;
+            unsigned int odd_shift = nibble_shift + 4;
+            unsigned int word =
+                ((r0_lo & even_mask) >> nibble_shift)
+                | (((r0_hi & even_mask) >> nibble_shift) << 4)
+                | (((r1_lo & even_mask) >> nibble_shift) << 8)
+                | (((r1_hi & even_mask) >> nibble_shift) << 12)
+                | (((r0_lo >> odd_shift) & 0xFu) << 16)
+                | (((r0_hi >> odd_shift) & 0xFu) << 20)
+                | (((r1_lo >> odd_shift) & 0xFu) << 24)
+                | (((r1_hi >> odd_shift) & 0xFu) << 28);
+            out[kt * (2 * n) + n_chunk * 128 + tid] = word;
+        }
+    }
+
+    // The weight grid has far more threads than the two scale arrays require.
+    // Give each grid thread at most one scale element so scale conversion adds
+    // no separate launch and remains distributed across resident blocks.
+    int w13_groups = w13_k / group_size;
+    int w2_groups = w2_k / group_size;
+    int w13_scale_total = w13_n * w13_groups;
+    int w2_scale_total = w2_n * w2_groups;
+    int scale_idx = linear_block * (int)blockDim.x + tid;
+    if (scale_idx < w13_scale_total + w2_scale_total) {
+        bool scale_w2 = scale_idx >= w13_scale_total;
+        int dst = scale_w2 ? scale_idx - w13_scale_total : scale_idx;
+        int scale_n = scale_w2 ? w2_n : w13_n;
+        int groups = scale_w2 ? w2_groups : w13_groups;
+        int scale_k = scale_w2 ? w2_k : w13_k;
+        int grouped = group_size < scale_k;
+        int perm_len = grouped ? 64 : 32;
+        int local = dst % perm_len;
+        int source_local;
+        if (grouped) {
+            source_local = (local >> 3) + 8 * (local & 7);
+        } else {
+            const int offsets[8] = {0, 1, 8, 9, 16, 17, 24, 25};
+            source_local = 2 * (local >> 3) + offsets[local & 7];
+        }
+        int transposed = dst - local + source_local;
+        int group = transposed / scale_n;
+        int row = transposed - group * scale_n;
+        const unsigned long long* scale_ptrs = scale_w2 ? w2s_ptrs : w13s_ptrs;
+        const unsigned short* scale_input =
+            reinterpret_cast<const unsigned short*>(scale_ptrs[expert]);
+        unsigned long long scale_offset = scale_w2 ? w2s_offset : w13s_offset;
+        unsigned short* scale_output = reinterpret_cast<unsigned short*>(
+            output + (unsigned long long)expert * output_stride + scale_offset);
+        scale_output[dst] = scale_input[row * groups + group];
+    }
+}
+
 // ── HQQ4 Dequant ───────────────────────────────────────────────────────
 
 extern "C" __global__ void hqq4_dequant_bf16(

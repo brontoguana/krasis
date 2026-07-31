@@ -1,5 +1,7 @@
 pub mod adaptive_cold_drop;
 pub mod chat_template;
+pub mod cpu_tail;
+pub mod cpu_tail_calibrate;
 pub mod decode;
 pub mod draft_model;
 pub mod gguf;
@@ -11,6 +13,7 @@ pub mod kernel;
 pub mod moe;
 pub mod numa;
 pub mod server;
+mod synthetic_repack;
 pub mod syscheck;
 pub mod text_only_messages;
 pub mod vram_monitor;

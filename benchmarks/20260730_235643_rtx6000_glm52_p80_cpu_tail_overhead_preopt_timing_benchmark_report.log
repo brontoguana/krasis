@@ -1,0 +1,44 @@
+================================================================
+Krasis Benchmark — 2026-07-31 00:13:40
+================================================================
+Model:            GLM-5.2
+Architecture:     glm_moe_dsa, 78 layers, 256 experts, top-8
+PP Partition:     [78] (1 GPUs)
+
+Hardware:
+  CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
+  RAM:            995 GB total, 642.1 GB used by process
+  GPU 0 (physical 1): NVIDIA RTX PRO 6000 Blackwell Workstation Edition (97887 MB), 11255 MB allocated
+
+Quantization:
+  GPU experts:    INT4 (Marlin)
+  CPU experts:    INT4
+  Attention:      HQQ4
+  Shared expert:  INT8
+  Dense MLP:      INT8
+  LM head:        INT8
+  KV cache:       k4v4
+
+Strategy:
+  Layer group size: 2 (layer_grouped(2))
+  Prefill threshold: 1
+  Mode:           gpu_decode (layer_grouped(2))
+
+Prefill (internal) — 1 runs at different lengths:
+  Run 1:  45.1 tok/s (1,000 tokens in 22196.1ms)
+  Best:   45.1 tok/s (1,000 tokens)
+
+Decode (internal) — 50/100/250 tokens, 3 separate prompts:
+   50 tokens: 5.20 tok/s (192.4ms/tok)
+  100 tokens: 5.30 tok/s (188.5ms/tok)
+  250 tokens: 5.24 tok/s (190.8ms/tok)
+  Best:    5.30 tok/s
+  HCS:     3887/19200 experts (20.2%)
+  Min free VRAM: 1178 MB
+
+Round trip (network) — 50/100/250 tokens via HTTP:
+   50 tokens: 9.31 tok/s (21.70s total)
+  100 tokens: 6.63 tok/s (31.77s total)
+  250 tokens: 5.59 tok/s (61.20s total)
+  Best:    9.31 tok/s
+================================================================

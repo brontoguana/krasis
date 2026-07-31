@@ -1,5 +1,76 @@
 # Krasis Benchmark Results
 
+## GLM-5.2 / CPU-tail merge gate - 2026-07-31
+
+The exact staged source passed `./dev build`, `./dev test-kernels cpu_tail`,
+`./dev test-kernels marlin_cpu`, `./dev model-config-test` (10/10), and
+`./dev launcher-test` (24/24) with the RTX A4500 Lore service left running and
+the free RTX PRO 6000 selected for CUDA tests. Protected `testconfigs/` files
+were unchanged. [Full gate log](20260731_glm52_cpu_tail_merge_final_gates.log).
+
+## GLM-5.2 two-worker CPU-tail experiment - 2026-07-31
+
+Purpose: determine whether exactly one additional persistent CPU-tail worker
+produces a net decode gain after measuring its simultaneous host-memory and
+GPU-DMA contention. CPU-tail, the transposed duplicate tier, and worker 2 were
+all explicit opt-ins. No chained claims, third worker, or HCS/cache-layout
+change was included.
+
+The corrected standalone sweep compared every two-team row with a persistent
+single-team row using the same primary CPU set and live DMA load. The first raw
+artifact is retained but invalidated because it compared unlike single- and
+two-team execution cadences.
+
+| Compact split | Worker 0 / 1 mean latency | Live DMA | DMA loss | Worker 1 predicted absorption | Predicted total net saving |
+|---------------|---------------------------:|---------:|---------:|------------------------------:|---------------------------:|
+| 16 + 2 | 1.389 / 3.729 ms | 25.248 GiB/s | 1.82% | 0.104 experts/token | 15.902 ms/token |
+| 16 + 4 | 1.418 / 2.687 ms | 24.974 GiB/s | 2.88% | 1.303 experts/token | 15.186 ms/token |
+| 16 + 8 | 1.498 / 2.137 ms | 24.321 GiB/s | 5.42% | 4.743 experts/token | 9.172 ms/token |
+| 16 + 16 | 1.649 / 1.556 ms | 22.969 GiB/s | 10.68% | 11.040 experts/token | 4.820 ms/token |
+| 32 + 8 | 1.355 / 2.094 ms | 24.217 GiB/s | 5.83% | 4.743 experts/token | 15.473 ms/token |
+
+The optimizer selected compact `16+2` on disjoint CPU sets
+`0-7,40-47` and `48-49`. Its predicted incremental value over the exact
+matched single-team row was only `0.161992 ms/token`, so the adjacent model A/B
+was the acceptance gate.
+
+| Run | Prefill | Decode 50 / 100 / 250 | Sustained saved traffic | Demand H2D | Min free VRAM | Evidence |
+|-----|--------:|-----------------------:|------------------------:|-----------:|--------------:|----------|
+| Two-worker, timing enabled | 44.9 tok/s | 6.15 / 6.25 / 5.94 tok/s | 468.908 MiB/token | 23.48 GB/s | 1,178 MiB | [launcher](20260731_052821_rtx6000_glm52_p80_75_10_cpu_tail_two_worker_timing_launcher.log), [stdout](20260731_052821_rtx6000_glm52_p80_75_10_cpu_tail_two_worker_timing_stdout.log), [report](20260731_052821_rtx6000_glm52_p80_75_10_cpu_tail_two_worker_timing_report.log) |
+| Fresh single-worker control, timing disabled | 45.1 tok/s | **6.30 / 6.33 / 6.06 tok/s** | 445.053 MiB/token | unavailable with timing off | 1,178 MiB | [launcher](20260731_054759_rtx6000_glm52_p80_75_10_cpu_tail_single_worker_speed_launcher.log), [stdout](20260731_054759_rtx6000_glm52_p80_75_10_cpu_tail_single_worker_speed_stdout.log), [report](20260731_054759_rtx6000_glm52_p80_75_10_cpu_tail_single_worker_speed_report.log) |
+| Two-worker candidate, timing disabled | 45.1 tok/s | **6.17 / 6.13 / 5.96 tok/s** | 470.399 MiB/token | unavailable with timing off | 1,178 MiB | [launcher](20260731_060742_rtx6000_glm52_p80_75_10_cpu_tail_two_worker_speed_launcher.log), [stdout](20260731_060742_rtx6000_glm52_p80_75_10_cpu_tail_two_worker_speed_stdout.log), [report](20260731_060742_rtx6000_glm52_p80_75_10_cpu_tail_two_worker_speed_report.log) |
+
+The timing-disabled two-worker deltas versus the adjacent same-source
+single-worker control were `-2.06% / -3.16% / -1.65%`. In the instrumented
+249-token row, worker 0 won `6,208/11,691` attempts (`53.10%`) at
+`1.338685 ms/attempt` and saved `462.795 MiB/token`; worker 1 won only
+`82/5,525` (`1.48%`) at `3.051232 ms/attempt` and saved
+`6.113 MiB/token`. The timing-disabled sustained row likewise gave worker 1
+only `135/5,519` wins and `10.064 MiB/token`.
+
+Frozen llama-witness validation passed the discrete gate: 7/8 argmax and 8/8
+top-10 containment. Against the accepted pruning-only comparison, later-token
+selected-logprob movement was `0.044718` mean and `0.240931` maximum: the mean
+is within the established `0.055885` boundary, while the maximum exceeds the
+established `0.230213` boundary by `0.010718`. Evidence:
+[launcher](20260731_062714_rtx6000_glm52_p80_75_10_cpu_tail_two_worker_witness_launcher.log),
+[summary](20260731_062714_rtx6000_glm52_p80_75_10_cpu_tail_two_worker_witness_summary.json),
+[report](20260731_062714_rtx6000_glm52_p80_75_10_cpu_tail_two_worker_witness_report.html),
+and [server](20260731_062714_rtx6000_glm52_p80_75_10_cpu_tail_two_worker_witness_server.log).
+
+Calibration and gate evidence:
+[invalidated raw calibration](20260731_rtx6000_glm52_cpu_tail_two_team_calibration.json),
+[corrected matched calibration](20260731_rtx6000_glm52_cpu_tail_two_team_calibration_matched.json),
+[calibration log](20260731_rtx6000_glm52_cpu_tail_two_team_calibration_matched.log),
+and [final gates](20260731_cpu_tail_two_worker_final_gates.log).
+
+Conclusion: worker 2 fails the net acceptance criterion. It increases removed
+weight traffic, but host-memory/DMA contention and a slow, rarely successful
+second team more than consume the saving. Worker 3 is not justified: its
+queue-only ceiling is at most 88 MiB/token, below worker 2's 224 MiB/token
+ceiling, while worker 2 realized only 6-10 MiB/token and already regressed
+decode. No third-worker implementation was attempted.
+
 ## GLM-5.2 first sparse DSA benchmark - 2026-07-29
 
 Purpose: establish the first timing-disabled performance baseline for the
@@ -213,6 +284,424 @@ not a production/default recommendation. The `0.414816` maximum later-token
 log-probability shift makes broader held-out quality or perplexity evidence
 mandatory before accepting a policy that omits about 3.8% routed mass in
 sustained decode.
+
+### GLM-5.2 p80 75/10 opportunistic CPU-tail experiment
+
+Purpose: test the proposed double-ended cold queue end to end. Adaptive
+cold-mass pruning runs first. The GPU copies surviving cold experts from the
+front while one persistent Rust worker attempts the final survivor from the
+existing production Marlin cache. A CPU miss falls through to normal H2D; the
+GPU does not wait beyond the front-DMA and split-hot deadline.
+
+Commands:
+
+```text
+KRASIS_SPLIT_EXPERT_LAUNCH=1 KRASIS_CPU_TAIL_RACE=1 \
+  ./dev benchmark \
+  tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf \
+  --adaptive-cold-mass-pruning 75/10 --timing
+
+KRASIS_SPLIT_EXPERT_LAUNCH=1 KRASIS_CPU_TAIL_RACE=1 \
+  ./dev benchmark \
+  tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf \
+  --adaptive-cold-mass-pruning 75/10
+```
+
+| Mode | Prefill internal | 50-token decode | 100-token decode | 250-token decode | Round trip 50/100/250 | HCS coverage | Min free VRAM |
+|------|-----------------:|----------------:|-----------------:|-----------------:|-----------------------:|-------------:|--------------:|
+| Adaptive p80 75/10 + split control | 44.2 tok/s | 5.79 tok/s | 5.98 tok/s | 5.72 tok/s | 9.68 / 7.34 / 6.29 tok/s | 3887/19200 | 1,178 MB |
+| Adaptive p80 75/10 + split + CPU tail | 45.0 tok/s | 5.99 tok/s | 6.00 tok/s | 5.88 tok/s | 10.19 / 7.61 / 6.31 tok/s | 3887/19200 | 1,178 MB |
+| CPU-tail delta | run variance | +3.5% | +0.3% | +2.8% | +5.3% / +3.7% / +0.3% | unchanged | unchanged |
+
+The first generic Marlin reader was a measured negative: it won zero of
+8,567 warmup attempts and zero of 5,349 diagnostic attempts. Demand H2D
+remained 25.61 GB/s, localizing the failure to CPU decoding of the
+GPU-oriented Marlin permutation. Replacing the per-value inverse lookup with
+the fixed algebraic Marlin tile pattern changed the result decisively:
+
+- all-cold calibration won 2,325/2,325 attempts and saved
+  1,348.682 MiB/token;
+- the timing-enabled sustained row won 2,725/11,002 attempts (24.77%), saved
+  203.144 MiB/token, and measured demand H2D at 24.57 GB/s;
+- the timing-disabled sustained row won 2,643/11,076 attempts (23.86%) and
+  saved 197.031 MiB/token;
+- timing-disabled wall fell from 174.9 to 170.2 ms/token, a 4.7 ms reduction;
+- no HCS budget skip, no-slot event, or copy failure occurred.
+
+This validates the opportunistic pipeline, but one CPU worker is a modest
+optimization rather than a path to 10 tok/s by itself.
+
+The frozen 2,682-token/eight-token witness remained at the accepted boundary:
+7/8 teacher-forced argmaxes, four contiguously, the disagreement at rank two,
+and 8/8 witness-token top-10 containment. Native token IDs, ranks, text, and
+first-token top-10 probabilities matched the pruning-only p80 run. Across the
+seven later positions, selected-token log probabilities moved by `0.038583`
+mean and `0.178039` maximum absolute delta versus pruning-only p80. Versus
+exact p80, the corresponding values were `0.090124` mean and `0.414816`
+maximum. The request won 91/313 CPU tails (29.07%), saved
+241.312 MiB/token, and reached 636 MiB free against the 600 MiB margin.
+
+CPU-tail uses INT16-quantized CPU activation math, so it remains an explicit
+approximate, quality-gated mode even without cold-mass pruning. It is not a
+default recommendation from this single witness profile.
+
+Evidence:
+
+- Timing diagnostic [report](20260729_234622_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_timing_benchmark_report.log),
+  [stdout](20260729_234622_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_timing_benchmark_stdout.log),
+  and [server](20260729_234622_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_timing_krasis.log)
+- Timing-disabled [report](20260730_000359_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_benchmark_report.log),
+  [stdout](20260730_000359_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_benchmark_stdout.log),
+  and [server](20260730_000359_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_krasis.log)
+- Witness [summary](20260730_002201_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_witness_summary.json),
+  [HTML report](20260730_002201_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_witness_report.html),
+  [stdout](20260730_002201_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_witness_stdout.log),
+  and [server](20260730_002201_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_witness_krasis.log)
+
+### GLM-5.2 p80 75/10 temporary transposed CPU-tail tier
+
+Purpose: measure whether the CPU-friendly expert layout provides enough
+additional decode throughput to justify a future single CPU-format host cache.
+This explicitly temporary, default-off experiment leaves the authoritative
+Marlin cache and every GPU/prefill/HCS path unchanged. After the startup p80
+selection, it builds a Rust-owned transposed RAM duplicate for every routed
+expert outside the 3,900-entry resident pool.
+
+Commands:
+
+```text
+KRASIS_SPLIT_EXPERT_LAUNCH=1 KRASIS_CPU_TAIL_RACE=1 \
+KRASIS_CPU_TAIL_TRANSPOSED=1 \
+  ./dev benchmark \
+  tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf \
+  --adaptive-cold-mass-pruning 75/10 --timing
+
+KRASIS_SPLIT_EXPERT_LAUNCH=1 KRASIS_CPU_TAIL_RACE=1 \
+KRASIS_CPU_TAIL_TRANSPOSED=1 \
+  ./dev benchmark \
+  tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf \
+  --adaptive-cold-mass-pruning 75/10
+```
+
+| Mode | Prefill internal | 50-token decode | 100-token decode | 250-token decode | Round trip 50/100/250 | Min free VRAM |
+|------|-----------------:|----------------:|-----------------:|-----------------:|-----------------------:|--------------:|
+| Adaptive p80 75/10 + split | 44.2 tok/s | 5.79 tok/s | 5.98 tok/s | 5.72 tok/s | 9.68 / 7.34 / 6.29 tok/s | 1,178 MB |
+| + Marlin-direct CPU tail | 45.0 tok/s | 5.99 tok/s | 6.00 tok/s | 5.88 tok/s | 10.19 / 7.61 / 6.31 tok/s | 1,178 MB |
+| + temporary transposed tier | 44.7 tok/s | 6.21 tok/s | 6.26 tok/s | 6.07 tok/s | 10.73 / 7.71 / 6.49 tok/s | 1,178 MB |
+| Transposed delta vs Marlin tail | run variance | +3.67% | +4.33% | +3.23% | +5.30% / +1.31% / +2.85% | unchanged |
+| Transposed delta vs pruning only | run variance | +7.25% | +4.68% | +6.12% | +10.85% / +5.04% / +3.18% | unchanged |
+
+The runtime derived the complete tier from actual tensors: 15,300
+non-resident experts, 297,802,137,600 bytes (277.349854 GiB), versus 3,900
+startup residents. Admission observed about 560 GiB MemAvailable and required
+an additional proportional 27.735 GiB headroom. Conversion took 84.949 seconds
+in the first diagnostic run, 53.645 seconds in the warm-cache speed run, and
+75.258 seconds in the witness run. The allocation and RTX 6000 state were
+released after each run.
+
+In the timing-enabled sustained row, transposed duplicates covered
+9,789/11,321 claims (86.468%). The transposed reader won 5,430/9,789
+(55.470%) at 1.366352 ms/attempt, while Marlin fallback won 358/1,532
+(23.368%) at 1.717581 ms/attempt. Total saved traffic was
+431.484940 MiB/token. Concurrent demand H2D measured 23.1-23.9 GB/s, below the
+roughly 25-26 GB/s control range, so the timing-disabled wall is the
+authoritative speed result.
+
+The timing-disabled sustained row won 5,886/11,072 attempts (53.161%).
+Transposed coverage was 86.994%, transposed wins were 5,515/9,632 (57.257%),
+Marlin fallback wins were 371/1,440 (25.764%), and total saved traffic was
+438.790663 MiB/token. Sustained wall fell from 170.1 to 164.9 ms/token versus
+Marlin-only CPU tail and from 174.8 ms/token versus pruning-only. Timing fields
+were zero, HCS had no budget skips/no-slot events/copy failures, and prefill
+and the 1,178 MiB decode floor remained unchanged.
+
+The frozen 2,682-token/eight-token witness kept the same discrete boundary as
+both prior approximate modes: 7/8 argmaxes, four contiguously; the sole
+disagreement remained rank two, all 8 witness tokens remained in native top
+10, and native token IDs/ranks/text plus first-token top-10 IDs/probabilities
+were unchanged. The request won 188/309 CPU tails (60.841%); transposed
+coverage was 92.233%, transposed wins were 184/285 (64.561%), and saved
+traffic was 498.535714 MiB/token. Its decode low-water was 1,118 MiB.
+
+The extra substitutions measurably changed the distribution. Across the seven
+later positions, selected-token log probabilities moved by 0.055885 mean and
+0.230213 maximum absolute delta versus pruning-only p80, compared with
+0.038583/0.178039 for Marlin-only CPU tail. Versus exact p80, the transposed
+values were 0.096616 mean and 0.414816 maximum. This remains an explicitly
+approximate, narrow-profile result rather than a default recommendation.
+
+Evidence:
+
+- Timing diagnostic [report](20260730_142701_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_transposed_timing_benchmark_report.log),
+  [stdout](20260730_142701_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_transposed_timing_benchmark_stdout.log),
+  and [server](20260730_142701_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_transposed_timing_krasis.log)
+- Timing-disabled [report](20260730_144716_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_transposed_benchmark_report.log),
+  [stdout](20260730_144716_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_transposed_benchmark_stdout.log),
+  and [server](20260730_144716_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_transposed_krasis.log)
+- Witness [summary](20260730_150856_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_transposed_witness_summary.json),
+  [HTML report](20260730_150856_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_transposed_witness_report.html),
+  [stdout](20260730_150856_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_transposed_witness_stdout.log),
+  and [server](20260730_150856_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_cpu_tail_transposed_witness_krasis.log)
+
+### Synthetic CPU-layout to Marlin GPU repack portability experiment
+
+Purpose: determine whether Krasis can make CPU-friendly INT4 the universal
+host-cache format and repack each arriving expert into canonical Marlin form
+on the GPU without materially reducing performance on either a large Blackwell
+card or a limited Ampere card. The acceptance boundary chosen before the runs
+was approximately 1-2% overhead on both prefill and decode on both GPUs.
+
+The default-off `KRASIS_SYNTH_REPACK=1` path keeps the authoritative Marlin
+host cache and all model numerics unchanged. After each real H2D copy it runs
+the genuine CPU-layout-to-Marlin permutation into an unused, runtime-sized
+scratch ring and places downstream work behind the repack completion event.
+The fused CUDA kernel is byte-exact against the existing Rust Marlin packer for
+complete GLM and QCN W13/W2 experts. It uses one model-derived top-k ring:
+148.500 MiB/eight slots for GLM and 15.469 MiB/ten slots for QCN.
+
+Final timing-disabled adjacent A/B:
+
+| GPU/model | Mode | Prefill | Decode 50 | Decode 100 | Decode 250 | HCS | Min free VRAM |
+|-----------|------|--------:|----------:|-----------:|-----------:|----:|--------------:|
+| RTX PRO 6000 / GLM-5.2 p80 75/10 | control | 44.9 tok/s | 5.93 tok/s | 6.01 tok/s | 5.67 tok/s | 3887/19200 | 1,178 MB |
+| RTX PRO 6000 / GLM-5.2 p80 75/10 | fused synthetic repack | 44.8 tok/s | 5.90 tok/s | 5.85 tok/s | 5.63 tok/s | 3874/19200 | 1,292 MB |
+| RTX PRO 6000 delta | | -0.22% | -0.51% | -2.66% | -0.71% | -13 experts | ring forced one HCS chunk eviction |
+| RTX A4500 / QCN HQQ6 k4v4 | control | 1,731.4 tok/s | 36.69 tok/s | 36.94 tok/s | 35.29 tok/s | 8500/24576 | 760 MB |
+| RTX A4500 / QCN HQQ6 k4v4 | fused synthetic repack | 1,686.9 tok/s | 35.57 tok/s | 36.00 tok/s | 34.05 tok/s | 8450/24576 | 808 MB |
+| RTX A4500 delta | | -2.57% | -3.05% | -2.54% | -3.51% | -50 experts | ring displaced one 50-expert HCS chunk |
+
+Timing-enabled kernel measurements:
+
+| GPU/model | Expert bytes | Computed HBM floor | Measured prefill | Measured decode | Repack/copy duty | Effective scratch traffic |
+|-----------|-------------:|-------------------:|-----------------:|----------------:|-----------------:|--------------------------:|
+| RTX PRO 6000 / GLM | 19,464,192 | about 21.7 us at 1.792 TB/s | 29.11-29.13 us/expert | 29.68-29.81 us/expert | 3.91-4.05% | 1.306-1.337 TB/s |
+| RTX A4500 / QCN | 1,622,016 | about 5.07 us at 640 GB/s | 5.99 us/expert | 7.58-7.75 us/expert | 6.74-8.03% | 419-541 GB/s |
+
+The A4500 kernel was optimized after the first instrumented pass exposed four
+launches per sparse one/two-expert batch. Fusing W13, W2, and scale work
+reduced prefill from 7.39 us/expert and sparse decode from 15.55-16.60
+us/expert to the final values above. Two integration defects were found before
+the final A/B: repeated decode-store resize briefly allocated a second ring,
+and the fused symbol was missing from one installed-kernel export contract.
+Both now fail closed or reuse the validated allocation; neither defective run
+is used for the final performance conclusion.
+
+The final GLM pair is broadly within the acceptance boundary, with the
+100-token row alone at -2.66%. The optimized A4500 pair consistently loses
+2.5-3.5% and therefore fails the predeclared weaker-card criterion. On this
+evidence, Marlin remains the universal cache format. CPU-format weights remain
+a calibration-gated big-host/special mode rather than a universal cache flip.
+
+Evidence:
+
+- Final GLM control [report](20260730_195938_rtx6000_glm52_p80_75_10_synth_repack_fused_control_benchmark_report.log),
+  [stdout](20260730_195938_rtx6000_glm52_p80_75_10_synth_repack_fused_control_benchmark_stdout.log),
+  and [server](20260730_195938_rtx6000_glm52_p80_75_10_synth_repack_fused_control_krasis.log)
+- Final GLM repack [report](20260730_201639_rtx6000_glm52_p80_75_10_synth_repack_fused_on_benchmark_report.log),
+  [stdout](20260730_201639_rtx6000_glm52_p80_75_10_synth_repack_fused_on_benchmark_stdout.log),
+  and [server](20260730_201639_rtx6000_glm52_p80_75_10_synth_repack_fused_on_krasis.log)
+- GLM timing [report](20260730_182315_rtx6000_glm52_p80_75_10_synth_repack_timing_benchmark_report.log),
+  [stdout](20260730_182315_rtx6000_glm52_p80_75_10_synth_repack_timing_benchmark_stdout.log),
+  and [server](20260730_182315_rtx6000_glm52_p80_75_10_synth_repack_timing_krasis.log)
+- Final A4500 control [report](20260730_194608_a4500_qcn_hqq6_synth_repack_fused_control_benchmark_report.log),
+  [stdout](20260730_194608_a4500_qcn_hqq6_synth_repack_fused_control_benchmark_stdout.log),
+  and [server](20260730_194608_a4500_qcn_hqq6_synth_repack_fused_control_krasis.log)
+- Final A4500 repack [report](20260730_195036_a4500_qcn_hqq6_synth_repack_fused_on_benchmark_report.log),
+  [stdout](20260730_195036_a4500_qcn_hqq6_synth_repack_fused_on_benchmark_stdout.log),
+  and [server](20260730_195036_a4500_qcn_hqq6_synth_repack_fused_on_krasis.log)
+- A4500 fused timing [report](20260730_194101_a4500_qcn_hqq6_synth_repack_fused_timing_benchmark_report.log),
+  [stdout](20260730_194101_a4500_qcn_hqq6_synth_repack_fused_timing_benchmark_stdout.log),
+  and [server](20260730_194101_a4500_qcn_hqq6_synth_repack_fused_timing_krasis.log)
+- [Byte-exact fused gate](20260730_synth_repack_fused_exactness_gate.log),
+  [final build gate](20260730_synth_repack_fused_build_gate.log),
+  [pre-model gates](20260730_synth_repack_pre_model_gates.log), and
+  [ring-reuse gates](20260730_synth_repack_ring_reuse_gates.log)
+- Post-review constructor teardown fix:
+  [final build and byte-exact gate](20260730_synth_repack_lifecycle_final_gates.log)
+
+Diagnostic and intermediate benchmark logs are also archived with
+`synth_repack` in their filenames, including the initial GLM pair, the A4500
+double-ring diagnosis, pre-fusion timing, ring-reuse result, and missing-export
+failure. They are retained as implementation evidence but are not used as the
+final A/B.
+
+### RTX PRO 6000 CPU-tail startup optimizer/calibration
+
+Purpose: optimize CPU-tail thread count and compact/spread cache-domain
+placement under a live pinned-memory H2D stream before deciding whether a
+future explicit CPU-format mode is likely to help. This standalone Rust
+harness loads only model geometry, synthesizes cache-cold experts in both CPU
+and Marlin layouts, and consumes the real GLM p80 75/10 queue-depth histogram.
+It does not load a model, convert a cache, or alter any model runtime path.
+
+Commands:
+
+```text
+./dev cpu-tail-calibrate \
+  tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf \
+  --group-size 128 \
+  --gpu-uuid GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d \
+  --budget-seconds 120 \
+  --histogram-log logs/dev-benchmark_20260730_142701/benchmark_stdout.log \
+  --baseline-ms-per-token 174.9 \
+  --isolated-reference-ms 0.508 \
+  --integrated-reference-ms 1.37
+
+./dev cpu-tail-calibrate \
+  tests/qcn-a4500-hqq6-synth-repack.conf \
+  --gpu-uuid GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d \
+  --budget-seconds 120 \
+  --histogram-log logs/dev-benchmark_20260730_142701/benchmark_stdout.log
+```
+
+| Geometry | Selected CPU setup | H2D baseline | Concurrent H2D | H2D loss | Transposed isolated/concurrent | Marlin isolated/concurrent | Predicted net |
+|----------|-------------------:|-------------:|---------------:|---------:|-------------------------------:|---------------------------:|--------------:|
+| GLM-5.2, 18.5625 MiB/expert | 8 compact cores | 25.726 GiB/s | 25.667 GiB/s | 0.231% | 1.226 / 1.470 ms | 1.829 / 2.176 ms | +7.178 ms/token, 5.72 -> 5.96 tok/s |
+| QCN, 1.547 MiB/expert | 4 compact cores | 22.891 GiB/s | 22.841 GiB/s | 0.217% | 0.141 / 0.163 ms | 0.310 / 0.309 ms | +0.772 ms/token under the GLM histogram |
+
+For GLM, the raw measured timing distribution predicts a 18.84% weighted
+queue win rate and 14.074 absorbed experts/token. Charging the historical
+unexplained scheduler/handoff margin reduces those to 14.12% and 10.545
+experts/token. The resulting 7.178 ms/token conservative saving moves the
+174.9 ms/token p80 75/10 baseline to 167.7 ms/token, or 5.96 tok/s. Predicted
+win probabilities by queue depth are 0% at depths 1-3, 74.71% at depth 4, and
+100% at depths 5-8.
+
+The historical 0.508 -> 1.370 ms integrated gap is 0.862 ms. At the selected
+GLM configuration, concurrent H2D explains 0.244 ms (28.29%); 0.618 ms
+(71.71%) remains attributable to runtime scheduling/handoff or other
+integration work. The optimizer charges that entire unexplained remainder
+before recommending an end-to-end validation run.
+
+The sweep demonstrates why maximum core count is not a useful policy. Sixteen
+compact GLM cores reduced CPU latency to 1.147 ms but slowed H2D by 14.56%;
+sixteen spread cores slowed H2D by 25.10%. Both were inferior to eight compact
+cores after charging the whole cold stream for DMA degradation. QCN's smaller
+expert instead selected four compact cores.
+
+Fourteen equal-duration H2D baseline windows are derived from the runtime
+thread-count × placement search space. GLM stabilized at 25.72 GiB/s; QCN
+required six windows to climb from 16.50 to its 22.89 GiB/s plateau. Earlier
+short-baseline diagnostics were rejected and are not used here.
+
+Evidence:
+
+- GLM [full log](20260730_rtx6000_glm52_cpu_tail_startup_calibration.log)
+  and [machine-readable report](20260730_rtx6000_glm52_cpu_tail_startup_calibration.json)
+- QCN [full log](20260730_rtx6000_qcn_cpu_tail_startup_calibration.log)
+  and [machine-readable report](20260730_rtx6000_qcn_cpu_tail_startup_calibration.json)
+- [Final build, smoke, and regression gates](20260730_cpu_tail_startup_calibration_final_gates.log)
+
+### RTX PRO 6000 CPU-tail per-attempt overhead attribution and persistent team
+
+Purpose: reconcile the previously incomparable isolated/integrated CPU-tail
+latencies, attribute the real production overhead by stage, and reduce that
+overhead before considering multiple workers or chained claims. This cycle
+retained exactly one CPU-tail command worker and one tail claim per eligible
+layer.
+
+The apples-to-apples cache-cold baseline showed that most of the apparent
+`0.508 -> 1.37 ms` gap was a thread-configuration mismatch:
+
+| Measurement | Threads/placement | Full transposed expert |
+|-------------|-------------------|-----------------------:|
+| Historical isolated reference | 16, earlier benchmark placement | 0.508 ms |
+| Production-matched isolated | 40, global Rayon/unpinned | 1.168 ms |
+| Pre-optimization integrated | 40, global Rayon/unpinned | 1.363 ms/attempt |
+| Persistent distinct-expert isolate | 16 compact, calibration-derived | 1.110 ms |
+| Persistent integrated | 16 compact, calibration-derived | 1.232 ms/attempt |
+
+The true integration residual therefore changed from approximately
+`0.195 ms` to `0.122 ms`, not from `0.862 ms` to zero. Timing-only stage
+instrumentation showed that claim handoff was already small:
+
+| Stage, sustained row | Global Rayon | Persistent 16 compact |
+|----------------------|-------------:|----------------------:|
+| Activation D2H | 0.0095 ms | 0.0095 ms |
+| Submit -> pickup | 0.0197-0.0203 ms | 0.0228-0.0240 ms |
+| Pickup -> worker start | 0.00016-0.00020 ms | 0.00014-0.00016 ms |
+| Claim -> worker start | 0.0297-0.0337 ms | 0.0331-0.0340 ms |
+| Full kernel, depth 3+ | 1.55-1.58 ms | 1.30-1.42 ms |
+| Compute -> visible, completed deep wins | ~0.0011 ms | ~0.0010 ms |
+
+The largest measured contributor was repeated Rayon wake/fan-out around
+layer-spaced work, not the command-channel handoff. With an eight-core local
+Rayon pool, inserting 0/0.5/1/2/3 ms gaps changed cache-cold compute from
+`1.216` to `1.349/1.346/1.708/1.741 ms`. A first persistent eight-core
+candidate was rejected end to end: it won only 3,076/11,238 sustained
+attempts, lost every depth-3 race, and ran transposed attempts at
+`1.716 ms`. A corrected 1.19 GiB distinct-expert sweep measured
+`1.571/1.110/1.124 ms` for 8-compact/16-compact/32-spread, selecting the
+16-compact row without a machine constant in runtime code.
+
+The accepted 16-core persistent team parks between experts and remains awake
+only across the guaranteed W13 -> activation -> W2 boundary. CPU IDs and
+thread count are read from a calibration artifact and validated against
+runtime affinity. Without an artifact, the prior global-Rayon path is
+unchanged. Marlin fallback, one-worker scheduling, and one-claim scheduling
+are unchanged.
+
+Per-depth sustained timing comparison:
+
+| Queue depth | Global Rayon wins | Persistent 16 wins |
+|------------:|------------------:|-------------------:|
+| 2 | 0/4,440 | 0/4,872 |
+| 3 | 3,433/4,006 (85.70%) | 2,926/3,352 (87.29%) |
+| 4 | 2,696/2,699 (99.89%) | 1,802/1,822 (98.90%) |
+| 5+ | 100% | 100% |
+
+Depth-2 remains unwinnable because its approximately 0.75 ms deadline is
+below the measured 1.18 ms canceled transposed kernel time. Early activation
+D2H could recover only about 0.0095 ms and therefore was not added.
+
+Adjacent timing-disabled A/B:
+
+| Mode | Prefill | Decode 50 | Decode 100 | Decode 250 | Min free VRAM |
+|------|--------:|----------:|-----------:|-----------:|--------------:|
+| Global Rayon control | 44.8 tok/s | 6.20 tok/s | 6.20 tok/s | 6.12 tok/s | 1,178 MB |
+| Persistent 16 compact | 45.0 tok/s | 6.44 tok/s | 6.31 tok/s | 6.16 tok/s | 1,178 MB |
+| Delta | +0.45% | +3.87% | +1.77% | +0.65% | unchanged |
+
+The frozen 2,682-token witness passed at the existing approximate boundary:
+7/8 argmax, first four contiguous, 8/8 top-10 containment, identical eight
+token IDs and ranks, and 1,118 MiB low-water. It won 184/308 CPU-tail races
+(59.74%), including 94/106 depth-3 and every depth-4+ race. Across the seven
+later positions, selected-token log probabilities moved by 0.045648 mean /
+0.230213 maximum versus pruning-only p80, within the accepted transposed-tier
+boundary of 0.055885 / 0.230213. Versus the previous accepted transposed-tier
+run itself, movement was 0.020893 / 0.103566 while preserving all token IDs
+and ranks. The earlier `025953` attempt is archived as invalid: it used the
+120-second client default even though this prompt's accepted prefill is
+142.788 seconds. The valid rerun used the established 300-second client wait
+bound and changed no runtime behavior.
+
+Evidence:
+
+- [Matched 40-thread isolate](20260730_cpu_tail_overhead_matched40_distinct_bench.log),
+  [gap attribution](20260731_cpu_tail_overhead_gap_attribution.log), and
+  [distinct persistent sweep](20260731_cpu_tail_overhead_persistent_distinct_sweep.log)
+- Pre-optimization timing [report](20260730_235643_rtx6000_glm52_p80_cpu_tail_overhead_preopt_timing_benchmark_report.log),
+  [stdout](20260730_235643_rtx6000_glm52_p80_cpu_tail_overhead_preopt_timing_benchmark_stdout.log),
+  and [server](20260730_235643_rtx6000_glm52_p80_cpu_tail_overhead_preopt_timing_krasis.log)
+- Rejected eight-core timing [report](20260731_012644_rtx6000_glm52_p80_cpu_tail_persistent8_rejected_timing_benchmark_report.log),
+  [stdout](20260731_012644_rtx6000_glm52_p80_cpu_tail_persistent8_rejected_timing_benchmark_stdout.log),
+  and [server](20260731_012644_rtx6000_glm52_p80_cpu_tail_persistent8_rejected_timing_krasis.log)
+- Accepted 16-core timing [report](20260731_015952_rtx6000_glm52_p80_cpu_tail_persistent16_timing_benchmark_report.log),
+  [stdout](20260731_015952_rtx6000_glm52_p80_cpu_tail_persistent16_timing_benchmark_stdout.log),
+  and [server](20260731_015952_rtx6000_glm52_p80_cpu_tail_persistent16_timing_krasis.log)
+- Timing-disabled control [report](20260731_022009_rtx6000_glm52_p80_cpu_tail_global_control_benchmark_report.log),
+  [stdout](20260731_022009_rtx6000_glm52_p80_cpu_tail_global_control_benchmark_stdout.log),
+  and [server](20260731_022009_rtx6000_glm52_p80_cpu_tail_global_control_krasis.log)
+- Timing-disabled persistent [report](20260731_023926_rtx6000_glm52_p80_cpu_tail_persistent16_benchmark_report.log),
+  [stdout](20260731_023926_rtx6000_glm52_p80_cpu_tail_persistent16_benchmark_stdout.log),
+  and [server](20260731_023926_rtx6000_glm52_p80_cpu_tail_persistent16_krasis.log)
+- Valid witness [summary](20260731_031618_rtx6000_glm52_p80_cpu_tail_persistent16_witness_summary.json),
+  [report](20260731_031618_rtx6000_glm52_p80_cpu_tail_persistent16_witness_report.html),
+  [stdout](20260731_031618_rtx6000_glm52_p80_cpu_tail_persistent16_witness_stdout.log),
+  and [server](20260731_031618_rtx6000_glm52_p80_cpu_tail_persistent16_witness_server.log)
+- [Final build and regression gates](20260731_cpu_tail_overhead_persistent16_final_gates.log);
+  the invalid timeout attempt is retained with
+  `20260731_025953_*_witness_invalid_timeout_*` filenames.
 
 ## Step-3.7-Flash RTX PRO 6000 adaptive 75/8 A/B - 2026-07-23
 

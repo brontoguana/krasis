@@ -1,0 +1,26 @@
+{
+  "source_artifact": "benchmarks/20260730_rtx6000_glm52_cpu_tail_startup_calibration.json",
+  "purpose": "Temporary measured single-worker persistent-team candidate selected from the source artifact's 16-core compact sweep row; not a production calibration artifact.",
+  "optimizer": {
+    "best_threads": 16,
+    "best_placement": "compact",
+    "best_cpu_ids": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47
+    ]
+  }
+}

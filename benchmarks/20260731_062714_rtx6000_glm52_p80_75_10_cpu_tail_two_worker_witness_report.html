@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>Reference Test — GLM-5.2</title>
+<style>
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px 40px;
+    line-height: 1.6;
+}
+h1 { color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 8px; }
+h2 { color: #79c0ff; margin-top: 32px; border-bottom: 1px solid #21262d; padding-bottom: 6px; }
+h3 { color: #d2a8ff; }
+.meta { color: #8b949e; margin-bottom: 20px; }
+.meta span { margin-right: 24px; }
+
+/* Summary dashboard */
+.dashboard { width: 100%; border-collapse: collapse; margin: 16px 0 32px; }
+.dashboard th {
+    background: #161b22; color: #8b949e; text-align: left;
+    padding: 8px 12px; border-bottom: 2px solid #30363d; font-size: 13px;
+    text-transform: uppercase; letter-spacing: 0.5px;
+}
+.dashboard td { padding: 8px 12px; border-bottom: 1px solid #21262d; }
+.dashboard tr:hover td { background: #161b22; }
+
+/* Status badges */
+.badge { padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; display: inline-block; }
+.badge-pass { background: #1a3a2a; color: #3fb950; }
+.badge-fail { background: #3a1a1a; color: #f85149; }
+.badge-warn { background: #3a2a1a; color: #d29922; }
+
+/* Collapsible cards */
+details { margin: 8px 0; }
+summary {
+    cursor: pointer; padding: 8px 12px; background: #161b22;
+    border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9;
+    font-weight: 600; user-select: none;
+}
+summary:hover { background: #1c2128; }
+details[open] > summary { border-radius: 6px 6px 0 0; border-bottom: none; }
+.detail-body {
+    border: 1px solid #30363d; border-top: none; border-radius: 0 0 6px 6px;
+    padding: 16px; background: #0d1117;
+}
+
+/* Token table */
+table.tokens { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12px; font-family: monospace; }
+table.tokens th {
+    background: #161b22; color: #8b949e; text-align: left;
+    padding: 4px 8px; border-bottom: 1px solid #30363d; font-size: 11px;
+}
+table.tokens td { padding: 4px 8px; border-bottom: 1px solid #21262d; }
+table.tokens .match { color: #3fb950; }
+table.tokens .mismatch { color: #f85149; }
+table.tokens .diverged { background: #2a1f0a; }
+
+/* Metrics row */
+.metrics-row { display: flex; gap: 24px; margin: 8px 0 16px; flex-wrap: wrap; }
+.metric-item { font-size: 13px; }
+.metric-label { color: #8b949e; }
+.metric-value { color: #c9d1d9; font-weight: 600; }
+.metric-good { color: #3fb950; }
+.metric-bad { color: #f85149; }
+.metric-ok { color: #d29922; }
+
+/* Text comparison */
+.text-compare { margin: 12px 0; }
+.text-block { background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+    padding: 12px 16px; margin: 6px 0; font-size: 13px; white-space: pre-wrap;
+    max-height: 200px; overflow-y: auto; }
+.text-label { color: #8b949e; font-size: 12px; margin-bottom: 4px; }
+.text-match { color: #3fb950; }
+.text-diverge { color: #d29922; background: #2a1f0a; padding: 0 2px; }
+.text-after { color: #8b949e; }
+
+/* Divergence analysis */
+.divergence { background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+    padding: 12px 16px; margin: 12px 0; font-size: 13px; }
+.divergence .label { color: #8b949e; display: inline-block; width: 180px; }
+
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+    padding: 12px 16px; overflow-x: auto; font-size: 13px; color: #e6edf3; }
+</style></head><body>
+<h1>Krasis Reference Test — GLM-5.2</h1>
+<div class="meta">
+<span>Date: 2026-07-31 06:39:52</span>
+<span>GPU: NVIDIA RTX A4500, 20470</span>
+<span>Config: glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf</span>
+<span>Duration: 748.6s</span>
+</div>
+<div class="meta">
+<span>Reference: GLM-5.2 (format v7)</span>
+<span>Conversations: 1</span>
+<span>Max tokens: 8</span>
+</div>
+<h2>Summary</h2>
+<table class="dashboard"><thead><tr>
+<th>Metric</th><th>Value</th><th>Status</th>
+</tr></thead><tbody>
+<tr><td><b>Overall</b></td><td>—</td><td><span class="badge badge-pass">PASS</span></td></tr>
+<tr><td><b>Prefill argmax match</b></td><td>n/a</td><td>Reference artifact has no prefill snapshots</td></tr>
+<tr><td><b>Prefill top-10 containment</b></td><td>n/a</td><td>Reference artifact has no prefill snapshots</td></tr>
+<tr><td>First-token match</td><td>1/1 (100%)</td>
+<td><span class="badge badge-pass">PASS</span></td></tr>
+<tr><td>Avg match run length</td><td>4.0 tokens</td>
+<td><span class="badge badge-fail">FAIL</span></td></tr>
+<tr><td>Avg decode top-k containment</td><td>100.0%</td>
+<td><span class="badge badge-pass">PASS</span></td></tr>
+<tr><td>Prompts PASS</td><td>0</td><td></td></tr>
+<tr><td>Prompts WARN</td><td>1</td><td></td></tr>
+<tr><td>Prompts FAIL</td><td>0</td><td></td></tr>
+</tbody></table>
+<h2>Per-Prompt Results</h2>
+<details open>
+<summary><span class="badge badge-warn">WARN</span> Conv 1: MOBY-DICK;
+
+or, THE WHALE.
+
+By Herman Melville
+
+
+
+CONTENTS
+
+ETYMOLOGY....</summary>
+<div class="detail-body">
+<div class="metrics-row">
+<div class="metric-item"><span class="metric-label">Prefill argmax: </span><span class="metric-value metric-bad">n/a</span></div>
+<div class="metric-item"><span class="metric-label">Prefill top-10: </span><span class="metric-value metric-bad">n/a</span></div>
+<div class="metric-item"><span class="metric-label">First token: </span><span class="metric-value metric-good">MATCH</span></div>
+<div class="metric-item"><span class="metric-label">Match run: </span><span class="metric-value metric-bad">4/8</span></div>
+<div class="metric-item"><span class="metric-label">Decode top-k: </span><span class="metric-value metric-good">100.0%</span></div>
+<div class="metric-item"><span class="metric-label">Time: </span><span class="metric-value">147.9s</span></div>
+</div>
+<table class="tokens"><thead><tr>
+<th>Pos</th><th>Ref Token</th><th>Our Token</th><th>Match</th><th>In Top-K</th><th>Rank</th><th>Ref LP</th><th>Our LP</th>
+</tr></thead><tbody>
+<tr>
+<td>0</td>
+<td>2132</td>
+<td>2132</td>
+<td><span class="match">&#10003;</span></td>
+<td><span class="match">#1</span></td>
+<td>1</td>
+<td>-1.655</td>
+<td>-1.320</td>
+</tr>
+<tr>
+<td>1</td>
+<td>5868</td>
+<td>5868</td>
+<td><span class="match">&#10003;</span></td>
+<td><span class="match">#1</span></td>
+<td>1</td>
+<td>-0.970</td>
+<td>-0.120</td>
+</tr>
+<tr>
+<td>2</td>
+<td>1075</td>
+<td>1075</td>
+<td><span class="match">&#10003;</span></td>
+<td><span class="match">#1</span></td>
+<td>1</td>
+<td>-0.000</td>
+<td>-0.000</td>
+</tr>
+<tr>
+<td>3</td>
+<td>498</td>
+<td>498</td>
+<td><span class="match">&#10003;</span></td>
+<td><span class="match">#1</span></td>
+<td>1</td>
+<td>-0.002</td>
+<td>-0.001</td>
+</tr>
+<tr class="diverged">
+<td>4</td>
+<td>3003</td>
+<td>614</td>
+<td><span class="mismatch">&#10007;</span></td>
+<td><span class="match">#2</span></td>
+<td>2</td>
+<td>-0.429</td>
+<td>-0.262</td>
+</tr>
+<tr>
+<td>5</td>
+<td>6094</td>
+<td>6094</td>
+<td><span class="match">&#10003;</span></td>
+<td><span class="match">#1</span></td>
+<td>1</td>
+<td>-0.236</td>
+<td>-0.401</td>
+</tr>
+<tr>
+<td>6</td>
+<td>279</td>
+<td>279</td>
+<td><span class="match">&#10003;</span></td>
+<td><span class="match">#1</span></td>
+<td>1</td>
+<td>-0.003</td>
+<td>-0.019</td>
+</tr>
+<tr>
+<td>7</td>
+<td>8567</td>
+<td>8567</td>
+<td><span class="match">&#10003;</span></td>
+<td><span class="match">#1</span></td>
+<td>1</td>
+<td>-0.268</td>
+<td>-0.201</td>
+</tr>
+</tbody></table>
+<div class="divergence">
+<div><span class="label">Divergence position:</span> 4</div>
+<div><span class="label">Reference token:</span> 3003 (logprob: -0.429)</div>
+<div><span class="label">Our token:</span> 614 (logprob: -0.262)</div>
+<div><span class="label">Ref token in our top-k:</span> Yes (rank #2)</div>
+<div><span class="label">Logprob gap:</span> 0.167</div>
+</div>
+<details><summary>Full text output</summary>
+<div class="detail-body">
+<div class="text-compare">
+<div class="text-label">Reference (BF16):</div>
+<div class="text-block">It looks like you've shared the opening</div>
+<div class="text-label">Our engine:</div>
+<div class="text-block">It looks like you have shared the opening</div>
+</div>
+</div></details>
+</div></details>
+<div class="meta" style="margin-top:32px;border-top:1px solid #30363d;padding-top:12px">
+<span>Generated by Krasis reference-test</span>
+<span>Total time: 748.6s</span>
+</div>
+</body></html>

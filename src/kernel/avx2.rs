@@ -2111,122 +2111,123 @@ pub unsafe fn expert_matmul_int4_marlin(
     n_start: usize,
     n_out: usize,
     group_size: usize,
-    tile_map: &MarlinTileMap,
-    scale_map: &MarlinScaleMap,
+    _tile_map: &MarlinTileMap,
+    _scale_map: &MarlinScaleMap,
 ) {
     let out_cols = 2 * n_stride;
     let tiles_per_group = group_size / 16;
     let num_groups = k / group_size;
+    debug_assert_eq!(n_start % 64, 0);
+    debug_assert_eq!(n_out % 64, 0);
 
-    // Process 64 N-positions at a time (one permutation chunk)
-    let n_full_chunks = n_out / 64;
-    let n_rem = n_out % 64;
+    // Marlin's 1024-value INT4 permutation chunk has a fixed structure. For a
+    // given output-column pair, four packed words contain all 16 K-values:
+    //
+    //   low:  q0*a[2r] + q1*a[2r+8] + q4*a[2r+1] + q5*a[2r+9]
+    //   high: q2*a[2r] + q3*a[2r+8] + q6*a[2r+1] + q7*a[2r+9]
+    //
+    // The four u32 lanes are the four 16-column subtiles. Decode those lanes
+    // together so the CPU does not perform a permutation-table lookup and a
+    // scalar write into a SIMD accumulator for every single INT4 value.
+    let nibble_mask = _mm_set1_epi32(0x000f);
+    let zero_i = _mm_setzero_si128();
+    let n_chunks = n_out / 64;
 
-    for nc_local in 0..n_full_chunks {
+    macro_rules! nibble_pair {
+        ($words:expr, $lo_shift:expr, $hi_shift:expr) => {{
+            let lo = _mm_and_si128(_mm_srli_epi32($words, $lo_shift), nibble_mask);
+            let hi = _mm_and_si128(_mm_srli_epi32($words, $hi_shift), nibble_mask);
+            _mm_or_si128(lo, _mm_slli_epi32(hi, 16))
+        }};
+    }
+
+    for nc_local in 0..n_chunks {
         let n_base = n_start + nc_local * 64;
-        let nc_in_full = n_base / 64; // chunk index in the full N dimension
-
-        // Float accumulators for this N-chunk (8 × __m256 = 64 f32)
-        let mut float_acc = [_mm256_setzero_ps(); 8];
+        let nc_in_full = n_base / 64;
+        let mut float_acc = [0.0f32; 64];
 
         for group in 0..num_groups {
-            // Integer accumulators: 8 × __m256i = 64 i32 values
-            let mut int_acc = [_mm256_setzero_si256(); 8];
+            // Four lanes correspond to N offsets 0,16,32,48. The low/high
+            // arrays cover offsets `col` and `col + 8`.
+            let mut int_acc_low = [zero_i; 8];
+            let mut int_acc_high = [zero_i; 8];
 
             for tile_in_group in 0..tiles_per_group {
                 let kt = group * tiles_per_group + tile_in_group;
                 let word_base = kt * out_cols + nc_in_full * 128;
+                let act_base = kt * 16;
 
-                // Unpack + accumulate: process 128 u32 words for this tile
-                // Each word has 8 INT4 values mapped via tile_map to (k_off, n_off)
-                for w in 0..128usize {
-                    let word = *packed.add(word_base + w);
-                    for b in 0..8u32 {
-                        let idx = w * 8 + b as usize;
-                        let val = ((word >> (b * 4)) & 0xF) as i32 - 8;
-                        let tk = *tile_map.k_off.get_unchecked(idx) as usize;
-                        let n_off = *tile_map.n_off.get_unchecked(idx) as usize;
-                        let k_idx = kt * 16 + tk;
-                        let act_val = *act_int16.add(k_idx) as i32;
+                for r in 0..4 {
+                    let a0 = *act_int16.add(act_base + 2 * r);
+                    let a8 = *act_int16.add(act_base + 2 * r + 8);
+                    let a1 = *act_int16.add(act_base + 2 * r + 1);
+                    let a9 = *act_int16.add(act_base + 2 * r + 9);
+                    let act_08 =
+                        _mm_set1_epi32((a0 as u16 as u32 | ((a8 as u16 as u32) << 16)) as i32);
+                    let act_19 =
+                        _mm_set1_epi32((a1 as u16 as u32 | ((a9 as u16 as u32) << 16)) as i32);
+                    let signed_zero_bias =
+                        _mm_set1_epi32(8 * (a0 as i32 + a8 as i32 + a1 as i32 + a9 as i32));
 
-                        // Accumulate into the right position in int_acc
-                        let acc_idx = n_off / 8;
-                        let lane = n_off % 8;
-                        // Scalar accumulation into the SIMD accumulator's lane
-                        let acc_arr = &mut int_acc[acc_idx] as *mut __m256i as *mut i32;
-                        *acc_arr.add(lane) += val * act_val;
+                    for col in 0..8 {
+                        let words = _mm_loadu_si128(
+                            packed.add(word_base + (col * 4 + r) * 4) as *const __m128i
+                        );
+
+                        let low_08 = nibble_pair!(words, 0, 4);
+                        let low_19 = nibble_pair!(words, 16, 20);
+                        let low_dot = _mm_sub_epi32(
+                            _mm_add_epi32(
+                                _mm_madd_epi16(low_08, act_08),
+                                _mm_madd_epi16(low_19, act_19),
+                            ),
+                            signed_zero_bias,
+                        );
+                        int_acc_low[col] = _mm_add_epi32(int_acc_low[col], low_dot);
+
+                        let high_08 = nibble_pair!(words, 8, 12);
+                        let high_19 = nibble_pair!(words, 24, 28);
+                        let high_dot = _mm_sub_epi32(
+                            _mm_add_epi32(
+                                _mm_madd_epi16(high_08, act_08),
+                                _mm_madd_epi16(high_19, act_19),
+                            ),
+                            signed_zero_bias,
+                        );
+                        int_acc_high[col] = _mm_add_epi32(int_acc_high[col], high_dot);
                     }
                 }
             }
 
-            // Apply scales: weight_scale[group, n] * act_scale[group]
             let a_scale = *act_scales.add(group);
-            let a_scale_vec = _mm256_set1_ps(a_scale);
+            let scale_chunk_base = group * n_stride + n_base;
+            for col in 0..8 {
+                let mut low = [0i32; 4];
+                let mut high = [0i32; 4];
+                _mm_storeu_si128(low.as_mut_ptr() as *mut __m128i, int_acc_low[col]);
+                _mm_storeu_si128(high.as_mut_ptr() as *mut __m128i, int_acc_high[col]);
 
-            for i in 0..8 {
-                let n_pos_base = n_base + i * 8;
-
-                // Load 8 weight scales for this group and N-positions
-                let mut w_scales = [0.0f32; 8];
-                for j in 0..8 {
-                    let n_pos = n_pos_base + j;
-                    let flat = group * n_stride + n_pos;
-                    let chunk = flat / 64;
-                    let local = flat % 64;
-                    let perm_idx = *scale_map.inv_perm.get_unchecked(local);
-                    w_scales[j] = bf16_to_f32(*scales.add(chunk * 64 + perm_idx));
+                for subtile in 0..4 {
+                    let low_local = subtile * 16 + col;
+                    let high_local = low_local + 8;
+                    // Grouped Marlin scales are stored as an 8x8 transpose.
+                    let low_scale_idx = (low_local % 8) * 8 + low_local / 8;
+                    let high_scale_idx = (high_local % 8) * 8 + high_local / 8;
+                    let low_scale = bf16_to_f32(*scales.add(scale_chunk_base + low_scale_idx));
+                    let high_scale = bf16_to_f32(*scales.add(scale_chunk_base + high_scale_idx));
+                    float_acc[low_local] =
+                        (low[subtile] as f32).mul_add(low_scale * a_scale, float_acc[low_local]);
+                    float_acc[high_local] =
+                        (high[subtile] as f32).mul_add(high_scale * a_scale, float_acc[high_local]);
                 }
-                let w_scale_vec = _mm256_loadu_ps(w_scales.as_ptr());
-                let combined = _mm256_mul_ps(w_scale_vec, a_scale_vec);
-
-                // Convert int_acc to f32 and FMA into float_acc
-                let int_f32 = _mm256_cvtepi32_ps(int_acc[i]);
-                float_acc[i] = _mm256_fmadd_ps(int_f32, combined, float_acc[i]);
-            }
-
-            // Reset integer accumulators for next group
-            for i in 0..8 {
-                int_acc[i] = _mm256_setzero_si256();
             }
         }
 
-        // Store results
-        for i in 0..8 {
-            _mm256_storeu_ps(output.add(nc_local * 64 + i * 8), float_acc[i]);
-        }
-    }
-
-    // Handle remainder N positions (if N not divisible by 64 — shouldn't happen for Marlin)
-    if n_rem > 0 {
-        let n_base = n_start + n_full_chunks * 64;
-        for i in 0..n_rem {
-            let n_pos = n_base + i;
-            let mut acc = 0.0f32;
-
-            for group in 0..num_groups {
-                // Fall back to looking up individual values via dequantize logic
-                let a_scale = *act_scales.add(group);
-                let flat_scale = group * n_stride + n_pos;
-                let chunk = flat_scale / 64;
-                let local = flat_scale % 64;
-                let perm_idx = scale_map.inv_perm[local];
-                let w_scale = bf16_to_f32(*scales.add(chunk * 64 + perm_idx));
-
-                let mut group_sum = 0i32;
-                for ki in 0..group_size {
-                    let k_abs = group * group_size + ki;
-                    // Need to find this (k_abs, n_pos) in Marlin layout — expensive, only for remainder
-                    // Use dequantize_marlin logic
-                    let kt = k_abs / 16;
-                    let _tk = k_abs % 16;
-                    // This is complex for remainder — but N % 64 == 0 for Marlin, so this never runs
-                    let _ = kt;
-                    group_sum += 0; // placeholder — Marlin requires N % 64 == 0
-                }
-                acc += group_sum as f32 * w_scale * a_scale;
-            }
-            *output.add(n_full_chunks * 64 + i) = acc;
-        }
+        std::ptr::copy_nonoverlapping(
+            float_acc.as_ptr(),
+            output.add(nc_local * 64),
+            float_acc.len(),
+        );
     }
 }
 

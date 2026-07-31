@@ -3706,6 +3706,14 @@ def main():
 
     heatmap_timing_enabled = _heatmap_substage_timing_enabled()
     heatmap_to_ready_start_s = None
+    cpu_tail_transposed_requested = os.environ.get(
+        "KRASIS_CPU_TAIL_TRANSPOSED", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if cpu_tail_transposed_requested and not args.hcs:
+        raise RuntimeError(
+            "KRASIS_CPU_TAIL_TRANSPOSED=1 requires HCS so the startup resident "
+            "set is known before building the complete non-resident duplicate tier"
+        )
 
     if not args.hcs:
         _status("GPU decode (no HCS)")
@@ -3938,6 +3946,20 @@ def main():
                     "Diagnostic HCS soft clamp: requested=%d MB loaded=%d MB applied=%d MB",
                     clamp_soft_mb, loaded_soft_mb, applied_soft_mb,
                 )
+            if cpu_tail_transposed_requested:
+                _status("Building CPU-tail transposed non-resident tier")
+                log_ram_ledger("before-cpu-tail-transposed-tier")
+                tier_t0 = time.time()
+                tier_result = store.cpu_tail_build_transposed_tier()
+                tier_elapsed = time.time() - tier_t0
+                _detail(tier_result)
+                _dim(f"CPU-tail transposed tier built in {tier_elapsed:.1f}s")
+                logger.warning(
+                    "CPU-tail transposed tier: %s (%.3fs)",
+                    tier_result,
+                    tier_elapsed,
+                )
+                log_ram_ledger("after-cpu-tail-transposed-tier")
             hcs_elapsed = time.time() - t_hcs
 
             vram_monitor.report_event("hcs_init_end")

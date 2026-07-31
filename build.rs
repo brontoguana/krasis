@@ -69,11 +69,8 @@ fn compile_windows_launcher_resources() {
     let rc_path = out_dir.join("krasis-windows-launcher.rc");
     let res_path = out_dir.join("krasis-windows-launcher.res");
     let icon_resource_path = absolute_icon.to_string_lossy().replace('\\', "/");
-    std::fs::write(
-        &rc_path,
-        format!("1 ICON \"{icon_resource_path}\"\r\n"),
-    )
-    .expect("failed to write Windows launcher resource script");
+    std::fs::write(&rc_path, format!("1 ICON \"{icon_resource_path}\"\r\n"))
+        .expect("failed to write Windows launcher resource script");
 
     let status = std::process::Command::new("rc.exe")
         .arg("/nologo")
@@ -81,7 +78,9 @@ fn compile_windows_launcher_resources() {
         .arg(&res_path)
         .arg(&rc_path)
         .status()
-        .unwrap_or_else(|error| panic!("failed to start rc.exe for Windows launcher icon: {error}"));
+        .unwrap_or_else(|error| {
+            panic!("failed to start rc.exe for Windows launcher icon: {error}")
+        });
     assert!(
         status.success(),
         "rc.exe failed to compile the Windows launcher icon: {status}"

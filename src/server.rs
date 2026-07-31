@@ -2532,19 +2532,18 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         .get("debug_prefill_device_trace_all_layers")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let debug_prefill_device_trace_mla_only =
-        match req.get("debug_prefill_device_trace_mla_only") {
-            Some(serde_json::Value::Bool(value)) => *value,
-            Some(_) => {
-                let _ = send_json(
-                    stream,
-                    400,
-                    r#"{"error":"debug_prefill_device_trace_mla_only must be a boolean"}"#,
-                );
-                return;
-            }
-            None => false,
-        };
+    let debug_prefill_device_trace_mla_only = match req.get("debug_prefill_device_trace_mla_only") {
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => {
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"debug_prefill_device_trace_mla_only must be a boolean"}"#,
+            );
+            return;
+        }
+        None => false,
+    };
     let debug_prefill_device_trace_full_pre_out_proj =
         match req.get("debug_prefill_device_trace_full_pre_out_proj") {
             Some(serde_json::Value::Bool(value)) => *value,

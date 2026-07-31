@@ -56,6 +56,8 @@
 #   ./dev trace-diff <expected> <actual>  Diff two KRASIS_TRACE logs offline
 #   ./dev awq-calibrate <config>    Deprecated AWQ calibration command (disabled)
 #   ./dev test-kernels [name]       Run CUDA kernel unit tests (or filter by name)
+#   ./dev cpu-tail-calibrate <config> [options]
+#                                    Optimize/measure CPU-tail under live GPU DMA
 #   ./dev chat [args]               Run krasis chat from source
 #   ./dev sanity                    Run sanity test prompts against running server
 #   ./dev kill                      Kill all krasis processes and free GPU memory
@@ -1511,6 +1513,14 @@ do_test_kernels() {
             filter="dsa_registration_tests"
         elif [[ "$1" == "context_window" ]]; then
             filter="server::tests::context_window_accounts_for_prompt_and_requested_output"
+        elif [[ "$1" == "cpu_tail" ]]; then
+            filter="cpu_tail"
+        elif [[ "$1" == "cpu_tail_persistent" ]]; then
+            filter="cpu_tail::tests::persistent_transposed_team_matches_rayon_glm_shape_and_tears_down"
+        elif [[ "$1" == "cpu_tail_bench" ]]; then
+            filter="moe::tests::test_cpu_tail_marlin_shape_bench"
+        elif [[ "$1" == "marlin_cpu" ]]; then
+            filter="kernel::avx2::tests::test_marlin_kernel"
         fi
         info "Filter: $filter"
         PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
@@ -1518,6 +1528,55 @@ do_test_kernels() {
     else
         PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
             cargo test --release --lib kernel_tests -- --nocapture 2>&1
+    fi
+}
+
+do_cpu_tail_calibrate() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev cpu-tail-calibrate <config> --budget-seconds N --histogram-log PATH [options]"
+        echo "Options: --gpu-ordinal N | --gpu-uuid GPU-..., --group-size N, --output PATH,"
+        echo "         --histogram-log PATH (repeatable), --baseline-ms-per-token MS,"
+        echo "         --isolated-reference-ms MS, --integrated-reference-ms MS,"
+        echo "         --two-team --layer-gap-us N, --smoke"
+        echo "Standalone Rust calibration only: does not load a model or alter runtime caches."
+        return 0
+    fi
+    [[ $# -ge 1 ]] || err "Usage: ./dev cpu-tail-calibrate <config> --budget-seconds N --histogram-log PATH [options]"
+    local config
+    config=$(resolve_config "$1")
+    shift
+    [[ -f "$config" ]] || err "Config not found: $config"
+    local run_dir
+    run_dir=$(create_run_dir "cpu-tail-calibrate")
+    local output="$run_dir/cpu_tail_calibration.json"
+    local has_output=false
+    local arg
+    for arg in "$@"; do
+        [[ "$arg" == "--output" ]] && has_output=true
+    done
+    info "Running standalone Rust CPU-tail calibration"
+    info "Config: $config"
+    info "Run dir: $run_dir"
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    local output_args=()
+    if ! $has_output; then
+        output_args=(--output "$output")
+    fi
+    (
+        cd "$SCRIPT_DIR"
+        PYO3_PYTHON="$PYTHON" \
+        LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --bin cpu-tail-calibrate -- \
+            "$config" "${output_args[@]}" "$@"
+    ) 2>&1 | tee "$run_dir/cpu_tail_calibration.log"
+    ok "CPU-tail calibration complete"
+    if ! $has_output; then
+        ok "JSON report: $output"
     fi
 }
 
@@ -3482,6 +3541,7 @@ case "$cmd" in
     awq-calibrate)  do_awq_calibrate "$@" ;;
     network)        do_network "$@" ;;
     test-kernels)   do_test_kernels "$@" ;;
+    cpu-tail-calibrate) do_cpu_tail_calibrate "$@" ;;
     validate)       do_validate "$@" ;;
     shell)          do_shell "$@" ;;
     python)         do_python "$@" ;;
@@ -3494,6 +3554,7 @@ case "$cmd" in
         echo "Core commands:"
         echo "  build                          Rebuild Rust extension into this repo only"
         echo "  build-fla-windows-sources      Generate portable FLA CUDA sources for Windows CI"
+        echo "  cpu-tail-calibrate <config>    Optimize/measure CPU-tail under live GPU DMA"
         echo "  build-sidecars [--force]       Build Marlin/FlashAttention package sidecars"
         echo "  verify-sidecars                Verify sidecar manifest, hashes, and symbols"
         echo "  sidecar-key [--json]           Print sidecar bundle cache key"

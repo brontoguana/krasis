@@ -167,6 +167,9 @@ graph contract:
 | `KRASIS_PREFETCH_BUDGET_OFF=1` | off | Disable the per-token prefetch byte budget (A/B diagnostics only) |
 | `KRASIS_PREFETCH_GATE=0` | on | Disable the demand-first temporal gate. When the gate is on (default with prefetch), each prefetch issuance waits GPU-side on the boundary's demand cold-DMA event, so prefetch bytes transfer during the segment's compute window instead of contending on the copy engine with the demand copies the graph is waiting on |
 | `KRASIS_SPLIT_EXPERT_LAUNCH=1` | off | Launch hot/staged experts before the cold-DMA wait so hot compute overlaps demand copies. Exact full/hot/cold weight masks preserve every routed contribution; compatible with legacy and ordinary GPU route synchronization. Latent-MoE graphs fail closed because their expert-input projection executes inside the captured segment and is not available for a safe pre-launch |
+| `KRASIS_CPU_TAIL_RACE=1` | off | After any adaptive cold-mass pruning, let a persistent Rust worker attempt the lowest-ranked surviving demand-cold expert directly from the existing INT4 Marlin host allocation while the GPU copies the other cold experts. A completed CPU result replaces that expert's weight H2D and GPU GEMV; a miss falls back to the normal GPU path without waiting. Requires split launch and legacy host-visible route synchronization; speculative decode, prefetch/APFL, GPU route sync, non-INT4, latent, biased, ungated, clamped, and non-SiLU experts fail visibly. CPU activations use the existing INT16-quantized Marlin-native kernel, so this is a separate approximate quality-gated mode even when cold-mass pruning is off |
+| `KRASIS_CPU_TAIL_WORKERS=2` | off | Experimental second CPU-tail worker. Requires `KRASIS_CPU_TAIL_RACE=1` and a `KRASIS_CPU_TAIL_CALIBRATION_JSON` artifact whose matched live-DMA two-team optimizer recommends a non-overlapping two-team split. The runtime revalidates both CPU sets against the current affinity mask and fails visibly on absent, overlapping, or stale placement evidence. At most two experts are claimed per cold queue; unset or `1` preserves single-worker behavior |
+| `KRASIS_CPU_TAIL_TRANSPOSED=1` | off | Temporary CPU-tail architecture experiment; also requires `KRASIS_CPU_TAIL_RACE=1`. After startup HCS selection, duplicate every non-resident routed expert into a CPU-transposed INT4 layout while leaving the Marlin host cache and every GPU/prefill/HCS path unchanged. Required bytes are derived from the actual selected set and tensors, checked against runtime `MemAvailable` plus proportional headroom, and allocation fails visibly rather than building a partial tier. Later-evicted startup residents use Marlin fallback; promotions retain unused duplicates. This can consume hundreds of GiB and is not a production cache mode |
 | `KRASIS_MARLIN_AUTOTUNE=1` | off | Measure batched w13 GEMV ksplit candidates (median of repeated timed blocks) on the real loaded expert shape at graph capture; overrides the occupancy formula only when a candidate beats the formula's own median by more than the margin |
 | `KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT=N` | 5 | Minimum relative win (percent) over the formula candidate before an autotune override is installed |
 | `KRASIS_ADAPTIVE_COLD_DROP=1` | off | Enable approximate demand-cold expert pruning. Only routed experts that would require a demand DMA are eligible; surviving router weights are not renormalized. Requires both percentage variables below. Results depend on runtime HCS residency, so this mode can vary with VRAM and cache state |
@@ -180,6 +183,17 @@ the legacy host-visible route-sync CUDA-graph path. It fails visibly rather
 than silently degrading when combined with GPU route sync or speculative
 decode. This is an explicit quality/performance tradeoff and is never enabled
 automatically.
+
+The CPU-tail race is also explicit and experimental. It uses only the existing
+Marlin cache, uploads a successful expert's BF16 output into the captured
+expert-output slot, and reports attempts, wins, deadline misses, saved demand
+bytes, and CPU/input-copy timing at request completion. Its single pinned
+output buffer is protected by a CUDA completion event; a later layer uses
+ordinary GPU DMA rather than waiting when that buffer is still in flight.
+The separate transposed-tier flag is a temporary RAM-duplication experiment:
+the tier is Rust-owned, freed with the decode store, and reports its expert
+coverage, bytes, conversion wall, per-layout attempts/wins, and per-layout
+worker time. It does not change the on-disk cache format.
 
 The interactive launcher exposes this as **Adaptive cold-mass pruning**. It
 defaults to `Off`; Left/Right cycles through `Off`, `75/3`, `75/5`, `75/8`,

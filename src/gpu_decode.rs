@@ -23,6 +23,10 @@ use cudarc::driver::sys as cuda_sys;
 use cudarc::driver::{CudaDevice, CudaSlice, DevicePtr, LaunchAsync, LaunchConfig};
 
 use crate::adaptive_cold_drop::{AdaptiveColdDropRuntime, AdaptiveColdDropShadow};
+use crate::cpu_tail::{
+    configured_worker_count, CpuTailExpertRef, CpuTailRuntime, CpuTailTransposedSource,
+    CpuTailTransposedTier, CpuTailWeightFormat,
+};
 
 const GPU_ROUTE_SYNC_DEFAULT_TIMEOUT_MS: u64 = 10_000;
 const PROMPT_HCS_DEFAULT_RETAIN_PCT: usize = 85;
@@ -3165,6 +3169,9 @@ const KERNEL_NAMES: &[&str] = &[
     "gqa_attention_polar4_tiled_g",
     "gqa_attention_polar4_reduce_g",
     "record_globaltimer_u64_g",
+    "cpu_int4_to_marlin_repack_batched",
+    "cpu_bf16_scales_to_marlin_repack_batched",
+    "cpu_expert_to_marlin_repack_batched",
 ];
 
 const MODULE_NAME: &str = "decode_kernels";
@@ -3527,6 +3534,27 @@ struct DynamicHcsPromotion {
     w13s_bytes: usize,
     w2p_bytes: usize,
     w2s_bytes: usize,
+}
+
+struct CpuTailPendingRace {
+    worker_index: usize,
+    sequence: u64,
+    format: CpuTailWeightFormat,
+    layer_idx: usize,
+    expert_idx: usize,
+    batch_slot: usize,
+    weight: f32,
+    staging_base: u64,
+    dma_bytes: u64,
+    dma_calls: u64,
+    front_dma_bytes: u64,
+    front_dma_calls: u64,
+    front_dma_experts: u64,
+    /// Cold-queue depth bucket at claim time (depth 2..=9+, index 0..=7).
+    depth_bucket: usize,
+    /// Submit timestamp (timing mode only) for deadline/win-total measurement.
+    submitted_at: Option<std::time::Instant>,
+    promotion: Option<DynamicHcsPromotion>,
 }
 
 impl HcsCacheEntry {
@@ -7654,9 +7682,11 @@ mod dsa_registration_tests {
         assert!(validate_stream_probe_outcome(0, 0, None)
             .unwrap_err()
             .contains("requires max_tokens > 0"));
-        assert!(validate_stream_probe_outcome(8, 3, Some("decode_step error: sentinel"))
-            .unwrap_err()
-            .contains("decode_step error: sentinel"));
+        assert!(
+            validate_stream_probe_outcome(8, 3, Some("decode_step error: sentinel"))
+                .unwrap_err()
+                .contains("decode_step error: sentinel")
+        );
         assert!(validate_stream_probe_outcome(8, 0, None)
             .unwrap_err()
             .contains("generated zero tokens"));
@@ -8650,12 +8680,7 @@ mod dsa_registration_tests {
             .debug_populate_dsa_prefill_owner_keys(0, &prefill_hidden, &[0, 1])
             .expect("prefill owner key initialization");
         let prefill_selected = prefill
-            .debug_run_dsa_prefill_owner_selection(
-                0,
-                &prefill_hidden,
-                &prefill_q_lora,
-                &[0, 1],
-            )
+            .debug_run_dsa_prefill_owner_selection(0, &prefill_hidden, &prefill_q_lora, &[0, 1])
             .expect("batched DSA prefill owner selection");
         assert_eq!(prefill_selected[0], 0);
         assert_eq!(prefill_selected[1], i32::MAX);
@@ -11594,6 +11619,71 @@ struct GpuDecodeGraph {
     hcs_cold_swap: HcsColdSwapStats,
     adaptive_cold_drop: AdaptiveColdDropRuntime,
     adaptive_cold_drop_shadow: AdaptiveColdDropShadow,
+    /// Explicit opt-in CPU/GPU tail race. The worker reads the same Marlin host
+    /// allocation as demand H2D unless the separately gated transposed-tier
+    /// experiment supplies a CPU-format duplicate for the claimed expert.
+    cpu_tail_workers: Vec<CpuTailRuntime>,
+    cpu_tail_transposed_requested: bool,
+    cpu_tail_transposed_tier: Option<CpuTailTransposedTier>,
+    cpu_tail_attempts: u64,
+    cpu_tail_wins: u64,
+    cpu_tail_deadline_misses: u64,
+    cpu_tail_busy_skips: u64,
+    cpu_tail_short_queue_skips: u64,
+    cpu_tail_errors: u64,
+    cpu_tail_saved_weight_bytes: u64,
+    cpu_tail_marlin_attempts: u64,
+    cpu_tail_marlin_wins: u64,
+    cpu_tail_marlin_results: u64,
+    cpu_tail_marlin_compute_s: f64,
+    cpu_tail_marlin_saved_weight_bytes: u64,
+    cpu_tail_transposed_attempts: u64,
+    cpu_tail_transposed_wins: u64,
+    cpu_tail_transposed_results: u64,
+    cpu_tail_transposed_compute_s: f64,
+    cpu_tail_transposed_saved_weight_bytes: u64,
+    cpu_tail_output_bytes: u64,
+    cpu_tail_input_d2h_s: f64,
+    cpu_tail_compute_s: f64,
+    cpu_tail_race_wait_s: f64,
+    /// Worker compute time split by race outcome (timing mode only): wins carry
+    /// full expert latency; misses carry time burned until cancel detection.
+    cpu_tail_win_compute_s: f64,
+    cpu_tail_miss_compute_s: f64,
+    /// Submit-to-cancel wall time summed over misses: the deadline each lost
+    /// race actually had (timing mode only).
+    cpu_tail_deadline_s: f64,
+    /// Submit-to-accepted-result wall time summed over wins (timing mode only).
+    cpu_tail_win_total_s: f64,
+    /// Submit-to-worker-pickup latency summed over collected results.
+    cpu_tail_dispatch_lag_s: f64,
+    /// Always-on race histograms by cold-queue depth (2..=9+).
+    cpu_tail_attempts_by_depth: [u64; 8],
+    cpu_tail_wins_by_depth: [u64; 8],
+    /// Per-worker attribution for the opt-in two-team experiment.
+    cpu_tail_worker_attempts: [u64; 2],
+    cpu_tail_worker_wins: [u64; 2],
+    cpu_tail_worker_deadline_misses: [u64; 2],
+    cpu_tail_worker_results: [u64; 2],
+    cpu_tail_worker_compute_s: [f64; 2],
+    cpu_tail_worker_saved_weight_bytes: [u64; 2],
+    cpu_tail_worker_attempts_by_depth: [[u64; 8]; 2],
+    cpu_tail_worker_wins_by_depth: [[u64; 8]; 2],
+    /// Timing-only stage attribution by cold-queue depth (2..=9+).
+    cpu_tail_stage_results_by_depth: [u64; 8],
+    cpu_tail_input_d2h_s_by_depth: [f64; 8],
+    cpu_tail_submit_to_pickup_s_by_depth: [f64; 8],
+    cpu_tail_pickup_to_worker_start_s_by_depth: [f64; 8],
+    cpu_tail_claim_to_worker_start_s_by_depth: [f64; 8],
+    cpu_tail_kernel_compute_s_by_depth: [f64; 8],
+    cpu_tail_compute_to_result_visible_s_by_depth: [f64; 8],
+    /// A CPU-tail output buffer cannot be reused until its prior asynchronous
+    /// 12 KiB H2D upload has completed. Later layers skip CPU stealing while
+    /// this event is pending; they never wait for it.
+    cpu_tail_output_copy_pending: bool,
+    /// Default-off cache-format cost probe. Production Marlin buffers remain
+    /// authoritative and the genuine repack output is discarded.
+    synthetic_repack: Option<Arc<std::sync::Mutex<crate::synthetic_repack::SyntheticRepackRing>>>,
     route_locality: RouteLocalityStats,
     route_shadow_logits: Vec<f32>,
     route_shadow_bias: Vec<f32>,
@@ -11730,6 +11820,13 @@ struct GpuDecodeGraph {
     /// Event used to order graph replay after cold-expert H2D DMA without blocking
     /// the CPU on copy_stream.
     graph_replay_dma_event: Option<CudaEvent>,
+    /// Replay-stream prerequisite completion for the CPU-tail deadline race.
+    /// Recorded after split-hot launch (or pointer upload when there is no hot
+    /// work); a tail misses only once both this and front demand H2D complete.
+    cpu_tail_replay_ready_event: Option<CudaEvent>,
+    /// Recorded after an accepted CPU-tail output upload on replay_stream.
+    /// Protects the single pinned host output buffer from early reuse.
+    cpu_tail_output_copy_event: Option<CudaEvent>,
     /// Event used to keep dynamic-HCS D2D promotion copies ordered before the
     /// cold staging buffers they read from are reused on copy_stream.
     graph_dynamic_promotion_event: Option<CudaEvent>,
@@ -17005,6 +17102,70 @@ impl GpuDecodeStore {
         } else {
             moe_inter
         };
+        let cpu_tail_enabled = env_truthy("KRASIS_CPU_TAIL_RACE");
+        let cpu_tail_transposed_enabled = env_truthy("KRASIS_CPU_TAIL_TRANSPOSED");
+        let synthetic_repack_enabled = crate::synthetic_repack::synthetic_repack_enabled();
+        if cpu_tail_transposed_enabled && !cpu_tail_enabled {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "KRASIS_CPU_TAIL_TRANSPOSED=1 requires KRASIS_CPU_TAIL_RACE=1",
+            ));
+        }
+        if !cpu_tail_enabled && std::env::var_os("KRASIS_CPU_TAIL_WORKERS").is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "KRASIS_CPU_TAIL_WORKERS requires KRASIS_CPU_TAIL_RACE=1",
+            ));
+        }
+        if synthetic_repack_enabled && cpu_tail_enabled {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "KRASIS_SYNTH_REPACK=1 is an isolated cache-format cost probe and cannot be combined with KRASIS_CPU_TAIL_RACE=1",
+            ));
+        }
+        if synthetic_repack_enabled && expert_bits != 4 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "KRASIS_SYNTH_REPACK=1 requires INT4 routed experts; got expert_bits={expert_bits}"
+            )));
+        }
+        let cpu_tail_workers = if cpu_tail_enabled {
+            if self.draft.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "KRASIS_CPU_TAIL_RACE=1 is not supported with speculative decode",
+                ));
+            }
+            if expert_bits != 4 {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "KRASIS_CPU_TAIL_RACE=1 requires INT4 routed experts; got expert_bits={expert_bits}"
+                )));
+            }
+            let worker_count =
+                configured_worker_count().map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            let mut runtimes = Vec::with_capacity(worker_count);
+            for worker_index in 0..worker_count {
+                runtimes.push(
+                    CpuTailRuntime::new_for_worker(
+                        hidden_size,
+                        moe_inter,
+                        group_size,
+                        env_truthy("KRASIS_DECODE_TIMING"),
+                        worker_index,
+                        worker_count,
+                    )
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
+                );
+            }
+            log::warn!(
+                "CPU tail race ENABLED: workers={} at most {} surviving demand-cold tail expert(s) may execute on persistent Rust workers; Marlin CPU math uses INT16 activation quantization and requires explicit quality validation",
+                worker_count,
+                worker_count,
+            );
+            if cpu_tail_transposed_enabled {
+                log::warn!(
+                    "CPU tail transposed tier REQUESTED: startup must build a complete CPU-format duplicate for every expert outside the selected HCS resident set; partial population and silent fallback are forbidden"
+                );
+            }
+            runtimes
+        } else {
+            Vec::new()
+        };
         let qkv_size = if max_qkv_size > 0 {
             max_qkv_size
         } else {
@@ -17622,6 +17783,54 @@ impl GpuDecodeStore {
             hcs_cold_swap: HcsColdSwapStats::from_env(),
             adaptive_cold_drop,
             adaptive_cold_drop_shadow,
+            cpu_tail_workers,
+            cpu_tail_transposed_requested: cpu_tail_transposed_enabled,
+            cpu_tail_transposed_tier: None,
+            cpu_tail_attempts: 0,
+            cpu_tail_wins: 0,
+            cpu_tail_deadline_misses: 0,
+            cpu_tail_busy_skips: 0,
+            cpu_tail_short_queue_skips: 0,
+            cpu_tail_errors: 0,
+            cpu_tail_saved_weight_bytes: 0,
+            cpu_tail_marlin_attempts: 0,
+            cpu_tail_marlin_wins: 0,
+            cpu_tail_marlin_results: 0,
+            cpu_tail_marlin_compute_s: 0.0,
+            cpu_tail_marlin_saved_weight_bytes: 0,
+            cpu_tail_transposed_attempts: 0,
+            cpu_tail_transposed_wins: 0,
+            cpu_tail_transposed_results: 0,
+            cpu_tail_transposed_compute_s: 0.0,
+            cpu_tail_transposed_saved_weight_bytes: 0,
+            cpu_tail_output_bytes: 0,
+            cpu_tail_input_d2h_s: 0.0,
+            cpu_tail_compute_s: 0.0,
+            cpu_tail_race_wait_s: 0.0,
+            cpu_tail_win_compute_s: 0.0,
+            cpu_tail_miss_compute_s: 0.0,
+            cpu_tail_deadline_s: 0.0,
+            cpu_tail_win_total_s: 0.0,
+            cpu_tail_dispatch_lag_s: 0.0,
+            cpu_tail_attempts_by_depth: [0; 8],
+            cpu_tail_wins_by_depth: [0; 8],
+            cpu_tail_worker_attempts: [0; 2],
+            cpu_tail_worker_wins: [0; 2],
+            cpu_tail_worker_deadline_misses: [0; 2],
+            cpu_tail_worker_results: [0; 2],
+            cpu_tail_worker_compute_s: [0.0; 2],
+            cpu_tail_worker_saved_weight_bytes: [0; 2],
+            cpu_tail_worker_attempts_by_depth: [[0; 8]; 2],
+            cpu_tail_worker_wins_by_depth: [[0; 8]; 2],
+            cpu_tail_stage_results_by_depth: [0; 8],
+            cpu_tail_input_d2h_s_by_depth: [0.0; 8],
+            cpu_tail_submit_to_pickup_s_by_depth: [0.0; 8],
+            cpu_tail_pickup_to_worker_start_s_by_depth: [0.0; 8],
+            cpu_tail_claim_to_worker_start_s_by_depth: [0.0; 8],
+            cpu_tail_kernel_compute_s_by_depth: [0.0; 8],
+            cpu_tail_compute_to_result_visible_s_by_depth: [0.0; 8],
+            cpu_tail_output_copy_pending: false,
+            synthetic_repack: None,
             route_locality: RouteLocalityStats::from_env(),
             route_shadow_logits: Vec::new(),
             route_shadow_bias: Vec::new(),
@@ -17682,6 +17891,8 @@ impl GpuDecodeStore {
             per_layer_moe_indices: Vec::new(),
             d_cublas_workspace: None,
             graph_replay_dma_event: None,
+            cpu_tail_replay_ready_event: None,
+            cpu_tail_output_copy_event: None,
             graph_dynamic_promotion_event: None,
             prefetch_depth: 0,
             d_prefetch_bufs: Vec::new(),
@@ -17919,6 +18130,38 @@ impl GpuDecodeStore {
             }
             self.graph.as_mut().unwrap().graph_replay_dma_event = Some(CudaEvent(ev));
             log::info!("GpuDecodeStore: pre-allocated graph replay DMA event");
+        }
+
+        if !self.graph.as_ref().unwrap().cpu_tail_workers.is_empty() {
+            let mut replay_ready_ev: cuda_sys::CUevent = std::ptr::null_mut();
+            unsafe {
+                let flags = cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32;
+                let err = cuda_sys::lib().cuEventCreate(&mut replay_ready_ev, flags);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "cuEventCreate CPU tail replay-ready event: {:?}",
+                        err
+                    )));
+                }
+            }
+            let mut output_copy_ev: cuda_sys::CUevent = std::ptr::null_mut();
+            unsafe {
+                let flags = cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32;
+                let err = cuda_sys::lib().cuEventCreate(&mut output_copy_ev, flags);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    let _ = cuda_sys::lib().cuEventDestroy_v2(replay_ready_ev);
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "cuEventCreate CPU tail output-copy event: {:?}",
+                        err
+                    )));
+                }
+            }
+            let graph = self.graph.as_mut().unwrap();
+            graph.cpu_tail_replay_ready_event = Some(CudaEvent(replay_ready_ev));
+            graph.cpu_tail_output_copy_event = Some(CudaEvent(output_copy_ev));
+            log::info!(
+                "GpuDecodeStore: pre-allocated CPU tail replay-ready and output-copy events"
+            );
         }
 
         {
@@ -19654,6 +19897,79 @@ impl GpuDecodeStore {
                 .alloc_zeros::<u8>(1)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
             graph.expert_buf_size = 1;
+
+            if crate::synthetic_repack::synthetic_repack_enabled() {
+                if graph.expert_bits != 4 {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "KRASIS_SYNTH_REPACK=1 supports routed INT4 experts only, got {} bits",
+                        graph.expert_bits
+                    )));
+                }
+                let moe_input_size = first_moe.moe_input_size.max(graph.hidden_size);
+                let w13_n = e
+                    .w13_packed_bytes
+                    .checked_mul(2)
+                    .and_then(|bytes| bytes.checked_div(moe_input_size))
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "synthetic repack w13 shape derivation overflow",
+                        )
+                    })?;
+                let w2_n = moe_input_size;
+                let w2_k = e
+                    .w2_packed_bytes
+                    .checked_mul(2)
+                    .and_then(|bytes| bytes.checked_div(w2_n))
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "synthetic repack w2 shape derivation overflow",
+                        )
+                    })?;
+                let w13_shape = crate::synthetic_repack::RepackMatrixShape {
+                    n: w13_n,
+                    k: moe_input_size,
+                    packed_bytes: e.w13_packed_bytes,
+                    scales_bytes: e.w13_scales_bytes,
+                };
+                let w2_shape = crate::synthetic_repack::RepackMatrixShape {
+                    n: w2_n,
+                    k: w2_k,
+                    packed_bytes: e.w2_packed_bytes,
+                    scales_bytes: e.w2_scales_bytes,
+                };
+                if let Some(existing) = graph.synthetic_repack.as_ref() {
+                    let ring = existing.lock().map_err(|_| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "synthetic repack ring mutex poisoned during resize",
+                        )
+                    })?;
+                    if !ring.matches_layout(
+                        graph.max_experts_per_tok,
+                        first_moe.experts.len(),
+                        w13_shape,
+                        w2_shape,
+                        graph.group_size,
+                    ) {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            "synthetic repack ring layout changed across expert-buffer resize",
+                        ));
+                    }
+                } else {
+                    graph.synthetic_repack = Some(Arc::new(std::sync::Mutex::new(
+                        crate::synthetic_repack::SyntheticRepackRing::new(
+                            &self.device,
+                            graph.max_experts_per_tok,
+                            first_moe.experts.len(),
+                            w13_shape,
+                            w2_shape,
+                            graph.group_size,
+                        )
+                        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
+                    )));
+                }
+            } else {
+                graph.synthetic_repack = None;
+            }
 
             log::info!(
                 "GpuDecodeStore: double-buffer 2x {:.1} KB = {:.1} MB, graph replay cold buffers {}x = {:.1} MB, legacy component buffers released (saved {:.1} MB) (w13p={}, w13s={}, w2p={}, w2s={})",
@@ -21910,6 +22226,112 @@ impl GpuDecodeStore {
             total_pct,
         );
         log::info!("{}", msg);
+        Ok(msg)
+    }
+
+    /// Build the temporary CPU-transposed duplicate tier after the startup HCS
+    /// resident set has been selected. This is an explicit experiment only;
+    /// the Marlin cache and every GPU path remain authoritative and unchanged.
+    fn cpu_tail_build_transposed_tier(&mut self) -> PyResult<String> {
+        let (layer_expert_counts, selected_resident_count, sources) = {
+            let graph = self
+                .graph
+                .as_ref()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+            if !graph.cpu_tail_transposed_requested {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "cpu_tail_build_transposed_tier requires KRASIS_CPU_TAIL_TRANSPOSED=1",
+                ));
+            }
+            if graph.cpu_tail_workers.is_empty() {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "cpu_tail_build_transposed_tier requires KRASIS_CPU_TAIL_RACE=1",
+                ));
+            }
+            if graph.cpu_tail_transposed_tier.is_some() {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "CPU-tail transposed tier has already been built for this decode store",
+                ));
+            }
+            let hcs = graph.hcs.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "CPU-tail transposed tier requires the HCS resident set to be initialized first",
+                )
+            })?;
+            let selected: std::collections::HashSet<(usize, usize)> =
+                hcs.cache.keys().copied().collect();
+            let layer_expert_counts: Vec<usize> = graph
+                .moe_layers
+                .iter()
+                .map(|layer| layer.as_ref().map(|moe| moe.experts.len()).unwrap_or(0))
+                .collect();
+            let mut sources = Vec::new();
+            let mut total_routed_experts = 0usize;
+            for (layer_idx, moe) in graph.moe_layers.iter().enumerate() {
+                let Some(moe) = moe.as_ref() else {
+                    continue;
+                };
+                total_routed_experts = total_routed_experts
+                    .checked_add(moe.experts.len())
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "CPU-tail transposed routed-expert count overflow",
+                        )
+                    })?;
+                for (expert_idx, expert) in moe.experts.iter().enumerate() {
+                    if selected.contains(&(layer_idx, expert_idx)) {
+                        continue;
+                    }
+                    sources.push(CpuTailTransposedSource {
+                        layer_idx,
+                        expert_idx,
+                        w13_packed_ptr: expert.w13_packed_ptr,
+                        w13_packed_len: expert.w13_packed_bytes / std::mem::size_of::<u32>(),
+                        w13_scales_ptr: expert.w13_scales_ptr,
+                        w13_scales_len: expert.w13_scales_bytes / std::mem::size_of::<u16>(),
+                        w2_packed_ptr: expert.w2_packed_ptr,
+                        w2_packed_len: expert.w2_packed_bytes / std::mem::size_of::<u32>(),
+                        w2_scales_ptr: expert.w2_scales_ptr,
+                        w2_scales_len: expert.w2_scales_bytes / std::mem::size_of::<u16>(),
+                        hidden_size: graph.hidden_size,
+                        intermediate_size: graph.moe_intermediate_size,
+                        group_size: graph.group_size,
+                    });
+                }
+            }
+            let selected_resident_count = selected.len();
+            if selected_resident_count
+                .checked_add(sources.len())
+                .filter(|&count| count == total_routed_experts)
+                .is_none()
+            {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "CPU-tail transposed tier selection mismatch: selected={} nonresident={} total_routed={}",
+                    selected_resident_count,
+                    sources.len(),
+                    total_routed_experts,
+                )));
+            }
+            (layer_expert_counts, selected_resident_count, sources)
+        };
+
+        let tier =
+            CpuTailTransposedTier::build(&layer_expert_counts, selected_resident_count, sources)
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let msg = format!(
+            "CPU-tail transposed tier: {} nonresident duplicates, {} selected HCS residents, {:.3} GiB RAM, {:.3}s conversion; dynamic promotions retain unused duplicates by design",
+            tier.expert_count(),
+            tier.selected_resident_count(),
+            tier.total_bytes() as f64 / (1024.0 * 1024.0 * 1024.0),
+            tier.conversion_s(),
+        );
+        let graph = self.graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "decode graph disappeared while building CPU-tail transposed tier",
+            )
+        })?;
+        graph.cpu_tail_transposed_tier = Some(tier);
+        log::warn!("{}", msg);
         Ok(msg)
     }
 
@@ -25666,12 +26088,8 @@ impl GpuDecodeStore {
                 true
             },
         );
-        validate_stream_probe_outcome(
-            max_tokens,
-            generated,
-            self.last_stream_failure.as_deref(),
-        )
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        validate_stream_probe_outcome(max_tokens, generated, self.last_stream_failure.as_deref())
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         Ok(tokens)
     }
 
@@ -26441,10 +26859,7 @@ impl GpuDecodeStore {
                 ));
             }
         }
-        Ok(Some((
-            *d_position.device_ptr(),
-            *d_seq_len.device_ptr(),
-        )))
+        Ok(Some((*d_position.device_ptr(), *d_seq_len.device_ptr())))
     }
 
     fn execute_dsa_owner_scores_for_graph(
@@ -30175,6 +30590,32 @@ impl GpuDecodeStore {
 
         // Build engine
         let topk = config.num_experts_per_tok.max(1);
+        let synthetic_repack = if crate::synthetic_repack::synthetic_repack_enabled() {
+            if !can_fused {
+                return Err(
+                    "KRASIS_SYNTH_REPACK=1 requires the fused pointer-table prefill path"
+                        .to_string(),
+                );
+            }
+            if layer_weights.iter().any(|layer| layer.moe_input_size > 0) {
+                return Err(
+                    "KRASIS_SYNTH_REPACK=1 does not yet support latent-width MoE prefill"
+                        .to_string(),
+                );
+            }
+            Some(
+                graph
+                    .synthetic_repack
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "KRASIS_SYNTH_REPACK=1 requested but decode repack ring was not initialized"
+                            .to_string()
+                    })?
+                    .clone(),
+            )
+        } else {
+            None
+        };
         let q_type = if config.expert_bits == 8 {
             crate::gpu_prefill::ScalarType::U8B128
         } else {
@@ -30382,6 +30823,7 @@ impl GpuDecodeStore {
             d_cold_staging: None, // allocated dynamically in prepare_for_prefill
             cold_expert_bytes: cold_per_expert,
             max_cold_experts: actual_max_cold,
+            synthetic_repack,
             last_cold_staging_failure: None,
             prefill_runtime_chunk_cap: None,
             active_prefill_prompt_tokens: 0,
@@ -36958,23 +37400,22 @@ impl GpuDecodeStore {
                                 layer_idx, *ckv_cache_ptr, *kpe_cache_ptr
                             ));
                         }
-                        let dsa_owner_active = if let Some(registration) =
-                            layer.dsa_indexer.as_ref()
-                        {
-                            if registration.owner_weights_present {
-                                if registration.owner_layer_idx != layer_idx {
-                                    return Err(format!(
-                                        "DSA layer {} carries owner weights for owner {}",
-                                        layer_idx, registration.owner_layer_idx
-                                    ));
+                        let dsa_owner_active =
+                            if let Some(registration) = layer.dsa_indexer.as_ref() {
+                                if registration.owner_weights_present {
+                                    if registration.owner_layer_idx != layer_idx {
+                                        return Err(format!(
+                                            "DSA layer {} carries owner weights for owner {}",
+                                            layer_idx, registration.owner_layer_idx
+                                        ));
+                                    }
+                                    true
+                                } else {
+                                    false
                                 }
-                                true
                             } else {
                                 false
-                            }
-                        } else {
-                            false
-                        };
+                            };
                         if dsa_owner_active && *q_lora_rank == 0 {
                             return Err(format!(
                                 "DSA owner layer {} requires an MLA query-LoRA latent",
@@ -39373,11 +39814,7 @@ impl GpuDecodeStore {
                 w13_kernel
                     .launch(
                         LaunchConfig {
-                            grid_dim: (
-                                w13_n_tiles as u32,
-                                w13_ksplits_batched as u32,
-                                topk as u32,
-                            ),
+                            grid_dim: (w13_n_tiles as u32, w13_ksplits_batched as u32, topk as u32),
                             block_dim: (256, 1, 1),
                             shared_mem_bytes: w13_smem,
                         },
@@ -39835,6 +40272,26 @@ impl GpuDecodeStore {
                     .to_string(),
             );
         }
+        if !graph.cpu_tail_workers.is_empty() {
+            if gpu_rs {
+                return Err(
+                    "KRASIS_CPU_TAIL_RACE=1 requires legacy host-visible route synchronization"
+                        .to_string(),
+                );
+            }
+            if !split_launch {
+                return Err(
+                    "KRASIS_CPU_TAIL_RACE=1 requires KRASIS_SPLIT_EXPERT_LAUNCH=1 so resident work remains overlapped with the tail race"
+                        .to_string(),
+                );
+            }
+            if prefetch_depth > 0 || apfl_replay {
+                return Err(
+                    "KRASIS_CPU_TAIL_RACE=1 is not yet compatible with expert prefetch/APFL; disable prefetch rather than combining unvalidated schedulers"
+                        .to_string(),
+                );
+            }
+        }
         if prefetch_depth > 0 {
             let num_moe = moe_indices.len();
             if graph.prefetch_prev_routes.len() != num_moe {
@@ -40108,6 +40565,7 @@ impl GpuDecodeStore {
         for graph_idx in 0..num_graphs {
             let mut wait_for_cold_dma = false;
             let mut dynamic_promotions: Vec<DynamicHcsPromotion> = Vec::new();
+            let mut cpu_tail_pending: Vec<CpuTailPendingRace> = Vec::new();
             // Cached cuEventQuery result for this boundary's prefetch ring
             // slot. Staged experts are consumed only when their copies are
             // already host-observed complete (consume-if-ready); a late slot
@@ -40240,6 +40698,14 @@ impl GpuDecodeStore {
                         // every cold expert needs a distinct resident buffer.
                         let mut cold_bufs: Vec<(u64, u64, u64, u64, usize)> =
                             Vec::with_capacity(cold_count);
+                        let mut synthetic_repack_ptrs: Vec<[u64; 4]> =
+                            Vec::with_capacity(cold_count);
+                        if let Some(repack) = graph.synthetic_repack.as_ref() {
+                            repack
+                                .lock()
+                                .map_err(|_| "synthetic repack ring lock poisoned".to_string())?
+                                .begin_layer();
+                        }
 
                         for ci in 0..cold_count {
                             let eid =
@@ -40305,6 +40771,16 @@ impl GpuDecodeStore {
                             graph.dma_cold_experts += 1;
                             let expert = &moe_data.experts[eid];
 
+                            if miss_count == 0 {
+                                if let Some(repack) = graph.synthetic_repack.as_ref() {
+                                    repack
+                                        .lock()
+                                        .map_err(|_| {
+                                            "synthetic repack ring lock poisoned".to_string()
+                                        })?
+                                        .begin_copy_batch(copy_stream)?;
+                                }
+                            }
                             if graph.graph_internal_timing && miss_count == 0 {
                                 graph
                                     .graph_timing_events
@@ -40372,6 +40848,7 @@ impl GpuDecodeStore {
                                 }
                             }
 
+                            synthetic_repack_ptrs.push([w13p, w13s, w2p, w2s]);
                             cold_bufs.push((w13p, w13s, w2p, w2s, batch_slot));
                         }
                         if cold_bufs.len() != cold_count {
@@ -40382,6 +40859,16 @@ impl GpuDecodeStore {
                         }
 
                         if miss_count > 0 {
+                            let completion_stream =
+                                if let Some(repack) = graph.synthetic_repack.as_ref() {
+                                    let mut repack = repack.lock().map_err(|_| {
+                                        "synthetic repack ring lock poisoned".to_string()
+                                    })?;
+                                    repack.launch_batch(copy_stream, &synthetic_repack_ptrs)?;
+                                    repack.repack_stream()
+                                } else {
+                                    copy_stream
+                                };
                             if graph.graph_internal_timing {
                                 graph
                                     .graph_timing_events
@@ -40399,7 +40886,8 @@ impl GpuDecodeStore {
                                 graph.graph_segment_demand_dma_samples[graph_idx] += 1;
                             }
                             let err = unsafe {
-                                cuda_sys::lib().cuEventRecord(graph_replay_dma_event, copy_stream)
+                                cuda_sys::lib()
+                                    .cuEventRecord(graph_replay_dma_event, completion_stream)
                             };
                             if err != cuda_sys::CUresult::CUDA_SUCCESS {
                                 return Err(format!(
@@ -40717,14 +41205,17 @@ impl GpuDecodeStore {
                         ));
                     }
 
-                    // Queue ALL cold expert DMAs on copy_stream (no per-expert sync).
-                    // Unlike normal decode, graph replay cannot reuse two ping-pong
-                    // buffers inside the captured batched expert graph: all top-k
-                    // pointers are consumed in one launch.
+                    // Ordinarily every surviving cold expert is queued immediately.
+                    // With the explicit CPU-tail race, one persistent Rust worker
+                    // instead claims the final (lowest router-rank) survivor after
+                    // pruning. Front H2D remains the deadline path; the tail DMA is
+                    // submitted normally if the worker has not completed before
+                    // both front H2D and split-hot replay prerequisites are ready.
                     let mut cold_ptrs_list: Vec<(u64, u64, u64, u64)> =
                         Vec::with_capacity(cold_experts.len());
                     let mut boundary_dma_bytes = 0u64;
                     let mut boundary_dma_calls = 0u64;
+                    let mut boundary_dma_experts = 0u64;
                     if !cold_experts.is_empty() && dynamic_promotion_event_pending {
                         let err = unsafe {
                             cuda_sys::lib().cuStreamWaitEvent(
@@ -40749,6 +41240,298 @@ impl GpuDecodeStore {
                             .demand_dma
                             .record_start(graph_idx, copy_stream)?;
                     }
+
+                    let mut cpu_tail_worker_by_index: Vec<Option<usize>> =
+                        vec![None; cold_experts.len()];
+                    if !graph.cpu_tail_workers.is_empty() {
+                        // Reap canceled attempts from earlier layers without
+                        // waiting. A still-running worker is simply unavailable
+                        // for this layer; GPU scheduling is unchanged.
+                        let mut output_copy_busy = false;
+                        if graph.cpu_tail_output_copy_pending {
+                            let event = graph
+                                .cpu_tail_output_copy_event
+                                .as_ref()
+                                .map(|event| event.0)
+                                .ok_or_else(|| {
+                                    "CPU tail output copy is pending without a CUDA event"
+                                        .to_string()
+                                })?;
+                            let status = unsafe { cuda_sys::lib().cuEventQuery(event) };
+                            if status == cuda_sys::CUresult::CUDA_SUCCESS {
+                                graph.cpu_tail_output_copy_pending = false;
+                            } else if status == cuda_sys::CUresult::CUDA_ERROR_NOT_READY {
+                                output_copy_busy = true;
+                            } else {
+                                return Err(format!(
+                                    "CPU tail output-copy event query layer={}: {:?}",
+                                    moe_layer_idx, status
+                                ));
+                            }
+                        }
+                        let mut available_workers = Vec::new();
+                        for worker_index in 0..graph.cpu_tail_workers.len() {
+                            let mut finished = None;
+                            let mut worker_busy = false;
+                            {
+                                let runtime = &mut graph.cpu_tail_workers[worker_index];
+                                if runtime.busy_sequence().is_some() {
+                                    finished = runtime.try_result()?;
+                                    worker_busy = finished.is_none();
+                                }
+                            }
+                            if let Some(result) = finished {
+                                if graph.timing_enabled {
+                                    let depth_bucket = result.depth_bucket;
+                                    if depth_bucket >= graph.cpu_tail_stage_results_by_depth.len() {
+                                        graph.cpu_tail_errors += 1;
+                                        return Err(format!(
+                                            "CPU tail result depth bucket out of range: {}",
+                                            depth_bucket
+                                        ));
+                                    }
+                                    graph.cpu_tail_stage_results_by_depth[depth_bucket] += 1;
+                                    graph.cpu_tail_submit_to_pickup_s_by_depth[depth_bucket] +=
+                                        result.dispatch_lag_s;
+                                    graph.cpu_tail_pickup_to_worker_start_s_by_depth
+                                        [depth_bucket] += result.pickup_to_worker_start_s;
+                                    graph.cpu_tail_claim_to_worker_start_s_by_depth
+                                        [depth_bucket] += result.claim_to_worker_start_s;
+                                    graph.cpu_tail_kernel_compute_s_by_depth[depth_bucket] +=
+                                        result.kernel_compute_s;
+                                    graph.cpu_tail_compute_to_result_visible_s_by_depth
+                                        [depth_bucket] += result.compute_to_result_visible_s;
+                                }
+                                graph.cpu_tail_compute_s += result.elapsed_s;
+                                graph.cpu_tail_worker_results[worker_index] += 1;
+                                graph.cpu_tail_worker_compute_s[worker_index] += result.elapsed_s;
+                                match result.format {
+                                    CpuTailWeightFormat::Marlin => {
+                                        graph.cpu_tail_marlin_results += 1;
+                                        graph.cpu_tail_marlin_compute_s += result.elapsed_s;
+                                    }
+                                    CpuTailWeightFormat::Transposed => {
+                                        graph.cpu_tail_transposed_results += 1;
+                                        graph.cpu_tail_transposed_compute_s += result.elapsed_s;
+                                    }
+                                }
+                                // A result collected at claim time belongs to a
+                                // race already resolved as a miss.
+                                graph.cpu_tail_miss_compute_s += result.elapsed_s;
+                                graph.cpu_tail_dispatch_lag_s += result.dispatch_lag_s;
+                                if let Some(error) = result.error {
+                                    graph.cpu_tail_errors += 1;
+                                    return Err(error);
+                                }
+                                graph.cpu_tail_workers[worker_index].finish(result.sequence)?;
+                            }
+                            if !worker_busy && !output_copy_busy {
+                                available_workers.push(worker_index);
+                            }
+                        }
+
+                        if cold_experts.len() < 2 {
+                            graph.cpu_tail_short_queue_skips += 1;
+                        } else if available_workers.is_empty() {
+                            graph.cpu_tail_busy_skips += 1;
+                        } else {
+                            let claim_count = available_workers
+                                .len()
+                                .min(cold_experts.len().saturating_sub(1));
+                            for (claim_ordinal, &worker_index) in
+                                available_workers.iter().take(claim_count).enumerate()
+                            {
+                                let candidate_index = cold_experts.len() - 1 - claim_ordinal;
+                                let effective_depth = cold_experts.len() - claim_ordinal;
+                                let depth_bucket = effective_depth.min(9) - 2;
+                                let claim_started =
+                                    graph.timing_enabled.then(std::time::Instant::now);
+                                let (_topk_pos, eid, weight) = cold_experts[candidate_index];
+                                if moe_data.moe_input_size != 0
+                                    || !moe_data.gated_experts
+                                    || moe_data.activation_type != 0
+                                    || moe_data.swiglu_limit != 0.0
+                                {
+                                    return Err(format!(
+                                        "KRASIS_CPU_TAIL_RACE=1 requires standard unclamped gated-SiLU experts; layer={} moe_input_size={} gated={} activation_type={} swiglu_limit={}",
+                                        moe_layer_idx,
+                                        moe_data.moe_input_size,
+                                        moe_data.gated_experts,
+                                        moe_data.activation_type,
+                                        moe_data.swiglu_limit,
+                                    ));
+                                }
+                                if graph
+                                    .layers
+                                    .get(moe_layer_idx)
+                                    .map(|layer| {
+                                        matches!(layer.mlp, GpuMlpConfig::Gemma4MoE { .. })
+                                    })
+                                    .unwrap_or(false)
+                                {
+                                    return Err(
+                                        "KRASIS_CPU_TAIL_RACE=1 does not support Gemma4 expert-input preparation"
+                                            .to_string(),
+                                    );
+                                }
+                                let expert = &moe_data.experts[eid];
+                                let expert_input_ptr = if graph.moe_input_override_ptr != 0 {
+                                    graph.moe_input_override_ptr
+                                } else {
+                                    *graph.d_hidden.device_ptr()
+                                };
+                                let input_bytes = graph.hidden_size * std::mem::size_of::<u16>();
+                                let input_ptr = graph.cpu_tail_workers[worker_index].input_ptr();
+                                let t_input = graph.timing_enabled.then(std::time::Instant::now);
+                                let copy_err = unsafe {
+                                    cuda_sys::lib().cuMemcpyDtoH_v2(
+                                        input_ptr as *mut std::ffi::c_void,
+                                        expert_input_ptr,
+                                        input_bytes,
+                                    )
+                                };
+                                if let Some(t_input) = t_input {
+                                    let elapsed_s = t_input.elapsed().as_secs_f64();
+                                    graph.cpu_tail_input_d2h_s += elapsed_s;
+                                    graph.cpu_tail_input_d2h_s_by_depth[depth_bucket] += elapsed_s;
+                                }
+                                if copy_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                    graph.cpu_tail_errors += 1;
+                                    return Err(format!(
+                                        "CPU tail activation D2H failed worker={} layer={} expert={}: {:?}",
+                                        worker_index, moe_layer_idx, eid, copy_err
+                                    ));
+                                }
+                                let cpu_expert = if let Some(transposed) = graph
+                                    .cpu_tail_transposed_tier
+                                    .as_ref()
+                                    .and_then(|tier| tier.expert(moe_layer_idx, eid))
+                                {
+                                    CpuTailExpertRef {
+                                        format: CpuTailWeightFormat::Transposed,
+                                        w13_packed_ptr: transposed.w13_packed.as_ptr() as usize,
+                                        w13_packed_len: transposed.w13_packed.len(),
+                                        w13_scales_ptr: transposed.w13_scales.as_ptr() as usize,
+                                        w13_scales_len: transposed.w13_scales.len(),
+                                        w2_packed_ptr: transposed.w2_packed.as_ptr() as usize,
+                                        w2_packed_len: transposed.w2_packed.len(),
+                                        w2_scales_ptr: transposed.w2_scales.as_ptr() as usize,
+                                        w2_scales_len: transposed.w2_scales.len(),
+                                        hidden_size: graph.hidden_size,
+                                        intermediate_size: graph.moe_intermediate_size,
+                                        group_size: graph.group_size,
+                                        swiglu_limit: moe_data.swiglu_limit,
+                                        activation_alpha: 1.0,
+                                    }
+                                } else {
+                                    CpuTailExpertRef {
+                                        format: CpuTailWeightFormat::Marlin,
+                                        w13_packed_ptr: expert.w13_packed_ptr,
+                                        w13_packed_len: expert.w13_packed_bytes
+                                            / std::mem::size_of::<u32>(),
+                                        w13_scales_ptr: expert.w13_scales_ptr,
+                                        w13_scales_len: expert.w13_scales_bytes
+                                            / std::mem::size_of::<u16>(),
+                                        w2_packed_ptr: expert.w2_packed_ptr,
+                                        w2_packed_len: expert.w2_packed_bytes
+                                            / std::mem::size_of::<u32>(),
+                                        w2_scales_ptr: expert.w2_scales_ptr,
+                                        w2_scales_len: expert.w2_scales_bytes
+                                            / std::mem::size_of::<u16>(),
+                                        hidden_size: graph.hidden_size,
+                                        intermediate_size: graph.moe_intermediate_size,
+                                        group_size: graph.group_size,
+                                        swiglu_limit: moe_data.swiglu_limit,
+                                        activation_alpha: 1.0,
+                                    }
+                                };
+                                let cpu_format = cpu_expert.format;
+                                let sequence = graph.cpu_tail_workers[worker_index].submit(
+                                    cpu_expert,
+                                    depth_bucket,
+                                    claim_started,
+                                )?;
+                                let submitted_at =
+                                    graph.timing_enabled.then(std::time::Instant::now);
+                                let base = graph_buf_base[candidate_index];
+                                let dma_bytes = if expert.contiguous_ptr != 0 {
+                                    expert.contiguous_bytes as u64
+                                } else {
+                                    (expert.w13_packed_bytes
+                                        + expert.w13_scales_bytes
+                                        + expert.w2_packed_bytes
+                                        + expert.w2_scales_bytes)
+                                        as u64
+                                };
+                                let dma_calls = if expert.contiguous_ptr != 0 { 1 } else { 4 };
+                                let promotion =
+                                    graph.hcs.as_ref().filter(|h| h.dynamic_enabled).map(|_| {
+                                        DynamicHcsPromotion {
+                                            source_path: "graph_replay_cpu_tail_deadline_miss",
+                                            layer_idx: moe_layer_idx,
+                                            expert_idx: eid,
+                                            src_base: base,
+                                            src_w13p_off: w13p_off,
+                                            src_w13s_off: w13s_off,
+                                            src_w2p_off: w2p_off,
+                                            src_w2s_off: w2s_off,
+                                            w13p_host: expert.w13_packed_ptr,
+                                            w13s_host: expert.w13_scales_ptr,
+                                            w2p_host: expert.w2_packed_ptr,
+                                            w2s_host: expert.w2_scales_ptr,
+                                            w13p_bytes: expert.w13_packed_bytes,
+                                            w13s_bytes: expert.w13_scales_bytes,
+                                            w2p_bytes: expert.w2_packed_bytes,
+                                            w2s_bytes: expert.w2_scales_bytes,
+                                        }
+                                    });
+                                cpu_tail_pending.push(CpuTailPendingRace {
+                                    worker_index,
+                                    sequence,
+                                    format: cpu_format,
+                                    layer_idx: moe_layer_idx,
+                                    expert_idx: eid,
+                                    batch_slot: hot_batch_count + candidate_index,
+                                    weight,
+                                    staging_base: base,
+                                    dma_bytes,
+                                    dma_calls,
+                                    front_dma_bytes: 0,
+                                    front_dma_calls: 0,
+                                    front_dma_experts: 0,
+                                    depth_bucket,
+                                    submitted_at,
+                                    promotion,
+                                });
+                                cpu_tail_worker_by_index[candidate_index] = Some(worker_index);
+                                graph.cpu_tail_attempts += 1;
+                                graph.cpu_tail_worker_attempts[worker_index] += 1;
+                                graph.cpu_tail_worker_attempts_by_depth[worker_index]
+                                    [depth_bucket] += 1;
+                                match cpu_format {
+                                    CpuTailWeightFormat::Marlin => {
+                                        graph.cpu_tail_marlin_attempts += 1;
+                                    }
+                                    CpuTailWeightFormat::Transposed => {
+                                        graph.cpu_tail_transposed_attempts += 1;
+                                    }
+                                }
+                                graph.cpu_tail_attempts_by_depth[depth_bucket] += 1;
+                            }
+                        }
+                    }
+
+                    let mut synthetic_repack_ptrs: Vec<[u64; 4]> =
+                        Vec::with_capacity(cold_experts.len());
+                    if let Some(repack) = graph.synthetic_repack.as_ref() {
+                        let mut repack = repack
+                            .lock()
+                            .map_err(|_| "synthetic repack ring lock poisoned".to_string())?;
+                        repack.begin_layer();
+                        if !cold_experts.is_empty() {
+                            repack.begin_copy_batch(copy_stream)?;
+                        }
+                    }
                     for (ci, &(_topk_pos, eid, _weight)) in cold_experts.iter().enumerate() {
                         let expert = &moe_data.experts[eid];
 
@@ -40759,6 +41542,13 @@ impl GpuDecodeStore {
                             base + w2p_off as u64,
                             base + w2s_off as u64,
                         );
+
+                        // Reserve the tail's ordinary staging pointers now, but
+                        // do not submit its weight transfer until the race loses.
+                        if cpu_tail_worker_by_index[ci].is_some() {
+                            cold_ptrs_list.push((w13p, w13s, w2p, w2s));
+                            continue;
+                        }
 
                         unsafe {
                             if expert.contiguous_ptr != 0 {
@@ -40807,6 +41597,8 @@ impl GpuDecodeStore {
                                 boundary_dma_calls += 4;
                             }
                         }
+                        boundary_dma_experts += 1;
+                        synthetic_repack_ptrs.push([w13p, w13s, w2p, w2s]);
                         cold_ptrs_list.push((w13p, w13s, w2p, w2s));
                         if graph
                             .hcs
@@ -40834,11 +41626,28 @@ impl GpuDecodeStore {
                             });
                         }
                     }
+                    for pending in &mut cpu_tail_pending {
+                        pending.front_dma_bytes = boundary_dma_bytes;
+                        pending.front_dma_calls = boundary_dma_calls;
+                        pending.front_dma_experts = boundary_dma_experts;
+                    }
 
-                    // Record copy-stream completion instead of blocking the CPU.
-                    // The replay stream waits on this event after d_batch_upload is queued.
+                    // Record front-copy completion. In the ordinary path this is
+                    // also the final demand event. In CPU-tail mode it is queried
+                    // against replay readiness and re-recorded after the tail
+                    // copy only when the CPU loses.
                     if !cold_experts.is_empty() {
-                        if graph.graph_internal_timing {
+                        let completion_stream =
+                            if let Some(repack) = graph.synthetic_repack.as_ref() {
+                                let mut repack = repack.lock().map_err(|_| {
+                                    "synthetic repack ring lock poisoned".to_string()
+                                })?;
+                                repack.launch_batch(copy_stream, &synthetic_repack_ptrs)?;
+                                repack.repack_stream()
+                            } else {
+                                copy_stream
+                            };
+                        if cpu_tail_pending.is_empty() && graph.graph_internal_timing {
                             graph
                                 .graph_timing_events
                                 .as_ref()
@@ -40849,11 +41658,11 @@ impl GpuDecodeStore {
                             graph.graph_segment_demand_dma_bytes[graph_idx] += boundary_dma_bytes;
                             graph.graph_segment_demand_dma_calls[graph_idx] += boundary_dma_calls;
                             graph.graph_segment_demand_dma_cold_experts[graph_idx] +=
-                                cold_experts.len() as u64;
+                                boundary_dma_experts;
                             graph.graph_segment_demand_dma_samples[graph_idx] += 1;
                         }
                         let err = unsafe {
-                            cuda_sys::lib().cuEventRecord(graph_replay_dma_event, copy_stream)
+                            cuda_sys::lib().cuEventRecord(graph_replay_dma_event, completion_stream)
                         };
                         if err != cuda_sys::CUresult::CUDA_SUCCESS {
                             return Err(format!(
@@ -40965,6 +41774,17 @@ impl GpuDecodeStore {
                             // Zero the hot prefix in the upload staging so the
                             // captured batched kernels skip already-computed slots.
                             std::ptr::write_bytes(h.add(ptr_stride * 4), 0, hot_batch_count * 4);
+                            for pending in &cpu_tail_pending {
+                                // A CPU result, if accepted, is placed directly
+                                // in d_batch_expert_outs. Keeping its ordinary
+                                // weight zero prevents the captured W13/W2 stack
+                                // from overwriting that slot.
+                                std::ptr::write_bytes(
+                                    h.add(ptr_stride * 4 + pending.batch_slot * 4),
+                                    0,
+                                    4,
+                                );
+                            }
                             let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                                 *graph.d_wts_full.as_ref().unwrap().device_ptr(),
                                 graph.h_wts_full.as_ptr() as *const std::ffi::c_void,
@@ -41065,6 +41885,352 @@ impl GpuDecodeStore {
                         .split_hot
                         .record_end(graph_idx, replay_stream)?;
                     split_hot_active[graph_idx] = true;
+                }
+            }
+
+            if !cpu_tail_pending.is_empty() {
+                // Resolve the nearer-deadline candidate first. If it misses,
+                // its fallback copy extends the copy-stream event and therefore
+                // becomes real additional deadline for the deeper candidate.
+                cpu_tail_pending.sort_by_key(|pending| pending.batch_slot);
+                let replay_ready_event = graph
+                    .cpu_tail_replay_ready_event
+                    .as_ref()
+                    .map(|event| event.0)
+                    .ok_or_else(|| {
+                        "CPU tail race active without replay-ready CUDA event".to_string()
+                    })?;
+                let record_err =
+                    unsafe { cuda_sys::lib().cuEventRecord(replay_ready_event, replay_stream) };
+                if record_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "CPU tail replay-ready event record layer={}: {:?}",
+                        cpu_tail_pending[0].layer_idx, record_err
+                    ));
+                }
+
+                let mut actual_dma_bytes = cpu_tail_pending[0].front_dma_bytes;
+                let mut actual_dma_calls = cpu_tail_pending[0].front_dma_calls;
+                let mut actual_dma_experts = cpu_tail_pending[0].front_dma_experts;
+                for pending in std::mem::take(&mut cpu_tail_pending) {
+                    let worker_index = pending.worker_index;
+                    let race_started = graph.timing_enabled.then(std::time::Instant::now);
+                    let mut cpu_result = None;
+                    let cpu_won = loop {
+                        if let Some(result) = graph.cpu_tail_workers[worker_index].try_result()? {
+                            if let Some(error) = result.error.as_ref() {
+                                graph.cpu_tail_errors += 1;
+                                return Err(error.clone());
+                            }
+                            if result.sequence != pending.sequence {
+                                graph.cpu_tail_errors += 1;
+                                return Err(format!(
+                                    "CPU tail race sequence mismatch worker={} layer={} expected={} got={}",
+                                    worker_index,
+                                    pending.layer_idx,
+                                    pending.sequence,
+                                    result.sequence
+                                ));
+                            }
+                            cpu_result = Some(result);
+                            break true;
+                        }
+
+                        let front_status =
+                            unsafe { cuda_sys::lib().cuEventQuery(graph_replay_dma_event) };
+                        let replay_status =
+                            unsafe { cuda_sys::lib().cuEventQuery(replay_ready_event) };
+                        let front_ready = front_status == cuda_sys::CUresult::CUDA_SUCCESS;
+                        let replay_ready = replay_status == cuda_sys::CUresult::CUDA_SUCCESS;
+                        if front_ready && replay_ready {
+                            break false;
+                        }
+                        if front_status != cuda_sys::CUresult::CUDA_SUCCESS
+                            && front_status != cuda_sys::CUresult::CUDA_ERROR_NOT_READY
+                        {
+                            return Err(format!(
+                                "CPU tail front-DMA event query worker={} layer={}: {:?}",
+                                worker_index, pending.layer_idx, front_status
+                            ));
+                        }
+                        if replay_status != cuda_sys::CUresult::CUDA_SUCCESS
+                            && replay_status != cuda_sys::CUresult::CUDA_ERROR_NOT_READY
+                        {
+                            return Err(format!(
+                                "CPU tail replay-ready event query worker={} layer={}: {:?}",
+                                worker_index, pending.layer_idx, replay_status
+                            ));
+                        }
+                        std::hint::spin_loop();
+                    };
+                    if let Some(race_started) = race_started {
+                        graph.cpu_tail_race_wait_s += race_started.elapsed().as_secs_f64();
+                    }
+
+                    if cpu_won {
+                        let result = cpu_result.unwrap();
+                        if graph.timing_enabled {
+                            let depth_bucket = result.depth_bucket;
+                            if depth_bucket >= graph.cpu_tail_stage_results_by_depth.len() {
+                                graph.cpu_tail_errors += 1;
+                                return Err(format!(
+                                    "CPU tail result depth bucket out of range: {}",
+                                    depth_bucket
+                                ));
+                            }
+                            graph.cpu_tail_stage_results_by_depth[depth_bucket] += 1;
+                            graph.cpu_tail_submit_to_pickup_s_by_depth[depth_bucket] +=
+                                result.dispatch_lag_s;
+                            graph.cpu_tail_pickup_to_worker_start_s_by_depth[depth_bucket] +=
+                                result.pickup_to_worker_start_s;
+                            graph.cpu_tail_claim_to_worker_start_s_by_depth[depth_bucket] +=
+                                result.claim_to_worker_start_s;
+                            graph.cpu_tail_kernel_compute_s_by_depth[depth_bucket] +=
+                                result.kernel_compute_s;
+                            graph.cpu_tail_compute_to_result_visible_s_by_depth[depth_bucket] +=
+                                result.compute_to_result_visible_s;
+                        }
+                        if result.format != pending.format {
+                            graph.cpu_tail_errors += 1;
+                            return Err(format!(
+                                "CPU tail result format mismatch worker={} layer={} expert={} pending={:?} result={:?}",
+                                worker_index,
+                                pending.layer_idx,
+                                pending.expert_idx,
+                                pending.format,
+                                result.format,
+                            ));
+                        }
+                        graph.cpu_tail_compute_s += result.elapsed_s;
+                        graph.cpu_tail_worker_results[worker_index] += 1;
+                        graph.cpu_tail_worker_compute_s[worker_index] += result.elapsed_s;
+                        match result.format {
+                            CpuTailWeightFormat::Marlin => {
+                                graph.cpu_tail_marlin_results += 1;
+                                graph.cpu_tail_marlin_compute_s += result.elapsed_s;
+                            }
+                            CpuTailWeightFormat::Transposed => {
+                                graph.cpu_tail_transposed_results += 1;
+                                graph.cpu_tail_transposed_compute_s += result.elapsed_s;
+                            }
+                        }
+                        graph.cpu_tail_win_compute_s += result.elapsed_s;
+                        graph.cpu_tail_dispatch_lag_s += result.dispatch_lag_s;
+                        if let Some(submitted_at) = pending.submitted_at {
+                            graph.cpu_tail_win_total_s += submitted_at.elapsed().as_secs_f64();
+                        }
+                        if !result.completed {
+                            graph.cpu_tail_errors += 1;
+                            return Err(format!(
+                                "CPU tail worker returned incomplete result before deadline worker={} layer={} expert={} sequence={}",
+                                worker_index,
+                                pending.layer_idx,
+                                pending.expert_idx,
+                                pending.sequence
+                            ));
+                        }
+                        let expected_output_bytes = graph.hidden_size * std::mem::size_of::<u16>();
+                        let runtime = &mut graph.cpu_tail_workers[worker_index];
+                        if runtime.hidden_size() != graph.hidden_size
+                            || runtime.output_bytes() != expected_output_bytes
+                        {
+                            graph.cpu_tail_errors += 1;
+                            return Err(format!(
+                                "CPU tail output shape mismatch worker={} layer={}: runtime_hidden={} graph_hidden={} output_bytes={} expected_bytes={}",
+                                worker_index,
+                                pending.layer_idx,
+                                runtime.hidden_size(),
+                                graph.hidden_size,
+                                runtime.output_bytes(),
+                                expected_output_bytes,
+                            ));
+                        }
+                        let output_dst = *graph.d_batch_expert_outs.device_ptr()
+                            + (pending.batch_slot * expected_output_bytes) as u64;
+                        let output_err = unsafe {
+                            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                output_dst,
+                                runtime.output_ptr() as *const std::ffi::c_void,
+                                expected_output_bytes,
+                                replay_stream,
+                            )
+                        };
+                        if output_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            graph.cpu_tail_errors += 1;
+                            return Err(format!(
+                                "CPU tail result H2D failed worker={} layer={} expert={}: {:?}",
+                                worker_index, pending.layer_idx, pending.expert_idx, output_err
+                            ));
+                        }
+                        let output_copy_event = graph
+                            .cpu_tail_output_copy_event
+                            .as_ref()
+                            .map(|event| event.0)
+                            .ok_or_else(|| {
+                                "CPU tail output upload active without completion event".to_string()
+                            })?;
+                        let event_err = unsafe {
+                            cuda_sys::lib().cuEventRecord(output_copy_event, replay_stream)
+                        };
+                        if event_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            graph.cpu_tail_errors += 1;
+                            return Err(format!(
+                                "CPU tail output-copy event record failed worker={} layer={} expert={}: {:?}",
+                                worker_index, pending.layer_idx, pending.expert_idx, event_err
+                            ));
+                        }
+                        graph.cpu_tail_output_copy_pending = true;
+                        runtime.finish(pending.sequence)?;
+                        graph.cpu_tail_wins += 1;
+                        graph.cpu_tail_wins_by_depth[pending.depth_bucket] += 1;
+                        graph.cpu_tail_worker_wins[worker_index] += 1;
+                        graph.cpu_tail_worker_wins_by_depth[worker_index][pending.depth_bucket] +=
+                            1;
+                        graph.cpu_tail_saved_weight_bytes += pending.dma_bytes;
+                        graph.cpu_tail_worker_saved_weight_bytes[worker_index] += pending.dma_bytes;
+                        match pending.format {
+                            CpuTailWeightFormat::Marlin => {
+                                graph.cpu_tail_marlin_wins += 1;
+                                graph.cpu_tail_marlin_saved_weight_bytes += pending.dma_bytes;
+                            }
+                            CpuTailWeightFormat::Transposed => {
+                                graph.cpu_tail_transposed_wins += 1;
+                                graph.cpu_tail_transposed_saved_weight_bytes += pending.dma_bytes;
+                            }
+                        }
+                        graph.cpu_tail_output_bytes += expected_output_bytes as u64;
+                    } else {
+                        graph.cpu_tail_workers[worker_index].cancel(pending.sequence);
+                        graph.cpu_tail_deadline_misses += 1;
+                        graph.cpu_tail_worker_deadline_misses[worker_index] += 1;
+                        if let Some(submitted_at) = pending.submitted_at {
+                            graph.cpu_tail_deadline_s += submitted_at.elapsed().as_secs_f64();
+                        }
+                        let expert = graph.moe_layers[pending.layer_idx]
+                            .as_ref()
+                            .and_then(|moe| moe.experts.get(pending.expert_idx))
+                            .ok_or_else(|| {
+                                format!(
+                                    "CPU tail deadline miss lost expert metadata worker={} layer={} expert={}",
+                                    worker_index, pending.layer_idx, pending.expert_idx
+                                )
+                            })?;
+                        unsafe {
+                            if expert.contiguous_ptr != 0 {
+                                let copy_err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                    pending.staging_base,
+                                    expert.contiguous_ptr as *const std::ffi::c_void,
+                                    expert.contiguous_bytes,
+                                    copy_stream,
+                                );
+                                if copy_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                    return Err(format!(
+                                        "CPU tail fallback contiguous H2D failed worker={} layer={} expert={}: {:?}",
+                                        worker_index, pending.layer_idx, pending.expert_idx, copy_err
+                                    ));
+                                }
+                            } else {
+                                for &(offset, host_ptr, bytes, label) in &[
+                                    (
+                                        w13p_off,
+                                        expert.w13_packed_ptr,
+                                        expert.w13_packed_bytes,
+                                        "w13_packed",
+                                    ),
+                                    (
+                                        w13s_off,
+                                        expert.w13_scales_ptr,
+                                        expert.w13_scales_bytes,
+                                        "w13_scales",
+                                    ),
+                                    (
+                                        w2p_off,
+                                        expert.w2_packed_ptr,
+                                        expert.w2_packed_bytes,
+                                        "w2_packed",
+                                    ),
+                                    (
+                                        w2s_off,
+                                        expert.w2_scales_ptr,
+                                        expert.w2_scales_bytes,
+                                        "w2_scales",
+                                    ),
+                                ] {
+                                    let copy_err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                        pending.staging_base + offset as u64,
+                                        host_ptr as *const std::ffi::c_void,
+                                        bytes,
+                                        copy_stream,
+                                    );
+                                    if copy_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                        return Err(format!(
+                                            "CPU tail fallback {} H2D failed worker={} layer={} expert={}: {:?}",
+                                            label,
+                                            worker_index,
+                                            pending.layer_idx,
+                                            pending.expert_idx,
+                                            copy_err
+                                        ));
+                                    }
+                                }
+                            }
+                            let event_err =
+                                cuda_sys::lib().cuEventRecord(graph_replay_dma_event, copy_stream);
+                            if event_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(format!(
+                                    "CPU tail fallback DMA event record worker={} layer={} expert={}: {:?}",
+                                    worker_index, pending.layer_idx, pending.expert_idx, event_err
+                                ));
+                            }
+                        }
+                        graph.dma_bytes_total += pending.dma_bytes;
+                        graph.dma_call_count += pending.dma_calls;
+                        actual_dma_bytes += pending.dma_bytes;
+                        actual_dma_calls += pending.dma_calls;
+                        actual_dma_experts += 1;
+                        if let Some(promotion) = pending.promotion {
+                            dynamic_promotions.push(promotion);
+                        }
+
+                        // Restore only this missed candidate's ordinary weight
+                        // before the captured cold expert stack is launched.
+                        let weight_offset =
+                            (graph.max_experts_per_tok * 8 * 4) + pending.batch_slot * 4;
+                        let weight_src = &graph.h_batch_weights[pending.batch_slot] as *const f32;
+                        let weight_err = unsafe {
+                            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                *graph.d_batch_upload.device_ptr() + weight_offset as u64,
+                                weight_src as *const std::ffi::c_void,
+                                std::mem::size_of::<f32>(),
+                                replay_stream,
+                            )
+                        };
+                        if weight_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!(
+                                "CPU tail fallback weight restore failed worker={} layer={} expert={} weight={}: {:?}",
+                                worker_index,
+                                pending.layer_idx,
+                                pending.expert_idx,
+                                pending.weight,
+                                weight_err
+                            ));
+                        }
+                    }
+                }
+
+                token_demand_bytes = token_demand_bytes.saturating_add(actual_dma_bytes);
+                if graph.graph_internal_timing {
+                    graph
+                        .graph_timing_events
+                        .as_ref()
+                        .unwrap()
+                        .demand_dma
+                        .record_end(graph_idx, copy_stream)?;
+                    demand_dma_active[graph_idx] = true;
+                    graph.graph_segment_demand_dma_bytes[graph_idx] += actual_dma_bytes;
+                    graph.graph_segment_demand_dma_calls[graph_idx] += actual_dma_calls;
+                    graph.graph_segment_demand_dma_cold_experts[graph_idx] += actual_dma_experts;
+                    graph.graph_segment_demand_dma_samples[graph_idx] += 1;
                 }
             }
 
@@ -44123,9 +45289,7 @@ impl GpuDecodeStore {
                             layer_idx, *ckv_cache_ptr, *kpe_cache_ptr
                         ));
                     }
-                    let dsa_owner_scalars = if let Some(registration) =
-                        layer.dsa_indexer.as_ref()
-                    {
+                    let dsa_owner_scalars = if let Some(registration) = layer.dsa_indexer.as_ref() {
                         if registration.owner_weights_present {
                             if registration.owner_layer_idx != layer_idx {
                                 return Err(format!(
@@ -47189,9 +48353,9 @@ impl GpuDecodeStore {
                     }
                 }
                 total_bytes += bytes;
-                self.device.bind_to_thread().map_err(|error| {
-                    format!("rebind DSA IndexShare source store: {:?}", error)
-                })?;
+                self.device
+                    .bind_to_thread()
+                    .map_err(|error| format!("rebind DSA IndexShare source store: {:?}", error))?;
             }
             Ok((replica_count, total_bytes))
         })();
@@ -47218,7 +48382,9 @@ impl GpuDecodeStore {
         prompt_len: usize,
     ) -> Result<(usize, usize), String> {
         if prompt_len == 0 {
-            return Err("DSA prompt key-cache handoff requires a positive prompt length".to_string());
+            return Err(
+                "DSA prompt key-cache handoff requires a positive prompt length".to_string(),
+            );
         }
         let source_graph = self.graph.as_ref().ok_or("source graph not configured")?;
         let destination_graph = aux_store
@@ -47252,13 +48418,10 @@ impl GpuDecodeStore {
             if source.index_head_dim != destination.index_head_dim {
                 return Err(format!(
                     "DSA owner {} prompt key width mismatch: source={} destination={}",
-                    destination.owner_layer_idx,
-                    source.index_head_dim,
-                    destination.index_head_dim
+                    destination.owner_layer_idx, source.index_head_dim, destination.index_head_dim
                 ));
             }
-            if prompt_len > source.max_context_tokens
-                || prompt_len > destination.max_context_tokens
+            if prompt_len > source.max_context_tokens || prompt_len > destination.max_context_tokens
             {
                 return Err(format!(
                     "DSA owner {} prompt length {} exceeds source/destination capacities {}/{}",
@@ -47338,9 +48501,9 @@ impl GpuDecodeStore {
                     }
                 }
                 total_bytes += bytes;
-                self.device.bind_to_thread().map_err(|error| {
-                    format!("rebind DSA prompt-key source store: {:?}", error)
-                })?;
+                self.device
+                    .bind_to_thread()
+                    .map_err(|error| format!("rebind DSA prompt-key source store: {:?}", error))?;
             }
             Ok((owner_count, total_bytes))
         })();
@@ -53542,7 +54705,11 @@ impl GpuDecodeStore {
             };
             let set_hash = validation_fnv1a_u64(sorted_bytes);
             let sample_count = selected.len().min(8);
-            let sample = selected.iter().take(sample_count).copied().collect::<Vec<_>>();
+            let sample = selected
+                .iter()
+                .take(sample_count)
+                .copied()
+                .collect::<Vec<_>>();
             let tail = selected
                 .iter()
                 .skip(selected.len().saturating_sub(sample_count))
@@ -53591,9 +54758,8 @@ impl GpuDecodeStore {
                     resource.owner_layer_idx, err
                 ));
             }
-            let key_row_raw = unsafe {
-                std::slice::from_raw_parts(key_row.as_ptr() as *const u8, key_row_bytes)
-            };
+            let key_row_raw =
+                unsafe { std::slice::from_raw_parts(key_row.as_ptr() as *const u8, key_row_bytes) };
 
             entries.push(serde_json::json!({
                 "phase": "dsa_owner_selection_after_decode",
@@ -53870,6 +55036,49 @@ impl GpuDecodeStore {
             g.dma_call_count = 0;
             g.dma_cold_experts = 0;
             g.dma_hcs_experts = 0;
+            g.cpu_tail_attempts = 0;
+            g.cpu_tail_wins = 0;
+            g.cpu_tail_deadline_misses = 0;
+            g.cpu_tail_busy_skips = 0;
+            g.cpu_tail_short_queue_skips = 0;
+            g.cpu_tail_errors = 0;
+            g.cpu_tail_saved_weight_bytes = 0;
+            g.cpu_tail_marlin_attempts = 0;
+            g.cpu_tail_marlin_wins = 0;
+            g.cpu_tail_marlin_results = 0;
+            g.cpu_tail_marlin_compute_s = 0.0;
+            g.cpu_tail_marlin_saved_weight_bytes = 0;
+            g.cpu_tail_transposed_attempts = 0;
+            g.cpu_tail_transposed_wins = 0;
+            g.cpu_tail_transposed_results = 0;
+            g.cpu_tail_transposed_compute_s = 0.0;
+            g.cpu_tail_transposed_saved_weight_bytes = 0;
+            g.cpu_tail_output_bytes = 0;
+            g.cpu_tail_input_d2h_s = 0.0;
+            g.cpu_tail_compute_s = 0.0;
+            g.cpu_tail_race_wait_s = 0.0;
+            g.cpu_tail_win_compute_s = 0.0;
+            g.cpu_tail_miss_compute_s = 0.0;
+            g.cpu_tail_deadline_s = 0.0;
+            g.cpu_tail_win_total_s = 0.0;
+            g.cpu_tail_dispatch_lag_s = 0.0;
+            g.cpu_tail_attempts_by_depth = [0; 8];
+            g.cpu_tail_wins_by_depth = [0; 8];
+            g.cpu_tail_worker_attempts = [0; 2];
+            g.cpu_tail_worker_wins = [0; 2];
+            g.cpu_tail_worker_deadline_misses = [0; 2];
+            g.cpu_tail_worker_results = [0; 2];
+            g.cpu_tail_worker_compute_s = [0.0; 2];
+            g.cpu_tail_worker_saved_weight_bytes = [0; 2];
+            g.cpu_tail_worker_attempts_by_depth = [[0; 8]; 2];
+            g.cpu_tail_worker_wins_by_depth = [[0; 8]; 2];
+            g.cpu_tail_stage_results_by_depth = [0; 8];
+            g.cpu_tail_input_d2h_s_by_depth = [0.0; 8];
+            g.cpu_tail_submit_to_pickup_s_by_depth = [0.0; 8];
+            g.cpu_tail_pickup_to_worker_start_s_by_depth = [0.0; 8];
+            g.cpu_tail_claim_to_worker_start_s_by_depth = [0.0; 8];
+            g.cpu_tail_kernel_compute_s_by_depth = [0.0; 8];
+            g.cpu_tail_compute_to_result_visible_s_by_depth = [0.0; 8];
             g.validation_decode_start_num_cached = 0;
             g.validation_decode_start_soft_num_cached = 0;
             g.validation_decode_start_hard_num_cached = 0;
@@ -54829,8 +56038,7 @@ impl GpuDecodeStore {
                         std::time::Instant::now()
                     };
                     if let Err(e) = self.replay_per_layer_graphs(next_token, pos, true) {
-                        let failure =
-                            format!("graph replay failed (no ungraphed fallback): {}", e);
+                        let failure = format!("graph replay failed (no ungraphed fallback): {}", e);
                         log::error!("gpu_generate_stream: {}", failure);
                         self.last_stream_failure = Some(failure);
                         break;
@@ -55136,6 +56344,223 @@ impl GpuDecodeStore {
             graph.adaptive_cold_drop_shadow.emit_summary(generated);
             graph.route_locality.emit_summary(generated);
             graph.prompt_hcs_shadow.emit_summary(generated);
+            if let Some(repack) = graph.synthetic_repack.as_ref() {
+                match repack.lock() {
+                    Ok(mut repack) => {
+                        let scratch_bytes = repack.scratch_bytes();
+                        let stats = repack.take_stats();
+                        if stats.experts > 0 {
+                            let experts = stats.experts as f64;
+                            let kernel_us_per_expert = stats.kernel_seconds / experts * 1.0e6;
+                            let copy_us_per_expert = stats.copy_seconds / experts * 1.0e6;
+                            let duty_pct = if stats.copy_seconds > 0.0 {
+                                stats.kernel_seconds / stats.copy_seconds * 100.0
+                            } else {
+                                0.0
+                            };
+                            let effective_mem_gb_s = if stats.kernel_seconds > 0.0 {
+                                stats.source_bytes as f64 * 2.0 / stats.kernel_seconds / 1.0e9
+                            } else {
+                                0.0
+                            };
+                            eprintln!(
+                                "SYNTHETIC REPACK SUMMARY phase=decode generated={} launches={} experts={} source_bytes={} scratch_bytes={} kernel_us_per_expert={:.6} copy_us_per_expert={:.6} duty_pct={:.6} effective_mem_gb_s={:.6} timing={}",
+                                generated,
+                                stats.launches,
+                                stats.experts,
+                                stats.source_bytes,
+                                scratch_bytes,
+                                kernel_us_per_expert,
+                                copy_us_per_expert,
+                                duty_pct,
+                                effective_mem_gb_s,
+                                stats.kernel_seconds > 0.0,
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("SYNTHETIC REPACK ERROR phase=decode reason=ring_lock_poisoned");
+                    }
+                }
+            }
+            if !graph.cpu_tail_workers.is_empty() {
+                let generated_f = generated.max(1) as f64;
+                let win_pct = if graph.cpu_tail_attempts > 0 {
+                    graph.cpu_tail_wins as f64 / graph.cpu_tail_attempts as f64 * 100.0
+                } else {
+                    0.0
+                };
+                let attempt_f = graph.cpu_tail_attempts.max(1) as f64;
+                eprintln!(
+                    "  \x1b[36mCPU tail: wins={}/{} ({:.2}%) deadline_misses={} busy_skips={} short_queue_skips={} saved={:.3} MiB/tok output={:.3} KiB/tok\x1b[0m",
+                    graph.cpu_tail_wins,
+                    graph.cpu_tail_attempts,
+                    win_pct,
+                    graph.cpu_tail_deadline_misses,
+                    graph.cpu_tail_busy_skips,
+                    graph.cpu_tail_short_queue_skips,
+                    graph.cpu_tail_saved_weight_bytes as f64 / generated_f / (1024.0 * 1024.0),
+                    graph.cpu_tail_output_bytes as f64 / generated_f / 1024.0,
+                );
+                let wins_f = graph.cpu_tail_wins.max(1) as f64;
+                let misses_f = graph.cpu_tail_deadline_misses.max(1) as f64;
+                let marlin_attempt_f = graph.cpu_tail_marlin_attempts.max(1) as f64;
+                let transposed_attempt_f = graph.cpu_tail_transposed_attempts.max(1) as f64;
+                let marlin_win_pct = if graph.cpu_tail_marlin_attempts > 0 {
+                    graph.cpu_tail_marlin_wins as f64 / graph.cpu_tail_marlin_attempts as f64
+                        * 100.0
+                } else {
+                    0.0
+                };
+                let transposed_win_pct = if graph.cpu_tail_transposed_attempts > 0 {
+                    graph.cpu_tail_transposed_wins as f64
+                        / graph.cpu_tail_transposed_attempts as f64
+                        * 100.0
+                } else {
+                    0.0
+                };
+                let transposed_coverage_pct = if graph.cpu_tail_attempts > 0 {
+                    graph.cpu_tail_transposed_attempts as f64 / graph.cpu_tail_attempts as f64
+                        * 100.0
+                } else {
+                    0.0
+                };
+                let (tier_experts, tier_selected_residents, tier_bytes, tier_conversion_s) = graph
+                    .cpu_tail_transposed_tier
+                    .as_ref()
+                    .map(|tier| {
+                        (
+                            tier.expert_count(),
+                            tier.selected_resident_count(),
+                            tier.total_bytes(),
+                            tier.conversion_s(),
+                        )
+                    })
+                    .unwrap_or((0, 0, 0, 0.0));
+                let depth_counts = |counts: &[u64; 8]| {
+                    counts
+                        .iter()
+                        .map(|c| c.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                let depth_ms = |sums: &[f64; 8], counts: &[u64; 8]| {
+                    sums.iter()
+                        .zip(counts)
+                        .map(|(sum, count)| {
+                            if *count == 0 {
+                                "0.000000".to_string()
+                            } else {
+                                format!("{:.6}", sum / *count as f64 * 1000.0)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                // eprintln (not log::) so the line reaches captured run logs.
+                eprintln!(
+                    "CPU TAIL SUMMARY generated={} attempts={} wins={} win_rate_pct={:.6} deadline_misses={} busy_skips={} short_queue_skips={} errors={} saved_weight_bytes={} saved_mib_per_token={:.6} output_bytes={} input_d2h_ms_per_token={:.6} worker_elapsed_ms_per_token={:.6} worker_elapsed_ms_per_attempt={:.6} race_wait_ms_per_token={:.6} win_compute_ms_avg={:.6} miss_compute_ms_avg={:.6} deadline_ms_avg={:.6} win_total_ms_avg={:.6} dispatch_lag_ms_avg={:.6} attempts_by_depth_2_to_9plus={} wins_by_depth_2_to_9plus={} marlin_attempts={} marlin_wins={} marlin_win_rate_pct={:.6} marlin_results={} marlin_worker_ms_per_attempt={:.6} marlin_saved_weight_bytes={} marlin_saved_mib_per_token={:.6} transposed_attempts={} transposed_wins={} transposed_win_rate_pct={:.6} transposed_coverage_pct={:.6} transposed_results={} transposed_worker_ms_per_attempt={:.6} transposed_saved_weight_bytes={} transposed_saved_mib_per_token={:.6} tier_experts={} tier_selected_residents={} tier_bytes={} tier_gib={:.6} tier_conversion_s={:.6} stage_results_by_depth_2_to_9plus={} activation_d2h_ms_by_depth_2_to_9plus={} submit_to_pickup_ms_by_depth_2_to_9plus={} pickup_to_worker_start_ms_by_depth_2_to_9plus={} claim_to_worker_start_ms_by_depth_2_to_9plus={} kernel_compute_ms_by_depth_2_to_9plus={} compute_to_result_visible_ms_by_depth_2_to_9plus={} cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate",
+                    generated,
+                    graph.cpu_tail_attempts,
+                    graph.cpu_tail_wins,
+                    win_pct,
+                    graph.cpu_tail_deadline_misses,
+                    graph.cpu_tail_busy_skips,
+                    graph.cpu_tail_short_queue_skips,
+                    graph.cpu_tail_errors,
+                    graph.cpu_tail_saved_weight_bytes,
+                    graph.cpu_tail_saved_weight_bytes as f64
+                        / generated_f
+                        / (1024.0 * 1024.0),
+                    graph.cpu_tail_output_bytes,
+                    graph.cpu_tail_input_d2h_s / generated_f * 1000.0,
+                    graph.cpu_tail_compute_s / generated_f * 1000.0,
+                    graph.cpu_tail_compute_s / attempt_f * 1000.0,
+                    graph.cpu_tail_race_wait_s / generated_f * 1000.0,
+                    graph.cpu_tail_win_compute_s / wins_f * 1000.0,
+                    graph.cpu_tail_miss_compute_s / misses_f * 1000.0,
+                    graph.cpu_tail_deadline_s / misses_f * 1000.0,
+                    graph.cpu_tail_win_total_s / wins_f * 1000.0,
+                    graph.cpu_tail_dispatch_lag_s / attempt_f * 1000.0,
+                    depth_counts(&graph.cpu_tail_attempts_by_depth),
+                    depth_counts(&graph.cpu_tail_wins_by_depth),
+                    graph.cpu_tail_marlin_attempts,
+                    graph.cpu_tail_marlin_wins,
+                    marlin_win_pct,
+                    graph.cpu_tail_marlin_results,
+                    graph.cpu_tail_marlin_compute_s / marlin_attempt_f * 1000.0,
+                    graph.cpu_tail_marlin_saved_weight_bytes,
+                    graph.cpu_tail_marlin_saved_weight_bytes as f64
+                        / generated_f
+                        / (1024.0 * 1024.0),
+                    graph.cpu_tail_transposed_attempts,
+                    graph.cpu_tail_transposed_wins,
+                    transposed_win_pct,
+                    transposed_coverage_pct,
+                    graph.cpu_tail_transposed_results,
+                    graph.cpu_tail_transposed_compute_s / transposed_attempt_f * 1000.0,
+                    graph.cpu_tail_transposed_saved_weight_bytes,
+                    graph.cpu_tail_transposed_saved_weight_bytes as f64
+                        / generated_f
+                        / (1024.0 * 1024.0),
+                    tier_experts,
+                    tier_selected_residents,
+                    tier_bytes,
+                    tier_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                    tier_conversion_s,
+                    depth_counts(&graph.cpu_tail_stage_results_by_depth),
+                    depth_ms(
+                        &graph.cpu_tail_input_d2h_s_by_depth,
+                        &graph.cpu_tail_attempts_by_depth,
+                    ),
+                    depth_ms(
+                        &graph.cpu_tail_submit_to_pickup_s_by_depth,
+                        &graph.cpu_tail_stage_results_by_depth,
+                    ),
+                    depth_ms(
+                        &graph.cpu_tail_pickup_to_worker_start_s_by_depth,
+                        &graph.cpu_tail_stage_results_by_depth,
+                    ),
+                    depth_ms(
+                        &graph.cpu_tail_claim_to_worker_start_s_by_depth,
+                        &graph.cpu_tail_stage_results_by_depth,
+                    ),
+                    depth_ms(
+                        &graph.cpu_tail_kernel_compute_s_by_depth,
+                        &graph.cpu_tail_stage_results_by_depth,
+                    ),
+                    depth_ms(
+                        &graph.cpu_tail_compute_to_result_visible_s_by_depth,
+                        &graph.cpu_tail_stage_results_by_depth,
+                    ),
+                );
+                for worker_index in 0..graph.cpu_tail_workers.len() {
+                    let attempts = graph.cpu_tail_worker_attempts[worker_index];
+                    let wins = graph.cpu_tail_worker_wins[worker_index];
+                    let attempt_f = attempts.max(1) as f64;
+                    let win_pct = if attempts > 0 {
+                        wins as f64 / attempts as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+                    eprintln!(
+                        "CPU TAIL WORKER SUMMARY worker={} attempts={} wins={} win_rate_pct={:.6} deadline_misses={} results={} worker_ms_per_attempt={:.6} saved_weight_bytes={} saved_mib_per_token={:.6} attempts_by_depth_2_to_9plus={} wins_by_depth_2_to_9plus={}",
+                        worker_index,
+                        attempts,
+                        wins,
+                        win_pct,
+                        graph.cpu_tail_worker_deadline_misses[worker_index],
+                        graph.cpu_tail_worker_results[worker_index],
+                        graph.cpu_tail_worker_compute_s[worker_index] / attempt_f * 1000.0,
+                        graph.cpu_tail_worker_saved_weight_bytes[worker_index],
+                        graph.cpu_tail_worker_saved_weight_bytes[worker_index] as f64
+                            / generated_f
+                            / (1024.0 * 1024.0),
+                        depth_counts(&graph.cpu_tail_worker_attempts_by_depth[worker_index]),
+                        depth_counts(&graph.cpu_tail_worker_wins_by_depth[worker_index]),
+                    );
+                }
+            }
             if let Some(hcs) = graph.hcs.as_ref() {
                 if hcs.dynamic_enabled {
                     let total = (graph.dma_cold_experts
@@ -62448,6 +63873,61 @@ impl GpuDecodeStore {
 
             // Build expert data pointers from GPU weight store
             let gpu_experts = &store.experts_gpu[moe_idx];
+            if self
+                .graph
+                .as_ref()
+                .and_then(|graph| graph.cpu_tail_workers.first())
+                .is_some()
+            {
+                let expected_w13_packed = (hidden_size / 8) * (2 * intermediate_size);
+                let expected_w13_scales = (hidden_size / group_size) * (2 * intermediate_size);
+                let expected_w2_packed = (intermediate_size / 8) * hidden_size;
+                let expected_w2_scales = (intermediate_size / group_size) * hidden_size;
+                for (expert_idx, expert) in gpu_experts.iter().enumerate() {
+                    let shape_ok = expert.hidden_size == hidden_size
+                        && expert.intermediate_size == intermediate_size
+                        && expert.group_size == group_size
+                        && expert.num_bits == 4
+                        && expert.w2_bits == 4
+                        && expert.gated
+                        && expert.activation_type == 0
+                        && expert.w13_packed.len() == expected_w13_packed
+                        && expert.w13_scales.len() == expected_w13_scales
+                        && expert.w2_packed.len() == expected_w2_packed
+                        && expert.w2_scales.len() == expected_w2_scales
+                        && expert.gate_bias.is_none()
+                        && expert.up_bias.is_none()
+                        && expert.down_bias.is_none();
+                    if !shape_ok {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "KRASIS_CPU_TAIL_RACE=1 unsupported expert contract at layer {} expert {}: hidden={}/{} intermediate={}/{} group={}/{} bits={}/{} gated={} activation={} lengths={}/{}/{}/{} expected={}/{}/{}/{} biases={}/{}/{}",
+                            abs_layer_idx,
+                            expert_idx,
+                            expert.hidden_size,
+                            hidden_size,
+                            expert.intermediate_size,
+                            intermediate_size,
+                            expert.group_size,
+                            group_size,
+                            expert.num_bits,
+                            expert.w2_bits,
+                            expert.gated,
+                            expert.activation_type,
+                            expert.w13_packed.len(),
+                            expert.w13_scales.len(),
+                            expert.w2_packed.len(),
+                            expert.w2_scales.len(),
+                            expected_w13_packed,
+                            expected_w13_scales,
+                            expected_w2_packed,
+                            expected_w2_scales,
+                            expert.gate_bias.is_some(),
+                            expert.up_bias.is_some(),
+                            expert.down_bias.is_some(),
+                        )));
+                    }
+                }
+            }
             let mut expert_ptrs = Vec::with_capacity(gpu_experts.len());
 
             for expert in gpu_experts.iter() {
@@ -65849,6 +67329,19 @@ impl Drop for GpuDecodeStore {
             }
             if let Some(ref events) = graph.graph_timing_events {
                 events.destroy();
+            }
+            unsafe {
+                for event in [
+                    graph.cpu_tail_replay_ready_event.as_ref(),
+                    graph.cpu_tail_output_copy_event.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if !event.0.is_null() {
+                        let _ = cuda_sys::lib().cuEventDestroy_v2(event.0);
+                    }
+                }
             }
         }
         unsafe {

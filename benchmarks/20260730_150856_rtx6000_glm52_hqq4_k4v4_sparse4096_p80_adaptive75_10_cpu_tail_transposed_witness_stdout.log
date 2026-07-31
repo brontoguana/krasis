@@ -1,0 +1,135 @@
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d
+Loaded config from tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf: {'model_path': '/home/main/.krasis/models/GLM-5.2', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 2000, 'max_context_tokens': 4096, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18201, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'heatmap_path': 'benchmarks/approved_heatmaps/glm52_hqq4_k4v4_approved_heatmap.json', 'force_load': False}
+
+[1m[36m▸ Krasis — GLM-5.2[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (config; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 2000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=557 MB, free=96700 MB, total=97258 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=31747 MB, reserved=31870 MB, used=32535 MB, free=64722 MB, total=97258 MB
+  [0;32mHQQ attention artifacts validated (6290 MB cached), 64722 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 75 layers...
+    GPU Marlin cache loaded: 375.2 GB in 345s
+  [0;32mExpert weights loaded in 345s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=31747 MB, reserved=31870 MB, used=32535 MB, free=64722 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=31747 MB, reserved=31870 MB, used=32535 MB, free=64722 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=31857 MB, reserved=31968 MB, used=32633 MB, free=64624 MB, total=97258 MB
+The tokenizer class you load from this checkpoint is not the same type as the class this function is called from. It may result in unexpected tokenization.
+The tokenizer class you load from this checkpoint is 'TokenizersBackend'.
+The class this function is called from is 'PreTrainedTokenizerFast'.
+  [33m[VRAM after-full-load][0m cuda:0: alloc=31857 MB, reserved=31968 MB, used=32633 MB, free=64624 MB, total=97258 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x4f9b1b70)[0m
+  [32mReleased redundant GPU execution source tensors (1,357 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 4.0s[0m
+  [2mcuda:0 warmup:  peak 92,113 MB used / 97,258 MB total  (min free: 5,144 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 73,636 MB / 97,258 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 13.61s (2.4 tok/s)  VRAM: 73540 MB free now, 73540 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=19200 dropped=2287 dropped/tok=71.469 saved_mb/tok=1326.639 dropped_mass_pct=6.533076 avg_layer_mass_pct=6.533076 max_layer_mass_pct=9.997282 rank_counts=[7:563,8:1724]
+  [36mCPU tail: wins=2325/2325 (100.00%) deadline_misses=0 busy_skips=0 short_queue_skips=0 saved=1348.682 MiB/tok output=871.875 KiB/tok[0m
+CPU TAIL SUMMARY generated=32 attempts=2325 wins=2325 win_rate_pct=100.000000 deadline_misses=0 busy_skips=0 short_queue_skips=0 errors=0 saved_weight_bytes=45254246400 saved_mib_per_token=1348.681641 output_bytes=28569600 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=0,0,0,0,163,1866,296,0 wins_by_depth_2_to_9plus=0,0,0,0,163,1866,296,0 marlin_attempts=2325 marlin_wins=2325 marlin_win_rate_pct=100.000000 marlin_results=2325 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=45254246400 marlin_saved_mib_per_token=1348.681641 transposed_attempts=0 transposed_wins=0 transposed_win_rate_pct=0.000000 transposed_coverage_pct=0.000000 transposed_results=0 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=0 transposed_saved_mib_per_token=0.000000 tier_experts=0 tier_selected_residents=0 tier_bytes=0 tier_gib=0.000000 tier_conversion_s=0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [32mShort calibration: baseline=73,636 MB, prefill post-alloc=5,352 MB, prefill min=858 MB, decode min=73,540 MB, post-cleanup=73,540 MB[0m
+  [32mAdaptive long calibration: default target=3,120 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.7515 MB/token[0m
+  [32mAdaptive long calibration: using 500 tokens (current low-water 858 MB is at/below adaptive floor 1200 MB)[0m
+  [32mScratch reservation: max=3,691 MB (at 4,096 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 73,540 MB[0m
+  [32mTransient deltas: short prefill=72,778 MB, long prefill=72,778 MB, short decode=96 MB, long decode=96 MB[0m
+  [32mGPU0 decode HCS budget: 72,844 MB[0m
+  [32mPrefill HCS budgets: short=162 MB, long=162 MB[0m
+  [32mWorst-case prefill scratch reservation: 3,691 MB at 4,096 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+  [2mUsing user-provided heatmap: glm52_hqq4_k4v4_approved_heatmap.json[0m
+  [32mApproved route heatmap validated against model/router signature and compatible runtime[0m
+  [32mHeatmap: 18,568 experts ranked from 18,568 entries[0m
+  [2mVRAM calibration: baseline 73540 MB | prefill 0.0 KB/tok, decode 0.0 KB/tok | HCS allowance prefill: short 162 MB, long 162 MB | decode: short 72844 MB, long 72844 MB | idle floors prefill=73378 MB decode=696 MB | decode-resident HCS budget=72844 MB[0m
+  [2mGPU0 HCS: 19200 experts (18568 ranked + 632 unranked), reclaimable: 72,844 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ Building CPU-tail transposed non-resident tier[0m
+CPU TAIL TRANSPOSED BUILD start experts=15300 selected_residents=3900 bytes=297802137600 gib=277.350 mem_available_gib=559.999 proportional_headroom_gib=27.735
+CPU TAIL TRANSPOSED BUILD progress=765/15300 elapsed_s=1.951
+CPU TAIL TRANSPOSED BUILD progress=1530/15300 elapsed_s=3.806
+CPU TAIL TRANSPOSED BUILD progress=2295/15300 elapsed_s=5.661
+CPU TAIL TRANSPOSED BUILD progress=3060/15300 elapsed_s=7.506
+CPU TAIL TRANSPOSED BUILD progress=3825/15300 elapsed_s=9.376
+CPU TAIL TRANSPOSED BUILD progress=4590/15300 elapsed_s=11.234
+CPU TAIL TRANSPOSED BUILD progress=5355/15300 elapsed_s=13.082
+CPU TAIL TRANSPOSED BUILD progress=6120/15300 elapsed_s=14.944
+CPU TAIL TRANSPOSED BUILD progress=6885/15300 elapsed_s=16.803
+CPU TAIL TRANSPOSED BUILD progress=7650/15300 elapsed_s=18.656
+CPU TAIL TRANSPOSED BUILD progress=8415/15300 elapsed_s=20.526
+CPU TAIL TRANSPOSED BUILD progress=9180/15300 elapsed_s=24.283
+CPU TAIL TRANSPOSED BUILD progress=9945/15300 elapsed_s=27.989
+CPU TAIL TRANSPOSED BUILD progress=10710/15300 elapsed_s=30.780
+CPU TAIL TRANSPOSED BUILD progress=11475/15300 elapsed_s=33.538
+CPU TAIL TRANSPOSED BUILD progress=12240/15300 elapsed_s=36.363
+CPU TAIL TRANSPOSED BUILD progress=13005/15300 elapsed_s=40.002
+CPU TAIL TRANSPOSED BUILD progress=13770/15300 elapsed_s=44.135
+CPU TAIL TRANSPOSED BUILD progress=14535/15300 elapsed_s=47.814
+CPU TAIL TRANSPOSED BUILD progress=15300/15300 elapsed_s=75.257
+CPU TAIL TRANSPOSED BUILD complete experts=15300 selected_residents=3900 bytes=297802137600 gib=277.350 conversion_s=75.258
+  [32mCPU-tail transposed tier: 15300 nonresident duplicates, 3900 selected HCS residents, 277.350 GiB RAM, 75.258s conversion; dynamic promotions retain unused duplicates by design[0m
+  [2mCPU-tail transposed tier built in 75.3s[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/19200 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 3900 experts in 3.01s (72393.8 MB, host_mode=source) | total: 3900/19200 (20.3%) coverage[0m
+  [2mLoaded in 78.3s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1182 MB after eviction (safety=600 MB, target=1084 MB)
+  [33mVRAM pressure eviction at startup_ready: evicted 13 soft HCS experts, freed 241.3 MB, final free 1,182 MB[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mGLM-5.2[0m
+  [32mAddress:[0m  [1m0.0.0.0:18201[0m
+  [32mContext:[0m  4,096 tokens  |  KV cache: 2,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18201/v1[0m
+    Chat endpoint: http://127.0.0.1:18201/v1/chat/completions
+    Models:        http://127.0.0.1:18201/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mGLM-5.2[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=0:0 conv_idx=0 turn=1 prompt_sequence_index=0 input_tokens_count=2682 positions=[2681] prompt_prefix="MOBY-DICK;\r\\n\r\\nor, THE WHALE.\r\\n\r\\nBy Herman Melville\r\\n\r\\n\r\\n\r\\nCONTENTS\r\\n\r\\nETYMOLOGY.\r\\n\r\\nEXTRACTS (Supplied by a Sub-Sub-Libr"
+  [32mdecode: 7 tokens in 2.05s (3.4 tok/s)  VRAM: 1182 MB free now, 1118 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=1678 dropped=336 dropped/tok=48.000 saved_mb/tok=891.000 dropped_mass_pct=4.424829 avg_layer_mass_pct=4.424829 max_layer_mass_pct=9.983619 rank_counts=[7:117,8:219]
+  [36mCPU tail: wins=188/309 (60.84%) deadline_misses=121 busy_skips=0 short_queue_skips=141 saved=498.536 MiB/tok output=322.286 KiB/tok[0m
+CPU TAIL SUMMARY generated=7 attempts=309 wins=188 win_rate_pct=60.841424 deadline_misses=121 busy_skips=0 short_queue_skips=141 errors=0 saved_weight_bytes=3659268096 saved_mib_per_token=498.535714 output_bytes=2310144 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=111,106,59,26,6,1,0,0 wins_by_depth_2_to_9plus=0,96,59,26,6,1,0,0 marlin_attempts=24 marlin_wins=4 marlin_win_rate_pct=16.666667 marlin_results=24 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=77856768 marlin_saved_mib_per_token=10.607143 transposed_attempts=285 transposed_wins=184 transposed_win_rate_pct=64.561404 transposed_coverage_pct=92.233010 transposed_results=284 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=3581411328 transposed_saved_mib_per_token=487.928571 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=75.257859 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=60.05% tail=1200/600 protected=2687 promotions=1144 evictions=1144 request_promotions=1144/4200 budget_skips=0 no_slot=10 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=0:0 conv_idx=0 turn=1 prompt_sequence_index=0 input_tokens_count=2682 positions=[2681] prompt_prefix="MOBY-DICK;\r\\n\r\\nor, THE WHALE.\r\\n\r\\nBy Herman Melville\r\\n\r\\n\r\\n\r\\nCONTENTS\r\\n\r\\nETYMOLOGY.\r\\n\r\\nEXTRACTS (Supplied by a Sub-Sub-Libr"

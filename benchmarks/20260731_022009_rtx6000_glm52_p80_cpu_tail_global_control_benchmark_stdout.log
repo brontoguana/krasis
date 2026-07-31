@@ -1,0 +1,269 @@
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d
+Loaded config from tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf: {'model_path': '/home/main/.krasis/models/GLM-5.2', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 2000, 'max_context_tokens': 4096, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18201, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'heatmap_path': 'benchmarks/approved_heatmaps/glm52_hqq4_k4v4_approved_heatmap.json', 'force_load': False}
+
+[1m[36m▸ Krasis — GLM-5.2[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (config; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 2000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=557 MB, free=96700 MB, total=97258 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=31747 MB, reserved=31870 MB, used=32535 MB, free=64722 MB, total=97258 MB
+  [0;32mHQQ attention artifacts validated (6290 MB cached), 64722 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 75 layers...
+    GPU Marlin cache loaded: 375.2 GB in 300s
+  [0;32mExpert weights loaded in 301s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=31747 MB, reserved=31870 MB, used=32535 MB, free=64722 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=31747 MB, reserved=31870 MB, used=32535 MB, free=64722 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=31857 MB, reserved=31968 MB, used=32633 MB, free=64624 MB, total=97258 MB
+The tokenizer class you load from this checkpoint is not the same type as the class this function is called from. It may result in unexpected tokenization. 
+The tokenizer class you load from this checkpoint is 'TokenizersBackend'. 
+The class this function is called from is 'PreTrainedTokenizerFast'.
+  [33m[VRAM after-full-load][0m cuda:0: alloc=31857 MB, reserved=31968 MB, used=32633 MB, free=64624 MB, total=97258 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+CPU TAIL EXECUTOR source=global rayon_threads=40 affinity=runtime_default strategy=rayon
+  [32mGPU decode store ready (addr=0x46a14290)[0m
+  [32mReleased redundant GPU execution source tensors (1,357 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 3.8s[0m
+  [2mcuda:0 warmup:  peak 92,113 MB used / 97,258 MB total  (min free: 5,144 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 73,636 MB / 97,258 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 13.53s (2.4 tok/s)  VRAM: 73540 MB free now, 73540 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=19200 dropped=2287 dropped/tok=71.469 saved_mb/tok=1326.639 dropped_mass_pct=6.533076 avg_layer_mass_pct=6.533076 max_layer_mass_pct=9.997282 rank_counts=[7:563,8:1724]
+  [36mCPU tail: wins=2325/2325 (100.00%) deadline_misses=0 busy_skips=0 short_queue_skips=0 saved=1348.682 MiB/tok output=871.875 KiB/tok[0m
+CPU TAIL SUMMARY generated=32 attempts=2325 wins=2325 win_rate_pct=100.000000 deadline_misses=0 busy_skips=0 short_queue_skips=0 errors=0 saved_weight_bytes=45254246400 saved_mib_per_token=1348.681641 output_bytes=28569600 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=0,0,0,0,163,1866,296,0 wins_by_depth_2_to_9plus=0,0,0,0,163,1866,296,0 marlin_attempts=2325 marlin_wins=2325 marlin_win_rate_pct=100.000000 marlin_results=2325 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=45254246400 marlin_saved_mib_per_token=1348.681641 transposed_attempts=0 transposed_wins=0 transposed_win_rate_pct=0.000000 transposed_coverage_pct=0.000000 transposed_results=0 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=0 transposed_saved_mib_per_token=0.000000 tier_experts=0 tier_selected_residents=0 tier_bytes=0 tier_gib=0.000000 tier_conversion_s=0.000000 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [32mShort calibration: baseline=73,636 MB, prefill post-alloc=5,352 MB, prefill min=858 MB, decode min=73,540 MB, post-cleanup=73,540 MB[0m
+  [32mAdaptive long calibration: default target=3,196 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.7515 MB/token[0m
+  [32mAdaptive long calibration: using 500 tokens (current low-water 858 MB is at/below adaptive floor 1200 MB)[0m
+  [32mScratch reservation: max=3,691 MB (at 4,096 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 73,540 MB[0m
+  [32mTransient deltas: short prefill=72,778 MB, long prefill=72,778 MB, short decode=96 MB, long decode=96 MB[0m
+  [32mGPU0 decode HCS budget: 72,844 MB[0m
+  [32mPrefill HCS budgets: short=162 MB, long=162 MB[0m
+  [32mWorst-case prefill scratch reservation: 3,691 MB at 4,096 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+  [2mUsing user-provided heatmap: glm52_hqq4_k4v4_approved_heatmap.json[0m
+  [32mApproved route heatmap validated against model/router signature and compatible runtime[0m
+  [32mHeatmap: 18,568 experts ranked from 18,568 entries[0m
+  [2mVRAM calibration: baseline 73540 MB | prefill 0.0 KB/tok, decode 0.0 KB/tok | HCS allowance prefill: short 162 MB, long 162 MB | decode: short 72844 MB, long 72844 MB | idle floors prefill=73378 MB decode=696 MB | decode-resident HCS budget=72844 MB[0m
+  [2mGPU0 HCS: 19200 experts (18568 ranked + 632 unranked), reclaimable: 72,844 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ Building CPU-tail transposed non-resident tier[0m
+CPU TAIL TRANSPOSED BUILD start experts=15300 selected_residents=3900 bytes=297802137600 gib=277.350 mem_available_gib=563.438 proportional_headroom_gib=27.735
+CPU TAIL TRANSPOSED BUILD progress=765/15300 elapsed_s=1.946
+CPU TAIL TRANSPOSED BUILD progress=1530/15300 elapsed_s=3.794
+CPU TAIL TRANSPOSED BUILD progress=2295/15300 elapsed_s=5.644
+CPU TAIL TRANSPOSED BUILD progress=3060/15300 elapsed_s=7.508
+CPU TAIL TRANSPOSED BUILD progress=3825/15300 elapsed_s=9.362
+CPU TAIL TRANSPOSED BUILD progress=4590/15300 elapsed_s=11.210
+CPU TAIL TRANSPOSED BUILD progress=5355/15300 elapsed_s=13.057
+CPU TAIL TRANSPOSED BUILD progress=6120/15300 elapsed_s=14.916
+CPU TAIL TRANSPOSED BUILD progress=6885/15300 elapsed_s=16.767
+CPU TAIL TRANSPOSED BUILD progress=7650/15300 elapsed_s=18.620
+CPU TAIL TRANSPOSED BUILD progress=8415/15300 elapsed_s=20.464
+CPU TAIL TRANSPOSED BUILD progress=9180/15300 elapsed_s=22.309
+CPU TAIL TRANSPOSED BUILD progress=9945/15300 elapsed_s=24.162
+CPU TAIL TRANSPOSED BUILD progress=10710/15300 elapsed_s=27.373
+CPU TAIL TRANSPOSED BUILD progress=11475/15300 elapsed_s=31.175
+CPU TAIL TRANSPOSED BUILD progress=12240/15300 elapsed_s=34.942
+CPU TAIL TRANSPOSED BUILD progress=13005/15300 elapsed_s=39.647
+CPU TAIL TRANSPOSED BUILD progress=13770/15300 elapsed_s=43.397
+CPU TAIL TRANSPOSED BUILD progress=14535/15300 elapsed_s=47.213
+CPU TAIL TRANSPOSED BUILD progress=15300/15300 elapsed_s=50.920
+CPU TAIL TRANSPOSED BUILD complete experts=15300 selected_residents=3900 bytes=297802137600 gib=277.350 conversion_s=50.921
+  [32mCPU-tail transposed tier: 15300 nonresident duplicates, 3900 selected HCS residents, 277.350 GiB RAM, 50.921s conversion; dynamic promotions retain unused duplicates by design[0m
+  [2mCPU-tail transposed tier built in 50.9s[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/19200 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 3900 experts in 2.96s (72393.8 MB, host_mode=source) | total: 3900/19200 (20.3%) coverage[0m
+  [2mLoaded in 53.9s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1182 MB after eviction (safety=600 MB, target=1084 MB)
+  [33mVRAM pressure eviction at startup_ready: evicted 13 soft HCS experts, freed 241.3 MB, final free 1,182 MB[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mGLM-5.2[0m
+  [32mAddress:[0m  [1m0.0.0.0:18201[0m
+  [32mContext:[0m  4,096 tokens  |  KV cache: 2,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18201/v1[0m
+    Chat endpoint: http://127.0.0.1:18201/v1/chat/completions
+    Models:        http://127.0.0.1:18201/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mGLM-5.2[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mGLM-5.2[0m
+  GPUs:     1x NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K)[0m
+  Prefill sizing:  [33mruntime-calibrated prefill cap 1,000 tokens (long probe low-water 762 MB, safety 600 MB)[0m
+  Warmup prefill:  3 prompts, ~1,000 tokens each
+  Timed prefill:   1 prompts at 1K tokens
+    [1] 1,000 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+  [32mdecode: 7 tokens in 1.15s (6.1 tok/s)  VRAM: 1178 MB free now, 1178 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=1449 dropped=355 dropped/tok=50.714 saved_mb/tok=941.384 dropped_mass_pct=4.070545 avg_layer_mass_pct=4.070545 max_layer_mass_pct=9.986551 rank_counts=[7:149,8:206]
+  [36mCPU tail: wins=150/288 (52.08%) deadline_misses=138 busy_skips=0 short_queue_skips=162 saved=397.768 MiB/tok output=257.143 KiB/tok[0m
+CPU TAIL SUMMARY generated=7 attempts=288 wins=150 win_rate_pct=52.083333 deadline_misses=138 busy_skips=0 short_queue_skips=162 errors=0 saved_weight_bytes=2919628800 saved_mib_per_token=397.767857 output_bytes=1843200 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=128,97,40,20,2,1,0,0 wins_by_depth_2_to_9plus=0,87,40,20,2,1,0,0 marlin_attempts=21 marlin_wins=5 marlin_win_rate_pct=23.809524 marlin_results=20 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=97320960 marlin_saved_mib_per_token=13.258929 transposed_attempts=267 transposed_wins=145 transposed_win_rate_pct=54.307116 transposed_coverage_pct=92.708333 transposed_results=267 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=2822307840 transposed_saved_mib_per_token=384.508929 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=50.920877 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=65.50% tail=1200/600 protected=2687 promotions=944 evictions=944 request_promotions=944/4200 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mdecode: 7 tokens in 1.29s (5.4 tok/s)  VRAM: 1178 MB free now, 1178 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=1651 dropped=346 dropped/tok=49.429 saved_mb/tok=917.518 dropped_mass_pct=4.740470 avg_layer_mass_pct=4.740470 max_layer_mass_pct=9.983180 rank_counts=[7:130,8:216]
+  [36mCPU tail: wins=184/321 (57.32%) deadline_misses=137 busy_skips=0 short_queue_skips=129 saved=487.929 MiB/tok output=315.429 KiB/tok[0m
+CPU TAIL SUMMARY generated=7 attempts=321 wins=184 win_rate_pct=57.320872 deadline_misses=137 busy_skips=0 short_queue_skips=129 errors=0 saved_weight_bytes=3581411328 saved_mib_per_token=487.928571 output_bytes=2260992 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=126,93,62,31,8,1,0,0 wins_by_depth_2_to_9plus=0,82,62,31,8,1,0,0 marlin_attempts=29 marlin_wins=10 marlin_win_rate_pct=34.482759 marlin_results=30 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=194641920 marlin_saved_mib_per_token=26.517857 transposed_attempts=292 transposed_wins=174 transposed_win_rate_pct=59.589041 transposed_coverage_pct=90.965732 transposed_results=292 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=3386769408 transposed_saved_mib_per_token=461.410714 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=50.920877 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=60.69% tail=1200/600 protected=2687 promotions=2065 evictions=2065 request_promotions=1121/4200 budget_skips=0 no_slot=0 copy_failures=0[0m
+  Warmup complete.
+  Prefill warmup (3 runs, ~1,000 tokens each)...
+    [1/3] 1,000 tokens
+    [2/3] 1,000 tokens
+    [3/3] 1,000 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1180 MB after eviction (safety=600 MB, target=1084 MB)
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1180 MB after eviction (safety=600 MB, target=1084 MB)
+  [32mdecode: 49 tokens in 7.48s (6.6 tok/s)  VRAM: 1180 MB free now, 1180 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=9129 dropped=2190 dropped/tok=44.694 saved_mb/tok=829.630 dropped_mass_pct=3.879848 avg_layer_mass_pct=3.879848 max_layer_mass_pct=9.996590 rank_counts=[7:883,8:1307]
+  [36mCPU tail: wins=961/2047 (46.95%) deadline_misses=1086 busy_skips=0 short_queue_skips=1553 saved=364.052 MiB/tok output=235.347 KiB/tok[0m
+CPU TAIL SUMMARY generated=49 attempts=2047 wins=961 win_rate_pct=46.946751 deadline_misses=1086 busy_skips=0 short_queue_skips=1553 errors=0 saved_weight_bytes=18705088512 saved_mib_per_token=364.052296 output_bytes=11808768 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=990,599,297,127,33,1,0,0 wins_by_depth_2_to_9plus=0,503,297,127,33,1,0,0 marlin_attempts=258 marlin_wins=52 marlin_win_rate_pct=20.155039 marlin_results=258 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=1012137984 marlin_saved_mib_per_token=19.698980 transposed_attempts=1789 transposed_wins=909 transposed_win_rate_pct=50.810509 transposed_coverage_pct=87.396190 transposed_results=1788 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=17692950528 transposed_saved_mib_per_token=344.353316 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=50.920877 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=68.95% tail=1200/600 protected=2687 promotions=8043 evictions=8043 request_promotions=5978/29400 budget_skips=0 no_slot=0 copy_failures=0[0m
+    50 tokens done
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1180 MB after eviction (safety=600 MB, target=1084 MB)
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1180 MB after eviction (safety=600 MB, target=1084 MB)
+  [32mdecode: 99 tokens in 16.55s (6.0 tok/s)  VRAM: 1180 MB free now, 1180 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=20207 dropped=4410 dropped/tok=44.545 saved_mb/tok=826.875 dropped_mass_pct=4.003774 avg_layer_mass_pct=4.003774 max_layer_mass_pct=9.993769 rank_counts=[7:1687,8:2723]
+  [36mCPU tail: wins=2482/4674 (53.10%) deadline_misses=2192 busy_skips=0 short_queue_skips=2676 saved=465.375 MiB/tok output=300.848 KiB/tok[0m
+CPU TAIL SUMMARY generated=99 attempts=4674 wins=2482 win_rate_pct=53.102268 deadline_misses=2192 busy_skips=0 short_queue_skips=2676 errors=0 saved_weight_bytes=48310124544 saved_mib_per_token=465.375000 output_bytes=30498816 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=1978,1477,804,325,82,8,0,0 wins_by_depth_2_to_9plus=0,1263,804,325,82,8,0,0 marlin_attempts=628 marlin_wins=156 marlin_win_rate_pct=24.840764 marlin_results=628 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=3036413952 marlin_saved_mib_per_token=29.250000 transposed_attempts=4046 transposed_wins=2326 transposed_win_rate_pct=57.488878 transposed_coverage_pct=86.563971 transposed_results=4047 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=45273710592 transposed_saved_mib_per_token=436.125000 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=50.920877 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=65.98% tail=1200/600 protected=2687 promotions=21358 evictions=21358 request_promotions=13315/59400 budget_skips=0 no_slot=0 copy_failures=0[0m
+    100 tokens done
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1180 MB after eviction (safety=600 MB, target=1084 MB)
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1180 MB after eviction (safety=600 MB, target=1084 MB)
+  [32mdecode: 249 tokens in 42.65s (5.8 tok/s)  VRAM: 1180 MB free now, 1180 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=50771 dropped=11008 dropped/tok=44.209 saved_mb/tok=820.627 dropped_mass_pct=3.953439 avg_layer_mass_pct=3.953439 max_layer_mass_pct=9.999897 rank_counts=[7:4208,8:6800]
+  [36mCPU tail: wins=6344/11691 (54.26%) deadline_misses=5347 busy_skips=0 short_queue_skips=6909 saved=472.934 MiB/tok output=305.735 KiB/tok[0m
+CPU TAIL SUMMARY generated=249 attempts=11691 wins=6344 win_rate_pct=54.263964 deadline_misses=5347 busy_skips=0 short_queue_skips=6909 errors=0 saved_weight_bytes=123480834048 saved_mib_per_token=472.933735 output_bytes=77955072 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=4841,3586,2042,884,293,42,3,0 wins_by_depth_2_to_9plus=0,3081,2041,884,293,42,3,0 marlin_attempts=1482 marlin_wins=397 marlin_win_rate_pct=26.788124 marlin_results=1482 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=7727284224 marlin_saved_mib_per_token=29.595633 transposed_attempts=10209 transposed_wins=5947 transposed_win_rate_pct=58.252522 transposed_coverage_pct=87.323582 transposed_results=10209 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=115753549824 transposed_saved_mib_per_token=443.338102 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=50.920877 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=66.02% tail=1200/600 protected=2687 promotions=54777 evictions=54777 request_promotions=33419/149400 budget_skips=0 no_slot=0 copy_failures=0[0m
+    250 tokens done
+  Warmup complete (185.4s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K tokens, 1 runs[0m
+  Run 1: 44.8 tok/s (1,000 tokens in 22326.1ms)
+  [1mBest: 44.8 tok/s (1,000 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+  [32mdecode: 49 tokens in 7.90s (6.2 tok/s)  VRAM: 1178 MB free now, 1178 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=9812 dropped=2175 dropped/tok=44.388 saved_mb/tok=823.948 dropped_mass_pct=3.928656 avg_layer_mass_pct=3.928656 max_layer_mass_pct=9.983558 rank_counts=[7:863,8:1312]
+  [36mCPU tail: wins=1167/2250 (51.87%) deadline_misses=1083 busy_skips=0 short_queue_skips=1350 saved=442.091 MiB/tok output=285.796 KiB/tok[0m
+CPU TAIL SUMMARY generated=49 attempts=2250 wins=1167 win_rate_pct=51.866667 deadline_misses=1083 busy_skips=0 short_queue_skips=1350 errors=0 saved_weight_bytes=22714712064 saved_mib_per_token=442.090561 output_bytes=14340096 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=965,738,364,131,41,9,2,0 wins_by_depth_2_to_9plus=0,620,364,131,41,9,2,0 marlin_attempts=310 marlin_wins=70 marlin_win_rate_pct=22.580645 marlin_results=310 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=1362493440 marlin_saved_mib_per_token=26.517857 transposed_attempts=1940 transposed_wins=1097 transposed_win_rate_pct=56.546392 transposed_coverage_pct=86.222222 transposed_results=1939 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=21352218624 transposed_saved_mib_per_token=415.572704 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=50.920877 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=66.63% tail=1200/600 protected=2687 promotions=61247 evictions=61247 request_promotions=6470/29400 budget_skips=0 no_slot=0 copy_failures=0[0m
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1182 MB after eviction (safety=600 MB, target=1084 MB)
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1182 MB after eviction (safety=600 MB, target=1084 MB)
+  [32mdecode: 99 tokens in 15.97s (6.2 tok/s)  VRAM: 1182 MB free now, 1182 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=19172 dropped=4333 dropped/tok=43.768 saved_mb/tok=812.438 dropped_mass_pct=3.776007 avg_layer_mass_pct=3.776007 max_layer_mass_pct=9.990985 rank_counts=[7:1689,8:2644]
+  [36mCPU tail: wins=2209/4383 (50.40%) deadline_misses=2174 busy_skips=0 short_queue_skips=2967 saved=414.188 MiB/tok output=267.758 KiB/tok[0m
+CPU TAIL SUMMARY generated=99 attempts=4383 wins=2209 win_rate_pct=50.399270 deadline_misses=2174 busy_skips=0 short_queue_skips=2967 errors=0 saved_weight_bytes=42996400128 saved_mib_per_token=414.187500 output_bytes=27144192 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=1996,1331,670,274,100,11,1,0 wins_by_depth_2_to_9plus=0,1153,670,274,100,11,1,0 marlin_attempts=563 marlin_wins=129 marlin_win_rate_pct=22.912966 marlin_results=563 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=2510880768 marlin_saved_mib_per_token=24.187500 transposed_attempts=3820 transposed_wins=2080 transposed_win_rate_pct=54.450262 transposed_coverage_pct=87.154917 transposed_results=3821 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=40485519360 transposed_saved_mib_per_token=390.000000 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=50.920877 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=67.72% tail=1200/600 protected=2687 promotions=73877 evictions=73877 request_promotions=12630/59400 budget_skips=0 no_slot=0 copy_failures=0[0m
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1182 MB after eviction (safety=600 MB, target=1084 MB)
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1182 MB after eviction (safety=600 MB, target=1084 MB)
+  [32mdecode: 249 tokens in 40.66s (6.1 tok/s)  VRAM: 1182 MB free now, 1182 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=48622 dropped=11131 dropped/tok=44.703 saved_mb/tok=829.796 dropped_mass_pct=3.832740 avg_layer_mass_pct=3.832740 max_layer_mass_pct=9.999291 rank_counts=[7:4440,8:6691]
+  [36mCPU tail: wins=5678/11040 (51.43%) deadline_misses=5362 busy_skips=0 short_queue_skips=7560 saved=423.285 MiB/tok output=273.639 KiB/tok[0m
+CPU TAIL SUMMARY generated=249 attempts=11040 wins=5678 win_rate_pct=51.431159 deadline_misses=5362 busy_skips=0 short_queue_skips=7560 errors=0 saved_weight_bytes=110517682176 saved_mib_per_token=423.284639 output_bytes=69771264 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=4890,3299,1754,789,244,58,6,0 wins_by_depth_2_to_9plus=0,2829,1752,789,244,58,6,0 marlin_attempts=1439 marlin_wins=353 marlin_win_rate_pct=24.530924 marlin_results=1439 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=6870859776 marlin_saved_mib_per_token=26.315512 transposed_attempts=9601 transposed_wins=5325 transposed_win_rate_pct=55.462973 transposed_coverage_pct=86.965580 transposed_results=9601 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=103646822400 transposed_saved_mib_per_token=396.969127 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=50.920877 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=67.46% tail=1200/600 protected=2687 promotions=105690 evictions=105690 request_promotions=31813/149400 budget_skips=0 no_slot=0 copy_failures=0[0m
+   50 tokens: 6.20 tok/s (161.4ms/tok)
+  100 tokens: 6.20 tok/s (161.4ms/tok)
+  250 tokens: 6.12 tok/s (163.3ms/tok)
+  [1mBest: 6.20 tok/s[0m
+  HCS:  3887/19200 experts loaded (20.2%)
+  VRAM: 1178 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+  [32mprefill: 8 tokens in 4.38s (1.8 tok/s)  VRAM: 73540 MB free now, 4442 MB min free during prefill[0m
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1182 MB after eviction (safety=600 MB, target=1084 MB)
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1182 MB after eviction (safety=600 MB, target=1084 MB)
+  [32mdecode: 7 tokens in 1.21s (5.8 tok/s)  VRAM: 1182 MB free now, 1182 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=1554 dropped=330 dropped/tok=47.143 saved_mb/tok=875.089 dropped_mass_pct=4.084022 avg_layer_mass_pct=4.084022 max_layer_mass_pct=9.967297 rank_counts=[7:151,8:179]
+  [36mCPU tail: wins=178/303 (58.75%) deadline_misses=125 busy_skips=0 short_queue_skips=147 saved=472.018 MiB/tok output=305.143 KiB/tok[0m
+CPU TAIL SUMMARY generated=7 attempts=303 wins=178 win_rate_pct=58.745875 deadline_misses=125 busy_skips=0 short_queue_skips=147 errors=0 saved_weight_bytes=3464626176 saved_mib_per_token=472.017857 output_bytes=2187264 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=112,111,44,24,10,2,0,0 wins_by_depth_2_to_9plus=0,98,44,24,10,2,0,0 marlin_attempts=28 marlin_wins=8 marlin_win_rate_pct=28.571429 marlin_results=28 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=155713536 marlin_saved_mib_per_token=21.214286 transposed_attempts=275 transposed_wins=170 transposed_win_rate_pct=61.818182 transposed_coverage_pct=90.759076 transposed_results=274 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=3308912640 transposed_saved_mib_per_token=450.803571 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=50.920877 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=63.00% tail=1200/600 protected=2687 promotions=106736 evictions=106736 request_promotions=1046/4200 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 53 tokens in 8.74s (6.1 tok/s)  VRAM: 73540 MB free now, 2270 MB min free during prefill[0m
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1182 MB after eviction (safety=600 MB, target=1084 MB)
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1182 MB after eviction (safety=600 MB, target=1084 MB)
+  [32mdecode: 49 tokens in 7.93s (6.2 tok/s)  VRAM: 1182 MB free now, 1182 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=9899 dropped=2188 dropped/tok=44.653 saved_mb/tok=828.872 dropped_mass_pct=3.980273 avg_layer_mass_pct=3.980273 max_layer_mass_pct=9.986101 rank_counts=[7:855,8:1333]
+  [36mCPU tail: wins=1199/2245 (53.41%) deadline_misses=1046 busy_skips=0 short_queue_skips=1355 saved=454.213 MiB/tok output=293.633 KiB/tok[0m
+CPU TAIL SUMMARY generated=49 attempts=2245 wins=1199 win_rate_pct=53.407572 deadline_misses=1046 busy_skips=0 short_queue_skips=1355 errors=0 saved_weight_bytes=23337566208 saved_mib_per_token=454.213010 output_bytes=14733312 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=932,750,376,133,40,14,0,0 wins_by_depth_2_to_9plus=0,638,374,133,40,14,0,0 marlin_attempts=299 marlin_wins=69 marlin_win_rate_pct=23.076923 marlin_results=299 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=1343029248 marlin_saved_mib_per_token=26.139031 transposed_attempts=1946 transposed_wins=1130 transposed_win_rate_pct=58.067831 transposed_coverage_pct=86.681514 transposed_results=1947 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=21994536960 transposed_saved_mib_per_token=428.073980 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=50.920877 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=66.33% tail=1200/600 protected=2687 promotions=113248 evictions=113248 request_promotions=6512/29400 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 58 tokens in 9.18s (6.3 tok/s)  VRAM: 73538 MB free now, 2140 MB min free during prefill[0m
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1180 MB after eviction (safety=600 MB, target=1084 MB)
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1180 MB after eviction (safety=600 MB, target=1084 MB)
+  [32mdecode: 99 tokens in 15.97s (6.2 tok/s)  VRAM: 1180 MB free now, 1180 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=19136 dropped=4485 dropped/tok=45.303 saved_mb/tok=840.938 dropped_mass_pct=3.883013 avg_layer_mass_pct=3.883013 max_layer_mass_pct=9.995435 rank_counts=[7:1761,8:2724]
+  [36mCPU tail: wins=2071/4346 (47.65%) deadline_misses=2275 busy_skips=0 short_queue_skips=3004 saved=388.312 MiB/tok output=251.030 KiB/tok[0m
+CPU TAIL SUMMARY generated=99 attempts=4346 wins=2071 win_rate_pct=47.653014 deadline_misses=2275 busy_skips=0 short_queue_skips=3004 errors=0 saved_weight_bytes=40310341632 saved_mib_per_token=388.312500 output_bytes=25448448 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=1998,1340,641,245,98,23,1,0 wins_by_depth_2_to_9plus=0,1065,639,245,98,23,1,0 marlin_attempts=545 marlin_wins=121 marlin_win_rate_pct=22.201835 marlin_results=545 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=2355167232 marlin_saved_mib_per_token=22.687500 transposed_attempts=3801 transposed_wins=1950 transposed_win_rate_pct=51.302289 transposed_coverage_pct=87.459733 transposed_results=3800 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=37955174400 transposed_saved_mib_per_token=365.625000 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=50.920877 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=67.78% tail=1200/600 protected=2687 promotions=125828 evictions=125828 request_promotions=12580/59400 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 53 tokens in 8.85s (6.0 tok/s)  VRAM: 73538 MB free now, 2252 MB min free during prefill[0m
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1180 MB after eviction (safety=600 MB, target=1084 MB)
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=1180 MB after eviction (safety=600 MB, target=1084 MB)
+  [32mdecode: 249 tokens in 41.69s (6.0 tok/s)  VRAM: 1180 MB free now, 1180 MB min free during decode[0m
+  [adaptive-cold-drop] protect_rank_pct=75.000 mass_pct=10.000 cold_before_drop=49114 dropped=10980 dropped/tok=44.096 saved_mb/tok=818.539 dropped_mass_pct=3.808854 avg_layer_mass_pct=3.808854 max_layer_mass_pct=9.999804 rank_counts=[7:4289,8:6691]
+  [36mCPU tail: wins=5808/11212 (51.80%) deadline_misses=5404 busy_skips=0 short_queue_skips=7388 saved=432.976 MiB/tok output=279.904 KiB/tok[0m
+CPU TAIL SUMMARY generated=249 attempts=11212 wins=5808 win_rate_pct=51.801641 deadline_misses=5404 busy_skips=0 short_queue_skips=7388 errors=0 saved_weight_bytes=113048027136 saved_mib_per_token=432.975904 output_bytes=71368704 input_d2h_ms_per_token=0.000000 worker_elapsed_ms_per_token=0.000000 worker_elapsed_ms_per_attempt=0.000000 race_wait_ms_per_token=0.000000 win_compute_ms_avg=0.000000 miss_compute_ms_avg=0.000000 deadline_ms_avg=0.000000 win_total_ms_avg=0.000000 dispatch_lag_ms_avg=0.000000 attempts_by_depth_2_to_9plus=4855,3400,1820,822,254,56,5,0 wins_by_depth_2_to_9plus=0,2853,1818,822,254,56,5,0 marlin_attempts=1399 marlin_wins=354 marlin_win_rate_pct=25.303788 marlin_results=1399 marlin_worker_ms_per_attempt=0.000000 marlin_saved_weight_bytes=6890323968 marlin_saved_mib_per_token=26.390060 transposed_attempts=9813 transposed_wins=5454 transposed_win_rate_pct=55.579334 transposed_coverage_pct=87.522298 transposed_results=9814 transposed_worker_ms_per_attempt=0.000000 transposed_saved_weight_bytes=106157703168 transposed_saved_mib_per_token=406.585843 tier_experts=15300 tier_selected_residents=3900 tier_bytes=297802137600 tier_gib=277.349854 tier_conversion_s=50.920877 stage_results_by_depth_2_to_9plus=0,0,0,0,0,0,0,0 activation_d2h_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 submit_to_pickup_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 pickup_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 claim_to_worker_start_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 kernel_compute_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 compute_to_result_visible_ms_by_depth_2_to_9plus=0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000 cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate
+  [36mDynamic HCS: hit=67.13% tail=1200/600 protected=2687 promotions=158154 evictions=158154 request_promotions=32326/149400 budget_skips=0 no_slot=0 copy_failures=0[0m
+   50 tokens: 10.48 tok/s (20.50s total)
+  100 tokens: 7.77 tok/s (28.97s total)
+  250 tokens: 6.50 tok/s (54.37s total)
+  [1mBest: 10.48 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m[32mBENCHMARK COMPLETE[0m
+  Model:                 [1mGLM-5.2[0m
+  Config:                INT4/4 HQQ4 KV=k4v4 1 GPU
+  Prefill (internal):    [32m[1m44.8 tok/s[0m  (best of 1K)
+  Decode (internal):     [32m[1m6.20 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m10.48 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          3887/19200 (20.2%)
+  Min free VRAM:         1178 MB
+  Log:     [2mlogs/dev-benchmark_20260731_022009/benchmark_report.log[0m
+

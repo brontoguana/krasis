@@ -5070,13 +5070,9 @@ fn prefill_device_trace_stage_label(stage_id: u64) -> &'static str {
         PDT_LAYER_MLA_MOE_SHARED_OUTPUT_FULL => "layer_mla_moe_shared_output_full",
         PDT_LAYER_MLA_MOE_OUTPUT_FULL => "layer_mla_moe_output_full",
         PDT_LAYER_MLA_MOE_SORTED_IDS_FULL => "layer_mla_moe_sorted_ids_full",
-        PDT_LAYER_MLA_MOE_EXPERT_BLOCK_IDS_FULL => {
-            "layer_mla_moe_expert_block_ids_full"
-        }
+        PDT_LAYER_MLA_MOE_EXPERT_BLOCK_IDS_FULL => "layer_mla_moe_expert_block_ids_full",
         PDT_LAYER_MLA_MOE_W1_PTR_TABLE_FULL => "layer_mla_moe_w1_ptr_table_full",
-        PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL => {
-            "layer_mla_moe_w1_scale_ptr_table_full"
-        }
+        PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL => "layer_mla_moe_w1_scale_ptr_table_full",
         PDT_LAYER_MAMBA2_SSD_OUTPUT_VALUE_DETAIL => "layer_mamba2_ssd_output_value_detail",
         PDT_LAYER_MAMBA2_SSD_OUTPUT_COMPONENT_DETAIL => "layer_mamba2_ssd_output_component_detail",
         PDT_LAYER_MAMBA2_SSD_OUTPUT_SOURCE_DETAIL => "layer_mamba2_ssd_output_source_detail",
@@ -6770,9 +6766,8 @@ fn launch_dsa_prefill_selection_chunk(
     } else {
         candidate_scores_a_ptr
             .checked_add(
-                u64::try_from(candidate_component_bytes).map_err(|_| {
-                    "DSA prefill candidate score component exceeds u64".to_string()
-                })?,
+                u64::try_from(candidate_component_bytes)
+                    .map_err(|_| "DSA prefill candidate score component exceeds u64".to_string())?,
             )
             .ok_or_else(|| "DSA prefill candidate score B pointer overflow".to_string())?
     };
@@ -6781,9 +6776,8 @@ fn launch_dsa_prefill_selection_chunk(
     } else {
         candidate_scores_b_ptr
             .checked_add(
-                u64::try_from(candidate_component_bytes).map_err(|_| {
-                    "DSA prefill candidate index component exceeds u64".to_string()
-                })?,
+                u64::try_from(candidate_component_bytes)
+                    .map_err(|_| "DSA prefill candidate index component exceeds u64".to_string())?,
             )
             .ok_or_else(|| "DSA prefill candidate index A pointer overflow".to_string())?
     };
@@ -6792,9 +6786,8 @@ fn launch_dsa_prefill_selection_chunk(
     } else {
         candidate_indices_a_ptr
             .checked_add(
-                u64::try_from(candidate_component_bytes).map_err(|_| {
-                    "DSA prefill candidate index component exceeds u64".to_string()
-                })?,
+                u64::try_from(candidate_component_bytes)
+                    .map_err(|_| "DSA prefill candidate index component exceeds u64".to_string())?,
             )
             .ok_or_else(|| "DSA prefill candidate index B pointer overflow".to_string())?
     };
@@ -7336,6 +7329,11 @@ pub struct PrefillEngine {
     pub d_cold_staging: Option<GpuBuf<u8>>,
     pub cold_expert_bytes: usize, // bytes per cold expert slot (w1p + w1s + w2p + w2s)
     pub max_cold_experts: usize,  // max cold experts the staging buffer can hold
+    /// Shared low-VRAM scratch ring for the default-off synthetic
+    /// canonical-INT4 -> Marlin repack cost probe. Decode and prefill share one
+    /// allocation because they never execute concurrently.
+    pub synthetic_repack:
+        Option<Arc<std::sync::Mutex<crate::synthetic_repack::SyntheticRepackRing>>>,
     pub last_cold_staging_failure: Option<ColdStagingFailure>,
     pub prefill_runtime_chunk_cap: Option<usize>,
     pub active_prefill_prompt_tokens: usize,
@@ -8823,8 +8821,7 @@ impl PrefillEngine {
         selected_rows.dedup();
         selected_experts.sort_unstable();
         selected_experts.dedup();
-        self.prefill_device_trace_enabled
-            .set(enabled && !mla_only);
+        self.prefill_device_trace_enabled.set(enabled && !mla_only);
         self.prefill_device_trace_mla_only.set(enabled && mla_only);
         self.prefill_device_trace_layer.set(layer_idx);
         self.prefill_device_trace_all_layers.set(all_layers);
@@ -10134,9 +10131,9 @@ impl PrefillEngine {
         row_idx: usize,
         width: usize,
     ) -> Result<(), String> {
-        let mla_stage =
-            (PDT_LAYER_MLA_Q_LORA_NORM_LAST..=PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL)
-                .contains(&stage_id);
+        let mla_stage = (PDT_LAYER_MLA_Q_LORA_NORM_LAST
+            ..=PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL)
+            .contains(&stage_id);
         if !(self.prefill_device_trace_enabled.get()
             || (self.prefill_device_trace_mla_only.get() && mla_stage))
             || self.prefill_device_trace_layer.get() != layer_idx
@@ -10201,9 +10198,9 @@ impl PrefillEngine {
         let layer_matches = trace_layer == layer_idx
             || (stage_id == PDT_LAYER_OUTPUT_SUM_ELEMENT_DETAIL
                 && trace_layer == layer_idx.saturating_add(1));
-        let mla_stage =
-            (PDT_LAYER_MLA_Q_LORA_NORM_LAST..=PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL)
-                .contains(&stage_id);
+        let mla_stage = (PDT_LAYER_MLA_Q_LORA_NORM_LAST
+            ..=PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL)
+            .contains(&stage_id);
         if !(self.prefill_device_trace_enabled.get()
             || (self.prefill_device_trace_mla_only.get() && mla_stage))
             || !layer_matches
@@ -10263,9 +10260,9 @@ impl PrefillEngine {
         logical_row_idx: usize,
         width: usize,
     ) -> Result<(), String> {
-        let mla_stage =
-            (PDT_LAYER_MLA_Q_LORA_NORM_LAST..=PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL)
-                .contains(&stage_id);
+        let mla_stage = (PDT_LAYER_MLA_Q_LORA_NORM_LAST
+            ..=PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL)
+            .contains(&stage_id);
         if !(self.prefill_device_trace_enabled.get()
             || (self.prefill_device_trace_mla_only.get() && mla_stage))
             || self.prefill_device_trace_layer.get() != layer_idx
@@ -15889,6 +15886,51 @@ impl PrefillEngine {
         Ok(ptrs)
     }
 
+    fn begin_synthetic_repack_layer(&self) -> Result<usize, String> {
+        let Some(repack) = self.synthetic_repack.as_ref() else {
+            return Ok(0);
+        };
+        let mut repack = repack
+            .lock()
+            .map_err(|_| "synthetic repack ring lock poisoned".to_string())?;
+        repack.begin_layer();
+        Ok(repack.slot_count())
+    }
+
+    fn launch_synthetic_repack_batch(&self, pointers: &[[u64; 4]]) -> Result<(), String> {
+        let Some(repack) = self.synthetic_repack.as_ref() else {
+            if pointers.is_empty() {
+                return Ok(());
+            }
+            return Err("synthetic repack batch supplied without an initialized ring".to_string());
+        };
+        repack
+            .lock()
+            .map_err(|_| "synthetic repack ring lock poisoned".to_string())?
+            .launch_batch(self.copy_stream, pointers)
+    }
+
+    fn begin_synthetic_repack_copy_batch(&self) -> Result<(), String> {
+        let Some(repack) = self.synthetic_repack.as_ref() else {
+            return Ok(());
+        };
+        repack
+            .lock()
+            .map_err(|_| "synthetic repack ring lock poisoned".to_string())?
+            .begin_copy_batch(self.copy_stream)
+    }
+
+    fn synthetic_repack_completion_stream(&self) -> Result<cuda_sys::CUstream, String> {
+        let repack = self
+            .synthetic_repack
+            .as_ref()
+            .ok_or_else(|| "synthetic repack completion requested without a ring".to_string())?;
+        Ok(repack
+            .lock()
+            .map_err(|_| "synthetic repack ring lock poisoned".to_string())?
+            .repack_stream())
+    }
+
     fn order_copy_stream_after_compute_for_cold_staging(&self) -> Result<(), String> {
         if self.cold_staging_reuse_event.is_null() {
             return Err("cold staging reuse event is not initialized".to_string());
@@ -16263,6 +16305,9 @@ impl PrefillEngine {
         let mt = self.gqa_timing_enabled.get();
         let mt_build = if mt { Some(Instant::now()) } else { None };
         let mut cold_h2d_ms = 0.0f64;
+        let synthetic_slots = self.begin_synthetic_repack_layer()?;
+        let mut synthetic_batch: Vec<[u64; 4]> = Vec::with_capacity(synthetic_slots);
+        let mut synthetic_launched = false;
 
         for eid in 0..n_experts {
             if let Some((hw1p, hw1s, hw2p, hw2s)) = self.expert_lookup(hcs_layer_idx, eid) {
@@ -16311,6 +16356,9 @@ impl PrefillEngine {
             let e = &moe_data.experts[eid];
             let slot_base = cold_staging_base + (cold_slot * self.cold_expert_bytes) as u64;
             let mut off = 0u64;
+            if synthetic_slots > 0 && synthetic_batch.is_empty() {
+                self.begin_synthetic_repack_copy_batch()?;
+            }
             let mt_cold = if mt { Some(Instant::now()) } else { None };
             unsafe {
                 cuda_sys::lib().cuMemcpyHtoDAsync_v2(
@@ -16351,11 +16399,28 @@ impl PrefillEngine {
                 );
             }
             self.h_expert_w2s_ptrs[eid] = slot_base + off;
+            if synthetic_slots > 0 {
+                synthetic_batch.push([
+                    self.h_expert_w1_ptrs[eid],
+                    self.h_expert_w1s_ptrs[eid],
+                    self.h_expert_w2_ptrs[eid],
+                    self.h_expert_w2s_ptrs[eid],
+                ]);
+                if synthetic_batch.len() == synthetic_slots {
+                    self.launch_synthetic_repack_batch(&synthetic_batch)?;
+                    synthetic_batch.clear();
+                    synthetic_launched = true;
+                }
+            }
             if let Some(t) = mt_cold {
                 cold_h2d_ms += t.elapsed().as_secs_f64() * 1000.0;
             }
             cold_slot += 1;
             cold_count += 1;
+        }
+        if !synthetic_batch.is_empty() {
+            self.launch_synthetic_repack_batch(&synthetic_batch)?;
+            synthetic_launched = true;
         }
 
         if let Some(t) = mt_build {
@@ -16369,8 +16434,13 @@ impl PrefillEngine {
         }
 
         let mt_upload = if mt { Some(Instant::now()) } else { None };
+        let dma_completion_stream = if synthetic_launched {
+            self.synthetic_repack_completion_stream()?
+        } else {
+            self.copy_stream
+        };
         unsafe {
-            cuda_sys::lib().cuEventRecord(self.dma_event, self.copy_stream);
+            cuda_sys::lib().cuEventRecord(self.dma_event, dma_completion_stream);
             cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                 ptrs[0],
                 self.h_expert_w1_ptrs.as_ptr() as *const _,
@@ -24501,6 +24571,42 @@ impl PrefillEngine {
             );
         }
 
+        if let Some(repack) = self.synthetic_repack.as_ref() {
+            let mut repack = repack
+                .lock()
+                .map_err(|_| "synthetic repack ring lock poisoned".to_string())?;
+            let scratch_bytes = repack.scratch_bytes();
+            let stats = repack.take_stats();
+            if stats.experts > 0 {
+                let experts = stats.experts as f64;
+                let kernel_us_per_expert = stats.kernel_seconds / experts * 1.0e6;
+                let copy_us_per_expert = stats.copy_seconds / experts * 1.0e6;
+                let duty_pct = if stats.copy_seconds > 0.0 {
+                    stats.kernel_seconds / stats.copy_seconds * 100.0
+                } else {
+                    0.0
+                };
+                let effective_mem_gb_s = if stats.kernel_seconds > 0.0 {
+                    stats.source_bytes as f64 * 2.0 / stats.kernel_seconds / 1.0e9
+                } else {
+                    0.0
+                };
+                eprintln!(
+                    "SYNTHETIC REPACK SUMMARY phase=prefill prompt_tokens={} launches={} experts={} source_bytes={} scratch_bytes={} kernel_us_per_expert={:.6} copy_us_per_expert={:.6} duty_pct={:.6} effective_mem_gb_s={:.6} timing={}",
+                    total_m,
+                    stats.launches,
+                    stats.experts,
+                    stats.source_bytes,
+                    scratch_bytes,
+                    kernel_us_per_expert,
+                    copy_us_per_expert,
+                    duty_pct,
+                    effective_mem_gb_s,
+                    stats.kernel_seconds > 0.0,
+                );
+            }
+        }
+
         Ok(PrefillResult {
             first_token,
             prompt_len: total_m,
@@ -30266,16 +30372,9 @@ impl PrefillEngine {
         let mut high = upper_chunk_rows;
         while low < high {
             let candidate = low + (high - low).div_ceil(2);
-            let required = estimate_scratch_vram_for_prompt(
-                &self.config,
-                candidate,
-                prompt_tokens,
-            )
-            .checked_add(self.minimum_dsa_prefill_workspace_bytes(
-                candidate,
-                prompt_tokens,
-            )?)
-            .ok_or_else(|| "DSA prefill combined scratch size overflow".to_string())?;
+            let required = estimate_scratch_vram_for_prompt(&self.config, candidate, prompt_tokens)
+                .checked_add(self.minimum_dsa_prefill_workspace_bytes(candidate, prompt_tokens)?)
+                .ok_or_else(|| "DSA prefill combined scratch size overflow".to_string())?;
             if required <= scratch_and_dsa_budget_bytes {
                 low = candidate;
             } else {
@@ -30332,8 +30431,7 @@ impl PrefillEngine {
         };
         let minimum_plan =
             plan_dsa_prefill_selection(1, context_end, geometry.index_topk, usize::MAX)?;
-        let minimum_total =
-            self.minimum_dsa_prefill_workspace_bytes(chunk_rows, context_end)?;
+        let minimum_total = self.minimum_dsa_prefill_workspace_bytes(chunk_rows, context_end)?;
         let fixed_bytes = minimum_total
             .checked_sub(minimum_plan.workspace_row_bytes)
             .ok_or_else(|| "DSA prefill fixed workspace size underflow".to_string())?;
@@ -30431,11 +30529,7 @@ impl PrefillEngine {
         if rows > workspace.max_chunk_rows || context_end > workspace.max_context_end {
             return Err(format!(
                 "DSA prefill owner {} workspace maxima rows/context {}/{}, request requires {}/{}",
-                layer_idx,
-                workspace.max_chunk_rows,
-                workspace.max_context_end,
-                rows,
-                context_end
+                layer_idx, workspace.max_chunk_rows, workspace.max_context_end, rows, context_end
             ));
         }
         if q_lora_residual_ptr == 0 {
@@ -31203,13 +31297,8 @@ impl PrefillEngine {
                 0,
                 kpe_cache_prefix_bytes / std::mem::size_of::<i32>(),
             )?;
-            let selected = workspace.resolve_for_layer(
-                layer_idx,
-                registration,
-                start_pos,
-                m,
-                context_end,
-            )?;
+            let selected =
+                workspace.resolve_for_layer(layer_idx, registration, start_pos, m, context_end)?;
             self.record_prefill_device_trace_i32_slice(
                 PDT_LAYER_MLA_DSA_SELECTED_LAST,
                 layer_idx,
@@ -31220,9 +31309,7 @@ impl PrefillEngine {
                     + u64::try_from(
                         trace_row
                             .checked_mul(selected.selected_per_row)
-                            .and_then(|value| {
-                                value.checked_mul(std::mem::size_of::<i32>())
-                            })
+                            .and_then(|value| value.checked_mul(std::mem::size_of::<i32>()))
                             .ok_or_else(|| {
                                 format!(
                                     "DSA sparse MLA layer {} selected trace offset overflow",
@@ -31239,14 +31326,12 @@ impl PrefillEngine {
                 trace_row,
                 selected.selected_per_row,
             )?;
-            let selected_elements = m
-                .checked_mul(selected.selected_per_row)
-                .ok_or_else(|| {
-                    format!(
-                        "DSA sparse MLA layer {} selected trace size overflow",
-                        layer_idx
-                    )
-                })?;
+            let selected_elements = m.checked_mul(selected.selected_per_row).ok_or_else(|| {
+                format!(
+                    "DSA sparse MLA layer {} selected trace size overflow",
+                    layer_idx
+                )
+            })?;
             self.record_prefill_device_trace_i32_slice(
                 PDT_LAYER_MLA_DSA_SELECTED_FULL,
                 layer_idx,
@@ -31287,9 +31372,8 @@ impl PrefillEngine {
             let mut a4 = num_heads_i32;
             let mut a5 = qk_dim_i32;
             let mut a6 = nope_i32;
-            let mut a7 = i32::try_from(ccd).map_err(|_| {
-                format!("DSA sparse MLA layer {} cKV width exceeds i32", layer_idx)
-            })?;
+            let mut a7 = i32::try_from(ccd)
+                .map_err(|_| format!("DSA sparse MLA layer {} cKV width exceeds i32", layer_idx))?;
             unsafe {
                 launch(
                     self.kernels.mla_prefill_absorb_wkc,
@@ -31324,9 +31408,7 @@ impl PrefillEngine {
                         trace_row
                             .checked_mul(nh)
                             .and_then(|value| value.checked_mul(ccd))
-                            .and_then(|value| {
-                                value.checked_mul(std::mem::size_of::<f32>())
-                            })
+                            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
                             .ok_or_else(|| {
                                 format!(
                                     "DSA sparse MLA layer {} absorbed-Q trace offset overflow",
@@ -31393,12 +31475,8 @@ impl PrefillEngine {
                     layer_idx
                 )
             })?;
-            let mut s15 = i32::try_from(context_end).map_err(|_| {
-                format!(
-                    "DSA sparse MLA layer {} context exceeds i32",
-                    layer_idx
-                )
-            })?;
+            let mut s15 = i32::try_from(context_end)
+                .map_err(|_| format!("DSA sparse MLA layer {} context exceeds i32", layer_idx))?;
             unsafe {
                 launch(
                     self.kernels.mla_prefill_sparse_attention_k4,
@@ -31441,9 +31519,7 @@ impl PrefillEngine {
                         trace_row
                             .checked_mul(nh)
                             .and_then(|value| value.checked_mul(ccd))
-                            .and_then(|value| {
-                                value.checked_mul(std::mem::size_of::<f32>())
-                            })
+                            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
                             .ok_or_else(|| {
                                 format!(
                                     "DSA sparse MLA layer {} attention trace offset overflow",
@@ -31471,8 +31547,7 @@ impl PrefillEngine {
                 mla_elements,
             )?;
 
-            if (self.prefill_device_trace_enabled.get()
-                || self.prefill_device_trace_mla_only.get())
+            if (self.prefill_device_trace_enabled.get() || self.prefill_device_trace_mla_only.get())
                 && self.prefill_device_trace_layer.get() == layer_idx
             {
                 unsafe {
@@ -46914,10 +46989,8 @@ impl PrefillEngine {
         // per-expert order, so atomic scatter order is not a valid execution
         // contract here.
         {
-            let stable_scatter_threads = m
-                .checked_next_power_of_two()
-                .unwrap_or(256)
-                .clamp(32, 256) as u32;
+            let stable_scatter_threads =
+                m.checked_next_power_of_two().unwrap_or(256).clamp(32, 256) as u32;
             let mut p0 = sorted_ids_val;
             let mut p1 = write_offsets_ptr;
             let mut p2 = topk_ids_ptr;
@@ -47185,6 +47258,11 @@ impl PrefillEngine {
         //    (zero copy), cold experts are H2D'd to a dynamic staging buffer sized
         //    from the routed experts for this layer/chunk.
         let use_ptr_table = self.d_expert_w1_ptrs.is_some() && !prefill_disable_ptr_table();
+        if self.synthetic_repack.is_some() && !use_ptr_table {
+            return Err(
+                "KRASIS_SYNTH_REPACK=1 requires the prefill expert pointer-table path".to_string(),
+            );
+        }
         let cold_staging_base = self.d_cold_staging.as_ref().map_or(0, |s| *s.device_ptr());
         let trace_step = if self.config.prefill_chunk_size > 0 {
             0
@@ -47282,6 +47360,9 @@ impl PrefillEngine {
             let mut pinned_count = 0usize;
             let mut cold_count = 0usize;
             let mut cold_slot = 0usize; // next available slot in cold staging
+            let synthetic_slots = self.begin_synthetic_repack_layer()?;
+            let mut synthetic_batch: Vec<[u64; 4]> = Vec::with_capacity(synthetic_slots);
+            let mut synthetic_launched = false;
 
             // Clear pointer tables (inactive experts get 0 = won't be accessed by kernel)
             for i in 0..n_experts {
@@ -47331,6 +47412,7 @@ impl PrefillEngine {
                     continue;
                 }
 
+                let cold_count_before = cold_count;
                 if let Some(md) = moe_data {
                     // Cold expert: H2D to staging slot. If cold staging is
                     // unexpectedly full, fall back to the contiguous fused
@@ -47359,6 +47441,9 @@ impl PrefillEngine {
                             let w1s_off = eid * self.w1_scales_per_expert;
                             let w2_off = eid * self.w2_packed_per_expert;
                             let w2s_off = eid * self.w2_scales_per_expert;
+                            if synthetic_slots > 0 && synthetic_batch.is_empty() {
+                                self.begin_synthetic_repack_copy_batch()?;
+                            }
                             let mt_cold = if mt { Some(Instant::now()) } else { None };
                             unsafe {
                                 cuda_sys::lib().cuMemcpyHtoDAsync_v2(
@@ -47409,6 +47494,9 @@ impl PrefillEngine {
                         let slot_base =
                             cold_staging_base + (cold_slot * self.cold_expert_bytes) as u64;
                         let mut off = 0u64;
+                        if synthetic_slots > 0 && synthetic_batch.is_empty() {
+                            self.begin_synthetic_repack_copy_batch()?;
+                        }
                         let mt_cold = if mt { Some(Instant::now()) } else { None };
                         // w1 packed
                         unsafe {
@@ -47460,6 +47548,23 @@ impl PrefillEngine {
                         cold_count += 1;
                     }
                 }
+                if synthetic_slots > 0 && cold_count > cold_count_before {
+                    synthetic_batch.push([
+                        self.h_expert_w1_ptrs[eid],
+                        self.h_expert_w1s_ptrs[eid],
+                        self.h_expert_w2_ptrs[eid],
+                        self.h_expert_w2s_ptrs[eid],
+                    ]);
+                    if synthetic_batch.len() == synthetic_slots {
+                        self.launch_synthetic_repack_batch(&synthetic_batch)?;
+                        synthetic_batch.clear();
+                        synthetic_launched = true;
+                    }
+                }
+            }
+            if !synthetic_batch.is_empty() {
+                self.launch_synthetic_repack_batch(&synthetic_batch)?;
+                synthetic_launched = true;
             }
             trace_hcs_count = hcs_count;
             trace_pinned_count = pinned_count;
@@ -47479,8 +47584,13 @@ impl PrefillEngine {
             // a CUDA event. This keeps the CPU out of the copy-stream wait while preserving
             // the same "pointer table + cold staging ready before MoE GEMM" dependency.
             let mt_upload = if mt { Some(Instant::now()) } else { None };
+            let dma_completion_stream = if synthetic_launched {
+                self.synthetic_repack_completion_stream()?
+            } else {
+                self.copy_stream
+            };
             unsafe {
-                cuda_sys::lib().cuEventRecord(self.dma_event, self.copy_stream);
+                cuda_sys::lib().cuEventRecord(self.dma_event, dma_completion_stream);
                 cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                     w1_ptrs_gpu,
                     self.h_expert_w1_ptrs.as_ptr() as *const _,
@@ -63891,6 +64001,9 @@ mod kernel_tests {
                     "gqa_attention_polar4_tiled_g",
                     "gqa_attention_polar4_reduce_g",
                     "gated_delta_net_step",
+                    "cpu_int4_to_marlin_repack_batched",
+                    "cpu_bf16_scales_to_marlin_repack_batched",
+                    "cpu_expert_to_marlin_repack_batched",
                 ],
             )
             .expect("Failed to load decode kernels PTX");
@@ -64131,6 +64244,150 @@ mod kernel_tests {
             panic!("{}: {} / {} elements differ", label, fail_count, n);
         }
         eprintln!("  {} PASS ({} elements, exact match)", label, n);
+    }
+
+    #[cfg(has_decode_kernels)]
+    #[test]
+    fn test_synthetic_repack_byte_exact_glm_and_qcn_experts() {
+        use crate::weights::marlin::{marlin_repack, QuantizedInt4};
+
+        let ctx = GpuTestCtx::new();
+        let fused_kernel = ctx.get_decode_kernel("cpu_expert_to_marlin_repack_batched");
+        let group_size = 128usize;
+        let experts = [
+            ("glm", (4096usize, 6144usize), (6144usize, 2048usize)),
+            ("qcn", (1024usize, 2048usize), (2048usize, 512usize)),
+        ];
+
+        for (label, (w13_n, w13_k), (w2_n, w2_k)) in experts {
+            let make_input = |n: usize, k: usize, salt: u32| {
+                assert_eq!(n % 64, 0, "{label}: N must satisfy Marlin tiles");
+                assert_eq!(k % 32, 0, "{label}: K must satisfy vectorized repack tiles");
+                let groups = k / group_size;
+                let packed: Vec<u32> = (0..n * (k / 8))
+                    .map(|idx| {
+                        let x = (idx as u32) ^ salt;
+                        x.wrapping_mul(0x9E37_79B9).rotate_left((idx % 31) as u32) ^ 0xA5C3_1F27
+                    })
+                    .collect();
+                let scales: Vec<u16> = (0..n * groups)
+                    .map(|idx| {
+                        half::bf16::from_f32(
+                            0.0005 + (((idx * 17) as u32 ^ salt) % 1009) as f32 * 0.00001,
+                        )
+                        .to_bits()
+                    })
+                    .collect();
+                let oracle = marlin_repack(&QuantizedInt4 {
+                    packed: packed.clone(),
+                    scales: scales.clone(),
+                    rows: n,
+                    cols: k,
+                    group_size,
+                });
+                (packed, scales, oracle)
+            };
+            let (w13_packed, w13_scales, w13_oracle) = make_input(w13_n, w13_k, 0x1357_9BDF);
+            let (w2_packed, w2_scales, w2_oracle) = make_input(w2_n, w2_k, 0x2468_ACE0);
+
+            let d_w13 = ctx.dev.htod_copy(w13_packed).unwrap();
+            let d_w13s = ctx.dev.htod_copy(w13_scales).unwrap();
+            let d_w2 = ctx.dev.htod_copy(w2_packed).unwrap();
+            let d_w2s = ctx.dev.htod_copy(w2_scales).unwrap();
+            let d_w13_ptrs = ctx.dev.htod_copy(vec![*d_w13.device_ptr()]).unwrap();
+            let d_w13s_ptrs = ctx.dev.htod_copy(vec![*d_w13s.device_ptr()]).unwrap();
+            let d_w2_ptrs = ctx.dev.htod_copy(vec![*d_w2.device_ptr()]).unwrap();
+            let d_w2s_ptrs = ctx.dev.htod_copy(vec![*d_w2s.device_ptr()]).unwrap();
+
+            let w13_packed_bytes = w13_oracle.packed.len() * 4;
+            let w13_scales_bytes = w13_oracle.scales.len() * 2;
+            let w2_packed_bytes = w2_oracle.packed.len() * 4;
+            let w2_scales_bytes = w2_oracle.scales.len() * 2;
+            let w13s_offset = w13_packed_bytes;
+            let w2_offset = w13s_offset + w13_scales_bytes;
+            let w2s_offset = w2_offset + w2_packed_bytes;
+            let output_stride = w2s_offset + w2_scales_bytes;
+            let d_output = ctx.dev.alloc_zeros::<u8>(output_stride).unwrap();
+
+            let mut w13_ptrs = *d_w13_ptrs.device_ptr();
+            let mut w13s_ptrs = *d_w13s_ptrs.device_ptr();
+            let mut w2_ptrs = *d_w2_ptrs.device_ptr();
+            let mut w2s_ptrs = *d_w2s_ptrs.device_ptr();
+            let mut output = *d_output.device_ptr();
+            let mut batch = 1i32;
+            let mut w13_n_i32 = w13_n as i32;
+            let mut w13_k_i32 = w13_k as i32;
+            let mut w2_n_i32 = w2_n as i32;
+            let mut w2_k_i32 = w2_k as i32;
+            let mut group_size_i32 = group_size as i32;
+            let mut output_stride_u64 = output_stride as u64;
+            let mut w13s_offset_u64 = w13s_offset as u64;
+            let mut w2_offset_u64 = w2_offset as u64;
+            let mut w2s_offset_u64 = w2s_offset as u64;
+            let blocks = (w13_k / 32) * (w13_n / 64) + (w2_k / 32) * (w2_n / 64);
+            unsafe {
+                launch(
+                    fused_kernel,
+                    (blocks as u32, 1, 1),
+                    (128, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut w13_ptrs as *mut _ as *mut std::ffi::c_void,
+                        &mut w13s_ptrs as *mut _ as *mut std::ffi::c_void,
+                        &mut w2_ptrs as *mut _ as *mut std::ffi::c_void,
+                        &mut w2s_ptrs as *mut _ as *mut std::ffi::c_void,
+                        &mut output as *mut _ as *mut std::ffi::c_void,
+                        &mut batch as *mut _ as *mut std::ffi::c_void,
+                        &mut w13_n_i32 as *mut _ as *mut std::ffi::c_void,
+                        &mut w13_k_i32 as *mut _ as *mut std::ffi::c_void,
+                        &mut w2_n_i32 as *mut _ as *mut std::ffi::c_void,
+                        &mut w2_k_i32 as *mut _ as *mut std::ffi::c_void,
+                        &mut group_size_i32 as *mut _ as *mut std::ffi::c_void,
+                        &mut output_stride_u64 as *mut _ as *mut std::ffi::c_void,
+                        &mut w13s_offset_u64 as *mut _ as *mut std::ffi::c_void,
+                        &mut w2_offset_u64 as *mut _ as *mut std::ffi::c_void,
+                        &mut w2s_offset_u64 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )
+                .unwrap();
+            }
+
+            ctx.dev.synchronize().unwrap();
+            let actual = ctx.dev.dtoh_sync_copy(&d_output).unwrap();
+            let mut expected = Vec::with_capacity(output_stride);
+            expected.extend(w13_oracle.packed.iter().flat_map(|word| word.to_le_bytes()));
+            expected.extend(
+                w13_oracle
+                    .scales
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes()),
+            );
+            expected.extend(w2_oracle.packed.iter().flat_map(|word| word.to_le_bytes()));
+            expected.extend(
+                w2_oracle
+                    .scales
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes()),
+            );
+            assert_eq!(
+                actual, expected,
+                "{label}: fused GPU expert repack differs from Rust Marlin oracle"
+            );
+            let expected_w13_packed: Vec<u8> = w13_oracle
+                .packed
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect();
+            eprintln!(
+                "synthetic_repack {label}: PASS w13={}x{} w2={}x{} bytes={}",
+                w13_n,
+                w13_k,
+                w2_n,
+                w2_k,
+                expected_w13_packed.len() + w13_scales_bytes + w2_packed_bytes + w2_scales_bytes,
+            );
+        }
     }
 
     fn f32_to_bf16_bytes(values: &[f32]) -> Vec<u8> {

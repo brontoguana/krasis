@@ -700,6 +700,142 @@ impl UnifiedExpertWeights {
         }
     }
 
+    /// Convert an existing standard gated INT4 Marlin expert into the unified
+    /// CPU-transposed layout without changing any quantized values.
+    ///
+    /// This is the inverse layout operation of `from_expert_weights_marlin`
+    /// for the two matrices used by the routed expert. It exists for the
+    /// opt-in CPU-tail transposed-tier experiment: the authoritative Marlin
+    /// host cache remains untouched while selected experts receive a separate
+    /// Rust-owned CPU execution layout.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_marlin_int4_transposed(
+        w13_packed: &[u32],
+        w13_scales: &[u16],
+        w2_packed: &[u32],
+        w2_scales: &[u16],
+        hidden_size: usize,
+        intermediate_size: usize,
+        group_size: usize,
+    ) -> Result<Self, String> {
+        use crate::weights::marlin::{generate_scale_perms, generate_weight_perm_int4};
+
+        fn convert_matrix(
+            packed: &[u32],
+            scales: &[u16],
+            k: usize,
+            n: usize,
+            group_size: usize,
+            weight_perm: &[usize; 1024],
+            scale_perm: &[usize; 64],
+        ) -> Result<(Vec<u32>, Vec<u16>), String> {
+            if k == 0
+                || n == 0
+                || group_size == 0
+                || k % 16 != 0
+                || n % 64 != 0
+                || k % group_size != 0
+                || group_size >= k
+            {
+                return Err(format!(
+                    "unsupported Marlin-to-transposed matrix shape: k={k} n={n} group={group_size}; require k%16=0, n%64=0, k%group=0, and group<k"
+                ));
+            }
+            let expected_packed = (k / 8)
+                .checked_mul(n)
+                .ok_or_else(|| "Marlin-to-transposed packed length overflow".to_string())?;
+            let expected_scales = (k / group_size)
+                .checked_mul(n)
+                .ok_or_else(|| "Marlin-to-transposed scale length overflow".to_string())?;
+            if packed.len() != expected_packed || scales.len() != expected_scales {
+                return Err(format!(
+                    "Marlin-to-transposed source length mismatch: packed={}/{} scales={}/{} for k={k} n={n} group={group_size}",
+                    packed.len(),
+                    expected_packed,
+                    scales.len(),
+                    expected_scales,
+                ));
+            }
+
+            let mut transposed_packed = vec![0u32; expected_packed];
+            let k_tiles = k / 16;
+            let n_chunks = n / 64;
+            let marlin_words_per_k_tile = 2 * n;
+            for kt in 0..k_tiles {
+                for nc in 0..n_chunks {
+                    let marlin_base = kt * marlin_words_per_k_tile + nc * 128;
+                    for packed_position in 0..1024 {
+                        let source_word = packed[marlin_base + packed_position / 8];
+                        let value = (source_word >> ((packed_position % 8) * 4)) & 0x0f;
+                        let clean_position = weight_perm[packed_position];
+                        let n_tile = clean_position / 256;
+                        let tile_position = clean_position % 256;
+                        let k_offset = tile_position / 16;
+                        let n_offset = n_tile * 16 + tile_position % 16;
+                        let k_position = kt * 16 + k_offset;
+                        let n_position = nc * 64 + n_offset;
+                        let destination = (k_position / 8) * n + n_position;
+                        transposed_packed[destination] |= value << ((k_position % 8) * 4);
+                    }
+                }
+            }
+
+            let mut transposed_scales = vec![0u16; expected_scales];
+            for (source_chunk, destination_chunk) in scales
+                .chunks_exact(64)
+                .zip(transposed_scales.chunks_exact_mut(64))
+            {
+                for destination_index in 0..64 {
+                    destination_chunk[scale_perm[destination_index]] =
+                        source_chunk[destination_index];
+                }
+            }
+
+            Ok((transposed_packed, transposed_scales))
+        }
+
+        let weight_perm = generate_weight_perm_int4();
+        let (scale_perm, _) = generate_scale_perms();
+        let (w13_packed, w13_scales) = convert_matrix(
+            w13_packed,
+            w13_scales,
+            hidden_size,
+            2 * intermediate_size,
+            group_size,
+            &weight_perm,
+            &scale_perm,
+        )?;
+        let (w2_packed, w2_scales) = convert_matrix(
+            w2_packed,
+            w2_scales,
+            intermediate_size,
+            hidden_size,
+            group_size,
+            &weight_perm,
+            &scale_perm,
+        )?;
+
+        Ok(UnifiedExpertWeights {
+            w13_packed,
+            w13_scales,
+            w2_packed,
+            w2_scales,
+            hidden_size,
+            intermediate_size,
+            group_size,
+            num_bits: 4,
+            w2_bits: 4,
+            gate_bias: None,
+            up_bias: None,
+            down_bias: None,
+            tiled: false,
+            gated: true,
+            activation_type: 0,
+            contiguous_backing: None,
+            borrowed: false,
+        })
+    }
+
     /// Convert from separate gate/up/down ExpertWeights (INT8) to unified transposed format.
     ///
     /// Concatenates gate+up into w13, transposes from [N, K] to [K, N].

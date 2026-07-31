@@ -28,6 +28,7 @@ use libc;
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
@@ -455,6 +456,309 @@ pub fn expert_forward_unified(
             scratch.expert_out[j] += down_bias[j];
         }
     }
+}
+
+/// Compute one standard gated-SiLU INT4 expert directly from the production
+/// Marlin host layout.
+///
+/// This is used by the opt-in opportunistic CPU-tail race. It deliberately
+/// consumes the same Marlin allocation used for GPU H2D so enabling the
+/// experiment does not create a second model-sized CPU cache. Activations are
+/// quantized to INT16 for the existing Marlin-native AVX2 kernel; callers must
+/// therefore treat this as an explicitly quality-gated path rather than an
+/// exact replacement for CUDA BF16 activation math.
+///
+/// Returns `false` when the caller cancelled this sequence before W2 began.
+#[allow(clippy::too_many_arguments)]
+pub fn expert_forward_marlin_int4_cpu_tail(
+    w13_packed: &[u32],
+    w13_scales: &[u16],
+    w2_packed: &[u32],
+    w2_scales: &[u16],
+    activation_bf16: &[u16],
+    output_bf16: &mut [u16],
+    hidden_size: usize,
+    intermediate_size: usize,
+    group_size: usize,
+    swiglu_limit: f32,
+    activation_alpha: f32,
+    scratch: &mut ExpertScratch,
+    cancel_sequence: &AtomicU64,
+    sequence: u64,
+) -> bool {
+    assert_eq!(activation_bf16.len(), hidden_size);
+    assert_eq!(output_bf16.len(), hidden_size);
+    assert!(hidden_size % 16 == 0);
+    assert!(intermediate_size % 16 == 0);
+    assert!(group_size > 0 && group_size % 16 == 0);
+    assert_eq!(
+        w13_packed.len(),
+        (hidden_size / 8) * (2 * intermediate_size)
+    );
+    assert_eq!(
+        w13_scales.len(),
+        (hidden_size / group_size) * (2 * intermediate_size)
+    );
+    assert_eq!(w2_packed.len(), (intermediate_size / 8) * hidden_size);
+    assert_eq!(
+        w2_scales.len(),
+        (intermediate_size / group_size) * hidden_size
+    );
+
+    if scratch.input_act_int16.len() != hidden_size
+        || scratch.input_act_scales.len() != hidden_size / group_size
+        || scratch.hidden_int16.len() != intermediate_size
+        || scratch.hidden_scales.len() != intermediate_size / group_size
+        || scratch.w13_out.len() != 2 * intermediate_size
+        || scratch.expert_out.len() != hidden_size
+    {
+        *scratch = ExpertScratch::new(hidden_size, intermediate_size, group_size);
+    }
+
+    quantize_activation_int16(
+        activation_bf16,
+        group_size,
+        &mut scratch.input_act_int16,
+        &mut scratch.input_act_scales,
+    );
+    if cancel_sequence.load(Ordering::Acquire) == sequence {
+        return false;
+    }
+
+    let (tile_map, scale_map) = get_marlin_maps();
+    matmul_int4_marlin_parallel(
+        w13_packed,
+        w13_scales,
+        &scratch.input_act_int16,
+        &scratch.input_act_scales,
+        &mut scratch.w13_out,
+        hidden_size,
+        2 * intermediate_size,
+        group_size,
+        tile_map,
+        scale_map,
+    );
+    if cancel_sequence.load(Ordering::Acquire) == sequence {
+        return false;
+    }
+
+    if swiglu_limit > 0.0 {
+        for i in 0..intermediate_size {
+            let mut gate = scratch.w13_out[i];
+            let mut up = scratch.w13_out[intermediate_size + i];
+            if gate > swiglu_limit {
+                gate = swiglu_limit;
+            }
+            if up > swiglu_limit {
+                up = swiglu_limit;
+            }
+            if up < -swiglu_limit {
+                up = -swiglu_limit;
+            }
+            let glu = gate * fast_sigmoid(gate * activation_alpha);
+            scratch.w13_out[i] = (up + 1.0) * glu;
+        }
+        quantize_activation_int16_f32(
+            &scratch.w13_out[..intermediate_size],
+            group_size,
+            &mut scratch.hidden_int16,
+            &mut scratch.hidden_scales,
+        );
+    } else if intermediate_size % 8 == 0 && group_size % 8 == 0 {
+        let w13_ptr = scratch.w13_out.as_mut_ptr();
+        unsafe {
+            silu_quantize_int16_avx2(
+                w13_ptr,
+                w13_ptr.add(intermediate_size) as *const f32,
+                scratch.hidden_int16.as_mut_ptr(),
+                scratch.hidden_scales.as_mut_ptr(),
+                intermediate_size,
+                group_size,
+            );
+        }
+    } else {
+        for i in 0..intermediate_size {
+            let gate = scratch.w13_out[i];
+            let up = scratch.w13_out[intermediate_size + i];
+            scratch.w13_out[i] = gate * fast_sigmoid(gate) * up;
+        }
+        quantize_activation_int16_f32(
+            &scratch.w13_out[..intermediate_size],
+            group_size,
+            &mut scratch.hidden_int16,
+            &mut scratch.hidden_scales,
+        );
+    }
+    if cancel_sequence.load(Ordering::Acquire) == sequence {
+        return false;
+    }
+
+    matmul_int4_marlin_parallel(
+        w2_packed,
+        w2_scales,
+        &scratch.hidden_int16,
+        &scratch.hidden_scales,
+        &mut scratch.expert_out,
+        intermediate_size,
+        hidden_size,
+        group_size,
+        tile_map,
+        scale_map,
+    );
+    if cancel_sequence.load(Ordering::Acquire) == sequence {
+        return false;
+    }
+
+    for (dst, &src) in output_bf16.iter_mut().zip(&scratch.expert_out) {
+        *dst = f32_to_bf16(src);
+    }
+    true
+}
+
+/// Compute one standard gated-SiLU INT4 expert from the unified
+/// CPU-transposed layout for the opt-in CPU-tail race.
+///
+/// The arithmetic and cancellation boundaries intentionally match
+/// `expert_forward_marlin_int4_cpu_tail`; only the weight reader differs.
+#[allow(clippy::too_many_arguments)]
+pub fn expert_forward_transposed_int4_cpu_tail(
+    w13_packed: &[u32],
+    w13_scales: &[u16],
+    w2_packed: &[u32],
+    w2_scales: &[u16],
+    activation_bf16: &[u16],
+    output_bf16: &mut [u16],
+    hidden_size: usize,
+    intermediate_size: usize,
+    group_size: usize,
+    swiglu_limit: f32,
+    activation_alpha: f32,
+    scratch: &mut ExpertScratch,
+    cancel_sequence: &AtomicU64,
+    sequence: u64,
+) -> bool {
+    assert_eq!(activation_bf16.len(), hidden_size);
+    assert_eq!(output_bf16.len(), hidden_size);
+    assert!(hidden_size % 8 == 0);
+    assert!(intermediate_size % 8 == 0);
+    assert!(group_size > 0 && group_size % 8 == 0);
+    assert_eq!(
+        w13_packed.len(),
+        (hidden_size / 8) * (2 * intermediate_size)
+    );
+    assert_eq!(
+        w13_scales.len(),
+        (hidden_size / group_size) * (2 * intermediate_size)
+    );
+    assert_eq!(w2_packed.len(), (intermediate_size / 8) * hidden_size);
+    assert_eq!(
+        w2_scales.len(),
+        (intermediate_size / group_size) * hidden_size
+    );
+
+    if scratch.input_act_int16.len() != hidden_size
+        || scratch.input_act_scales.len() != hidden_size / group_size
+        || scratch.hidden_int16.len() != intermediate_size
+        || scratch.hidden_scales.len() != intermediate_size / group_size
+        || scratch.w13_out.len() != 2 * intermediate_size
+        || scratch.expert_out.len() != hidden_size
+    {
+        *scratch = ExpertScratch::new(hidden_size, intermediate_size, group_size);
+    }
+
+    quantize_activation_int16(
+        activation_bf16,
+        group_size,
+        &mut scratch.input_act_int16,
+        &mut scratch.input_act_scales,
+    );
+    if cancel_sequence.load(Ordering::Acquire) == sequence {
+        return false;
+    }
+
+    matmul_int4_transposed_integer_parallel(
+        w13_packed,
+        w13_scales,
+        &scratch.input_act_int16,
+        &scratch.input_act_scales,
+        &mut scratch.w13_out,
+        hidden_size,
+        2 * intermediate_size,
+        group_size,
+    );
+    if cancel_sequence.load(Ordering::Acquire) == sequence {
+        return false;
+    }
+
+    if swiglu_limit > 0.0 {
+        for i in 0..intermediate_size {
+            let mut gate = scratch.w13_out[i];
+            let mut up = scratch.w13_out[intermediate_size + i];
+            if gate > swiglu_limit {
+                gate = swiglu_limit;
+            }
+            if up > swiglu_limit {
+                up = swiglu_limit;
+            }
+            if up < -swiglu_limit {
+                up = -swiglu_limit;
+            }
+            let glu = gate * fast_sigmoid(gate * activation_alpha);
+            scratch.w13_out[i] = (up + 1.0) * glu;
+        }
+        quantize_activation_int16_f32(
+            &scratch.w13_out[..intermediate_size],
+            group_size,
+            &mut scratch.hidden_int16,
+            &mut scratch.hidden_scales,
+        );
+    } else if intermediate_size % 8 == 0 && group_size % 8 == 0 {
+        let w13_ptr = scratch.w13_out.as_mut_ptr();
+        unsafe {
+            silu_quantize_int16_avx2(
+                w13_ptr,
+                w13_ptr.add(intermediate_size) as *const f32,
+                scratch.hidden_int16.as_mut_ptr(),
+                scratch.hidden_scales.as_mut_ptr(),
+                intermediate_size,
+                group_size,
+            );
+        }
+    } else {
+        for i in 0..intermediate_size {
+            let gate = scratch.w13_out[i];
+            let up = scratch.w13_out[intermediate_size + i];
+            scratch.w13_out[i] = gate * fast_sigmoid(gate) * up;
+        }
+        quantize_activation_int16_f32(
+            &scratch.w13_out[..intermediate_size],
+            group_size,
+            &mut scratch.hidden_int16,
+            &mut scratch.hidden_scales,
+        );
+    }
+    if cancel_sequence.load(Ordering::Acquire) == sequence {
+        return false;
+    }
+
+    matmul_int4_transposed_integer_parallel(
+        w2_packed,
+        w2_scales,
+        &scratch.hidden_int16,
+        &scratch.hidden_scales,
+        &mut scratch.expert_out,
+        intermediate_size,
+        hidden_size,
+        group_size,
+    );
+    if cancel_sequence.load(Ordering::Acquire) == sequence {
+        return false;
+    }
+
+    for (dst, &src) in output_bf16.iter_mut().zip(&scratch.expert_out) {
+        *dst = f32_to_bf16(src);
+    }
+    true
 }
 
 /// Full MoE forward for a single token on one layer.
@@ -1591,7 +1895,7 @@ fn prefetch_expert_nta(_expert: &ExpertWeights) {
 /// Uses 2^(x * log2(e)) decomposition with degree-5 minimax polynomial.
 /// ~20 bit accuracy, avoids ~20 cycle libm exp call.
 #[inline]
-fn fast_sigmoid(x: f32) -> f32 {
+pub(crate) fn fast_sigmoid(x: f32) -> f32 {
     // Clamp to avoid overflow in exp
     let neg_x = (-x).max(-20.0).min(20.0);
     // exp(neg_x) = 2^(neg_x * log2(e))
@@ -4456,6 +4760,517 @@ mod tests {
             scratch.expert_out[0],
         );
         assert!(rms > 1e-6, "Output RMS too small: {rms}");
+    }
+
+    #[test]
+    fn test_cpu_tail_marlin_forward_matches_integer_reference_and_cancels() {
+        // GLM-5.2 routed-expert shape. The 4,096-column W13 output and
+        // 6,144-column W2 output force the parallel transposed kernel through
+        // nonzero N offsets, not only its column-zero chunk.
+        let hidden = 6144;
+        let intermediate = 2048;
+        let group_size = 128;
+
+        let mut gate_bf16 = vec![0u16; intermediate * hidden];
+        let mut up_bf16 = vec![0u16; intermediate * hidden];
+        let mut down_bf16 = vec![0u16; hidden * intermediate];
+        for i in 0..gate_bf16.len() {
+            gate_bf16[i] = f32_to_bf16((i as f32 / gate_bf16.len() as f32 - 0.5) * 0.1);
+            up_bf16[i] = f32_to_bf16((i as f32 / up_bf16.len() as f32 - 0.3) * 0.1);
+        }
+        for i in 0..down_bf16.len() {
+            down_bf16[i] = f32_to_bf16((i as f32 / down_bf16.len() as f32 - 0.5) * 0.1);
+        }
+        let expert = ExpertWeights {
+            gate: QuantWeight::Int4(quantize_int4(&gate_bf16, intermediate, hidden, group_size)),
+            up: QuantWeight::Int4(quantize_int4(&up_bf16, intermediate, hidden, group_size)),
+            down: QuantWeight::Int4(quantize_int4(&down_bf16, hidden, intermediate, group_size)),
+        };
+        let marlin = UnifiedExpertWeights::from_expert_weights_marlin(&expert, 4);
+        let transposed_reference = UnifiedExpertWeights::from_expert_weights(&expert);
+        let transposed_from_marlin = UnifiedExpertWeights::from_marlin_int4_transposed(
+            &marlin.w13_packed,
+            &marlin.w13_scales,
+            &marlin.w2_packed,
+            &marlin.w2_scales,
+            hidden,
+            intermediate,
+            group_size,
+        )
+        .expect("Marlin-to-transposed conversion");
+        assert_eq!(
+            transposed_from_marlin.w13_packed,
+            transposed_reference.w13_packed
+        );
+        assert_eq!(
+            transposed_from_marlin.w13_scales,
+            transposed_reference.w13_scales
+        );
+        assert_eq!(
+            transposed_from_marlin.w2_packed,
+            transposed_reference.w2_packed
+        );
+        assert_eq!(
+            transposed_from_marlin.w2_scales,
+            transposed_reference.w2_scales
+        );
+        let activation: Vec<u16> = (0..hidden)
+            .map(|i| f32_to_bf16(((i * 3 + 1) as f32 / hidden as f32 - 0.5) * 0.2))
+            .collect();
+
+        let mut act_int16 = vec![0i16; hidden];
+        let mut act_scales = vec![0.0f32; hidden / group_size];
+        quantize_activation_int16(&activation, group_size, &mut act_int16, &mut act_scales);
+        let mut reference_scratch = ExpertScratch::new(hidden, intermediate, group_size);
+        expert_forward_integer(
+            &expert,
+            &act_int16,
+            &act_scales,
+            &mut reference_scratch,
+            false,
+        );
+
+        let cancel_sequence = AtomicU64::new(0);
+        let mut cpu_tail_scratch = ExpertScratch::new(hidden, intermediate, group_size);
+        let mut output = vec![0u16; hidden];
+        assert!(expert_forward_marlin_int4_cpu_tail(
+            &marlin.w13_packed,
+            &marlin.w13_scales,
+            &marlin.w2_packed,
+            &marlin.w2_scales,
+            &activation,
+            &mut output,
+            hidden,
+            intermediate,
+            group_size,
+            0.0,
+            1.0,
+            &mut cpu_tail_scratch,
+            &cancel_sequence,
+            7,
+        ));
+
+        let mut max_abs_diff = 0.0f32;
+        for (actual, expected) in output.iter().zip(&reference_scratch.expert_out) {
+            max_abs_diff = max_abs_diff
+                .max((bf16_to_f32(*actual) - bf16_to_f32(f32_to_bf16(*expected))).abs());
+        }
+        assert!(
+            max_abs_diff <= 0.001,
+            "CPU-tail Marlin output differs from integer reference: max_abs_diff={max_abs_diff}"
+        );
+
+        let mut transposed_output = vec![0u16; hidden];
+        assert!(expert_forward_transposed_int4_cpu_tail(
+            &transposed_from_marlin.w13_packed,
+            &transposed_from_marlin.w13_scales,
+            &transposed_from_marlin.w2_packed,
+            &transposed_from_marlin.w2_scales,
+            &activation,
+            &mut transposed_output,
+            hidden,
+            intermediate,
+            group_size,
+            0.0,
+            1.0,
+            &mut cpu_tail_scratch,
+            &cancel_sequence,
+            9,
+        ));
+        let mut transposed_max_abs_diff = 0.0f32;
+        for (actual, expected) in transposed_output.iter().zip(&reference_scratch.expert_out) {
+            transposed_max_abs_diff = transposed_max_abs_diff
+                .max((bf16_to_f32(*actual) - bf16_to_f32(f32_to_bf16(*expected))).abs());
+        }
+        assert!(
+            transposed_max_abs_diff <= 0.001,
+            "CPU-tail transposed output differs from integer reference: max_abs_diff={transposed_max_abs_diff}"
+        );
+
+        cancel_sequence.store(8, Ordering::Release);
+        let mut canceled_output = vec![0x7fc1u16; hidden];
+        assert!(!expert_forward_marlin_int4_cpu_tail(
+            &marlin.w13_packed,
+            &marlin.w13_scales,
+            &marlin.w2_packed,
+            &marlin.w2_scales,
+            &activation,
+            &mut canceled_output,
+            hidden,
+            intermediate,
+            group_size,
+            0.0,
+            1.0,
+            &mut cpu_tail_scratch,
+            &cancel_sequence,
+            8,
+        ));
+        assert!(canceled_output.iter().all(|&value| value == 0x7fc1));
+
+        cancel_sequence.store(10, Ordering::Release);
+        let mut canceled_transposed_output = vec![0x7fc1u16; hidden];
+        assert!(!expert_forward_transposed_int4_cpu_tail(
+            &transposed_from_marlin.w13_packed,
+            &transposed_from_marlin.w13_scales,
+            &transposed_from_marlin.w2_packed,
+            &transposed_from_marlin.w2_scales,
+            &activation,
+            &mut canceled_transposed_output,
+            hidden,
+            intermediate,
+            group_size,
+            0.0,
+            1.0,
+            &mut cpu_tail_scratch,
+            &cancel_sequence,
+            10,
+        ));
+        assert!(canceled_transposed_output
+            .iter()
+            .all(|&value| value == 0x7fc1));
+    }
+
+    /// Timing diagnostic for the production Marlin-native CPU tail forward.
+    ///
+    /// Skipped unless `KRASIS_CPU_TAIL_BENCH=1`. Dimensions come from env so
+    /// any model's expert shape can be measured without code changes:
+    /// `KRASIS_CPU_TAIL_BENCH_HIDDEN`/`_INTER`/`_GROUP`/`_EXPERTS`/`_ITERS`.
+    /// Replicas are distinct allocations so a large working set defeats L3
+    /// reuse and measures cold-DRAM behaviour like the real demand stream.
+    #[test]
+    fn test_cpu_tail_marlin_shape_bench() {
+        fn env_usize(name: &str, default: usize) -> usize {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        }
+        if std::env::var("KRASIS_CPU_TAIL_BENCH").as_deref() != Ok("1") {
+            eprintln!("cpu_tail_bench: skipped (set KRASIS_CPU_TAIL_BENCH=1 to run)");
+            return;
+        }
+        let hidden = env_usize("KRASIS_CPU_TAIL_BENCH_HIDDEN", 6144);
+        let intermediate = env_usize("KRASIS_CPU_TAIL_BENCH_INTER", 2048);
+        let group_size = env_usize("KRASIS_CPU_TAIL_BENCH_GROUP", 128);
+        let experts = env_usize("KRASIS_CPU_TAIL_BENCH_EXPERTS", 64).max(1);
+        let iters = env_usize("KRASIS_CPU_TAIL_BENCH_ITERS", 256).max(1);
+        let inter_expert_gap_us = env_usize("KRASIS_CPU_TAIL_BENCH_GAP_US", 0);
+
+        let mut gate_bf16 = vec![0u16; intermediate * hidden];
+        let mut up_bf16 = vec![0u16; intermediate * hidden];
+        let mut down_bf16 = vec![0u16; hidden * intermediate];
+        for i in 0..gate_bf16.len() {
+            gate_bf16[i] = f32_to_bf16((i as f32 / gate_bf16.len() as f32 - 0.5) * 0.1);
+            up_bf16[i] = f32_to_bf16((i as f32 / up_bf16.len() as f32 - 0.3) * 0.1);
+        }
+        for i in 0..down_bf16.len() {
+            down_bf16[i] = f32_to_bf16((i as f32 / down_bf16.len() as f32 - 0.5) * 0.1);
+        }
+        let expert = ExpertWeights {
+            gate: QuantWeight::Int4(quantize_int4(&gate_bf16, intermediate, hidden, group_size)),
+            up: QuantWeight::Int4(quantize_int4(&up_bf16, intermediate, hidden, group_size)),
+            down: QuantWeight::Int4(quantize_int4(&down_bf16, hidden, intermediate, group_size)),
+        };
+        let marlin = UnifiedExpertWeights::from_expert_weights_marlin(&expert, 4);
+        let w13_bytes = marlin.w13_packed.len() * 4 + marlin.w13_scales.len() * 2;
+        let w2_bytes = marlin.w2_packed.len() * 4 + marlin.w2_scales.len() * 2;
+        let bytes_per_expert = w13_bytes + w2_bytes;
+        let replicas: Vec<_> = (0..experts)
+            .map(|_| {
+                (
+                    marlin.w13_packed.clone(),
+                    marlin.w13_scales.clone(),
+                    marlin.w2_packed.clone(),
+                    marlin.w2_scales.clone(),
+                )
+            })
+            .collect();
+        eprintln!(
+            "CPU_TAIL_BENCH shape hidden={hidden} intermediate={intermediate} group={group_size} experts={experts} iters={iters} bytes_per_expert={bytes_per_expert} working_set_mib={:.1}",
+            (bytes_per_expert * experts) as f64 / (1024.0 * 1024.0)
+        );
+
+        let activation: Vec<u16> = (0..hidden)
+            .map(|i| f32_to_bf16(((i * 3 + 1) as f32 / hidden as f32 - 0.5) * 0.2))
+            .collect();
+        let cancel_sequence = AtomicU64::new(0);
+        let mut scratch = ExpertScratch::new(hidden, intermediate, group_size);
+        let mut output = vec![0u16; hidden];
+
+        // One warm pass settles the rayon pool and faults every replica page.
+        for replica in replicas.iter() {
+            assert!(expert_forward_marlin_int4_cpu_tail(
+                &replica.0,
+                &replica.1,
+                &replica.2,
+                &replica.3,
+                &activation,
+                &mut output,
+                hidden,
+                intermediate,
+                group_size,
+                0.0,
+                1.0,
+                &mut scratch,
+                &cancel_sequence,
+                1,
+            ));
+        }
+
+        let started = std::time::Instant::now();
+        let mut checksum = 0.0f64;
+        for i in 0..iters {
+            let replica = &replicas[i % experts];
+            assert!(expert_forward_marlin_int4_cpu_tail(
+                &replica.0,
+                &replica.1,
+                &replica.2,
+                &replica.3,
+                &activation,
+                &mut output,
+                hidden,
+                intermediate,
+                group_size,
+                0.0,
+                1.0,
+                &mut scratch,
+                &cancel_sequence,
+                1,
+            ));
+            checksum += bf16_to_f32(output[0]) as f64;
+        }
+        let full_s = started.elapsed().as_secs_f64();
+        eprintln!(
+            "CPU_TAIL_BENCH full_forward ms_per_expert={:.6} weight_gib_s={:.3} checksum={checksum:.6}",
+            full_s / iters as f64 * 1000.0,
+            (bytes_per_expert as f64 * iters as f64) / full_s / (1024.0 * 1024.0 * 1024.0)
+        );
+
+        let mut act_int16 = vec![0i16; hidden];
+        let mut act_scales = vec![0.0f32; hidden / group_size];
+        quantize_activation_int16(&activation, group_size, &mut act_int16, &mut act_scales);
+        let (tile_map, scale_map) = get_marlin_maps();
+
+        let mut w13_out = vec![0.0f32; 2 * intermediate];
+        let started = std::time::Instant::now();
+        for i in 0..iters {
+            let replica = &replicas[i % experts];
+            matmul_int4_marlin_parallel(
+                &replica.0,
+                &replica.1,
+                &act_int16,
+                &act_scales,
+                &mut w13_out,
+                hidden,
+                2 * intermediate,
+                group_size,
+                tile_map,
+                scale_map,
+            );
+        }
+        let w13_s = started.elapsed().as_secs_f64();
+        eprintln!(
+            "CPU_TAIL_BENCH w13_parallel ms_per_call={:.6} gib_s={:.3}",
+            w13_s / iters as f64 * 1000.0,
+            (w13_bytes as f64 * iters as f64) / w13_s / (1024.0 * 1024.0 * 1024.0)
+        );
+
+        let hid_src: Vec<u16> = (0..intermediate)
+            .map(|i| f32_to_bf16(((i * 5 + 3) as f32 / intermediate as f32 - 0.5) * 0.3))
+            .collect();
+        let mut hid_int16 = vec![0i16; intermediate];
+        let mut hid_scales = vec![0.0f32; intermediate / group_size];
+        quantize_activation_int16(&hid_src, group_size, &mut hid_int16, &mut hid_scales);
+        let mut w2_out = vec![0.0f32; hidden];
+        let started = std::time::Instant::now();
+        for i in 0..iters {
+            let replica = &replicas[i % experts];
+            matmul_int4_marlin_parallel(
+                &replica.2,
+                &replica.3,
+                &hid_int16,
+                &hid_scales,
+                &mut w2_out,
+                intermediate,
+                hidden,
+                group_size,
+                tile_map,
+                scale_map,
+            );
+        }
+        let w2_s = started.elapsed().as_secs_f64();
+        eprintln!(
+            "CPU_TAIL_BENCH w2_parallel ms_per_call={:.6} gib_s={:.3}",
+            w2_s / iters as f64 * 1000.0,
+            (w2_bytes as f64 * iters as f64) / w2_s / (1024.0 * 1024.0 * 1024.0)
+        );
+
+        let serial_iters = (iters / 8).max(1);
+        let started = std::time::Instant::now();
+        for i in 0..serial_iters {
+            let replica = &replicas[i % experts];
+            matmul_int4_marlin(
+                &replica.0,
+                &replica.1,
+                &act_int16,
+                &act_scales,
+                &mut w13_out,
+                hidden,
+                2 * intermediate,
+                group_size,
+                tile_map,
+                scale_map,
+            );
+        }
+        let serial_s = started.elapsed().as_secs_f64();
+        eprintln!(
+            "CPU_TAIL_BENCH w13_serial ms_per_call={:.6} gib_s={:.3}",
+            serial_s / serial_iters as f64 * 1000.0,
+            (w13_bytes as f64 * serial_iters as f64) / serial_s / (1024.0 * 1024.0 * 1024.0)
+        );
+
+        // Apples-to-apples transposed-layout row for comparing the integrated
+        // CPU-tail worker against an isolated kernel using this process's exact
+        // Rayon pool. Set RAYON_NUM_THREADS to the production krasis_threads
+        // value when invoking the built test command.
+        let transposed = UnifiedExpertWeights::from_marlin_int4_transposed(
+            &marlin.w13_packed,
+            &marlin.w13_scales,
+            &marlin.w2_packed,
+            &marlin.w2_scales,
+            hidden,
+            intermediate,
+            group_size,
+        )
+        .expect("convert Marlin bench expert to transposed layout");
+        let transposed_replicas: Vec<_> = (0..experts)
+            .map(|_| {
+                (
+                    transposed.w13_packed.clone(),
+                    transposed.w13_scales.clone(),
+                    transposed.w2_packed.clone(),
+                    transposed.w2_scales.clone(),
+                )
+            })
+            .collect();
+        let persistent_team =
+            if std::env::var("KRASIS_CPU_TAIL_PERSISTENT_BENCH").as_deref() == Ok("1") {
+                let cpu_ids = crate::cpu_tail::process_allowed_cpus();
+                Some(
+                    crate::cpu_tail::PersistentTransposedTeam::new(&cpu_ids)
+                        .expect("build persistent transposed bench team"),
+                )
+            } else {
+                None
+            };
+        for replica in &transposed_replicas {
+            if let Some(team) = persistent_team.as_ref() {
+                assert!(crate::cpu_tail::expert_forward_transposed_persistent(
+                    team,
+                    &replica.0,
+                    &replica.1,
+                    &replica.2,
+                    &replica.3,
+                    &activation,
+                    &mut output,
+                    hidden,
+                    intermediate,
+                    group_size,
+                    0.0,
+                    1.0,
+                    &mut scratch,
+                    &cancel_sequence,
+                    1,
+                )
+                .expect("persistent transposed warm pass"));
+            } else {
+                assert!(expert_forward_transposed_int4_cpu_tail(
+                    &replica.0,
+                    &replica.1,
+                    &replica.2,
+                    &replica.3,
+                    &activation,
+                    &mut output,
+                    hidden,
+                    intermediate,
+                    group_size,
+                    0.0,
+                    1.0,
+                    &mut scratch,
+                    &cancel_sequence,
+                    1,
+                ));
+            }
+        }
+        let started = std::time::Instant::now();
+        let mut transposed_checksum = 0.0f64;
+        let mut transposed_compute_s = 0.0f64;
+        for i in 0..iters {
+            if inter_expert_gap_us != 0 {
+                std::thread::sleep(std::time::Duration::from_micros(inter_expert_gap_us as u64));
+            }
+            let replica = &transposed_replicas[i % experts];
+            let compute_started = std::time::Instant::now();
+            if let Some(team) = persistent_team.as_ref() {
+                assert!(crate::cpu_tail::expert_forward_transposed_persistent(
+                    team,
+                    &replica.0,
+                    &replica.1,
+                    &replica.2,
+                    &replica.3,
+                    &activation,
+                    &mut output,
+                    hidden,
+                    intermediate,
+                    group_size,
+                    0.0,
+                    1.0,
+                    &mut scratch,
+                    &cancel_sequence,
+                    1,
+                )
+                .expect("persistent transposed bench forward"));
+            } else {
+                assert!(expert_forward_transposed_int4_cpu_tail(
+                    &replica.0,
+                    &replica.1,
+                    &replica.2,
+                    &replica.3,
+                    &activation,
+                    &mut output,
+                    hidden,
+                    intermediate,
+                    group_size,
+                    0.0,
+                    1.0,
+                    &mut scratch,
+                    &cancel_sequence,
+                    1,
+                ));
+            }
+            transposed_compute_s += compute_started.elapsed().as_secs_f64();
+            transposed_checksum += bf16_to_f32(output[0]) as f64;
+        }
+        let transposed_s = started.elapsed().as_secs_f64();
+        eprintln!(
+            "CPU_TAIL_BENCH transposed_full_forward executor={} rayon_threads={} worker_threads={} inter_expert_gap_us={} compute_ms_per_expert={:.6} wall_ms_per_expert={:.6} weight_gib_s={:.3} checksum={transposed_checksum:.6}",
+            if persistent_team.is_some() {
+                "persistent"
+            } else {
+                "rayon"
+            },
+            rayon::current_num_threads(),
+            persistent_team
+                .as_ref()
+                .map(|_| crate::cpu_tail::process_allowed_cpus().len())
+                .unwrap_or_else(rayon::current_num_threads),
+            inter_expert_gap_us,
+            transposed_compute_s / iters as f64 * 1000.0,
+            transposed_s / iters as f64 * 1000.0,
+            (bytes_per_expert as f64 * iters as f64)
+                / transposed_compute_s
+                / (1024.0 * 1024.0 * 1024.0)
+        );
     }
 
     #[test]
