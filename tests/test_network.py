@@ -88,6 +88,86 @@ def send_chat_request(
         return 0, str(e)
 
 
+def send_streaming_chat_request_with_metrics(
+    base_url: str,
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+    timeout: int,
+) -> Tuple[int, str, Optional[str], Optional[Dict[str, Any]], float, float]:
+    """Stream one request while retaining server timing and client timing.
+
+    Returns status, assembled text, finish reason, authoritative
+    ``krasis_timing``, wall seconds, and first-to-last-token tok/s.  The last
+    value follows the standard benchmark's round-trip decode calculation.
+    """
+    url = f"{base_url}/v1/chat/completions"
+    payload = {
+        "model": "test",
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": True,
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    started = time.perf_counter()
+    first_content_at = None
+    text_parts: List[str] = []
+    finish_reason = None
+    krasis_timing = None
+    try:
+        response = urllib.request.urlopen(req, timeout=timeout)
+        status = response.status
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data: "):
+                continue
+            data = line[6:]
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            timing = chunk.get("krasis_timing")
+            if isinstance(timing, dict):
+                krasis_timing = timing
+                continue
+            choices = chunk.get("choices", [])
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {})
+            content = delta.get("content", "")
+            if content:
+                if first_content_at is None:
+                    first_content_at = time.perf_counter()
+                text_parts.append(content)
+            finish = choices[0].get("finish_reason")
+            if finish:
+                finish_reason = finish
+        response.close()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", errors="replace"), None, None, time.perf_counter() - started, 0.0
+    except urllib.error.URLError as e:
+        return 0, str(e.reason), None, None, time.perf_counter() - started, 0.0
+    except Exception as e:
+        return 0, str(e), None, None, time.perf_counter() - started, 0.0
+
+    finished = time.perf_counter()
+    wall_s = finished - started
+    round_trip_tok_s = 0.0
+    if first_content_at is not None and isinstance(krasis_timing, dict):
+        generated = int(krasis_timing.get("total_generated", 0) or 0)
+        decode_s = finished - first_content_at
+        if generated > 1 and decode_s > 0:
+            round_trip_tok_s = (generated - 1) / decode_s
+    return status, "".join(text_parts), finish_reason, krasis_timing, wall_s, round_trip_tok_s
+
+
 def parse_sse_content(sse_body: str) -> Tuple[str, Optional[str]]:
     """Parse SSE response body into (full_text, finish_reason)."""
     text_parts = []
@@ -138,12 +218,14 @@ def is_garbage(text: str) -> bool:
 
 class TestResult:
     def __init__(self, name: str, passed: bool, detail: str = "",
-                 response_text: str = "", elapsed: float = 0.0):
+                 response_text: str = "", elapsed: float = 0.0,
+                 timing: Optional[Dict[str, Any]] = None):
         self.name = name
         self.passed = passed
         self.detail = detail
         self.response_text = response_text
         self.elapsed = elapsed
+        self.timing = timing
 
 
 def check_health(base_url: str) -> bool:
@@ -270,12 +352,23 @@ def test_large_prompt_response(
     min_words: int = 3,
 ) -> TestResult:
     """Large-prompt test: generate if in context, pass safe rejection if not."""
-    t0 = time.time()
-    status, body = send_chat_request(
-        base_url, messages, max_tokens=max_tokens,
-        temperature=0.3, stream=stream, timeout=timeout,
-    )
-    elapsed = time.time() - t0
+    timing = None
+    round_trip_tok_s = 0.0
+    if stream:
+        status, text, finish, timing, elapsed, round_trip_tok_s = (
+            send_streaming_chat_request_with_metrics(
+                base_url, messages, max_tokens=max_tokens,
+                temperature=0.3, timeout=timeout,
+            )
+        )
+        body = text
+    else:
+        t0 = time.time()
+        status, body = send_chat_request(
+            base_url, messages, max_tokens=max_tokens,
+            temperature=0.3, stream=False, timeout=timeout,
+        )
+        elapsed = time.time() - t0
 
     if status == 413:
         detail = _context_rejection_detail(body)
@@ -287,11 +380,25 @@ def test_large_prompt_response(
     if status != 200:
         return TestResult(name, False, f"HTTP {status}", elapsed=elapsed)
 
-    if stream:
-        text, finish = parse_sse_content(body)
-    else:
+    if not stream:
         text = body.get("choices", [{}])[0].get("message", {}).get("content", "")
         finish = body.get("choices", [{}])[0].get("finish_reason")
+
+    if stream and timing is None:
+        return TestResult(
+            name, False,
+            "WARNING: server did not send krasis_timing; refusing to report estimated performance",
+            response_text=text, elapsed=elapsed,
+        )
+    if timing is not None:
+        required_timing = ("prompt_tokens", "prefill_tok_s", "decode_tok_s", "total_generated")
+        missing_timing = [key for key in required_timing if key not in timing]
+        if missing_timing:
+            return TestResult(
+                name, False,
+                f"WARNING: krasis_timing missing required fields: {', '.join(missing_timing)}",
+                response_text=text, elapsed=elapsed, timing=timing,
+            )
 
     if is_garbage(text):
         return TestResult(name, False, f"Garbage output: {text[:100]!r}",
@@ -308,8 +415,16 @@ def test_large_prompt_response(
                           f"Bad finish_reason: {finish!r}",
                           response_text=text, elapsed=elapsed)
 
-    return TestResult(name, True, f"OK ({elapsed:.1f}s, {word_count} words)",
-                      response_text=text, elapsed=elapsed)
+    detail = f"OK ({elapsed:.1f}s, {word_count} words)"
+    if timing is not None:
+        detail += (
+            f" | prompt_tokens={int(timing['prompt_tokens'])}"
+            f" | Prefill (internal)={float(timing['prefill_tok_s']):.1f} tok/s"
+            f" | Decode (internal)={float(timing['decode_tok_s']):.2f} tok/s"
+            f" | Round trip={round_trip_tok_s:.2f} tok/s"
+        )
+    return TestResult(name, True, detail, response_text=text, elapsed=elapsed,
+                      timing=timing)
 
 
 # ═══════════════════════════════════════════════════════════════════

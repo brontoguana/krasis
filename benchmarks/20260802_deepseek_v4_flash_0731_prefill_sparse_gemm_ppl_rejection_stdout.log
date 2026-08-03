@@ -1,0 +1,25 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/deepseek-v4-flash-0731-bf16.conf
+Model:       /home/main/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-0731
+Dataset:     wikitext-2
+Port:        18220
+Attention:   bf16
+KV dtype:    bf16
+Window:      2048, stride=1024
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 287,737
+  [  0.4%] Window 1/281 | scored 2047 this, 2047/287737 total | PPL=3.1664 | 115 tok/s
+  [  0.7%] Window 2/281 | scored 1024 this, 3071/287737 total | PPL=2.8156 | 86 tok/s
+  [  1.1%] Window 3/281 | scored 1024 this, 4095/287737 total | PPL=2.7544 | 77 tok/s
+  [  1.4%] Window 4/281 | scored 1024 this, 5119/287737 total | PPL=2.7012 | 73 tok/s
+  [  1.8%] Window 5/281 | scored 1024 this, 6143/287737 total | PPL=2.9047 | 70 tok/s
+  [  2.1%] Window 6/281 | scored 1024 this, 7167/287737 total | PPL=3.1769 | 68 tok/s
+  [  2.5%] Window 7/281 | scored 1024 this, 8191/287737 total | PPL=3.3567 | 66 tok/s
+  [  2.8%] Window 8/281 | scored 1024 this, 9215/287737 total | PPL=3.6048 | 65 tok/s
+  [  3.2%] Window 9/281 | scored 1024 this, 10239/287737 total | PPL=3.5476 | 64 tok/s
+  [  3.6%] Window 10/281 | scored 1024 this, 11263/287737 total | PPL=3.5630 | 64 tok/s
+  [  3.9%] Window 11/281 | scored 1024 this, 12287/287737 total | PPL=3.3998 | 63 tok/s
+  [  4.3%] Window 12/281 | scored 1024 this, 13311/287737 total | PPL=3.2273 | 63 tok/s

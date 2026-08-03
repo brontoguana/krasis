@@ -1,0 +1,285 @@
+{
+  "schema": "deepseek_v4_0731_independent_quality_anchor_v1",
+  "classification": "ambiguous_anchor_far_from_all",
+  "summary": "Scalar is closest in aggregate, but per-window winners are mixed and llama.cpp is about 12 percent below every Krasis path; this does not validate promotion of either GEMM path.",
+  "method": {
+    "witness_repo": "/home/main/Documents/Claude/krasis-llama-witness-dsv4",
+    "gguf": "/home/main/.krasis/witness-gguf/DeepSeek-V4-Flash-0731-native-source.gguf",
+    "cpu_only": true,
+    "ggml_cuda": false,
+    "threads": 128,
+    "window_size": 2048,
+    "stride": 1024,
+    "max_windows": 10,
+    "token_identity": "all 287737 IDs exact",
+    "prefix_11264_sha256": "de9300ba65dcbec7f6dc023d7534b1de3db1c77b260a74886f84d5ba55eb11b8",
+    "first_window_command_shape": "requested ctx 1025 + stride/2 1023 = actual ctx 2048; stride 2047; chunks 1",
+    "later_windows_command_shape": "requested ctx 1536 + stride/2 512 = actual ctx 2048; stride 1024; chunks 10",
+    "derivation": "Window 1 uses its dedicated 2047-target PPL. Windows 2-10 are weighted log-loss differences between adjacent equal-1024-target llama cumulative rows. Krasis per-window values are weighted log-loss differences from archived cumulative rows.",
+    "precision_note": "CLI cumulative PPL source rows are printed to 4 decimals; reconstructed per-window and aggregate values are approximate at that source precision."
+  },
+  "source_cumulative": {
+    "llama_full_window1": 2.8605,
+    "llama_overlap_1024_each": [
+      2.109,
+      1.9247,
+      1.9323,
+      1.9436,
+      2.2036,
+      2.5377,
+      2.7717,
+      3.0755,
+      3.0412,
+      3.1069
+    ],
+    "scalar": [
+      3.1127,
+      2.7794,
+      2.7375,
+      2.6891,
+      2.8854,
+      3.1479,
+      3.3252,
+      3.5695,
+      3.5191,
+      3.5398
+    ],
+    "ordinary_gemm": [
+      3.1664,
+      2.8156,
+      2.7544,
+      2.7012,
+      2.9026,
+      3.1749,
+      3.3582,
+      3.6063,
+      3.5469,
+      3.5624
+    ],
+    "best_fp32_pedantic_postscale_gemm": [
+      3.1347,
+      2.7903,
+      2.7543,
+      2.7115,
+      2.9016,
+      3.1731,
+      3.351,
+      3.5938,
+      3.5394,
+      3.5553
+    ]
+  },
+  "windows": [
+    {
+      "window": 1,
+      "input_global_range": [
+        0,
+        2047
+      ],
+      "scored_target_global_range": [
+        1,
+        2047
+      ],
+      "scored_tokens": 2047,
+      "llama_anchor_ppl": 2.8605,
+      "scalar_ppl": 3.1127,
+      "abs_anchor_minus_scalar": 0.25219999999999976,
+      "ordinary_gemm_ppl": 3.1664000000000003,
+      "abs_anchor_minus_ordinary_gemm": 0.3059000000000003,
+      "best_gemm_ppl": 3.1347,
+      "abs_anchor_minus_best_gemm": 0.2742,
+      "closest": "scalar"
+    },
+    {
+      "window": 2,
+      "input_global_range": [
+        1024,
+        3071
+      ],
+      "scored_target_global_range": [
+        2048,
+        3071
+      ],
+      "scored_tokens": 1024,
+      "llama_anchor_ppl": 1.7565054954954955,
+      "scalar_ppl": 2.21629038113209,
+      "abs_anchor_minus_scalar": 0.4597848856365947,
+      "ordinary_gemm_ppl": 2.2265431469321264,
+      "abs_anchor_minus_ordinary_gemm": 0.4700376514366309,
+      "best_gemm_ppl": 2.2111086823334998,
+      "abs_anchor_minus_best_gemm": 0.45460318683800427,
+      "closest": "best_gemm"
+    },
+    {
+      "window": 3,
+      "input_global_range": [
+        2048,
+        4095
+      ],
+      "scored_target_global_range": [
+        3072,
+        4095
+      ],
+      "scored_tokens": 1024,
+      "llama_anchor_ppl": 1.947590148114004,
+      "scalar_ppl": 2.6155907581107,
+      "abs_anchor_minus_scalar": 0.668000609996696,
+      "ordinary_gemm_ppl": 2.578721786573922,
+      "abs_anchor_minus_ordinary_gemm": 0.6311316384599177,
+      "best_gemm_ppl": 2.6490964986952648,
+      "abs_anchor_minus_best_gemm": 0.7015063505812607,
+      "closest": "ordinary_gemm"
+    },
+    {
+      "window": 4,
+      "input_global_range": [
+        3072,
+        5119
+      ],
+      "scored_target_global_range": [
+        4096,
+        5119
+      ],
+      "scored_tokens": 1024,
+      "llama_anchor_ppl": 1.977898039262743,
+      "scalar_ppl": 2.503950952972255,
+      "abs_anchor_minus_scalar": 0.526052913709512,
+      "ordinary_gemm_ppl": 2.4985263743617327,
+      "abs_anchor_minus_ordinary_gemm": 0.5206283350989898,
+      "best_gemm_ppl": 2.5468872402652885,
+      "abs_anchor_minus_best_gemm": 0.5689892010025455,
+      "closest": "ordinary_gemm"
+    },
+    {
+      "window": 5,
+      "input_global_range": [
+        4096,
+        6143
+      ],
+      "scored_target_global_range": [
+        5120,
+        6143
+      ],
+      "scored_tokens": 1024,
+      "llama_anchor_ppl": 3.641130603885027,
+      "scalar_ppl": 4.103661400992195,
+      "abs_anchor_minus_scalar": 0.46253079710716793,
+      "ordinary_gemm_ppl": 4.15823415994106,
+      "abs_anchor_minus_ordinary_gemm": 0.5171035560560329,
+      "best_gemm_ppl": 4.071444071451801,
+      "abs_anchor_minus_best_gemm": 0.4303134675667746,
+      "closest": "best_gemm"
+    },
+    {
+      "window": 6,
+      "input_global_range": [
+        5120,
+        7167
+      ],
+      "scored_target_global_range": [
+        6144,
+        7167
+      ],
+      "scored_tokens": 1024,
+      "llama_anchor_ppl": 5.140174461892701,
+      "scalar_ppl": 5.307297097631546,
+      "abs_anchor_minus_scalar": 0.16712263573884467,
+      "ordinary_gemm_ppl": 5.436872897394603,
+      "abs_anchor_minus_ordinary_gemm": 0.2966984355019022,
+      "best_gemm_ppl": 5.426541420659913,
+      "abs_anchor_minus_best_gemm": 0.2863669587672124,
+      "closest": "scalar"
+    },
+    {
+      "window": 7,
+      "input_global_range": [
+        6144,
+        8191
+      ],
+      "scored_target_global_range": [
+        7168,
+        8191
+      ],
+      "scored_tokens": 1024,
+      "llama_anchor_ppl": 4.705241022271668,
+      "scalar_ppl": 4.879467643321764,
+      "abs_anchor_minus_scalar": 0.1742266210500958,
+      "ordinary_gemm_ppl": 4.974143351789185,
+      "abs_anchor_minus_ordinary_gemm": 0.268902329517517,
+      "best_gemm_ppl": 4.9089202173976165,
+      "abs_anchor_minus_best_gemm": 0.20367919512594845,
+      "closest": "scalar"
+    },
+    {
+      "window": 8,
+      "input_global_range": [
+        7168,
+        9215
+      ],
+      "scored_target_global_range": [
+        8192,
+        9215
+      ],
+      "scored_tokens": 1024,
+      "llama_anchor_ppl": 6.36945535775694,
+      "scalar_ppl": 6.293528946431159,
+      "abs_anchor_minus_scalar": 0.07592641132578137,
+      "ordinary_gemm_ppl": 6.377845268991069,
+      "abs_anchor_minus_ordinary_gemm": 0.008389911234129244,
+      "best_gemm_ppl": 6.288688005064143,
+      "abs_anchor_minus_best_gemm": 0.08076735269279656,
+      "closest": "ordinary_gemm"
+    },
+    {
+      "window": 9,
+      "input_global_range": [
+        8192,
+        10239
+      ],
+      "scored_target_global_range": [
+        9216,
+        10239
+      ],
+      "scored_tokens": 1024,
+      "llama_anchor_ppl": 2.7802188622145563,
+      "scalar_ppl": 3.0963898499318607,
+      "abs_anchor_minus_scalar": 0.31617098771730445,
+      "ordinary_gemm_ppl": 3.0544978238305327,
+      "abs_anchor_minus_ordinary_gemm": 0.2742789616159764,
+      "best_gemm_ppl": 3.0854449015013854,
+      "abs_anchor_minus_best_gemm": 0.3052260392868291,
+      "closest": "ordinary_gemm"
+    },
+    {
+      "window": 10,
+      "input_global_range": [
+        9216,
+        11263
+      ],
+      "scored_target_global_range": [
+        10240,
+        11263
+      ],
+      "scored_tokens": 1024,
+      "llama_anchor_ppl": 3.7658924651636387,
+      "scalar_ppl": 3.753594948230893,
+      "abs_anchor_minus_scalar": 0.012297516932745722,
+      "ordinary_gemm_ppl": 3.7211588605857058,
+      "abs_anchor_minus_ordinary_gemm": 0.04473360457793296,
+      "best_gemm_ppl": 3.7182656518934545,
+      "abs_anchor_minus_best_gemm": 0.047626813270184254,
+      "closest": "scalar"
+    }
+  ],
+  "aggregate": {
+    "scored_tokens": 11263,
+    "llama_anchor_ppl": 3.170313087533478,
+    "scalar_ppl": 3.5398,
+    "abs_anchor_minus_scalar": 0.3694869124665221,
+    "ordinary_gemm_ppl": 3.5624,
+    "abs_anchor_minus_ordinary_gemm": 0.39208691246652183,
+    "best_gemm_ppl": 3.5553,
+    "abs_anchor_minus_best_gemm": 0.38498691246652195,
+    "closest": "scalar"
+  }
+}

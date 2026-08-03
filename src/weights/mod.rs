@@ -86,6 +86,13 @@ pub fn gguf_type_to_cpu_bits(dtype: crate::gguf::GgmlType) -> (u8, bool) {
 /// - DeepSeek V2/V3: `n_routed_experts`, `first_k_dense_replace` (flat)
 /// - Kimi K2.5: same keys but nested under `text_config`
 /// - Qwen3-MoE: `num_experts`, `decoder_sparse_step` (flat)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwiGluMode {
+    Standard,
+    GptOss,
+    DeepSeekClamp,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
     pub hidden_size: usize,
@@ -112,6 +119,13 @@ pub struct ModelConfig {
     /// Sigmoid scaling factor for custom activation. Only used when swiglu_limit > 0.
     /// GPT OSS: 1.702.
     pub activation_alpha: f32,
+    /// Activation contract for gated experts. The similarly named clamp fields
+    /// in GPT-OSS and DeepSeek-V4 have different equations.
+    pub swiglu_mode: SwiGluMode,
+    /// Source dense-weight FP8 block geometry declared by the checkpoint.
+    /// DeepSeek-V4 uses this for its E4M3/E8M0 shared experts; `None` means the
+    /// model does not declare that source format.
+    pub source_fp8_block_size: Option<(usize, usize)>,
     /// Maps MoE index (0-based) to absolute layer index.
     /// For standard models: [first_k_dense_replace, first_k_dense_replace+1, ...].
     /// For hybrid models (Nemotron): non-contiguous, e.g. [1, 3, 6, 8, ...].
@@ -236,7 +250,11 @@ impl ModelConfig {
         // first_k_dense_replace (DeepSeek/Kimi) OR derive from decoder_sparse_step (Qwen3)
         // Default to 0 when neither field exists (e.g. GPT OSS: all layers are MoE)
         let mut first_k_dense_replace = if let Some(v) = cfg.get("first_k_dense_replace") {
-            v.as_u64().ok_or("first_k_dense_replace not a number")? as usize
+            if v.is_null() {
+                0
+            } else {
+                v.as_u64().ok_or("first_k_dense_replace not a number")? as usize
+            }
         } else if let Some(step) = cfg.get("decoder_sparse_step") {
             let step = step.as_u64().ok_or("decoder_sparse_step not a number")? as usize;
             if step <= 1 {
@@ -329,7 +347,13 @@ impl ModelConfig {
             .and_then(|v| v.as_f64())
             .unwrap_or(1.0) as f32;
 
-        // GPT OSS: swiglu_limit enables custom activation gate*sigmoid(gate*alpha)*(up+1)
+        let model_type = cfg
+            .get("model_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // GPT-OSS and DeepSeek-V4 both publish swiglu_limit but use different
+        // equations. Preserve that distinction explicitly through the runtime.
         let swiglu_limit = cfg
             .get("swiglu_limit")
             .and_then(|v| v.as_f64())
@@ -337,7 +361,14 @@ impl ModelConfig {
 
         // Activation alpha for custom SwiGLU activation (e.g. GPT OSS uses 1.702).
         // Must be present in config.json when swiglu_limit > 0.
-        let activation_alpha = if swiglu_limit > 0.0 {
+        let swiglu_mode = if swiglu_limit <= 0.0 {
+            SwiGluMode::Standard
+        } else if model_type == "deepseek_v4" {
+            SwiGluMode::DeepSeekClamp
+        } else {
+            SwiGluMode::GptOss
+        };
+        let activation_alpha = if swiglu_mode == SwiGluMode::GptOss {
             cfg.get("activation_alpha")
                 .or_else(|| cfg.get("silu_alpha"))
                 .and_then(|v| v.as_f64())
@@ -347,6 +378,33 @@ impl ModelConfig {
                 ))? as f32
         } else {
             0.0
+        };
+
+        let source_fp8_block_size = if model_type == "deepseek_v4" {
+            let raw = cfg
+                .get("quantization_config")
+                .and_then(|value| value.get("weight_block_size"))
+                .and_then(|value| value.as_array())
+                .ok_or("deepseek_v4 requires quantization_config.weight_block_size")?;
+            if raw.len() != 2 {
+                return Err(format!(
+                    "deepseek_v4 quantization_config.weight_block_size must have two entries, got {}",
+                    raw.len()
+                ));
+            }
+            let block_rows = raw[0]
+                .as_u64()
+                .filter(|value| *value > 0)
+                .ok_or("deepseek_v4 FP8 block row size must be a positive integer")?
+                as usize;
+            let block_cols = raw[1]
+                .as_u64()
+                .filter(|value| *value > 0)
+                .ok_or("deepseek_v4 FP8 block column size must be a positive integer")?
+                as usize;
+            Some((block_rows, block_cols))
+        } else {
+            None
         };
 
         // Detect if experts are gated (standard: gate+up+down) or ungated (Nemotron relu2: up+down only).
@@ -386,6 +444,8 @@ impl ModelConfig {
             routed_scaling_factor,
             swiglu_limit,
             activation_alpha,
+            swiglu_mode,
+            source_fp8_block_size,
             moe_layer_indices,
             experts_gated,
         })
@@ -2358,6 +2418,8 @@ impl WeightStore {
                 routed_scaling_factor: 1.0,
                 swiglu_limit: 0.0,
                 activation_alpha: 0.0,
+                swiglu_mode: SwiGluMode::Standard,
+                source_fp8_block_size: None,
                 moe_layer_indices: Vec::new(),
                 experts_gated: true,
             },
@@ -3360,10 +3422,13 @@ impl WeightStore {
         let shared_name = detect_shared_expert_name(&index.weight_map);
         let expert_sublayer = detect_expert_sublayer(&index.weight_map);
         let shared_gated = has_shared_gate_proj(&index.weight_map, shared_name);
+        let deepseek_v4_fp4 = is_deepseek_v4_fp4(&index.weight_map);
 
         // Collect shard names needed for shared experts
         let mut shard_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let shared_projs: &[&str] = if shared_gated {
+        let shared_projs: &[&str] = if deepseek_v4_fp4 {
+            &["w1", "w3", "w2"]
+        } else if shared_gated {
             &["gate_proj", "up_proj", "down_proj"]
         } else {
             &["up_proj", "down_proj"]
@@ -3376,6 +3441,12 @@ impl WeightStore {
                 let name = format!("{prefix}.{proj}.weight");
                 if let Some(shard) = index.weight_map.get(&name) {
                     shard_names.insert(shard.clone());
+                }
+                if deepseek_v4_fp4 {
+                    let scale_name = format!("{prefix}.{proj}.scale");
+                    if let Some(shard) = index.weight_map.get(&scale_name) {
+                        shard_names.insert(shard.clone());
+                    }
                 }
             }
         }
@@ -3400,7 +3471,22 @@ impl WeightStore {
             let layer_idx = config.moe_abs_layer(moe_idx);
             let prefix =
                 shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
-            let (gate, up, down) = if shared_gated {
+            let (gate, up, down) = if deepseek_v4_fp4 {
+                load_deepseek_v4_fp8_expert(
+                    layer_idx,
+                    0,
+                    &prefix,
+                    &index.weight_map,
+                    &shards,
+                    config.source_fp8_block_size.ok_or(
+                        "DeepSeek-V4 shared expert requires source FP8 block geometry",
+                    )?,
+                    group_size,
+                    num_bits,
+                    ExpertInt4CalibMode::Amax,
+                    None,
+                )?
+            } else if shared_gated {
                 load_and_quantize_expert(
                     layer_idx,
                     0,
@@ -3491,6 +3577,7 @@ impl WeightStore {
         let expert_sublayer = detect_expert_sublayer(&index.weight_map);
         let shared_name = detect_shared_expert_name(&index.weight_map);
         let shared_gated = has_shared_gate_proj(&index.weight_map, shared_name);
+        let deepseek_v4_fp4 = is_deepseek_v4_fp4(&index.weight_map);
 
         let overall_start = std::time::Instant::now();
         let mut experts_gpu: Vec<Vec<UnifiedExpertWeights>> = Vec::new();
@@ -3502,9 +3589,26 @@ impl WeightStore {
 
             let mut layer_experts = Vec::with_capacity(config.n_routed_experts);
             for eidx in 0..config.n_routed_experts {
-                let prefix =
-                    format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.experts.{eidx}");
-                let (gate, up, down) = if !experts_gated {
+                let prefix = if deepseek_v4_fp4 {
+                    format!("layers.{layer_idx}.ffn.experts.{eidx}")
+                } else {
+                    format!(
+                        "{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.experts.{eidx}"
+                    )
+                };
+                let (gate, up, down) = if deepseek_v4_fp4 {
+                    load_deepseek_v4_fp4_expert(
+                        layer_idx,
+                        eidx,
+                        &prefix,
+                        &index.weight_map,
+                        &shards,
+                        0,
+                        16,
+                        ExpertInt4CalibMode::Amax,
+                        None,
+                    )?
+                } else if !experts_gated {
                     load_and_quantize_expert_ungated(&prefix, &index.weight_map, &shards, 0, 16)?
                 } else {
                     load_and_quantize_expert(
@@ -3548,7 +3652,22 @@ impl WeightStore {
                 let layer_idx = config.moe_abs_layer(moe_idx);
                 let prefix =
                     shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
-                let (gate, up, down) = if shared_gated {
+                let (gate, up, down) = if deepseek_v4_fp4 {
+                    load_deepseek_v4_fp8_expert(
+                        layer_idx,
+                        0,
+                        &prefix,
+                        &index.weight_map,
+                        &shards,
+                        config.source_fp8_block_size.ok_or(
+                            "DeepSeek-V4 shared expert requires source FP8 block geometry",
+                        )?,
+                        0,
+                        16,
+                        ExpertInt4CalibMode::Amax,
+                        None,
+                    )?
+                } else if shared_gated {
                     load_and_quantize_expert(
                         layer_idx,
                         0,
@@ -3652,6 +3771,7 @@ impl WeightStore {
 
         // Detect prefix and quantization format
         let layers_prefix = detect_expert_prefix(&index.weight_map)?;
+        let deepseek_v4_fp4 = is_deepseek_v4_fp4(&index.weight_map);
         let mxfp4 = is_mxfp4(&index.weight_map);
         let stacked = !mxfp4 && is_stacked_experts(&index.weight_map);
         let separate_stacked = !mxfp4 && is_separate_stacked_experts(&index.weight_map);
@@ -3688,6 +3808,9 @@ impl WeightStore {
 
         if mxfp4 {
             log::info!("Detected MXFP4 pre-quantized experts — will dequant to BF16 then quantize to INT{gpu_bits}");
+        }
+        if deepseek_v4_fp4 {
+            log::info!("Detected DeepSeek-V4 source FP4 experts — will dequant E2M1/E8M0 then quantize to INT{gpu_bits}");
         }
         if stacked {
             log::info!("Detected stacked expert format (Marlin cache build)");
@@ -3820,10 +3943,26 @@ impl WeightStore {
                 (0..config.n_routed_experts)
                     .into_par_iter()
                     .map(|eidx| -> Result<ExpertWeights, String> {
-                        let prefix = format!(
-                            "{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.experts.{eidx}"
-                        );
-                        let (gate, up, down) = if !experts_gated {
+                        let prefix = if deepseek_v4_fp4 {
+                            format!("layers.{layer_idx}.ffn.experts.{eidx}")
+                        } else {
+                            format!(
+                                "{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.experts.{eidx}"
+                            )
+                        };
+                        let (gate, up, down) = if deepseek_v4_fp4 {
+                            load_deepseek_v4_fp4_expert(
+                                layer_idx,
+                                eidx,
+                                &prefix,
+                                &index.weight_map,
+                                &shards,
+                                effective_group_size,
+                                gpu_bits,
+                                expert_int4_calib_mode,
+                                expert_int4_calib_data,
+                            )?
+                        } else if !experts_gated {
                             // Nemotron: ungated experts (no gate_proj, just up_proj + down_proj)
                             if prequantized {
                                 let u = QuantWeight::Int4(load_prequantized_weight(
@@ -4022,7 +4161,22 @@ impl WeightStore {
                 let prefix =
                     shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
                 let shared_io_start = std::time::Instant::now();
-                let (gate, up, down) = if shared_gated {
+                let (gate, up, down) = if deepseek_v4_fp4 {
+                    load_deepseek_v4_fp8_expert(
+                        layer_idx,
+                        0,
+                        &prefix,
+                        &index.weight_map,
+                        &shards,
+                        config.source_fp8_block_size.ok_or(
+                            "DeepSeek-V4 shared expert requires source FP8 block geometry",
+                        )?,
+                        effective_group_size,
+                        gpu_bits,
+                        ExpertInt4CalibMode::Amax,
+                        None,
+                    )?
+                } else if shared_gated {
                     load_and_quantize_expert(
                         layer_idx,
                         0,
@@ -4656,6 +4810,7 @@ impl WeightStore {
 
         // Detect prefix and quantization format
         let layers_prefix = detect_expert_prefix(&index.weight_map)?;
+        let deepseek_v4_fp4 = is_deepseek_v4_fp4(&index.weight_map);
         let mxfp4 = is_mxfp4(&index.weight_map);
         let stacked = !mxfp4 && is_stacked_experts(&index.weight_map);
         let separate_stacked = !mxfp4 && is_separate_stacked_experts(&index.weight_map);
@@ -4695,6 +4850,9 @@ impl WeightStore {
 
         if mxfp4 {
             log::info!("Detected MXFP4 experts — will dequant to BF16 then quantize to CPU INT{cpu_num_bits}");
+        }
+        if deepseek_v4_fp4 {
+            log::info!("Detected DeepSeek-V4 source FP4 experts — will dequant E2M1/E8M0 then quantize to CPU INT{cpu_num_bits}");
         }
         if stacked {
             log::info!(
@@ -4771,10 +4929,26 @@ impl WeightStore {
             } else {
                 let mut data = Vec::with_capacity(config.n_routed_experts);
                 for eidx in 0..config.n_routed_experts {
-                    let prefix = format!(
-                        "{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.experts.{eidx}"
-                    );
-                    let (gate, up, down) = if !experts_gated {
+                    let prefix = if deepseek_v4_fp4 {
+                        format!("layers.{layer_idx}.ffn.experts.{eidx}")
+                    } else {
+                        format!(
+                            "{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.experts.{eidx}"
+                        )
+                    };
+                    let (gate, up, down) = if deepseek_v4_fp4 {
+                        load_deepseek_v4_fp4_expert(
+                            layer_idx,
+                            eidx,
+                            &prefix,
+                            &index.weight_map,
+                            &shards,
+                            effective_group_size,
+                            cpu_num_bits,
+                            ExpertInt4CalibMode::Amax,
+                            None,
+                        )?
+                    } else if !experts_gated {
                         if prequantized {
                             let u = QuantWeight::Int4(load_prequantized_weight(
                                 &prefix,
@@ -4912,7 +5086,22 @@ impl WeightStore {
                 let layer_idx = config.moe_abs_layer(moe_idx);
                 let prefix =
                     shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
-                let (gate, up, down) = if shared_gated {
+                let (gate, up, down) = if deepseek_v4_fp4 {
+                    load_deepseek_v4_fp8_expert(
+                        layer_idx,
+                        0,
+                        &prefix,
+                        &index.weight_map,
+                        &shards,
+                        config.source_fp8_block_size.ok_or(
+                            "DeepSeek-V4 shared expert requires source FP8 block geometry",
+                        )?,
+                        effective_group_size,
+                        cpu_num_bits,
+                        ExpertInt4CalibMode::Amax,
+                        None,
+                    )?
+                } else if shared_gated {
                     load_and_quantize_expert(
                         layer_idx,
                         0,
@@ -5395,7 +5584,7 @@ impl WeightStore {
     /// Only needed for GPT OSS models (with gate_up_proj_bias/down_proj_bias).
     /// Must be called after cache loading. No-op if biases not found.
     pub fn attach_expert_biases(&mut self, model_dir: &Path) {
-        if self.config.swiglu_limit <= 0.0 {
+        if self.config.swiglu_mode != SwiGluMode::GptOss {
             return; // Not a GPT OSS model
         }
 
@@ -7417,6 +7606,9 @@ fn detect_physical_cores() -> usize {
 /// Auto-detect the expert weight prefix from the weight map.
 /// Returns "model" for Qwen3/V2-Lite or "language_model.model" for Kimi K2.5.
 fn detect_expert_prefix(weight_map: &HashMap<String, String>) -> Result<String, String> {
+    if is_deepseek_v4_fp4(weight_map) {
+        return Ok(String::new());
+    }
     for key in weight_map.keys() {
         if let Some(pos) = key.find(".layers.") {
             // Standard MoE: .mlp.experts.  Nemotron: .mixer.experts.
@@ -7441,6 +7633,9 @@ fn detect_expert_prefix(weight_map: &HashMap<String, String>) -> Result<String, 
 
 /// Detect expert sublayer: "mlp" (standard), "mixer" (Nemotron), or "moe" (Step).
 fn detect_expert_sublayer(weight_map: &HashMap<String, String>) -> &'static str {
+    if is_deepseek_v4_fp4(weight_map) {
+        return "ffn";
+    }
     for key in weight_map.keys() {
         if key.contains(".mixer.experts.") {
             return "mixer";
@@ -7454,6 +7649,9 @@ fn detect_expert_sublayer(weight_map: &HashMap<String, String>) -> &'static str 
 
 /// Check if experts have gate_proj (standard gated MoE) or just up_proj (Nemotron).
 fn has_gate_proj_experts(weight_map: &HashMap<String, String>) -> bool {
+    if is_deepseek_v4_fp4(weight_map) {
+        return true;
+    }
     for key in weight_map.keys() {
         if (key.contains(".experts.") && key.contains("gate_proj"))
             || key.contains(".moe.gate_proj.weight")
@@ -7470,6 +7668,9 @@ fn has_gate_proj_experts(weight_map: &HashMap<String, String>) -> bool {
 /// cannot be reused for shared experts. Qwen3.6 has stacked routed experts but
 /// separate gated shared experts (`shared_expert.gate_proj.weight`).
 fn has_shared_gate_proj(weight_map: &HashMap<String, String>, shared_name: &str) -> bool {
+    if is_deepseek_v4_fp4(weight_map) {
+        return weight_map.contains_key("layers.0.ffn.shared_experts.w1.weight");
+    }
     let mlp_gate = format!(".mlp.{shared_name}.gate_proj");
     let mixer_gate = format!(".mixer.{shared_name}.gate_proj");
     let direct_gate = format!(".{shared_name}.gate_proj");
@@ -7481,6 +7682,9 @@ fn has_shared_gate_proj(weight_map: &HashMap<String, String>, shared_name: &str)
 /// Detect shared expert naming: "shared_experts" (DeepSeek) vs "shared_expert" (QCN).
 /// Returns the substring to use in weight name construction.
 fn detect_shared_expert_name(weight_map: &HashMap<String, String>) -> &'static str {
+    if is_deepseek_v4_fp4(weight_map) {
+        return "shared_experts";
+    }
     for key in weight_map.keys() {
         if key.contains(".mlp.shared_experts.") || key.contains(".mixer.shared_experts.") {
             return "shared_experts";
@@ -7501,6 +7705,9 @@ fn shared_expert_prefix(
     expert_sublayer: &str,
     shared_name: &str,
 ) -> String {
+    if layers_prefix.is_empty() {
+        return format!("layers.{layer_idx}.{expert_sublayer}.{shared_name}");
+    }
     if shared_name == "share_expert" {
         format!("{layers_prefix}.layers.{layer_idx}.share_expert")
     } else {
@@ -7567,6 +7774,57 @@ fn dequant_fp8_to_bf16(fp8_data: &[u8], scale: f32) -> Vec<u16> {
         .collect()
 }
 
+/// Dequantize a rank-2 E4M3 matrix with a rank-2 E8M0 block-scale grid.
+///
+/// The block geometry is part of the checkpoint contract and is passed from
+/// `quantization_config.weight_block_size`; it is not inferred from this
+/// machine or from one known model shape.
+fn dequantize_fp8e4m3_e8m0_blocks_to_bf16(
+    weights: &[u8],
+    scales: &[u8],
+    rows: usize,
+    cols: usize,
+    block_rows: usize,
+    block_cols: usize,
+) -> Result<Vec<u16>, String> {
+    if block_rows == 0 || block_cols == 0 {
+        return Err("FP8 source block dimensions must be positive".to_string());
+    }
+    let weight_elements = rows
+        .checked_mul(cols)
+        .ok_or("FP8 source matrix element count overflow")?;
+    if weights.len() != weight_elements {
+        return Err(format!(
+            "FP8 source payload has {} bytes, expected {weight_elements} for [{rows}, {cols}]",
+            weights.len()
+        ));
+    }
+    let scale_rows = rows.div_ceil(block_rows);
+    let scale_cols = cols.div_ceil(block_cols);
+    let scale_elements = scale_rows
+        .checked_mul(scale_cols)
+        .ok_or("FP8 source scale count overflow")?;
+    if scales.len() != scale_elements {
+        return Err(format!(
+            "FP8 source scale payload has {} bytes, expected {scale_elements} for [{scale_rows}, {scale_cols}]",
+            scales.len()
+        ));
+    }
+
+    let mut output = Vec::with_capacity(weight_elements);
+    for row in 0..rows {
+        let scale_row = row / block_rows;
+        for col in 0..cols {
+            let scale_col = col / block_cols;
+            let scale_byte = scales[scale_row * scale_cols + scale_col];
+            let scale = f32::from_bits((scale_byte as u32) << 23);
+            let value = fp8e4m3_to_f32(weights[row * cols + col]) * scale;
+            output.push(marlin::f32_to_bf16(value));
+        }
+    }
+    Ok(output)
+}
+
 /// Detect stacked expert format (Qwen3.5, Mistral 4).
 /// These models store all experts in stacked 3D tensors per layer:
 ///   experts.gate_up_proj [E, 2*inter, hidden]
@@ -7620,6 +7878,15 @@ fn is_mxfp4(weight_map: &HashMap<String, String>) -> bool {
         .any(|k| k.ends_with(".gate_up_proj_blocks"))
 }
 
+/// Detect DeepSeek-V4's source-native per-expert MXFP4 layout.
+///
+/// Unlike GPT-OSS stacked MXFP4, V4 stores each projection separately as
+/// packed E2M1 bytes plus an E8M0 scale tensor at one scale per 32 logical K.
+fn is_deepseek_v4_fp4(weight_map: &HashMap<String, String>) -> bool {
+    weight_map.contains_key("layers.0.ffn.experts.0.w1.weight")
+        && weight_map.contains_key("layers.0.ffn.experts.0.w1.scale")
+}
+
 /// FP4 E2M1 lookup table for MXFP4 dequantization (OCP MX format).
 const FP4_LUT: [f32; 16] = [
     0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
@@ -7669,6 +7936,249 @@ fn dequantize_mxfp4_to_bf16(
     }
 
     output
+}
+
+fn load_deepseek_v4_fp4_projection(
+    prefix: &str,
+    proj_name: &str,
+    weight_map: &HashMap<String, String>,
+    shards: &HashMap<String, MmapSafetensors>,
+) -> Result<(Vec<u16>, usize, usize), String> {
+    let weight_name = format!("{prefix}.{proj_name}.weight");
+    let scale_name = format!("{prefix}.{proj_name}.scale");
+    let weight_shard_name = weight_map
+        .get(&weight_name)
+        .ok_or_else(|| format!("Tensor not found: {weight_name}"))?;
+    let scale_shard_name = weight_map
+        .get(&scale_name)
+        .ok_or_else(|| format!("Tensor not found: {scale_name}"))?;
+    let weight_shard = shards
+        .get(weight_shard_name)
+        .ok_or_else(|| format!("Shard not loaded: {weight_shard_name}"))?;
+    let scale_shard = shards
+        .get(scale_shard_name)
+        .ok_or_else(|| format!("Shard not loaded: {scale_shard_name}"))?;
+    let weight_info = weight_shard
+        .tensor_info(&weight_name)
+        .ok_or_else(|| format!("Tensor not in shard: {weight_name}"))?;
+    let scale_info = scale_shard
+        .tensor_info(&scale_name)
+        .ok_or_else(|| format!("Tensor not in shard: {scale_name}"))?;
+
+    if weight_info.dtype != Dtype::I8 || weight_info.shape.len() != 2 {
+        return Err(format!(
+            "DeepSeek-V4 {weight_name} must be rank-2 I8 packed FP4, got {:?} {:?}",
+            weight_info.dtype, weight_info.shape
+        ));
+    }
+    if scale_info.dtype != Dtype::F8E8M0 || scale_info.shape.len() != 2 {
+        return Err(format!(
+            "DeepSeek-V4 {scale_name} must be rank-2 F8_E8M0, got {:?} {:?}",
+            scale_info.dtype, scale_info.shape
+        ));
+    }
+
+    let rows = weight_info.shape[0];
+    let logical_cols = weight_info.shape[1]
+        .checked_mul(2)
+        .ok_or_else(|| format!("DeepSeek-V4 {weight_name} logical width overflow"))?;
+    if logical_cols % 32 != 0 {
+        return Err(format!(
+            "DeepSeek-V4 {weight_name} logical width {logical_cols} is not divisible by 32"
+        ));
+    }
+    let blocks_per_row = logical_cols / 32;
+    if scale_info.shape != [rows, blocks_per_row] {
+        return Err(format!(
+            "DeepSeek-V4 {scale_name} shape {:?} != expected [{rows}, {blocks_per_row}]",
+            scale_info.shape
+        ));
+    }
+
+    let packed: &[u8] = weight_shard
+        .tensor_as_slice(&weight_name)
+        .map_err(|e| format!("Failed to read {weight_name}: {e}"))?;
+    let scales: &[u8] = scale_shard
+        .tensor_as_slice(&scale_name)
+        .map_err(|e| format!("Failed to read {scale_name}: {e}"))?;
+    let expected_packed = rows * blocks_per_row * 16;
+    if packed.len() != expected_packed || scales.len() != rows * blocks_per_row {
+        return Err(format!(
+            "DeepSeek-V4 FP4 payload size mismatch for {weight_name}/{scale_name}"
+        ));
+    }
+
+    Ok((
+        dequantize_mxfp4_to_bf16(packed, scales, rows, blocks_per_row),
+        rows,
+        logical_cols,
+    ))
+}
+
+fn load_deepseek_v4_fp4_expert(
+    layer_idx: usize,
+    expert_idx: usize,
+    prefix: &str,
+    weight_map: &HashMap<String, String>,
+    shards: &HashMap<String, MmapSafetensors>,
+    group_size: usize,
+    num_bits: u8,
+    int4_calib_mode: ExpertInt4CalibMode,
+    calib_data: Option<&ExpertInt4CalibData>,
+) -> Result<(QuantWeight, QuantWeight, QuantWeight), String> {
+    let load = |source_name: &str, logical_name: &str| -> Result<QuantWeight, String> {
+        let (bf16, rows, cols) =
+            load_deepseek_v4_fp4_projection(prefix, source_name, weight_map, shards)?;
+        match num_bits {
+            16 => Ok(QuantWeight::Bf16(QuantizedBf16 {
+                data: bf16,
+                rows,
+                cols,
+            })),
+            8 => Ok(QuantWeight::Int8(quantize_int8(
+                &bf16, rows, cols, group_size,
+            ))),
+            4 => Ok(QuantWeight::Int4(quantize_int4_expert_calibrated(
+                &bf16,
+                rows,
+                cols,
+                group_size,
+                int4_calib_mode,
+                layer_idx,
+                expert_idx,
+                logical_name,
+                calib_data,
+            ))),
+            other => Err(format!(
+                "Unsupported DeepSeek-V4 expert target width INT{other}"
+            )),
+        }
+    };
+
+    // Source W1 is gate, W3 is up, and W2 is down.
+    Ok((load("w1", "gate_proj")?, load("w3", "up_proj")?, load("w2", "down_proj")?))
+}
+
+fn load_deepseek_v4_fp8_projection(
+    prefix: &str,
+    proj_name: &str,
+    weight_map: &HashMap<String, String>,
+    shards: &HashMap<String, MmapSafetensors>,
+    source_block_size: (usize, usize),
+) -> Result<(Vec<u16>, usize, usize), String> {
+    let weight_name = format!("{prefix}.{proj_name}.weight");
+    let scale_name = format!("{prefix}.{proj_name}.scale");
+    let weight_shard_name = weight_map
+        .get(&weight_name)
+        .ok_or_else(|| format!("Tensor not found: {weight_name}"))?;
+    let scale_shard_name = weight_map
+        .get(&scale_name)
+        .ok_or_else(|| format!("Tensor not found: {scale_name}"))?;
+    let weight_shard = shards
+        .get(weight_shard_name)
+        .ok_or_else(|| format!("Shard not loaded: {weight_shard_name}"))?;
+    let scale_shard = shards
+        .get(scale_shard_name)
+        .ok_or_else(|| format!("Shard not loaded: {scale_shard_name}"))?;
+    let weight_info = weight_shard
+        .tensor_info(&weight_name)
+        .ok_or_else(|| format!("Tensor not in shard: {weight_name}"))?;
+    let scale_info = scale_shard
+        .tensor_info(&scale_name)
+        .ok_or_else(|| format!("Tensor not in shard: {scale_name}"))?;
+
+    if weight_info.dtype != Dtype::F8E4M3 || weight_info.shape.len() != 2 {
+        return Err(format!(
+            "DeepSeek-V4 {weight_name} must be rank-2 F8_E4M3, got {:?} {:?}",
+            weight_info.dtype, weight_info.shape
+        ));
+    }
+    if scale_info.dtype != Dtype::F8E8M0 || scale_info.shape.len() != 2 {
+        return Err(format!(
+            "DeepSeek-V4 {scale_name} must be rank-2 F8_E8M0, got {:?} {:?}",
+            scale_info.dtype, scale_info.shape
+        ));
+    }
+
+    let rows = weight_info.shape[0];
+    let cols = weight_info.shape[1];
+    let (block_rows, block_cols) = source_block_size;
+    if block_rows == 0 || block_cols == 0 {
+        return Err(format!(
+            "DeepSeek-V4 source FP8 block dimensions must be positive, got [{block_rows}, {block_cols}]"
+        ));
+    }
+    let expected_scale_shape = [rows.div_ceil(block_rows), cols.div_ceil(block_cols)];
+    if scale_info.shape != expected_scale_shape {
+        return Err(format!(
+            "DeepSeek-V4 {scale_name} shape {:?} != expected {:?} for {weight_name} shape [{rows}, {cols}] and source block [{block_rows}, {block_cols}]",
+            scale_info.shape, expected_scale_shape
+        ));
+    }
+
+    let weights: &[u8] = weight_shard
+        .tensor_as_slice(&weight_name)
+        .map_err(|e| format!("Failed to read {weight_name}: {e}"))?;
+    let scales: &[u8] = scale_shard
+        .tensor_as_slice(&scale_name)
+        .map_err(|e| format!("Failed to read {scale_name}: {e}"))?;
+    let bf16 = dequantize_fp8e4m3_e8m0_blocks_to_bf16(
+        weights, scales, rows, cols, block_rows, block_cols,
+    )?;
+    Ok((bf16, rows, cols))
+}
+
+fn load_deepseek_v4_fp8_expert(
+    layer_idx: usize,
+    expert_idx: usize,
+    prefix: &str,
+    weight_map: &HashMap<String, String>,
+    shards: &HashMap<String, MmapSafetensors>,
+    source_block_size: (usize, usize),
+    group_size: usize,
+    num_bits: u8,
+    int4_calib_mode: ExpertInt4CalibMode,
+    calib_data: Option<&ExpertInt4CalibData>,
+) -> Result<(QuantWeight, QuantWeight, QuantWeight), String> {
+    let load = |source_name: &str, logical_name: &str| -> Result<QuantWeight, String> {
+        let (bf16, rows, cols) = load_deepseek_v4_fp8_projection(
+            prefix,
+            source_name,
+            weight_map,
+            shards,
+            source_block_size,
+        )?;
+        match num_bits {
+            16 => Ok(QuantWeight::Bf16(QuantizedBf16 {
+                data: bf16,
+                rows,
+                cols,
+            })),
+            8 => Ok(QuantWeight::Int8(quantize_int8(
+                &bf16, rows, cols, group_size,
+            ))),
+            4 => Ok(QuantWeight::Int4(quantize_int4_expert_calibrated(
+                &bf16,
+                rows,
+                cols,
+                group_size,
+                int4_calib_mode,
+                layer_idx,
+                expert_idx,
+                logical_name,
+                calib_data,
+            ))),
+            other => Err(format!(
+                "Unsupported DeepSeek-V4 shared-expert target width INT{other}"
+            )),
+        }
+    };
+
+    Ok((
+        load("w1", "gate_proj")?,
+        load("w3", "up_proj")?,
+        load("w2", "down_proj")?,
+    ))
 }
 
 /// Load raw bytes for a tensor from mmapped safetensors shards.
@@ -8910,6 +9420,100 @@ fn load_stacked_layer_experts(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn test_deepseek_v4_source_fp4_contract() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "model_type": "deepseek_v4",
+                "hidden_size": 4096,
+                "moe_intermediate_size": 2048,
+                "n_routed_experts": 256,
+                "num_experts_per_tok": 6,
+                "num_hidden_layers": 43,
+                "first_k_dense_replace": null,
+                "n_shared_experts": 1,
+                "routed_scaling_factor": 1.5,
+                "swiglu_limit": 10.0,
+                "quantization_config": {
+                    "weight_block_size": [128, 128]
+                }
+            }"#,
+        )
+        .unwrap();
+        let config = ModelConfig::from_json(&json).unwrap();
+        assert_eq!(config.first_k_dense_replace, 0);
+        assert_eq!(config.num_moe_layers(), 43);
+        assert_eq!(config.swiglu_mode, SwiGluMode::DeepSeekClamp);
+        assert_eq!(config.activation_alpha, 0.0);
+        assert_eq!(config.source_fp8_block_size, Some((128, 128)));
+
+        let mut weight_map = HashMap::new();
+        for suffix in ["w1.weight", "w1.scale", "w2.weight", "w3.weight"] {
+            weight_map.insert(
+                format!("layers.0.ffn.experts.0.{suffix}"),
+                "model-00001.safetensors".to_string(),
+            );
+        }
+        weight_map.insert(
+            "layers.0.ffn.shared_experts.w1.weight".to_string(),
+            "model-00001.safetensors".to_string(),
+        );
+        assert!(is_deepseek_v4_fp4(&weight_map));
+        assert_eq!(detect_expert_prefix(&weight_map).unwrap(), "");
+        assert_eq!(detect_expert_sublayer(&weight_map), "ffn");
+        assert!(has_gate_proj_experts(&weight_map));
+        assert!(has_shared_gate_proj(&weight_map, "shared_experts"));
+        assert_eq!(
+            shared_expert_prefix("", 7, "ffn", "shared_experts"),
+            "layers.7.ffn.shared_experts"
+        );
+    }
+
+    #[test]
+    fn test_deepseek_v4_e2m1_e8m0_dequant_nibble_order() {
+        // Each source byte stores adjacent values as low then high nibble.
+        // 0x21 = E2M1 values 0.5, 1.0; E8M0 byte 128 = scale 2.
+        let packed = vec![0x21u8; 16];
+        let scales = vec![128u8];
+        let actual = dequantize_mxfp4_to_bf16(&packed, &scales, 1, 1);
+        assert_eq!(actual.len(), 32);
+        for pair in actual.chunks_exact(2) {
+            assert_eq!(bf16_to_f32(pair[0]), 1.0);
+            assert_eq!(bf16_to_f32(pair[1]), 2.0);
+        }
+    }
+
+    #[test]
+    fn test_deepseek_v4_e4m3_e8m0_block_dequant_and_edges() {
+        // E4M3 0x38 is exactly 1.0. Use a non-production matrix and partial
+        // edge blocks so indexing cannot accidentally assume model dimensions.
+        let weights = vec![0x38u8; 3 * 5];
+        let scales = vec![127u8, 128u8, 129u8, 130u8];
+        let actual = dequantize_fp8e4m3_e8m0_blocks_to_bf16(
+            &weights, &scales, 3, 5, 2, 3,
+        )
+        .unwrap();
+        let expected = [
+            1.0f32, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0, 4.0, 8.0,
+            8.0,
+        ];
+        assert_eq!(actual.len(), expected.len());
+        for (&got, &want) in actual.iter().zip(expected.iter()) {
+            assert_eq!(bf16_to_f32(got), want);
+        }
+
+        let error = dequantize_fp8e4m3_e8m0_blocks_to_bf16(
+            &weights,
+            &scales[..3],
+            3,
+            5,
+            2,
+            3,
+        )
+        .unwrap_err();
+        assert!(error.contains("expected 4"));
+    }
 
     #[test]
     fn test_stacked_routed_detection_does_not_hide_gated_shared_experts() {

@@ -102,8 +102,43 @@ class PagedKVCache:
         elif self.kv_format_str == "k4v4":
             self.kv_format = 9
 
-        # Compute cache dimensions based on attention type
-        if cfg.is_mla:
+        # Compute cache dimensions based on attention type. DeepSeek-V4 has a
+        # distinct K-only sparse-attention state; it is neither MLA nor GQA.
+        if cfg.is_deepseek_v4:
+            if combined:
+                raise ValueError("DeepSeek-V4 does not use a combined MLA KV cache")
+            if self.kv_format_str != "bf16" or kv_dtype != torch.bfloat16:
+                raise ValueError(
+                    "DeepSeek-V4 correctness bring-up requires source-faithful BF16 KV state; "
+                    f"got kv_format={self.kv_format_str!r}, dtype={kv_dtype}. "
+                    "No quantized-cache fallback is available."
+                )
+            if cfg.attention_head_dim <= 0 or cfg.index_head_dim <= 0:
+                raise ValueError(
+                    "DeepSeek-V4 requires positive attention_head_dim and index_head_dim"
+                )
+            if cfg.sliding_window <= 0:
+                raise ValueError("DeepSeek-V4 requires a positive sliding_window")
+            if cfg.compress_ratios is None:
+                raise ValueError("DeepSeek-V4 requires per-layer compress_ratios")
+            self.dsv4_compress_ratios = [
+                int(cfg.compress_ratios[layer_idx]) for layer_idx in self.layer_indices
+            ]
+            invalid_ratios = sorted(
+                {ratio for ratio in self.dsv4_compress_ratios if ratio not in (0, 4, 128)}
+            )
+            if invalid_ratios:
+                raise ValueError(
+                    "DeepSeek-V4 cache supports the shipped raw/CSA/HCA ratios 0, 4, and 128; "
+                    f"got {invalid_ratios}"
+                )
+            self.ckv_dim = None
+            self.kpe_dim = None
+            self.num_kv_heads = None
+            self.gqa_head_dim = None
+            self.kv_cache_dim = cfg.attention_head_dim
+            self.variable_gqa_dims = False
+        elif cfg.is_mla:
             if combined:
                 raise ValueError(
                     "Native MLA k4v4 cache uses separate compressed and positional stores; "
@@ -190,7 +225,9 @@ class PagedKVCache:
                     prefill_ws / (1024 * 1024), new_mb,
                 )
 
-            if getattr(self, "ring_window_gqa", False):
+            if self.attention_type == "deepseek_v4":
+                max_pages = self._max_dsv4_pages_for_budget(budget_bytes)
+            elif getattr(self, "ring_window_gqa", False):
                 max_pages = self._max_pages_for_budget(budget_bytes)
             else:
                 max_pages = max(64, budget_bytes // bytes_per_page)
@@ -227,7 +264,106 @@ class PagedKVCache:
         self.kpe_cache = None
         self.kv_cache = None
 
-        if cfg.is_gqa:
+        # DeepSeek-V4 cache/state stores. Lists are indexed by the local layer
+        # offset for this GPU split. Runtime execution consumes their pointers
+        # directly from Rust/CUDA; Python only owns the setup allocations.
+        self.dsv4_raw_cache = None
+        self.dsv4_compressed_cache = None
+        self.dsv4_index_cache = None
+        self.dsv4_compressor_kv_state = None
+        self.dsv4_compressor_score_state = None
+        self.dsv4_index_kv_state = None
+        self.dsv4_index_score_state = None
+
+        if cfg.is_deepseek_v4:
+            self.layer_page_counts = [max_pages] * num_layers
+            self.dsv4_raw_cache = []
+            self.dsv4_compressed_cache = []
+            self.dsv4_index_cache = []
+            self.dsv4_compressor_kv_state = []
+            self.dsv4_compressor_score_state = []
+            self.dsv4_index_kv_state = []
+            self.dsv4_index_score_state = []
+            context_tokens = max_pages * page_size
+            alloc_bytes = 0
+            for ratio in self.dsv4_compress_ratios:
+                raw = torch.zeros(
+                    cfg.sliding_window,
+                    cfg.attention_head_dim,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+                self.dsv4_raw_cache.append(raw)
+                alloc_bytes += raw.nbytes
+
+                if ratio == 0:
+                    self.dsv4_compressed_cache.append(None)
+                    self.dsv4_index_cache.append(None)
+                    self.dsv4_compressor_kv_state.append(None)
+                    self.dsv4_compressor_score_state.append(None)
+                    self.dsv4_index_kv_state.append(None)
+                    self.dsv4_index_score_state.append(None)
+                    continue
+
+                compressed_rows = max(1, math.ceil(context_tokens / ratio))
+                compressed = torch.zeros(
+                    compressed_rows,
+                    cfg.attention_head_dim,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+                overlap_width = 2 if ratio == 4 else 1
+                state_rows = overlap_width * ratio
+                state_cols = overlap_width * cfg.attention_head_dim
+                compressor_kv = torch.zeros(
+                    state_rows, state_cols, dtype=torch.float32, device=device
+                )
+                compressor_score = torch.full(
+                    (state_rows, state_cols),
+                    float("-inf"),
+                    dtype=torch.float32,
+                    device=device,
+                )
+                self.dsv4_compressed_cache.append(compressed)
+                self.dsv4_compressor_kv_state.append(compressor_kv)
+                self.dsv4_compressor_score_state.append(compressor_score)
+                alloc_bytes += compressed.nbytes + compressor_kv.nbytes + compressor_score.nbytes
+
+                if ratio == 4:
+                    index_cache = torch.zeros(
+                        compressed_rows,
+                        cfg.index_head_dim,
+                        dtype=torch.bfloat16,
+                        device=device,
+                    )
+                    index_state_cols = overlap_width * cfg.index_head_dim
+                    index_kv = torch.zeros(
+                        state_rows, index_state_cols, dtype=torch.float32, device=device
+                    )
+                    index_score = torch.full(
+                        (state_rows, index_state_cols),
+                        float("-inf"),
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    self.dsv4_index_cache.append(index_cache)
+                    self.dsv4_index_kv_state.append(index_kv)
+                    self.dsv4_index_score_state.append(index_score)
+                    alloc_bytes += index_cache.nbytes + index_kv.nbytes + index_score.nbytes
+                else:
+                    self.dsv4_index_cache.append(None)
+                    self.dsv4_index_kv_state.append(None)
+                    self.dsv4_index_score_state.append(None)
+
+            expected_bytes = self._dsv4_bytes_for_pages(max_pages)
+            if alloc_bytes != expected_bytes:
+                raise RuntimeError(
+                    "DeepSeek-V4 KV allocation disagrees with its budget model: "
+                    f"allocated={alloc_bytes}, expected={expected_bytes}"
+                )
+            alloc_mb = alloc_bytes / (1024**2)
+            layout_str = "deepseek-v4-bf16-raw-csa-hca-index"
+        elif cfg.is_gqa:
             if self.kv_format == 2:
                 # Polar4: radius (BF16) + angles (4-bit uint8)
                 num_blocks = (self.num_kv_heads * self.gqa_head_dim) // 16
@@ -453,7 +589,62 @@ class PagedKVCache:
         self._free_pages: List[int] = list(range(max_pages))
         self._free_pages.reverse()  # pop from end
 
+    def _dsv4_bytes_for_pages(self, max_pages: int) -> int:
+        """Exact BF16 V4 cache/state bytes for a logical page capacity."""
+        if max_pages <= 0:
+            raise ValueError(f"DeepSeek-V4 max_pages must be positive, got {max_pages}")
+        context_tokens = max_pages * self.page_size
+        head_dim = self.cfg.attention_head_dim
+        index_dim = self.cfg.index_head_dim
+        total = 0
+        for ratio in self.dsv4_compress_ratios:
+            total += self.cfg.sliding_window * head_dim * 2
+            if ratio == 0:
+                continue
+
+            compressed_rows = max(1, math.ceil(context_tokens / ratio))
+            total += compressed_rows * head_dim * 2
+            overlap_width = 2 if ratio == 4 else 1
+            state_rows = overlap_width * ratio
+            state_cols = overlap_width * head_dim
+            total += state_rows * state_cols * 4 * 2  # KV and score FP32 states
+
+            if ratio == 4:
+                total += compressed_rows * index_dim * 2
+                index_state_cols = overlap_width * index_dim
+                total += state_rows * index_state_cols * 4 * 2
+        return total
+
+    def _max_dsv4_pages_for_budget(self, budget_bytes: int) -> int:
+        """Largest config-bounded V4 context whose measured layout fits budget."""
+        runtime_pages = max(
+            1, math.ceil(self.cfg.max_position_embeddings / self.page_size)
+        )
+        minimum_bytes = self._dsv4_bytes_for_pages(1)
+        if minimum_bytes > budget_bytes:
+            raise ValueError(
+                "DeepSeek-V4 KV budget cannot hold even one logical page: "
+                f"need {minimum_bytes / (1024**2):.1f} MiB, "
+                f"have {budget_bytes / (1024**2):.1f} MiB"
+            )
+        if self._dsv4_bytes_for_pages(runtime_pages) <= budget_bytes:
+            return runtime_pages
+
+        lo, hi = 1, runtime_pages
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self._dsv4_bytes_for_pages(mid) <= budget_bytes:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo
+
     def _bytes_per_page(self) -> int:
+        if self.attention_type == "deepseek_v4":
+            return max(
+                1,
+                self._dsv4_bytes_for_pages(2) - self._dsv4_bytes_for_pages(1),
+            )
         if self.attention_type == "mla":
             return self.page_size * (
                 self.ckv_row_bytes + self.kpe_row_bytes
@@ -532,6 +723,8 @@ class PagedKVCache:
         return max_pages
 
     def _bytes_for_pages(self, max_pages: int) -> int:
+        if self.attention_type == "deepseek_v4":
+            return self._dsv4_bytes_for_pages(max_pages)
         if not (getattr(self, "variable_gqa_dims", False) and self.kv_format in (5, 6, 7, 8, 9)):
             return max_pages * self._bytes_per_page()
         k_packed_bytes = 16 if self.kv_format == 8 else 14 if self.kv_format == 6 else 8 if self.kv_format == 9 else 12
@@ -632,6 +825,25 @@ class PagedKVCache:
         """Get combined KV cache for MLA (TRTLLM format)."""
         assert self.attention_type == "mla" and self.combined
         return self.kv_cache[layer_offset].unsqueeze(0)
+
+    def get_deepseek_v4_layer_caches(self, layer_offset: int) -> dict:
+        """Return the exact V4 raw/compressed/index state for one local layer."""
+        if self.attention_type != "deepseek_v4":
+            raise ValueError("DeepSeek-V4 cache access requested for another architecture")
+        if layer_offset < 0 or layer_offset >= self.num_layers:
+            raise IndexError(
+                f"DeepSeek-V4 layer offset {layer_offset} outside [0, {self.num_layers})"
+            )
+        return {
+            "raw": self.dsv4_raw_cache[layer_offset],
+            "compressed": self.dsv4_compressed_cache[layer_offset],
+            "index": self.dsv4_index_cache[layer_offset],
+            "compressor_kv_state": self.dsv4_compressor_kv_state[layer_offset],
+            "compressor_score_state": self.dsv4_compressor_score_state[layer_offset],
+            "index_kv_state": self.dsv4_index_kv_state[layer_offset],
+            "index_score_state": self.dsv4_index_score_state[layer_offset],
+            "ratio": self.dsv4_compress_ratios[layer_offset],
+        }
 
     # ── GQA cache access ──
 

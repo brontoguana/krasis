@@ -1,4 +1,5 @@
 import os
+import hashlib
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -94,6 +95,31 @@ class TokenizerLoaderTests(unittest.TestCase):
 
         self.assertIs(result, sentinel)
         load.assert_called_once_with("/model")
+
+    def test_deepseek_v4_checkpoint_uses_canonical_bundled_template(self):
+        class Sentinel:
+            chat_template = None
+
+        sentinel = Sentinel()
+        with tempfile.TemporaryDirectory() as model_path:
+            with open(os.path.join(model_path, "config.json"), "w", encoding="utf-8") as handle:
+                handle.write('{"model_type":"deepseek_v4"}')
+            with open(
+                os.path.join(model_path, "tokenizer_config.json"), "w", encoding="utf-8"
+            ) as handle:
+                handle.write('{"tokenizer_class":"PreTrainedTokenizerFast"}')
+
+            with patch(
+                "krasis.tokenizer.AutoTokenizer.from_pretrained", return_value=sentinel
+            ):
+                result = load_hf_tokenizer(model_path)
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(
+            hashlib.sha256(result.chat_template.encode("utf-8")).hexdigest(),
+            "b6f8261e0d132011f6420590294c9811f715fc9a51fb376d939d1f1d7150e967",
+        )
+        self.assertIn("enable_thinking", result.chat_template)
 
 
 if __name__ == "__main__":

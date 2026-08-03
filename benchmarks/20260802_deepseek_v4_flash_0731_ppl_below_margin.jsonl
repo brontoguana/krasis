@@ -1,0 +1,2 @@
+{"timestamp_ms":1785631186252,"kind":"below_safety_margin","pid":3735952,"device":0,"free_mb":590,"safety_margin_mb":600,"deficit_mb":10,"hard_exit_floor_mb":125,"current_event":"server_ready","request_context":""}
+{"timestamp_ms":1785634461561,"kind":"below_safety_margin","pid":3735952,"device":0,"free_mb":578,"safety_margin_mb":600,"deficit_mb":22,"hard_exit_floor_mb":125,"current_event":"server_ready","request_context":""}

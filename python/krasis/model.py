@@ -14,6 +14,7 @@ import gc
 import hashlib
 import importlib
 import logging
+import math
 import os
 import json
 import shutil
@@ -2525,6 +2526,13 @@ class KrasisModel:
                 "dt_bias": attn.dt_bias,
                 "norm_weight": attn.norm_weight,
             }
+        elif layer.cfg.is_deepseek_v4:
+            if attn is None or not hasattr(attn, "attention"):
+                raise RuntimeError(
+                    f"DeepSeek-V4 layer {layer.layer_idx} has no native attention weights"
+                )
+            result["attention"] = dict(attn.attention)
+            result["hyper_connection"] = dict(attn.hyper_connection)
         elif hasattr(attn, "kv_a_proj"):
             # MLA
             attn_d = {
@@ -2566,6 +2574,8 @@ class KrasisModel:
                 result["gate"]["bias"] = layer.gate_bias
             if layer.e_score_correction_bias is not None:
                 result["gate"]["e_score_correction_bias"] = layer.e_score_correction_bias
+            if getattr(layer, "router_tid2eid", None) is not None:
+                result["gate"]["tid2eid"] = layer.router_tid2eid
             if getattr(layer, "router_input_scale", None) is not None:
                 result["gate"]["input_scale"] = layer.router_input_scale
             if getattr(layer, "router_per_expert_scale", None) is not None:
@@ -4095,6 +4105,115 @@ class KrasisModel:
             sin_f32,
         )
 
+    def _deepseek_v4_rope_table_ptrs(
+        self,
+        max_seq: int,
+        compress_ratio: int,
+        target_device: torch.device,
+    ) -> tuple[int, int, int, torch.Tensor, torch.Tensor]:
+        """Build the exact shipped DeepSeek-V4 RoPE table for one layer mode.
+
+        Pure sliding-window layers deliberately disable YaRN and use the base
+        model theta. Compressed layers use the checkpoint compression theta and
+        its YaRN parameters. These setup-owned FP32 tables are consumed only by
+        Rust/CUDA at runtime.
+        """
+        rope_dim = int(self.cfg.qk_rope_head_dim)
+        if max_seq <= 0 or rope_dim <= 0 or rope_dim % 2:
+            raise ValueError(
+                f"Invalid DeepSeek-V4 RoPE contract max_seq={max_seq}, dim={rope_dim}"
+            )
+        if compress_ratio not in (0, 4, 128):
+            raise ValueError(
+                f"Unsupported DeepSeek-V4 compression ratio {compress_ratio}"
+            )
+
+        rope_params = self.cfg.rope_scaling or {}
+        if not isinstance(rope_params, dict):
+            raise ValueError("DeepSeek-V4 rope_scaling must be an object")
+        if compress_ratio:
+            original_seq_len = int(
+                rope_params.get("original_max_position_embeddings", 0) or 0
+            )
+            base = float(self.cfg.compress_rope_theta)
+            factor = float(rope_params.get("factor", 1.0))
+            beta_fast = float(rope_params.get("beta_fast", 32.0))
+            beta_slow = float(rope_params.get("beta_slow", 1.0))
+            if original_seq_len <= 0 or factor <= 0.0:
+                raise ValueError(
+                    "Compressed DeepSeek-V4 RoPE requires positive YaRN "
+                    f"original length/factor, got {original_seq_len}/{factor}"
+                )
+        else:
+            original_seq_len = 0
+            base = float(self.cfg.rope_theta)
+            factor = 1.0
+            beta_fast = 32.0
+            beta_slow = 1.0
+        if base <= 0.0:
+            raise ValueError(f"Invalid DeepSeek-V4 RoPE base {base}")
+
+        cache = getattr(self, "_rust_deepseek_v4_rope_tables", None)
+        if cache is None:
+            cache = {}
+            self._rust_deepseek_v4_rope_tables = cache
+        key = (
+            max_seq,
+            compress_ratio,
+            rope_dim,
+            base,
+            original_seq_len,
+            factor,
+            beta_fast,
+            beta_slow,
+            str(target_device),
+        )
+        cached = cache.get(key)
+        if cached is None:
+            half = rope_dim // 2
+            freqs = 1.0 / (
+                base
+                ** (
+                    torch.arange(0, rope_dim, 2, dtype=torch.float32)
+                    / float(rope_dim)
+                )
+            )
+            if original_seq_len > 0:
+                def _correction_dim(rotations: float) -> float:
+                    return rope_dim * math.log(
+                        original_seq_len / (rotations * 2.0 * math.pi)
+                    ) / (2.0 * math.log(base))
+
+                low = max(math.floor(_correction_dim(beta_fast)), 0)
+                high = min(math.ceil(_correction_dim(beta_slow)), rope_dim - 1)
+                ramp_high = float(high) if low != high else float(high) + 0.001
+                ramp = torch.clamp(
+                    (torch.arange(half, dtype=torch.float32) - float(low))
+                    / (ramp_high - float(low)),
+                    0.0,
+                    1.0,
+                )
+                smooth = 1.0 - ramp
+                freqs = freqs / factor * (1.0 - smooth) + freqs * smooth
+
+            positions = torch.arange(max_seq, dtype=torch.float32)
+            angles = torch.outer(positions, freqs)
+            cos_f32 = angles.cos().contiguous().to(target_device)
+            sin_f32 = angles.sin().contiguous().to(target_device)
+            cached = (cos_f32, sin_f32)
+            cache[key] = cached
+            self._keep_rust_decode_weight(
+                "deepseek_v4_rope_table", cos_f32, sin_f32
+            )
+        cos_f32, sin_f32 = cached
+        return (
+            int(cos_f32.data_ptr()),
+            int(sin_f32.data_ptr()),
+            int(cos_f32.shape[0]),
+            cos_f32,
+            sin_f32,
+        )
+
     def _keep_rust_decode_weight(self, label: str, *values) -> None:
         keepalive = getattr(self, "_rust_decode_weights", None)
         if keepalive is None:
@@ -5611,6 +5730,11 @@ class KrasisModel:
 
         self.final_norm = loader.load_final_norm(primary_dev)
         self.lm_head_data = loader.load_lm_head(primary_dev)
+        self._deepseek_v4_hc_head = (
+            loader.load_deepseek_v4_hc_head(primary_dev)
+            if self.cfg.is_deepseek_v4
+            else None
+        )
 
         # ── VRAM checkpoint ──
         def _vram_snap(label):
@@ -5646,6 +5770,23 @@ class KrasisModel:
         Does NOT include KV cache, embedding, or lm_head.
         """
         total = 0
+        seen_storages: set[tuple[str, int, int]] = set()
+
+        def tensor_bytes(value) -> int:
+            if isinstance(value, torch.Tensor):
+                if value.device.type != 'cuda':
+                    return 0
+                storage = value.untyped_storage()
+                key = (str(value.device), storage.data_ptr(), storage.nbytes())
+                if key in seen_storages:
+                    return 0
+                seen_storages.add(key)
+                return storage.nbytes()
+            if isinstance(value, dict):
+                return sum(tensor_bytes(item) for item in value.values())
+            if isinstance(value, (tuple, list)):
+                return sum(tensor_bytes(item) for item in value)
+            return 0
         for layer in self.layers:
             # Norms
             if layer.input_norm_weight is not None:
@@ -5656,44 +5797,26 @@ class KrasisModel:
             # Attention weights (skip Mamba2/MoE-only layers which have no attention)
             attn = layer.attention
             if attn is not None:
-                for attr_name in dir(attn):
-                    val = getattr(attn, attr_name, None)
-                    if isinstance(val, torch.Tensor) and val.device.type == 'cuda':
-                        total += val.nelement() * val.element_size()
-                    elif isinstance(val, tuple) and len(val) == 2:
-                        # INT8 (weight, scale) tuple
-                        for t in val:
-                            if isinstance(t, torch.Tensor) and t.device.type == 'cuda':
-                                total += t.nelement() * t.element_size()
+                total += tensor_bytes(vars(attn))
 
             # Gate weights + shared expert (MoE layers)
             if layer.is_moe:
                 if layer.gate_weight is not None:
-                    total += layer.gate_weight.nelement() * layer.gate_weight.element_size()
+                    total += tensor_bytes(layer.gate_weight)
                 if layer.gate_bias is not None:
-                    total += layer.gate_bias.nelement() * layer.gate_bias.element_size()
+                    total += tensor_bytes(layer.gate_bias)
                 if layer.e_score_correction_bias is not None:
-                    total += layer.e_score_correction_bias.nelement() * layer.e_score_correction_bias.element_size()
+                    total += tensor_bytes(layer.e_score_correction_bias)
+                if getattr(layer, "router_tid2eid", None) is not None:
+                    total += tensor_bytes(layer.router_tid2eid)
                 if layer.shared_expert is not None:
-                    for v in layer.shared_expert.values():
-                        if isinstance(v, torch.Tensor):
-                            total += v.nelement() * v.element_size()
-                        elif isinstance(v, tuple):
-                            for t in v:
-                                if isinstance(t, torch.Tensor):
-                                    total += t.nelement() * t.element_size()
+                    total += tensor_bytes(layer.shared_expert)
                 if layer.shared_expert_gate is not None:
-                    total += layer.shared_expert_gate.nelement() * layer.shared_expert_gate.element_size()
+                    total += tensor_bytes(layer.shared_expert_gate)
 
             # Dense MLP (non-MoE layers)
             if not layer.is_moe and hasattr(layer, 'mlp') and layer.mlp is not None:
-                for v in layer.mlp.values():
-                    if isinstance(v, torch.Tensor):
-                        total += v.nelement() * v.element_size()
-                    elif isinstance(v, tuple):
-                        for t in v:
-                            if isinstance(t, torch.Tensor):
-                                total += t.nelement() * t.element_size()
+                total += tensor_bytes(layer.mlp)
 
         return total
 
@@ -8566,6 +8689,51 @@ class KrasisModel:
             return (w_int8.float() * scale.float().unsqueeze(1)).to(torch.bfloat16)
         return w
 
+    def _register_deepseek_v4_hash_tables(
+        self,
+        store,
+        device: torch.device,
+        keepalive: list,
+        layer_indices=None,
+    ) -> None:
+        if not self.cfg.is_deepseek_v4:
+            return
+        selected = range(len(self.layers)) if layer_indices is None else layer_indices
+        for layer_idx in selected:
+            layer = self.layers[layer_idx]
+            table = getattr(layer, "router_tid2eid", None)
+            if layer_idx < self.cfg.num_hash_layers:
+                if table is None:
+                    raise RuntimeError(
+                        f"DeepSeek-V4 hash layer {layer_idx} has no tid2eid table"
+                    )
+                expected = (self.cfg.vocab_size, self.cfg.num_experts_per_tok)
+                if tuple(table.shape) != expected or table.dtype != torch.int64:
+                    raise RuntimeError(
+                        f"DeepSeek-V4 hash layer {layer_idx} table contract "
+                        f"{tuple(table.shape)}/{table.dtype} != {expected}/torch.int64"
+                    )
+                minimum = int(table.min().item())
+                maximum = int(table.max().item())
+                if minimum < 0 or maximum >= self.cfg.n_routed_experts:
+                    raise RuntimeError(
+                        f"DeepSeek-V4 hash layer {layer_idx} expert range "
+                        f"[{minimum}, {maximum}] outside [0, {self.cfg.n_routed_experts})"
+                    )
+                table_i32 = table.to(
+                    device=device, dtype=torch.int32, non_blocking=True
+                ).contiguous()
+                keepalive.append(table_i32)
+                store.set_moe_deepseek_v4_hash_table(
+                    layer_idx=layer_idx,
+                    table_ptr=table_i32.data_ptr(),
+                    vocab_size=self.cfg.vocab_size,
+                )
+            elif table is not None:
+                raise RuntimeError(
+                    f"DeepSeek-V4 non-hash layer {layer_idx} unexpectedly has tid2eid"
+                )
+
     def setup_gpu_decode_store(self) -> "GpuDecodeStore":
         """Create and configure a GpuDecodeStore for Rust-native GPU decode.
 
@@ -8941,7 +9109,143 @@ class KrasisModel:
                     get_layer_scales, is_awq_scaled_tensor)
                 _layer_awq_scales = get_layer_scales(_awq_template, layer_idx)
 
-            if hqq_active:
+            if self.cfg.is_deepseek_v4:
+                if self._stream_attn_enabled:
+                    raise RuntimeError(
+                        "DeepSeek-V4 nested attention streaming is not implemented. "
+                        "The legacy flat GQA/LA streamer cannot represent compressor and "
+                        "indexer tensors, so startup stops instead of registering partial weights."
+                    )
+                v4 = attn.attention
+                hc = attn.hyper_connection
+
+                def _v4_register(weight, name):
+                    return _register_attn_weight(
+                        weight, layer_idx, "deepseek_v4", name
+                    )
+
+                v4_wids = {
+                    name: _v4_register(v4[name], name)
+                    for name in ("wq_a", "wq_b", "wkv", "wo_a", "wo_b")
+                }
+                cache, v4_offset = self._kv_cache_slot_for_layer(layer_idx)
+                v4_cache = cache.get_deepseek_v4_layer_caches(v4_offset)
+                raw_cache = v4_cache["raw"]
+                v4_max_seq = int(cache.max_context_tokens)
+                (
+                    v4_rope_cos_ptr,
+                    v4_rope_sin_ptr,
+                    v4_rope_rows,
+                    _v4_rope_cos,
+                    _v4_rope_sin,
+                ) = self._deepseek_v4_rope_table_ptrs(
+                    v4_max_seq, int(v4_cache["ratio"]), device
+                )
+                store.register_deepseek_v4_layer(
+                    layer_idx=layer_idx,
+                    input_norm_ptr=inp_norm.data_ptr(),
+                    input_norm_size=inp_norm.numel(),
+                    post_attn_norm_ptr=post_norm.data_ptr(),
+                    post_attn_norm_size=post_norm.numel(),
+                    wq_a_wid=v4_wids["wq_a"],
+                    wq_b_wid=v4_wids["wq_b"],
+                    wkv_wid=v4_wids["wkv"],
+                    wo_a_wid=v4_wids["wo_a"],
+                    wo_b_wid=v4_wids["wo_b"],
+                    attn_sink_ptr=v4["attn_sink"].data_ptr(),
+                    attn_sink_elems=v4["attn_sink"].numel(),
+                    q_norm_ptr=v4["q_norm"].data_ptr(),
+                    q_norm_elems=v4["q_norm"].numel(),
+                    kv_norm_ptr=v4["kv_norm"].data_ptr(),
+                    kv_norm_elems=v4["kv_norm"].numel(),
+                    num_heads=self.cfg.num_attention_heads,
+                    head_dim=self.cfg.attention_head_dim,
+                    rope_dim=self.cfg.qk_rope_head_dim,
+                    o_groups=self.cfg.o_groups,
+                    sliding_window=self.cfg.sliding_window,
+                    compress_ratio=int(v4_cache["ratio"]),
+                    compress_rope_theta=self.cfg.compress_rope_theta,
+                    raw_cache_ptr=raw_cache.data_ptr(),
+                    raw_cache_elems=raw_cache.numel(),
+                    rope_cos_ptr=v4_rope_cos_ptr,
+                    rope_sin_ptr=v4_rope_sin_ptr,
+                    rope_rows=v4_rope_rows,
+                    logical_max_seq=v4_max_seq,
+                )
+
+                if v4_cache["ratio"] > 0:
+                    compressor = v4["compressor"]
+                    compressed = v4_cache["compressed"]
+                    kv_state = v4_cache["compressor_kv_state"]
+                    score_state = v4_cache["compressor_score_state"]
+                    store.register_deepseek_v4_compressor(
+                        layer_idx=layer_idx,
+                        ape_wid=_v4_register(compressor["ape"], "compressor.ape"),
+                        wkv_wid=_v4_register(compressor["wkv"], "compressor.wkv"),
+                        wgate_wid=_v4_register(compressor["wgate"], "compressor.wgate"),
+                        norm_ptr=compressor["norm"].data_ptr(),
+                        norm_elems=compressor["norm"].numel(),
+                        cache_ptr=compressed.data_ptr(),
+                        cache_elems=compressed.numel(),
+                        cache_rows=compressed.shape[0],
+                        kv_state_ptr=kv_state.data_ptr(),
+                        kv_state_elems=kv_state.numel(),
+                        score_state_ptr=score_state.data_ptr(),
+                        score_state_elems=score_state.numel(),
+                    )
+
+                if v4_cache["ratio"] == 4:
+                    indexer = v4["indexer"]
+                    index_compressor = indexer["compressor"]
+                    index_cache = v4_cache["index"]
+                    index_kv_state = v4_cache["index_kv_state"]
+                    index_score_state = v4_cache["index_score_state"]
+                    store.register_deepseek_v4_indexer(
+                        layer_idx=layer_idx,
+                        wq_b_wid=_v4_register(indexer["wq_b"], "indexer.wq_b"),
+                        weights_proj_wid=_v4_register(
+                            indexer["weights_proj"], "indexer.weights_proj"
+                        ),
+                        ape_wid=_v4_register(
+                            index_compressor["ape"], "indexer.compressor.ape"
+                        ),
+                        compressor_wkv_wid=_v4_register(
+                            index_compressor["wkv"], "indexer.compressor.wkv"
+                        ),
+                        compressor_wgate_wid=_v4_register(
+                            index_compressor["wgate"], "indexer.compressor.wgate"
+                        ),
+                        norm_ptr=index_compressor["norm"].data_ptr(),
+                        norm_elems=index_compressor["norm"].numel(),
+                        cache_ptr=index_cache.data_ptr(),
+                        cache_elems=index_cache.numel(),
+                        cache_rows=index_cache.shape[0],
+                        kv_state_ptr=index_kv_state.data_ptr(),
+                        kv_state_elems=index_kv_state.numel(),
+                        score_state_ptr=index_score_state.data_ptr(),
+                        score_state_elems=index_score_state.numel(),
+                        index_topk=self.cfg.index_topk,
+                        index_n_heads=self.cfg.index_n_heads,
+                        index_head_dim=self.cfg.index_head_dim,
+                    )
+
+                store.register_deepseek_v4_hyper_connection(
+                    layer_idx=layer_idx,
+                    attn_fn_wid=_v4_register(hc["hc_attn_fn"], "hc_attn_fn"),
+                    attn_base_ptr=hc["hc_attn_base"].data_ptr(),
+                    attn_base_elems=hc["hc_attn_base"].numel(),
+                    attn_scale_ptr=hc["hc_attn_scale"].data_ptr(),
+                    attn_scale_elems=hc["hc_attn_scale"].numel(),
+                    ffn_fn_wid=_v4_register(hc["hc_ffn_fn"], "hc_ffn_fn"),
+                    ffn_base_ptr=hc["hc_ffn_base"].data_ptr(),
+                    ffn_base_elems=hc["hc_ffn_base"].numel(),
+                    ffn_scale_ptr=hc["hc_ffn_scale"].data_ptr(),
+                    ffn_scale_elems=hc["hc_ffn_scale"].numel(),
+                    mult=self.cfg.hc_mult,
+                    sinkhorn_iters=self.cfg.hc_sinkhorn_iters,
+                    eps=self.cfg.hc_eps,
+                )
+            elif hqq_active:
                 # HQQ registration below owns attention projection residency.
                 # Do not route HQQ tensors through the normal BF16/Marlin
                 # registration path, otherwise quantized attention becomes
@@ -9418,11 +9722,41 @@ class KrasisModel:
             else:
                 store.register_mlp(layer_idx, "none")
 
+        if self.cfg.is_deepseek_v4:
+            hc_head = self._deepseek_v4_hc_head
+            if hc_head is None:
+                raise RuntimeError("DeepSeek-V4 final hyper-connection head was not loaded")
+            store.register_deepseek_v4_head(
+                fn_wid=_register_attn_weight(
+                    hc_head["hc_head_fn"], -1, "deepseek_v4", "hc_head_fn"
+                ),
+                base_ptr=hc_head["hc_head_base"].data_ptr(),
+                base_elems=hc_head["hc_head_base"].numel(),
+                scale_ptr=hc_head["hc_head_scale"].data_ptr(),
+                scale_elems=hc_head["hc_head_scale"].numel(),
+                mult=self.cfg.hc_mult,
+                eps=self.cfg.hc_eps,
+            )
+            registered_v4_layers = store.finalize_deepseek_v4_layers()
+            if registered_v4_layers != self.cfg.num_hidden_layers:
+                raise RuntimeError(
+                    "DeepSeek-V4 runtime registration count mismatch: "
+                    f"{registered_v4_layers}/{self.cfg.num_hidden_layers}"
+                )
+            logger.info(
+                "DeepSeek-V4 runtime registration complete: %d/%d layers",
+                registered_v4_layers,
+                self.cfg.num_hidden_layers,
+            )
+
         self._finalize_mamba2_projection_int4_cache()
 
         # Register MoE expert data from engine (all MoE layers at once)
         if self.krasis_engine is not None:
             store.setup_from_engine(self.krasis_engine)
+            self._register_deepseek_v4_hash_tables(
+                store, device, self._rust_decode_weights
+            )
             if self.cfg.swiglu_limits or self.cfg.swiglu_limits_shared:
                 for layer_idx, layer in enumerate(self.layers):
                     if layer.is_moe:
@@ -10516,6 +10850,12 @@ class KrasisModel:
         # Register MoE expert data from engine (same engine, same CPU RAM data)
         if self.krasis_engine is not None:
             store.setup_from_engine(self.krasis_engine)
+            self._register_deepseek_v4_hash_tables(
+                store,
+                aux_device,
+                self._aux_decode_weights,
+                range(layer_start, layer_end),
+            )
             if self.cfg.swiglu_limits or self.cfg.swiglu_limits_shared:
                 for layer_idx, layer in enumerate(self.layers):
                     if layer.is_moe:

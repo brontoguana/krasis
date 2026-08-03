@@ -1,0 +1,13 @@
+warning: no usable GPU found, --gpu-layers option will be ignored
+warning: one possible reason is that llama.cpp was compiled without GPU support
+warning: consult docs/build.md for compilation instructions
+0.00.006.657 I Will perform strided perplexity calculation -> adjusting context size from 1536 to 2048
+2.10.511.171 I 
+2.10.511.326 I system_info: n_threads = 128 (n_threads_batch = 128) / 128 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+2.10.511.336 I perplexity_v2: tokenizing the input ..
+2.11.513.027 I perplexity_v2: have 287737 tokens. Calculation chunk = 2048
+2.11.513.037 I perplexity_v2: computing over 10 chunks, n_ctx=2048, batch_size=1536, n_seq=1
+3.03.614.599 I perplexity_v2: 52.10 seconds per pass - ETA 8.68 minutes
+[1]2.1090,[2]1.9247,[3]1.9323,[4]1.9436,[5]2.2036,[6]2.5377,[7]2.7717,[8]3.0755,[9]3.0412,[10]3.1069,
+
+10.59.528.048 W ~llama_context:        CPU compute buffer size of 307.3420 MiB, does not match expectation of 268.5098 MiB

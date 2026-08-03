@@ -6,6 +6,9 @@
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <limits.h>
+#include "deepseek_v4_hc.cuh"
+#include "deepseek_v4_attention.cuh"
+#include "deepseek_v4_compressor.cuh"
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -29,8 +32,18 @@ __device__ __forceinline__ float silu(float x) {
     return x / (1.0f + __expf(-x));
 }
 
-__device__ __forceinline__ void apply_swiglu_limit(float &silu_gate, float &up, float limit) {
-    if (limit > 0.0f) {
+__device__ __forceinline__ void apply_swiglu_limit(
+    float raw_gate,
+    float &silu_gate,
+    float &up,
+    float limit,
+    int mode
+) {
+    if (limit > 0.0f && mode == 2) {
+        float clamped_gate = fminf(raw_gate, limit);
+        up = fminf(fmaxf(up, -limit), limit);
+        silu_gate = silu(clamped_gate);
+    } else if (limit > 0.0f) {
         silu_gate = fminf(silu_gate, limit);
         up = fminf(fmaxf(up, -limit), limit);
     }
@@ -681,6 +694,326 @@ extern "C" __global__ void normalize_topk_weights(
         for (int t = 0; t < topk; t++) {
             topk_weights[t] *= inv;
         }
+    }
+}
+
+// DeepSeek-V4 routing contract. The score is sqrt(softplus(logit)); the
+// correction bias changes selection only, while routed weights are gathered
+// from the unbiased score, normalized over the selected set, and scaled.
+// Hash layers supply their exact expert IDs from tid2eid instead of selecting.
+// This correctness kernel is deliberately separate from legacy softmax and
+// sigmoid routing so unsupported combinations cannot silently alias either.
+extern "C" __global__ void deepseek_v4_sqrtsoftplus_topk(
+    const float* __restrict__ logits,              // [M, num_experts]
+    const float* __restrict__ correction_bias,     // [num_experts] or null
+    const int* __restrict__ hash_table,            // [vocab_size, topk] or null
+    const int* __restrict__ token_ids,             // [M] when hash_table is set
+    int* __restrict__ topk_indices,                // [M, topk]
+    float* __restrict__ topk_weights,              // [M, topk]
+    int num_experts,
+    int topk,
+    float routed_scaling_factor,
+    int hash_vocab_size
+) {
+    int row = (int)blockIdx.x;
+    if (threadIdx.x != 0 || num_experts <= 0 || topk <= 0) return;
+
+    const float* row_logits = logits + (long long)row * num_experts;
+    int* row_indices = topk_indices + (long long)row * topk;
+    float* row_weights = topk_weights + (long long)row * topk;
+
+    if (hash_table) {
+        int token_id = token_ids[row];
+        if (token_id < 0 || token_id >= hash_vocab_size) {
+            for (int slot = 0; slot < topk; ++slot) {
+                row_indices[slot] = -1;
+                row_weights[slot] = 0.0f;
+            }
+            return;
+        }
+        const int* row_hash = hash_table + (long long)token_id * topk;
+        for (int slot = 0; slot < topk; ++slot) row_indices[slot] = row_hash[slot];
+    } else {
+        for (int slot = 0; slot < topk; ++slot) {
+            float best = -3.402823466e+38F;
+            int best_idx = -1;
+            for (int expert = 0; expert < num_experts; ++expert) {
+                bool already_selected = false;
+                for (int prev = 0; prev < slot; ++prev) {
+                    if (row_indices[prev] == expert) {
+                        already_selected = true;
+                        break;
+                    }
+                }
+                if (already_selected) continue;
+                float x = row_logits[expert];
+                float softplus = fmaxf(x, 0.0f) + log1pf(expf(-fabsf(x)));
+                float selection = sqrtf(softplus);
+                if (correction_bias) selection += correction_bias[expert];
+                // Strict greater-than preserves the shipped left-to-right tie break.
+                if (selection > best) {
+                    best = selection;
+                    best_idx = expert;
+                }
+            }
+            row_indices[slot] = best_idx;
+        }
+    }
+
+    float sum = 0.0f;
+    for (int slot = 0; slot < topk; ++slot) {
+        int expert = row_indices[slot];
+        if (expert < 0 || expert >= num_experts) {
+            row_weights[slot] = 0.0f;
+            continue;
+        }
+        float x = row_logits[expert];
+        float softplus = fmaxf(x, 0.0f) + log1pf(expf(-fabsf(x)));
+        float weight = sqrtf(softplus);
+        row_weights[slot] = weight;
+        sum += weight;
+    }
+    if (sum > 0.0f) {
+        float scale = routed_scaling_factor / sum;
+        for (int slot = 0; slot < topk; ++slot) row_weights[slot] *= scale;
+    }
+}
+
+// Parallel learned-router score evaluation with the exact serial selection
+// and normalization contract above. Expensive sqrt(softplus) evaluations are
+// distributed across the block; thread 0 retains the shipped left-to-right
+// strict-greater scan, tie break, selected-weight recomputation, accumulation,
+// and scaling order. Hash routing remains valid here for parity testing, while
+// production keeps its already-cheap table lookup on the serial kernel.
+extern "C" __global__ void deepseek_v4_sqrtsoftplus_topk_parallel(
+    const float* __restrict__ logits,              // [M, num_experts]
+    const float* __restrict__ correction_bias,     // [num_experts] or null
+    const int* __restrict__ hash_table,            // [vocab_size, topk] or null
+    const int* __restrict__ token_ids,             // [M] when hash_table is set
+    int* __restrict__ topk_indices,                // [M, topk]
+    float* __restrict__ topk_weights,              // [M, topk]
+    int num_experts,
+    int topk,
+    float routed_scaling_factor,
+    int hash_vocab_size
+) {
+    int row = (int)blockIdx.x;
+    if (num_experts <= 0 || topk <= 0) return;
+
+    const float* row_logits = logits + (long long)row * num_experts;
+    int* row_indices = topk_indices + (long long)row * topk;
+    float* row_weights = topk_weights + (long long)row * topk;
+
+    if (hash_table) {
+        if (threadIdx.x != 0) return;
+        int token_id = token_ids[row];
+        if (token_id < 0 || token_id >= hash_vocab_size) {
+            for (int slot = 0; slot < topk; ++slot) {
+                row_indices[slot] = -1;
+                row_weights[slot] = 0.0f;
+            }
+            return;
+        }
+        const int* row_hash = hash_table + (long long)token_id * topk;
+        for (int slot = 0; slot < topk; ++slot) row_indices[slot] = row_hash[slot];
+    } else {
+        extern __shared__ float selection_scores[];
+        for (int expert = (int)threadIdx.x; expert < num_experts;
+             expert += (int)blockDim.x) {
+            float x = row_logits[expert];
+            float softplus = fmaxf(x, 0.0f) + log1pf(expf(-fabsf(x)));
+            float selection = sqrtf(softplus);
+            if (correction_bias) selection += correction_bias[expert];
+            selection_scores[expert] = selection;
+        }
+        __syncthreads();
+
+        if (threadIdx.x != 0) return;
+        for (int slot = 0; slot < topk; ++slot) {
+            float best = -3.402823466e+38F;
+            int best_idx = -1;
+            for (int expert = 0; expert < num_experts; ++expert) {
+                bool already_selected = false;
+                for (int prev = 0; prev < slot; ++prev) {
+                    if (row_indices[prev] == expert) {
+                        already_selected = true;
+                        break;
+                    }
+                }
+                if (already_selected) continue;
+                float selection = selection_scores[expert];
+                if (selection > best) {
+                    best = selection;
+                    best_idx = expert;
+                }
+            }
+            row_indices[slot] = best_idx;
+        }
+    }
+
+    if (threadIdx.x != 0) return;
+    float sum = 0.0f;
+    for (int slot = 0; slot < topk; ++slot) {
+        int expert = row_indices[slot];
+        if (expert < 0 || expert >= num_experts) {
+            row_weights[slot] = 0.0f;
+            continue;
+        }
+        float x = row_logits[expert];
+        float softplus = fmaxf(x, 0.0f) + log1pf(expf(-fabsf(x)));
+        float weight = sqrtf(softplus);
+        row_weights[slot] = weight;
+        sum += weight;
+    }
+    if (sum > 0.0f) {
+        float scale = routed_scaling_factor / sum;
+        for (int slot = 0; slot < topk; ++slot) row_weights[slot] *= scale;
+    }
+}
+
+// Parallel learned-router score evaluation and exact maximum selection.
+// Selection is comparison-only: each thread scans a config-derived strided
+// subset, then a shared-memory pair reduction chooses the greatest score and
+// lowest expert index. That reproduces the serial strict-greater left-to-right
+// tie break without changing any score or selected-weight arithmetic.
+extern "C" __global__ void deepseek_v4_sqrtsoftplus_topk_parallel_selection(
+    const float* __restrict__ logits,
+    const float* __restrict__ correction_bias,
+    const int* __restrict__ hash_table,
+    const int* __restrict__ token_ids,
+    int* __restrict__ topk_indices,
+    float* __restrict__ topk_weights,
+    int num_experts,
+    int topk,
+    float routed_scaling_factor,
+    int hash_vocab_size
+) {
+    int row = (int)blockIdx.x;
+    if (num_experts <= 0 || topk <= 0) return;
+
+    const float* row_logits = logits + (long long)row * num_experts;
+    int* row_indices = topk_indices + (long long)row * topk;
+    float* row_weights = topk_weights + (long long)row * topk;
+
+    if (hash_table) {
+        if (threadIdx.x != 0) return;
+        int token_id = token_ids[row];
+        if (token_id < 0 || token_id >= hash_vocab_size) {
+            for (int slot = 0; slot < topk; ++slot) {
+                row_indices[slot] = -1;
+                row_weights[slot] = 0.0f;
+            }
+            return;
+        }
+        const int* row_hash = hash_table + (long long)token_id * topk;
+        for (int slot = 0; slot < topk; ++slot) row_indices[slot] = row_hash[slot];
+    } else {
+        extern __shared__ unsigned char deepseek_v4_topk_smem[];
+        float* selection_scores =
+            reinterpret_cast<float*>(deepseek_v4_topk_smem);
+        float* reduction_scores = selection_scores + num_experts;
+        int* reduction_indices = reinterpret_cast<int*>(
+            reduction_scores + (int)blockDim.x);
+
+        for (int expert = (int)threadIdx.x; expert < num_experts;
+             expert += (int)blockDim.x) {
+            float x = row_logits[expert];
+            float softplus = fmaxf(x, 0.0f) + log1pf(expf(-fabsf(x)));
+            float selection = sqrtf(softplus);
+            if (correction_bias) selection += correction_bias[expert];
+            selection_scores[expert] = selection;
+        }
+        __syncthreads();
+
+        for (int slot = 0; slot < topk; ++slot) {
+            float local_best = -3.402823466e+38F;
+            int local_idx = -1;
+            for (int expert = (int)threadIdx.x; expert < num_experts;
+                 expert += (int)blockDim.x) {
+                bool already_selected = false;
+                for (int prev = 0; prev < slot; ++prev) {
+                    if (row_indices[prev] == expert) {
+                        already_selected = true;
+                        break;
+                    }
+                }
+                if (already_selected) continue;
+                float selection = selection_scores[expert];
+                if (selection > local_best) {
+                    local_best = selection;
+                    local_idx = expert;
+                }
+            }
+            reduction_scores[threadIdx.x] = local_best;
+            reduction_indices[threadIdx.x] = local_idx;
+            __syncthreads();
+
+            int stride = 1;
+            while (stride < (int)blockDim.x) stride <<= 1;
+            stride >>= 1;
+            for (; stride > 0; stride >>= 1) {
+                int other = (int)threadIdx.x + stride;
+                if ((int)threadIdx.x < stride && other < (int)blockDim.x) {
+                    float other_score = reduction_scores[other];
+                    int other_idx = reduction_indices[other];
+                    float own_score = reduction_scores[threadIdx.x];
+                    int own_idx = reduction_indices[threadIdx.x];
+                    if (other_idx >= 0 &&
+                        (own_idx < 0 || other_score > own_score ||
+                         (other_score == own_score && other_idx < own_idx))) {
+                        reduction_scores[threadIdx.x] = other_score;
+                        reduction_indices[threadIdx.x] = other_idx;
+                    }
+                }
+                __syncthreads();
+            }
+            if (threadIdx.x == 0) row_indices[slot] = reduction_indices[0];
+            __syncthreads();
+        }
+    }
+
+    if (threadIdx.x != 0) return;
+    float sum = 0.0f;
+    for (int slot = 0; slot < topk; ++slot) {
+        int expert = row_indices[slot];
+        if (expert < 0 || expert >= num_experts) {
+            row_weights[slot] = 0.0f;
+            continue;
+        }
+        float x = row_logits[expert];
+        float softplus = fmaxf(x, 0.0f) + log1pf(expf(-fabsf(x)));
+        float weight = sqrtf(softplus);
+        row_weights[slot] = weight;
+        sum += weight;
+    }
+    if (sum > 0.0f) {
+        float scale = routed_scaling_factor / sum;
+        for (int slot = 0; slot < topk; ++slot) row_weights[slot] *= scale;
+    }
+}
+
+// DeepSeek-V4 clamps the raw gate (upper bound only) and raw up projection
+// (symmetric bound) before applying SiLU. This differs from the existing
+// Step/GPT-OSS limited kernels, which must remain numerically unchanged.
+extern "C" __global__ void deepseek_v4_swiglu_bf16(
+    unsigned short* __restrict__ output,
+    const unsigned short* __restrict__ gate_up,
+    int intermediate_size,
+    float limit
+) {
+    int row = (int)blockIdx.x;
+    int index = (int)threadIdx.x;
+    for (int i = index; i < intermediate_size; i += (int)blockDim.x) {
+        long long base = (long long)row * intermediate_size * 2;
+        float gate = __bfloat162float(
+            *reinterpret_cast<const __nv_bfloat16*>(&gate_up[base + i]));
+        float up = __bfloat162float(
+            *reinterpret_cast<const __nv_bfloat16*>(&gate_up[base + intermediate_size + i]));
+        gate = fminf(gate, limit);
+        up = fminf(fmaxf(up, -limit), limit);
+        __nv_bfloat16 value = __float2bfloat16(silu(gate) * up);
+        output[(long long)row * intermediate_size + i] =
+            *reinterpret_cast<unsigned short*>(&value);
     }
 }
 
@@ -4207,7 +4540,8 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum(
     int group_size,
     float weight,       // routing weight for this expert
     const float* weight_ptr, // optional: if non-NULL, weight = sigmoid(*weight_ptr)
-    float swiglu_limit
+    float swiglu_limit,
+    int swiglu_mode
 ) {
     // If weight_ptr is non-NULL, read the gate logit and apply sigmoid on GPU
     if (weight_ptr != NULL) {
@@ -4226,7 +4560,7 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
-        apply_swiglu_limit(silu_g, u, swiglu_limit);
+        apply_swiglu_limit(g, silu_g, u, swiglu_limit, swiglu_mode);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -4343,7 +4677,8 @@ extern "C" __global__ void marlin_gemv_int8_fused_silu_accum(
     int K, int N, int group_size,
     float weight,
     const float* weight_ptr,
-    float swiglu_limit
+    float swiglu_limit,
+    int swiglu_mode
 ) {
     if (weight_ptr != NULL) {
         weight = 1.0f / (1.0f + __expf(-(*weight_ptr)));
@@ -4360,7 +4695,7 @@ extern "C" __global__ void marlin_gemv_int8_fused_silu_accum(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
-        apply_swiglu_limit(silu_g, u, swiglu_limit);
+        apply_swiglu_limit(g, silu_g, u, swiglu_limit, swiglu_mode);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -5052,7 +5387,8 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum_v2(
     const int* __restrict__ inv_weight_perm,    // [1024]
     const int* __restrict__ inv_scale_perm,     // [64]
     int K, int N, int group_size, int k_splits,
-    float swiglu_limit
+    float swiglu_limit,
+    int swiglu_mode
 ) {
     extern __shared__ char smem_raw[];
     unsigned short* s_input = (unsigned short*)smem_raw;
@@ -5067,7 +5403,7 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum_v2(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
-        apply_swiglu_limit(silu_g, u, swiglu_limit);
+        apply_swiglu_limit(g, silu_g, u, swiglu_limit, swiglu_mode);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -5186,7 +5522,8 @@ extern "C" __global__ void marlin_gemv_int8_fused_silu_accum_v2(
     const int* __restrict__ inv_weight_perm,
     const int* __restrict__ inv_scale_perm,
     int K, int N, int group_size, int k_splits,
-    float swiglu_limit
+    float swiglu_limit,
+    int swiglu_mode
 ) {
     extern __shared__ char smem_raw[];
     unsigned short* s_input = (unsigned short*)smem_raw;
@@ -5200,7 +5537,7 @@ extern "C" __global__ void marlin_gemv_int8_fused_silu_accum_v2(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
-        apply_swiglu_limit(silu_g, u, swiglu_limit);
+        apply_swiglu_limit(g, silu_g, u, swiglu_limit, swiglu_mode);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -5769,6 +6106,7 @@ extern "C" __global__ void fused_silu_w2_batched(
     const int* __restrict__ inv_scale_perm,
     int K, int N, int group_size,
     float swiglu_limit,
+    int swiglu_mode,
     const float* __restrict__ weights                       // [num_experts] - skip if zero
 ) {
     int expert_idx = blockIdx.z;
@@ -5790,7 +6128,7 @@ extern "C" __global__ void fused_silu_w2_batched(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
-        apply_swiglu_limit(silu_g, u, swiglu_limit);
+        apply_swiglu_limit(g, silu_g, u, swiglu_limit, swiglu_mode);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -5898,6 +6236,7 @@ extern "C" __global__ void fused_silu_w2_batched_timed(
     const int* __restrict__ inv_scale_perm,
     int K, int N, int group_size,
     float swiglu_limit,
+    int swiglu_mode,
     const float* __restrict__ weights,
     unsigned long long* __restrict__ debug_clocks,
     int clock_base,
@@ -5951,7 +6290,7 @@ extern "C" __global__ void fused_silu_w2_batched_timed(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&g_bits));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&u_bits));
         float silu_g = g / (1.0f + __expf(-g));
-        apply_swiglu_limit(silu_g, u, swiglu_limit);
+        apply_swiglu_limit(g, silu_g, u, swiglu_limit, swiglu_mode);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         unsigned long long t_math_end = 0;
         if (sample_iter) {
@@ -6096,6 +6435,7 @@ extern "C" __global__ void fused_silu_w2_int8_batched(
     const int* __restrict__ inv_scale_perm,
     int K, int N, int group_size,
     float swiglu_limit,
+    int swiglu_mode,
     const float* __restrict__ weights                       // [num_experts] — skip if zero
 ) {
     int expert_idx = blockIdx.z;
@@ -6117,7 +6457,7 @@ extern "C" __global__ void fused_silu_w2_int8_batched(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
-        apply_swiglu_limit(silu_g, u, swiglu_limit);
+        apply_swiglu_limit(g, silu_g, u, swiglu_limit, swiglu_mode);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }

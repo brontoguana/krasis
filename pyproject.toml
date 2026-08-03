@@ -47,6 +47,7 @@ python-source = "python"
 module-name = "krasis.krasis"
 include = [
     {path = "python/krasis/prompts/*", format = "wheel"},
+    {path = "python/krasis/chat_templates/*", format = "wheel"},
     {path = "python/krasis/libkrasis*.so", format = "wheel"},
     {path = "python/krasis/*.dll", format = "wheel"},
     {path = "python/krasis/fla_sidecar_contract.json", format = "wheel"},

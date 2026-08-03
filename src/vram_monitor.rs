@@ -514,7 +514,7 @@ pub struct VramMonitor {
     running: Arc<AtomicBool>,
     warn_enabled: Arc<AtomicBool>,
     safety_margin_bytes: Arc<AtomicU64>,
-    poll_interval_ms: u64,
+    poll_interval_ms: Arc<AtomicU64>,
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -527,6 +527,11 @@ impl VramMonitor {
         poll_interval_ms: u64,
         safety_margin_mb: u64,
     ) -> PyResult<Self> {
+        if !(1..=1000).contains(&poll_interval_ms) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "VRAM monitor poll interval must be between 1 and 1000 milliseconds",
+            ));
+        }
         let devices: Vec<DeviceState> = device_indices
             .into_iter()
             .map(|id| DeviceState {
@@ -541,7 +546,7 @@ impl VramMonitor {
             running: Arc::new(AtomicBool::new(false)),
             warn_enabled: Arc::new(AtomicBool::new(false)),
             safety_margin_bytes: Arc::new(AtomicU64::new(safety_margin_mb * 1024 * 1024)),
-            poll_interval_ms,
+            poll_interval_ms: Arc::new(AtomicU64::new(poll_interval_ms)),
             thread_handle: None,
         })
     }
@@ -565,7 +570,7 @@ impl VramMonitor {
         let running = self.running.clone();
         let warn_enabled = self.warn_enabled.clone();
         let safety_margin = self.safety_margin_bytes.clone();
-        let poll_ms = self.poll_interval_ms;
+        let poll_interval_ms = self.poll_interval_ms.clone();
 
         let handle = thread::Builder::new()
             .name("vram-monitor".into())
@@ -593,12 +598,10 @@ impl VramMonitor {
                 log::info!(
                     "VRAM monitor started: {} device(s), poll interval {}ms",
                     devices.len(),
-                    poll_ms,
+                    poll_interval_ms.load(Ordering::Relaxed),
                 );
 
-                let interval = Duration::from_millis(poll_ms);
-                let report_every = std::cmp::max(1, 200 / poll_ms); // ~200ms between samples
-                let mut poll_count = 0u64;
+                let mut report_elapsed_ms = 0u64;
 
                 while running.load(Ordering::Acquire) {
                     let mut readings = Vec::with_capacity(devices.len());
@@ -677,12 +680,14 @@ impl VramMonitor {
                     }
 
                     // Record periodic sample for VRAM report (every ~200ms)
-                    poll_count += 1;
-                    if poll_count % report_every == 0 {
+                    let poll_ms = poll_interval_ms.load(Ordering::Relaxed).clamp(1, 1000);
+                    report_elapsed_ms = report_elapsed_ms.saturating_add(poll_ms);
+                    if report_elapsed_ms >= 200 {
                         report_sample(readings);
+                        report_elapsed_ms %= 200;
                     }
 
-                    thread::sleep(interval);
+                    thread::sleep(Duration::from_millis(poll_ms));
                 }
 
                 log::info!("VRAM monitor stopped");
@@ -795,6 +800,20 @@ impl VramMonitor {
     fn set_safety_margin_mb(&self, margin_mb: u64) {
         self.safety_margin_bytes
             .store(margin_mb * 1024 * 1024, Ordering::Relaxed);
+    }
+
+    /// Change the polling cadence and return the previous value. Startup
+    /// calibration uses a high-resolution cadence, then restores the normal
+    /// runtime cadence before serving requests or collecting speed evidence.
+    fn set_poll_interval_ms(&self, poll_interval_ms: u64) -> PyResult<u64> {
+        if !(1..=1000).contains(&poll_interval_ms) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "VRAM monitor poll interval must be between 1 and 1000 milliseconds",
+            ));
+        }
+        Ok(self
+            .poll_interval_ms
+            .swap(poll_interval_ms, Ordering::AcqRel))
     }
 
     // ── VRAM Report methods ──

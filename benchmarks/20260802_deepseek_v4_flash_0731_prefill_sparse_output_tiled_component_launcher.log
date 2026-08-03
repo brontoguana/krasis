@@ -1,0 +1,1265 @@
+[0;36m[1m=>[0m Decode timing ENABLED (adds ~30-50% overhead — not for speed benchmarks)
+[0;36m[1m=>[0m Waiting for selected GPUs (6000) to clear...
+[0;32m[1mOK[0m Selected GPUs (6000) clear.
+[0;36m[1m=>[0m Running standard benchmark: tests/deepseek-v4-flash-0731-bf16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260802_104113
+[0;36m[1m=>[0m Log: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260802_104113/benchmark_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d
+Loaded config from tests/deepseek-v4-flash-0731-bf16.conf: {'model_path': '/home/main/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-0731', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d', 'num_gpus': 1, 'layer_group_size': 1, 'kv_cache_mb': 1000, 'kv_dtype': 'bf16', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'bf16', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '127.0.0.1', 'port': 18220, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — DeepSeek-V4-Flash-0731[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (config; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: bf16  |  KV: bf16[0m
+  [32mLayer groups: 1  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+  [33mUNVALIDATED BF16 debug path enabled: attention=BF16. This path likely contains unknown bugs and must not be used as a correctness oracle. Use HF Transformers BF16 reference data for validation; production runs must use quantized configs.[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=557 MB, free=96700 MB, total=97258 MB
+
+[1m[36m▸ Loading GPU weights[0m
+DeepSeek-V4 checkpoint namespace inventory: 67606 layers.* main tensors across 43 layers; 4705 mtp.* auxiliary tensors across blocks [0, 1, 2] explicitly skipped; 6 root main tensors; unexpected=0
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=12696 MB, reserved=12716 MB, used=13381 MB, free=83876 MB, total=97258 MB
+  [0;32mAttention resident on GPU (10970 MB), 83876 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 43 layers...
+    GPU Marlin cache loaded: 143.4 GB in 93s
+  [0;32mExpert weights loaded in 93s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=12696 MB, reserved=12716 MB, used=13381 MB, free=83876 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=12696 MB, reserved=12716 MB, used=13381 MB, free=83876 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=13702 MB, reserved=13750 MB, used=14415 MB, free=82842 MB, total=97258 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=13702 MB, reserved=13750 MB, used=14415 MB, free=82842 MB, total=97258 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x57793560)[0m
+  [32mReleased redundant GPU execution source tensors (677 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+[PREFILL-TIMING] 300 tokens, 2118.6ms total (142 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  2099.0ms ( 99.1% of prefill) event=  2095.8ms sync=   321.1ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     8.7ms event=     8.4ms sync=     8.0ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=   119.5ms event=   119.3ms sync=     0.8ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     9.6ms event=     9.4ms sync=     8.0ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=    10.0ms event=     9.8ms sync=     7.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     7.2ms event=     7.0ms sync=     6.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=    22.6ms event=    22.3ms sync=     0.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=   225.3ms event=   225.0ms sync=   225.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=    45.1ms event=    44.8ms sync=    44.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=    11.0ms event=    10.7ms sync=     9.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     1.1ms event=     0.8ms sync=     0.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     8.6ms event=     8.4ms sync=     8.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1629.1ms event=  1628.9ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     1.1ms event=     0.8ms sync=     0.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]   moe:      1628.9ms ( 76.9%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:        31.3ms (  1.9% of moe)
+[PREFILL-TIMING]       dma:       1274.2ms ( 78.2% of moe)
+[PREFILL-TIMING]         route_d2h:     1.1ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     21.4ms ptr_upload:     0.4ms dma_wait:  1229.8ms
+[PREFILL-TIMING]       w1+act:     305.4ms ( 18.7% of moe)
+[PREFILL-TIMING]       w2:          15.5ms (  1.0% of moe)
+[PREFILL-TIMING]       scatter:      0.8ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.8ms (  0.0% of moe)
+[PREFILL-TIMING]   other:      19.5ms (  0.9%)
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 3.7s[0m
+  [2mcuda:0 warmup:  peak 94,817 MB used / 97,258 MB total  (min free: 2,440 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 81,052 MB / 97,258 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+[PREFILL-TIMING] 500 tokens, 4304.2ms total (116 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  4302.0ms ( 99.9% of prefill) event=  4298.7ms sync=   609.6ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=    13.2ms event=    12.8ms sync=    12.6ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     2.3ms event=     2.1ms sync=     1.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=    15.0ms event=    14.7ms sync=    13.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=    16.6ms event=    16.4ms sync=    14.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     8.6ms event=     8.3ms sync=     7.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     2.0ms event=     1.7ms sync=     0.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=   444.8ms event=   444.6ms sync=   444.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=    88.8ms event=    88.5ms sync=    88.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=    11.9ms event=    11.6ms sync=    10.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     1.4ms event=     1.2ms sync=     1.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=    13.1ms event=    12.8ms sync=    12.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  3682.9ms event=  3682.7ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     1.3ms event=     1.1ms sync=     1.1ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      3682.7ms ( 85.6%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.8ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       3575.5ms ( 97.1% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.4ms
+[PREFILL-TIMING]         cold_h2d:     61.1ms ptr_upload:     0.4ms dma_wait:  3511.5ms
+[PREFILL-TIMING]       w1+act:      66.4ms (  1.8% of moe)
+[PREFILL-TIMING]       w2:          35.0ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      1.2ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.9ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.1ms (  0.0%)
+  [32mdecode: 32 tokens in 5.20s (6.1 tok/s)  VRAM: 80990 MB free now, 80990 MB min free during decode[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (32 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        160.92 ms/tok  (  6.2 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:  10.40 ms  ( 6.5%)            [36m│[0m
+  [36m│[0m    Sync wait:   147.00 ms  (91.4%)            [36m│[0m
+  [36m│[0m      inter:     143.29 ms  final:  3.70 ms     [36m│[0m
+  [36m│[0m    Classify:      0.05 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.32 ms  ( 1.4%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        1.05 ms  ( 0.7%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 26.17 ms                  [36m│[0m
+  [36m│[0m    First route:   0.28 ms  ( 1.1%)        [36m│[0m
+  [36m│[0m    Middle segs:  25.01 ms  (95.6%)        [36m│[0m
+  [36m│[0m    Final seg:     0.88 ms  ( 3.4%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.28 ms/tok (0.28 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  25.01 ms/tok (0.60 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.88 ms/tok (0.88 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.28 ms/tok (0.28 ms/seg) [36m│[0m
+  [36m│[0m    GQA route: 143.01 ms/tok (3.41 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.70 ms/tok (3.70 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #43   3.70 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #40   3.54 ms  graph40 experts L39 + route L40 GQA   [36m│[0m
+  [36m│[0m    #4    3.52 ms  graph4 experts L3 + route L4 GQA      [36m│[0m
+  [36m│[0m    #16   3.52 ms  graph16 experts L15 + route L16 GQA   [36m│[0m
+  [36m│[0m    #36   3.51 ms  graph36 experts L35 + route L36 GQA   [36m│[0m
+  [36m│[0m    #32   3.50 ms  graph32 experts L31 + route L32 GQA   [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #43   0.88 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #40   0.64 ms  graph40 experts L39 + route L40 GQA   [36m│[0m
+  [36m│[0m    #42   0.64 ms  graph42 experts L41 + route L42 GQA   [36m│[0m
+  [36m│[0m    #34   0.64 ms  graph34 experts L33 + route L34 GQA   [36m│[0m
+  [36m│[0m    #24   0.64 ms  graph24 experts L23 + route L24 GQA   [36m│[0m
+  [36m│[0m    #36   0.64 ms  graph36 experts L35 + route L36 GQA   [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2231.9 MB W2: 1115.9 MB shared: 558.0 MB [36m│[0m
+  [36m│[0m    Router:   90.2 MB LA in/out:    0.0/   0.0 MB [36m│[0m
+  [36m│[0m    LA state R+W:   0.0 MB GQA in/out:   0.0/   0.0 MB LM:1059.1 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 258.0 (1032 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  0.0 (0 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    3192.75 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     0/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 3168.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 123.78 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    26.20 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #40  H2D  2.96 | hot 0.00 | graph 0.64  [36m│[0m
+  [36m│[0m         wait  3.54 ms |  71.9 MB | 5.81 cold [36m│[0m
+  [36m│[0m    #25  H2D  2.95 | hot 0.00 | graph 0.56  [36m│[0m
+  [36m│[0m         wait  3.42 ms |  71.9 MB | 5.81 cold [36m│[0m
+  [36m│[0m    #4   H2D  2.94 | hot 0.00 | graph 0.64  [36m│[0m
+  [36m│[0m         wait  3.52 ms |  71.9 MB | 5.81 cold [36m│[0m
+  [36m│[0m    #16  H2D  2.94 | hot 0.00 | graph 0.64  [36m│[0m
+  [36m│[0m         wait  3.52 ms |  71.9 MB | 5.81 cold [36m│[0m
+  [36m│[0m    #36  H2D  2.93 | hot 0.00 | graph 0.64  [36m│[0m
+  [36m│[0m         wait  3.51 ms |  71.9 MB | 5.81 cold [36m│[0m
+  [36m│[0m    #33  H2D  2.92 | hot 0.00 | graph 0.56  [36m│[0m
+  [36m│[0m         wait  3.40 ms |  71.9 MB | 5.81 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mShort calibration: baseline=81,052 MB, prefill post-alloc=3,768 MB, prefill min=612 MB, decode min=80,990 MB, post-cleanup=80,990 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=2.7001 MB/token[0m
+  [32mAdaptive long calibration: using 500 tokens (current low-water 612 MB is at/below adaptive floor 1200 MB)[0m
+  [32mScratch reservation: max=135,475 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 80,990 MB[0m
+  [32mTransient deltas: short prefill=80,440 MB, long prefill=80,440 MB, short decode=62 MB, long decode=62 MB[0m
+  [32mGPU0 decode HCS budget: 80,328 MB[0m
+  [32mPrefill HCS budgets: short=0 MB, long=0 MB[0m
+  [32mWorst-case prefill scratch reservation: 135,475 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [2mNo approved heatmap artifact matches this model/router signature and validated runtime; falling back to quick startup heatmap generation[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+  [2mQuick heatmap prompt 1/6: 27 prefill tokens + 256 decode tokens[0m
+[PREFILL-TIMING] 27 tokens, 1363.6ms total (20 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1361.4ms ( 99.8% of prefill) event=  1358.2ms sync=    22.5ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.7ms event=     2.5ms sync=     2.1ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.7ms event=     2.5ms sync=     1.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     2.7ms event=     2.5ms sync=     1.0ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.0ms event=     2.8ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.3ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     5.8ms event=     5.6ms sync=     5.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.8ms event=     1.6ms sync=     1.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.1ms event=     4.9ms sync=     4.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.6ms event=     2.4ms sync=     2.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1330.2ms event=  1330.0ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      1330.0ms ( 97.5%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.6ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1291.8ms ( 97.1% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     22.5ms ptr_upload:     0.4ms dma_wait:  1257.4ms
+[PREFILL-TIMING]       w1+act:      21.6ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          11.9ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.1ms (  0.2%)
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (288 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        165.47 ms/tok  (  6.0 tok/s)    [36m│[0m
+  [36m│[0m  Graph replay hides per-component kernels.      [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 258.0/tok | HCS   0.0/tok | 3192.75 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 1032.0/tok | HCS cache 0 | hit/miss 0/66048 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [2mQuick heatmap prompt 1/6 done: 257 route tokens, 44.7s (elapsed 44.7s, eta 223.6s)[0m
+  [2mQuick heatmap prompt 2/6: 35 prefill tokens + 256 decode tokens[0m
+[PREFILL-TIMING] 35 tokens, 1613.1ms total (22 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1610.9ms ( 99.9% of prefill) event=  1607.5ms sync=    27.0ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.9ms event=     2.6ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.4ms sync=     0.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     3.1ms event=     2.7ms sync=     1.6ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     3.0ms event=     2.8ms sync=     1.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     6.5ms event=     6.3ms sync=     2.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     7.9ms event=     7.6ms sync=     7.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     2.2ms event=     1.9ms sync=     2.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     6.3ms event=     6.0ms sync=     5.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.9ms event=     2.7ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1571.5ms event=  1571.2ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]   moe:      1571.2ms ( 97.4%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.7ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1527.2ms ( 97.2% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     26.7ms ptr_upload:     0.4ms dma_wait:  1497.9ms
+[PREFILL-TIMING]       w1+act:      25.2ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          14.0ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.2ms (  0.1%)
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (544 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        165.77 ms/tok  (  6.0 tok/s)    [36m│[0m
+  [36m│[0m  Graph replay hides per-component kernels.      [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 258.0/tok | HCS   0.0/tok | 3192.75 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 1032.0/tok | HCS cache 0 | hit/miss 0/132096 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [2mQuick heatmap prompt 2/6 done: 257 route tokens, 45.0s (elapsed 89.8s, eta 179.5s)[0m
+  [2mQuick heatmap prompt 3/6: 27 prefill tokens + 256 decode tokens[0m
+[PREFILL-TIMING] 27 tokens, 1325.9ms total (20 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1323.7ms ( 99.8% of prefill) event=  1320.4ms sync=    22.6ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.7ms event=     2.5ms sync=     2.1ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.5ms event=     1.3ms sync=     0.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.7ms event=     2.5ms sync=     1.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     2.7ms event=     2.5ms sync=     1.0ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.0ms event=     2.7ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.3ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     5.8ms event=     5.5ms sync=     5.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.8ms event=     1.6ms sync=     1.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.2ms event=     5.0ms sync=     4.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.7ms event=     2.4ms sync=     2.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1292.4ms event=  1292.2ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      1292.2ms ( 97.5%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.6ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1254.4ms ( 97.1% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     21.9ms ptr_upload:     0.4ms dma_wait:  1229.9ms
+[PREFILL-TIMING]       w1+act:      21.4ms (  1.7% of moe)
+[PREFILL-TIMING]       w2:          11.7ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.2ms (  0.2%)
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (800 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        166.72 ms/tok  (  6.0 tok/s)    [36m│[0m
+  [36m│[0m  Graph replay hides per-component kernels.      [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 258.0/tok | HCS   0.0/tok | 3192.75 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 1032.0/tok | HCS cache 0 | hit/miss 0/198144 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [2mQuick heatmap prompt 3/6 done: 257 route tokens, 45.4s (elapsed 135.2s, eta 135.2s)[0m
+  [2mQuick heatmap prompt 4/6: 21 prefill tokens + 256 decode tokens[0m
+[PREFILL-TIMING] 21 tokens, 1270.4ms total (17 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1268.3ms ( 99.8% of prefill) event=  1265.1ms sync=    20.4ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.5ms event=     2.3ms sync=     1.9ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.6ms event=     2.4ms sync=     1.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     2.6ms event=     2.4ms sync=     1.0ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.1ms event=     2.8ms sync=     2.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.3ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     4.4ms event=     4.2ms sync=     4.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.5ms event=     1.2ms sync=     1.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.2ms event=     5.0ms sync=     4.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.5ms event=     2.2ms sync=     1.9ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1239.2ms event=  1239.0ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      1239.0ms ( 97.5%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.6ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1202.8ms ( 97.1% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     20.9ms ptr_upload:     0.4ms dma_wait:  1179.5ms
+[PREFILL-TIMING]       w1+act:      20.3ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          11.2ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.1ms (  0.2%)
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (1056 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        166.59 ms/tok  (  6.0 tok/s)    [36m│[0m
+  [36m│[0m  Graph replay hides per-component kernels.      [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 258.0/tok | HCS   0.0/tok | 3192.75 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 1032.0/tok | HCS cache 0 | hit/miss 0/264192 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [2mQuick heatmap prompt 4/6 done: 257 route tokens, 44.7s (elapsed 179.9s, eta 89.9s)[0m
+  [2mQuick heatmap prompt 5/6: 32 prefill tokens + 256 decode tokens[0m
+[PREFILL-TIMING] 32 tokens, 1531.7ms total (21 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1529.5ms ( 99.9% of prefill) event=  1526.3ms sync=    24.5ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.8ms event=     2.6ms sync=     2.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.9ms event=     2.6ms sync=     1.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     2.9ms event=     2.6ms sync=     1.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.1ms event=     2.8ms sync=     2.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.3ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     7.0ms event=     6.7ms sync=     6.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     2.0ms event=     1.8ms sync=     1.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.1ms event=     4.9ms sync=     4.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.8ms event=     2.5ms sync=     2.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1496.3ms event=  1496.1ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      1496.1ms ( 97.7%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.5ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1454.1ms ( 97.2% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     25.5ms ptr_upload:     0.4ms dma_wait:  1425.9ms
+[PREFILL-TIMING]       w1+act:      24.2ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          13.3ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.1ms (  0.1%)
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (1312 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        167.06 ms/tok  (  6.0 tok/s)    [36m│[0m
+  [36m│[0m  Graph replay hides per-component kernels.      [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 258.0/tok | HCS   0.0/tok | 3192.75 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 1032.0/tok | HCS cache 0 | hit/miss 0/330240 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [2mQuick heatmap prompt 5/6 done: 257 route tokens, 45.7s (elapsed 225.6s, eta 45.1s)[0m
+  [2mQuick heatmap prompt 6/6: 38 prefill tokens + 256 decode tokens[0m
+[PREFILL-TIMING] 38 tokens, 1622.1ms total (23 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1619.9ms ( 99.9% of prefill) event=  1616.4ms sync=    28.8ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.9ms event=     2.7ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.4ms sync=     0.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     3.0ms event=     2.8ms sync=     1.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     3.1ms event=     2.9ms sync=     1.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     6.6ms event=     6.3ms sync=     2.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     8.8ms event=     8.5ms sync=     8.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     2.4ms event=     2.2ms sync=     2.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     6.2ms event=     6.0ms sync=     5.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     3.0ms event=     2.7ms sync=     2.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1579.0ms event=  1578.7ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.9ms event=     0.5ms sync=     0.6ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]   moe:      1578.7ms ( 97.3%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.7ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1534.7ms ( 97.2% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     26.4ms ptr_upload:     0.4ms dma_wait:  1502.0ms
+[PREFILL-TIMING]       w1+act:      25.3ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          14.0ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.2ms (  0.1%)
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (1568 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        166.94 ms/tok  (  6.0 tok/s)    [36m│[0m
+  [36m│[0m  Graph replay hides per-component kernels.      [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 258.0/tok | HCS   0.0/tok | 3192.75 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 1032.0/tok | HCS cache 0 | hit/miss 0/396288 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [2mQuick heatmap prompt 6/6 done: 257 route tokens, 45.1s (elapsed 270.7s, eta 0.0s)[0m
+  [32mHeatmap: 9,419 experts ranked from 9,419 entries[0m
+  [2mVRAM calibration: baseline 80990 MB | prefill 0.0 KB/tok, decode 0.0 KB/tok | HCS allowance prefill: short 0 MB, long 0 MB | decode: short 80328 MB, long 80328 MB | idle floors prefill=80990 MB decode=662 MB | decode-resident HCS budget=80328 MB[0m
+  [2mGPU0 HCS: 11008 experts (9419 ranked + 1589 unranked), reclaimable: 80,328 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/11008 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 6440 experts in 3.42s (79695.0 MB, host_mode=source) | total: 6440/11008 (58.5%) coverage[0m
+  [2mLoaded in 3.5s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mDeepSeek-V4-Flash-0731[0m
+  [32mAddress:[0m  [1m127.0.0.1:18220[0m
+  [32mContext:[0m  149,808 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18220/v1[0m
+    Chat endpoint: http://127.0.0.1:18220/v1/chat/completions
+    Models:        http://127.0.0.1:18220/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mDeepSeek-V4-Flash-0731[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mDeepSeek-V4-Flash-0731[0m
+  GPUs:     1x NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+  Strategy: gpu_decode (layer_grouped(1))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K)[0m
+  Prefill sizing:  [33mruntime-calibrated prefill cap 1,000 tokens (long probe low-water 550 MB, safety 600 MB)[0m
+  Warmup prefill:  3 prompts, ~1,000 tokens each
+  Timed prefill:   1 prompts at 1K tokens
+    [1] 1,000 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+[PREFILL-TIMING] 10 tokens, 683.1ms total (15 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=   681.0ms ( 99.7% of prefill) event=   677.7ms sync=    17.0ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.4ms event=     2.1ms sync=     1.8ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.3ms event=     2.1ms sync=     1.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     2.5ms event=     2.3ms sync=     0.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.0ms event=     2.8ms sync=     2.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.5ms event=     1.3ms sync=     0.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     2.3ms event=     2.0ms sync=     2.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.0ms event=     0.7ms sync=     0.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.3ms event=     5.0ms sync=     4.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.3ms event=     2.0ms sync=     1.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=   655.4ms event=   655.2ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:       655.2ms ( 95.9%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.5ms (  0.4% of moe)
+[PREFILL-TIMING]       dma:        631.4ms ( 96.4% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     11.0ms ptr_upload:     0.4ms dma_wait:   618.1ms
+[PREFILL-TIMING]       w1+act:      12.6ms (  1.9% of moe)
+[PREFILL-TIMING]       w2:           6.8ms (  1.0% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.2ms (  0.3%)
+  [32mdecode: 7 tokens in 0.28s (24.8 tok/s)  VRAM: 1136 MB free now, 1136 MB min free during decode[0m
+  [36mDynamic HCS: hit=90.86% tail=516/258 protected=5924 promotions=87 evictions=87 request_promotions=87/1806 budget_skips=0 no_slot=78 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (7 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         38.99 ms/tok  ( 25.6 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   5.29 ms  (13.6%)            [36m│[0m
+  [36m│[0m    Sync wait:    32.89 ms  (84.4%)            [36m│[0m
+  [36m│[0m      inter:      31.97 ms  final:  0.92 ms     [36m│[0m
+  [36m│[0m    Classify:      0.03 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.28 ms  ( 0.7%)            [36m│[0m
+  [36m│[0m    Upload:        0.08 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Launch:        0.42 ms  ( 1.1%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 22.13 ms                  [36m│[0m
+  [36m│[0m    First route:   0.23 ms  ( 1.1%)        [36m│[0m
+  [36m│[0m    Middle segs:  21.12 ms  (95.4%)        [36m│[0m
+  [36m│[0m    Final seg:     0.78 ms  ( 3.5%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.23 ms/tok (0.23 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  21.12 ms/tok (0.50 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.78 ms/tok (0.78 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.23 ms/tok (0.23 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  31.74 ms/tok (0.76 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.92 ms/tok (0.92 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #2    2.40 ms  graph2 experts L1 + route L2 GQA      [36m│[0m
+  [36m│[0m    #3    2.28 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m    #1    2.12 ms  graph1 experts L0 + route L1 GQA      [36m│[0m
+  [36m│[0m    #43   0.92 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #39   0.89 ms  graph39 experts L38 + route L39 GQA   [36m│[0m
+  [36m│[0m    #17   0.89 ms  graph17 experts L16 + route L17 GQA   [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #43   0.78 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #40   0.53 ms  graph40 experts L39 + route L40 GQA   [36m│[0m
+  [36m│[0m    #18   0.53 ms  graph18 experts L17 + route L18 GQA   [36m│[0m
+  [36m│[0m    #28   0.53 ms  graph28 experts L27 + route L28 GQA   [36m│[0m
+  [36m│[0m    #10   0.53 ms  graph10 experts L9 + route L10 GQA    [36m│[0m
+  [36m│[0m    #26   0.53 ms  graph26 experts L25 + route L26 GQA   [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2231.9 MB W2: 1115.9 MB shared: 558.0 MB [36m│[0m
+  [36m│[0m    Router:   90.2 MB LA in/out:    0.0/   0.0 MB [36m│[0m
+  [36m│[0m    LA state R+W:   0.0 MB GQA in/out:   0.0/   0.0 MB LM:1059.1 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 23.6 (94 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  234.4 (6440 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    291.70 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     251/7                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 3168.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 11.20 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    26.14 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #2   H2D  1.93 | hot 0.00 | graph 0.52  [36m│[0m
+  [36m│[0m         wait  2.40 ms |  49.5 MB | 4.00 cold [36m│[0m
+  [36m│[0m    #3   H2D  1.84 | hot 0.00 | graph 0.47  [36m│[0m
+  [36m│[0m         wait  2.28 ms |  46.0 MB | 3.71 cold [36m│[0m
+  [36m│[0m    #1   H2D  1.73 | hot 0.00 | graph 0.43  [36m│[0m
+  [36m│[0m         wait  2.12 ms |  42.4 MB | 3.43 cold [36m│[0m
+  [36m│[0m    #39  H2D  0.42 | hot 0.00 | graph 0.48  [36m│[0m
+  [36m│[0m         wait  0.89 ms |  10.6 MB | 0.86 cold [36m│[0m
+  [36m│[0m    #17  H2D  0.42 | hot 0.00 | graph 0.48  [36m│[0m
+  [36m│[0m         wait  0.89 ms |  10.6 MB | 0.86 cold [36m│[0m
+  [36m│[0m    #38  H2D  0.35 | hot 0.00 | graph 0.52  [36m│[0m
+  [36m│[0m         wait  0.86 ms |   8.8 MB | 0.71 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+[PREFILL-TIMING] 11 tokens, 772.1ms total (14 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=   769.9ms ( 99.7% of prefill) event=   766.6ms sync=    17.1ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.4ms event=     2.1ms sync=     1.8ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.5ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.4ms event=     2.1ms sync=     1.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     2.4ms event=     2.1ms sync=     0.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.0ms event=     2.7ms sync=     2.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.5ms event=     1.3ms sync=     0.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     2.3ms event=     2.1ms sync=     2.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.0ms event=     0.8ms sync=     0.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.2ms event=     5.0ms sync=     4.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.3ms event=     2.1ms sync=     1.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=   744.4ms event=   744.2ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:       744.2ms ( 96.4%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.5ms (  0.3% of moe)
+[PREFILL-TIMING]       dma:        718.5ms ( 96.6% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     12.2ms ptr_upload:     0.4ms dma_wait:   704.0ms
+[PREFILL-TIMING]       w1+act:      13.6ms (  1.8% of moe)
+[PREFILL-TIMING]       w2:           7.5ms (  1.0% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.2ms (  0.3%)
+  [32mdecode: 7 tokens in 0.30s (23.6 tok/s)  VRAM: 1136 MB free now, 1136 MB min free during decode[0m
+  [36mDynamic HCS: hit=89.31% tail=516/258 protected=5924 promotions=196 evictions=196 request_promotions=109/1806 budget_skips=0 no_slot=162 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (7 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         41.00 ms/tok  ( 24.4 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   6.48 ms  (15.8%)            [36m│[0m
+  [36m│[0m    Sync wait:    33.69 ms  (82.2%)            [36m│[0m
+  [36m│[0m      inter:      32.83 ms  final:  0.85 ms     [36m│[0m
+  [36m│[0m    Classify:      0.03 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.29 ms  ( 0.7%)            [36m│[0m
+  [36m│[0m    Upload:        0.08 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Launch:        0.43 ms  ( 1.0%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 22.10 ms                  [36m│[0m
+  [36m│[0m    First route:   0.23 ms  ( 1.1%)        [36m│[0m
+  [36m│[0m    Middle segs:  21.08 ms  (95.4%)        [36m│[0m
+  [36m│[0m    Final seg:     0.79 ms  ( 3.6%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.23 ms/tok (0.23 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  21.08 ms/tok (0.50 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.79 ms/tok (0.79 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.23 ms/tok (0.23 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  32.60 ms/tok (0.78 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.85 ms/tok (0.85 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #1    2.54 ms  graph1 experts L0 + route L1 GQA      [36m│[0m
+  [36m│[0m    #2    2.50 ms  graph2 experts L1 + route L2 GQA      [36m│[0m
+  [36m│[0m    #3    2.30 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m    #9    0.96 ms  graph9 experts L8 + route L9 GQA      [36m│[0m
+  [36m│[0m    #13   0.91 ms  graph13 experts L12 + route L13 GQA   [36m│[0m
+  [36m│[0m    #34   0.88 ms  graph34 experts L33 + route L34 GQA   [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #43   0.79 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #10   0.53 ms  graph10 experts L9 + route L10 GQA    [36m│[0m
+  [36m│[0m    #14   0.53 ms  graph14 experts L13 + route L14 GQA   [36m│[0m
+  [36m│[0m    #40   0.53 ms  graph40 experts L39 + route L40 GQA   [36m│[0m
+  [36m│[0m    #36   0.53 ms  graph36 experts L35 + route L36 GQA   [36m│[0m
+  [36m│[0m    #22   0.53 ms  graph22 experts L21 + route L22 GQA   [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2231.9 MB W2: 1115.9 MB shared: 558.0 MB [36m│[0m
+  [36m│[0m    Router:   90.2 MB LA in/out:    0.0/   0.0 MB [36m│[0m
+  [36m│[0m    LA state R+W:   0.0 MB GQA in/out:   0.0/   0.0 MB LM:1059.1 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 27.6 (110 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  230.4 (6440 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    341.20 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     483/33                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 3168.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 12.06 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    25.67 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  2.16 | hot 0.00 | graph 0.43  [36m│[0m
+  [36m│[0m         wait  2.54 ms |  53.0 MB | 4.29 cold [36m│[0m
+  [36m│[0m    #2   H2D  2.03 | hot 0.00 | graph 0.51  [36m│[0m
+  [36m│[0m         wait  2.50 ms |  49.5 MB | 4.00 cold [36m│[0m
+  [36m│[0m    #3   H2D  1.87 | hot 0.00 | graph 0.47  [36m│[0m
+  [36m│[0m         wait  2.30 ms |  46.0 MB | 3.71 cold [36m│[0m
+  [36m│[0m    #9   H2D  0.50 | hot 0.00 | graph 0.48  [36m│[0m
+  [36m│[0m         wait  0.96 ms |  12.4 MB | 1.00 cold [36m│[0m
+  [36m│[0m    #13  H2D  0.43 | hot 0.00 | graph 0.48  [36m│[0m
+  [36m│[0m         wait  0.91 ms |  10.6 MB | 0.86 cold [36m│[0m
+  [36m│[0m    #34  H2D  0.37 | hot 0.00 | graph 0.52  [36m│[0m
+  [36m│[0m         wait  0.88 ms |   8.8 MB | 0.71 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  Warmup complete.
+  Prefill warmup (3 runs, ~1,000 tokens each)...
+[PREFILL-TIMING] 1000 tokens, 5790.6ms total (173 tok/s)
+[PREFILL-TIMING]   embed:       0.1ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  5788.1ms (100.0% of prefill) event=  5784.7ms sync=  1533.0ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=    24.5ms event=    24.2ms sync=    23.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     2.9ms event=     2.6ms sync=     1.8ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=    26.1ms event=    25.8ms sync=    24.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=    41.0ms event=    40.8ms sync=    39.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=    15.7ms event=    15.5ms sync=    15.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     3.0ms event=     2.8ms sync=     1.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=  1144.8ms event=  1144.5ms sync=  1144.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=   230.2ms event=   229.9ms sync=   230.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=    24.8ms event=    24.5ms sync=    23.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     2.5ms event=     2.2ms sync=     2.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=    24.4ms event=    24.1ms sync=    23.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  4245.9ms event=  4245.7ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     2.3ms event=     2.1ms sync=     2.1ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      4245.7ms ( 73.3%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         3.3ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       4101.3ms ( 96.6% of moe)
+[PREFILL-TIMING]         route_d2h:     1.1ms ptr_alloc:     0.5ms ptr_build:     0.4ms
+[PREFILL-TIMING]         cold_h2d:     78.3ms ptr_upload:     0.4ms dma_wait:  4019.9ms
+[PREFILL-TIMING]       w1+act:      91.7ms (  2.2% of moe)
+[PREFILL-TIMING]       w2:          45.5ms (  1.1% of moe)
+[PREFILL-TIMING]       scatter:      1.8ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       1.3ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.4ms (  0.0%)
+    [1/3] 1,000 tokens
+[PREFILL-TIMING] 1000 tokens, 5359.4ms total (187 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  5356.9ms (100.0% of prefill) event=  5353.5ms sync=  1532.8ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=    24.5ms event=    24.2ms sync=    23.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     2.8ms event=     2.5ms sync=     1.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=    26.1ms event=    25.9ms sync=    24.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=    41.0ms event=    40.7ms sync=    39.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=    15.7ms event=    15.5ms sync=    15.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     3.0ms event=     2.7ms sync=     1.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=  1144.7ms event=  1144.5ms sync=  1144.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=   230.0ms event=   229.7ms sync=   229.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=    24.7ms event=    24.4ms sync=    23.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     2.4ms event=     2.2ms sync=     2.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=    24.4ms event=    24.1ms sync=    23.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  3815.2ms event=  3815.0ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     2.3ms event=     2.1ms sync=     2.1ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      3815.0ms ( 71.2%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         3.3ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       3678.7ms ( 96.4% of moe)
+[PREFILL-TIMING]         route_d2h:     1.2ms ptr_alloc:     0.5ms ptr_build:     0.4ms
+[PREFILL-TIMING]         cold_h2d:     69.2ms ptr_upload:     0.4ms dma_wait:  3606.5ms
+[PREFILL-TIMING]       w1+act:      86.7ms (  2.3% of moe)
+[PREFILL-TIMING]       w2:          42.3ms (  1.1% of moe)
+[PREFILL-TIMING]       scatter:      1.9ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       1.3ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.4ms (  0.0%)
+    [2/3] 1,000 tokens
+[PREFILL-TIMING] 1000 tokens, 6014.1ms total (166 tok/s)
+[PREFILL-TIMING]   embed:       0.1ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  6011.7ms (100.0% of prefill) event=  6008.3ms sync=  1533.4ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=    24.5ms event=    24.2ms sync=    23.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     2.8ms event=     2.5ms sync=     1.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=    26.0ms event=    25.8ms sync=    24.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=    41.0ms event=    40.8ms sync=    39.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=    15.8ms event=    15.5ms sync=    15.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     3.0ms event=     2.8ms sync=     1.9ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=  1145.0ms event=  1144.7ms sync=  1144.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=   230.2ms event=   229.9ms sync=   230.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=    24.8ms event=    24.5ms sync=    23.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     2.5ms event=     2.2ms sync=     2.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=    24.4ms event=    24.1ms sync=    23.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  4469.3ms event=  4469.2ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     2.3ms event=     2.1ms sync=     2.1ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      4469.2ms ( 74.3%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         3.3ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       4322.8ms ( 96.7% of moe)
+[PREFILL-TIMING]         route_d2h:     1.1ms ptr_alloc:     0.5ms ptr_build:     0.4ms
+[PREFILL-TIMING]         cold_h2d:     80.4ms ptr_upload:     0.4ms dma_wait:  4239.3ms
+[PREFILL-TIMING]       w1+act:      92.9ms (  2.1% of moe)
+[PREFILL-TIMING]       w2:          46.3ms (  1.0% of moe)
+[PREFILL-TIMING]       scatter:      1.8ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       1.3ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.4ms (  0.0%)
+    [3/3] 1,000 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+[PREFILL-TIMING] 50 tokens, 1899.8ms total (26 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1897.6ms ( 99.9% of prefill) event=  1894.1ms sync=    35.5ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     3.4ms event=     3.1ms sync=     2.8ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.4ms sync=     0.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     3.3ms event=     3.0ms sync=     2.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     3.3ms event=     3.1ms sync=     1.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     7.7ms event=     7.5ms sync=     2.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.8ms event=     1.6ms sync=     0.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=    13.5ms event=    13.0ms sync=    13.3ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     3.3ms event=     3.1ms sync=     3.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     6.4ms event=     6.0ms sync=     5.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     3.2ms event=     2.9ms sync=     2.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1848.7ms event=  1848.5ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      1848.5ms ( 97.3%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.6ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       1799.2ms ( 97.3% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     30.4ms ptr_upload:     0.4ms dma_wait:  1766.2ms
+[PREFILL-TIMING]       w1+act:      28.8ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          15.8ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.2ms (  0.1%)
+  [32mdecode: 49 tokens in 1.73s (28.3 tok/s)  VRAM: 1138 MB free now, 1138 MB min free during decode[0m
+  [36mDynamic HCS: hit=94.11% tail=516/258 protected=5924 promotions=941 evictions=941 request_promotions=745/12642 budget_skips=0 no_slot=162 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (49 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         35.00 ms/tok  ( 28.6 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   1.29 ms  ( 3.7%)            [36m│[0m
+  [36m│[0m    Sync wait:    33.09 ms  (94.5%)            [36m│[0m
+  [36m│[0m      inter:      32.06 ms  final:  1.02 ms     [36m│[0m
+  [36m│[0m    Classify:      0.02 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.19 ms  ( 0.5%)            [36m│[0m
+  [36m│[0m    Upload:        0.09 ms  ( 0.3%)            [36m│[0m
+  [36m│[0m    Launch:        0.31 ms  ( 0.9%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 25.80 ms                  [36m│[0m
+  [36m│[0m    First route:   0.27 ms  ( 1.1%)        [36m│[0m
+  [36m│[0m    Middle segs:  24.63 ms  (95.5%)        [36m│[0m
+  [36m│[0m    Final seg:     0.90 ms  ( 3.5%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.27 ms/tok (0.27 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  24.63 ms/tok (0.59 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.90 ms/tok (0.90 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.27 ms/tok (0.27 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  31.79 ms/tok (0.76 ms/seg) [36m│[0m
+  [36m│[0m    Final:       1.02 ms/tok (1.02 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #3    1.45 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m    #2    1.39 ms  graph2 experts L1 + route L2 GQA      [36m│[0m
+  [36m│[0m    #1    1.13 ms  graph1 experts L0 + route L1 GQA      [36m│[0m
+  [36m│[0m    #43   1.02 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #38   0.83 ms  graph38 experts L37 + route L38 GQA   [36m│[0m
+  [36m│[0m    #10   0.83 ms  graph10 experts L9 + route L10 GQA    [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #43   0.90 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #4    0.62 ms  graph4 experts L3 + route L4 GQA      [36m│[0m
+  [36m│[0m    #36   0.62 ms  graph36 experts L35 + route L36 GQA   [36m│[0m
+  [36m│[0m    #42   0.62 ms  graph42 experts L41 + route L42 GQA   [36m│[0m
+  [36m│[0m    #24   0.62 ms  graph24 experts L23 + route L24 GQA   [36m│[0m
+  [36m│[0m    #14   0.62 ms  graph14 experts L13 + route L14 GQA   [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2231.9 MB W2: 1115.9 MB shared: 558.0 MB [36m│[0m
+  [36m│[0m    Router:   90.2 MB LA in/out:    0.0/   0.0 MB [36m│[0m
+  [36m│[0m    LA state R+W:   0.0 MB GQA in/out:   0.0/   0.0 MB LM:1059.1 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 15.2 (61 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  242.8 (6440 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    188.15 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     726/48                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 3168.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 7.48 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    25.84 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #3   H2D  0.91 | hot 0.00 | graph 0.56  [36m│[0m
+  [36m│[0m         wait  1.45 ms |  22.5 MB | 1.82 cold [36m│[0m
+  [36m│[0m    #2   H2D  0.79 | hot 0.00 | graph 0.61  [36m│[0m
+  [36m│[0m         wait  1.39 ms |  20.0 MB | 1.61 cold [36m│[0m
+  [36m│[0m    #1   H2D  0.65 | hot 0.00 | graph 0.50  [36m│[0m
+  [36m│[0m         wait  1.13 ms |  15.4 MB | 1.24 cold [36m│[0m
+  [36m│[0m    #11  H2D  0.23 | hot 0.00 | graph 0.56  [36m│[0m
+  [36m│[0m         wait  0.78 ms |   5.6 MB | 0.45 cold [36m│[0m
+  [36m│[0m    #19  H2D  0.22 | hot 0.00 | graph 0.56  [36m│[0m
+  [36m│[0m         wait  0.77 ms |   5.6 MB | 0.45 cold [36m│[0m
+  [36m│[0m    #10  H2D  0.22 | hot 0.00 | graph 0.61  [36m│[0m
+  [36m│[0m         wait  0.83 ms |   5.6 MB | 0.45 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+    50 tokens done
+[PREFILL-TIMING] 56 tokens, 1982.6ms total (28 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1980.2ms ( 99.9% of prefill) event=  1976.7ms sync=    39.2ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     3.3ms event=     3.1ms sync=     2.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.7ms event=     1.5ms sync=     0.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     3.6ms event=     3.3ms sync=     2.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     3.4ms event=     3.2ms sync=     1.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     7.8ms event=     7.6ms sync=     2.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.7ms event=     1.4ms sync=     0.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=    15.9ms event=    15.5ms sync=    15.7ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     4.0ms event=     3.5ms sync=     3.8ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     6.4ms event=     6.1ms sync=     5.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.9ms event=     0.6ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     3.3ms event=     3.1ms sync=     2.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1927.5ms event=  1927.3ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      1927.3ms ( 97.2%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.7ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       1876.1ms ( 97.3% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     31.5ms ptr_upload:     0.4ms dma_wait:  1835.6ms
+[PREFILL-TIMING]       w1+act:      30.0ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          16.4ms (  0.8% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.3ms (  0.1%)
+  [32mdecode: 99 tokens in 3.61s (27.4 tok/s)  VRAM: 1138 MB free now, 1138 MB min free during decode[0m
+  [36mDynamic HCS: hit=93.40% tail=516/258 protected=5924 promotions=2576 evictions=2576 request_promotions=1635/25542 budget_skips=0 no_slot=212 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (99 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         36.31 ms/tok  ( 27.5 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.97 ms  ( 2.7%)            [36m│[0m
+  [36m│[0m    Sync wait:    34.72 ms  (95.6%)            [36m│[0m
+  [36m│[0m      inter:      33.72 ms  final:  1.01 ms     [36m│[0m
+  [36m│[0m    Classify:      0.02 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.21 ms  ( 0.6%)            [36m│[0m
+  [36m│[0m    Upload:        0.09 ms  ( 0.3%)            [36m│[0m
+  [36m│[0m    Launch:        0.30 ms  ( 0.8%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 26.34 ms                  [36m│[0m
+  [36m│[0m    First route:   0.28 ms  ( 1.1%)        [36m│[0m
+  [36m│[0m    Middle segs:  25.15 ms  (95.5%)        [36m│[0m
+  [36m│[0m    Final seg:     0.90 ms  ( 3.4%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.28 ms/tok (0.28 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  25.15 ms/tok (0.60 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.90 ms/tok (0.90 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.28 ms/tok (0.28 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  33.43 ms/tok (0.80 ms/seg) [36m│[0m
+  [36m│[0m    Final:       1.01 ms/tok (1.01 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #3    1.38 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m    #2    1.35 ms  graph2 experts L1 + route L2 GQA      [36m│[0m
+  [36m│[0m    #1    1.32 ms  graph1 experts L0 + route L1 GQA      [36m│[0m
+  [36m│[0m    #43   1.01 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #7    0.90 ms  graph7 experts L6 + route L7 GQA      [36m│[0m
+  [36m│[0m    #38   0.89 ms  graph38 experts L37 + route L38 GQA   [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #43   0.90 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #4    0.63 ms  graph4 experts L3 + route L4 GQA      [36m│[0m
+  [36m│[0m    #14   0.63 ms  graph14 experts L13 + route L14 GQA   [36m│[0m
+  [36m│[0m    #8    0.63 ms  graph8 experts L7 + route L8 GQA      [36m│[0m
+  [36m│[0m    #36   0.63 ms  graph36 experts L35 + route L36 GQA   [36m│[0m
+  [36m│[0m    #42   0.63 ms  graph42 experts L41 + route L42 GQA   [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2231.9 MB W2: 1115.9 MB shared: 558.0 MB [36m│[0m
+  [36m│[0m    Router:   90.2 MB LA in/out:    0.0/   0.0 MB [36m│[0m
+  [36m│[0m    LA state R+W:   0.0 MB GQA in/out:   0.0/   0.0 MB LM:1059.1 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 17.0 (68 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  241.0 (6440 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    210.62 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     962/70                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 3168.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 8.58 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    25.39 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  0.82 | hot 0.00 | graph 0.51  [36m│[0m
+  [36m│[0m         wait  1.32 ms |  19.6 MB | 1.59 cold [36m│[0m
+  [36m│[0m    #3   H2D  0.82 | hot 0.00 | graph 0.57  [36m│[0m
+  [36m│[0m         wait  1.38 ms |  19.9 MB | 1.61 cold [36m│[0m
+  [36m│[0m    #2   H2D  0.73 | hot 0.00 | graph 0.63  [36m│[0m
+  [36m│[0m         wait  1.35 ms |  17.6 MB | 1.42 cold [36m│[0m
+  [36m│[0m    #7   H2D  0.34 | hot 0.00 | graph 0.57  [36m│[0m
+  [36m│[0m         wait  0.90 ms |   8.2 MB | 0.67 cold [36m│[0m
+  [36m│[0m    #38  H2D  0.26 | hot 0.00 | graph 0.63  [36m│[0m
+  [36m│[0m         wait  0.89 ms |   6.2 MB | 0.51 cold [36m│[0m
+  [36m│[0m    #19  H2D  0.26 | hot 0.00 | graph 0.57  [36m│[0m
+  [36m│[0m         wait  0.83 ms |   6.2 MB | 0.51 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+    100 tokens done
+[PREFILL-TIMING] 53 tokens, 1909.1ms total (28 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1906.9ms ( 99.9% of prefill) event=  1903.4ms sync=    37.1ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     3.3ms event=     3.1ms sync=     2.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.4ms sync=     0.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     3.6ms event=     3.2ms sync=     2.2ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     3.4ms event=     3.1ms sync=     1.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     7.7ms event=     7.4ms sync=     2.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.7ms event=     1.4ms sync=     0.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=    14.5ms event=    14.2ms sync=    14.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     3.6ms event=     3.3ms sync=     3.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     6.4ms event=     6.1ms sync=     5.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     3.4ms event=     3.0ms sync=     2.8ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1856.4ms event=  1856.2ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      1856.2ms ( 97.2%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.7ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       1806.4ms ( 97.3% of moe)
+[PREFILL-TIMING]         route_d2h:     1.1ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     30.5ms ptr_upload:     0.4ms dma_wait:  1773.1ms
+[PREFILL-TIMING]       w1+act:      29.1ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          15.9ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.2ms (  0.1%)
+  [32mdecode: 249 tokens in 9.14s (27.3 tok/s)  VRAM: 1138 MB free now, 1138 MB min free during decode[0m
+  [36mDynamic HCS: hit=93.38% tail=516/258 protected=5924 promotions=6829 evictions=6829 request_promotions=4253/64242 budget_skips=0 no_slot=212 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (249 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         36.55 ms/tok  ( 27.4 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.72 ms  ( 2.0%)            [36m│[0m
+  [36m│[0m    Sync wait:    35.21 ms  (96.3%)            [36m│[0m
+  [36m│[0m      inter:      34.14 ms  final:  1.07 ms     [36m│[0m
+  [36m│[0m    Classify:      0.02 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.21 ms  ( 0.6%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 0.3%)            [36m│[0m
+  [36m│[0m    Launch:        0.29 ms  ( 0.8%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 26.73 ms                  [36m│[0m
+  [36m│[0m    First route:   0.29 ms  ( 1.1%)        [36m│[0m
+  [36m│[0m    Middle segs:  25.53 ms  (95.5%)        [36m│[0m
+  [36m│[0m    Final seg:     0.91 ms  ( 3.4%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.29 ms/tok (0.29 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  25.53 ms/tok (0.61 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.91 ms/tok (0.91 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.29 ms/tok (0.29 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  33.85 ms/tok (0.81 ms/seg) [36m│[0m
+  [36m│[0m    Final:       1.07 ms/tok (1.07 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #2    1.54 ms  graph2 experts L1 + route L2 GQA      [36m│[0m
+  [36m│[0m    #3    1.48 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m    #1    1.33 ms  graph1 experts L0 + route L1 GQA      [36m│[0m
+  [36m│[0m    #43   1.07 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #8    0.89 ms  graph8 experts L7 + route L8 GQA      [36m│[0m
+  [36m│[0m    #6    0.87 ms  graph6 experts L5 + route L6 GQA      [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #43   0.91 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #4    0.64 ms  graph4 experts L3 + route L4 GQA      [36m│[0m
+  [36m│[0m    #36   0.64 ms  graph36 experts L35 + route L36 GQA   [36m│[0m
+  [36m│[0m    #42   0.64 ms  graph42 experts L41 + route L42 GQA   [36m│[0m
+  [36m│[0m    #24   0.64 ms  graph24 experts L23 + route L24 GQA   [36m│[0m
+  [36m│[0m    #14   0.64 ms  graph14 experts L13 + route L14 GQA   [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2231.9 MB W2: 1115.9 MB shared: 558.0 MB [36m│[0m
+  [36m│[0m    Router:   90.2 MB LA in/out:    0.0/   0.0 MB [36m│[0m
+  [36m│[0m    LA state R+W:   0.0 MB GQA in/out:   0.0/   0.0 MB LM:1059.1 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 17.1 (68 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  240.9 (6440 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    211.37 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     1200/90                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 3168.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 8.67 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    25.44 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #2   H2D  0.91 | hot 0.00 | graph 0.64  [36m│[0m
+  [36m│[0m         wait  1.54 ms |  22.0 MB | 1.78 cold [36m│[0m
+  [36m│[0m    #3   H2D  0.91 | hot 0.00 | graph 0.58  [36m│[0m
+  [36m│[0m         wait  1.48 ms |  22.1 MB | 1.79 cold [36m│[0m
+  [36m│[0m    #1   H2D  0.83 | hot 0.00 | graph 0.52  [36m│[0m
+  [36m│[0m         wait  1.33 ms |  19.7 MB | 1.59 cold [36m│[0m
+  [36m│[0m    #8   H2D  0.26 | hot 0.00 | graph 0.64  [36m│[0m
+  [36m│[0m         wait  0.89 ms |   6.4 MB | 0.51 cold [36m│[0m
+  [36m│[0m    #11  H2D  0.24 | hot 0.00 | graph 0.58  [36m│[0m
+  [36m│[0m         wait  0.81 ms |   5.8 MB | 0.47 cold [36m│[0m
+  [36m│[0m    #19  H2D  0.24 | hot 0.00 | graph 0.58  [36m│[0m
+  [36m│[0m         wait  0.81 ms |   5.7 MB | 0.46 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+    250 tokens done
+  Warmup complete (67.3s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K tokens, 1 runs[0m
+[PREFILL-TIMING] 1000 tokens, 5753.4ms total (174 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  5751.0ms (100.0% of prefill) event=  5747.7ms sync=  1536.1ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=    24.5ms event=    24.2ms sync=    23.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     2.8ms event=     2.5ms sync=     1.8ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=    26.2ms event=    25.9ms sync=    24.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=    41.0ms event=    40.8ms sync=    39.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=    15.8ms event=    15.5ms sync=    15.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     3.0ms event=     2.8ms sync=     1.9ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=  1146.8ms event=  1146.5ms sync=  1146.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=   230.9ms event=   230.6ms sync=   230.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=    24.9ms event=    24.6ms sync=    23.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     2.5ms event=     2.2ms sync=     2.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=    24.4ms event=    24.2ms sync=    23.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  4206.0ms event=  4205.8ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     2.4ms event=     2.1ms sync=     2.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      4205.8ms ( 73.1%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         3.3ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       4061.7ms ( 96.6% of moe)
+[PREFILL-TIMING]         route_d2h:     1.1ms ptr_alloc:     0.5ms ptr_build:     0.4ms
+[PREFILL-TIMING]         cold_h2d:     75.4ms ptr_upload:     0.4ms dma_wait:  3983.2ms
+[PREFILL-TIMING]       w1+act:      91.5ms (  2.2% of moe)
+[PREFILL-TIMING]       w2:          45.4ms (  1.1% of moe)
+[PREFILL-TIMING]       scatter:      1.8ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       1.3ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.4ms (  0.0%)
+  Run 1: 152.1 tok/s (1,000 tokens in 6572.5ms)
+  [1mBest: 152.1 tok/s (1,000 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+[PREFILL-TIMING] 52 tokens, 1957.4ms total (27 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1955.2ms ( 99.9% of prefill) event=  1951.7ms sync=    36.8ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     3.2ms event=     3.0ms sync=     2.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     3.4ms event=     3.1ms sync=     2.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     3.3ms event=     3.0ms sync=     1.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     7.7ms event=     7.4ms sync=     2.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     2.0ms event=     1.7ms sync=     0.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=    14.0ms event=    13.7ms sync=    13.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     3.5ms event=     3.1ms sync=     3.3ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     6.7ms event=     6.3ms sync=     5.5ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     3.2ms event=     3.0ms sync=     2.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1905.3ms event=  1905.0ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]   moe:      1905.0ms ( 97.3%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.7ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       1854.6ms ( 97.4% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     31.2ms ptr_upload:     0.4ms dma_wait:  1806.4ms
+[PREFILL-TIMING]       w1+act:      29.4ms (  1.5% of moe)
+[PREFILL-TIMING]       w2:          16.2ms (  0.8% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.1ms (  0.1%)
+  [32mdecode: 49 tokens in 1.70s (28.8 tok/s)  VRAM: 1136 MB free now, 1136 MB min free during decode[0m
+  [36mDynamic HCS: hit=94.53% tail=516/258 protected=5924 promotions=7521 evictions=7521 request_promotions=692/12642 budget_skips=0 no_slot=212 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (49 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         34.46 ms/tok  ( 29.0 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   1.30 ms  ( 3.8%)            [36m│[0m
+  [36m│[0m    Sync wait:    32.56 ms  (94.5%)            [36m│[0m
+  [36m│[0m      inter:      31.56 ms  final:  1.00 ms     [36m│[0m
+  [36m│[0m    Classify:      0.02 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.18 ms  ( 0.5%)            [36m│[0m
+  [36m│[0m    Upload:        0.09 ms  ( 0.3%)            [36m│[0m
+  [36m│[0m    Launch:        0.31 ms  ( 0.9%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 25.81 ms                  [36m│[0m
+  [36m│[0m    First route:   0.27 ms  ( 1.1%)        [36m│[0m
+  [36m│[0m    Middle segs:  24.64 ms  (95.5%)        [36m│[0m
+  [36m│[0m    Final seg:     0.89 ms  ( 3.5%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.27 ms/tok (0.27 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  24.64 ms/tok (0.59 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.89 ms/tok (0.89 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.27 ms/tok (0.27 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  31.29 ms/tok (0.74 ms/seg) [36m│[0m
+  [36m│[0m    Final:       1.00 ms/tok (1.00 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #2    1.33 ms  graph2 experts L1 + route L2 GQA      [36m│[0m
+  [36m│[0m    #1    1.31 ms  graph1 experts L0 + route L1 GQA      [36m│[0m
+  [36m│[0m    #3    1.28 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m    #43   1.00 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #4    0.81 ms  graph4 experts L3 + route L4 GQA      [36m│[0m
+  [36m│[0m    #8    0.81 ms  graph8 experts L7 + route L8 GQA      [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #43   0.89 ms  graph43 experts L42 + final           [36m│[0m
+  [36m│[0m    #4    0.62 ms  graph4 experts L3 + route L4 GQA      [36m│[0m
+  [36m│[0m    #42   0.62 ms  graph42 experts L41 + route L42 GQA   [36m│[0m
+  [36m│[0m    #14   0.62 ms  graph14 experts L13 + route L14 GQA   [36m│[0m
+  [36m│[0m    #36   0.62 ms  graph36 experts L35 + route L36 GQA   [36m│[0m
+  [36m│[0m    #24   0.62 ms  graph24 experts L23 + route L24 GQA   [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2231.9 MB W2: 1115.9 MB shared: 558.0 MB [36m│[0m
+  [36m│[0m    Router:   90.2 MB LA in/out:    0.0/   0.0 MB [36m│[0m
+  [36m│[0m    LA state R+W:   0.0 MB GQA in/out:   0.0/   0.0 MB LM:1059.1 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 14.1 (56 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  243.9 (6440 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    174.77 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     1440/108                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 3168.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 6.91 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    25.83 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  0.83 | hot 0.00 | graph 0.50  [36m│[0m
+  [36m│[0m         wait  1.31 ms |  20.5 MB | 1.65 cold [36m│[0m
+  [36m│[0m    #3   H2D  0.73 | hot 0.00 | graph 0.56  [36m│[0m
+  [36m│[0m         wait  1.28 ms |  17.9 MB | 1.45 cold [36m│[0m
+  [36m│[0m    #2   H2D  0.73 | hot 0.00 | graph 0.61  [36m│[0m
+  [36m│[0m         wait  1.33 ms |  18.4 MB | 1.49 cold [36m│[0m
+  [36m│[0m    #11  H2D  0.21 | hot 0.00 | graph 0.56  [36m│[0m
+  [36m│[0m         wait  0.77 ms |   5.3 MB | 0.43 cold [36m│[0m
+  [36m│[0m    #8   H2D  0.20 | hot 0.00 | graph 0.61  [36m│[0m
+  [36m│[0m         wait  0.81 ms |   4.8 MB | 0.39 cold [36m│[0m
+  [36m│[0m    #4   H2D  0.20 | hot 0.00 | graph 0.62  [36m│[0m
+  [36m│[0m         wait  0.81 ms |   4.8 MB | 0.39 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+[PREFILL-TIMING] 58 tokens, 1944.4ms total (30 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1942.1ms ( 99.9% of prefill) event=  1938.6ms sync=    39.8ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     3.3ms event=     3.1ms sync=     2.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     3.5ms event=     3.2ms sync=     2.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     3.4ms event=     3.1ms sync=     1.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     7.7ms event=     7.4ms sync=     2.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=    16.5ms event=    16.2ms sync=    16.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     4.0ms event=     3.6ms sync=     3.8ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     6.5ms event=     6.2ms sync=     5.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     3.3ms event=     3.1ms sync=     2.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1889.1ms event=  1888.9ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]   moe:      1888.9ms ( 97.1%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.7ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       1838.0ms ( 97.3% of moe)
+[PREFILL-TIMING]         route_d2h:     1.2ms ptr_alloc:     0.6ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     31.4ms ptr_upload:     0.4ms dma_wait:  1795.9ms
+[PREFILL-TIMING]       w1+act:      29.8ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          16.3ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.3ms (  0.1%)

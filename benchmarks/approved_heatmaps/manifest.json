@@ -2542,6 +2542,144 @@
         "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
         "notes": "Measured on 2026-07-15 as part of the Qwen3.5-397B stats heatmap batch. Published as a matched per-HQQ artifact; numeric priority is ahead of the legacy p00080 Q397 HQQ6 artifact so current stats profiles select the p00006 matched-HQQ heatmaps."
       }
+    },
+    {
+      "artifact_id": "deepseek_v4_flash_0731_bf16_index_score_gemm_p00080",
+      "status": "approved",
+      "priority": 0,
+      "model_name": "DeepSeek-V4-Flash-0731",
+      "source_checkpoint": "p00080",
+      "path": "benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_promoted_approved_heatmap.json",
+      "filename": "deepseek_v4_flash_0731_bf16_index_score_gemm_promoted_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_promoted_approved_heatmap.json",
+      "sha256": "4516b4da13f7cbf4b0b6dbac778d03f9e458582eaae7d392ecc116e817c96303",
+      "bytes": 146683,
+      "route_signature_sha256": "ce0eb2e7391bf30d1a920d6706065899e9dcaf88117bdf23a4cdfe13450941ad",
+      "validated_runtime_sha256s": [
+        "e736d5d6767d53daa055a377d92a2b20fe1e803d9b4ef11d479d3728166d51f0"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "bf16",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "bf16",
+          "layer_group_size": 1,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "capture": {
+        "prompt_count_processed": 80,
+        "captured_decode_route_tokens": 20554,
+        "ranked_entries": 10131,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "80 held-out approved heatmap prompts with per-prompt measured HCS refresh",
+        "runtime": "INT4 experts, BF16 attention/KV, gathered sparse scores, BF16/FP32 GEMM sparse output, and BF16/FP32 GEMM learned-index scores, layer group 1",
+        "notes": "Full DeepSeek-V4-Flash-0731 promoted learned-index-GEMM default route prior built from prompts disjoint from the benchmark corpus; all dimensions and residency budgets were measured from the loaded runtime."
+      }
+    },
+    {
+      "artifact_id": "deepseek_v4_flash_0731_bf16_sparse_output_gemm_p00080",
+      "status": "approved",
+      "priority": 0,
+      "model_name": "DeepSeek-V4-Flash-0731",
+      "source_checkpoint": "p00080",
+      "path": "benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_sparse_output_gemm_approved_heatmap.json",
+      "filename": "deepseek_v4_flash_0731_bf16_sparse_output_gemm_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_sparse_output_gemm_approved_heatmap.json",
+      "sha256": "4d5f495f0b6891d2ce46e88e3ceb17222ad60430f60989e7e763c09c229119f5",
+      "bytes": 146719,
+      "route_signature_sha256": "ce0eb2e7391bf30d1a920d6706065899e9dcaf88117bdf23a4cdfe13450941ad",
+      "validated_runtime_sha256s": [
+        "e736d5d6767d53daa055a377d92a2b20fe1e803d9b4ef11d479d3728166d51f0"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "bf16",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "bf16",
+          "layer_group_size": 1,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "capture": {
+        "prompt_count_processed": 80,
+        "captured_decode_route_tokens": 20560,
+        "ranked_entries": 10137,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "80 held-out approved heatmap prompts with per-prompt measured HCS refresh",
+        "runtime": "INT4 experts, BF16 attention/KV, gathered sparse scores and BF16/FP32 GEMM sparse output, layer group 1",
+        "notes": "Full DeepSeek-V4-Flash-0731 gathered-score and sparse-output-GEMM default route prior built from prompts disjoint from the benchmark corpus; all dimensions and residency budgets were measured from the loaded runtime."
+      }
+    },
+    {
+      "artifact_id": "deepseek_v4_flash_0731_bf16_gathered_p00080",
+      "status": "approved",
+      "priority": 1,
+      "model_name": "DeepSeek-V4-Flash-0731",
+      "source_checkpoint": "p00080",
+      "path": "benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_gathered_approved_heatmap.json",
+      "filename": "deepseek_v4_flash_0731_bf16_gathered_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_gathered_approved_heatmap.json",
+      "sha256": "8405502f28b41dc1655c1b9cae0e972bae27d0f045b37128e0a4c091d2bd8ed9",
+      "bytes": 146656,
+      "route_signature_sha256": "ce0eb2e7391bf30d1a920d6706065899e9dcaf88117bdf23a4cdfe13450941ad",
+      "validated_runtime_sha256s": [
+        "e736d5d6767d53daa055a377d92a2b20fe1e803d9b4ef11d479d3728166d51f0"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "bf16",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "bf16",
+          "layer_group_size": 1,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "capture": {
+        "prompt_count_processed": 80,
+        "captured_decode_route_tokens": 20529,
+        "ranked_entries": 10122,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "80 held-out approved heatmap prompts with per-prompt measured HCS refresh",
+        "runtime": "INT4 experts, BF16 attention/KV, layer group 1",
+        "notes": "Full DeepSeek-V4-Flash-0731 gathered-score-default route prior built from prompts disjoint from the benchmark corpus; all dimensions and residency budgets were measured from the loaded runtime."
+      }
     }
   ]
 }

@@ -1,0 +1,23 @@
+Checking server health at http://localhost:18220... [0;32mOK[0m
+Sending warmup request... done (6.0s)
+  [2m>>> Hi there! 👋 How can I[0m
+
+[1m[0;36mTest 4: Network Multi-Prompt Validation[0m
+============================================================
+  [0;32mPASS[0m OK (6.2s) [factual_qa]
+  [0;32mPASS[0m OK (6.4s) [math_simple]
+  [0;32mPASS[0m OK (9.6s) [code_gen]
+  [0;32mPASS[0m OK (6.7s, 5 words) [multi_turn]
+  [0;32mPASS[0m OK (6.0s, 7 words) [short_prompt]
+  [0;32mPASS[0m OK (6.2s) [streaming_factual]
+  [0;32mPASS[0m OK (9.1s) [streaming_code]
+  [0;32mPASS[0m OK (7.1s) [json_output]
+  [0;32mPASS[0m OK (6.4s) [blocking_math]
+
+[1m[0;36mTest 5: Network Large-Prompt Validation[0m
+============================================================
+  Loading ~1K token prompt... done (7044 chars)
+  [0;32mPASS[0m OK (21.1s, 84 words) | prompt_tokens=2043 | Prefill (internal)=182.7 tok/s | Decode (internal)=23.59 tok/s | Round trip=23.59 tok/s [large_2k]
+  Loading ~8K token prompt... done (35045 chars)
+  [0;32mPASS[0m OK (48.5s, 91 words) | prompt_tokens=8623 | Prefill (internal)=222.9 tok/s | Decode (internal)=22.90 tok/s | Round trip=22.90 tok/s [large_10k]
+  Loading ~21K token prompt... done (87555 chars)

@@ -33,6 +33,9 @@ const DEEPSEEK_CHAT_TEMPLATE: &str = concat!(
     "{% endif %}",
 );
 
+const DEEPSEEK_V4_CHAT_TEMPLATE: &str =
+    include_str!("../python/krasis/chat_templates/deepseek_v4.jinja");
+
 impl ChatTemplateEngine {
     /// Load a chat template from tokenizer_config.json.
     ///
@@ -66,18 +69,15 @@ impl ChatTemplateEngine {
                             }
                         }
                     }
-                    default_tmpl
-                        .or(first_tmpl)
-                        .unwrap_or_else(|| DEEPSEEK_CHAT_TEMPLATE.to_string())
+                    match default_tmpl.or(first_tmpl) {
+                        Some(template) => template,
+                        None => resolve_missing_chat_template(tokenizer_config_path)?,
+                    }
                 }
-                _ => load_sibling_chat_template(tokenizer_config_path)
-                    .unwrap_or_else(|| DEEPSEEK_CHAT_TEMPLATE.to_string()),
+                _ => resolve_missing_chat_template(tokenizer_config_path)?,
             }
         } else {
-            load_sibling_chat_template(tokenizer_config_path).unwrap_or_else(|| {
-                log::info!("No chat_template in config — using DeepSeek format fallback");
-                DEEPSEEK_CHAT_TEMPLATE.to_string()
-            })
+            resolve_missing_chat_template(tokenizer_config_path)?
         };
 
         // Extract bos_token and eos_token
@@ -159,7 +159,8 @@ impl ChatTemplateEngine {
         let tools: serde_json::Value = if tools_json.is_empty() {
             serde_json::Value::Array(vec![])
         } else {
-            serde_json::from_str(tools_json).unwrap_or(serde_json::Value::Array(vec![]))
+            serde_json::from_str(tools_json)
+                .map_err(|e| format!("Failed to parse tools JSON: {}", e))?
         };
 
         // Pre-process messages before rendering. Keep plain string content unchanged.
@@ -201,16 +202,34 @@ impl ChatTemplateEngine {
 
         let mut env = minijinja::Environment::new();
 
-        // Register the template
-        env.add_template("chat", &self.template_source)
-            .map_err(|e| format!("Failed to compile chat template: {}", e))?;
-
         // Add tojson filter (used by Qwen templates to serialize tool parameters)
         env.add_filter("tojson", |value: minijinja::Value| -> String {
             // Convert minijinja Value to serde_json Value for proper JSON serialization
             let json_val = minijinja_value_to_json(&value);
             serde_json::to_string(&json_val).unwrap_or_else(|_| value.to_string())
         });
+
+        // DeepSeek-V4 accepts OpenAI tool-call arguments as either an object or
+        // a JSON string. Keep malformed JSON visible instead of silently
+        // rendering an invalid tool invocation.
+        env.add_filter(
+            "from_json",
+            |value: minijinja::Value| -> Result<minijinja::Value, minijinja::Error> {
+                let input = value.as_str().ok_or_else(|| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "from_json requires a string",
+                    )
+                })?;
+                let parsed: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        format!("from_json received invalid JSON: {}", error),
+                    )
+                })?;
+                Ok(minijinja::Value::from_serialize(parsed))
+            },
+        );
 
         // Add raise_exception function (used by some templates)
         env.add_function("raise_exception", raise_exception);
@@ -312,11 +331,47 @@ impl ChatTemplateEngine {
                     Err(_) => Ok(args.get(1).cloned().unwrap_or(minijinja::Value::UNDEFINED)),
                 }
             }
+            "items" => {
+                if value.kind() != minijinja::value::ValueKind::Map {
+                    return Err(minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "items requires a mapping",
+                    ));
+                }
+                if !args.is_empty() {
+                    return Err(minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "items takes no arguments",
+                    ));
+                }
+                let keys = value.try_iter().map_err(|error| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        format!("items could not iterate mapping: {}", error),
+                    )
+                })?;
+                let mut items = Vec::new();
+                for key in keys {
+                    let item = value.get_item(&key).map_err(|error| {
+                        minijinja::Error::new(
+                            minijinja::ErrorKind::InvalidOperation,
+                            format!("items could not read mapping value: {}", error),
+                        )
+                    })?;
+                    items.push(minijinja::Value::from(vec![key, item]));
+                }
+                Ok(minijinja::Value::from(items))
+            }
             _ => Err(minijinja::Error::new(
                 minijinja::ErrorKind::UnknownMethod,
                 format!("unknown method: {}", method),
             )),
         });
+
+        // Register after filters/functions so templates that reference them
+        // compile against the complete environment.
+        env.add_template("chat", &self.template_source)
+            .map_err(|e| format!("Failed to compile chat template: {}", e))?;
 
         let tmpl = env
             .get_template("chat")
@@ -368,6 +423,57 @@ fn load_sibling_chat_template(tokenizer_config_path: &str) -> Option<String> {
         }
         Err(_) => None,
     }
+}
+
+fn resolve_missing_chat_template(tokenizer_config_path: &str) -> Result<String, String> {
+    if let Some(template) = load_sibling_chat_template(tokenizer_config_path) {
+        return Ok(template);
+    }
+
+    let config_path = std::path::Path::new(tokenizer_config_path);
+    let model_config_path = config_path
+        .parent()
+        .unwrap_or(config_path)
+        .join("config.json");
+    match std::fs::read_to_string(&model_config_path) {
+        Ok(data) => {
+            let config: serde_json::Value = serde_json::from_str(&data).map_err(|e| {
+                format!(
+                    "Failed to parse model config {} while resolving chat template: {}",
+                    model_config_path.display(),
+                    e
+                )
+            })?;
+            let model_type = config
+                .get("model_type")
+                .and_then(|value| value.as_str())
+                .or_else(|| {
+                    config
+                        .get("text_config")
+                        .and_then(|value| value.get("model_type"))
+                        .and_then(|value| value.as_str())
+                });
+            if model_type == Some("deepseek_v4") {
+                log::info!(
+                    "Checkpoint ships no Jinja template; using bundled DeepSeek-V4 template"
+                );
+                return Ok(DEEPSEEK_V4_CHAT_TEMPLATE
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Failed to read model config {} while resolving chat template: {}",
+                model_config_path.display(),
+                error
+            ));
+        }
+    }
+
+    log::info!("No chat_template in config — using DeepSeek format fallback");
+    Ok(DEEPSEEK_CHAT_TEMPLATE.to_string())
 }
 
 /// Extract a token string from tokenizer_config.json.
@@ -672,5 +778,78 @@ mod tests {
         let messages = r#"[{"role":"assistant","content":"x","reasoning_content":"thinking"}]"#;
         let rendered = engine.apply(messages, false, false).unwrap();
         assert_eq!(rendered, "thinking");
+    }
+
+    #[test]
+    fn bundled_deepseek_v4_template_renders_chat_mode() {
+        let config_path = write_tokenizer_config("{{ bos_token }}");
+        let config_dir = std::path::Path::new(&config_path).parent().unwrap();
+        fs::write(
+            config_dir.join("config.json"),
+            serde_json::json!({"model_type": "deepseek_v4"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            &config_path,
+            serde_json::json!({
+                "chat_template": null,
+                "bos_token": {"content": "<｜begin▁of▁sentence｜>"},
+                "eos_token": {"content": "<｜end▁of▁sentence｜>"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        let rendered = engine
+            .apply(
+                r#"[{"role":"user","content":"Compute 29 plus 34. Put the number first."}]"#,
+                true,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            rendered,
+            "<｜begin▁of▁sentence｜><｜User｜>Compute 29 plus 34. Put the number first.<｜Assistant｜></think>"
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_template_renders_openai_tool_calls() {
+        let config_path = write_tokenizer_config("{{ bos_token }}");
+        let config_dir = std::path::Path::new(&config_path).parent().unwrap();
+        fs::write(
+            config_dir.join("config.json"),
+            serde_json::json!({"model_type": "deepseek_v4"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            &config_path,
+            serde_json::json!({
+                "chat_template": null,
+                "bos_token": {"content": "<｜begin▁of▁sentence｜>"},
+                "eos_token": {"content": "<｜end▁of▁sentence｜>"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        let rendered = engine
+            .apply_with_tools(
+                r#"[{"role":"user","content":"Check London weather."},{"role":"assistant","content":"","tool_calls":[{"type":"function","function":{"name":"weather","arguments":"{\"city\":\"London\",\"days\":2}"}}]}]"#,
+                r#"[{"type":"function","function":{"name":"weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"}}}}}]"#,
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(rendered.contains("<｜DSML｜invoke name=\"weather\">"));
+        assert!(rendered.contains(
+            "<｜DSML｜parameter name=\"city\" string=\"true\">London</｜DSML｜parameter>"
+        ));
+        assert!(rendered.contains(
+            "<｜DSML｜parameter name=\"days\" string=\"false\">2</｜DSML｜parameter>"
+        ));
+        assert!(rendered.contains("<｜end▁of▁sentence｜>"));
     }
 }

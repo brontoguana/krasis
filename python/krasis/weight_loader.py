@@ -154,7 +154,101 @@ class WeightLoader:
                 )
             with safe_open(single_path, framework="pt", device="cpu") as handle:
                 self._weight_map = {name: "model.safetensors" for name in handle.keys()}
+        if self.cfg.is_deepseek_v4:
+            self._validate_deepseek_v4_checkpoint_inventory()
         self._handles: Dict[str, object] = {}
+
+    def _validate_deepseek_v4_checkpoint_inventory(self) -> None:
+        """Fail closed on unknown V4 namespaces and inventory skipped MTP blocks.
+
+        DeepSeek-V4 main-model tensors live at the checkpoint root while its
+        speculative D-Spark/MTP blocks live under ``mtp.*``. Krasis does not
+        execute speculative decoding, so the auxiliary namespace must remain
+        explicit and disjoint from the configured main-layer range.
+        """
+        root_main = {
+            "embed.weight",
+            "norm.weight",
+            "head.weight",
+            "hc_head_base",
+            "hc_head_fn",
+            "hc_head_scale",
+        }
+        main_layer_count = 0
+        main_layer_ids = set()
+        auxiliary_count = 0
+        auxiliary_block_ids = set()
+        unexpected = []
+
+        for name in self._weight_map:
+            parts = name.split(".")
+            if name.startswith("layers.") and len(parts) >= 3:
+                try:
+                    layer_idx = int(parts[1])
+                except ValueError:
+                    unexpected.append(name)
+                    continue
+                if not 0 <= layer_idx < self.cfg.num_hidden_layers:
+                    unexpected.append(name)
+                    continue
+                main_layer_count += 1
+                main_layer_ids.add(layer_idx)
+            elif name.startswith("mtp.") and len(parts) >= 3:
+                try:
+                    block_idx = int(parts[1])
+                except ValueError:
+                    unexpected.append(name)
+                    continue
+                if block_idx < 0:
+                    unexpected.append(name)
+                    continue
+                auxiliary_count += 1
+                auxiliary_block_ids.add(block_idx)
+            elif name not in root_main:
+                unexpected.append(name)
+
+        if unexpected:
+            preview = ", ".join(sorted(unexpected)[:8])
+            raise ValueError(
+                "DeepSeek-V4 checkpoint contains unexpected tensor namespace(s): "
+                f"{preview} (unexpected_count={len(unexpected)})"
+            )
+
+        expected_layers = set(range(self.cfg.num_hidden_layers))
+        if main_layer_ids != expected_layers:
+            missing = sorted(expected_layers - main_layer_ids)
+            extra = sorted(main_layer_ids - expected_layers)
+            raise ValueError(
+                "DeepSeek-V4 main-layer inventory mismatch: "
+                f"missing={missing}, extra={extra}"
+            )
+
+        if auxiliary_block_ids:
+            expected_blocks = set(range(max(auxiliary_block_ids) + 1))
+            if auxiliary_block_ids != expected_blocks:
+                raise ValueError(
+                    "DeepSeek-V4 MTP block inventory must be contiguous from zero: "
+                    f"found={sorted(auxiliary_block_ids)}"
+                )
+            targets = self.cfg.dspark_target_layer_ids
+            if targets is not None and len(auxiliary_block_ids) != len(targets):
+                raise ValueError(
+                    "DeepSeek-V4 D-Spark/MTP block count does not match target-layer "
+                    f"count: blocks={len(auxiliary_block_ids)}, targets={len(targets)}"
+                )
+
+        inventory_message = (
+            "DeepSeek-V4 checkpoint namespace inventory: "
+            f"{main_layer_count} layers.* main tensors across "
+            f"{len(main_layer_ids)} layers; {auxiliary_count} mtp.* auxiliary "
+            f"tensors across blocks {sorted(auxiliary_block_ids)} explicitly "
+            f"skipped; {sum(name in root_main for name in self._weight_map)} "
+            "root main tensors; unexpected=0"
+        )
+        logger.info(inventory_message)
+        # The normal launcher does not enable Python INFO logging. Keep this
+        # fail-closed checkpoint audit visible in every built-command log.
+        print(inventory_message, flush=True)
 
     @staticmethod
     def _memory_allocated_mb(device: torch.device) -> float:
@@ -185,6 +279,34 @@ class WeightLoader:
         w = self._read_tensor(name)
         if w.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz,
                         torch.float8_e5m2, torch.float8_e5m2fnuz):
+            if self.cfg.is_deepseek_v4:
+                if not name.endswith(".weight"):
+                    raise ValueError(
+                        f"DeepSeek-V4 FP8 tensor is not a weight: {name}"
+                    )
+                scale_name = name.removesuffix(".weight") + ".scale"
+                if scale_name not in self._weight_map:
+                    raise KeyError(
+                        f"DeepSeek-V4 FP8 tensor {name} has no block scale {scale_name}"
+                    )
+                scale = self._read_tensor(scale_name)
+                if w.ndim != 2 or scale.ndim != 2:
+                    raise ValueError(
+                        f"DeepSeek-V4 FP8 dequant requires rank-2 weight/scale; "
+                        f"got {name} {tuple(w.shape)} and {scale_name} {tuple(scale.shape)}"
+                    )
+                block_rows = (w.shape[0] + 127) // 128
+                block_cols = (w.shape[1] + 127) // 128
+                if tuple(scale.shape) != (block_rows, block_cols):
+                    raise ValueError(
+                        f"DeepSeek-V4 FP8 scale {scale_name} shape {tuple(scale.shape)} "
+                        f"!= expected {(block_rows, block_cols)} for {tuple(w.shape)}"
+                    )
+                scale_f32 = scale.float()
+                expanded = scale_f32.repeat_interleave(128, 0)
+                expanded = expanded.repeat_interleave(128, 1)
+                expanded = expanded[: w.shape[0], : w.shape[1]]
+                return (w.float() * expanded).to(torch.bfloat16)
             # Look for companion scale_inv tensor
             scale_name = f"{name}_scale_inv"
             if scale_name not in self._weight_map:
@@ -214,8 +336,24 @@ class WeightLoader:
         w = self._read_and_dequant(name)
         return w.to(device)
 
+    def _load_f32(self, name: str, device: torch.device) -> torch.Tensor:
+        """Load a checkpoint tensor that is semantically FP32."""
+        w = self._read_tensor(name)
+        if w.dtype != torch.float32:
+            raise ValueError(f"Expected FP32 tensor {name}, got {w.dtype}")
+        return w.to(device)
+
+    def _load_i64(self, name: str, device: torch.device) -> torch.Tensor:
+        """Load an integer lookup table without changing its values."""
+        w = self._read_tensor(name)
+        if w.dtype != torch.int64:
+            raise ValueError(f"Expected I64 tensor {name}, got {w.dtype}")
+        return w.to(device)
+
     def load_embedding(self, device: torch.device) -> torch.Tensor:
         """Load embedding table (BF16, ~2.2 GB for Kimi K2.5)."""
+        if self.cfg.is_deepseek_v4:
+            return self._load_bf16("embed.weight", device)
         # Nemotron uses "embeddings" instead of "embed_tokens"
         name = f"{self.cfg.layers_prefix}.embed_tokens.weight"
         if name not in self._weight_map:
@@ -225,6 +363,8 @@ class WeightLoader:
 
     def load_final_norm(self, device: torch.device) -> torch.Tensor:
         """Load final RMSNorm weight (BF16, tiny)."""
+        if self.cfg.is_deepseek_v4:
+            return self._load_bf16("norm.weight", device)
         # Nemotron uses "norm_f" instead of "norm"
         name = f"{self.cfg.layers_prefix}.norm.weight"
         if name not in self._weight_map:
@@ -283,7 +423,7 @@ class WeightLoader:
         Returns (weight_int8, scale) if INT8, or plain BF16 tensor if BF16.
         """
         # lm_head location depends on model — try multiple naming conventions
-        name = "lm_head.weight"
+        name = "head.weight" if self.cfg.is_deepseek_v4 else "lm_head.weight"
         if name not in self._weight_map:
             if self.cfg.layers_prefix != "model":
                 prefix = self.cfg.layers_prefix.rsplit(".", 1)[0]
@@ -317,9 +457,120 @@ class WeightLoader:
         """
         if proj_device is None:
             proj_device = device
+        if self.cfg.is_deepseek_v4:
+            return self._load_deepseek_v4_attention(
+                layer_idx, device, proj_device
+            )
         if self.cfg.is_gqa:
             return self._load_gqa_attention(layer_idx, device, proj_device)
         return self._load_mla_attention(layer_idx, device)
+
+    def _load_deepseek_v4_compressor(
+        self,
+        prefix: str,
+        layer_idx: int,
+        device: torch.device,
+        proj_device: torch.device,
+        step_prefix: str,
+    ) -> Dict[str, torch.Tensor]:
+        result = {
+            "ape": self._load_f32(f"{prefix}.ape", device),
+            "wkv": _timed_bf16_load(
+                self,
+                layer_idx=layer_idx,
+                tensor_name=f"{prefix}.wkv.weight",
+                device=proj_device,
+                step=f"{step_prefix}.wkv",
+            ),
+            "wgate": _timed_bf16_load(
+                self,
+                layer_idx=layer_idx,
+                tensor_name=f"{prefix}.wgate.weight",
+                device=proj_device,
+                step=f"{step_prefix}.wgate",
+            ),
+            "norm": self._load_bf16(f"{prefix}.norm.weight", device),
+        }
+        return result
+
+    def _load_deepseek_v4_attention(
+        self,
+        layer_idx: int,
+        device: torch.device,
+        proj_device: torch.device,
+    ) -> Dict[str, torch.Tensor | Dict[str, torch.Tensor]]:
+        prefix = f"{self.cfg.layer_tensor_prefix(layer_idx)}.attn"
+        result: Dict[str, torch.Tensor | Dict[str, torch.Tensor]] = {
+            "attn_sink": self._load_f32(f"{prefix}.attn_sink", device),
+            "q_norm": self._load_bf16(f"{prefix}.q_norm.weight", device),
+            "kv_norm": self._load_bf16(f"{prefix}.kv_norm.weight", device),
+        }
+        for projection in ("wq_a", "wq_b", "wkv", "wo_a", "wo_b"):
+            result[projection] = _timed_bf16_load(
+                self,
+                layer_idx=layer_idx,
+                tensor_name=f"{prefix}.{projection}.weight",
+                device=proj_device,
+                step=f"deepseek_v4.{projection}",
+            )
+
+        ratio = self.cfg.compress_ratios[layer_idx]
+        if ratio > 0:
+            result["compressor"] = self._load_deepseek_v4_compressor(
+                f"{prefix}.compressor",
+                layer_idx,
+                device,
+                proj_device,
+                "deepseek_v4.compressor",
+            )
+        if ratio == 4:
+            indexer_prefix = f"{prefix}.indexer"
+            result["indexer"] = {
+                "wq_b": _timed_bf16_load(
+                    self,
+                    layer_idx=layer_idx,
+                    tensor_name=f"{indexer_prefix}.wq_b.weight",
+                    device=proj_device,
+                    step="deepseek_v4.indexer.wq_b",
+                ),
+                "weights_proj": self._load_bf16(
+                    f"{indexer_prefix}.weights_proj.weight", device
+                ),
+                "compressor": self._load_deepseek_v4_compressor(
+                    f"{indexer_prefix}.compressor",
+                    layer_idx,
+                    device,
+                    proj_device,
+                    "deepseek_v4.indexer.compressor",
+                ),
+            }
+        return result
+
+    def load_deepseek_v4_hyper_connection(
+        self, layer_idx: int, device: torch.device
+    ) -> Dict[str, torch.Tensor]:
+        prefix = self.cfg.layer_tensor_prefix(layer_idx)
+        return {
+            name: self._load_f32(f"{prefix}.{name}", device)
+            for name in (
+                "hc_attn_fn",
+                "hc_attn_base",
+                "hc_attn_scale",
+                "hc_ffn_fn",
+                "hc_ffn_base",
+                "hc_ffn_scale",
+            )
+        }
+
+    def load_deepseek_v4_hc_head(
+        self, device: torch.device
+    ) -> Dict[str, torch.Tensor]:
+        if not self.cfg.is_deepseek_v4:
+            raise ValueError("DeepSeek-V4 HC head requested for another architecture")
+        return {
+            name: self._load_f32(name, device)
+            for name in ("hc_head_fn", "hc_head_base", "hc_head_scale")
+        }
 
     def _load_mla_attention(
         self, layer_idx: int, device: torch.device
@@ -548,6 +799,16 @@ class WeightLoader:
         self, layer_idx: int, device: torch.device
     ) -> Dict[str, torch.Tensor]:
         """Load input_layernorm and post_attention_layernorm (BF16)."""
+        if self.cfg.is_deepseek_v4:
+            prefix = self.cfg.layer_tensor_prefix(layer_idx)
+            return {
+                "input_layernorm": self._load_bf16(
+                    f"{prefix}.attn_norm.weight", device
+                ),
+                "post_attention_layernorm": self._load_bf16(
+                    f"{prefix}.ffn_norm.weight", device
+                ),
+            }
         prefix = f"{self.cfg.layers_prefix}.layers.{layer_idx}"
         norms = {
             "input_layernorm": self._load_bf16(
@@ -602,6 +863,22 @@ class WeightLoader:
         - "router.proj" (Gemma4 text)
         - "moe.gate" + "moe.router_bias" (Step)
         """
+        if self.cfg.is_deepseek_v4:
+            prefix = f"{self.cfg.layer_tensor_prefix(layer_idx)}.ffn.gate"
+            result = {"weight": self._load_bf16(f"{prefix}.weight", device)}
+            table_name = f"{prefix}.tid2eid"
+            bias_name = f"{prefix}.bias"
+            if layer_idx < self.cfg.num_hash_layers:
+                if table_name not in self._weight_map:
+                    raise KeyError(f"Missing DeepSeek-V4 hash table {table_name}")
+                result["tid2eid"] = self._load_i64(table_name, device)
+            else:
+                if bias_name not in self._weight_map:
+                    raise KeyError(f"Missing DeepSeek-V4 router bias {bias_name}")
+                result["e_score_correction_bias"] = self._load_f32(
+                    bias_name, device
+                )
+            return result
         # Detect naming: "gate" vs "router"
         prefix_gate = f"{self.cfg.layers_prefix}.layers.{layer_idx}.mlp.gate"
         prefix_router = f"{self.cfg.layers_prefix}.layers.{layer_idx}.mlp.router"
@@ -653,6 +930,18 @@ class WeightLoader:
         - "shared_expert" (singular, Qwen3-Next)
         - "share_expert" (Step sibling of "moe")
         """
+        if self.cfg.is_deepseek_v4:
+            prefix = f"{self.cfg.layer_tensor_prefix(layer_idx)}.ffn.shared_experts"
+            load = (
+                self._load_and_quantize
+                if self.quant_cfg.shared_expert == "int8"
+                else self._load_bf16
+            )
+            return {
+                "gate_proj": load(f"{prefix}.w1.weight", device),
+                "up_proj": load(f"{prefix}.w3.weight", device),
+                "down_proj": load(f"{prefix}.w2.weight", device),
+            }
         # Detect naming convention from weight map
         prefix_plural = f"{self.cfg.layers_prefix}.layers.{layer_idx}.mlp.shared_experts"
         prefix_singular = f"{self.cfg.layers_prefix}.layers.{layer_idx}.mlp.shared_expert"
@@ -877,6 +1166,10 @@ class WeightLoader:
             "is_moe": self.cfg.is_moe_layer(layer_idx),
             "layer_type": layer_type,
         }
+        if self.cfg.is_deepseek_v4:
+            result["hyper_connection"] = self.load_deepseek_v4_hyper_connection(
+                layer_idx, device
+            )
         norms_elapsed = time.perf_counter() - start
         _emit_real_model_timing(
             {

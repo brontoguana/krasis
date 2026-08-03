@@ -6864,6 +6864,7 @@ pub fn extract_top_logprobs(logits: &[f32], vocab_size: usize, top_n: usize) -> 
         routed_scaling_factor: 1.0,
         swiglu_limit: 0.0,
         activation_alpha: 0.0,
+        swiglu_mode: crate::weights::SwiGluMode::Standard,
         moe_layer_indices: (first_k_dense_replace..num_layers).collect(),
         experts_gated: true,  // Always gated for CPU decode path (only used by existing models)
     };

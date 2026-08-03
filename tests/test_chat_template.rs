@@ -27,6 +27,38 @@ fn write_tokenizer_config(template: &str, name: &str) -> String {
     path.to_string_lossy().to_string()
 }
 
+fn write_architecture_only_tokenizer_config(model_type: &str, name: &str) -> String {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "krasis_chat_template_arch_test_{}_{}_{}",
+        std::process::id(),
+        name,
+        nonce
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("config.json"),
+        serde_json::json!({"model_type": model_type}).to_string(),
+    )
+    .unwrap();
+    let path = dir.join("tokenizer_config.json");
+    fs::write(
+        &path,
+        serde_json::json!({
+            "chat_template": null,
+            "bos_token": {"content": "<｜begin▁of▁sentence｜>"},
+            "eos_token": {"content": "<｜end▁of▁sentence｜>"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    path.to_string_lossy().to_string()
+}
+
 #[test]
 fn qwen36_preserve_thinking_is_defined_false() {
     let template = concat!(
@@ -81,4 +113,54 @@ fn text_content_parts_are_flattened_for_templates() {
     let messages =
         r#"[{"role":"user","content":[{"type":"text","text":"Hello"},{"text":" world"}]}]"#;
     assert_eq!(engine.apply(messages, false, false).unwrap(), "Hello world");
+}
+
+#[test]
+fn deepseek_v4_without_checkpoint_jinja_uses_architecture_template() {
+    let config_path = write_architecture_only_tokenizer_config("deepseek_v4", "dsv4");
+    let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+    let rendered = engine
+        .apply(
+            r#"[{"role":"user","content":"Give the chemical symbol for sodium, followed by one short sentence."}]"#,
+            true,
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        rendered,
+        "<｜begin▁of▁sentence｜><｜User｜>Give the chemical symbol for sodium, followed by one short sentence.<｜Assistant｜></think>"
+    );
+}
+
+#[test]
+fn deepseek_v4_renders_openai_tool_calls() {
+    let config_path = write_architecture_only_tokenizer_config("deepseek_v4", "dsv4_tools");
+    let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+    let rendered = engine
+        .apply_with_tools(
+            r#"[{"role":"user","content":"Check London weather."},{"role":"assistant","content":"","tool_calls":[{"type":"function","function":{"name":"weather","arguments":"{\"city\":\"London\",\"days\":2}"}}]}]"#,
+            r#"[{"type":"function","function":{"name":"weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"}}}}}]"#,
+            false,
+            false,
+        )
+        .unwrap();
+    assert!(rendered.contains("<｜DSML｜invoke name=\"weather\">"));
+    assert!(rendered.contains(
+        "<｜DSML｜parameter name=\"city\" string=\"true\">London</｜DSML｜parameter>"
+    ));
+    assert!(rendered.contains(
+        "<｜DSML｜parameter name=\"days\" string=\"false\">2</｜DSML｜parameter>"
+    ));
+    assert!(rendered.contains("<｜end▁of▁sentence｜>"));
+}
+
+#[test]
+fn from_json_filter_rejects_malformed_tool_arguments() {
+    let template = "{{ messages[0].content | from_json }}";
+    let config_path = write_tokenizer_config(template, "from_json_invalid");
+    let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+    let error = engine
+        .apply(r#"[{"role":"user","content":"{broken"}]"#, false, false)
+        .unwrap_err();
+    assert!(error.contains("from_json received invalid JSON"));
 }

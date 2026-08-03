@@ -321,6 +321,10 @@ def _detect_layers_prefix(model_path: str) -> str:
                 prefix = key[:pos]
                 if not is_auxiliary_prefix(prefix):
                     return prefix
+        # DeepSeek-V4 uses a root-level namespace: layers.0.attn.*, layers.0.ffn.*.
+        # The empty prefix is intentional and is handled by tensor_name helpers.
+        if any(key.startswith("layers.") for key in index.get("weight_map", {})):
+            return ""
         # Fallback: any .layers. key
         for key in index.get("weight_map", {}):
             pos = key.find(".layers.")
@@ -551,6 +555,23 @@ class ModelConfig:
     indexer_rope_interleave: bool = False
     index_share_for_mtp_iteration: bool = False
 
+    # DeepSeek-V4 compressed sparse attention. These fields are deliberately
+    # separate from MLA/GLM-DSA because the cache and indexer semantics differ.
+    attention_head_dim: int = 0
+    o_lora_rank: int = 0
+    o_groups: int = 0
+    compress_ratios: Optional[List[int]] = None
+    compress_rope_theta: float = 0.0
+    num_hash_layers: int = 0
+    hc_mult: int = 0
+    hc_sinkhorn_iters: int = 0
+    hc_eps: float = 0.0
+    expert_dtype: str = ""
+    dspark_block_size: int = 0
+    dspark_noise_token_id: int = 0
+    dspark_target_layer_ids: Optional[List[int]] = None
+    dspark_markov_rank: int = 0
+
     # GQA dimensions (None for MLA models)
     gqa_head_dim: Optional[int] = None    # per-head dim (e.g. 128 for Qwen3)
     global_head_dim: int = 0              # Gemma4 full-attention head dim
@@ -680,16 +701,17 @@ class ModelConfig:
         tie = cfg.get("tie_word_embeddings",
                        raw.get("tie_word_embeddings", tie_default))
 
-        # Detect attention type: MLA has kv_lora_rank, GQA does not
-        is_mla = "kv_lora_rank" in cfg
-
         # Model architecture type
         arch = cfg.get("model_type", "")
+        is_deepseek_v4 = arch == "deepseek_v4"
+        # DeepSeek-V4 is neither legacy MLA nor GQA: it has a single latent KV
+        # vector plus compressed/indexed sparse attention and a low-rank output.
+        is_mla = "kv_lora_rank" in cfg and not is_deepseek_v4
         step3_text = arch in ("step3p5", "step3p7")
 
         # Handle first_k_dense_replace from either field or decoder_sparse_step
         if "first_k_dense_replace" in cfg:
-            first_k_dense = cfg["first_k_dense_replace"]
+            first_k_dense = int(cfg["first_k_dense_replace"] or 0)
         elif "decoder_sparse_step" in cfg:
             step = cfg["decoder_sparse_step"]
             first_k_dense = 0 if step <= 1 else step
@@ -719,6 +741,113 @@ class ModelConfig:
         index_share_for_mtp_iteration = bool(
             cfg.get("index_share_for_mtp_iteration", False)
         )
+        attention_head_dim = int(cfg.get("head_dim", 0) or 0)
+        o_lora_rank = int(cfg.get("o_lora_rank", 0) or 0)
+        o_groups = int(cfg.get("o_groups", 0) or 0)
+        raw_compress_ratios = cfg.get("compress_ratios")
+        if raw_compress_ratios is None:
+            compress_ratios = None
+        elif isinstance(raw_compress_ratios, list):
+            if any(not isinstance(value, int) for value in raw_compress_ratios):
+                raise ValueError("compress_ratios must contain only integers")
+            compress_ratios = list(raw_compress_ratios)
+        else:
+            raise ValueError("compress_ratios must be an array when present")
+        compress_rope_theta = float(cfg.get("compress_rope_theta", 0.0) or 0.0)
+        num_hash_layers = int(cfg.get("num_hash_layers", 0) or 0)
+        hc_mult = int(cfg.get("hc_mult", 0) or 0)
+        hc_sinkhorn_iters = int(cfg.get("hc_sinkhorn_iters", 0) or 0)
+        hc_eps = float(cfg.get("hc_eps", 0.0) or 0.0)
+        expert_dtype = str(cfg.get("expert_dtype", "") or "")
+        dspark_block_size = int(cfg.get("dspark_block_size", 0) or 0)
+        dspark_noise_token_id = int(cfg.get("dspark_noise_token_id", 0) or 0)
+        raw_dspark_targets = cfg.get("dspark_target_layer_ids")
+        if raw_dspark_targets is None:
+            dspark_target_layer_ids = None
+        elif isinstance(raw_dspark_targets, list):
+            if any(not isinstance(value, int) for value in raw_dspark_targets):
+                raise ValueError("dspark_target_layer_ids must contain only integers")
+            dspark_target_layer_ids = list(raw_dspark_targets)
+        else:
+            raise ValueError("dspark_target_layer_ids must be an array when present")
+        dspark_markov_rank = int(cfg.get("dspark_markov_rank", 0) or 0)
+
+        if is_deepseek_v4:
+            required_positive = {
+                "q_lora_rank": int(cfg.get("q_lora_rank", 0) or 0),
+                "head_dim": attention_head_dim,
+                "qk_rope_head_dim": int(cfg.get("qk_rope_head_dim", 0) or 0),
+                "o_lora_rank": o_lora_rank,
+                "o_groups": o_groups,
+                "index_topk": index_topk,
+                "index_head_dim": index_head_dim,
+                "index_n_heads": index_n_heads,
+                "sliding_window": int(cfg.get("sliding_window", 0) or 0),
+                "compress_rope_theta": int(compress_rope_theta),
+                "hc_mult": hc_mult,
+                "hc_sinkhorn_iters": hc_sinkhorn_iters,
+            }
+            for field_name, value in required_positive.items():
+                if value <= 0:
+                    raise ValueError(
+                        f"deepseek_v4 requires positive {field_name}, got {value}"
+                    )
+            rope_dim = required_positive["qk_rope_head_dim"]
+            if attention_head_dim <= rope_dim:
+                raise ValueError(
+                    "deepseek_v4 head_dim must exceed qk_rope_head_dim"
+                )
+            if rope_dim % 2 != 0 or index_head_dim % 2 != 0:
+                raise ValueError(
+                    "deepseek_v4 qk_rope_head_dim and index_head_dim must be even"
+                )
+            num_heads = int(cfg["num_attention_heads"])
+            if num_heads % o_groups != 0:
+                raise ValueError(
+                    f"deepseek_v4 num_attention_heads {num_heads} is not divisible "
+                    f"by o_groups {o_groups}"
+                )
+            if compress_ratios is None or len(compress_ratios) < num_layers:
+                actual_len = 0 if compress_ratios is None else len(compress_ratios)
+                raise ValueError(
+                    "deepseek_v4 compress_ratios length "
+                    f"{actual_len} < num_hidden_layers {num_layers}"
+                )
+            invalid_ratios = [value for value in compress_ratios if value < 0]
+            if invalid_ratios:
+                raise ValueError("deepseek_v4 compress_ratios must be non-negative")
+            if num_hash_layers < 0 or num_hash_layers > num_layers:
+                raise ValueError(
+                    f"deepseek_v4 num_hash_layers {num_hash_layers} outside "
+                    f"[0, {num_layers}]"
+                )
+            if hc_eps <= 0.0:
+                raise ValueError(f"deepseek_v4 requires positive hc_eps, got {hc_eps}")
+            if expert_dtype != "fp4":
+                raise ValueError(
+                    f"deepseek_v4 requires expert_dtype='fp4', got {expert_dtype!r}"
+                )
+            if cfg.get("scoring_func") != "sqrtsoftplus":
+                raise ValueError("deepseek_v4 requires scoring_func='sqrtsoftplus'")
+            if cfg.get("topk_method") != "noaux_tc":
+                raise ValueError("deepseek_v4 requires topk_method='noaux_tc'")
+            if int(cfg.get("n_shared_experts", 0) or 0) != 1:
+                raise ValueError("deepseek_v4 requires exactly one shared expert")
+            if dspark_target_layer_ids is not None:
+                for layer_idx in dspark_target_layer_ids:
+                    if layer_idx < 0 or layer_idx >= num_layers:
+                        raise ValueError(
+                            "deepseek_v4 dspark_target_layer_ids contains "
+                            f"out-of-range layer {layer_idx}"
+                        )
+                if dspark_target_layer_ids and (
+                    dspark_block_size <= 0
+                    or dspark_markov_rank <= 0
+                    or not 0 <= dspark_noise_token_id < int(cfg["vocab_size"])
+                ):
+                    raise ValueError(
+                        "deepseek_v4 DSpark metadata is incomplete or invalid"
+                    )
         if arch == "glm_moe_dsa":
             if not indexer_rope_interleave:
                 raise ValueError(
@@ -867,7 +996,9 @@ class ModelConfig:
 
         # Pre-quantized expert format (GPT OSS uses MXFP4)
         quant_config = cfg.get("quantization_config", {})
-        expert_quant_method = quant_config.get("quant_method", "")
+        expert_quant_method = (
+            expert_dtype if is_deepseek_v4 else quant_config.get("quant_method", "")
+        )
 
         # SwiGLU activation limit (GPT OSS scalar; Step has per-layer arrays).
         swiglu_limit = cfg.get("swiglu_limit", 0.0)
@@ -924,17 +1055,17 @@ class ModelConfig:
         return cls(
             model_path=model_path,
             hidden_size=cfg["hidden_size"],
-            intermediate_size=cfg.get("intermediate_size", cfg.get("moe_intermediate_size", 0)),
+            intermediate_size=cfg.get("intermediate_size") or cfg.get("moe_intermediate_size", 0),
             moe_intermediate_size=moe_inter,
             num_hidden_layers=num_layers,
             num_attention_heads=cfg["num_attention_heads"],
             num_key_value_heads=base_kv_heads,
             vocab_size=cfg["vocab_size"],
             # MLA fields (None for GQA)
-            q_lora_rank=cfg.get("q_lora_rank") if is_mla else None,
+            q_lora_rank=cfg.get("q_lora_rank") if (is_mla or is_deepseek_v4) else None,
             kv_lora_rank=cfg.get("kv_lora_rank") if is_mla else None,
             qk_nope_head_dim=cfg.get("qk_nope_head_dim") if is_mla else None,
-            qk_rope_head_dim=cfg.get("qk_rope_head_dim") if is_mla else None,
+            qk_rope_head_dim=cfg.get("qk_rope_head_dim") if (is_mla or is_deepseek_v4) else None,
             v_head_dim=cfg.get("v_head_dim") if is_mla else None,
             # DSA / IndexShare fields
             index_topk=index_topk,
@@ -945,8 +1076,22 @@ class ModelConfig:
             indexer_types=indexer_types,
             indexer_rope_interleave=indexer_rope_interleave,
             index_share_for_mtp_iteration=index_share_for_mtp_iteration,
+            attention_head_dim=attention_head_dim,
+            o_lora_rank=o_lora_rank,
+            o_groups=o_groups,
+            compress_ratios=compress_ratios,
+            compress_rope_theta=compress_rope_theta,
+            num_hash_layers=num_hash_layers,
+            hc_mult=hc_mult,
+            hc_sinkhorn_iters=hc_sinkhorn_iters,
+            hc_eps=hc_eps,
+            expert_dtype=expert_dtype,
+            dspark_block_size=dspark_block_size,
+            dspark_noise_token_id=dspark_noise_token_id,
+            dspark_target_layer_ids=dspark_target_layer_ids,
+            dspark_markov_rank=dspark_markov_rank,
             # GQA fields (None for MLA)
-            gqa_head_dim=cfg.get("head_dim") if not is_mla else None,
+            gqa_head_dim=cfg.get("head_dim") if not (is_mla or is_deepseek_v4) else None,
             global_head_dim=cfg.get("global_head_dim", 0),
             num_global_key_value_heads=cfg.get("num_global_key_value_heads", 0),
             attention_k_eq_v=bool(cfg.get("attention_k_eq_v", False)),
@@ -1023,7 +1168,9 @@ class ModelConfig:
 
     @property
     def attention_type(self) -> str:
-        """'mla' for MLA (DeepSeek/Kimi), 'gqa' for GQA (Qwen3)."""
+        """Runtime attention family selected by the model architecture."""
+        if self.is_deepseek_v4:
+            return "deepseek_v4"
         return "mla" if self.kv_lora_rank is not None else "gqa"
 
     @property
@@ -1032,7 +1179,11 @@ class ModelConfig:
 
     @property
     def is_gqa(self) -> bool:
-        return self.kv_lora_rank is None
+        return self.kv_lora_rank is None and not self.is_deepseek_v4
+
+    @property
+    def is_deepseek_v4(self) -> bool:
+        return self.model_type == "deepseek_v4"
 
     @property
     def is_dsa(self) -> bool:
@@ -1072,6 +1223,8 @@ class ModelConfig:
     @property
     def head_dim(self) -> int:
         """Full head dim for q: nope + rope (MLA) or gqa_head_dim (GQA)."""
+        if self.is_deepseek_v4:
+            return self.attention_head_dim
         if self.is_mla:
             return self.qk_nope_head_dim + self.qk_rope_head_dim
         return self.gqa_head_dim
@@ -1132,9 +1285,23 @@ class ModelConfig:
     @property
     def rotary_dim(self) -> int:
         """Number of head dimensions that get RoPE (partial_rotary_factor * head_dim)."""
+        if self.is_deepseek_v4:
+            return self.qk_rope_head_dim
         if self.is_mla:
             return self.qk_rope_head_dim
         return int(self.gqa_head_dim * self.partial_rotary_factor)
+
+    def tensor_name(self, suffix: str) -> str:
+        """Join a checkpoint tensor suffix to an optional root namespace."""
+        return f"{self.layers_prefix}.{suffix}" if self.layers_prefix else suffix
+
+    def layer_tensor_prefix(self, layer_idx: int) -> str:
+        """Return the checkpoint prefix for a main-model layer."""
+        if layer_idx < 0 or layer_idx >= self.num_hidden_layers:
+            raise IndexError(
+                f"layer_idx {layer_idx} outside [0, {self.num_hidden_layers})"
+            )
+        return self.tensor_name(f"layers.{layer_idx}")
 
     @property
     def kv_compressed_dim(self) -> int:

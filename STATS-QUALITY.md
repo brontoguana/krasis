@@ -10,6 +10,7 @@ Detailed quality logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](be
 
 | Model | Params | Active params | Quant | BF16 reference | Prompts | PPL | PPL delta vs BF16 | BF16 top-k drift | Prefill argmax | Prefill top-10 | First token | Result |
 | --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| [DeepSeek-V4-Flash-0731](benchmarks/BENCHMARKS.md#deepseek-v4-flash-0731-learned-index-gemm-attempt-1-full-ppl--2026-08-03) | 304.2B checkpoint / 284B main | 13B main | INT4/BF16/BF16 KV | llama-witness native source + frozen Krasis scalar anchor | 4 | 4.8214 | +0.114% vs 4.8159 scalar anchor | diagnostic deltas in accepted range | 4/4 | 4/4 | 4/4 | PASS |
 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ4/k4v4 | llama-witness BF16 | 8 | 5.8175 | +3.28% | avg 0.254%, max 0.783% | 8/8 | 8/8 | 8/8 | PASS |
 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ6/k6v6 | llama-witness BF16 | 8 | 5.6895 | +1.00% | avg 0.200%, max 0.695% | 8/8 | 8/8 | 8/8 | PASS |
 | Ornith-1.0-35B | 35B class | 3B class | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 5.9170 | +3.67% | n/a | n/a | n/a | n/a | PASS |
@@ -36,6 +37,13 @@ Detailed quality logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](be
 | Nemotron-3-Nano-30B-A3B | 31.6B total | 3.2B | INT4/HQQ6/k6v6 | llama-witness BF16 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | BLOCKED |
 
 Column notes:
+
+- DeepSeek-V4-Flash-0731's PPL delta is intentionally reported against the
+  frozen accepted scalar INT4 anchor (`4.8159`), not against the native-source
+  witness quantization tier. The final 281-window result is
+  `4.82137538882331` (`+0.11369%`), while the independent llama-witness gate
+  passed all four prompts for prefill argmax, top-10 containment, and first
+  token. The full prefill campaign stayed inside its permanent quality ledger.
 
 - `PPL delta vs BF16` uses the per-model Krasis BF16 runtime baseline, measured
   through the Rust prefill `/v1/internal/prefill_logits` test endpoint with

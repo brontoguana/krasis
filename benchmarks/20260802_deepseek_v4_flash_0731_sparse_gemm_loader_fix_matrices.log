@@ -1,0 +1,1318 @@
+[0;36m[1m=>[0m Running CUDA kernel unit tests...
+[0;36m[1m=>[0m Filter: deepseek_v4_
+warning: krasis@1.0.16: KRASIS_BUILD_TIMING phase="probe libnuma" duration_ms=0 duration_s=0.000
+warning: krasis@1.0.16: KRASIS_BUILD_TIMING phase="nvcc decode PTX compile" duration_ms=9416 duration_s=9.416
+warning: krasis@1.0.16: Compiled GPU decode kernels to PTX (/home/main/Documents/Claude/krasis/target/release/build/krasis-f7a8714dfe794f09/out/decode_kernels.ptx)
+warning: krasis@1.0.16: KRASIS_BUILD_TIMING phase="decode PTX" duration_ms=9416 duration_s=9.416
+warning: krasis@1.0.16: KRASIS_BUILD_TIMING phase="nvcc prefill PTX compile" duration_ms=7464 duration_s=7.465
+warning: krasis@1.0.16: Compiled GPU prefill kernels to PTX (/home/main/Documents/Claude/krasis/target/release/build/krasis-f7a8714dfe794f09/out/prefill_kernels.ptx)
+warning: krasis@1.0.16: KRASIS_BUILD_TIMING phase="prefill PTX" duration_ms=7464 duration_s=7.465
+warning: krasis@1.0.16: Reusing cached HQQ CUDA search kernels at /home/main/Documents/Claude/krasis/target/release/build/krasis-f7a8714dfe794f09/out/hqq_search_kernels.ptx
+warning: krasis@1.0.16: KRASIS_BUILD_TIMING phase="HQQ search PTX" duration_ms=0 duration_s=0.000
+warning: krasis@1.0.16: KRASIS_BUILD_TIMING phase="build.rs total" duration_ms=16881 duration_s=16.882
+   Compiling krasis v1.0.16 (/home/main/Documents/Claude/krasis)
+warning: unused imports: `repack_tiled_int4_packed`, `repack_tiled_int8_packed`, and `repack_tiled_scales`
+  --> src/decode.rs:12:36
+   |
+12 |     quantize_activation_int16_f32, repack_tiled_int4_packed, repack_tiled_int8_packed,
+   |                                    ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+13 |     repack_tiled_scales,
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::time::Instant`
+     --> src/gpu_decode.rs:66831:13
+      |
+66831 |         use std::time::Instant;
+      |             ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::weights::marlin::bf16_to_f32`
+     --> src/gpu_decode.rs:70543:13
+      |
+70543 |         use crate::weights::marlin::bf16_to_f32;
+      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::weights::marlin::bf16_to_f32`
+     --> src/gpu_decode.rs:71093:13
+      |
+71093 |         use crate::weights::marlin::bf16_to_f32;
+      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `UnifiedExpertWeights`
+     --> src/gpu_decode.rs:71094:30
+      |
+71094 |         use crate::weights::{UnifiedExpertWeights, WeightStore};
+      |                              ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::weights::marlin::bf16_to_f32`
+     --> src/gpu_decode.rs:71351:13
+      |
+71351 |         use crate::weights::marlin::bf16_to_f32;
+      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated constant `gpu_decode::GpuDecodeStore::__pymethod_set_debug_decode_hcs_equiv_trace_once__::SIGNATURE`: this function has implicit defaults for the trailing `Option<T>` arguments 
+         = note: these implicit defaults are being phased out 
+         = help: add `#[pyo3(signature = (layer_idx=None))]` to this function to silence this warning and keep the current behavior
+     --> src/gpu_decode.rs:19011:12
+      |
+19011 |     pub fn set_debug_decode_hcs_equiv_trace_once(&mut self, layer_idx...
+      |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(deprecated)]` on by default
+
+warning: unused variable: `rope_len`
+    --> src/decode.rs:2839:9
+     |
+2839 |         rope_len: usize,
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rope_len`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `hs`
+    --> src/decode.rs:3273:13
+     |
+3273 |         let hs = g.hidden_size;
+     |             ^^ help: if this is intentional, prefix it with an underscore: `_hs`
+
+warning: unused variable: `kv_lora_rank`
+    --> src/decode.rs:3352:21
+     |
+3352 |                     kv_lora_rank,
+     |                     ^^^^^^^^^^^^ help: try ignoring the field: `kv_lora_rank: _`
+
+warning: unused variable: `qk_nope_dim`
+    --> src/decode.rs:3353:21
+     |
+3353 |                     qk_nope_dim,
+     |                     ^^^^^^^^^^^ help: try ignoring the field: `qk_nope_dim: _`
+
+warning: unused variable: `qk_rope_dim`
+    --> src/decode.rs:3354:21
+     |
+3354 |                     qk_rope_dim,
+     |                     ^^^^^^^^^^^ help: try ignoring the field: `qk_rope_dim: _`
+
+warning: unused variable: `max_seq`
+    --> src/decode.rs:5767:5
+     |
+5767 |     max_seq: usize,
+     |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_max_seq`
+
+warning: unused variable: `r6`
+     --> src/gpu_decode.rs:14451:13
+      |
+14451 |         let r6 = graph.h_graph_moe_route_clocks[base + 12];
+      |             ^^ help: if this is intentional, prefix it with an underscore: `_r6`
+
+warning: unused variable: `f`
+     --> src/gpu_decode.rs:23233:17
+      |
+23233 |             let f = self
+      |                 ^ help: if this is intentional, prefix it with an underscore: `_f`
+
+warning: unused variable: `row_len`
+     --> src/gpu_decode.rs:23537:13
+      |
+23537 |         let row_len = n * 16;
+      |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_row_len`
+
+warning: value assigned to `marlin_swap_ms` is never read
+     --> src/gpu_decode.rs:33024:34
+      |
+33024 |         let mut marlin_swap_ms = 0.0f64;
+      |                                  ^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `hcs_evict_ms` is never read
+     --> src/gpu_decode.rs:33025:32
+      |
+33025 |         let mut hcs_evict_ms = 0.0f64;
+      |                                ^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `simple_swap_ms` is never read
+     --> src/gpu_decode.rs:33154:34
+      |
+33154 |         let mut simple_swap_ms = 0.0f64;
+      |                                  ^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+     --> src/gpu_decode.rs:35673:13
+      |
+35673 |         let mut engine = PrefillEngine {
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `total_w1_packed`
+     --> src/gpu_decode.rs:35570:13
+      |
+35570 |         let total_w1_packed = n_routed * w1_packed_per_expert;
+      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_w1_packed`
+
+warning: unused variable: `total_w1_scales`
+     --> src/gpu_decode.rs:35571:13
+      |
+35571 |         let total_w1_scales = n_routed * w1_scales_per_expert;
+      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_w1_scales`
+
+warning: unused variable: `total_w2_packed`
+     --> src/gpu_decode.rs:35572:13
+      |
+35572 |         let total_w2_packed = n_routed * w2_packed_per_expert;
+      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_w2_packed`
+
+warning: unused variable: `total_w2_scales`
+     --> src/gpu_decode.rs:35573:13
+      |
+35573 |         let total_w2_scales = n_routed * w2_scales_per_expert;
+      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_w2_scales`
+
+warning: unused variable: `conv_state_ptr`
+     --> src/gpu_decode.rs:36652:17
+      |
+36652 |                 conv_state_ptr,
+      |                 ^^^^^^^^^^^^^^ help: try ignoring the field: `conv_state_ptr: _`
+
+warning: unused variable: `recur_state_ptr`
+     --> src/gpu_decode.rs:36653:17
+      |
+36653 |                 recur_state_ptr,
+      |                 ^^^^^^^^^^^^^^^ help: try ignoring the field: `recur_state_ptr: _`
+
+warning: unused variable: `positions`
+     --> src/gpu_decode.rs:36907:9
+      |
+36907 |         positions: &[usize],
+      |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_positions`
+
+warning: unused variable: `eps`
+     --> src/gpu_decode.rs:36910:13
+      |
+36910 |         let eps = graph.eps;
+      |             ^^^ help: if this is intentional, prefix it with an underscore: `_eps`
+
+warning: unused variable: `k`
+     --> src/gpu_decode.rs:36917:13
+      |
+36917 |         let k = graph.kernels.as_ref().ok_or("kernels not cached")?.c...
+      |             ^ help: if this is intentional, prefix it with an underscore: `_k`
+
+warning: unused variable: `has_hd512_k4v4_graph_target`
+     --> src/gpu_decode.rs:38797:13
+      |
+38797 |         let has_hd512_k4v4_graph_target = graph.kv_format == 9
+      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_has_hd512_k4v4_graph_target`
+
+warning: unused variable: `is_bf16_expert`
+     --> src/gpu_decode.rs:39700:13
+      |
+39700 |         let is_bf16_expert = expert_bits == 16;
+      |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_is_bf16_expert`
+
+warning: unused variable: `w13_ksplits_batched`
+     --> src/gpu_decode.rs:39787:13
+      |
+39787 |         let w13_ksplits_batched = if w13_max_ksplits > 1 {
+      |             ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_w13_ksplits_batched`
+
+warning: variable `gqa_cache_idx` is assigned to, but never used
+     --> src/gpu_decode.rs:40818:13
+      |
+40818 |         let mut gqa_cache_idx = seg_gqa_offset;
+      |             ^^^^^^^^^^^^^^^^^
+      |
+      = note: consider using `_gqa_cache_idx` instead
+
+warning: value assigned to `gqa_cache_idx` is never read
+     --> src/gpu_decode.rs:40822:13
+      |
+40822 |             gqa_cache_idx = seg_gqa_offset;
+      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `gqa_cache_idx` is never read
+     --> src/gpu_decode.rs:40825:21
+      |
+40825 |                     gqa_cache_idx += 1;
+      |                     ^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `gqa_cache_idx` is never read
+     --> src/gpu_decode.rs:43185:29
+      |
+43185 | ...                   gqa_cache_idx += 1;
+      |                       ^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+     --> src/gpu_decode.rs:46586:17
+      |
+46586 |             let mut prefetch_slot_ready: Option<bool> = None;
+      |                 ----^^^^^^^^^^^^^^^^^^^
+      |                 |
+      |                 help: remove this `mut`
+
+warning: unused variable: `hs`
+     --> src/gpu_decode.rs:46229:13
+      |
+46229 |         let hs = graph.hidden_size;
+      |             ^^ help: if this is intentional, prefix it with an underscore: `_hs`
+
+warning: unused variable: `prefetch_slot_ready`
+     --> src/gpu_decode.rs:46586:17
+      |
+46586 |             let mut prefetch_slot_ready: Option<bool> = None;
+      |                 ^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prefetch_slot_ready`
+
+warning: unnecessary `unsafe` block
+     --> src/gpu_decode.rs:49568:49
+      |
+49548 | ...                   unsafe {
+      |                       ------ because it's nested under this `unsafe` block
+...
+49568 | ...                       let k_out = unsafe {
+      |                                       ^^^^^^ unnecessary `unsafe` block
+      |
+      = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> src/gpu_decode.rs:48950:13
+      |
+48950 |         let mut tt_norm = 0.0f64;
+      |             ----^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_decode.rs:48951:13
+      |
+48951 |         let mut tt_shared = 0.0f64;
+      |             ----^^^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable `gqa_cache_idx` is assigned to, but never used
+     --> src/gpu_decode.rs:48945:13
+      |
+48945 | ...   let mut gqa_cache_idx = seg_gqa_offset; // Start at offset for ...
+      |           ^^^^^^^^^^^^^^^^^
+      |
+      = note: consider using `_gqa_cache_idx` instead
+
+warning: unused variable: `tt_norm`
+     --> src/gpu_decode.rs:48950:13
+      |
+48950 |         let mut tt_norm = 0.0f64;
+      |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tt_norm`
+
+warning: unused variable: `half_dim`
+     --> src/gpu_decode.rs:49950:25
+      |
+49950 |                     let half_dim = *rope_half_dim;
+      |                         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_half_dim`
+
+warning: unused variable: `num_blocks`
+     --> src/gpu_decode.rs:50733:33
+      |
+50733 | ...                   let num_blocks = graph.kv_blocks_for_layer(laye...
+      |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_blocks`
+
+warning: unused variable: `c_ptr`
+     --> src/gpu_decode.rs:52477:25
+      |
+52477 |                     let c_ptr = b_ptr + (n_groups * state_size * 4) a...
+      |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_c_ptr`
+
+warning: value assigned to `gqa_cache_idx` is never read
+     --> src/gpu_decode.rs:51431:25
+      |
+51431 |                         gqa_cache_idx += 1;
+      |                         ^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `step_ok` is never read
+     --> src/gpu_decode.rs:55407:41
+      |
+55407 | ...                   step_ok = false;
+      |                       ^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+     --> src/gpu_decode.rs:55782:13
+      |
+55782 |         let mut tt_proj: f64 = 0.0;
+      |             ----^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: unused variable: `tt_proj`
+     --> src/gpu_decode.rs:55782:13
+      |
+55782 |         let mut tt_proj: f64 = 0.0;
+      |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tt_proj`
+
+warning: unused variable: `half_dim`
+     --> src/gpu_decode.rs:56344:25
+      |
+56344 |                     let half_dim = *rope_half_dim;
+      |                         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_half_dim`
+
+warning: unused variable: `is_bf16_expert`
+     --> src/gpu_decode.rs:57666:13
+      |
+57666 |         let is_bf16_expert = expert_bits == 16;
+      |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_is_bf16_expert`
+
+warning: unused variable: `draft_context_window`
+     --> src/gpu_decode.rs:61663:13
+      |
+61663 |         let draft_context_window = self.draft_context_window;
+      |             ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_draft_context_window`
+
+warning: unused variable: `used_mb`
+     --> src/gpu_decode.rs:62648:17
+      |
+62648 |             let used_mb = total_mb - free_mb;
+      |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_used_mb`
+
+warning: unused variable: `t_moe`
+     --> src/gpu_decode.rs:71273:13
+      |
+71273 |         let t_moe = Instant::now();
+      |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_t_moe`
+
+warning: unused variable: `diag_moe_detail`
+     --> src/gpu_prefill.rs:21228:13
+      |
+21228 |         let diag_moe_detail = std::env::var("KRASIS_PREFILL_DIAG_MOE_...
+      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_diag_moe_detail`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:26319:13
+      |
+26319 | ...   let mut reset = |label: &str, compressor: &DeepseekV4Compressor...
+      |           ----^^^^^
+      |           |
+      |           help: remove this `mut`
+
+warning: value assigned to `attn_path` is never read
+     --> src/gpu_prefill.rs:35726:29
+      |
+35726 |         let mut attn_path = "custom_tiled";
+      |                             ^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `attn_path` is never read
+     --> src/gpu_prefill.rs:37496:17
+      |
+37496 |                 attn_path = "fa2_cross_chunk";
+      |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `attention_branch_idx` is never read
+     --> src/gpu_prefill.rs:35781:40
+      |
+35781 |         let mut attention_branch_idx = GQA_BRANCH_CUSTOM_NO_FA2;
+      |                                        ^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: unused variable: `la_chunk_out`
+     --> src/gpu_prefill.rs:43586:13
+      |
+43586 |         let la_chunk_out = *self
+      |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_la_chunk_out`
+
+warning: unused variable: `act_t`
+     --> src/gpu_prefill.rs:53724:17
+      |
+53724 |             let act_t = std::cmp::max(32, ((std::cmp::min(1024, inter...
+      |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_act_t`
+
+warning: value assigned to `d_temp_vendor_accum` is never read
+     --> src/gpu_prefill.rs:54980:33
+      |
+54980 | ...                   d_temp_vendor_accum = 0;
+      |                       ^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `d_temp_vendor_src` is never read
+     --> src/gpu_prefill.rs:54984:33
+      |
+54984 | ...                   d_temp_vendor_src = 0;
+      |                       ^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `d_temp_vendor_topk_weights` is never read
+     --> src/gpu_prefill.rs:54988:33
+      |
+54988 | ...                   d_temp_vendor_topk_weights = 0;
+      |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: unused variable: `shared_ws_len`
+     --> src/gpu_prefill.rs:63424:13
+      |
+63424 |         let shared_ws_len = self.config.sms * MARLIN_MAX_LOCK_SLOTS_P...
+      |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_shared_ws_len`
+
+warning: unused variable: `dv`
+     --> src/gpu_prefill.rs:65882:13
+      |
+65882 |         let dv = config.la_v_head_dim;
+      |             ^^ help: if this is intentional, prefix it with an underscore: `_dv`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:69245:21
+      |
+69245 | ...   let mut launch_prepare = |pre: u64, post: u64, comb: u64, threa...
+      |           ----^^^^^^^^^^^^^^
+      |           |
+      |           help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:70062:13
+      |
+70062 |         let mut d_kv_state = ctx.alloc_f32(state_elems);
+      |             ----^^^^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:70063:13
+      |
+70063 |         let mut d_score_state = ctx.alloc_f32(state_elems);
+      |             ----^^^^^^^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:70235:13
+      |
+70235 | ...   let mut d_rotated = ctx.dev.htod_copy(original.clone()).unwrap();
+      |           ----^^^^^^^^^
+      |           |
+      |           help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:70338:13
+      |
+70338 |         let mut d_long_fp4 = ctx
+      |             ----^^^^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:70382:13
+      |
+70382 |         let mut d_fp8 = ctx.dev.htod_copy(fp8_input.clone()).unwrap();
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:70457:13
+      |
+70457 | ...   let mut d_decode_reference = ctx.dev.htod_copy(actual_norm[..he...
+      |           ----^^^^^^^^^^^^^^^^^^
+      |           |
+      |           help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:72277:13
+      |
+72277 |         let mut m_i32 = m as i32;
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: unused variable: `m_i32`
+     --> src/gpu_prefill.rs:72277:13
+      |
+72277 |         let mut m_i32 = m as i32;
+      |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_m_i32`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:73099:13
+      |
+73099 |         let mut norm_correction_i32: i32 = 0;
+      |             ----^^^^^^^^^^^^^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: unused variable: `norm_correction_i32`
+     --> src/gpu_prefill.rs:73099:13
+      |
+73099 |         let mut norm_correction_i32: i32 = 0;
+      |             ^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_norm_correction_i32`
+
+warning: unnecessary `unsafe` block
+     --> src/gpu_prefill.rs:74091:13
+      |
+74091 |             unsafe {
+      |             ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+     --> src/gpu_prefill.rs:74212:9
+      |
+74212 |         unsafe {
+      |         ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `vocab`
+     --> src/gpu_prefill.rs:75325:13
+      |
+75325 |         let vocab = 1000usize;
+      |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_vocab`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:75751:13
+      |
+75751 |         let mut q_ptr = *d_q.device_ptr() as u64;
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:75752:13
+      |
+75752 |         let mut k_ptr = *d_k.device_ptr() as u64;
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:75753:13
+      |
+75753 |         let mut v_ptr = *d_v_new.device_ptr() as u64;
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:75754:13
+      |
+75754 |         let mut h_ptr = *d_h.device_ptr() as u64;
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:75755:13
+      |
+75755 |         let mut g_ptr = *d_g_cum.device_ptr() as u64;
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:75756:13
+      |
+75756 |         let mut o_ptr = *d_out.device_ptr() as u64;
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:75757:13
+      |
+75757 |         let mut scale = 1.0f32;
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:75758:13
+      |
+75758 |         let mut t_i32 = t as i32;
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_prefill.rs:75863:13
+      |
+75863 |         let mut t_i32 = t as i32;
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: value assigned to `prompt_hcs_snapshot` is never read
+    --> src/server.rs:1382:76
+     |
+1382 | ...<u64>, usize, usize, usize)> = None;
+     |                                   ^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+    --> src/server.rs:3560:13
+     |
+3560 |         let mut on_token = |token_id: usize,
+     |             ----^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: value assigned to `scratch_tokens_after_prepare` is never read
+    --> src/server.rs:3190:44
+     |
+3190 |     let mut scratch_tokens_after_prepare = 0usize;
+     |                                            ^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `prefill_chunk_size_after_prepare` is never read
+    --> src/server.rs:3191:48
+     |
+3191 | ..._after_prepare = engine.config.prefill_chunk_size;
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `evicted`
+    --> src/server.rs:5032:14
+     |
+5032 |         let (evicted, _) = store
+     |              ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_evicted`
+
+warning: value assigned to `prefill_lock_ms` is never read
+    --> src/server.rs:5040:35
+     |
+5040 |         let mut prefill_lock_ms = 0.0f64;
+     |                                   ^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `prefill_hcs_snapshot_ms` is never read
+    --> src/server.rs:5041:43
+     |
+5041 |         let mut prefill_hcs_snapshot_ms = 0.0f64;
+     |                                           ^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `prefill_tokenize_ms` is never read
+    --> src/server.rs:5042:39
+     |
+5042 |         let mut prefill_tokenize_ms = 0.0f64;
+     |                                       ^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `prefill_prepare_runtime_ms` is never read
+    --> src/server.rs:5043:46
+     |
+5043 |         let mut prefill_prepare_runtime_ms = 0.0f64;
+     |                                              ^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `prefill_scratch_ms` is never read
+    --> src/server.rs:5044:38
+     |
+5044 |         let mut prefill_scratch_ms = 0.0f64;
+     |                                      ^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `prefill_run_ms` is never read
+    --> src/server.rs:5045:34
+     |
+5045 |         let mut prefill_run_ms = 0.0f64;
+     |                                  ^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `prefill_shadow_ms` is never read
+    --> src/server.rs:5046:37
+     |
+5046 |         let mut prefill_shadow_ms = 0.0f64;
+     |                                     ^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `prefill_release_ms` is never read
+    --> src/server.rs:5047:38
+     |
+5047 |         let mut prefill_release_ms = 0.0f64;
+     |                                      ^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `prefill_stop_ids_ms` is never read
+    --> src/server.rs:5048:39
+     |
+5048 |         let mut prefill_stop_ids_ms = 0.0f64;
+     |                                       ^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `prefill_restore_ms` is never read
+    --> src/server.rs:5049:38
+     |
+5049 |         let mut prefill_restore_ms = 0.0f64;
+     |                                      ^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `w13_n`
+    --> src/weights/mod.rs:1098:13
+     |
+1098 |         let w13_n = if ungated {
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_w13_n`
+
+warning: value assigned to `effective_gs` is never read
+    --> src/weights/mod.rs:2629:13
+     |
+2629 |             effective_gs = 0;
+     |             ^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `total_moe_layers`
+    --> src/weights/mod.rs:3525:9
+     |
+3525 |         total_moe_layers: usize,
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_moe_layers`
+
+warning: type `PrefillTraceConfig` is more private than the item `gpu_prefill::PrefillEngine::trace`
+    --> src/gpu_prefill.rs:7677:5
+     |
+7677 |     pub trace: Option<PrefillTraceConfig>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `gpu_prefill::PrefillEngine::trace` is reachable at visibility `pub`
+     |
+note: but type `PrefillTraceConfig` is only usable at visibility `pub(crate)`
+    --> src/gpu_prefill.rs:964:1
+     |
+ 964 | pub(crate) struct PrefillTraceConfig {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `SyntheticRepackRing` is more private than the item `gpu_prefill::PrefillEngine::synthetic_repack`
+    --> src/gpu_prefill.rs:7862:5
+     |
+7862 | /     pub synthetic_repack:
+7863 | |         Option<Arc<std::sync::Mutex<crate::synthetic_repack::SyntheticRepackRing>>>,
+     | |___________________________________________________________________________________^ field `gpu_prefill::PrefillEngine::synthetic_repack` is reachable at visibility `pub`
+     |
+note: but type `SyntheticRepackRing` is only usable at visibility `pub(crate)`
+    --> src/synthetic_repack.rs:95:1
+     |
+  95 | pub(crate) struct SyntheticRepackRing {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `prefetch_weight_nta` is never used
+    --> src/decode.rs:2177:4
+     |
+2177 | fn prefetch_weight_nta(w: &TransposedWeight) {
+     |    ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `bf16_to_f32` is never used
+    --> src/decode.rs:2204:4
+     |
+2204 | fn bf16_to_f32(x: u16) -> f32 {
+     |    ^^^^^^^^^^^
+
+warning: struct `Xorshift64` is never constructed
+    --> src/decode.rs:5922:8
+     |
+5922 | struct Xorshift64(u64);
+     |        ^^^^^^^^^^
+
+warning: associated items `new`, `next_u64`, `next_u32`, and `next_f32` are never used
+    --> src/decode.rs:5925:8
+     |
+5924 | impl Xorshift64 {
+     | --------------- associated items in this implementation
+5925 |     fn new(seed: u64) -> Self {
+     |        ^^^
+...
+5929 |     fn next_u64(&mut self) -> u64 {
+     |        ^^^^^^^^
+...
+5936 |     fn next_u32(&mut self) -> u32 {
+     |        ^^^^^^^^
+...
+5941 |     fn next_f32(&mut self, scale: f32) -> f32 {
+     |        ^^^^^^^^
+
+warning: function `fill_random_u32` is never used
+    --> src/decode.rs:5949:4
+     |
+5949 | fn fill_random_u32(v: &mut [u32], rng: &mut Xorshift64) {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `fill_random_scales_u16` is never used
+    --> src/decode.rs:5956:4
+     |
+5956 | fn fill_random_scales_u16(v: &mut [u16], rng: &mut Xorshift64) {
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `fill_random_f32` is never used
+    --> src/decode.rs:5965:4
+     |
+5965 | fn fill_random_f32(v: &mut [f32], rng: &mut Xorshift64, scale: f32) {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `fill_random_u16` is never used
+    --> src/decode.rs:5972:4
+     |
+5972 | fn fill_random_u16(v: &mut [u16], rng: &mut Xorshift64) {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `hint_hugepages` is never used
+    --> src/decode.rs:5986:4
+     |
+5986 | fn hint_hugepages<T>(v: &mut [T]) {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `fake_transposed_weight` is never used
+    --> src/decode.rs:6054:4
+     |
+6054 | fn fake_transposed_weight(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `buf_size` is never read
+    --> src/gpu_decode.rs:3280:5
+     |
+3276 | struct PrefetchSlot {
+     |        ------------ field in this struct
+...
+3280 |     buf_size: usize,
+     |     ^^^^^^^^
+
+warning: method `decode_kb_per_tok` is never used
+    --> src/gpu_decode.rs:3442:8
+     |
+3354 | impl VramCalibration {
+     | -------------------- method in this implementation
+...
+3442 |     fn decode_kb_per_tok(&self) -> f64 {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: field `pool_slot` is never read
+    --> src/gpu_decode.rs:3609:5
+     |
+3593 | struct HcsCacheEntry {
+     |        ------------- field in this struct
+...
+3609 |     pool_slot: Option<usize>,
+     |     ^^^^^^^^^
+
+warning: method `is_marlin` is never used
+    --> src/gpu_decode.rs:7215:8
+     |
+7138 | impl GpuWeight {
+     | -------------- method in this implementation
+...
+7215 |     fn is_marlin(&self) -> bool {
+     |        ^^^^^^^^^
+
+warning: fields `compress_rope_theta` and `raw_cache_elems` are never read
+    --> src/gpu_decode.rs:7362:16
+     |
+7347 | pub(crate) struct DeepseekV4LayerRegistration {
+     |                   --------------------------- fields in this struct
+...
+7362 |     pub(crate) compress_rope_theta: f32,
+     |                ^^^^^^^^^^^^^^^^^^^
+7363 |     pub(crate) raw_cache_ptr: u64,
+7364 |     pub(crate) raw_cache_elems: usize,
+     |                ^^^^^^^^^^^^^^^
+     |
+     = note: `DeepseekV4LayerRegistration` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: multiple fields are never read
+     --> src/gpu_decode.rs:10856:5
+      |
+10851 | struct HqqPrefillSidecarRegistration {
+      |        ----------------------------- fields in this struct
+...
+10856 |     correction_bytes: usize,
+      |     ^^^^^^^^^^^^^^^^
+10857 |     scales_ptr: u64,
+10858 |     scales_bytes: usize,
+      |     ^^^^^^^^^^^^
+10859 |     base_f32_ptr: u64,
+10860 |     base_f32_bytes: usize,
+      |     ^^^^^^^^^^^^^^
+10861 |     output_rows_ptr: u64,
+10862 |     output_rows_bytes: usize,
+      |     ^^^^^^^^^^^^^^^^^
+10863 |     groups_ptr: u64,
+      |     ^^^^^^^^^^
+10864 |     groups_bytes: usize,
+      |     ^^^^^^^^^^^^
+10865 |     start_cols_ptr: u64,
+10866 |     start_cols_bytes: usize,
+      |     ^^^^^^^^^^^^^^^^
+10867 |     widths_ptr: u64,
+10868 |     widths_bytes: usize,
+      |     ^^^^^^^^^^^^
+      |
+      = note: `HqqPrefillSidecarRegistration` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `validate_hqq4_tensor_desc` is never used
+     --> src/gpu_decode.rs:11607:4
+      |
+11607 | fn validate_hqq4_tensor_desc(
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `build_hqq_tensors` is never used
+     --> src/gpu_decode.rs:11738:4
+      |
+11738 | fn build_hqq_tensors(
+      |    ^^^^^^^^^^^^^^^^^
+
+warning: field `size` is never read
+     --> src/gpu_decode.rs:12594:5
+      |
+12591 | struct PinnedMapped {
+      |        ------------ field in this struct
+...
+12594 |     size: usize,
+      |     ^^^^
+
+warning: multiple fields are never read
+     --> src/gpu_decode.rs:12666:5
+      |
+12647 | struct CachedKernels {
+      |        ------------- fields in this struct
+...
+12666 |     deepseek_v4_sqrtsoftplus_topk_parallel: cudarc::driver::CudaFunct...
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+12667 |     deepseek_v4_sqrtsoftplus_topk_parallel_selection: cudarc::driver:...
+12668 |     deepseek_v4_swiglu_bf16: cudarc::driver::CudaFunction,
+      |     ^^^^^^^^^^^^^^^^^^^^^^^
+...
+12678 |     deepseek_v4_sparse_scores: cudarc::driver::CudaFunction,
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+12679 |     deepseek_v4_gather_selected_kv_scores: cudarc::driver::CudaFunction,
+12680 |     deepseek_v4_sparse_output: cudarc::driver::CudaFunction,
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+12684 |     deepseek_v4_compressor_rmsnorm: cudarc::driver::CudaFunction,
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+12713 |     marlin_gemv_int4: cudarc::driver::CudaFunction,
+      |     ^^^^^^^^^^^^^^^^
+...
+12758 |     apply_gated_attn: cudarc::driver::CudaFunction,
+      |     ^^^^^^^^^^^^^^^^
+12759 |     // Fused v2 kernels with inline atomic reduction (no separate red...
+12760 |     marlin_gemv_int4_v2_fused_f32: cudarc::driver::CudaFunction,
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+12761 |     marlin_gemv_int8_v2: cudarc::driver::CudaFunction,
+12762 |     marlin_gemv_int8_v2_fused_f32: cudarc::driver::CudaFunction,
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+12786 |     gqa_attention_g: cudarc::driver::CudaFunction,
+      |     ^^^^^^^^^^^^^^^
+...
+12789 |     gqa_attention_g_bf16: cudarc::driver::CudaFunction,
+      |     ^^^^^^^^^^^^^^^^^^^^
+...
+12824 |     gqa_attention_polar4_g: cudarc::driver::CudaFunction,
+      |     ^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `CachedKernels` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: multiple fields are never read
+     --> src/gpu_decode.rs:12964:5
+      |
+12840 | struct GpuDecodeGraph {
+      |        -------------- fields in this struct
+...
+12964 |     d_batch_w13_packed_ptrs: cudarc::driver::CudaSlice<u64>,
+      |     ^^^^^^^^^^^^^^^^^^^^^^^
+12965 |     d_batch_w13_scales_ptrs: cudarc::driver::CudaSlice<u64>,
+      |     ^^^^^^^^^^^^^^^^^^^^^^^
+12966 |     d_batch_w2_packed_ptrs: cudarc::driver::CudaSlice<u64>,
+      |     ^^^^^^^^^^^^^^^^^^^^^^
+12967 |     d_batch_w2_scales_ptrs: cudarc::driver::CudaSlice<u64>,
+      |     ^^^^^^^^^^^^^^^^^^^^^^
+12968 |     // Device array for batched routing weights: [max_experts_...
+12969 |     d_batch_weights: cudarc::driver::CudaSlice<f32>,
+      |     ^^^^^^^^^^^^^^^
+...
+12981 |     batch_upload_ptrs_bytes: usize,  // 4 * max * 8
+      |     ^^^^^^^^^^^^^^^^^^^^^^^
+12982 |     batch_upload_total_bytes: usize, // 4 * max * 8 + 3 * max * 4
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+13110 |     d_gqa_gate_buf: Option<cudarc::driver::CudaSlice<f32>>,
+      |     ^^^^^^^^^^^^^^
+
+warning: fields `eid` and `buf_idx` are never read
+     --> src/gpu_decode.rs:13696:5
+      |
+13695 | struct PrefetchStagedExpert {
+      |        -------------------- fields in this struct
+13696 |     eid: usize,
+      |     ^^^
+13697 |     buf_idx: usize,
+      |     ^^^^^^^
+      |
+      = note: `PrefetchStagedExpert` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `hqq_bf16_weight_bufs` is never read
+     --> src/gpu_decode.rs:16210:5
+      |
+16105 | pub struct GpuDecodeStore {
+      |            -------------- field in this struct
+...
+16210 |     hqq_bf16_weight_bufs: Vec<CudaSlice<u16>>,
+      |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `hqq4_dequant_to_bf16` and `materialize_hqq_gqa_decode_weights` are never used
+     --> src/gpu_decode.rs:17759:8
+      |
+16229 | impl GpuDecodeStore {
+      | ------------------- methods in this implementation
+...
+17759 |     fn hqq4_dequant_to_bf16(
+      |        ^^^^^^^^^^^^^^^^^^^^
+...
+18541 |     fn materialize_hqq_gqa_decode_weights(&mut self, layer_idx: usize...
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `COLD_EXPERT_HELPERS_PTX` is never used
+  --> src/gpu_prefill.rs:33:7
+   |
+33 | const COLD_EXPERT_HELPERS_PTX: &str = include_str!(concat!(env!("OUT_DIR...
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `diag_compute_moe_accum_last_cpu_from_sorted_rows` is never used
+    --> src/gpu_prefill.rs:4142:4
+     |
+4142 | fn diag_compute_moe_accum_last_cpu_from_sorted_rows(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MARLIN_MAX_BLOCKS_PER_SM` is never used
+    --> src/gpu_prefill.rs:4570:7
+     |
+4570 | const MARLIN_MAX_BLOCKS_PER_SM: usize = 4;
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+    --> src/gpu_prefill.rs:5475:5
+     |
+5469 | pub struct PrefillKernels {
+     |            -------------- fields in this struct
+...
+5475 |     scale_bf16: RawCuFunc,
+     |     ^^^^^^^^^^
+...
+5522 |     deepseek_v4_sparse_scores: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5528 |     deepseek_v4_sparse_output_cached_exp: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+5529 |     deepseek_v4_compressor_pool_prefill: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+5530 |     deepseek_v4_compressor_state_prefill: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+5531 |     deepseek_v4_compressor_decode: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5548 |     moe_sum_reduce: RawCuFunc,
+     |     ^^^^^^^^^^^^^^
+5549 |     gqa_prefill: RawCuFunc,
+     |     ^^^^^^^^^^^
+...
+5572 |     causal_conv1d: RawCuFunc,
+     |     ^^^^^^^^^^^^^
+...
+5620 |     fp32_to_bf16_batch: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^^^
+...
+5633 |     la_compute_v_new: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^
+5634 |     la_chunk_output: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^
+5635 |     la_state_update: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^
+...
+5639 |     la_fp32_to_bf16: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^
+...
+5681 |     moe_gather_sorted: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^^
+5682 |     moe_replicate_hidden: RawCuFunc,
+5683 |     moe_scatter_fused: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^^
+
+warning: methods `diag_compute_la_gated_rmsnorm_last_cpu`, `diag_compute_fla_g_cumsum_last_cpu_from_gate_f32`, `upload_tokens`, `launch_scale_bf16`, and `forward_gqa` are never used
+     --> src/gpu_prefill.rs:18980:8
+      |
+ 8125 | impl PrefillEngine {
+      | ------------------ methods in this implementation
+...
+18980 |     fn diag_compute_la_gated_rmsnorm_last_cpu(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+19486 |     fn diag_compute_fla_g_cumsum_last_cpu_from_gate_f32(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+26217 |     fn upload_tokens(&self, token_ids: &[u32]) -> Result<(), String> {
+      |        ^^^^^^^^^^^^^
+...
+26869 |     fn launch_scale_bf16(
+      |        ^^^^^^^^^^^^^^^^^
+...
+34085 |     fn forward_gqa(&self, layer_idx: usize, m: usize) -> Result<(), S...
+      |        ^^^^^^^^^^^
+
+warning: field `dtype` is never read
+     --> src/gpu_prefill.rs:68016:9
+      |
+68013 |     struct TensorMeta {
+      |            ---------- field in this struct
+...
+68016 |         dtype: String,
+      |         ^^^^^
+
+warning: method `upload_u8` is never used
+     --> src/gpu_prefill.rs:68286:12
+      |
+68072 |     impl GpuTestCtx {
+      |     --------------- method in this implementation
+...
+68286 |         fn upload_u8(&self, bytes: &[u8]) -> CudaSlice<u8> {
+      |            ^^^^^^^^^
+
+warning: methods `stats` and `completion_event` are never used
+   --> src/synthetic_repack.rs:321:19
+    |
+155 | impl SyntheticRepackRing {
+    | ------------------------ methods in this implementation
+...
+321 |     pub(crate) fn stats(&self) -> SyntheticRepackStats {
+    |                   ^^^^^
+...
+476 |     pub(crate) fn completion_event(&self) -> Option<cuda_sys::CUevent> {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: function `cpu_expert_byte_sizes_mixed` is never used
+    --> src/weights/mod.rs:2074:4
+     |
+2074 | fn cpu_expert_byte_sizes_mixed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_marlin_expert` is never used
+    --> src/weights/mod.rs:7088:4
+     |
+7088 | fn read_marlin_expert(
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `read_unified_expert_cpu` is never used
+    --> src/weights/mod.rs:7234:4
+     |
+7234 | fn read_unified_expert_cpu(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_unified_expert_cpu_mixed` is never used
+    --> src/weights/mod.rs:7345:4
+     |
+7345 | fn read_unified_expert_cpu_mixed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: structure field `mamba2_A` should have a snake case name
+    --> src/gpu_prefill.rs:7449:9
+     |
+7449 |     pub mamba2_A: u64,
+     |         ^^^^^^^^ help: convert the identifier to snake case: `mamba2_a`
+     |
+     = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: structure field `mamba2_D` should have a snake case name
+    --> src/gpu_prefill.rs:7451:9
+     |
+7451 |     pub mamba2_D: u64,
+     |         ^^^^^^^^ help: convert the identifier to snake case: `mamba2_d`
+
+warning: variable `parallel_dA_cumsum_owned` should have a snake case name
+     --> src/gpu_prefill.rs:40801:17
+      |
+40801 |             let parallel_dA_cumsum_owned = if mamba2_ssd_parallel_chu...
+      |                 ^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `parallel_d_a_cumsum_owned`
+
+warning: variable `parallel_dA_cumsum` should have a snake case name
+     --> src/gpu_prefill.rs:40809:17
+      |
+40809 |             let parallel_dA_cumsum = parallel_dA_cumsum_owned.as_ref();
+      |                 ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `parallel_d_a_cumsum`
+
+warning: variable `parallel_dA_cumsum` should have a snake case name
+     --> src/gpu_prefill.rs:41087:21
+      |
+41087 |                 let parallel_dA_cumsum = parallel_dA_cumsum
+      |                     ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `parallel_d_a_cumsum`
+
+warning: variable `parallel_dA_cumsum` should have a snake case name
+     --> src/gpu_prefill.rs:41708:21
+      |
+41708 |                 let parallel_dA_cumsum = parallel_dA_cumsum
+      |                     ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `parallel_d_a_cumsum`
+
+warning: `krasis` (lib test) generated 153 warnings (run `cargo fix --lib -p krasis --tests` to apply 75 suggestions)
+    Finished `release` profile [optimized] target(s) in 4m 58s
+     Running unittests src/lib.rs (target/release/deps/krasis-ec057fbaf3d6d99f)
+
+running 18 tests
+test chat_template::tests::bundled_deepseek_v4_template_renders_chat_mode ... ok
+test chat_template::tests::deepseek_v4_template_renders_openai_tool_calls ... ok
+test weights::tests::test_deepseek_v4_e2m1_e8m0_dequant_nibble_order ... ok
+test weights::tests::test_deepseek_v4_e4m3_e8m0_block_dequant_and_edges ... ok
+test weights::tests::test_deepseek_v4_source_fp4_contract ... ok
+test gpu_prefill::kernel_tests::test_deepseek_v4_prefill_swiglu_matches_shipped_equation ... ok
+test gpu_prefill::kernel_tests::test_deepseek_v4_tail_rope_matches_adjacent_complex_equation ... ok
+test gpu_prefill::kernel_tests::test_deepseek_v4_prefill_router_matches_score_and_hash_contracts ... ok
+test gpu_prefill::kernel_tests::test_deepseek_v4_sparse_attention_matches_cpu_equations ... ok
+test gpu_prefill::kernel_tests::test_deepseek_v4_hyper_connection_matches_shipped_equations ... ok
+test gpu_decode::dsa_registration_tests::deepseek_v4_batched_bf16_rmsnorm_matches_cpu_equation ... ok
+test gpu_prefill::kernel_tests::test_deepseek_v4_parallel_hc_prepare_is_bit_exact ... ok
+test gpu_prefill::kernel_tests::test_deepseek_v4_compressor_indexer_primitives_match_cpu_equations ... ok
+test gpu_decode::dsa_registration_tests::deepseek_v4_gathered_sparse_score_gemm_matches_reference_equation ... ok
+test gpu_prefill::kernel_tests::test_deepseek_v4_prefill_gathered_score_modes_match_scalar_semantics ... ok
+DeepSeek-V4 grouped WO-A diagnostic groups=8 rows=128 cols=1024 weights_ptr=0x4020d2800 input_ptr=0x4022d2800 reference_ptr=0x402027a00 batched_ptr=0x402033200 differing=1 max_abs=0.0009765625 first_differences=[(965, 15970, 15969, 0.22070313, 0.21972656)]
+DeepSeek-V4 grouped WO-A diagnostic groups=3 rows=7 cols=37 weights_ptr=0x402033200 input_ptr=0x402027a00 reference_ptr=0x402027c00 batched_ptr=0x402027e00 differing=0 max_abs=0 first_differences=[]
+test gpu_decode::dsa_registration_tests::deepseek_v4_grouped_wo_a_batched_gemv_matches_individual_within_one_bf16_ulp ... ok
+test gpu_decode::dsa_registration_tests::deepseek_v4_router_and_activation_match_shipped_equations ... ok
+test gpu_decode::dsa_registration_tests::deepseek_v4_sparse_output_cached_exp_matches_reference_bit_exact ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 273 filtered out; finished in 1.25s
+
+.DeepSeek-V4 checkpoint namespace inventory: 4 layers.* main tensors across 4 layers; 3 mtp.* auxiliary tensors across blocks [0, 1, 2] explicitly skipped; 6 root main tensors; unexpected=0
+................
+----------------------------------------------------------------------
+Ran 17 tests in 0.029s
+
+OK
+[0;36m[1m=>[0m Running launcher config matrix test
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/launcher-test_20260802_225730
+........................
+----------------------------------------------------------------------
+Ran 24 tests in 32.108s
+
+OK

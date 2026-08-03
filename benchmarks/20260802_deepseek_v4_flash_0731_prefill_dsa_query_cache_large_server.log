@@ -1,0 +1,976 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (6000) to clear...
+[0;32m[1mOK[0m Selected GPUs (6000) clear.
+[0;36m[1m=>[0m Launching from: tests/deepseek-v4-flash-0731-bf16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/dev-run_20260802_142808
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d
+Loaded config from tests/deepseek-v4-flash-0731-bf16.conf: {'model_path': '/home/main/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-0731', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d', 'num_gpus': 1, 'layer_group_size': 1, 'kv_cache_mb': 1000, 'kv_dtype': 'bf16', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'bf16', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '127.0.0.1', 'port': 18220, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — DeepSeek-V4-Flash-0731[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (config; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: bf16  |  KV: bf16[0m
+  [32mLayer groups: 1  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+  [33mUNVALIDATED BF16 debug path enabled: attention=BF16. This path likely contains unknown bugs and must not be used as a correctness oracle. Use HF Transformers BF16 reference data for validation; production runs must use quantized configs.[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=557 MB, free=96700 MB, total=97258 MB
+
+[1m[36m▸ Loading GPU weights[0m
+DeepSeek-V4 checkpoint namespace inventory: 67606 layers.* main tensors across 43 layers; 4705 mtp.* auxiliary tensors across blocks [0, 1, 2] explicitly skipped; 6 root main tensors; unexpected=0
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=12696 MB, reserved=12716 MB, used=13381 MB, free=83876 MB, total=97258 MB
+  [0;32mAttention resident on GPU (10970 MB), 83876 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 43 layers...
+    GPU Marlin cache loaded: 143.4 GB in 94s
+  [0;32mExpert weights loaded in 94s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=12696 MB, reserved=12716 MB, used=13381 MB, free=83876 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=12696 MB, reserved=12716 MB, used=13381 MB, free=83876 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=13702 MB, reserved=13750 MB, used=14415 MB, free=82842 MB, total=97258 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=13702 MB, reserved=13750 MB, used=14415 MB, free=82842 MB, total=97258 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x6c1d1780)[0m
+  [32mReleased redundant GPU execution source tensors (677 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+[PREFILL-TIMING] 300 tokens, 2182.3ms total (137 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  2162.5ms ( 99.1% of prefill) event=  2157.9ms sync=   318.6ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     8.7ms event=     8.4ms sync=     8.1ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=   121.6ms event=   121.3ms sync=     0.8ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     9.7ms event=     9.4ms sync=     8.1ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=    14.3ms event=    12.6ms sync=    11.1ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     7.3ms event=     7.1ms sync=     6.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=    22.8ms event=    22.5ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=   225.6ms event=   225.4ms sync=   225.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=    38.7ms event=    38.4ms sync=    38.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=    11.1ms event=    10.8ms sync=     9.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     1.1ms event=     0.8ms sync=     0.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     8.7ms event=     8.4ms sync=     8.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1692.0ms event=  1691.8ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     1.1ms event=     0.8ms sync=     0.9ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     5.4ms event=     5.3ms sync=     4.5ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.9ms event=     0.7ms sync=     0.5ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.5ms event=     0.3ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.9ms event=     0.8ms sync=     0.9ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     1.0ms event=     0.9ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     4.0ms event=     3.9ms sync=     3.9ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:      1691.8ms ( 77.5%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:        31.8ms (  1.9% of moe)
+[PREFILL-TIMING]       dma:       1333.9ms ( 78.8% of moe)
+[PREFILL-TIMING]         route_d2h:     1.1ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     22.4ms ptr_upload:     0.4ms dma_wait:  1282.9ms
+[PREFILL-TIMING]       w1+act:     307.6ms ( 18.2% of moe)
+[PREFILL-TIMING]       w2:          16.0ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.8ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.8ms (  0.0% of moe)
+[PREFILL-TIMING]   other:      19.7ms (  0.9%)
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 3.7s[0m
+  [2mcuda:0 warmup:  peak 94,877 MB used / 97,258 MB total  (min free: 2,380 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 81,052 MB / 97,258 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+[PREFILL-TIMING] 500 tokens, 4369.0ms total (114 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  4366.9ms (100.0% of prefill) event=  4362.1ms sync=   605.9ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=    13.1ms event=    12.9ms sync=    12.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     2.5ms event=     2.2ms sync=     1.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=    14.7ms event=    14.5ms sync=    13.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=    24.3ms event=    22.6ms sync=    21.7ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     8.7ms event=     8.5ms sync=     8.0ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     2.0ms event=     1.7ms sync=     0.8ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=   445.0ms event=   444.8ms sync=   444.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=    77.8ms event=    77.6ms sync=    77.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=    12.0ms event=    11.7ms sync=    10.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     1.4ms event=     1.2ms sync=     1.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=    13.1ms event=    12.8ms sync=    12.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  3750.8ms event=  3750.6ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     1.5ms event=     1.1ms sync=     1.3ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     8.3ms event=     8.1ms sync=     7.5ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     1.1ms event=     1.0ms sync=     0.8ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.6ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     1.4ms event=     1.3ms sync=     1.3ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.6ms event=     0.5ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.4ms event=     0.3ms sync=     0.3ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=    10.5ms event=    10.4ms sync=    10.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:      3750.6ms ( 85.8%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.8ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       3643.3ms ( 97.1% of moe)
+[PREFILL-TIMING]         route_d2h:     1.1ms ptr_alloc:     0.5ms ptr_build:     0.4ms
+[PREFILL-TIMING]         cold_h2d:     60.6ms ptr_upload:     0.4ms dma_wait:  3579.7ms
+[PREFILL-TIMING]       w1+act:      66.5ms (  1.8% of moe)
+[PREFILL-TIMING]       w2:          35.0ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      1.1ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       1.0ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.1ms (  0.0%)
+  [32mdecode: 32 tokens in 5.13s (6.2 tok/s)  VRAM: 80990 MB free now, 80990 MB min free during decode[0m
+  [32mShort calibration: baseline=81,052 MB, prefill post-alloc=3,768 MB, prefill min=612 MB, decode min=80,990 MB, post-cleanup=80,990 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=2.7001 MB/token[0m
+  [32mAdaptive long calibration: using 500 tokens (current low-water 612 MB is at/below adaptive floor 1200 MB)[0m
+  [32mScratch reservation: max=135,475 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 80,990 MB[0m
+  [32mTransient deltas: short prefill=80,440 MB, long prefill=80,440 MB, short decode=62 MB, long decode=62 MB[0m
+  [32mGPU0 decode HCS budget: 80,328 MB[0m
+  [32mPrefill HCS budgets: short=0 MB, long=0 MB[0m
+  [32mWorst-case prefill scratch reservation: 135,475 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [2mNo approved heatmap artifact matches this model/router signature and validated runtime; falling back to quick startup heatmap generation[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+  [2mQuick heatmap prompt 1/6: 27 prefill tokens + 256 decode tokens[0m
+[PREFILL-TIMING] 27 tokens, 1383.2ms total (20 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1380.7ms ( 99.8% of prefill) event=  1376.0ms sync=    23.6ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.7ms event=     2.5ms sync=     2.1ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.4ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.8ms event=     2.5ms sync=     1.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.7ms event=     3.0ms sync=     2.4ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.1ms event=     2.8ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     5.8ms event=     5.6ms sync=     5.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.5ms event=     1.3ms sync=     1.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.1ms event=     4.9ms sync=     4.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.6ms event=     2.4ms sync=     2.1ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1347.6ms event=  1347.4ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.5ms event=     1.3ms sync=     0.7ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.4ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:      1347.4ms ( 97.4%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.7ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1308.9ms ( 97.1% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     22.3ms ptr_upload:     0.4ms dma_wait:  1274.4ms
+[PREFILL-TIMING]       w1+act:      21.7ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          12.0ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.5ms (  0.2%)
+  [2mQuick heatmap prompt 1/6 done: 257 route tokens, 42.1s (elapsed 42.1s, eta 210.5s)[0m
+  [2mQuick heatmap prompt 2/6: 35 prefill tokens + 256 decode tokens[0m
+[PREFILL-TIMING] 35 tokens, 1642.1ms total (21 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1639.5ms ( 99.8% of prefill) event=  1634.6ms sync=    28.3ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.9ms event=     2.6ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.4ms sync=     0.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     3.1ms event=     2.7ms sync=     1.7ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     5.1ms event=     3.2ms sync=     2.7ms wall_minus_event=     1.8ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     6.6ms event=     6.3ms sync=     2.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.7ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     7.8ms event=     7.6ms sync=     7.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.9ms event=     1.7ms sync=     1.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     6.2ms event=     5.9ms sync=     5.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.8ms event=     2.6ms sync=     2.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1598.4ms event=  1598.2ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.5ms event=     1.4ms sync=     0.8ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.4ms event=     0.1ms sync=     0.3ms wall_minus_event=     0.2ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.4ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:      1598.2ms ( 97.3%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.8ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1553.9ms ( 97.2% of moe)
+[PREFILL-TIMING]         route_d2h:     1.1ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     26.6ms ptr_upload:     0.4ms dma_wait:  1524.8ms
+[PREFILL-TIMING]       w1+act:      25.4ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          14.0ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.5ms (  0.2%)
+  [2mQuick heatmap prompt 2/6 done: 257 route tokens, 42.8s (elapsed 84.9s, eta 169.7s)[0m
+  [2mQuick heatmap prompt 3/6: 27 prefill tokens + 256 decode tokens[0m
+[PREFILL-TIMING] 27 tokens, 1342.0ms total (20 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1339.4ms ( 99.8% of prefill) event=  1334.5ms sync=    23.9ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.7ms event=     2.5ms sync=     2.1ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.8ms event=     2.5ms sync=     1.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.7ms event=     3.0ms sync=     2.4ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.0ms event=     2.7ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     5.8ms event=     5.6ms sync=     5.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.5ms event=     1.3ms sync=     1.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.1ms event=     4.9ms sync=     4.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.8ms event=     0.5ms sync=     0.6ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.7ms event=     2.4ms sync=     2.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1306.2ms event=  1305.9ms sync=     0.2ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.4ms event=     1.3ms sync=     0.7ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.3ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:      1305.9ms ( 97.3%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.6ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1267.9ms ( 97.1% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     21.8ms ptr_upload:     0.5ms dma_wait:  1243.4ms
+[PREFILL-TIMING]       w1+act:      21.5ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          11.8ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.5ms (  0.2%)
+  [2mQuick heatmap prompt 3/6 done: 257 route tokens, 42.4s (elapsed 127.2s, eta 127.2s)[0m
+  [2mQuick heatmap prompt 4/6: 21 prefill tokens + 256 decode tokens[0m
+[PREFILL-TIMING] 21 tokens, 1254.3ms total (17 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1251.8ms ( 99.8% of prefill) event=  1247.0ms sync=    21.8ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.5ms event=     2.3ms sync=     1.9ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.6ms event=     2.4ms sync=     1.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.7ms event=     3.0ms sync=     2.4ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.0ms event=     2.7ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     4.6ms event=     4.2ms sync=     4.4ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.4ms event=     1.1ms sync=     1.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.1ms event=     4.8ms sync=     4.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.5ms event=     2.3ms sync=     1.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1220.8ms event=  1220.5ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.5ms event=     1.4ms sync=     0.7ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.3ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:      1220.5ms ( 97.3%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.6ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1184.2ms ( 97.0% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     20.8ms ptr_upload:     0.4ms dma_wait:  1160.9ms
+[PREFILL-TIMING]       w1+act:      20.4ms (  1.7% of moe)
+[PREFILL-TIMING]       w2:          11.3ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.5ms (  0.2%)
+  [2mQuick heatmap prompt 4/6 done: 257 route tokens, 42.1s (elapsed 169.4s, eta 84.7s)[0m
+  [2mQuick heatmap prompt 5/6: 32 prefill tokens + 256 decode tokens[0m
+[PREFILL-TIMING] 32 tokens, 1537.5ms total (21 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1535.0ms ( 99.8% of prefill) event=  1530.3ms sync=    25.8ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.8ms event=     2.6ms sync=     2.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.4ms sync=     0.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.9ms event=     2.6ms sync=     1.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.9ms event=     3.2ms sync=     2.5ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.2ms event=     3.0ms sync=     2.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     7.0ms event=     6.7ms sync=     6.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.8ms event=     1.5ms sync=     1.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.1ms event=     4.9ms sync=     4.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.8ms event=     2.5ms sync=     2.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1499.8ms event=  1499.6ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.5ms event=     1.4ms sync=     0.8ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.4ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:      1499.6ms ( 97.5%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.5ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1457.3ms ( 97.2% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     25.6ms ptr_upload:     0.4ms dma_wait:  1429.2ms
+[PREFILL-TIMING]       w1+act:      24.3ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          13.4ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.5ms (  0.2%)
+  [2mQuick heatmap prompt 5/6 done: 257 route tokens, 42.5s (elapsed 211.8s, eta 42.4s)[0m
+  [2mQuick heatmap prompt 6/6: 38 prefill tokens + 256 decode tokens[0m
+[PREFILL-TIMING] 38 tokens, 1624.9ms total (23 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1622.4ms ( 99.8% of prefill) event=  1617.6ms sync=    29.4ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     3.0ms event=     2.6ms sync=     2.4ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.4ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     3.1ms event=     2.8ms sync=     1.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     5.0ms event=     3.3ms sync=     2.6ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     6.5ms event=     6.3ms sync=     2.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     8.8ms event=     8.5ms sync=     8.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     2.0ms event=     1.8ms sync=     1.8ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     6.2ms event=     6.0ms sync=     5.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.9ms event=     2.6ms sync=     2.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1580.2ms event=  1579.9ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.6ms event=     1.5ms sync=     0.8ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.4ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:      1579.9ms ( 97.2%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.7ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1535.7ms ( 97.2% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     26.7ms ptr_upload:     0.4ms dma_wait:  1502.9ms
+[PREFILL-TIMING]       w1+act:      25.5ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          14.0ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.5ms (  0.2%)
+  [2mQuick heatmap prompt 6/6 done: 257 route tokens, 42.7s (elapsed 254.5s, eta 0.0s)[0m
+  [32mHeatmap: 9,470 experts ranked from 9,470 entries[0m
+  [2mVRAM calibration: baseline 80990 MB | prefill 0.0 KB/tok, decode 0.0 KB/tok | HCS allowance prefill: short 0 MB, long 0 MB | decode: short 80328 MB, long 80328 MB | idle floors prefill=80990 MB decode=662 MB | decode-resident HCS budget=80328 MB[0m
+  [2mGPU0 HCS: 11008 experts (9470 ranked + 1538 unranked), reclaimable: 80,328 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/11008 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 6440 experts in 3.42s (79695.0 MB, host_mode=source) | total: 6440/11008 (58.5%) coverage[0m
+  [2mLoaded in 3.5s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mDeepSeek-V4-Flash-0731[0m
+  [32mAddress:[0m  [1m127.0.0.1:18220[0m
+  [32mContext:[0m  149,808 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18220/v1[0m
+    Chat endpoint: http://127.0.0.1:18220/v1/chat/completions
+    Models:        http://127.0.0.1:18220/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mDeepSeek-V4-Flash-0731[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+[PREFILL-TIMING] 7 tokens, 606.6ms total (12 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=   603.2ms ( 99.4% of prefill) event=   598.6ms sync=    17.5ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.3ms event=     2.0ms sync=     1.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.3ms event=     2.0ms sync=     0.9ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.6ms event=     3.0ms sync=     2.4ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.0ms event=     2.8ms sync=     2.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.5ms event=     1.3ms sync=     0.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     1.7ms event=     1.4ms sync=     1.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     0.8ms event=     0.5ms sync=     0.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.3ms event=     5.0ms sync=     4.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.2ms event=     1.9ms sync=     1.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=   576.6ms event=   576.4ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.1ms event=     1.0ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.9ms event=     0.8ms sync=     0.6ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:       576.4ms ( 95.0%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.5ms (  0.4% of moe)
+[PREFILL-TIMING]       dma:        554.2ms ( 96.2% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:      9.7ms ptr_upload:     0.4ms dma_wait:   542.3ms
+[PREFILL-TIMING]       w1+act:      11.5ms (  2.0% of moe)
+[PREFILL-TIMING]       w2:           6.2ms (  1.1% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       3.4ms (  0.6%)
+  [32mprefill: 7 tokens in 1.38s (5.1 tok/s)  VRAM: 80992 MB free now, 3310 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.30s (23.0 tok/s)  VRAM: 1136 MB free now, 1136 MB min free during decode[0m
+  [36mDynamic HCS: hit=88.82% tail=516/258 protected=5924 promotions=109 evictions=109 request_promotions=109/1806 budget_skips=0 no_slot=93 copy_failures=0[0m
+[PREFILL-TIMING] 16 tokens, 996.1ms total (16 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=   993.4ms ( 99.7% of prefill) event=   988.8ms sync=    20.0ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.5ms event=     2.3ms sync=     1.9ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.5ms event=     2.3ms sync=     1.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.5ms event=     2.8ms sync=     2.1ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.1ms event=     2.8ms sync=     2.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.5ms event=     1.3ms sync=     0.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     3.2ms event=     3.0ms sync=     3.0ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.1ms event=     0.8ms sync=     0.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.2ms event=     5.0ms sync=     4.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.4ms event=     2.2ms sync=     1.9ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=   964.3ms event=   964.1ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.3ms event=     1.1ms sync=     0.5ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.3ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:       964.1ms ( 96.8%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.5ms (  0.3% of moe)
+[PREFILL-TIMING]       dma:        933.8ms ( 96.9% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     15.8ms ptr_upload:     0.4ms dma_wait:   913.3ms
+[PREFILL-TIMING]       w1+act:      16.5ms (  1.7% of moe)
+[PREFILL-TIMING]       w2:           9.3ms (  1.0% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.6ms (  0.3%)
+  [32mprefill: 16 tokens in 1.82s (8.8 tok/s)  VRAM: 80990 MB free now, 2802 MB min free during prefill[0m
+  [32mdecode: 1 tokens in 0.05s (18.6 tok/s)  VRAM: 1134 MB free now, 1134 MB min free during decode[0m
+  [36mDynamic HCS: hit=85.66% tail=516/258 protected=5924 promotions=136 evictions=136 request_promotions=27/16254 budget_skips=0 no_slot=103 copy_failures=0[0m
+[PREFILL-TIMING] 18 tokens, 1026.7ms total (18 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1023.6ms ( 99.7% of prefill) event=  1019.0ms sync=    20.7ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.6ms event=     2.3ms sync=     1.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.6ms event=     2.3ms sync=     1.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.5ms event=     2.9ms sync=     2.2ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.0ms event=     2.7ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     3.8ms event=     3.5ms sync=     3.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.3ms event=     1.1ms sync=     1.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.1ms event=     4.9ms sync=     3.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.5ms event=     2.2ms sync=     1.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=   993.6ms event=   993.4ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.3ms event=     1.2ms sync=     0.6ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.4ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:       993.4ms ( 96.8%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.5ms (  0.3% of moe)
+[PREFILL-TIMING]       dma:        962.3ms ( 96.9% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     16.9ms ptr_upload:     0.4ms dma_wait:   940.6ms
+[PREFILL-TIMING]       w1+act:      17.2ms (  1.7% of moe)
+[PREFILL-TIMING]       w2:           9.3ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       3.1ms (  0.3%)
+  [32mprefill: 18 tokens in 1.85s (9.7 tok/s)  VRAM: 80990 MB free now, 1878 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.29s (23.9 tok/s)  VRAM: 1134 MB free now, 1134 MB min free during decode[0m
+  [36mDynamic HCS: hit=89.59% tail=516/258 protected=5924 promotions=308 evictions=308 request_promotions=172/16254 budget_skips=0 no_slot=119 copy_failures=0[0m
+[PREFILL-TIMING] 22 tokens, 1186.2ms total (19 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1183.1ms ( 99.7% of prefill) event=  1178.4ms sync=    21.7ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.6ms event=     2.3ms sync=     1.9ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.6ms event=     2.4ms sync=     1.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.6ms event=     2.9ms sync=     2.3ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.0ms event=     2.7ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     4.5ms event=     4.3ms sync=     4.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.4ms event=     1.1ms sync=     1.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.1ms event=     4.8ms sync=     4.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.5ms event=     2.3ms sync=     1.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1152.1ms event=  1151.8ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.4ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.3ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:      1151.8ms ( 97.1%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.5ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1116.9ms ( 97.0% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     19.6ms ptr_upload:     0.4ms dma_wait:  1094.8ms
+[PREFILL-TIMING]       w1+act:      19.6ms (  1.7% of moe)
+[PREFILL-TIMING]       w2:          10.7ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       3.0ms (  0.3%)
+  [32mprefill: 22 tokens in 2.01s (11.0 tok/s)  VRAM: 80990 MB free now, 2630 MB min free during prefill[0m
+  [32mdecode: 74 tokens in 3.29s (22.5 tok/s)  VRAM: 1134 MB free now, 1134 MB min free during decode[0m
+  [36mDynamic HCS: hit=87.16% tail=516/258 protected=5924 promotions=2517 evictions=2517 request_promotions=2209/131838 budget_skips=0 no_slot=362 copy_failures=0[0m
+[PREFILL-TIMING] 26 tokens, 1253.7ms total (21 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1250.5ms ( 99.7% of prefill) event=  1245.7ms sync=    23.3ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.7ms event=     2.5ms sync=     2.1ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.8ms event=     2.5ms sync=     1.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     5.0ms event=     3.3ms sync=     2.4ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.1ms event=     2.8ms sync=     2.5ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     5.4ms event=     5.1ms sync=     5.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.5ms event=     1.3ms sync=     1.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.1ms event=     4.8ms sync=     4.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.8ms event=     2.5ms sync=     2.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1217.5ms event=  1217.3ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.6ms event=     1.4ms sync=     0.7ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.7ms event=     0.6ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.3ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:      1217.3ms ( 97.1%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.5ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1181.0ms ( 97.0% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     20.6ms ptr_upload:     0.4ms dma_wait:  1155.2ms
+[PREFILL-TIMING]       w1+act:      20.4ms (  1.7% of moe)
+[PREFILL-TIMING]       w2:          11.2ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       3.1ms (  0.2%)
+  [32mprefill: 26 tokens in 2.08s (12.5 tok/s)  VRAM: 80990 MB free now, 2594 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.27s (25.9 tok/s)  VRAM: 1134 MB free now, 1134 MB min free during decode[0m
+  [36mDynamic HCS: hit=92.30% tail=516/258 protected=5924 promotions=2656 evictions=2656 request_promotions=139/131838 budget_skips=0 no_slot=362 copy_failures=0[0m
+[PREFILL-TIMING] 5 tokens, 477.9ms total (10 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=   474.2ms ( 99.2% of prefill) event=   469.5ms sync=    17.4ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.3ms event=     2.0ms sync=     1.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.5ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.2ms event=     2.0ms sync=     0.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.7ms event=     3.0ms sync=     2.4ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.0ms event=     2.8ms sync=     2.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.3ms sync=     0.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     1.4ms event=     1.1ms sync=     1.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.5ms event=     5.2ms sync=     4.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.2ms event=     1.9ms sync=     1.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=   447.7ms event=   447.4ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.1ms event=     1.0ms sync=     0.3ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.9ms event=     0.7ms sync=     0.6ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:       447.4ms ( 93.6%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.4ms (  0.5% of moe)
+[PREFILL-TIMING]       dma:        427.8ms ( 95.6% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:      7.7ms ptr_upload:     0.4ms dma_wait:   417.9ms
+[PREFILL-TIMING]       w1+act:       9.7ms (  2.2% of moe)
+[PREFILL-TIMING]       w2:           5.4ms (  1.2% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.2% of moe)
+[PREFILL-TIMING]   other:       3.7ms (  0.8%)
+  [32mprefill: 5 tokens in 1.30s (3.9 tok/s)  VRAM: 80990 MB free now, 3458 MB min free during prefill[0m
+  [32mdecode: 9 tokens in 0.40s (22.6 tok/s)  VRAM: 1134 MB free now, 1134 MB min free during decode[0m
+  [36mDynamic HCS: hit=87.42% tail=516/258 protected=5924 promotions=2801 evictions=2801 request_promotions=145/7998 budget_skips=0 no_slot=509 copy_failures=0[0m
+[PREFILL-TIMING] 16 tokens, 988.6ms total (16 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=   985.8ms ( 99.7% of prefill) event=   980.9ms sync=    20.2ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.5ms event=     2.3ms sync=     1.9ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.5ms event=     2.2ms sync=     1.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.4ms event=     2.7ms sync=     2.1ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.1ms event=     2.9ms sync=     2.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.5ms event=     1.3ms sync=     0.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     3.4ms event=     3.0ms sync=     3.2ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.1ms event=     0.9ms sync=     0.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.3ms event=     4.9ms sync=     4.3ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.4ms event=     2.2ms sync=     1.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=   956.4ms event=   956.2ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.3ms event=     1.1ms sync=     0.5ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.3ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:       956.2ms ( 96.7%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.5ms (  0.3% of moe)
+[PREFILL-TIMING]       dma:        925.6ms ( 96.8% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     16.2ms ptr_upload:     0.4ms dma_wait:   904.8ms
+[PREFILL-TIMING]       w1+act:      16.7ms (  1.7% of moe)
+[PREFILL-TIMING]       w2:           9.3ms (  1.0% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.7ms (  0.3%)
+  [32mprefill: 16 tokens in 1.81s (8.8 tok/s)  VRAM: 80990 MB free now, 1878 MB min free during prefill[0m
+  [32mdecode: 1 tokens in 0.05s (22.2 tok/s)  VRAM: 1134 MB free now, 1134 MB min free during decode[0m
+  [36mDynamic HCS: hit=93.41% tail=516/258 protected=5924 promotions=2818 evictions=2818 request_promotions=17/16254 budget_skips=0 no_slot=509 copy_failures=0[0m
+[PREFILL-TIMING] 13 tokens, 851.5ms total (15 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=   848.3ms ( 99.6% of prefill) event=   843.7ms sync=    18.9ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.4ms event=     2.1ms sync=     1.8ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.5ms event=     1.3ms sync=     0.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.5ms event=     2.2ms sync=     1.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.5ms event=     2.8ms sync=     2.1ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.0ms event=     2.7ms sync=     2.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.5ms event=     1.3ms sync=     0.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     2.7ms event=     2.5ms sync=     2.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.0ms event=     0.8ms sync=     0.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.2ms event=     4.9ms sync=     4.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.4ms event=     2.1ms sync=     1.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=   820.2ms event=   820.0ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.2ms event=     1.1ms sync=     0.5ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.4ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:       820.0ms ( 96.3%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.5ms (  0.3% of moe)
+[PREFILL-TIMING]       dma:        792.4ms ( 96.6% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.5ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     14.0ms ptr_upload:     0.4ms dma_wait:   776.1ms
+[PREFILL-TIMING]       w1+act:      14.8ms (  1.8% of moe)
+[PREFILL-TIMING]       w2:           8.2ms (  1.0% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       3.1ms (  0.4%)
+  [32mprefill: 13 tokens in 1.67s (7.8 tok/s)  VRAM: 80990 MB free now, 2126 MB min free during prefill[0m
+  [32mdecode: 83 tokens in 3.17s (26.2 tok/s)  VRAM: 1134 MB free now, 1134 MB min free during decode[0m
+  [36mDynamic HCS: hit=91.43% tail=516/258 protected=5924 promotions=3801 evictions=3801 request_promotions=983/131838 budget_skips=0 no_slot=1361 copy_failures=0[0m
+[PREFILL-TIMING] 35 tokens, 1518.9ms total (23 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1515.8ms ( 99.8% of prefill) event=  1511.0ms sync=    28.2ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.9ms event=     2.6ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.9ms event=     2.7ms sync=     1.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.9ms event=     3.2ms sync=     2.6ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.1ms event=     2.9ms sync=     2.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     7.8ms event=     7.6ms sync=     7.6ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.9ms event=     1.7ms sync=     1.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     6.3ms event=     6.1ms sync=     5.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.8ms event=     0.6ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.9ms event=     2.6ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  1478.2ms event=  1478.0ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.8ms event=     0.5ms sync=     0.6ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.5ms event=     1.4ms sync=     0.8ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.4ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:      1478.0ms ( 97.3%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.6ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       1436.7ms ( 97.2% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     24.5ms ptr_upload:     0.4ms dma_wait:  1409.8ms
+[PREFILL-TIMING]       w1+act:      23.7ms (  1.6% of moe)
+[PREFILL-TIMING]       w2:          12.9ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       3.1ms (  0.2%)
+  [32mprefill: 35 tokens in 2.34s (14.9 tok/s)  VRAM: 80988 MB free now, 2258 MB min free during prefill[0m
+  [32mdecode: 12 tokens in 0.49s (24.3 tok/s)  VRAM: 1132 MB free now, 1132 MB min free during decode[0m
+  [36mDynamic HCS: hit=89.83% tail=516/258 protected=5924 promotions=4105 evictions=4105 request_promotions=304/16254 budget_skips=0 no_slot=1372 copy_failures=0[0m
+[PREFILL-TIMING] 18 tokens, 1018.2ms total (18 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall=  1015.6ms ( 99.7% of prefill) event=  1010.8ms sync=    20.8ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=     2.5ms event=     2.3ms sync=     1.9ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     1.6ms event=     1.3ms sync=     0.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=     2.6ms event=     2.3ms sync=     1.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=     4.5ms event=     2.9ms sync=     2.2ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=     3.0ms event=     2.7ms sync=     2.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     1.6ms event=     1.4ms sync=     0.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=     3.8ms event=     3.5ms sync=     3.6ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=     1.3ms event=     1.0ms sync=     1.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=     5.1ms event=     4.8ms sync=     3.9ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=     2.6ms event=     2.2ms sync=     2.0ms wall_minus_event=     0.4ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=   985.6ms event=   985.4ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     0.7ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=     1.3ms event=     1.2ms sync=     0.6ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     0.6ms event=     0.5ms sync=     0.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     0.2ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     0.3ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.5ms event=     0.3ms sync=     0.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     0.2ms event=     0.1ms sync=     0.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:       985.4ms ( 96.8%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         2.5ms (  0.3% of moe)
+[PREFILL-TIMING]       dma:        953.9ms ( 96.8% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     16.5ms ptr_upload:     0.4ms dma_wait:   932.5ms
+[PREFILL-TIMING]       w1+act:      17.4ms (  1.8% of moe)
+[PREFILL-TIMING]       w2:           9.5ms (  1.0% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.7ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.6ms (  0.3%)
+  [32mprefill: 18 tokens in 1.84s (9.8 tok/s)  VRAM: 80990 MB free now, 2752 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.29s (24.0 tok/s)  VRAM: 1134 MB free now, 1134 MB min free during decode[0m
+  [36mDynamic HCS: hit=89.59% tail=516/258 protected=5924 promotions=4280 evictions=4280 request_promotions=175/131838 budget_skips=0 no_slot=1385 copy_failures=0[0m
+[PREFILL-TIMING] 2043 tokens, 10367.9ms total (197 tok/s)
+[PREFILL-TIMING]   embed:       0.1ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall= 10364.1ms (100.0% of prefill) event= 10359.3ms sync=  5251.8ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.1ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=    47.9ms event=    47.6ms sync=    47.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=     4.0ms event=     3.8ms sync=     3.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=    49.6ms event=    49.3ms sync=    48.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=   179.7ms event=   177.9ms sync=   177.3ms wall_minus_event=     1.7ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=    30.7ms event=    30.4ms sync=    30.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=     3.9ms event=     3.6ms sync=     2.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall=  3287.4ms event=  3287.1ms sync=  3287.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=  1549.7ms event=  1549.4ms sync=  1549.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=    51.3ms event=    51.0ms sync=    50.0ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=     4.9ms event=     4.6ms sync=     4.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=    48.1ms event=    47.8ms sync=    47.4ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  5102.4ms event=  5102.2ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=     4.6ms event=     4.4ms sync=     4.4ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=    31.0ms event=    30.8ms sync=    30.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     2.5ms event=     2.4ms sync=     2.3ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     0.6ms event=     0.5ms sync=     0.5ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     1.8ms event=     1.6ms sync=     1.7ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=     5.2ms event=     5.1ms sync=     5.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     0.8ms event=     0.7ms sync=     0.6ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.4ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.2ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     1.0ms event=     0.8ms sync=     0.9ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=   134.6ms event=   134.5ms sync=   134.6ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=     1.4ms event=     1.3ms sync=     1.3ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]   moe:      5102.2ms ( 49.2%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         4.5ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       4881.7ms ( 95.7% of moe)
+[PREFILL-TIMING]         route_d2h:     1.1ms ptr_alloc:     0.4ms ptr_build:     0.5ms
+[PREFILL-TIMING]         cold_h2d:     91.1ms ptr_upload:     0.4ms dma_wait:  4787.6ms
+[PREFILL-TIMING]       w1+act:     145.9ms (  2.9% of moe)
+[PREFILL-TIMING]       w2:          63.8ms (  1.3% of moe)
+[PREFILL-TIMING]       scatter:      3.3ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       2.0ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       3.8ms (  0.0%)
+  [32mprefill: 2043 tokens in 11.18s (182.7 tok/s)  VRAM: 80920 MB free now, 650 MB min free during prefill[0m
+VRAM pressure: evicted 20 soft HCS experts / 1 chunks; free=1376 MB after eviction (safety=600 MB, target=1096 MB)
+  [32mdecode: 120 tokens in 5.09s (23.6 tok/s)  VRAM: 1128 MB free now, 1128 MB min free during decode[0m
+  [36mDynamic HCS: hit=91.16% tail=516/258 protected=5924 promotions=7018 evictions=7018 request_promotions=2738/32766 budget_skips=0 no_slot=1385 copy_failures=0[0m
+[PREFILL-TIMING] 8623 tokens, 37905.1ms total (227 tok/s)
+[PREFILL-TIMING]   embed:       0.1ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     deepseek_v4 breakdown (diagnostic sync-isolated): wall= 37899.5ms (100.0% of prefill) event= 37894.4ms sync= 32035.8ms
+[PREFILL-TIMING]       hc_replicate         wall=     0.4ms event=     0.4ms sync=     0.4ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm    wall=   370.2ms event=   369.9ms sync=   369.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       q_a_norm             wall=    12.9ms event=    12.6ms sync=    12.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       compressor           wall=   266.5ms event=   266.2ms sync=   265.1ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       indexer              wall=  2033.5ms event=  2031.3ms sync=  2030.7ms wall_minus_event=     2.2ms over 43 calls
+[PREFILL-TIMING]       q_b_norm_rope        wall=   128.3ms event=   128.0ms sync=   127.5ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       kv_index             wall=    10.0ms event=     9.7ms sync=     8.8ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       sparse_scores        wall= 19363.5ms event= 19363.4ms sync= 19363.3ms wall_minus_event=     0.1ms over 43 calls
+[PREFILL-TIMING]       sparse_output        wall=  9249.6ms event=  9249.4ms sync=  9249.3ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       output_proj          wall=   201.6ms event=   201.3ms sync=   200.3ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       attn_hc_post         wall=    19.5ms event=    19.2ms sync=    19.2ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm     wall=   370.4ms event=   370.1ms sync=   369.7ms wall_minus_event=     0.3ms over 43 calls
+[PREFILL-TIMING]       moe                  wall=  5853.4ms event=  5853.2ms sync=     0.2ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]       ffn_hc_post          wall=    19.9ms event=    19.6ms sync=    19.7ms wall_minus_event=     0.2ms over 43 calls
+[PREFILL-TIMING]         indexer internals:
+[PREFILL-TIMING]           compressor       wall=   126.1ms event=   126.0ms sync=   125.4ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           query_proj       wall=     8.3ms event=     8.2ms sync=     8.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           rope             wall=     2.3ms event=     2.1ms sync=     2.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           hadamard         wall=     7.6ms event=     7.5ms sync=     7.5ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           fp4_qat          wall=    21.4ms event=    21.3ms sync=    21.3ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           weights          wall=     1.6ms event=     1.5ms sync=     1.3ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           causal_counts    wall=     0.5ms event=     0.2ms sync=     0.3ms wall_minus_event=     0.3ms over 42 calls
+[PREFILL-TIMING]           select_query     wall=     5.3ms event=     5.1ms sync=     5.2ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_scores    wall=  1795.1ms event=  1794.9ms sync=  1795.0ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_base_sort wall=    32.2ms event=    32.0ms sync=    32.1ms wall_minus_event=     0.1ms over 21 calls
+[PREFILL-TIMING]           select_merge     wall=    32.6ms event=    32.4ms sync=    32.5ms wall_minus_event=     0.2ms over 21 calls
+[PREFILL-TIMING]   moe:      5853.2ms ( 15.4%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         9.0ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       5185.8ms ( 88.6% of moe)
+[PREFILL-TIMING]         route_d2h:     1.2ms ptr_alloc:     0.5ms ptr_build:     0.5ms
+[PREFILL-TIMING]         cold_h2d:     97.7ms ptr_upload:     0.4ms dma_wait:  5084.8ms
+[PREFILL-TIMING]       w1+act:     454.1ms (  7.8% of moe)
+[PREFILL-TIMING]       w2:         173.2ms (  3.0% of moe)
+[PREFILL-TIMING]       scatter:     14.6ms (  0.2% of moe)
+[PREFILL-TIMING]       shared:      15.5ms (  0.3% of moe)
+[PREFILL-TIMING]   other:       5.4ms (  0.0%)
+  [32mprefill: 8623 tokens in 38.69s (222.9 tok/s)  VRAM: 80736 MB free now, 650 MB min free during prefill[0m
+  [32mdecode: 127 tokens in 5.54s (22.9 tok/s)  VRAM: 1384 MB free now, 1128 MB min free during decode[0m
+  [36mDynamic HCS: hit=91.58% tail=516/258 protected=5904 promotions=9777 evictions=9777 request_promotions=2759/32766 budget_skips=0 no_slot=1385 copy_failures=0[0m

@@ -1,0 +1,19 @@
+DeepSeek-V4-Flash-0731 parallel HC prepare candidate — component gate
+Date: 2026-08-02
+Command: KRASIS_DEEPSEEK_V4_PARALLEL_HC_PREPARE=1 KRASIS_DECODE_V4_PATH_CLOCKS=1 ./dev benchmark tests/deepseek-v4-flash-0731-bf16.conf --approved-heatmap-mode require --approved-heatmap-manifest-url file:///home/main/Documents/Claude/krasis/benchmarks/approved_heatmaps/20260802_deepseek_v4_flash_0731_local_manifest.json --timing
+Run directory: logs/dev-benchmark_20260802_052021
+
+Sustained 249-token component result:
+- Serial-control Sinkhorn span: 1.43 ms/token (adjacent attribution run dev-benchmark_20260802_045839)
+- Parallel candidate Sinkhorn span: 0.65 ms/token
+- Reduction: 0.78 ms/token (54.5%)
+- Candidate HC combined span: 1.62 ms/token
+- Candidate graph replay: 27.22 ms/token
+- Experts: 10.00 ms/token
+- HCS: 6,440/11,008 resident; final measured hit 94.08%
+- Min free VRAM: 1,126 MiB
+
+Earlier calibrated panels agreed directionally: serial 1.22-1.38 versus
+parallel 0.56-0.63 ms/token. The component clears the approximately 1% total
+token threshold. This timing-on run is attribution evidence only; acceptance
+requires an adjacent timing-disabled control/candidate benchmark.

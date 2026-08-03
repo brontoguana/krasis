@@ -13,6 +13,11 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <math.h>
+#include "deepseek_v4_hc.cuh"
+#define KRASIS_DEEPSEEK_V4_PREFILL_ONLY_KERNELS 1
+#include "deepseek_v4_attention.cuh"
+#undef KRASIS_DEEPSEEK_V4_PREFILL_ONLY_KERNELS
+#include "deepseek_v4_compressor.cuh"
 
 /* ── Helpers ───────────────────────────────────────────────────────────── */
 
@@ -1396,6 +1401,40 @@ extern "C" __global__ void dsa_prefill_fused_scores_kernel(
     }
 }
 
+// Accumulate one learned-index head after a BF16-input/FP32-accumulate GEMM.
+// The temporary matrix and final score matrix are both row-major
+// [row_count, context_end]. Heads are launched sequentially so this epilogue
+// preserves the model's head summation order while applying ReLU and the
+// BF16-rounded per-row head weight. Future positions are deliberately left
+// untouched because the existing top-k kernel applies the causal boundary.
+extern "C" __global__ void dsa_prefill_accumulate_gemm_scores_kernel(
+    float* __restrict__ output,
+    const float* __restrict__ head_scores,
+    const __nv_bfloat16* __restrict__ head_weights,
+    const int* __restrict__ positions,
+    int row_count,
+    int context_end,
+    int num_heads,
+    int head,
+    int initialize)
+{
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = (int64_t)row_count * context_end;
+    if (linear >= total || positions == nullptr || num_heads <= 0 ||
+        head < 0 || head >= num_heads) {
+        return;
+    }
+    int row = (int)(linear / context_end);
+    int token = (int)(linear - (int64_t)row * context_end);
+    int causal_context = min(max(positions[row] + 1, 0), context_end);
+    if (token >= causal_context) return;
+
+    float contribution = bf16_to_float(
+        head_weights[(int64_t)row * num_heads + head]) *
+        fmaxf(head_scores[linear], 0.0f);
+    output[linear] = initialize ? contribution : output[linear] + contribution;
+}
+
 __device__ inline bool dsa_prefill_topk_precedes(
     float lhs_score,
     int lhs_index,
@@ -2054,6 +2093,29 @@ extern "C" __global__ void silu_mul_limited_batched_kernel(
     }
 }
 
+/* DeepSeek-V4 applies its SwiGLU limit to the raw projections: the gate has
+ * an upper bound only, while the up projection is clamped symmetrically. The
+ * SiLU is evaluated after clamping the gate. Keep this separate from the
+ * existing limited kernel because Step/GPT-OSS use different semantics. */
+extern "C" __global__ void deepseek_v4_swiglu_batched_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ gate_up,
+    int N,
+    float limit)
+{
+    int token = blockIdx.x;
+    int two_N = 2 * N;
+    const __nv_bfloat16* gu = gate_up + (int64_t)token * two_N;
+    __nv_bfloat16* o = out + (int64_t)token * N;
+
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        float gate = fminf(bf16_to_float(gu[i]), limit);
+        float up = fminf(fmaxf(bf16_to_float(gu[N + i]), -limit), limit);
+        float silu_gate = gate / (1.0f + __expf(-gate));
+        o[i] = float_to_bf16(silu_gate * up);
+    }
+}
+
 extern "C" void krasis_silu_mul_batched(
     void* out, const void* gate_up,
     int M, int N, void* stream)
@@ -2333,6 +2395,84 @@ extern "C" __global__ void sigmoid_topk_kernel(
         for (int k = 0; k < topk; k++) {
             tw[k] = raw_scores[top_idxs[k]];
             ti[k] = top_idxs[k];
+        }
+    }
+}
+
+/* DeepSeek-V4 router: score = sqrt(softplus(logit)). Correction bias changes
+ * selection only; routed weights are gathered from the unbiased score. Hash
+ * layers select expert IDs from the checkpoint token-to-expert table. The
+ * caller performs the config-requested selected-weight normalization and
+ * applies routed_scaling_factor during scatter. */
+extern "C" __global__ void deepseek_v4_sqrtsoftplus_topk_kernel(
+    float* __restrict__ topk_weights,       /* [M, topk] */
+    int* __restrict__ topk_ids,             /* [M, topk] */
+    const float* __restrict__ gate,         /* [M, E] FP32 */
+    const float* __restrict__ correction,   /* [E] or NULL */
+    const int* __restrict__ hash_table,     /* [vocab_size, topk] or NULL */
+    const int* __restrict__ token_ids,      /* [M], required for hash */
+    int E,
+    int topk,
+    int hash_vocab_size)
+{
+    int token = blockIdx.x;
+    const float* g = gate + (int64_t)token * E;
+    float* tw = topk_weights + (int64_t)token * topk;
+    int* ti = topk_ids + (int64_t)token * topk;
+
+    extern __shared__ char smem_raw[];
+    float* selection_scores = (float*)smem_raw;
+    float* raw_scores = selection_scores + E;
+    float* top_vals = raw_scores + E;
+    int* top_idxs = (int*)(top_vals + topk);
+
+    for (int i = threadIdx.x; i < E; i += blockDim.x) {
+        float x = g[i];
+        float softplus = fmaxf(x, 0.0f) + log1pf(expf(-fabsf(x)));
+        float raw = sqrtf(softplus);
+        raw_scores[i] = raw;
+        selection_scores[i] = raw + (correction ? correction[i] : 0.0f);
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        bool valid_hash = false;
+        if (hash_table) {
+            int token_id = token_ids[token];
+            valid_hash = token_id >= 0 && token_id < hash_vocab_size;
+            if (valid_hash) {
+                const int* hash_row = hash_table + (int64_t)token_id * topk;
+                for (int k = 0; k < topk; ++k) ti[k] = hash_row[k];
+            }
+        } else {
+            for (int k = 0; k < topk; ++k) {
+                top_vals[k] = -INFINITY;
+                top_idxs[k] = -1;
+            }
+            for (int i = 0; i < E; ++i) {
+                float score = selection_scores[i];
+                if (score > top_vals[topk - 1]) {
+                    int pos = topk - 1;
+                    while (pos > 0 && score > top_vals[pos - 1]) {
+                        top_vals[pos] = top_vals[pos - 1];
+                        top_idxs[pos] = top_idxs[pos - 1];
+                        --pos;
+                    }
+                    top_vals[pos] = score;
+                    top_idxs[pos] = i;
+                }
+            }
+            for (int k = 0; k < topk; ++k) ti[k] = top_idxs[k];
+        }
+
+        for (int k = 0; k < topk; ++k) {
+            int expert = ti[k];
+            if ((hash_table && !valid_hash) || expert < 0 || expert >= E) {
+                ti[k] = -1;
+                tw[k] = 0.0f;
+            } else {
+                tw[k] = raw_scores[expert];
+            }
         }
     }
 }

@@ -647,6 +647,10 @@ def measure_dataset(args: argparse.Namespace) -> dict[str, Any]:
 
     stride = args.stride
     starts = list(range(0, len(tokens) - 1, stride))
+    if args.max_windows is not None:
+        if args.max_windows <= 0:
+            raise ValueError(f"--max-windows must be positive, got {args.max_windows}")
+        starts = starts[: args.max_windows]
     total_nll = 0.0
     total_scored = 0
     windows = 0
@@ -783,6 +787,7 @@ def main() -> None:
     parser.add_argument("--window-size", type=int, default=2048)
     parser.add_argument("--stride", type=int, default=1024)
     parser.add_argument("--max-tokens", type=int, default=None)
+    parser.add_argument("--max-windows", type=int, default=None)
     parser.add_argument("--prompt-suite", default="quality-chat-v1")
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--reference-json", type=Path, default=None)

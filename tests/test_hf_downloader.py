@@ -158,6 +158,7 @@ class HFDownloaderTests(unittest.TestCase):
             [
                 "Qwen/Qwen3-Coder-Next",
                 "stepfun-ai/Step-3.7-Flash",
+                "deepseek-ai/DeepSeek-V4-Flash-0731",
                 "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
                 "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
                 "Qwen/Qwen3.6-35B-A3B",

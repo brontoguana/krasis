@@ -1,0 +1,807 @@
+#pragma once
+
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+#include <math.h>
+
+// Source-faithful DeepSeek-V4 compressor/indexer primitives shared by full-GPU
+// prefill and Rust decode. All geometry is supplied at runtime.
+
+__device__ __forceinline__ float dsv4_pow2_scale(float amax, float format_max) {
+    return exp2f(ceilf(log2f(amax / format_max)));
+}
+
+__device__ __forceinline__ float dsv4_e2m1_round(float value) {
+    const float levels[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    float magnitude = fminf(fabsf(value), 6.0f);
+    int best = 0;
+    float best_distance = fabsf(magnitude - levels[0]);
+#pragma unroll
+    for (int code = 1; code < 8; ++code) {
+        float distance = fabsf(magnitude - levels[code]);
+        if (distance < best_distance ||
+            (distance == best_distance && (code & 1) == 0 && (best & 1) != 0)) {
+            best = code;
+            best_distance = distance;
+        }
+    }
+    return copysignf(levels[best], value);
+}
+
+// Pool complete compression windows. FP32 WKV/WGate projections and FP32 APE
+// enter the exact per-dimension softmax equation. With overlap enabled, the
+// first half comes from the preceding window and the second half from the
+// current window, matching Compressor.overlap_transform.
+extern "C" __global__ void deepseek_v4_compressor_pool_prefill_kernel(
+    float* __restrict__ output,
+    const float* __restrict__ kv,
+    const float* __restrict__ score,
+    const float* __restrict__ ape,
+    int tokens,
+    int head_dim,
+    int ratio,
+    int overlap)
+{
+    int dim = (int)blockIdx.x;
+    int group = (int)blockIdx.y;
+    int groups = ratio > 0 ? tokens / ratio : 0;
+    if (dim >= head_dim || group >= groups || ratio <= 0) return;
+    int candidates = overlap ? 2 * ratio : ratio;
+    if (candidates > (int)blockDim.x) return;
+    int projected_dim = overlap ? 2 * head_dim : head_dim;
+    extern __shared__ float shared[];
+    float* scores = shared;
+    float* values = shared + blockDim.x;
+    float* work = shared + 2 * blockDim.x;
+    int lane = (int)threadIdx.x;
+    float candidate_score = -INFINITY;
+    float candidate_value = 0.0f;
+    if (lane < candidates) {
+        int slot = overlap && lane >= ratio ? lane - ratio : lane;
+        int token;
+        int column;
+        if (overlap && lane < ratio) {
+            token = (group - 1) * ratio + slot;
+            column = dim;
+        } else {
+            token = group * ratio + slot;
+            column = overlap ? head_dim + dim : dim;
+        }
+        if (token >= 0 && token < tokens) {
+            int64_t offset = (int64_t)token * projected_dim + column;
+            int64_t ape_offset = (int64_t)slot * projected_dim + column;
+            candidate_score = score[offset] + ape[ape_offset];
+            candidate_value = kv[offset];
+        }
+    }
+    scores[lane] = candidate_score;
+    values[lane] = candidate_value;
+    work[lane] = candidate_score;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) work[lane] = fmaxf(work[lane], work[lane + stride]);
+        __syncthreads();
+    }
+    float maximum = work[0];
+    float weight = lane < candidates && isfinite(scores[lane])
+        ? expf(scores[lane] - maximum)
+        : 0.0f;
+    scores[lane] = weight;
+    work[lane] = weight;
+    values[lane] *= weight;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            work[lane] += work[lane + stride];
+            values[lane] += values[lane + stride];
+        }
+        __syncthreads();
+    }
+    if (lane == 0) {
+        output[(int64_t)group * head_dim + dim] = values[0] / work[0];
+    }
+}
+
+// Preserve the exact incremental state that Compressor.forward would retain
+// after a full-prompt prefill. This is separate from pooling so the prefill
+// path can process all complete groups in parallel without changing decode
+// continuation semantics.
+extern "C" __global__ void deepseek_v4_compressor_state_prefill_kernel(
+    float* __restrict__ kv_state,
+    float* __restrict__ score_state,
+    const float* __restrict__ kv,
+    const float* __restrict__ score,
+    const float* __restrict__ ape,
+    int tokens,
+    int head_dim,
+    int ratio,
+    int overlap)
+{
+    int copies = overlap ? 2 : 1;
+    int projected_dim = copies * head_dim;
+    int state_rows = copies * ratio;
+    int64_t total = (int64_t)state_rows * projected_dim;
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (linear >= total || ratio <= 0 || head_dim <= 0) return;
+    int row = (int)(linear / projected_dim);
+    int column = (int)(linear % projected_dim);
+    int cutoff = tokens - tokens % ratio;
+    int remainder = tokens - cutoff;
+    int token = -1;
+    int ape_slot = 0;
+    if (overlap) {
+        if (row < ratio) {
+            if (cutoff >= ratio) token = cutoff - ratio + row;
+            ape_slot = row;
+        } else {
+            int remainder_row = row - ratio;
+            if (remainder_row < remainder) token = cutoff + remainder_row;
+            ape_slot = remainder_row;
+        }
+    } else {
+        if (row < remainder) token = cutoff + row;
+        ape_slot = row;
+    }
+    if (token >= 0) {
+        int64_t source = (int64_t)token * projected_dim + column;
+        kv_state[linear] = kv[source];
+        score_state[linear] = score[source] + ape[(int64_t)ape_slot * projected_dim + column];
+    } else {
+        kv_state[linear] = 0.0f;
+        score_state[linear] = -INFINITY;
+    }
+}
+
+// Update one-token compressor state. On ratio boundaries this also emits the
+// pooled FP32 row; callers then run cast-before-RMSNorm, RoPE and QAT. One
+// block owns one output dimension, so its state update and read are ordered
+// without a grid-wide synchronization.
+extern "C" __global__ void deepseek_v4_compressor_decode_kernel(
+    float* __restrict__ output,
+    float* __restrict__ kv_state,
+    float* __restrict__ score_state,
+    const float* __restrict__ kv,
+    const float* __restrict__ score,
+    const float* __restrict__ ape,
+    const int* __restrict__ position_ptr,
+    int head_dim,
+    int ratio,
+    int overlap)
+{
+    int dim = (int)blockIdx.x;
+    if (dim >= head_dim || ratio <= 0 || position_ptr == nullptr) return;
+    int position = *position_ptr;
+    if (position < 0) return;
+    int slot = position % ratio;
+    int copies = overlap ? 2 : 1;
+    int projected_dim = copies * head_dim;
+    int write_row = overlap ? ratio + slot : slot;
+    if (threadIdx.x == 0) {
+        for (int copy = 0; copy < copies; ++copy) {
+            int column = copy * head_dim + dim;
+            int64_t state_offset = (int64_t)write_row * projected_dim + column;
+            kv_state[state_offset] = kv[column];
+            score_state[state_offset] = score[column] + ape[(int64_t)slot * projected_dim + column];
+        }
+    }
+    __syncthreads();
+    if ((position + 1) % ratio != 0) return;
+    int candidates = copies * ratio;
+    if (candidates > (int)blockDim.x) return;
+    extern __shared__ float shared[];
+    float* scores = shared;
+    float* values = shared + blockDim.x;
+    float* work = shared + 2 * blockDim.x;
+    int lane = (int)threadIdx.x;
+    float candidate_score = -INFINITY;
+    float candidate_value = 0.0f;
+    if (lane < candidates) {
+        int state_row = lane;
+        int column = overlap && lane >= ratio ? head_dim + dim : dim;
+        int64_t state_offset = (int64_t)state_row * projected_dim + column;
+        candidate_score = score_state[state_offset];
+        candidate_value = kv_state[state_offset];
+    }
+    scores[lane] = candidate_score;
+    values[lane] = candidate_value;
+    work[lane] = candidate_score;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) work[lane] = fmaxf(work[lane], work[lane + stride]);
+        __syncthreads();
+    }
+    float maximum = work[0];
+    float weight = lane < candidates && isfinite(scores[lane])
+        ? expf(scores[lane] - maximum)
+        : 0.0f;
+    work[lane] = weight;
+    values[lane] *= weight;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            work[lane] += work[lane + stride];
+            values[lane] += values[lane + stride];
+        }
+        __syncthreads();
+    }
+    if (lane == 0) output[dim] = values[0] / work[0];
+    __syncthreads();
+    if (overlap && lane < ratio) {
+        for (int copy = 0; copy < copies; ++copy) {
+            int column = copy * head_dim + dim;
+            int64_t destination = (int64_t)lane * projected_dim + column;
+            int64_t source = (int64_t)(ratio + lane) * projected_dim + column;
+            kv_state[destination] = kv_state[source];
+            score_state[destination] = score_state[source];
+        }
+    }
+}
+
+// Graph-addressable learned-index score kernel. A fixed occupancy-sized grid
+// walks only the live compressed prefix derived on GPU from the decode
+// position. Each warp computes one head dot product; one key row is shared by
+// all heads in the block. The query and key have already undergone adjacent
+// tail RoPE, normalized Hadamard rotation, and FP4 QAT.
+extern "C" __global__ void deepseek_v4_index_scores_decode_kernel(
+    float* __restrict__ output,
+    const __nv_bfloat16* __restrict__ key_cache,
+    const __nv_bfloat16* __restrict__ query,
+    const __nv_bfloat16* __restrict__ head_weights,
+    const int* __restrict__ compressed_count,
+    int score_capacity,
+    int num_heads,
+    int head_dim)
+{
+    if (compressed_count == nullptr || score_capacity <= 0 || num_heads <= 0 ||
+        head_dim <= 0 || (blockDim.x & 31) != 0) return;
+    int context = min(max(*compressed_count, 0), score_capacity);
+    int num_warps = blockDim.x >> 5;
+    int warp = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    extern __shared__ float shared[];
+    float* shared_key = shared;
+    float* contributions = shared_key + head_dim;
+
+    for (int token = (int)blockIdx.x; token < context; token += (int)gridDim.x) {
+        for (int dim = (int)threadIdx.x; dim < head_dim; dim += (int)blockDim.x) {
+            shared_key[dim] = __bfloat162float(
+                key_cache[(int64_t)token * head_dim + dim]);
+        }
+        __syncthreads();
+        for (int head = warp; head < num_heads; head += num_warps) {
+            const __nv_bfloat16* head_query = query + (int64_t)head * head_dim;
+            float dot = 0.0f;
+            for (int dim = lane; dim < head_dim; dim += 32) {
+                dot += __bfloat162float(head_query[dim]) * shared_key[dim];
+            }
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                dot += __shfl_down_sync(0xffffffff, dot, offset);
+            }
+            if (lane == 0) {
+                contributions[head] = __bfloat162float(head_weights[head]) * fmaxf(dot, 0.0f);
+            }
+        }
+        __syncthreads();
+        if (warp == 0) {
+            float score = 0.0f;
+            for (int head = lane; head < num_heads; head += 32) score += contributions[head];
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                score += __shfl_down_sync(0xffffffff, score, offset);
+            }
+            if (lane == 0) output[token] = score;
+        }
+        __syncthreads();
+    }
+    for (int token = context + (int)blockIdx.x; token < score_capacity;
+         token += (int)gridDim.x) {
+        output[token] = -INFINITY;
+    }
+}
+
+// Continue compressor prefill from an arbitrary absolute prompt position.
+// One block owns one output dimension and walks the chunk in order, so state
+// updates and ratio-boundary pooling are ordered without host or grid-wide
+// synchronization. `output` is local to this chunk: row zero corresponds to
+// `first_output_group` in the persistent compressed cache.
+extern "C" __global__ void deepseek_v4_compressor_continue_prefill_kernel(
+    float* __restrict__ output,
+    float* __restrict__ kv_state,
+    float* __restrict__ score_state,
+    const float* __restrict__ kv,
+    const float* __restrict__ score,
+    const float* __restrict__ ape,
+    int start_pos,
+    int tokens,
+    int head_dim,
+    int ratio,
+    int overlap,
+    int first_output_group)
+{
+    int dim = (int)blockIdx.x;
+    if (dim >= head_dim || ratio <= 0 || tokens <= 0) return;
+    int copies = overlap ? 2 : 1;
+    int projected_dim = copies * head_dim;
+    int candidates = copies * ratio;
+    if (candidates > (int)blockDim.x) return;
+    extern __shared__ float shared[];
+    float* weights = shared;
+    float* values = shared + blockDim.x;
+    float* work = shared + 2 * blockDim.x;
+    int lane = (int)threadIdx.x;
+
+    for (int local = 0; local < tokens; ++local) {
+        int position = start_pos + local;
+        int slot = position % ratio;
+        int write_row = overlap ? ratio + slot : slot;
+        if (lane == 0) {
+            for (int copy = 0; copy < copies; ++copy) {
+                int column = copy * head_dim + dim;
+                int64_t source = (int64_t)local * projected_dim + column;
+                int64_t state_offset = (int64_t)write_row * projected_dim + column;
+                kv_state[state_offset] = kv[source];
+                score_state[state_offset] =
+                    score[source] + ape[(int64_t)slot * projected_dim + column];
+            }
+        }
+        __syncthreads();
+        if ((position + 1) % ratio == 0) {
+            float candidate_score = -INFINITY;
+            float candidate_value = 0.0f;
+            if (lane < candidates) {
+                int column = overlap && lane >= ratio ? head_dim + dim : dim;
+                int64_t state_offset = (int64_t)lane * projected_dim + column;
+                candidate_score = score_state[state_offset];
+                candidate_value = kv_state[state_offset];
+            }
+            weights[lane] = candidate_score;
+            values[lane] = candidate_value;
+            work[lane] = candidate_score;
+            __syncthreads();
+            for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+                if (lane < stride) work[lane] = fmaxf(work[lane], work[lane + stride]);
+                __syncthreads();
+            }
+            float maximum = work[0];
+            float weight = lane < candidates && isfinite(weights[lane])
+                ? expf(weights[lane] - maximum)
+                : 0.0f;
+            work[lane] = weight;
+            values[lane] *= weight;
+            __syncthreads();
+            for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+                if (lane < stride) {
+                    work[lane] += work[lane + stride];
+                    values[lane] += values[lane + stride];
+                }
+                __syncthreads();
+            }
+            if (lane == 0) {
+                int output_group = position / ratio;
+                int output_row = output_group - first_output_group;
+                output[(int64_t)output_row * head_dim + dim] = values[0] / work[0];
+            }
+            __syncthreads();
+            if (overlap && lane < ratio) {
+                for (int copy = 0; copy < copies; ++copy) {
+                    int column = copy * head_dim + dim;
+                    int64_t destination = (int64_t)lane * projected_dim + column;
+                    int64_t source = (int64_t)(ratio + lane) * projected_dim + column;
+                    kv_state[destination] = kv_state[source];
+                    score_state[destination] = score_state[source];
+                }
+            }
+        }
+        __syncthreads();
+    }
+}
+
+// Cast pooled FP32 to BF16, then apply the checkpoint BF16-weighted RMSNorm.
+// The cast-before-normalize ordering is required by Compressor.forward.
+extern "C" __global__ void deepseek_v4_compressor_rmsnorm_kernel(
+    __nv_bfloat16* __restrict__ output,
+    const float* __restrict__ input,
+    const __nv_bfloat16* __restrict__ weight,
+    int rows,
+    int width,
+    float eps)
+{
+    int row = (int)blockIdx.x;
+    if (row >= rows || width <= 0) return;
+    extern __shared__ float reduction[];
+    int lane = (int)threadIdx.x;
+    float sumsq = 0.0f;
+    for (int dim = lane; dim < width; dim += (int)blockDim.x) {
+        float value = __bfloat162float(__float2bfloat16(input[(int64_t)row * width + dim]));
+        sumsq += value * value;
+    }
+    reduction[lane] = sumsq;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) reduction[lane] += reduction[lane + stride];
+        __syncthreads();
+    }
+    float inv = rsqrtf(reduction[0] / (float)width + eps);
+    for (int dim = lane; dim < width; dim += (int)blockDim.x) {
+        float value = __bfloat162float(__float2bfloat16(input[(int64_t)row * width + dim]));
+        output[(int64_t)row * width + dim] = __float2bfloat16(
+            value * inv * __bfloat162float(weight[dim]));
+    }
+}
+
+// Graph-safe one-token compressor finalization. The decode graph launches this
+// every token, but it writes a cache row only when the current token closes a
+// compression window. Keeping the boundary test on-device preserves a fixed
+// launch graph while retaining the exact cast -> RMSNorm -> RoPE -> QAT order
+// used by the shipped incremental implementation.
+extern "C" __global__ void deepseek_v4_compressor_finalize_decode_kernel(
+    __nv_bfloat16* __restrict__ cache,
+    const float* __restrict__ pooled,
+    const __nv_bfloat16* __restrict__ norm_weight,
+    const int* __restrict__ position_ptr,
+    const float* __restrict__ cos_table,
+    const float* __restrict__ sin_table,
+    int cache_rows,
+    int head_dim,
+    int rope_dim,
+    int rope_rows,
+    int ratio,
+    int indexer_mode,
+    int qat_block_size,
+    float eps)
+{
+    if (blockIdx.x != 0 || position_ptr == nullptr || cache == nullptr || pooled == nullptr ||
+        norm_weight == nullptr || cos_table == nullptr || sin_table == nullptr ||
+        cache_rows <= 0 || head_dim <= 0 || head_dim > (int)blockDim.x ||
+        rope_dim <= 0 || rope_dim > head_dim || (rope_dim & 1) != 0 ||
+        rope_rows <= 0 || ratio <= 0 || qat_block_size <= 0) return;
+    int position = *position_ptr;
+    if (position < 0 || (position + 1) % ratio != 0) return;
+    int cache_row = (position + 1) / ratio - 1;
+    if (cache_row < 0 || cache_row >= cache_rows) return;
+    int compressed_position = cache_row * ratio;
+    if (compressed_position < 0 || compressed_position >= rope_rows) return;
+
+    extern __shared__ float shared[];
+    int lane = (int)threadIdx.x;
+    __nv_bfloat16* output = cache + (int64_t)cache_row * head_dim;
+
+    float cast_value = lane < head_dim
+        ? __bfloat162float(__float2bfloat16(pooled[lane]))
+        : 0.0f;
+    shared[lane] = cast_value * cast_value;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) shared[lane] += shared[lane + stride];
+        __syncthreads();
+    }
+    float inv = rsqrtf(shared[0] / (float)head_dim + eps);
+    if (lane < head_dim) {
+        output[lane] = __float2bfloat16(
+            cast_value * inv * __bfloat162float(norm_weight[lane]));
+    }
+    __syncthreads();
+
+    int half_rope = rope_dim / 2;
+    int tail = head_dim - rope_dim;
+    if (lane < half_rope) {
+        int real_index = tail + 2 * lane;
+        float real = __bfloat162float(output[real_index]);
+        float imag = __bfloat162float(output[real_index + 1]);
+        float cosine = cos_table[(int64_t)compressed_position * half_rope + lane];
+        float sine = sin_table[(int64_t)compressed_position * half_rope + lane];
+        output[real_index] = __float2bfloat16(real * cosine - imag * sine);
+        output[real_index + 1] = __float2bfloat16(imag * cosine + real * sine);
+    }
+    __syncthreads();
+
+    if (indexer_mode != 0) {
+        if ((head_dim & (head_dim - 1)) != 0) return;
+        if (lane < head_dim) shared[lane] = __bfloat162float(output[lane]);
+        __syncthreads();
+        for (int stride = 1; stride < head_dim; stride <<= 1) {
+            if (lane < head_dim / 2) {
+                int base = (lane / stride) * (stride << 1);
+                int offset = lane - (lane / stride) * stride;
+                float left = shared[base + offset];
+                float right = shared[base + offset + stride];
+                shared[base + offset] = left + right;
+                shared[base + offset + stride] = left - right;
+            }
+            __syncthreads();
+        }
+        if (lane < head_dim) {
+            output[lane] = __float2bfloat16(shared[lane] * rsqrtf((float)head_dim));
+        }
+        __syncthreads();
+    }
+
+    int quant_cols = indexer_mode != 0 ? head_dim : head_dim - rope_dim;
+    for (int block_start = 0; block_start < quant_cols; block_start += qat_block_size) {
+        float amax = 0.0f;
+        int column = block_start + lane;
+        if (lane < qat_block_size && column < quant_cols) {
+            amax = fabsf(__bfloat162float(output[column]));
+        }
+        shared[lane] = amax;
+        __syncthreads();
+        for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (lane < stride) shared[lane] = fmaxf(shared[lane], shared[lane + stride]);
+            __syncthreads();
+        }
+        if (lane < qat_block_size && column < quant_cols) {
+            float value = __bfloat162float(output[column]);
+            if (indexer_mode != 0) {
+                float scale = dsv4_pow2_scale(fmaxf(shared[0], 6.0f * 0x1p-126f), 6.0f);
+                float scaled = fminf(fmaxf(value / scale, -6.0f), 6.0f);
+                output[column] = __float2bfloat16(dsv4_e2m1_round(scaled) * scale);
+            } else {
+                float scale = dsv4_pow2_scale(fmaxf(shared[0], 1.0e-4f), 448.0f);
+                float scaled = fminf(fmaxf(value / scale, -448.0f), 448.0f);
+                __nv_fp8_e4m3 quantized(scaled);
+                output[column] = __float2bfloat16((float)quantized * scale);
+            }
+        }
+        __syncthreads();
+    }
+}
+
+// In-place block FP8 E4M3 quantize/dequantize with power-of-two scales. Only
+// quant_cols are transformed so the main compressor can preserve RoPE dims.
+extern "C" __global__ void deepseek_v4_fp8_qat_inplace_kernel(
+    __nv_bfloat16* __restrict__ values,
+    int rows,
+    int row_width,
+    int quant_cols,
+    int block_size)
+{
+    int block = (int)blockIdx.x;
+    int row = (int)blockIdx.y;
+    int block_start = block * block_size;
+    if (row >= rows || block_start >= quant_cols || block_size <= 0) return;
+    extern __shared__ float reduction[];
+    int lane = (int)threadIdx.x;
+    float amax = 0.0f;
+    for (int offset = lane; offset < block_size; offset += (int)blockDim.x) {
+        int column = block_start + offset;
+        if (column < quant_cols) {
+            amax = fmaxf(amax, fabsf(__bfloat162float(values[(int64_t)row * row_width + column])));
+        }
+    }
+    reduction[lane] = amax;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) reduction[lane] = fmaxf(reduction[lane], reduction[lane + stride]);
+        __syncthreads();
+    }
+    float scale = dsv4_pow2_scale(fmaxf(reduction[0], 1.0e-4f), 448.0f);
+    for (int offset = lane; offset < block_size; offset += (int)blockDim.x) {
+        int column = block_start + offset;
+        if (column < quant_cols) {
+            int64_t index = (int64_t)row * row_width + column;
+            float scaled = fminf(fmaxf(__bfloat162float(values[index]) / scale, -448.0f), 448.0f);
+            __nv_fp8_e4m3 quantized(scaled);
+            values[index] = __float2bfloat16((float)quantized * scale);
+        }
+    }
+}
+
+// Normalized Walsh-Hadamard rotation used by the learned indexer. Runtime
+// validation requires a power-of-two width; each row is independent.
+extern "C" __global__ void deepseek_v4_hadamard_inplace_kernel(
+    __nv_bfloat16* __restrict__ values,
+    int rows,
+    int width)
+{
+    int row = (int)blockIdx.x;
+    if (row >= rows || width <= 0 || (width & (width - 1)) != 0 ||
+        width > (int)blockDim.x) return;
+    extern __shared__ float shared[];
+    int lane = (int)threadIdx.x;
+    if (lane < width) shared[lane] = __bfloat162float(values[(int64_t)row * width + lane]);
+    __syncthreads();
+    for (int stride = 1; stride < width; stride <<= 1) {
+        if (lane < width / 2) {
+            int base = (lane / stride) * (stride << 1);
+            int offset = lane - (lane / stride) * stride;
+            float left = shared[base + offset];
+            float right = shared[base + offset + stride];
+            shared[base + offset] = left + right;
+            shared[base + offset + stride] = left - right;
+        }
+        __syncthreads();
+    }
+    if (lane < width) {
+        values[(int64_t)row * width + lane] = __float2bfloat16(
+            shared[lane] * rsqrtf((float)width));
+    }
+}
+
+// In-place block FP4 E2M1 quantize/dequantize with power-of-two UE8M0 scale.
+extern "C" __global__ void deepseek_v4_fp4_qat_inplace_kernel(
+    __nv_bfloat16* __restrict__ values,
+    int rows,
+    int width,
+    int block_size)
+{
+    if (block_size <= 0 || width <= 0) return;
+    int blocks_per_row = (width + block_size - 1) / block_size;
+    int linear_block = (int)blockIdx.x;
+    int row = linear_block / blocks_per_row;
+    int block = linear_block - row * blocks_per_row;
+    int block_start = block * block_size;
+    if (row >= rows || block_start >= width) return;
+    extern __shared__ float reduction[];
+    int lane = (int)threadIdx.x;
+    float amax = 0.0f;
+    for (int offset = lane; offset < block_size; offset += (int)blockDim.x) {
+        int column = block_start + offset;
+        if (column < width) {
+            amax = fmaxf(amax, fabsf(__bfloat162float(values[(int64_t)row * width + column])));
+        }
+    }
+    reduction[lane] = amax;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) reduction[lane] = fmaxf(reduction[lane], reduction[lane + stride]);
+        __syncthreads();
+    }
+    float scale = dsv4_pow2_scale(fmaxf(reduction[0], 6.0f * 0x1p-126f), 6.0f);
+    for (int offset = lane; offset < block_size; offset += (int)blockDim.x) {
+        int column = block_start + offset;
+        if (column < width) {
+            int64_t index = (int64_t)row * width + column;
+            float scaled = fminf(fmaxf(__bfloat162float(values[index]) / scale, -6.0f), 6.0f);
+            values[index] = __float2bfloat16(dsv4_e2m1_round(scaled) * scale);
+        }
+    }
+}
+
+// The shipped indexer rounds weights_proj(x) *
+// (head_dim^-0.5 * n_heads^-0.5) back to BF16 before score accumulation.
+extern "C" __global__ void deepseek_v4_scale_index_weights_kernel(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ input,
+    int elements,
+    float scale)
+{
+    int index = (int)blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < elements) {
+        output[index] = __float2bfloat16(__bfloat162float(input[index]) * scale);
+    }
+}
+
+// Build the raw sliding-window portion of sparse-attention indices. Prefill
+// uses absolute rows in its transient contiguous raw buffer; decode uses the
+// physical ring slots. Both preserve chronological accumulation order.
+extern "C" __global__ void deepseek_v4_window_indices_kernel(
+    int* __restrict__ output,
+    const int* __restrict__ positions,
+    int rows,
+    int window,
+    int output_stride,
+    int physical_ring)
+{
+    int column = (int)blockIdx.x * blockDim.x + threadIdx.x;
+    int row = (int)blockIdx.y;
+    if (row >= rows || column >= window || positions == nullptr ||
+        output_stride < window || window <= 0) return;
+    int position = positions[row];
+    int count = min(position + 1, window);
+    int value = -1;
+    if (column < count) {
+        int earliest = position + 1 - count;
+        int absolute = earliest + column;
+        value = physical_ring ? absolute % window : absolute;
+    }
+    output[(int64_t)row * output_stride + column] = value;
+}
+
+// Offset validated learned compressed-cache selections into the concatenated
+// raw+compressed sparse-attention index space. Invalid/padded candidates stay
+// -1 rather than becoming large positive offsets.
+extern "C" __global__ void deepseek_v4_offset_index_selection_kernel(
+    int* __restrict__ output,
+    const int* __restrict__ selected,
+    const int* __restrict__ valid_counts,
+    int rows,
+    int selected_stride,
+    int output_stride,
+    int output_column,
+    int cache_offset)
+{
+    int column = (int)blockIdx.x * blockDim.x + threadIdx.x;
+    int row = (int)blockIdx.y;
+    if (row >= rows || column >= selected_stride || valid_counts == nullptr ||
+        output_stride < output_column + selected_stride) return;
+    int index = selected[(int64_t)row * selected_stride + column];
+    output[(int64_t)row * output_stride + output_column + column] =
+        index >= 0 && index < valid_counts[row] ? index + cache_offset : -1;
+}
+
+// Positions assigned to compressed rows use the first token in each source
+// window, matching `freqs_cis[:cutoff:ratio]` in the shipped implementation.
+extern "C" __global__ void deepseek_v4_compressed_positions_kernel(
+    int* __restrict__ output,
+    int rows,
+    int first_group,
+    int ratio)
+{
+    int row = (int)blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows && ratio > 0) output[row] = (first_group + row) * ratio;
+}
+
+// Convert absolute token positions to the compressed-cache causal boundary.
+// `offset=-1` produces the pseudo-position consumed by the shared DSA scorer
+// (which uses position+1 as its valid count); `offset=0` produces the literal
+// valid-count vector consumed by V4's selection-offset validator.
+extern "C" __global__ void deepseek_v4_compressed_causal_counts_kernel(
+    int* __restrict__ output,
+    const int* __restrict__ positions,
+    int rows,
+    int ratio,
+    int offset)
+{
+    int row = (int)blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows || positions == nullptr || ratio <= 0) return;
+    output[row] = (positions[row] + 1) / ratio + offset;
+}
+
+// Build the causal static-compressor suffix of the attention index matrix.
+// The raw prefix occupies [0, raw_offset), so valid compressed rows are
+// shifted by raw_offset; incomplete future rows remain -1.
+extern "C" __global__ void deepseek_v4_static_compressed_indices_kernel(
+    int* __restrict__ output,
+    const int* __restrict__ positions,
+    int rows,
+    int ratio,
+    int output_stride,
+    int output_column,
+    int selected_stride,
+    int raw_offset)
+{
+    int column = (int)blockIdx.x * blockDim.x + threadIdx.x;
+    int row = (int)blockIdx.y;
+    if (row >= rows || column >= selected_stride || ratio <= 0 ||
+        output_stride < output_column + selected_stride) return;
+    int valid = (positions[row] + 1) / ratio;
+    output[(int64_t)row * output_stride + output_column + column] =
+        column < valid ? raw_offset + column : -1;
+}
+
+// Store a chunk's normalized/QAT KV both in absolute chronological prompt
+// history and in the persistent modulo ring consumed by Rust decode.
+extern "C" __global__ void deepseek_v4_store_raw_kv_kernel(
+    __nv_bfloat16* __restrict__ history,
+    __nv_bfloat16* __restrict__ ring,
+    const __nv_bfloat16* __restrict__ input,
+    int start_pos,
+    int tokens,
+    int head_dim,
+    int window)
+{
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = (int64_t)tokens * head_dim;
+    if (linear >= total || head_dim <= 0 || window <= 0) return;
+    int token = (int)(linear / head_dim);
+    int dim = (int)(linear % head_dim);
+    int position = start_pos + token;
+    __nv_bfloat16 value = input[linear];
+    history[(int64_t)position * head_dim + dim] = value;
+    ring[((int64_t)(position % window) * head_dim) + dim] = value;
+}
+
+// Decode writes one normalized/QAT KV row into the physical sliding ring. The
+// absolute prompt history is prefill-only and is deliberately not addressed.
+extern "C" __global__ void deepseek_v4_store_raw_kv_decode_kernel(
+    __nv_bfloat16* __restrict__ ring,
+    const __nv_bfloat16* __restrict__ input,
+    const int* __restrict__ position,
+    int head_dim,
+    int window)
+{
+    int dim = (int)blockIdx.x * blockDim.x + threadIdx.x;
+    if (dim >= head_dim || position == nullptr || head_dim <= 0 || window <= 0) return;
+    int pos = *position;
+    if (pos < 0) return;
+    ring[(int64_t)(pos % window) * head_dim + dim] = input[dim];
+}

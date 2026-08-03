@@ -1,0 +1,95 @@
+Checking server health at http://localhost:18220... [0;32mOK[0m
+Sending warmup request... done (6.0s)
+  [2m>>> Hi there! How can I help you[0m
+
+[1m[0;36mTest 4: Network Multi-Prompt Validation[0m
+============================================================
+  [0;32mPASS[0m OK (6.1s) [factual_qa]
+  [0;32mPASS[0m OK (6.4s) [math_simple]
+  [0;32mPASS[0m OK (9.5s) [code_gen]
+  [0;32mPASS[0m OK (6.7s, 5 words) [multi_turn]
+  [0;32mPASS[0m OK (6.0s, 7 words) [short_prompt]
+  [0;32mPASS[0m OK (6.1s) [streaming_factual]
+  [0;32mPASS[0m OK (9.0s) [streaming_code]
+  [0;32mPASS[0m OK (7.1s) [json_output]
+  [0;32mPASS[0m OK (6.4s) [blocking_math]
+
+[1m[0;36mTest 5: Network Large-Prompt Validation[0m
+============================================================
+  Loading ~1K token prompt... done (7044 chars)
+  [0;32mPASS[0m OK (15.7s, 70 words) | prompt_tokens=2043 | Prefill (internal)=319.8 tok/s | Decode (internal)=22.78 tok/s | Round trip=22.78 tok/s [large_2k]
+  Loading ~8K token prompt... done (35045 chars)
+  [0;32mPASS[0m OK (20.7s, 90 words) | prompt_tokens=8623 | Prefill (internal)=818.6 tok/s | Decode (internal)=21.34 tok/s | Round trip=21.34 tok/s [large_10k]
+  Loading ~21K token prompt... done (87555 chars)
+  [0;32mPASS[0m OK (33.9s, 91 words) | prompt_tokens=23348 | Prefill (internal)=994.4 tok/s | Decode (internal)=20.17 tok/s | Round trip=20.17 tok/s [large_25k]
+  Loading ~87K token prompt... done (244208 chars)
+  [0;32mPASS[0m OK (105.8s, 100 words) | prompt_tokens=62403 | Prefill (internal)=659.5 tok/s | Decode (internal)=19.47 tok/s | Round trip=19.47 tok/s [large_100k]
+
+[1m[0;36mTest 6: Multi-Turn Sequential Conversation[0m
+============================================================
+  Turn 1: establishing facts... [0;32mPASS[0m OK (11.4s)
+  Turn 2: recalling dog's name... [0;32mPASS[0m OK (10.0s)
+  Turn 3: recalling city... [0;32mPASS[0m OK (9.3s)
+  Turn 4: recalling number (streaming)... [0;32mPASS[0m OK (9.6s)
+  Turn 5: recalling all three facts... [0;32mPASS[0m OK (13.6s)
+
+============================================================
+[1mSUMMARY[0m: 18/18 passed, 0 failed, 299.3s total
+
+[1mResponse texts (review for coherence):[0m
+
+  [[0;32mPASS[0m] factual_qa: OK (6.1s)
+  [2m>>> Paris[0m
+
+  [[0;32mPASS[0m] math_simple: OK (6.4s)
+  [2m>>> 7 * 8 = 56[0m
+
+  [[0;32mPASS[0m] code_gen: OK (9.5s)
+  [2m>>> ```python\ndef fibonacci(n):\n    if n <= 0:\n        return 0\n    elif n == 1:\n        return 1\n    else:\n        a, b = 0, 1\n        for _ in range(2, n + 1):\n            a, b = b, a + b\n        return b\n```[0m
+
+  [[0;32mPASS[0m] multi_turn: OK (6.7s, 5 words)
+  [2m>>> Your name is Alice! 😊[0m
+
+  [[0;32mPASS[0m] short_prompt: OK (6.0s, 7 words)
+  [2m>>> Hello! How can I help you today?[0m
+
+  [[0;32mPASS[0m] streaming_factual: OK (6.1s)
+  [2m>>> Tokyo[0m
+
+  [[0;32mPASS[0m] streaming_code: OK (9.0s)
+  [2m>>> Here's a Python hello world one-liner:\n\n```python\nprint("Hello, World!")\n```\n\nOr if you want to be more creative:\n\n```python\nprint('Hello, World!')\n```\n\nOr using a variable:\n\n```python\nprint("Hello, World!" if True else "Goodbye")\n```\n\nThe simplest and most common one is just:\n\n```python\nprint("Hello, World!")\n```[0m
+
+  [[0;32mPASS[0m] json_output: OK (7.1s)
+  [2m>>> {"name": "Alice", "age": 25}[0m
+
+  [[0;32mPASS[0m] blocking_math: OK (6.4s)
+  [2m>>> 15 + 27 = 42[0m
+
+  [[0;32mPASS[0m] large_2k: OK (15.7s, 70 words) | prompt_tokens=2043 | Prefill (internal)=319.8 tok/s | Decode (internal)=22.78 tok/s | Round trip=22.78 tok/s
+  [2m>>> The provided text is the front matter and table of contents for Herman Melville's *Moby-Dick; or, The Whale*. It includes a dedication page, a table of contents listing all 135 chapters plus an epilogue, and the beginning of the book's preliminary sections: an "Etymology" section with definitions of the word "whale" in various languages, and the start of "Extracts," a collection of quotations about whales compiled by a fictional "Sub-Sub-Librarian."[0m
+
+  [[0;32mPASS[0m] large_10k: OK (20.7s, 90 words) | prompt_tokens=8623 | Prefill (internal)=818.6 tok/s | Decode (internal)=21.34 tok/s | Round trip=21.34 tok/s
+  [2m>>> Based on the text provided, the main themes are:\n\n1.  **High Society and Hypocrisy:** The opening chapters are a deep dive into the artificiality and ritual of the Russian aristocracy in the early 19th century. The entire reception at Anna Pávlovna's is a performance. People say things they don't mean (like Prince Vasíli's mechanical compliments), perform tedious duties (visiting the "aunt"), and are served up like "choice morsels" of food. The characters are defined by their social roles and th[0m
+
+  [[0;32mPASS[0m] large_25k: OK (33.9s, 91 words) | prompt_tokens=23348 | Prefill (internal)=994.4 tok/s | Decode (internal)=20.17 tok/s | Round trip=20.17 tok/s
+  [2m>>> Based on the provided text, here is a summary of the key events:\n\n**Book First—A Just Man**\n*   **M. Myriel's Background:** The story introduces M. Charles-François-Bienvenu Myriel, the Bishop of D——, an old man of about 75. He was once a worldly nobleman who emigrated to Italy during the Revolution, where his wife died. He returned as a priest and was made Bishop after a clever exchange with Napoleon.\n*   **The Bishop's Charity:** Upon his arrival, he immediately gives up his grand episcopal pa[0m
+
+  [[0;32mPASS[0m] large_100k: OK (105.8s, 100 words) | prompt_tokens=62403 | Prefill (internal)=659.5 tok/s | Decode (internal)=19.47 tok/s | Round trip=19.47 tok/s
+  [2m>>> Based on the provided text, the overall narrative arc of *The Count of Monte Cristo* is the transformation of an innocent, hopeful young man into a vengeful, mysterious agent of justice, driven by a betrayal that destroys his life.\n\nHere is a breakdown of that arc as depicted in the text:\n\n**1. The Setup: A Life of Promise and Happiness**\nThe story begins with Edmond Dantès, a young, capable, and well-liked sailor, returning to Marseilles after a successful voyage. He is on the cusp of achieving[0m
+
+  [[0;32mPASS[0m] multi_turn_t1: OK (11.4s)
+  [2m>>> Of course! Here's my acknowledgment of each fact:\n\n1. **Your dog's name is Biscuit** – Got it! I'll remember that your furry friend is named Biscuit. 🐶\n2. **You live in Wellington, New Zealand** – Noted! I'll keep in mind that you're based in Wellington. 🇳🇿\n3. **Your favorite number is 42** – Understood! 42 is a great choice (and quite meaningful in some circles). 🔢\n\nI'll keep these in mind for our conversation. What would you like to talk about?[0m
+
+  [[0;32mPASS[0m] multi_turn_t2_dog: OK (10.0s)
+  [2m>>> Your dog's name is **Biscuit**! 🐕 What would you like to do next?[0m
+
+  [[0;32mPASS[0m] multi_turn_t3_city: OK (9.3s)
+  [2m>>> You live in **Wellington, New Zealand**! 🇳🇿 How can I help you today?[0m
+
+  [[0;32mPASS[0m] multi_turn_t4_number: OK (9.6s)
+  [2m>>> Your favorite number is **42** — and you live in Wellington, New Zealand. 😊 What would you like to do next?[0m
+
+  [[0;32mPASS[0m] multi_turn_t5_all: OK (13.6s)
+  [2m>>> Absolutely! Here are the three facts you shared with me at the start of our conversation:\n\n1. **Your dog's name** is **Biscuit** (I'll keep it as "Biscuit" — you spelled it "Biscuit" in your first message, and I'll match that spelling exactly).  \n2. **You live in** **Wellington, New Zealand**.  \n3. **Your favorite number** is **42**.  \n\nLet me know if you'd like to talk about any of these or something new![0m
+
+[0;32m[1mALL TESTS PASSED[0m

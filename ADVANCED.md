@@ -52,9 +52,15 @@ The preferred way to run Krasis is with a config file:
 krasis --config path/to/config.conf
 ./dev run qcn            # resolves to testconfigs/qcn.conf
 ./dev benchmark qcn      # same
+./dev run dsv4           # DeepSeek-V4-Flash-0731 production config
 ```
 
 Config files use `KEY=VALUE` format. CLI flags override config file values.
+
+`dsv4`, `deepseek-v4`, and `deepseek-v4-flash-0731` resolve to the validated
+DeepSeek-V4-Flash-0731 INT4-expert, BF16-attention/KV config. GPU selection,
+layer partitioning, HCS residency, and VRAM budgets remain runtime-measured;
+the named config does not encode a particular GPU or fixed residency budget.
 
 ## Server Flags
 

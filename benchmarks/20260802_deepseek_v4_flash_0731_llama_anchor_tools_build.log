@@ -1,0 +1,23 @@
+[  2%] Built target llama-common-base
+[  2%] Built target cpp-httplib
+[  6%] Built target ggml-base
+[ 14%] Built target ggml-cpu
+[ 14%] Built target ggml
+[ 85%] Built target llama
+[ 97%] Built target llama-common
+[100%] Building CXX object tools/tokenize/CMakeFiles/llama-tokenize.dir/tokenize.cpp.o
+[100%] Linking CXX executable ../../bin/llama-tokenize
+[100%] Built target llama-tokenize
+[  2%] Built target llama-common-base
+[  2%] Built target cpp-httplib
+[  6%] Built target ggml-base
+[ 14%] Built target ggml-cpu
+[ 14%] Built target ggml
+[ 85%] Built target llama
+[ 97%] Built target llama-common
+[ 97%] Building CXX object tools/perplexity/CMakeFiles/llama-perplexity-impl.dir/perplexity.cpp.o
+[ 97%] Linking CXX shared library ../../bin/libllama-perplexity-impl.so
+[ 97%] Built target llama-perplexity-impl
+[ 97%] Building CXX object tools/perplexity/CMakeFiles/llama-perplexity.dir/main.cpp.o
+[100%] Linking CXX executable ../../bin/llama-perplexity
+[100%] Built target llama-perplexity

@@ -1,0 +1,33 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/deepseek-v4-flash-0731-bf16.conf
+Model:       /home/main/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-0731
+Dataset:     wikitext-2
+Port:        18220
+Attention:   bf16
+KV dtype:    bf16
+Window:      2048, stride=1024
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 287,737
+  [ 10.0%] Window 1/10 | scored 2047 this, 2047/287737 total | PPL=3.1664 | 119 tok/s
+  [ 20.0%] Window 2/10 | scored 1024 this, 3071/287737 total | PPL=2.8156 | 89 tok/s
+  [ 30.0%] Window 3/10 | scored 1024 this, 4095/287737 total | PPL=2.7544 | 80 tok/s
+  [ 40.0%] Window 4/10 | scored 1024 this, 5119/287737 total | PPL=2.7012 | 75 tok/s
+  [ 50.0%] Window 5/10 | scored 1024 this, 6143/287737 total | PPL=2.9047 | 72 tok/s
+  [ 60.0%] Window 6/10 | scored 1024 this, 7167/287737 total | PPL=3.1730 | 70 tok/s
+  [ 70.0%] Window 7/10 | scored 1024 this, 8191/287737 total | PPL=3.3531 | 68 tok/s
+  [ 80.0%] Window 8/10 | scored 1024 this, 9215/287737 total | PPL=3.5997 | 67 tok/s
+  [ 90.0%] Window 9/10 | scored 1024 this, 10239/287737 total | PPL=3.5411 | 66 tok/s
+  [100.0%] Window 10/10 | scored 1024 this, 11263/287737 total | PPL=3.5571 | 66 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    3.5571
+  BPC:           1.8307
+  Tokens scored: 11,263
+  Elapsed:       171.8s (66 tok/s)
+  Log:           perplexity/results/DeepSeek-V4-Flash-0731_wikitext-2_rust_prefill_bf16_bf16_20260803_021647.log
+========================================================

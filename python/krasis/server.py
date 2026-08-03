@@ -367,6 +367,7 @@ STARTUP_CALIBRATION_LONG_INITIAL_MULTIPLIER = int(os.environ.get(
     "KRASIS_STARTUP_CALIBRATION_LONG_INITIAL_MULTIPLIER",
     "8",
 ))
+VRAM_CALIBRATION_POLL_INTERVAL_MS = 1
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -1149,6 +1150,18 @@ def _startup_calibration_long_floor_mb(safety_margin_mb: int) -> int:
     return max(1, safety_margin_mb * 2)
 
 
+def _require_startup_vram_floor(
+    label: str,
+    min_free_mb: int,
+    safety_margin_mb: int,
+) -> None:
+    if min_free_mb < safety_margin_mb:
+        raise RuntimeError(
+            f"{label} breached the configured VRAM safety floor: "
+            f"min_free={min_free_mb} MB safety={safety_margin_mb} MB"
+        )
+
+
 def _startup_stage_exact_kv_mb_per_token(model: KrasisModel, kv_dtype: str) -> float:
     """Return compact-KV stage-exact prefill temp growth in MB/token."""
     if kv_dtype not in ("k6v6", "k4v4"):
@@ -1232,6 +1245,8 @@ def _next_startup_calibration_probe_target(
     observed_prefill_mins: list[tuple[int, int]],
     target_floor_mb: int,
     estimated_prefill_mb_per_token: float = 0.0,
+    fail_closed_probe_tokens: Optional[int] = None,
+    runtime_safety_floor_mb: Optional[int] = None,
 ) -> tuple[Optional[int], str]:
     """Choose the next startup long-calibration probe from observed low-water data."""
     if not observed_prefill_mins:
@@ -1240,7 +1255,13 @@ def _next_startup_calibration_probe_target(
     current_tokens, current_min_free_mb = observed_prefill_mins[-1]
     if current_tokens >= default_long_tokens:
         return None, "default long target reached"
-    if current_min_free_mb <= target_floor_mb:
+    fail_closed_probe = (
+        fail_closed_probe_tokens is not None
+        and fail_closed_probe_tokens > current_tokens
+        and runtime_safety_floor_mb is not None
+        and current_min_free_mb >= runtime_safety_floor_mb
+    )
+    if current_min_free_mb <= target_floor_mb and not fail_closed_probe:
         return None, (
             f"current low-water {current_min_free_mb} MB is at/below "
             f"adaptive floor {target_floor_mb} MB"
@@ -1250,7 +1271,11 @@ def _next_startup_calibration_probe_target(
         current_tokens + 1,
         short_tokens * max(1, STARTUP_CALIBRATION_LONG_INITIAL_MULTIPLIER),
     )
+    if fail_closed_probe_tokens is not None:
+        first_long = min(first_long, fail_closed_probe_tokens)
     raw_candidate = min(default_long_tokens, max(current_tokens * 2, first_long))
+    if fail_closed_probe_tokens is not None:
+        raw_candidate = min(raw_candidate, fail_closed_probe_tokens)
     if len(observed_prefill_mins) < 2:
         projected, reason = _project_startup_calibration_probe_target(
             current_tokens=current_tokens,
@@ -1262,6 +1287,12 @@ def _next_startup_calibration_probe_target(
         )
         if projected is not None:
             return projected, f"model-estimated initial probe ({reason})"
+        if fail_closed_probe and raw_candidate > current_tokens:
+            return raw_candidate, (
+                "runtime-derived fail-closed probe "
+                f"(entry floor validated through {fail_closed_probe_tokens} tokens; "
+                f"projection declined: {reason})"
+            )
         if estimated_prefill_mb_per_token > 0.0:
             return None, reason
 
@@ -1303,6 +1334,12 @@ def _next_startup_calibration_probe_target(
         mb_per_token=slope_mb_per_token,
     )
     if candidate is None:
+        if fail_closed_probe and raw_candidate > current_tokens:
+            return raw_candidate, (
+                "runtime-derived fail-closed probe "
+                f"(entry floor validated through {fail_closed_probe_tokens} tokens; "
+                f"projection declined: {reason})"
+            )
         return None, reason
     return candidate, (
         f"worst observed slope {worst_slope_mb_per_token:.4f} MB/token, "
@@ -2829,8 +2866,6 @@ def main():
     validation_components = []
     if args.gpu_expert_bits == 16:
         validation_components.append("GPU experts=BF16")
-    if args.attention_quant == "bf16":
-        validation_components.append("attention=BF16")
     if args.shared_expert_quant == "bf16":
         validation_components.append("shared expert=BF16")
     if args.dense_mlp_quant == "bf16":
@@ -3023,9 +3058,32 @@ def main():
         SAFETY_MARGIN_MB = args.vram_safety_margin
     else:
         SAFETY_MARGIN_MB = 600
-    vram_monitor = VramMonitor(device_indices, poll_interval_ms=50, safety_margin_mb=SAFETY_MARGIN_MB)
+    _vram_poll_raw = os.environ.get("KRASIS_VRAM_MONITOR_POLL_MS")
+    if _vram_poll_raw is None:
+        _vram_poll_ms = 50
+    else:
+        try:
+            _vram_poll_ms = int(_vram_poll_raw)
+        except ValueError as exc:
+            raise SystemExit(
+                "KRASIS_VRAM_MONITOR_POLL_MS must be an integer number of milliseconds"
+            ) from exc
+        if not 1 <= _vram_poll_ms <= 1000:
+            raise SystemExit(
+                "KRASIS_VRAM_MONITOR_POLL_MS must be between 1 and 1000 milliseconds"
+            )
+        _dim(f"VRAM monitor poll override: {_vram_poll_ms} ms")
+    _vram_startup_poll_ms = min(_vram_poll_ms, VRAM_CALIBRATION_POLL_INTERVAL_MS)
+    vram_monitor = VramMonitor(
+        device_indices,
+        poll_interval_ms=_vram_startup_poll_ms,
+        safety_margin_mb=SAFETY_MARGIN_MB,
+    )
     vram_monitor.start()
-    _dim("VRAM monitor started (tracking warmup)")
+    _dim(
+        "VRAM monitor started "
+        f"(startup measurement {_vram_startup_poll_ms} ms; runtime {_vram_poll_ms} ms)"
+    )
     for idx in device_indices:
         total = vram_monitor.total_mb(idx)
         _dim(f"cuda:{idx}: {total:,} MB total")
@@ -3142,6 +3200,11 @@ def main():
             "VRAM warmup cuda:%d: peak_used=%d MB, min_free=%d MB, total=%d MB",
             idx, warmup_peak_used, warmup_min_free, total,
         )
+        _require_startup_vram_floor(
+            f"Rust prefill warmup cuda:{idx}",
+            int(warmup_min_free),
+            SAFETY_MARGIN_MB,
+        )
 
     # ── Phase 2: VRAM calibration ──
     # Measure real short/long prefill and decode VRAM minima with no HCS loaded,
@@ -3211,6 +3274,21 @@ def main():
             max_calibration_tokens, STARTUP_CALIBRATION_DECODE_TOKENS, forced_long_target,
         )
     calibration_stop_ids: list[int] = []
+    calibration_guard_margin_mb = _startup_calibration_long_floor_mb(SAFETY_MARGIN_MB)
+    previous_prefill_margin_mb = int(
+        gpu_store.set_prefill_safety_margin_mb(calibration_guard_margin_mb)
+    )
+    _detail(
+        "Calibration prefill guard: "
+        f"{calibration_guard_margin_mb:,} MB "
+        f"(runtime safety remains {SAFETY_MARGIN_MB:,} MB)"
+    )
+    logger.info(
+        "Startup calibration prefill guard: previous=%d MB guard=%d MB runtime=%d MB",
+        previous_prefill_margin_mb,
+        calibration_guard_margin_mb,
+        SAFETY_MARGIN_MB,
+    )
 
     def _measure_vram_probe(label: str, prompt_tokens: list[int]) -> tuple[int, int, int, int, int]:
         _detail(f"{label}: probing {len(prompt_tokens):,} prompt tokens + {STARTUP_CALIBRATION_DECODE_TOKENS} decode tokens")
@@ -3269,6 +3347,16 @@ def main():
             f"prefill post-alloc={prefill_post_alloc_free:,} MB, "
             f"prefill min={prefill_min_free:,} MB, decode min={decode_min_free:,} MB, "
             f"post-cleanup={post_cleanup_free:,} MB"
+        )
+        _require_startup_vram_floor(
+            f"{label} prefill",
+            prefill_min_free,
+            SAFETY_MARGIN_MB,
+        )
+        _require_startup_vram_floor(
+            f"{label} decode",
+            decode_min_free,
+            SAFETY_MARGIN_MB,
         )
         if startup_diag:
             prefill_tps = prompt_len / prefill_elapsed if prefill_elapsed > 0 else 0.0
@@ -3338,12 +3426,47 @@ def main():
             long_target, adaptive_floor_mb, estimated_prefill_mb_per_token,
         )
         while True:
+            current_probe_tokens = observed_prefill_mins[-1][0]
+            bounded_probe_tokens = min(
+                long_target,
+                max(
+                    current_probe_tokens + 1,
+                    current_probe_tokens * 2,
+                    short_tokens * max(1, STARTUP_CALIBRATION_LONG_INITIAL_MULTIPLIER),
+                ),
+            )
+            fail_closed_probe_tokens: Optional[int] = None
+            if bounded_probe_tokens > current_probe_tokens:
+                probe_entry_floor_mb = int(
+                    gpu_store.prefill_minimum_entry_free_mb(bounded_probe_tokens)
+                )
+                probe_available_mb = int(long_baseline_free)
+                if probe_entry_floor_mb <= probe_available_mb:
+                    fail_closed_probe_tokens = bounded_probe_tokens
+                logger.info(
+                    "Adaptive startup calibration fail-closed probe: current_tokens=%d "
+                    "next_tokens=%d entry_floor_mb=%d available_mb=%d admitted=%s",
+                    current_probe_tokens,
+                    bounded_probe_tokens,
+                    probe_entry_floor_mb,
+                    probe_available_mb,
+                    fail_closed_probe_tokens is not None,
+                )
+                _detail(
+                    "Adaptive long calibration fail-closed entry check: "
+                    f"{bounded_probe_tokens:,} tokens require "
+                    f"{probe_entry_floor_mb:,} MB, "
+                    f"{probe_available_mb:,} MB available — "
+                    f"{'admitted' if fail_closed_probe_tokens is not None else 'not admitted'}"
+                )
             next_target, reason = _next_startup_calibration_probe_target(
                 short_tokens=short_tokens,
                 default_long_tokens=long_target,
                 observed_prefill_mins=observed_prefill_mins,
                 target_floor_mb=adaptive_floor_mb,
                 estimated_prefill_mb_per_token=estimated_prefill_mb_per_token,
+                fail_closed_probe_tokens=fail_closed_probe_tokens,
+                runtime_safety_floor_mb=SAFETY_MARGIN_MB,
             )
             if next_target is None:
                 _detail(
@@ -3383,7 +3506,7 @@ def main():
                 break
             if long_tokens >= long_target:
                 break
-            if long_prefill_min <= adaptive_floor_mb:
+            if long_prefill_min <= adaptive_floor_mb and long_tokens >= long_target:
                 _detail(
                     f"Adaptive long calibration: reached low-water floor at "
                     f"{long_prefill_min:,} MB; using {long_tokens:,} tokens"
@@ -3393,6 +3516,15 @@ def main():
                     long_tokens, long_prefill_min, adaptive_floor_mb,
                 )
                 break
+
+    restored_prefill_margin_mb = int(
+        gpu_store.set_prefill_safety_margin_mb(SAFETY_MARGIN_MB)
+    )
+    logger.info(
+        "Startup calibration prefill guard restored: previous=%d MB runtime=%d MB",
+        restored_prefill_margin_mb,
+        SAFETY_MARGIN_MB,
+    )
 
     # Compute max scratch: worst case prompt (50K tokens).
     # This determines how much VRAM prefill can claim via soft eviction.
@@ -3434,6 +3566,11 @@ def main():
     prefill_long_hcs_budget = max(0, prefill_long_free - SAFETY_MARGIN_MB)
 
     vram_monitor.report_event("calibration_end")
+    previous_poll_interval_ms = int(vram_monitor.set_poll_interval_ms(_vram_poll_ms))
+    _detail(
+        "VRAM monitor runtime cadence restored: "
+        f"{previous_poll_interval_ms} ms -> {_vram_poll_ms} ms"
+    )
     _status("VRAM calibration complete")
     _detail(f"Post-calibration free VRAM: {post_calibration_free_mb:,} MB")
     log_ram_ledger("after-vram-calibration")

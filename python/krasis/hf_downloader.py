@@ -142,6 +142,15 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Validated StepFun sparse MoE target with HQQ4 attention and k4v4 KV.",
     ),
     SupportedHFModel(
+        key="dsv4",
+        display_name="DeepSeek-V4-Flash",
+        repo_id="deepseek-ai/DeepSeek-V4-Flash-0731",
+        local_dir_name="deepseek-ai/DeepSeek-V4-Flash-0731",
+        revision="9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+        recommended_config="testconfigs/deepseek-v4-flash-0731-4-4-a16.conf",
+        notes="Quality-gated DeepSeek-V4-Flash-0731 target with INT4 experts and BF16 attention/KV.",
+    ),
+    SupportedHFModel(
         key="nemotron-nano",
         display_name="NVIDIA Nemotron-3 Nano 30B A3B",
         repo_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",

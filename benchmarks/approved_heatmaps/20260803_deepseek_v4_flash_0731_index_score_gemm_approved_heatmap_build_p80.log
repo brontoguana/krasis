@@ -1,0 +1,195 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (6000) to clear...
+[0;32m[1mOK[0m Selected GPUs (6000) clear.
+[0;36m[1m=>[0m Building approved HCS route heatmap: tests/deepseek-v4-flash-0731-bf16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/approved-heatmap-build_20260803_180444
+[0;36m[1m=>[0m Log: /home/main/Documents/Claude/krasis/logs/approved-heatmap-build_20260803_180444/approved_heatmap_build_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d
+Loaded config from tests/deepseek-v4-flash-0731-bf16.conf: {'model_path': '/home/main/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-0731', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d', 'num_gpus': 1, 'layer_group_size': 1, 'kv_cache_mb': 1000, 'kv_dtype': 'bf16', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'bf16', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '127.0.0.1', 'port': 18220, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — DeepSeek-V4-Flash-0731[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (config; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: bf16  |  KV: bf16[0m
+  [32mLayer groups: 1  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+  [33mUNVALIDATED BF16 debug path enabled: attention=BF16. This path likely contains unknown bugs and must not be used as a correctness oracle. Use HF Transformers BF16 reference data for validation; production runs must use quantized configs.[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=557 MB, free=96700 MB, total=97258 MB
+
+[1m[36m▸ Loading GPU weights[0m
+DeepSeek-V4 checkpoint namespace inventory: 67606 layers.* main tensors across 43 layers; 4705 mtp.* auxiliary tensors across blocks [0, 1, 2] explicitly skipped; 6 root main tensors; unexpected=0
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=12696 MB, reserved=12716 MB, used=13381 MB, free=83876 MB, total=97258 MB
+  [0;32mAttention resident on GPU (10970 MB), 83876 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 43 layers...
+    GPU Marlin cache loaded: 143.4 GB in 93s
+  [0;32mExpert weights loaded in 93s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=12696 MB, reserved=12716 MB, used=13381 MB, free=83876 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=12696 MB, reserved=12716 MB, used=13381 MB, free=83876 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=13702 MB, reserved=13750 MB, used=14415 MB, free=82842 MB, total=97258 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=13702 MB, reserved=13750 MB, used=14415 MB, free=82842 MB, total=97258 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x5817b3d0)[0m
+  [32mReleased redundant GPU execution source tensors (677 MB)[0m
+  [2mVRAM monitor started (startup measurement 1 ms; runtime 50 ms)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+DeepSeek-V4 prefill sparse-score mode: bf16_fp32
+DeepSeek-V4 prefill sparse-output mode: bf16_fp32_gemm
+DeepSeek-V4 prefill index-score mode: bf16_fp32_gemm
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 3.5s[0m
+  [2mcuda:0 warmup:  peak 94,951 MB used / 97,258 MB total  (min free: 2,306 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 81,052 MB / 97,258 MB[0m
+  [32mCalibration prefill guard: 1,200 MB (runtime safety remains 600 MB)[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 5.21s (6.1 tok/s)  VRAM: 80990 MB free now, 80990 MB min free during decode[0m
+  [32mShort calibration: baseline=81,052 MB, prefill post-alloc=4,368 MB, prefill min=1,140 MB, decode min=80,990 MB, post-cleanup=80,990 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=2.7001 MB/token[0m
+  [32mAdaptive long calibration fail-closed entry check: 4,000 tokens require 5,199 MB, 81,052 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 4,000 tokens (runtime-derived fail-closed probe (entry floor validated through 4000 tokens; projection declined: current low-water 1140 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 4,000 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 5.25s (6.1 tok/s)  VRAM: 80992 MB free now, 80992 MB min free during decode[0m
+  [32mLong calibration: baseline=80,990 MB, prefill post-alloc=4,428 MB, prefill min=1,220 MB, decode min=80,992 MB, post-cleanup=80,992 MB[0m
+  [32mAdaptive long calibration fail-closed entry check: 8,000 tokens require 5,367 MB, 80,990 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 8,000 tokens (runtime-derived fail-closed probe (entry floor validated through 8000 tokens; projection declined: current low-water 1220 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 8,000 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 5.19s (6.2 tok/s)  VRAM: 80992 MB free now, 80992 MB min free during decode[0m
+  [32mLong calibration: baseline=80,992 MB, prefill post-alloc=4,428 MB, prefill min=1,188 MB, decode min=80,992 MB, post-cleanup=80,992 MB[0m
+  [32mAdaptive long calibration fail-closed entry check: 16,000 tokens require 5,714 MB, 80,992 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 16,000 tokens (runtime-derived fail-closed probe (entry floor validated through 16000 tokens; projection declined: current low-water 1188 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 16,000 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 5.27s (6.1 tok/s)  VRAM: 80994 MB free now, 80994 MB min free during decode[0m
+  [32mLong calibration: baseline=80,992 MB, prefill post-alloc=4,440 MB, prefill min=1,212 MB, decode min=80,994 MB, post-cleanup=80,994 MB[0m
+  [32mAdaptive long calibration fail-closed entry check: 32,000 tokens require 6,402 MB, 80,992 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 32,000 tokens (runtime-derived fail-closed probe (entry floor validated through 32000 tokens; projection declined: current low-water 1212 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 32,000 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 5.20s (6.2 tok/s)  VRAM: 80992 MB free now, 80992 MB min free during decode[0m
+  [32mLong calibration: baseline=80,994 MB, prefill post-alloc=4,440 MB, prefill min=1,200 MB, decode min=80,992 MB, post-cleanup=80,992 MB[0m
+  [32mAdaptive long calibration fail-closed entry check: 39,920 tokens require 6,750 MB, 80,994 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 39,920 tokens (runtime-derived fail-closed probe (entry floor validated through 39920 tokens; projection declined: current low-water 1200 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 5.33s (6.0 tok/s)  VRAM: 80990 MB free now, 80990 MB min free during decode[0m
+  [32mLong calibration: baseline=80,992 MB, prefill post-alloc=4,440 MB, prefill min=1,200 MB, decode min=80,990 MB, post-cleanup=80,990 MB[0m
+  [32mScratch reservation: max=135,475 MB (at 50,000 tokens)[0m
+  [32mVRAM monitor runtime cadence restored: 1 ms -> 50 ms[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 80,990 MB[0m
+  [32mTransient deltas: short prefill=79,912 MB, long prefill=79,792 MB, short decode=62 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 80,328 MB[0m
+  [32mPrefill HCS budgets: short=478 MB, long=598 MB[0m
+  [32mWorst-case prefill scratch reservation: 135,475 MB at 50,000 tokens[0m
+  [32mInitial HCS residency: none; only the first prompt will run cold[0m
+
+[1m[36m▸ Approved HCS route heatmap build[0m
+  [32mPrompts: 80 from benchmarks/approved_heatmaps/step37_hqq4_k4v4_prompts.txt; decode tokens/prompt: 256; checkpoint_every=8; residency_refresh_every=1[0m
+  [32mAdaptive HCS refresh after prompt 1: 6,061 ranked experts, 3.5s[0m
+  [32mAdaptive HCS refresh after prompt 2: 7,416 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 3: 8,052 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 4: 8,467 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 5: 8,775 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 6: 8,981 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 7: 9,129 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 8: 9,202 ranked experts, 3.7s[0m
+  [32mCheckpoint 8: 9,202 ranked experts, 2,056 decode tokens, 189.1s -> benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_approved_heatmap.p00008.json[0m
+  [32mAdaptive HCS refresh after prompt 9: 9,289 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 10: 9,417 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 11: 9,463 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 12: 9,563 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 13: 9,602 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 14: 9,650 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 15: 9,686 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 16: 9,719 ranked experts, 3.7s[0m
+  [32mCheckpoint 16: 9,719 ranked experts, 4,112 decode tokens, 346.7s -> benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_approved_heatmap.p00016.json[0m
+  [32mAdaptive HCS refresh after prompt 17: 9,764 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 18: 9,801 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 19: 9,832 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 20: 9,849 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 21: 9,863 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 22: 9,874 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 23: 9,889 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 24: 9,908 ranked experts, 3.7s[0m
+  [32mCheckpoint 24: 9,908 ranked experts, 6,168 decode tokens, 505.6s -> benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_approved_heatmap.p00024.json[0m
+  [32mAdaptive HCS refresh after prompt 25: 9,914 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 26: 9,922 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 27: 9,942 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 28: 9,956 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 29: 9,961 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 30: 9,965 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 31: 9,970 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 32: 9,973 ranked experts, 3.7s[0m
+  [32mCheckpoint 32: 9,973 ranked experts, 8,224 decode tokens, 661.5s -> benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_approved_heatmap.p00032.json[0m
+  [32mAdaptive HCS refresh after prompt 33: 9,975 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 34: 9,981 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 35: 9,988 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 36: 9,990 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 37: 10,003 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 38: 10,007 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 39: 10,014 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 40: 10,022 ranked experts, 3.7s[0m
+  [32mCheckpoint 40: 10,022 ranked experts, 10,280 decode tokens, 818.1s -> benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_approved_heatmap.p00040.json[0m
+  [32mAdaptive HCS refresh after prompt 41: 10,026 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 42: 10,032 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 43: 10,035 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 44: 10,037 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 45: 10,039 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 46: 10,040 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 47: 10,041 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 48: 10,042 ranked experts, 3.7s[0m
+  [32mCheckpoint 48: 10,042 ranked experts, 12,336 decode tokens, 973.0s -> benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_approved_heatmap.p00048.json[0m
+  [32mAdaptive HCS refresh after prompt 49: 10,043 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 50: 10,045 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 51: 10,049 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 52: 10,054 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 53: 10,055 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 54: 10,060 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 55: 10,063 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 56: 10,064 ranked experts, 3.7s[0m
+  [32mCheckpoint 56: 10,064 ranked experts, 14,392 decode tokens, 1128.5s -> benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_approved_heatmap.p00056.json[0m
+  [32mAdaptive HCS refresh after prompt 57: 10,069 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 58: 10,071 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 59: 10,072 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 60: 10,074 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 61: 10,080 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 62: 10,081 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 63: 10,090 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 64: 10,090 ranked experts, 3.7s[0m
+  [32mCheckpoint 64: 10,090 ranked experts, 16,448 decode tokens, 1286.2s -> benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_approved_heatmap.p00064.json[0m
+  [32mAdaptive HCS refresh after prompt 65: 10,097 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 66: 10,099 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 67: 10,101 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 68: 10,104 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 69: 10,106 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 70: 10,109 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 71: 10,110 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 72: 10,113 ranked experts, 3.7s[0m
+  [32mCheckpoint 72: 10,113 ranked experts, 18,504 decode tokens, 1443.5s -> benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_approved_heatmap.p00072.json[0m
+  [32mAdaptive HCS refresh after prompt 73: 10,113 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 74: 10,116 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 75: 10,119 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 76: 10,122 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 77: 10,124 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 78: 10,125 ranked experts, 3.7s[0m
+  [32mAdaptive HCS refresh after prompt 79: 10,127 ranked experts, 3.7s[0m
+  [32mCheckpoint final: 10,130 ranked experts, 20,560 decode tokens, 1596.8s -> benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_approved_heatmap.json, benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_approved_heatmap.p00080.json[0m
+APPROVED HEATMAP BUILD COMPLETE
+[0;36m[1m=>[0m Approved heatmap build log saved: /home/main/Documents/Claude/krasis/logs/approved-heatmap-build_20260803_180444/approved_heatmap_build_stdout.log

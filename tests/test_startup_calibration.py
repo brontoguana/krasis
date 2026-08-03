@@ -51,6 +51,48 @@ class StartupCalibrationProbeTests(unittest.TestCase):
         self.assertIsNone(next_target)
         self.assertIn("validation reserve", reason)
 
+    def test_long_calibration_uses_runtime_derived_fail_closed_probe_near_guard(self) -> None:
+        next_target, reason = server._next_startup_calibration_probe_target(
+            short_tokens=500,
+            default_long_tokens=39_920,
+            observed_prefill_mins=[(500, 1_152)],
+            target_floor_mb=1_200,
+            estimated_prefill_mb_per_token=2.7,
+            fail_closed_probe_tokens=4_000,
+            runtime_safety_floor_mb=600,
+        )
+
+        self.assertEqual(next_target, 4_000)
+        self.assertIn("runtime-derived fail-closed", reason)
+
+    def test_long_calibration_rejects_fail_closed_probe_below_runtime_floor(self) -> None:
+        next_target, reason = server._next_startup_calibration_probe_target(
+            short_tokens=500,
+            default_long_tokens=39_920,
+            observed_prefill_mins=[(500, 599)],
+            target_floor_mb=1_200,
+            estimated_prefill_mb_per_token=2.7,
+            fail_closed_probe_tokens=4_000,
+            runtime_safety_floor_mb=600,
+        )
+
+        self.assertIsNone(next_target)
+        self.assertIn("adaptive floor", reason)
+
+    def test_long_calibration_continues_fail_closed_from_measured_long_probe(self) -> None:
+        next_target, reason = server._next_startup_calibration_probe_target(
+            short_tokens=500,
+            default_long_tokens=39_920,
+            observed_prefill_mins=[(500, 1_140), (4_000, 1_188)],
+            target_floor_mb=1_200,
+            estimated_prefill_mb_per_token=2.7,
+            fail_closed_probe_tokens=8_000,
+            runtime_safety_floor_mb=600,
+        )
+
+        self.assertEqual(next_target, 8_000)
+        self.assertIn("runtime-derived fail-closed", reason)
+
     def test_long_calibration_stops_when_validation_floor_is_too_close(self) -> None:
         next_target, reason = server._next_startup_calibration_probe_target(
             short_tokens=500,
@@ -71,6 +113,11 @@ class StartupCalibrationProbeTests(unittest.TestCase):
     def test_long_calibration_uses_configured_safety_as_floor_source(self) -> None:
         self.assertEqual(server._startup_calibration_long_floor_mb(600), 1_200)
         self.assertEqual(server._startup_calibration_long_floor_mb(500), 1_000)
+
+    def test_startup_vram_floor_is_fail_closed(self) -> None:
+        server._require_startup_vram_floor("probe", 600, 600)
+        with self.assertRaisesRegex(RuntimeError, "min_free=599 MB safety=600 MB"):
+            server._require_startup_vram_floor("probe", 599, 600)
 
     def test_compact_kv_stage_exact_estimate_uses_model_dimensions(self) -> None:
         cfg = SimpleNamespace(

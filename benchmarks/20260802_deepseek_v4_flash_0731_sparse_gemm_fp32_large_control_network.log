@@ -1,0 +1,95 @@
+Checking server health at http://localhost:18220... [0;32mOK[0m
+Sending warmup request... done (6.1s)
+  [2m>>> Hi there! How can I help you[0m
+
+[1m[0;36mTest 4: Network Multi-Prompt Validation[0m
+============================================================
+  [0;32mPASS[0m OK (6.2s) [factual_qa]
+  [0;32mPASS[0m OK (6.4s) [math_simple]
+  [0;32mPASS[0m OK (9.5s) [code_gen]
+  [0;32mPASS[0m OK (6.6s, 5 words) [multi_turn]
+  [0;32mPASS[0m OK (6.0s, 7 words) [short_prompt]
+  [0;32mPASS[0m OK (6.2s) [streaming_factual]
+  [0;32mPASS[0m OK (9.0s) [streaming_code]
+  [0;32mPASS[0m OK (7.1s) [json_output]
+  [0;32mPASS[0m OK (6.4s) [blocking_math]
+
+[1m[0;36mTest 5: Network Large-Prompt Validation[0m
+============================================================
+  Loading ~1K token prompt... done (7044 chars)
+  [0;32mPASS[0m OK (20.8s, 78 words) | prompt_tokens=2043 | Prefill (internal)=185.0 tok/s | Decode (internal)=22.78 tok/s | Round trip=22.78 tok/s [large_2k]
+  Loading ~8K token prompt... done (35045 chars)
+  [0;32mPASS[0m OK (48.2s, 89 words) | prompt_tokens=8623 | Prefill (internal)=226.7 tok/s | Decode (internal)=21.44 tok/s | Round trip=21.44 tok/s [large_10k]
+  Loading ~21K token prompt... done (87555 chars)
+  [0;32mPASS[0m OK (117.3s, 106 words) | prompt_tokens=23348 | Prefill (internal)=218.6 tok/s | Decode (internal)=20.20 tok/s | Round trip=20.20 tok/s [large_25k]
+  Loading ~87K token prompt... done (244208 chars)
+  [0;32mPASS[0m OK (390.4s, 101 words) | prompt_tokens=62403 | Prefill (internal)=164.6 tok/s | Decode (internal)=19.40 tok/s | Round trip=19.40 tok/s [large_100k]
+
+[1m[0;36mTest 6: Multi-Turn Sequential Conversation[0m
+============================================================
+  Turn 1: establishing facts... [0;32mPASS[0m OK (11.6s)
+  Turn 2: recalling dog's name... [0;32mPASS[0m OK (10.1s)
+  Turn 3: recalling city... [0;32mPASS[0m OK (10.2s)
+  Turn 4: recalling number (streaming)... [0;32mPASS[0m OK (10.4s)
+  Turn 5: recalling all three facts... [0;32mPASS[0m OK (13.1s)
+
+============================================================
+[1mSUMMARY[0m: 18/18 passed, 0 failed, 701.7s total
+
+[1mResponse texts (review for coherence):[0m
+
+  [[0;32mPASS[0m] factual_qa: OK (6.2s)
+  [2m>>> Paris[0m
+
+  [[0;32mPASS[0m] math_simple: OK (6.4s)
+  [2m>>> 7 * 8 = 56[0m
+
+  [[0;32mPASS[0m] code_gen: OK (9.5s)
+  [2m>>> ```python\ndef fibonacci(n):\n    if n <= 0:\n        return 0\n    elif n == 1:\n        return 1\n    else:\n        a, b = 0, 1\n        for _ in range(2, n + 1):\n            a, b = b, a + b\n        return b\n```[0m
+
+  [[0;32mPASS[0m] multi_turn: OK (6.6s, 5 words)
+  [2m>>> Your name is Alice! 😊[0m
+
+  [[0;32mPASS[0m] short_prompt: OK (6.0s, 7 words)
+  [2m>>> Hello! How can I help you today?[0m
+
+  [[0;32mPASS[0m] streaming_factual: OK (6.2s)
+  [2m>>> Tokyo[0m
+
+  [[0;32mPASS[0m] streaming_code: OK (9.0s)
+  [2m>>> Here's a Python hello world one-liner:\n\n```python\nprint("Hello, World!")\n```\n\nOr if you want to be more creative:\n\n```python\nprint('Hello, World!')\n```\n\nOr using a variable:\n\n```python\nprint("Hello, World!" if True else "Goodbye")\n```\n\nThe simplest and most common one is just:\n\n```python\nprint("Hello, World!")\n```[0m
+
+  [[0;32mPASS[0m] json_output: OK (7.1s)
+  [2m>>> {"name": "Alice", "age": 25}[0m
+
+  [[0;32mPASS[0m] blocking_math: OK (6.4s)
+  [2m>>> 15 + 27 = 42[0m
+
+  [[0;32mPASS[0m] large_2k: OK (20.8s, 78 words) | prompt_tokens=2043 | Prefill (internal)=185.0 tok/s | Decode (internal)=22.78 tok/s | Round trip=22.78 tok/s
+  [2m>>> This is the beginning of Herman Melville's *Moby-Dick; or, The Whale*, including the title page, a table of contents listing all 135 chapters and the epilogue, and the opening sections of "Etymology" and "Extracts." The etymology provides dictionary and language origins for the word "whale," while the extracts are a collection of miscellaneous quotations about whales from various sources, compiled by a fictional "Sub-Sub-Librarian." The provided text also includes a transcriber's note explaining[0m
+
+  [[0;32mPASS[0m] large_10k: OK (48.2s, 89 words) | prompt_tokens=8623 | Prefill (internal)=226.7 tok/s | Decode (internal)=21.44 tok/s | Round trip=21.44 tok/s
+  [2m>>> Based on the text provided, the main themes are:\n\n1.  **The Superficiality and Hypocrisy of High Society:** The entire first chapters are a satire of the Russian aristocracy. Conversations are conducted in French, not Russian, and are filled with empty pleasantries. Anna Pavlovna's reception is a "conversational machine" where people perform social duties, like greeting the "aunt" whom no one knows or cares about. The guests are described as "spindles" in a machine, and their interactions are ba[0m
+
+  [[0;32mPASS[0m] large_25k: OK (117.3s, 106 words) | prompt_tokens=23348 | Prefill (internal)=218.6 tok/s | Decode (internal)=20.20 tok/s | Round trip=20.20 tok/s
+  [2m>>> Based on the provided text, here is a summary of the key events:\n\n**Book First: A Just Man**\n*   The story introduces M. Myriel, the Bishop of D——, an old man of about 75. He was once a man of the world but became a priest after the Revolution and was appointed bishop after a chance encounter with Napoleon.\n*   Upon his arrival, he immediately demonstrates his character by giving up his grand episcopal palace to the town hospital, moving himself into the smaller hospital building.\n*   He lives a[0m
+
+  [[0;32mPASS[0m] large_100k: OK (390.4s, 101 words) | prompt_tokens=62403 | Prefill (internal)=164.6 tok/s | Decode (internal)=19.40 tok/s | Round trip=19.40 tok/s
+  [2m>>> The overall narrative arc of the provided text is the setup and execution of a great betrayal, followed by the immediate, devastating consequences for the innocent victim. It is the foundational act of the entire novel, establishing the central conflict and the motivation for the epic revenge that will follow.\n\nHere is a breakdown of the arc's key stages:\n\n**1. The Ascent (Chapters 1-5):** The story opens with the return of the young, capable, and universally loved sailor, Edmond Dantès, to Mars[0m
+
+  [[0;32mPASS[0m] multi_turn_t1: OK (11.6s)
+  [2m>>> Of course! Here's my acknowledgment of each fact:\n\n1. **Your dog's name is Biscuit** – Got it! I'll remember that your furry friend is called Biscuit. 🐶\n2. **You live in Wellington, New Zealand** – Noted! I'll keep in mind that you're based in Wellington. 🇳🇿\n3. **Your favorite number is 42** – Understood! 42 is a great choice (very *Hitchhiker's Guide*). 🔢\n\nI'll keep these in mind for our conversation. What would you like to talk about?[0m
+
+  [[0;32mPASS[0m] multi_turn_t2_dog: OK (10.1s)
+  [2m>>> Your dog's name is **Biscuit**! 🐕 How can I help you next?[0m
+
+  [[0;32mPASS[0m] multi_turn_t3_city: OK (10.2s)
+  [2m>>> You live in **Wellington, New Zealand**! 🌤️ (Lovely city—great coffee and wind, from what I know!) What else can I do for you?[0m
+
+  [[0;32mPASS[0m] multi_turn_t4_number: OK (10.4s)
+  [2m>>> Your favorite number is **42** — easy to remember, even without the meaning of life, the answer to your question is set! 😄 What's next on your list?[0m
+
+  [[0;32mPASS[0m] multi_turn_t5_all: OK (13.1s)
+  [2m>>> Absolutely! Here are all three facts you shared with me at the start of our conversation:  \n\n1. Your dog's name is **Biscuit** — and I'll always remember, no bones about it.  \n2. You live in **Wellington, New Zealand** — the coolest little capital by the harbor.  \n3. Your favorite number is **42** — the ultimate answer to life, the universe, and everything.  \n\nAnything else you'd like to add or ask?[0m
+
+[0;32m[1mALL TESTS PASSED[0m

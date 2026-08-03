@@ -1,5 +1,966 @@
 # Krasis Benchmark Results
 
+## DeepSeek-V4-Flash-0731 release integration gates — 2026-08-03
+
+The curated Hugging Face entry is pinned to the exact validated checkpoint
+revision `9e165c30e2704aec5d9d593cce3eebd58bbef1cb`. The portable named config
+resolves through `dsv4`/`deepseek-v4` and leaves GPU selection, partitioning,
+HCS residency, and VRAM budgets to runtime discovery.
+
+Final release-source checks passed: curated downloader 15/15, model/config
+17/17, and launcher 24/24. A fresh `./dev run dsv4 --selected-gpus 6000`
+smoke used approved-heatmap `require` mode with the local pre-publication
+file-URL manifest, loaded
+`deepseek_v4_flash_0731_bf16_index_score_gemm_p00080_local`, skipped quick
+heatmap collection, restored HCS 6,440/11,008, completed the full adaptive
+500/4K/8K/16K/32K/39,920 calibration curve, and reached HTTP 200. Probe
+low-water values were 1,212/1,152/1,176/1,224/1,224/1,272 MiB against the
+600 MiB runtime margin. Teardown fully released the RTX PRO 6000 and the
+A4500 service remained HTTP 200.
+
+The published manifest entry and promoted p80 artifact are byte-verified at
+146,683 bytes with SHA-256
+`4516b4da13f7cbf4b0b6dbac778d03f9e458582eaae7d392ecc116e817c96303`.
+The raw GitHub URLs must be verified after the commit is pushed.
+
+Evidence: [downloader test](20260803_deepseek_v4_flash_0731_release_hf_downloader_test.log),
+[model/config gate](20260803_deepseek_v4_flash_0731_release_model_config_gate.log),
+[launcher gate](20260803_deepseek_v4_flash_0731_release_launcher_gate.log),
+[named-config smoke](20260803_deepseek_v4_flash_0731_release_named_config_smoke.log),
+and [runtime log](20260803_deepseek_v4_flash_0731_release_named_config_smoke_runtime.log).
+
+## DeepSeek-V4-Flash-0731 learned-index-GEMM-default operational baseline — 2026-08-03
+
+Timing-disabled fresh-process runs used the exact promoted default and required
+its newly rebuilt p80 artifact. There was no timing instrumentation or competing
+download/heavy I/O. The standard benchmark and a separate normal server with
+the sole canonical Gutenberg client measured:
+
+| Prompt / generation | Prefill internal | Decode internal | Round trip | HCS | Min free VRAM |
+|---|---:|---:|---:|---:|---:|
+| 1,000 prompt | 152.2 tok/s | — | — | 6,440/11,008 | 1,134 MiB benchmark floor |
+| 50 decode | — | 29.38 tok/s | 54.05 tok/s | 6,440/11,008 | 1,134 MiB |
+| 100 decode | — | 28.20 tok/s | 35.97 tok/s | 6,440/11,008 | 1,134 MiB |
+| 250 decode | — | 28.49 tok/s | 30.60 tok/s | 6,440/11,008 | 1,134 MiB |
+| 2,043 prompt | 320.6 tok/s | 22.58 tok/s | 22.58 tok/s | 6,440/11,008 | 716 MiB |
+| 8,623 prompt | 906.3 tok/s | 21.32 tok/s | 21.32 tok/s | 6,440/11,008 | 710 MiB |
+| 23,348 prompt | 1,328.2 tok/s | 20.45 tok/s | 20.45 tok/s | 6,440/11,008 | 692 MiB |
+| 62,403 prompt | 1,204.3 tok/s | 19.41 tok/s | 19.41 tok/s | 6,440/11,008 | 650 MiB |
+
+The large-prompt suite passed 18/18. Relative to the frozen campaign-start
+curve `154.1/184.3/227.2/218.9/164.8` at 1K/2K/8.6K/23K/62K, the final
+deltas are `-1.23%/+73.96%/+298.90%/+506.76%/+630.76%`. Relative to the
+previous accepted sparse-output-GEMM baseline, the deltas are
+`-21.14%/+0.25%/+10.71%/+33.57%/+82.61%`. The 1K regression is therefore a
+real short-context GEMM launch-overhead tradeoff, not hidden by the large-
+context gains. Standard decode is within noise of `27.6/28.0/28.5` and long-
+context decode is unchanged.
+
+Evidence: [standard launcher](20260803_deepseek_v4_flash_0731_index_score_gemm_promoted_standard_benchmark_launcher.log),
+[standard report](20260803_deepseek_v4_flash_0731_index_score_gemm_promoted_standard_benchmark_report.log),
+[standard stdout](20260803_deepseek_v4_flash_0731_index_score_gemm_promoted_standard_benchmark_stdout.log),
+[standard runtime](20260803_deepseek_v4_flash_0731_index_score_gemm_promoted_standard_benchmark_runtime.log),
+[large server](20260803_deepseek_v4_flash_0731_index_score_gemm_promoted_large_server.log),
+[large client](20260803_deepseek_v4_flash_0731_index_score_gemm_promoted_large_client.log),
+and [large runtime](20260803_deepseek_v4_flash_0731_index_score_gemm_promoted_large_runtime.log).
+
+## DeepSeek-V4-Flash-0731 learned-index-GEMM-default p80 and promotion — 2026-08-03
+
+The exact no-environment default passed build/import, DeepSeek math 20/20,
+model/config 17/17, and launcher 24/24. A new non-resumed 80-prompt held-out
+heatmap was then built on that exact binary with 256 decode tokens per prompt,
+checkpoints every 8, and measured HCS refresh after every prompt. It completed
+in 1,595.5 seconds with 20,554 route tokens and 10,131 ranked experts. The
+146,683-byte artifact has SHA-256
+`4516b4da13f7cbf4b0b6dbac778d03f9e458582eaae7d392ecc116e817c96303`.
+
+The artifact is registered at priority 0 without deleting prior artifacts. A
+fresh fail-closed `require` start selected
+`deepseek_v4_flash_0731_bf16_index_score_gemm_p00080_local`, skipped quick
+collection, loaded 6,440/11,008 HCS experts, and reached HTTP 200. Its full
+calibration curve held 1,188–1,272 MiB and emitted no warning.
+
+Evidence: [build](approved_heatmaps/20260803_deepseek_v4_flash_0731_index_score_gemm_promoted_approved_heatmap_build_p80.log),
+[build runtime](approved_heatmaps/20260803_deepseek_v4_flash_0731_index_score_gemm_promoted_approved_heatmap_build_p80_runtime.log),
+[verification server](approved_heatmaps/20260803_deepseek_v4_flash_0731_index_score_gemm_promoted_approved_heatmap_verify_server.log),
+[verification runtime](approved_heatmaps/20260803_deepseek_v4_flash_0731_index_score_gemm_promoted_approved_heatmap_verify_runtime.log),
+[artifact](approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_promoted_approved_heatmap.json),
+[promotion build](20260803_deepseek_v4_flash_0731_index_score_gemm_promotion_build.log),
+[math gate](20260803_deepseek_v4_flash_0731_index_score_gemm_promotion_math_gate.log),
+[model/config gate](20260803_deepseek_v4_flash_0731_index_score_gemm_promotion_model_config_gate.log),
+and [launcher gate](20260803_deepseek_v4_flash_0731_index_score_gemm_promotion_launcher_gate.log).
+
+## DeepSeek-V4-Flash-0731 learned-index GEMM attempt 1 full PPL — 2026-08-03
+
+The opt-in `bf16_fp32_gemm` learned-index candidate completed all 281
+WikiText-2 windows and 287,736 scored targets at full-precision PPL
+`4.82137538882331`, BPC `2.269444761306463`, and mean loss
+`1.573059237736113`. This is `-0.05141%` versus the current accepted
+sparse-output baseline `4.8238553272398335` and `+0.11369%` versus the frozen
+original scalar anchor `4.8159`. It therefore passes both the per-change and
+cumulative quality budgets without consuming additional quality budget.
+
+The explicit witness had already passed 4/4 with exactly baseline diagnostic
+deltas. Startup calibration measured 1,152--1,248 MiB across its full
+500/4K/8K/16K/32K/39,920-token probe curve; no VRAM warning occurred. The
+candidate was quality-accepted at this gate and was subsequently promoted
+after the exact-default source matrices passed.
+
+Evidence: [launcher](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ppl_full_launcher.log),
+[server](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ppl_full_server.log),
+[stdout](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ppl_full_stdout.log),
+[result](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ppl_full_result.log),
+and [machine-readable result](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ppl_full_result.json).
+
+## DeepSeek-V4-Flash-0731 learned-index GEMM attempt 1 witness — 2026-08-03
+
+The opt-in `bf16_fp32_gemm` learned-index candidate passed the explicit
+`llama_witness_deepseek_v4_0731_exact_prefix_first_token` profile: prefill
+argmax `4/4`, prefill top-10 containment `4/4`, and first-token match `4/4`.
+Top-10 overlaps were `7/10, 7/10, 9/10, 8/10`; selected-token absolute
+log-probability deltas were `0.03648005, 0.00026033, 0.13094573, 0.02413441`.
+These are exactly the accepted sparse-output baseline values and remain in the
+established diagnostic range. Calibration held 1,152/1,200 MiB on its short
+and bounded long probes, no VRAM warning occurred, and the run completed in
+511.3 seconds.
+
+This clears the witness hard gate but does not accept the candidate. The full
+281-window WikiText-2 result remains decisive.
+
+Evidence: [launcher](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_witness_launcher.log),
+[server](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_witness_server.log),
+[summary](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_witness_summary.json),
+and [HTML report](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_witness.html).
+
+## DeepSeek-V4-Flash-0731 learned-index GEMM attempt 1 quality screen — 2026-08-03
+
+The opt-in candidate completed the exact first ten WikiText-2 windows over
+11,263 scored targets at PPL `3.5600` and BPC `1.8319`. The accepted sparse-
+output runtime's comparable screen was `3.5657`, making the candidate about
+`0.16%` better on this iteration discriminator. No warning occurred.
+
+This is not acceptance and no quality cost is booked. Witness 4/4 and full
+281-window PPL remain mandatory before promotion.
+
+Evidence: [launcher](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ppl10_launcher.log),
+[server](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ppl10_server.log),
+[stdout](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ppl10_stdout.log),
+[result](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ppl10_result.log),
+and [machine-readable result](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ppl10_result.json).
+
+## DeepSeek-V4-Flash-0731 learned-index GEMM attempt 1 adjacent A/B — 2026-08-03
+
+Timing-disabled adjacent fresh-process legs used the same source and extension,
+required their exact p80 artifacts, and had no competing heavy I/O. Both passed
+18/18 and loaded 6,440/11,008 HCS experts.
+
+| Tokens | Control prefill | Candidate prefill | Delta | Control -> candidate decode | Control -> candidate floor |
+|---:|---:|---:|---:|---:|---:|
+| 2,043 | 283.8 | 318.2 tok/s | +12.12% | 22.49 -> 22.71 | 708 -> 708 MiB |
+| 8,623 | 775.8 | 758.0 tok/s | -2.29% | 21.57 -> 21.71 | 698 -> 700 MiB |
+| 23,348 | 970.4 | 1,330.2 tok/s | +37.08% | 20.59 -> 20.54 | 676 -> 680 MiB |
+| 62,403 | 660.2 | 1,232.9 tok/s | +86.75% | 19.73 -> 19.23 | 616 -> 628 MiB |
+
+Round trip matched internal decode for these streaming rows. The candidate
+clears the projected 1,200 tok/s lower bound at both 23K and 62K while
+preserving the 600 MiB floor. This is speed evidence only: the candidate is
+still opt-in and quality-unaccepted.
+
+Evidence: [control server](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ab_control_server.log),
+[control client](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ab_control_client.log),
+[control runtime](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ab_control_runtime.log),
+[candidate server](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ab_candidate_server.log),
+[candidate client](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ab_candidate_client.log),
+and [candidate runtime](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_ab_candidate_runtime.log).
+
+## DeepSeek-V4-Flash-0731 learned-index GEMM candidate p80 — 2026-08-03
+
+The exact opt-in candidate built the fixed 80-prompt held-out heatmap with 256
+decode tokens per prompt, checkpoints every 8, and measured HCS refresh after
+every prompt. It completed in 1,596.8 seconds, captured 20,560 decode-route
+tokens, and ranked 10,130/11,008 experts without a VRAM warning. The final
+artifact is 146,605 bytes with SHA-256
+`ac8324f716a5e12bd62b43d0af719de9a0d7bd6297bb73da0d7a8ae48a213baa`.
+
+A fresh `require` start loaded local artifact
+`deepseek_v4_flash_0731_bf16_index_score_gemm_p00080_local`, selected the
+candidate mode, skipped quick collection, loaded 6,440/11,008 HCS experts, and
+reached HTTP 200. Candidate status remains opt-in and quality-unaccepted; the
+repository manifest was not changed.
+
+Evidence: [build](approved_heatmaps/20260803_deepseek_v4_flash_0731_index_score_gemm_approved_heatmap_build_p80.log),
+[build runtime](approved_heatmaps/20260803_deepseek_v4_flash_0731_index_score_gemm_approved_heatmap_build_p80_runtime.log),
+[verification server](approved_heatmaps/20260803_deepseek_v4_flash_0731_index_score_gemm_approved_heatmap_verify_server.log),
+[verification runtime](approved_heatmaps/20260803_deepseek_v4_flash_0731_index_score_gemm_approved_heatmap_verify_runtime.log),
+[artifact](approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_approved_heatmap.json).
+
+## DeepSeek-V4-Flash-0731 learned-index GEMM calibration/VRAM proof — 2026-08-03 (diagnostic)
+
+The opt-in learned-index `bf16_fp32_gemm` candidate was run in a fresh process
+without timing or VRAM-ledger instrumentation. Startup admitted successive
+4K/8K/16K/32K/39,920-token calibration probes using the Rust engine's live,
+runtime-derived minimum-entry requirement under the doubled 1,200 MiB
+calibration guard. The configured runtime margin remained 600 MiB.
+
+The sole canonical large-request client passed 18/18. Minimum free VRAM was
+706/688/648/600 MiB at 2,043/8,623/23,348/62,403 tokens, replacing the unsafe
+698/604/600/576 MiB curve from the single-4K calibration proof. No below-margin
+event occurred. Quick-heatmap throughput is diagnostic only and is not speed
+evidence; the candidate remains opt-in and quality-unaccepted.
+
+Evidence: [server](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_vram_curve_proof_server.log),
+[client](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_vram_curve_proof_client.log),
+and [runtime](20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_vram_curve_proof_runtime.log).
+
+## DeepSeek-V4-Flash-0731 learned-index GEMM attempt 1 component diagnostic — 2026-08-03 (not accepted)
+
+- Candidate: opt-in `bf16_fp32_gemm` learned-index selection-score path; timing instrumentation enabled, so throughput is diagnostic only.
+- Result: 18/18 network checks passed. Selection-score CUDA event time fell from 7.479 s to 1.544 s at 23,348 tokens and from 52.561 s to 9.206 s at 62,403 tokens. Total instrumented 62K prefill fell from 93.511 s to 50.101 s.
+- Blocked from advancing at this boundary: the first 2K request monitor observed 578 MiB at `cleanup_end`, below the 600 MiB hard safety margin. Candidate remains opt-in pending root-cause instrumentation and a fresh-process proof.
+- Logs: `20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_component_server.log`, `20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_component_client.log`, `20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_component_runtime.log`, `20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_component_below_vram.log`.
+
+## DeepSeek-V4-Flash-0731 sparse-output-GEMM-default operational baseline - 2026-08-03
+
+Timing-disabled fresh-process runs used the exact promoted binary and required
+its new p80 artifact. No download/heavy I/O or timing instrumentation was
+active. The standard benchmark and the separately launched normal server plus
+sole Gutenberg network client measured:
+
+| Prompt / generation | Prefill internal | Decode internal | Round trip | HCS | Min free VRAM |
+|---|---:|---:|---:|---:|---:|
+| 1,000 prompt | 193.0 tok/s | — | — | 6,440/11,008 | 1,136 MiB benchmark floor |
+| 50 decode | — | 28.86 tok/s | 52.31 tok/s | 6,440/11,008 | 1,136 MiB |
+| 100 decode | — | 27.51 tok/s | 35.53 tok/s | 6,440/11,008 | 1,136 MiB |
+| 250 decode | — | 28.76 tok/s | 31.18 tok/s | 6,440/11,008 | 1,136 MiB |
+| 2,043 prompt | 319.8 tok/s | 22.78 tok/s | 22.78 tok/s | 6,440/11,008 | 650 MiB |
+| 8,623 prompt | 818.6 tok/s | 21.34 tok/s | 21.34 tok/s | 6,440/11,008 | 650 MiB |
+| 23,348 prompt | 994.4 tok/s | 20.17 tok/s | 20.17 tok/s | 6,440/11,008 | 650 MiB |
+| 62,403 prompt | 659.5 tok/s | 19.47 tok/s | 19.47 tok/s | 6,440/11,008 | 650 MiB |
+
+The standard decode rows are within adjacent-run noise of the prior
+27.6/28.0/28.5 tok/s reference. All 18/18 network checks passed. Relative to
+the frozen campaign-start 1K/2K/8.6K/23K/62K curve
+`154.1/184.3/227.2/218.9/164.8`, prefill gains are
+`+25.24%/+73.52%/+260.30%/+354.27%/+300.18%`. The exact 650 MiB large-request
+floors are close to the unchanged 600 MiB margin and show that calibrated HCS
+eviction is using rather than stranding available VRAM.
+
+Evidence: [standard launcher](20260803_deepseek_v4_flash_0731_sparse_output_gemm_default_p80_benchmark_launcher.log),
+[standard stdout](20260803_deepseek_v4_flash_0731_sparse_output_gemm_default_p80_benchmark_stdout.log),
+[standard report](20260803_deepseek_v4_flash_0731_sparse_output_gemm_default_p80_benchmark_report.log),
+[large server](20260803_deepseek_v4_flash_0731_sparse_output_gemm_default_p80_large_server.log),
+[large client](20260803_deepseek_v4_flash_0731_sparse_output_gemm_default_p80_large_client.log),
+and [large runtime](20260803_deepseek_v4_flash_0731_sparse_output_gemm_default_p80_large_runtime.log).
+
+## DeepSeek-V4-Flash-0731 sparse-output-GEMM-default approved p80 - 2026-08-03
+
+The full held-out approved heatmap was rebuilt on the exact promoted gathered-
+score plus sparse-output-GEMM defaults: 80 prompts disjoint from benchmark
+prompts, 256 decode tokens per prompt, and measured HCS refresh after every
+prompt. It captured 20,560 decode-route tokens, ranked 10,137/11,008 experts,
+and completed in 1,592.1 seconds. Startup calibration held 1,212 MiB and no
+below-margin warning appeared. The final artifact is 146,719 bytes with
+SHA-256 `4d5f495f0b6891d2ce46e88e3ceb17222ad60430f60989e7e763c09c229119f5`.
+
+A fresh fail-closed `require` start loaded artifact
+`deepseek_v4_flash_0731_bf16_sparse_output_gemm_p00080_local`, explicitly
+selected both promoted modes, skipped quick heatmap collection, restored
+6,440/11,008 HCS coverage (58.5%), and reached `/v1/models` HTTP 200. Its
+calibration floor was 1,144 MiB. Teardown fully released the RTX PRO 6000 and
+the A4500 service remained HTTP 200. Prior artifacts remain intact.
+
+Evidence: [build launcher](approved_heatmaps/20260803_deepseek_v4_flash_0731_sparse_output_gemm_approved_heatmap_build_p80.log),
+[build runtime](approved_heatmaps/20260803_deepseek_v4_flash_0731_sparse_output_gemm_approved_heatmap_build_p80_server.log),
+[verification launcher](approved_heatmaps/20260803_deepseek_v4_flash_0731_sparse_output_gemm_approved_heatmap_verify_launcher.log),
+[verification runtime](approved_heatmaps/20260803_deepseek_v4_flash_0731_sparse_output_gemm_approved_heatmap_verify_server.log),
+[artifact](approved_heatmaps/deepseek_v4_flash_0731_bf16_sparse_output_gemm_approved_heatmap.json).
+
+## DeepSeek-V4-Flash-0731 sparse-output GEMM promoted-source gate - 2026-08-03
+
+After changing the no-environment default to `bf16_fp32_gemm` while retaining
+explicit `scalar_bf16x2`, the exact promoted source passes build/import,
+DeepSeek math 19/19, model/config 17/17, and launcher 24/24. The math suite
+includes the production and irregular/invalid-index sparse-output GEMM
+comparison. No model speed row was run during this gate.
+
+Evidence: [build](20260803_deepseek_v4_flash_0731_sparse_output_gemm_promoted_build.log),
+[math](20260803_deepseek_v4_flash_0731_sparse_output_gemm_promoted_math.log),
+[model/config](20260803_deepseek_v4_flash_0731_sparse_output_gemm_promoted_model_config.log),
+and [launcher](20260803_deepseek_v4_flash_0731_sparse_output_gemm_promoted_launcher.log).
+
+## DeepSeek-V4-Flash-0731 sparse-output GEMM attempt 1 full PPL - 2026-08-03
+
+The opt-in `bf16_fp32_gemm` candidate completed all 281 WikiText-2 windows:
+PPL `4.8238553272398335`, BPC `2.2701866398658037`, and mean loss
+`1.5735734687678378` over 287,736 scored targets. This is `+0.07925%` versus
+the current accepted gathered-score baseline `4.8200355517` and `+0.16519%`
+versus the frozen scalar anchor `4.8159`, inside the `0.75%` per-change and
+`2.00%` cumulative budgets. Fresh startup explicitly selected the candidate,
+calibration held 1,144 MiB, no VRAM warning occurred, and the RTX 6000 was
+fully released after teardown. Throughput from this quality run is not speed
+evidence.
+
+Together with the prior 10-window discriminator and 4/4 witness result, this
+accepts sparse-output GEMM attempt 1 for default promotion. Exact-default
+build/matrix gates remain mandatory after the no-environment default changes.
+
+Evidence: [launcher](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ppl_full_launcher.log),
+[server](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ppl_full_server.log),
+[stdout](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ppl_full_stdout.log),
+[machine-readable result](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ppl_full_result.json),
+and [text result](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ppl_full_result.log).
+
+## DeepSeek-V4-Flash-0731 sparse-output GEMM attempt 1 witness - 2026-08-03
+
+The opt-in `bf16_fp32_gemm` candidate passed the explicit
+`llama_witness_deepseek_v4_0731_exact_prefix_first_token` profile: prefill
+argmax 4/4, prefill top-10 containment 4/4, and first-token match 4/4. Top-10
+overlaps were `7/10, 7/10, 9/10, 8/10`; selected-token absolute log-prob
+deltas were `0.03648005, 0.00026033, 0.13094573, 0.02413441`, within the
+established diagnostic order and with no token mismatch. Fresh startup selected
+the candidate mode, calibrated at 1,140 MiB, and emitted no VRAM warning.
+
+This clears the witness hard gate but does not accept the candidate; the full
+281-window WikiText-2 result remains decisive.
+
+Evidence: [launcher](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_witness_launcher.log),
+[server](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_witness_server.log),
+[summary](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_witness_summary.json),
+and [HTML report](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_witness.html).
+
+## DeepSeek-V4-Flash-0731 sparse-output GEMM attempt 1 quality screen - 2026-08-03
+
+The opt-in `bf16_fp32_gemm` sparse-output candidate completed the exact first
+10 WikiText-2 windows through the Rust prefill endpoint at PPL `3.5657` over
+11,263 scored targets. The exact accepted-source gathered-score control screen
+was `3.5612`, so the candidate screen shift is `+0.126%`. Startup explicitly
+selected `bf16_fp32_gemm`; warmup held 2,306 MiB and calibrated prefill held
+1,164 MiB against the 600 MiB runtime floor. No VRAM warning occurred.
+
+This is an iteration discriminator only. The result advances the candidate to
+the explicit witness and full 281-window PPL gates; it does not accept or
+promote the candidate and no quality-ledger cost is booked yet.
+
+Evidence: [launcher](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ppl10_launcher.log),
+[server](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ppl10_server.log),
+[stdout](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ppl10_stdout.log),
+and [result](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ppl10_result.log).
+
+## DeepSeek-V4-Flash-0731 sparse-output GEMM attempt 1 adjacent A/B - 2026-08-03
+
+Timing-disabled adjacent same-source control/candidate runs used fresh processes,
+the same built artifact, the required gathered-score p80 heatmap, and the
+canonical Gutenberg large-prompt workload. The control used the accepted
+`scalar_bf16x2` sparse output; the candidate differed only by selecting
+`bf16_fp32_gemm`. No download or other heavy I/O was active. Both legs passed
+18/18 network checks and loaded 6,440/11,008 HCS experts (58.5%).
+
+| Prompt tokens | Control prefill | Candidate prefill | Prefill change | Control decode / round trip | Candidate decode / round trip | Control / candidate min free |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2,043 | 258.8 tok/s | 315.4 tok/s | +21.87% | 22.30 / 22.30 tok/s | 22.97 / 22.97 tok/s | 718 / 722 MiB |
+| 8,623 | 450.8 tok/s | 825.6 tok/s | +83.14% | 21.58 / 21.58 tok/s | 21.09 / 21.09 tok/s | 718 / 722 MiB |
+| 23,348 | 479.1 tok/s | 991.2 tok/s | +106.89% | 20.31 / 20.31 tok/s | 20.03 / 20.03 tok/s | 718 / 722 MiB |
+| 62,403 | 322.8 tok/s | 661.6 tok/s | +104.96% | 19.06 / 19.06 tok/s | 18.96 / 18.95 tok/s | 718 / 722 MiB |
+
+The candidate reaches 99.62% of the component run's approximately 995 tok/s
+23K projection and 92.74% of the 713.4 tok/s zero-sparse-output arithmetic
+ceiling at 62K. Its 62K result also reproduces the timing-enabled component
+diagnostic (661.5 tok/s) without instrumentation. Decode differences are mixed
+between +3.00% and -2.27% and are not a directional regression signal in this
+single generated-output workload. The candidate is **not accepted or
+promoted**: its 10-window screen, witness, and full 281-window PPL gates have
+not run.
+
+Evidence: [control server](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ab_control_server.log),
+[control client](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ab_control_client.log),
+[candidate server](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ab_candidate_server.log),
+and [candidate client](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_ab_candidate_client.log).
+
+## DeepSeek-V4-Flash-0731 sparse-output GEMM attempt 1 post-review gate - 2026-08-03
+
+After changing candidate-only softmax launch sizing to checked, fail-closed
+power-of-two arithmetic, the exact candidate source passes build/import,
+DeepSeek math 19/19, model/config 17/17, and launcher 24/24. No model request or
+speed row was run during this CPU/CUDA equation gate. Timing-disabled A/B remains
+pending an I/O-isolated window.
+
+Evidence: [complete gate log](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_review_gates.log).
+
+## DeepSeek-V4-Flash-0731 sparse-output GEMM attempt 1 component - 2026-08-03
+
+Timing-enabled component run on the opt-in candidate, with approved gathered
+p80 required. All 18 network tests passed; startup calibration held 1,148 MiB
+and all large prompts held 650 MiB. At 62,403 tokens:
+
+| Metric | Scalar control | GEMM candidate | Change |
+|---|---:|---:|---:|
+| Sparse output events | 105,633.1 ms | 6,569.1 ms | -93.781% |
+| Total measured events | 193,087.1 ms | 93,511.1 ms | -51.571% |
+
+The candidate's diagnostic 2K/8.6K/23K/62K throughput was
+`314.7/824.6/994.7/661.5 tok/s`; timing instrumentation was enabled, so these
+are not accepted speed rows. The new 62K distribution is learned indexer
+60.308% (selection scores 56.208%), MoE 16.408%, sparse output 7.025%, and
+gathered sparse scores 5.105%. This clears the component gate for a
+timing-disabled adjacent A/B.
+
+Evidence: [launcher](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_component_launcher.log),
+[runtime](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_component_runtime.log),
+and [client](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_component_client.log).
+
+## DeepSeek-V4-Flash-0731 sparse-output GEMM attempt 1 pre-model gate - 2026-08-03
+
+The opt-in BF16-input/FP32-accumulate sparse-output GEMM candidate passes the
+exact-source pre-model gate: build/import, DeepSeek math 19/19, model/config
+17/17, and launcher 24/24. The new parity test covers production
+`64x512x640` geometry and an irregular shape with negative/out-of-range
+indices, enforcing a bound derived from BF16 normalized-weight rounding and
+FP32 reduction error. This is not yet model-speed or promotion evidence.
+
+Evidence: [build](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_build.log),
+[math](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_math.log),
+and [matrices](20260803_deepseek_v4_flash_0731_sparse_output_gemm_attempt1_matrices.log).
+
+## DeepSeek-V4-Flash-0731 current-source prefill attribution - 2026-08-03
+
+Timing-enabled diagnostic run on the exact accepted gathered-score default,
+with the approved p80 required and no competing GPU work. All 18 network tests
+passed and every canonical large request held a 650 MiB floor. At 62,403
+tokens, the dedicated CUDA events measured 193,087.1 ms total:
+
+| Stage | Event time | Share of measured prefill |
+|---|---:|---:|
+| Sparse output | 105,633.1 ms | 54.707% |
+| Learned indexer | 56,255.9 ms | 29.135% |
+| └ selection scores | 52,431.1 ms | 27.154% |
+| MoE | 16,021.7 ms | 8.298% |
+| Gathered sparse scores | 4,772.8 ms | 2.472% |
+| Attention HC pre-norm | 2,678.7 ms | 1.387% |
+| FFN HC pre-norm | 2,679.2 ms | 1.388% |
+| Compressor | 2,192.6 ms | 1.136% |
+
+The timing-instrumented 321.8 tok/s row is diagnostic only. Removing all sparse-
+output cost would imply a 713.4 tok/s arithmetic ceiling before learned-index
+work, making sparse output the measured first GEMM-family target.
+
+Evidence: [launcher](20260803_deepseek_v4_flash_0731_sparse_output_attribution_prefill_launcher.log),
+[runtime](20260803_deepseek_v4_flash_0731_sparse_output_attribution_prefill_runtime.log),
+and [client](20260803_deepseek_v4_flash_0731_sparse_output_attribution_prefill_client.log).
+
+## DeepSeek-V4-Flash-0731 sparse-output attribution attempt 0 - 2026-08-03
+
+Rejected as incomplete instrumentation. The run enabled the general `--timing`
+surface, which produced decode timing, but omitted the separately gated
+`KRASIS_PREFILL_TIMING=1` counters. It therefore contains no valid DeepSeek
+prefill-stage split and is not used to choose a candidate. All four canonical
+large requests completed with a 650 MiB floor. The client was 17/18 only
+because the final free-form multi-turn response repeated the first remembered
+fact until its output limit and did not reach the other two; all large-prompt
+checks passed. A corrected current-source attribution is required.
+
+Evidence: [server launcher](20260803_deepseek_v4_flash_0731_sparse_output_attribution_attempt0_launcher.log),
+[runtime](20260803_deepseek_v4_flash_0731_sparse_output_attribution_attempt0_runtime.log),
+and [client](20260803_deepseek_v4_flash_0731_sparse_output_attribution_attempt0_client.log).
+
+## DeepSeek-V4-Flash-0731 gathered-default p80 baseline - 2026-08-03
+
+Timing-disabled standard and canonical Gutenberg runs used the exact accepted
+default and required the freshly registered p80 artifact. The standard row was
+1K internal prefill `184.3 tok/s`; internal decode was
+`28.36/28.38/29.00 tok/s` at 50/100/250 tokens; best network round trip was
+`52.32 tok/s`; HCS was 6,440/11,008 (58.5%); minimum decode free VRAM was
+`1,136 MiB`.
+
+The isolated large-prompt server had no internal benchmark thread. All 18
+network, large-prompt, and multi-turn checks passed:
+
+| Prompt tokens | Prefill (internal) | Decode (internal) | Round trip | Min free VRAM |
+|---:|---:|---:|---:|---:|
+| 2,043 | 261.1 tok/s | 22.97 tok/s | 22.97 tok/s | 650 MiB |
+| 8,623 | 452.4 tok/s | 21.82 tok/s | 21.82 tok/s | 650 MiB |
+| 23,348 | 478.9 tok/s | 20.14 tok/s | 20.14 tok/s | 650 MiB |
+| 62,403 | 322.5 tok/s | 19.49 tok/s | 19.49 tok/s | 650 MiB |
+
+Against the campaign-start curve `154.1/184.3/227.2/218.9/164.8` at
+1K/2K/8.6K/23K/62K, the accepted p80 curve improves
+`+19.60/+41.67/+99.12/+118.78/+95.69%`. The large floor is exactly 50 MiB
+above the configured safety margin, confirming HCS remains maximized without
+violating the hard gate.
+
+An earlier large-network invocation is explicitly rejected as speed evidence:
+the server's `--benchmark` flag started an internal benchmark concurrently with
+the network client, and the fail-closed staging guard rejected the overlapping
+request. No guard or budget was weakened; the table above is the clean rerun.
+
+Evidence: [standard launcher](20260803_deepseek_v4_flash_0731_sparse_gemm_default_p80_benchmark_launcher.log),
+[standard stdout](20260803_deepseek_v4_flash_0731_sparse_gemm_default_p80_benchmark_stdout.log),
+[standard report](20260803_deepseek_v4_flash_0731_sparse_gemm_default_p80_benchmark_report.log),
+[large server](20260803_deepseek_v4_flash_0731_sparse_gemm_default_p80_large_server.log),
+[large client](20260803_deepseek_v4_flash_0731_sparse_gemm_default_p80_large_network.log),
+and [large runtime](20260803_deepseek_v4_flash_0731_sparse_gemm_default_p80_large_krasis.log).
+
+## DeepSeek-V4-Flash-0731 gathered-default approved p80 - 2026-08-03
+
+The full held-out approved heatmap was rebuilt on the exact accepted gathered-
+score default with production params: 80 prompts disjoint from benchmark
+prompts, 256 decode tokens per prompt, and measured HCS refresh after every
+prompt. It captured 20,529 decode-route tokens, ranked 10,122/11,008 experts,
+and completed in 1,595.9 seconds. Startup calibration held `1,164 MiB`; no
+below-margin warning appeared. The final artifact is 146,656 bytes with SHA-256
+`8405502f28b41dc1655c1b9cae0e972bae27d0f045b37128e0a4c091d2bd8ed9`.
+
+A fresh fail-closed server start then loaded artifact
+`deepseek_v4_flash_0731_bf16_gathered_p00080_local` from the updated local
+manifest, emitted no quick-heatmap generation line, restored 6,440/11,008 HCS
+coverage (58.5%), and reached `/v1/models` HTTP 200. Its calibration floor was
+`1,148 MiB`; teardown fully released the RTX PRO 6000.
+
+Evidence: [build launcher](approved_heatmaps/20260803_deepseek_v4_flash_0731_gathered_approved_heatmap_build_p80.log),
+[build runtime](approved_heatmaps/20260803_deepseek_v4_flash_0731_gathered_approved_heatmap_build_p80_server.log),
+[verification launcher](approved_heatmaps/20260803_deepseek_v4_flash_0731_gathered_approved_heatmap_verify_launcher.log),
+and [verification runtime](approved_heatmaps/20260803_deepseek_v4_flash_0731_gathered_approved_heatmap_verify_server.log).
+
+## DeepSeek-V4-Flash-0731 exact-default gathered-score witness - 2026-08-03
+
+After making ordinary BF16-input/FP32-accumulate gathered sparse scoring the
+no-environment default, the exact default binary passed the explicit 0731
+witness profile 4/4: all prefill argmaxes, top-10 containment checks, and
+first tokens matched. Top-10 overlaps were `8/10, 7/10, 9/10, 6/10`; selected
+token logprob deltas were `0.01445805, 0.00017133, 0.08615973, 0.12348641`.
+Startup calibration measured a `1,144 MiB` floor with the corrected high-
+resolution contract, HCS was 6,440/11,008 (58.5%), no VRAM warning appeared,
+and the RTX PRO 6000 was fully released after the run. Full 281-window PPL on
+this exact default remains mandatory before promotion is recorded.
+
+Evidence: [launcher](20260803_deepseek_v4_flash_0731_sparse_gemm_default_witness_launcher.log),
+[server](20260803_deepseek_v4_flash_0731_sparse_gemm_default_witness_server.log),
+and [summary](20260803_deepseek_v4_flash_0731_sparse_gemm_default_witness_summary.json).
+
+The same exact-default source then completed all 281 WikiText-2 windows:
+287,736 scored targets, total NLL `452545.8012631096`, and PPL
+`4.820035551737156`. This is `+0.0859%` versus the frozen scalar `4.8159`
+anchor, passing the authorized `0.75%` per-change and `2.00%` cumulative
+budgets. Startup calibration measured `1,156 MiB`, no below-margin file
+appeared during the corpus, and teardown fully released the RTX PRO 6000.
+Throughput from this quality run is not speed evidence. With witness, decode,
+source matrices, and fresh-process/large-request VRAM gates also green,
+ordinary gathered sparse scoring is accepted as the first permanent quality-
+ledger entry.
+
+Evidence: [full-PPL launcher](20260803_deepseek_v4_flash_0731_sparse_gemm_default_ppl_full_launcher.log),
+[stdout](20260803_deepseek_v4_flash_0731_sparse_gemm_default_ppl_full_stdout.log),
+[server](20260803_deepseek_v4_flash_0731_sparse_gemm_default_ppl_full_server.log),
+[runtime](20260803_deepseek_v4_flash_0731_sparse_gemm_default_ppl_full_krasis.log),
+and [machine-readable result](20260803_deepseek_v4_flash_0731_sparse_gemm_default_ppl_full_result.json).
+
+## DeepSeek-V4-Flash-0731 authorized gathered-score reconstruction gate - 2026-08-02
+
+The user-authorized quality-for-speed reconstruction passed the exact-source
+production build/import, DeepSeek math 18/18, model/config 17/17, and launcher
+24/24 gates. The CUDA parity gate covers both decision-relevant gathered modes
+(`bf16_fp32` and `fp32_pedantic_postscale`) at production and irregular
+geometry, including invalid indices. CUDA tests were pinned to the RTX PRO
+6000 through `KRASIS_TEST_GPU_ORDINAL=1`; the A4500 service remained HTTP 200.
+This is a correctness/build gate, not speed evidence.
+
+Evidence: [full gate log](20260802_deepseek_v4_flash_0731_sparse_gemm_authorized_full_gates.log).
+
+The first subsequent component load stopped before warmup because the
+production PTX registration list omitted the three symbols that were present
+in both the compiled PTX and test loader. No request or measurement ran. The
+registration defect is fixed; the corrected exact source passed build/import,
+DeepSeek math 18/18, model/config 17/17, and launcher 24/24 before another
+model load.
+Evidence: [failed loader probe](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_component_loader_failure.log).
+
+Loader-fix evidence: [production build](20260802_deepseek_v4_flash_0731_sparse_gemm_loader_fix_build.log)
+and [missing matrices rerun](20260802_deepseek_v4_flash_0731_sparse_gemm_loader_fix_matrices.log).
+
+The first loader-fixed FP32 run proved production loading, explicit mode
+selection, approved-heatmap consumption, a 612 MiB startup-calibration floor,
+and no runtime VRAM warning. It reached 185.5 tok/s at 1K and 29.29 tok/s best
+internal decode, but did not set the explicit prefill component clocks; those
+numbers are therefore neither component nor timing-disabled acceptance
+evidence. The displayed 550 MiB long-probe value is the benchmark's
+calibration-derived sizing value also present in scalar controls, not a runtime
+monitor event. Evidence: [launcher](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_component_loaderfixed_no_prefill_clock.log),
+[server](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_component_loaderfixed_no_prefill_clock_krasis.log),
+and [report](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_component_loaderfixed_no_prefill_clock_report.log).
+
+The corrected prefill-clock component gate then measured the quality-better
+FP32/pedantic/post-scale path at `60.0/60.0/60.2/60.3 ms` sparse-score CUDA
+event time across four 1K panels. Ordinary gathered GEMM measured
+`29.8/29.8/29.9/30.1 ms`, while scalar measured `1138.5..1141.2 ms`. FP32
+therefore retains about 95% of the score-stage saving. Instrumented throughput
+is not speed evidence. Startup calibration held 612 MiB with no runtime VRAM
+warning; HCS was 6,440/11,008 and decode best was 28.99 tok/s.
+
+Evidence: [component stdout](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_pedantic_postscale_component_stdout.log),
+[server](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_pedantic_postscale_component_krasis.log),
+and [report](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_pedantic_postscale_component_report.log).
+
+Adjacent timing-disabled canonical Gutenberg A/B measured the reconstructed
+FP32/pedantic/post-scale variant:
+
+| Prompt tokens | Scalar control | FP32 candidate | Gain | Candidate floor |
+|---:|---:|---:|---:|---:|
+| 2,043 | 185.0 | 255.5 | +38.1% | 650 MiB |
+| 8,623 | 226.7 | 443.2 | +95.5% | 650 MiB |
+| 23,348 | 218.6 | 470.0 | +115.0% | 650 MiB |
+| 62,403 | 164.6 | 317.5 | +92.9% | 650 MiB |
+
+Both legs passed all 18 network, large-prompt, and multi-turn checks. The
+candidate's first 2K and 8.6K requests on a fresh process held 650 MiB with no
+runtime warning. Against archived ordinary GEMM
+(`257.6/442.5/465.8/313.6`), FP32 differs by
+`-0.8%/+0.2%/+0.9%/+1.2%`, far inside the rule allowing at most 5% of the gain
+to be traded for better quality. A fresh screen subsequently showed that the
+reconstructed FP32 mode did not reproduce its archived quality result, so this
+speed leg alone did not select it for promotion.
+
+Evidence: [control server](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_large_control_server.log),
+[control network](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_large_control_network.log),
+[candidate server](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_large_candidate_server.log),
+and [candidate network](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_large_candidate_network.log).
+
+The fresh exact-binary 10-window screens resolved variant selection. The
+reconstructed FP32/pedantic/post-scale path produced `3.5671` (`+0.771%`
+versus scalar `3.5398`), rather than its archived `3.5553`. Ordinary
+BF16-input/FP32-accumulate GEMM then reproduced its stable first-window value
+`3.1664` exactly and finished at `3.5612`, only `-0.034%` from the archived
+`3.5624` and `+0.605%` versus scalar. The common runtime and harness are
+therefore reproducible; only the retired FP32 reconstruction differs. Ordinary
+GEMM is selected from the current-source data because it is both higher quality
+and twice as fast inside the score component (`29.8--30.1 ms` versus
+`60.0--60.3 ms`), while retaining the same end-to-end large-prompt gain. This
+is screening evidence only; witness and full-corpus PPL remain mandatory.
+
+Evidence: [FP32 reconstruction screen](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_reconstruction_ppl10_stdout.log)
+and [selected ordinary screen](20260803_deepseek_v4_flash_0731_sparse_gemm_bf16_selected_ppl10_stdout.log).
+
+The selected ordinary path then passed the explicit 0731 witness profile 4/4:
+all four prefill argmaxes, top-10 containment checks, and first tokens matched.
+Top-10 overlaps were `8/10, 7/10, 9/10, 6/10`; selected-token absolute logprob
+deltas were `0.01445805, 0.00017133, 0.08615973, 0.12348641`, within the
+established gathered-score diagnostic range. Startup calibration held
+`612 MiB`, no runtime warning appeared, and the GPU was fully released after
+the 495.1-second run. Full 281-window PPL is still mandatory before promotion.
+
+Evidence: [witness stdout](20260803_deepseek_v4_flash_0731_sparse_gemm_bf16_selected_witness_stdout.log),
+[server](20260803_deepseek_v4_flash_0731_sparse_gemm_bf16_selected_witness_krasis.log),
+and [summary](20260803_deepseek_v4_flash_0731_sparse_gemm_bf16_selected_witness_summary.json).
+
+The full 281-window WikiText-2 gate also passed quality: PPL
+`4.820498752287418` over 287,736 targets versus the frozen scalar anchor
+`4.8159`, a `+0.0955%` shift. This is within both authorized quality budgets.
+Promotion is nevertheless blocked: final log audit found a `578 MiB`
+diagnostic-prefill low-water event, below the hard 600 MiB floor. Archived
+scalar full-PPL runs contain the same transient, so it is being localized with
+request/phase instrumentation before any default change. Throughput from this
+quality run is not speed evidence.
+
+Evidence: [full-PPL launcher](20260803_deepseek_v4_flash_0731_sparse_gemm_bf16_selected_ppl_full_launcher.log),
+[stdout](20260803_deepseek_v4_flash_0731_sparse_gemm_bf16_selected_ppl_full_stdout.log),
+[server](20260803_deepseek_v4_flash_0731_sparse_gemm_bf16_selected_ppl_full_server.log),
+and [runtime log](20260803_deepseek_v4_flash_0731_sparse_gemm_bf16_selected_ppl_full_krasis.log).
+
+The follow-up 1 ms diagnostic localized the low-water defect. Startup short
+calibration reached `540 MiB`, while all ten later 2,048-token PPL requests
+stayed at or above 600 MiB and produced no warning record. A calibration-only
+VRAM-ledger run reproduced `544 MiB` and showed the exact boundary: the engine
+already reserved the model-derived 3,168 MiB all-expert cold-staging maximum;
+the real prompt used 3,155.6 MiB of it and then consumed roughly 68 MiB of
+previously unmeasured live execution state. Diagnostic throughput is not speed
+evidence. The calibration contract is being fixed and re-gated before
+promotion.
+
+Evidence: [1 ms diagnostic server](20260803_deepseek_v4_flash_0731_vram_phase_diag10_server.log),
+[diagnostic client](20260803_deepseek_v4_flash_0731_vram_phase_diag10_stdout.log),
+[calibration ledger launcher](20260803_deepseek_v4_flash_0731_vram_warmup_reserve_diag_launcher.log),
+and [calibration runtime ledger](20260803_deepseek_v4_flash_0731_vram_warmup_reserve_diag_krasis.log).
+
+The config-derived calibration fix passed exact-source build/import, DeepSeek
+math 18/18, startup/model 26/26, and launcher 24/24. On a fresh process the
+same 500-token probe prepared with a 1,200 MiB calibration guard and held
+`1,140 MiB` free, versus 540/544 MiB before. The configured 600 MiB engine
+margin and normal 50 ms monitor cadence were restored before runtime.
+
+Evidence: [fix gates](20260803_deepseek_v4_flash_0731_vram_calibration_fix_gates.log)
+and [fresh calibration verification](20260803_deepseek_v4_flash_0731_vram_calibration_fix_verify_launcher.log).
+
+Fresh normal-runtime validation of the selected ordinary gathered-score path
+passed all 18 network, canonical-large, and multi-turn checks after the fix:
+
+| Prompt tokens | Prefill (internal) | Decode (internal) | Round trip | Min free VRAM |
+|---:|---:|---:|---:|---:|
+| 2,043 | 258.6 tok/s | 23.61 tok/s | 23.61 tok/s | 698 MiB |
+| 8,623 | 452.3 tok/s | 22.66 tok/s | 22.66 tok/s | 698 MiB |
+| 23,348 | 478.1 tok/s | 21.75 tok/s | 21.75 tok/s | 698 MiB |
+| 62,403 | 322.9 tok/s | 20.92 tok/s | 20.91 tok/s | 698 MiB |
+
+HCS coverage was 6,440/11,008 experts (58.5%). Decode is neutral-to-better
+than adjacent earlier scalar/candidate large rows. No warning file appeared.
+
+Evidence: [server](20260803_deepseek_v4_flash_0731_sparse_gemm_selected_postcal_server.log)
+and [network](20260803_deepseek_v4_flash_0731_sparse_gemm_selected_postcal_network.log).
+
+## DeepSeek-V4-Flash-0731 independent llama.cpp quality anchor - 2026-08-02
+
+CPU-only llama.cpp in the explicit dsv4 witness worktree scored the exact same
+first ten WikiText-2 windows as the Krasis screen. Token identity was proved
+before scoring: all 287,737 IDs matched, including the 11,264-token evaluated
+prefix (`de9300ba...eb11b8`). The first window scored 2,047 targets; windows
+2--10 scored 1,024 targets each, for 11,263 total.
+
+The matched llama.cpp aggregate is approximately `3.1703`, versus accepted
+scalar/query-cache `3.5398` (absolute gap `0.3695`), ordinary gathered GEMM
+`3.5624` (gap `0.3921`), and the best FP32-input/pedantic/post-scale GEMM
+`3.5553` (gap `0.3850`). Scalar is closest in aggregate, but the per-window
+winners are mixed (scalar 4, ordinary GEMM 4, best GEMM 2) and the independent
+anchor is about 12% below every Krasis path. Classification is therefore
+**ambiguous / anchor far from all**, not evidence to promote either GEMM path.
+
+The per-window values are reconstructed from weighted differences of the
+tools' cumulative log-losses. Source PPL rows are printed to four decimals, so
+the reconstructed values inherit that precision.
+
+Evidence: [exact window/token manifest](20260802_deepseek_v4_flash_0731_llama_anchor_exact_windows.json),
+[token identity](20260802_deepseek_v4_flash_0731_llama_anchor_token_identity.json),
+[CPU tools build](20260802_deepseek_v4_flash_0731_llama_anchor_tools_build.log),
+[full first-window run](20260802_deepseek_v4_flash_0731_llama_anchor_window1.log),
+[overlap run](20260802_deepseek_v4_flash_0731_llama_anchor_windows2_10.log),
+[comparison table](20260802_deepseek_v4_flash_0731_llama_anchor_comparison.md),
+and [machine-readable comparison](20260802_deepseek_v4_flash_0731_llama_anchor_comparison.json).
+
+## DeepSeek-V4-Flash-0731 gathered sparse-score precision gate - 2026-08-02
+
+The recovered default-off multi-token gathered-GEMM diagnostic matrix passed
+the exact-source production build/import, DeepSeek math 18/18, model/config
+17/17, and launcher 24/24 gates. Production and irregular geometry tests cover
+BF16/FP32 inputs, ordinary/pedantic FP32 cuBLAS accumulation, in-GEMM/post-GEMM
+scaling, and invalid-index `-inf` semantics. At 0731 geometry all four modes
+had the same maximum absolute score delta, `1.013279e-6`, versus the accepted
+scalar path (dimension-derived bound `0.00390625`). This is correctness and
+diagnostic evidence, not a speed result.
+
+Evidence: [full gate log](20260802_deepseek_v4_flash_0731_sparse_gemm_precision_full_gates.log).
+
+### Controlled quality screen: ordinary BF16-input/FP32-compute GEMM
+
+The first fresh-process ten-window screen explicitly selected `Bf16Fp32` and
+reproduced the earlier quality rejection. Window 1 was exactly `3.1664`, and
+window 10 was PPL `3.5624` versus the accepted scalar path's `3.5398`
+(`+0.64%`); the archived rejected candidate was `3.5630`. Startup calibration
+held `612 MiB` free against the unchanged `600 MiB` margin, with no runtime
+below-margin warning. This is screening evidence only, not a promotion gate.
+
+Evidence: [launcher](20260802_deepseek_v4_flash_0731_sparse_gemm_bf16_fp32_ppl10_launcher.log),
+[stdout](20260802_deepseek_v4_flash_0731_sparse_gemm_bf16_fp32_ppl10_stdout.log),
+[server](20260802_deepseek_v4_flash_0731_sparse_gemm_bf16_fp32_ppl10_server.log),
+and [result](20260802_deepseek_v4_flash_0731_sparse_gemm_bf16_fp32_ppl10_result.log).
+
+The matched pedantic-compute screen changed window 1 from `3.1664` to `3.1263`
+but finished window 10 at `3.5617`, only `0.0007` better than ordinary GEMM and
+still `+0.62%` versus scalar `3.5398`. This proves math mode affects outputs but
+does not explain the aggregate rejection. Calibration again held `612 MiB`
+and no below-margin event occurred. Evidence: [pedantic launcher](20260802_deepseek_v4_flash_0731_sparse_gemm_bf16_pedantic_ppl10_launcher.log),
+[stdout](20260802_deepseek_v4_flash_0731_sparse_gemm_bf16_pedantic_ppl10_stdout.log),
+[server](20260802_deepseek_v4_flash_0731_sparse_gemm_bf16_pedantic_ppl10_server.log),
+and [result](20260802_deepseek_v4_flash_0731_sparse_gemm_bf16_pedantic_ppl10_result.log).
+
+With pedantic compute retained but scale moved from cuBLAS alpha to an explicit
+FP32 post-kernel, window 1 recovered to `3.1126` versus scalar `3.1127`.
+Window 10 still ended at `3.5598` (`+0.565%` versus scalar), so epilogue order
+does not explain the accumulated regression. The runtime monitor also captured
+`582 MiB`, 18 MiB below the required margin. Evidence: [post-scale launcher](20260802_deepseek_v4_flash_0731_sparse_gemm_bf16_pedantic_postscale_ppl10_launcher.log),
+[stdout](20260802_deepseek_v4_flash_0731_sparse_gemm_bf16_pedantic_postscale_ppl10_stdout.log),
+[server](20260802_deepseek_v4_flash_0731_sparse_gemm_bf16_pedantic_postscale_ppl10_server.log),
+and [result](20260802_deepseek_v4_flash_0731_sparse_gemm_bf16_pedantic_postscale_ppl10_result.log).
+
+The final exact-FP32-input, pedantic-compute, explicit-post-scale screen ended
+at PPL `3.5553`, still `+0.438%` versus scalar `3.5398` and about eleven times
+the authorized `±0.04%` band. Calibration held `612 MiB` and no runtime margin
+warning occurred. The complete controlled result is:
+
+| Sparse-score formulation | Window-10 PPL | Delta vs scalar |
+|---|---:|---:|
+| Accepted scalar query-cache | 3.5398 | control |
+| BF16 inputs, FP32 compute, GEMM alpha | 3.5624 | +0.638% |
+| BF16 inputs, pedantic FP32, GEMM alpha | 3.5617 | +0.619% |
+| BF16 inputs, pedantic FP32, post-scale | 3.5598 | +0.565% |
+| FP32 inputs, pedantic FP32, post-scale | 3.5553 | +0.438% |
+
+The last row rules out BF16 operand handling as the remaining fix; reduction
+association is the surviving quality-significant difference. Per the explicit
+stop condition, no witness/full-PPL/promotion A/B was run and the diagnostic
+GEMM path was removed. Evidence: [FP32 launcher](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_pedantic_postscale_ppl10_launcher.log),
+[stdout](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_pedantic_postscale_ppl10_stdout.log),
+[server](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_pedantic_postscale_ppl10_server.log),
+and [result](20260802_deepseek_v4_flash_0731_sparse_gemm_fp32_pedantic_postscale_ppl10_result.log).
+
+Restored accepted source passed production build/import, full DeepSeek math
+17/17, model/config 17/17, and launcher 24/24 after removal of the rejected
+diagnostic implementation. The narrower seven-test prefill subset also passed
+but is not counted as the full math gate. Rejected runtime symbols/switches are
+absent and `git diff --check` is clean. Evidence: [combined restored gates](20260802_deepseek_v4_flash_0731_sparse_gemm_rejected_restored_gates.log)
+and [full math gate](20260802_deepseek_v4_flash_0731_sparse_gemm_rejected_full_math_gate.log).
+
+## DeepSeek-V4-Flash-0731 correctness baseline - 2026-08-02
+
+The production-validation INT4-expert/BF16-attention path completed the full
+Rust WikiText-2 gate after its independent native-source llama-witness pass:
+281/281 windows, 287,736 scored tokens, PPL `4.8159`, BPC `2.2678`, mean loss
+`1.571929`, and evaluator throughput `48 tok/s`. This is the 0731 checkpoint's
+quality baseline for later numerics-changing decode or prefill optimizations;
+the previously measured approximately 0.04% window-2+ repeatability band
+remains a separate open measurement issue.
+
+The configured VRAM safety margin was 600 MiB. Startup calibration measured a
+612 MiB prefill low-water and HCS loaded 6,440/11,008 experts (58.5%), but the
+runtime monitor captured two later transient lows at 590 and 578 MiB. The
+22 MiB maximum deficit is retained as a real budget-calculation issue; the
+margin was not changed or bypassed.
+
+Evidence: [launcher](20260802_deepseek_v4_flash_0731_ppl_launcher.log),
+[full stdout](20260802_deepseek_v4_flash_0731_ppl_stdout.log),
+[server](20260802_deepseek_v4_flash_0731_ppl_server.log),
+[result](20260802_deepseek_v4_flash_0731_ppl_result.log),
+[result JSON](20260802_deepseek_v4_flash_0731_ppl_result.json), and
+[below-margin events](20260802_deepseek_v4_flash_0731_ppl_below_margin.jsonl).
+
+### Full approved HCS route heatmap
+
+Built with the exact 0731 production-validation runtime and the established
+held-out approved corpus: 80 prompts disjoint from benchmark prompts, 256
+decode tokens per prompt, checkpoints every eight prompts, and measured HCS
+residency refresh after every prompt. The final p80 artifact contains 10,129
+ranked experts from 20,560 decoded route tokens and completed in 1,619.6 s.
+Startup calibration remained config-derived at a 612 MiB prefill low-water and
+an 80,328 MiB decode-HCS budget; no below-margin event occurred during the
+heatmap build.
+
+The artifact is registered under exact route/runtime hashes in the approved
+manifest. Artifact SHA-256 is
+`65f48283cd3d684c66c313f9a0722839173d56f8cd613cf800adfc3d9ce760d3`
+at 146,664 bytes. Evidence: [build log](approved_heatmaps/20260802_deepseek_v4_flash_0731_approved_heatmap_build_p80.log),
+[final artifact](approved_heatmaps/deepseek_v4_flash_0731_bf16_approved_heatmap.json),
+and [held-out prompts](approved_heatmaps/deepseek_v4_flash_0731_approved_heatmap_prompts.txt).
+
+Fresh startup in approved-manifest `require` mode loaded
+`deepseek_v4_flash_0731_bf16_p00080_local`, validated all 10,129 entries, and
+explicitly skipped quick startup heatmap collection. The adjacent
+timing-disabled standard baseline measured:
+
+| Metric | 50 | 100 | 250 |
+|---|---:|---:|---:|
+| Decode (internal) | 27.96 tok/s | 26.73 tok/s | 26.90 tok/s |
+| Round trip (network) | 50.73 tok/s | 34.90 tok/s | 29.88 tok/s |
+
+Prefill (internal) was `148.1 tok/s` at 1,000 tokens. HCS loaded
+6,440/11,008 experts (58.5%), final request hit rate was 94.01%, minimum decode
+free VRAM was 1,136 MiB, and no below-margin event occurred. Evidence:
+[launcher](20260802_deepseek_v4_flash_0731_approved_baseline_launcher.log),
+[stdout](20260802_deepseek_v4_flash_0731_approved_baseline_stdout.log), and
+[report](20260802_deepseek_v4_flash_0731_approved_baseline_report.log).
+
+### Canonical large-prompt scaling baseline
+
+The same timing-disabled 0731 source/config and required approved p80 heatmap
+passed the complete network suite (18/18). The large rows use the repository's
+canonical Gutenberg prompts, not generated or repeated filler. Metrics are the
+server's authoritative `krasis_timing` values; the client reports no token-count
+estimate or timing fallback.
+
+| Canonical row | Actual prompt tokens | Prefill (internal) | Decode (internal) | Round trip |
+|---|---:|---:|---:|---:|
+| `large_2k` | 2,043 | 166.6 tok/s | 22.06 tok/s | 22.05 tok/s |
+| `large_10k` | 8,623 | 201.1 tok/s | 20.71 tok/s | 20.71 tok/s |
+| `large_25k` | 23,348 | 192.0 tok/s | 19.71 tok/s | 19.71 tok/s |
+| `large_100k` | 62,403 | 145.4 tok/s | 18.40 tok/s | 18.40 tok/s |
+
+Startup again loaded `deepseek_v4_flash_0731_bf16_p00080_local`, validated
+10,129 ranked entries, and skipped the quick heatmap. HCS loaded 6,440/11,008
+experts (58.5%). Startup calibration measured a 662 MiB decode idle floor;
+the lowest observed live spot-check during the longest row was 651 MiB and no
+below-margin event file was emitted. The RTX 6000 was fully released after the
+suite and the A4500 service remained HTTP 200. Evidence: [server launcher](20260802_deepseek_v4_flash_0731_large_prompt_server_launcher.log),
+[server log](20260802_deepseek_v4_flash_0731_large_prompt_server.log), and
+[network results](20260802_deepseek_v4_flash_0731_large_prompt_network.log).
+
+### Decode attribution baseline
+
+The fresh 0731 timing run reproduced the preview checkpoint's outstanding
+compute target. At the sustained 249-token row, graph replay was 28.35
+ms/token and the mixed segments split into 10.00 ms/token routed experts,
+16.31 attention/HC, 0.58 routing/top-k, and 0.22 residual. Within attention,
+the existing markers assigned 8.85 ms/token and left 7.45 ms/token before
+sparse scoring:
+
+| Existing attention component | ms/token |
+|---|---:|
+| Sparse scoring | 0.40 |
+| Sparse output | 1.96 |
+| Attention inverse RoPE | 0.12 |
+| Grouped WO-A | 1.95 |
+| WO-B | 1.92 |
+| HC post/FFN prepare | 2.52 |
+| Unattributed prefix | **7.45** |
+
+Demand H2D was separately measured at 8.13 ms/token and 25.67 GB/s; I/O work
+remains outside this compute-only optimization phase. HCS coverage was 58.5%
+and the diagnostic decode floor was 1,130 MiB. Evidence:
+[launcher](20260802_deepseek_v4_flash_0731_decode_attribution_baseline_launcher.log),
+[stdout](20260802_deepseek_v4_flash_0731_decode_attribution_baseline_stdout.log),
+and [report](20260802_deepseek_v4_flash_0731_decode_attribution_baseline_report.log).
+
+The follow-up timing-only split accounted for the former 7.45 ms/token prefix
+bucket. In the sustained 249-token row, graph replay was 28.59 ms/token and
+the six new spans measured:
+
+| DeepSeek-V4 attention-prefix component | ms/token |
+|---|---:|
+| HC attention prepare + input RMSNorm | **2.23** |
+| Q-B projection + query norm + RoPE | **2.05** |
+| Learned indexer + top-k selection | **1.39** |
+| Main compressor | **0.93** |
+| KV projection/norm/QAT + index assembly | **0.78** |
+| Q-A projection + low-rank norm | **0.55** |
+
+The new prefix spans sum to 7.93 ms/token. Together with the downstream
+markers they assign 16.78 ms/token against the 16.55 ms/token attention event;
+the -0.24 ms overlap is marker overhead/clock-boundary error, so no positive
+unattributed prefix remains. Routed experts stayed at 10.00 ms/token and
+routing/top-k at 0.58, confirming that the split did not move adjacent work.
+The largest target is now the 2.23 ms HC-prepare/input-norm span; it must be
+split below its five-kernel boundary before an optimization is selected.
+Minimum free VRAM was 1,126 MiB and no below-margin event occurred. Evidence:
+[launcher](20260802_deepseek_v4_flash_0731_decode_prefix_split_launcher.log),
+[stdout](20260802_deepseek_v4_flash_0731_decode_prefix_split_stdout.log), and
+[report](20260802_deepseek_v4_flash_0731_decode_prefix_split_report.log).
+
+The HC follow-up then split the leading combined span. The sustained
+249-token row measured:
+
+| HC attention-prepare subcomponent | ms/token |
+|---|---:|
+| Serial mix/Sinkhorn preparation | **1.43** |
+| HC function projection | 0.39 |
+| HC inverse RMS | 0.22 |
+| Attention input RMSNorm | 0.20 |
+| HC state reduction | 0.15 |
+| Combined HC/input span | **2.39** |
+
+The serial one-thread Sinkhorn kernel is 59.8% of the span and 3.8% of the
+37.69 ms/token measured request. The same ranking held in every calibration
+and benchmark panel (`1.22-1.43 ms/token` for Sinkhorn), while routed experts
+remained 10.00 ms/token. This clears the component gate for a runtime-geometry
+parallel Sinkhorn candidate; no HC fusion is justified before measuring that
+candidate. HCS remained 6,440/11,008 (58.5%), hit rate 94.08%, and minimum free
+VRAM 1,126 MiB. Evidence:
+[launcher](20260802_deepseek_v4_flash_0731_hc_split_attribution_launcher.log),
+[stdout](20260802_deepseek_v4_flash_0731_hc_split_attribution_stdout.log), and
+[report](20260802_deepseek_v4_flash_0731_hc_split_attribution_report.log).
+
 ## Ornith-397B decode-compute attribution campaign - 2026-07-31
 
 Purpose: attribute the RTX PRO 6000 decode graph below segment granularity,
@@ -7103,3 +8064,62 @@ Default: pure CPU MoE decode (no HCS), streamed attention with double buffering.
 ## Ornith-397B accepted campaign final gate — 2026-07-31
 
 - [Exact-source gate log](20260731_ornith397_accepted_final_gates.log) — build/import pass; DSA registration 15/15 (parallel top-k, shared-format dispatch, HQQ group cache, and wide RMSNorm included); Marlin CPU 4/4; focused HQQ group-cache 1/1; focused route-prep RMSNorm 1/1; model/config 10/10; launcher 24/24. Tests auto-selected the largest free CUDA device. The earlier explicit-ordinal invocation targeted the occupied A4500 and is invalid setup evidence, not a source failure.
+## DeepSeek-V4-Flash-0731 parallel HC prepare component gate — 2026-08-02
+
+- [Gate log](20260802_deepseek_v4_flash_0731_parallel_hc_gates.log) — build/import pass; DeepSeek math 17/17 including bit-exact serial/parallel parity across runtime `hc_mult` 1/2/3/4/7/16 and Sinkhorn iterations 1/5/20; model/config 17/17; launcher 24/24.
+- [Launcher](20260802_deepseek_v4_flash_0731_parallel_hc_component_launcher.log), [full log](20260802_deepseek_v4_flash_0731_parallel_hc_component_stdout.log), [report](20260802_deepseek_v4_flash_0731_parallel_hc_component_report.log) — sustained Sinkhorn `1.43 -> 0.65 ms/token`, a 0.78 ms/token (54.5%) reduction. Candidate graph replay was 27.22 ms/token with 6,440/11,008 HCS experts, 94.08% final hit rate, and 1,126 MiB minimum free VRAM. Component gate passed; timing-disabled adjacent A/B remains the acceptance gate.
+- Timing-disabled adjacent A/B: [control launcher](20260802_deepseek_v4_flash_0731_parallel_hc_speed_control_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_parallel_hc_speed_control_stdout.log), [report](20260802_deepseek_v4_flash_0731_parallel_hc_speed_control_report.log); [candidate launcher](20260802_deepseek_v4_flash_0731_parallel_hc_speed_candidate_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_parallel_hc_speed_candidate_stdout.log), [report](20260802_deepseek_v4_flash_0731_parallel_hc_speed_candidate_report.log) — internal decode `27.92/26.70/26.88 -> 29.27/28.05/28.13 tok/s` (`+4.84%/+5.06%/+4.65%`); 1K internal prefill `147.0 -> 148.2 tok/s` (`+0.82%`); network `50.88/34.98/29.84 -> 53.13/35.73/30.87 tok/s`; HCS 6,440/11,008 and minimum decode free VRAM 1,136 MiB in both runs. Candidate accepted and promoted to the normal DeepSeek-V4 decode and prefill paths.
+- [Promoted-source gates](20260802_deepseek_v4_flash_0731_parallel_hc_promoted_gates.log) — exact accepted source passed build/import, DeepSeek math 17/17, model/config 17/17, and launcher 24/24.
+
+## DeepSeek-V4-Flash-0731 prefill attribution instrumentation — 2026-08-02
+
+- [Exact-source gates](20260802_deepseek_v4_flash_0731_prefill_timing_gates.log) — build/import pass; DeepSeek math 17/17; model/config 17/17; launcher 24/24. The fourteen-stage CUDA-event/wall/sync timing surface is active only under `KRASIS_PREFILL_TIMING` and does not provide speed-benchmark data.
+- [Attribution report](20260802_deepseek_v4_flash_0731_prefill_attribution_report.md), [server log](20260802_deepseek_v4_flash_0731_prefill_attribution_server.log), [network log](20260802_deepseek_v4_flash_0731_prefill_attribution_network.log), [launcher log](20260802_deepseek_v4_flash_0731_prefill_attribution_launcher.log) — canonical 2,043/8,623/23,348/62,403-token prompts measured sparse scoring at 38.2/55.2/59.8/54.7% of CUDA-event prefill time, sparse output at 14.5/22.6/23.6/26.1%, indexer at 1.0/3.1/7.0/13.2%, and MoE at 44.2/15.9/6.4/3.6%. The fourteen stages account for the total within 13 ms at every size. All four large-prompt requests passed; the 62,403-token row reached 650 MiB minimum free VRAM versus the 600 MiB margin. One stochastic multi-turn recall subtest failed and is retained in the raw log. Sparse scoring passes the first prefill component gate; no speed claim is taken from this timing-enabled run.
+
+## DeepSeek-V4-Flash-0731 gathered sparse-score GEMM component gate — 2026-08-02
+
+- [Exact-source gates](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_gates.log) — build/import pass; DeepSeek math 17/17 including production and irregular multi-token score parity with exact invalid-index semantics; model/config 17/17; launcher 24/24.
+- [Component report](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_component_report.md), [launcher](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_component_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_component_stdout.log), [benchmark report](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_component_report.log) — candidate sparse scoring measured 29.8-30.1 ms across all 43 layers at 1,000 tokens, versus 4,341.7 ms at 2,043 tokens for the original kernel in the preceding attribution. HCS remained 6,440/11,008 and minimum free VRAM was 1,136 MiB. The timing-enabled run is component evidence only; adjacent timing-disabled A/B is pending.
+- Timing-disabled adjacent standard A/B: [control launcher](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_speed_control_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_speed_control_stdout.log), [report](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_speed_control_report.log); [candidate launcher](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_speed_candidate_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_speed_candidate_stdout.log), [report](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_speed_candidate_report.log) — 1K internal prefill `147.1 -> 184.4 tok/s` (`+25.36%`). Internal decode was `29.30/28.07/28.17 -> 29.41/28.24/29.03 tok/s`; HCS remained 6,440/11,008 and minimum free VRAM remained 1,136 MiB. Canonical large-prompt A/B and 0731 quality gates remain pending before promotion.
+- [Large-prompt A/B report](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_large_ab_report.md), [control server](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_large_control_server.log), [control network](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_large_control_network.log), [candidate server](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_large_candidate_server.log), [candidate network](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_large_candidate_network.log) — timing-disabled internal prefill improved `166.7/201.5/191.9/145.5 -> 254.3/441.6/465.1/313.4 tok/s` at 2,043/8,623/23,348/62,403 tokens (`+52.5%/+119.2%/+142.4%/+115.4%`). Both members passed 18/18 network checks. Candidate acceptance is blocked by a one-time 578 MiB low-water on its first 8,623-token GEMM, 22 MiB below the 600 MiB margin; later 23K/62K rows returned to 650 MiB. Lazy workspace behavior must be fixed and retested before quality gates or promotion.
+- [Workspace-fix gates](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_workspace_gates.log) — exact source passed build/import, DeepSeek math 17/17, model/config 17/17, and launcher 24/24. The fix reuses a runtime-sized buffer that is dead during attention and restores the cuBLAS handle before MoE; large-prompt VRAM retest is pending.
+- Corrected workspace-bounded retest: [server](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_workspace_large_server.log), [network](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_workspace_large_network.log) — internal prefill measured `257.6/442.5/465.8/313.6 tok/s` at 2,043/8,623/23,348/62,403 tokens. All four rows held 650 MiB minimum free VRAM against the unchanged 600 MiB margin and the network suite passed 18/18, proving the lazy-workspace defect fixed.
+- Authoritative quality rejection: [witness launcher](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_witness_launcher.log), [witness server](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_witness_server.log), [witness summary](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_witness_summary.json), [witness HTML](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_witness.html), [partial PPL launcher](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_ppl_rejection_launcher.log), [partial PPL stdout](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_ppl_rejection_stdout.log), [partial PPL server](20260802_deepseek_v4_flash_0731_prefill_sparse_gemm_ppl_rejection_server.log). The frozen witness passed 4/4 argmax and top-10 containment, but cumulative WikiText-2 PPL was worse at every fixed checkpoint through window 10: window 1 `3.1664` versus `3.1127`, window 8 `3.6048` versus `3.5695`, and window 10 `3.5630` versus `3.5398` (`+0.66%`). This exceeds the approximately 0.04% repeatability band. Candidate rejected and removed despite its large speed gain.
+
+## DeepSeek-V4-Flash-0731 query-cached sparse-score optimization — 2026-08-02
+
+- [Pre-model gates](20260802_deepseek_v4_flash_0731_prefill_query_cached_gates.log) — build/import, DeepSeek math 17/17 with exact FP32-bit equality at production and irregular geometries, model/config 17/17, and launcher 24/24.
+- [Component launcher](20260802_deepseek_v4_flash_0731_prefill_query_cached_component_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_prefill_query_cached_component_stdout.log), [server](20260802_deepseek_v4_flash_0731_prefill_query_cached_component_krasis.log) — matched 500-token sparse-score time fell from 515.6 to 444.5 ms (`-71.1 ms`, `-13.8%`). Calibration remained 612 MiB. Timing-enabled overall speed is diagnostic only.
+- First timing-disabled adjacent A/B: [control launcher](20260802_deepseek_v4_flash_0731_prefill_query_cached_speed_control_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_prefill_query_cached_speed_control_stdout.log), [report](20260802_deepseek_v4_flash_0731_prefill_query_cached_speed_control_report.log); [candidate launcher](20260802_deepseek_v4_flash_0731_prefill_query_cached_speed_candidate_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_prefill_query_cached_speed_candidate_stdout.log), [report](20260802_deepseek_v4_flash_0731_prefill_query_cached_speed_candidate_report.log) — 1K internal prefill `148.3 -> 154.1 tok/s` (`+3.91%`); internal decode `29.41/27.92/28.27 -> 29.40/28.05/28.12`; HCS remained 6,440/11,008. The candidate leg recorded one intermittent 594 MiB prefill low, so acceptance paused for runtime-ledger diagnosis.
+- [VRAM diagnostic launcher](20260802_deepseek_v4_flash_0731_prefill_query_cached_vram_diag_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_prefill_query_cached_vram_diag_stdout.log), [report](20260802_deepseek_v4_flash_0731_prefill_query_cached_vram_diag_report.log), [server](20260802_deepseek_v4_flash_0731_prefill_query_cached_vram_diag_krasis.log) — measured 3,818 MiB after scratch and a config-derived 3,168 MiB cold staging pool, predicting and observing a 650 MiB prefill floor. The query cache uses only on-chip dynamic shared memory and adds no device allocation. The earlier 594 MiB event is an intermittent pre-existing 0731 budget issue, not a fixed candidate cost.
+- Clean instrumentation-off repeat: [control launcher](20260802_deepseek_v4_flash_0731_prefill_query_cached_repeat_control_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_prefill_query_cached_repeat_control_stdout.log), [report](20260802_deepseek_v4_flash_0731_prefill_query_cached_repeat_control_report.log), [server](20260802_deepseek_v4_flash_0731_prefill_query_cached_repeat_control_krasis.log); [candidate launcher](20260802_deepseek_v4_flash_0731_prefill_query_cached_repeat_candidate_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_prefill_query_cached_repeat_candidate_stdout.log), [report](20260802_deepseek_v4_flash_0731_prefill_query_cached_repeat_candidate_report.log), [server](20260802_deepseek_v4_flash_0731_prefill_query_cached_repeat_candidate_krasis.log) — 1K internal prefill `146.7 -> 154.1 tok/s` (`+5.04%`); best internal decode `29.26 -> 29.29 tok/s`; best network round trip `53.36 -> 53.17 tok/s`; HCS remained 6,440/11,008 and neither run crossed the 600 MiB margin. Candidate accepted.
+- [Promoted-source gates](20260802_deepseek_v4_flash_0731_prefill_query_cached_promoted_gates.log) — exact default source passed build/import, DeepSeek math 17/17, model/config 17/17, and launcher 24/24. The experiment switch was removed; the original score kernel remains only as the exact parity reference.
+
+## DeepSeek-V4-Flash-0731 sparse-output attempt 1 — 2026-08-02
+
+- [Portable candidate gates](20260802_deepseek_v4_flash_0731_prefill_sparse_output_tiled_gates.log), [launcher retry](20260802_deepseek_v4_flash_0731_prefill_sparse_output_tiled_launcher_retry.log) — build/import, DeepSeek math 17/17 with bit-exact production, irregular, invalid-index, and >1,024-width parity, model/config 17/17, launcher 24/24.
+- [Component launcher](20260802_deepseek_v4_flash_0731_prefill_sparse_output_tiled_component_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_prefill_sparse_output_tiled_component_stdout.log), [server](20260802_deepseek_v4_flash_0731_prefill_sparse_output_tiled_component_krasis.log) — cached/tiled exponentials regressed matched 500-token sparse output from 86.3 to 88.5 ms and repeated 1K sparse output from 223.3-224.1 to 229.7-229.9 ms. Calibration retained the 612 MiB low-water. Candidate rejected at the component gate; no timing-disabled A/B was spent.
+- [Accepted-source restoration gates](20260802_deepseek_v4_flash_0731_prefill_sparse_output_attempt1_revert_gates.log) — the prefill candidate and its unmeasured decode-kernel tiling were removed; the exact restored source passed build/import, DeepSeek math 17/17, model/config 17/17, and launcher 24/24.
+
+## DeepSeek-V4-Flash-0731 sparse-output attempt 2 — 2026-08-02
+
+- [Pre-model gates](20260802_deepseek_v4_flash_0731_prefill_sparse_output_bf16x2_gates.log) — build/import, DeepSeek math 17/17 with exact-bit production even-width and irregular odd-width parity, model/config 17/17, and launcher 24/24.
+- Timing-enabled component evidence: [launcher](20260802_deepseek_v4_flash_0731_prefill_sparse_output_bf16x2_component_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_prefill_sparse_output_bf16x2_component_stdout.log), [server](20260802_deepseek_v4_flash_0731_prefill_sparse_output_bf16x2_component_krasis.log), [large server](20260802_deepseek_v4_flash_0731_prefill_sparse_output_bf16x2_large_component_server.log), [large client](20260802_deepseek_v4_flash_0731_prefill_sparse_output_bf16x2_large_component_client.log) — sparse output fell `86.3 -> 77.6 ms` at 500 tokens (`-10.1%`), `223.3-224.1 -> 203.4-205.3 ms` at 1K (`-8.5%`), `1,651.6 -> 1,547.8 ms` at 2,043 tokens (`-6.3%`), and `9,709.1 -> 9,242.1 ms` at 8,623 (`-4.8%`). The large rows cleared the approximately 1% total-prefill component threshold.
+- Timing-disabled adjacent same-source large-prompt A/B: [control server](20260802_deepseek_v4_flash_0731_prefill_sparse_output_bf16x2_large_ab_control_server.log), [control client](20260802_deepseek_v4_flash_0731_prefill_sparse_output_bf16x2_large_ab_control_client.log), [candidate server](20260802_deepseek_v4_flash_0731_prefill_sparse_output_bf16x2_large_ab_candidate_server.log), [candidate client](20260802_deepseek_v4_flash_0731_prefill_sparse_output_bf16x2_large_ab_candidate_client.log) — internal prefill improved `182.2/224.0/215.9/162.1 -> 184.3/227.2/218.9/164.8 tok/s` at 2,043/8,623/23,348/62,403 tokens (`+1.15%/+1.43%/+1.39%/+1.67%`). All network checks passed, every large candidate row held 650 MiB minimum free VRAM against the 600 MiB margin, and decode/round-trip remained workload-consistent. Candidate accepted.
+- [Promoted-source gates](20260802_deepseek_v4_flash_0731_prefill_sparse_output_bf16x2_promoted_gates.log) — exact default source passed build/import, DeepSeek math 17/17, model/config 17/17, and launcher 24/24. The environment switch and stored branch are absent; the scalar symbol remains only as the exact parity reference.
+
+## DeepSeek-V4-Flash-0731 learned-indexer prefill attribution — 2026-08-02
+
+- [Exact-source gates](20260802_deepseek_v4_flash_0731_prefill_indexer_split_gates.log) — build/import, DeepSeek math 17/17, model/config 17/17, launcher 24/24. Instrumentation is active only under prefill timing and does not change kernels, scratch, or launch geometry.
+- [Server](20260802_deepseek_v4_flash_0731_prefill_indexer_split_server.log), [network](20260802_deepseek_v4_flash_0731_prefill_indexer_split_client.log) — timing-enabled canonical 2,043/8,623/23,348/62,403-token rows measured indexer selection at 74.5/1,166.9/7,865.2/54,778.8 ms and the index compressor at 30.8/125.8/530.2/1,350.1 ms. Selection grows from 64.4% to 97.1% of the indexer and reaches 14.5% of total 62K prefill. Query projection, RoPE, Hadamard, FP4 QAT, and head-weight work are each below 1% of total. All network checks passed and every large row retained 650 MiB minimum free VRAM. Selection needs a score/base-sort/merge timing split before a candidate is chosen; no speed claim is derived from this instrumented run.
+- [Selection-split gates](20260802_deepseek_v4_flash_0731_prefill_selection_split_gates.log) — the timing-only causal-count/query-preparation/fused-score/base-sort/merge split passed build/import, DeepSeek math 17/17, model/config 17/17, and launcher 24/24. Timing-disabled and non-DeepSeek dispatcher calls pass no timing context, so production math and synchronization remain unchanged.
+- [Selection-split server](20260802_deepseek_v4_flash_0731_prefill_selection_split_server.log), [network](20260802_deepseek_v4_flash_0731_prefill_selection_split_client.log) — all checks passed. At 2,043/8,623/23,348/62,403 tokens, fused-score CUDA event time was 72.3/1,097.6/7,502.5/52,589.5 ms. At 62K it accounts for 96.0% of the 54,781 ms selection block and 93.2% of the 56,425 ms indexer; base sort and merge were only 1,051.6 and 1,103.9 ms. Every large row retained 650 MiB minimum free VRAM. Instrumented throughput is diagnostic only; fused scoring is the measured next target.
+- [Query-cache candidate gates](20260802_deepseek_v4_flash_0731_prefill_dsa_query_cache_gates.log) — exact source passed production build/import, DeepSeek math 18/18 including exact-bit 64x128 and irregular 3x7 control/candidate equality, model/config 17/17, and launcher 24/24. The earlier 17-test run excluded the new test by name and is not evidence. Component timing remains pending.
+- Query-cache component evidence: [launcher](20260802_deepseek_v4_flash_0731_prefill_dsa_query_cache_component_launcher.log), [stdout](20260802_deepseek_v4_flash_0731_prefill_dsa_query_cache_component_stdout.log), [report](20260802_deepseek_v4_flash_0731_prefill_dsa_query_cache_component_report.log), [server](20260802_deepseek_v4_flash_0731_prefill_dsa_query_cache_component_krasis.log), [large server](20260802_deepseek_v4_flash_0731_prefill_dsa_query_cache_large_server.log), [large client](20260802_deepseek_v4_flash_0731_prefill_dsa_query_cache_large_client.log) — rejected before any timing-disabled A/B. Fused-score CUDA time regressed `1.8 -> 3.8 ms` at 300 tokens, `4.9 -> 10.3 ms` at 500, `72.3 -> 134.5 ms` at 2,043 (+86.0%), and `1,097.6 -> 1,794.9 ms` at 8,623 (+63.5%). Diagnostic internal prefill fell `185.2 -> 182.7 tok/s` at 2K and `227.1 -> 222.9 tok/s` at 8K. The 8K row retained 650 MiB minimum free VRAM. Candidate/env/test code was removed; restored-source gates are required.
+- [Restored-control gates](20260802_deepseek_v4_flash_0731_prefill_dsa_control_restored_gates.log) — the learned-index query-cache experiment is absent while the separately accepted sparse-attention query cache remains intact. Exact source passed build/import, DeepSeek math 17/17, model/config 17/17, and launcher 24/24. RTX PRO 6000 remained fully free and the A4500 service remained HTTP 200.
+# 2026-08-03 — DeepSeek-V4-Flash-0731 learned-index GEMM attempt 1 component diagnostic (not accepted)
+
+- Candidate: opt-in `bf16_fp32_gemm` learned-index selection-score path; timing instrumentation enabled, so throughput is diagnostic only.
+- Result: 18/18 network checks passed. Selection-score CUDA event time fell from 7.479 s to 1.544 s at 23,348 tokens and from 52.561 s to 9.206 s at 62,403 tokens. Total instrumented 62K prefill fell from 93.511 s to 50.101 s.
+- Rejected from advancing at this boundary: first 2K request monitor observed 578 MiB at `cleanup_end`, below the 600 MiB hard safety margin. Candidate remains opt-in pending root-cause instrumentation and a fresh-process proof.
+- Logs: `20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_component_server.log`, `20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_component_client.log`, `20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_component_runtime.log`, `20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_component_below_vram.log`.

@@ -495,6 +495,11 @@ def build_contract(
     generation_json = _load_json(model_dir / "generation_config.json") if (model_dir / "generation_config.json").is_file() else {}
     tokenizer_cfg = _load_json(model_dir / "tokenizer_config.json") if (model_dir / "tokenizer_config.json").is_file() else {}
     template_name, template_source = _extract_chat_template(tokenizer_cfg, model_dir)
+    if not template_source:
+        resolved_template = getattr(tokenizer, "chat_template", "") or ""
+        if isinstance(resolved_template, str) and resolved_template:
+            template_name = "runtime_resolved"
+            template_source = resolved_template
     supports_enable_thinking = "enable_thinking" in template_source
 
     prompt_source = None

@@ -1,0 +1,45 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (6000) to clear...
+[0;32m[1mOK[0m Selected GPUs (6000) clear.
+[0;36m[1m=>[0m Running reference test: tests/deepseek-v4-flash-0731-bf16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/reference-test_20260803_134128
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Reference test: DeepSeek-V4-Flash-0731
+Config: tests/deepseek-v4-flash-0731-bf16.conf
+Reference data: /home/main/Documents/Claude/krasis-internal/reference-outputs/output/DeepSeek-V4-Flash-0731/llama_witness_deepseek_v4_0731_exact_prefix_first_token.json
+Reference artifact state: explicit_valid (format 7, llama_witness_deepseek_v4_0731_exact_prefix_first_token.json)
+
+============================================================
+Config: INT4/BF16 (deepseek-v4-flash-0731-bf16.conf)
+============================================================
+Starting server...
+Waiting for server on port 18220...
+Server ready.
+  Conv 1: 17 input tokens, prompt: Give the chemical symbol for sodium, followed by one short s...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=7/10 selected_logprob_delta=0.03648005035682809
+  Conv 2: 16 input tokens, prompt: Compute 29 plus 34. Put the number first....
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=7/10 selected_logprob_delta=0.000260327043249275
+  Conv 3: 19 input tokens, prompt: Name one Rust standard-library smart pointer and state its p...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.1309457262954589
+  Conv 4: 27 input tokens, prompt: Continue the sequence 2, 6, 12, 20 with the next two values ...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=8/10 selected_logprob_delta=0.02413441284612128
+Stopping server...
+
+============================================================
+REFERENCE TEST: PASS
+============================================================
+  Prompts: 4 PASS, 0 WARN, 0 FAIL (of 4)
+  Prefill argmax match: 4/4 (100%)
+  Prefill top-10 containment: 4/4 (100%)
+  First-token match: 4/4
+  Avg match run: 1.0 tokens
+  Avg decode top-k: 100.0%
+  Duration: 495.0s
+  Report: /home/main/Documents/Claude/krasis/logs/reference-test_20260803_134128/reference_test.html
+  Summary JSON: /home/main/Documents/Claude/krasis/logs/reference-test_20260803_134128/reference_test_summary.json
+

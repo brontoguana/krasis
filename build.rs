@@ -187,7 +187,13 @@ fn nvcc_host_compiler_args() -> Vec<String> {
 
 fn compile_cuda_kernels() {
     let cu_src = "src/cuda/decode_kernels.cu";
+    let deepseek_v4_hc_header = "src/cuda/deepseek_v4_hc.cuh";
+    let deepseek_v4_attention_header = "src/cuda/deepseek_v4_attention.cuh";
+    let deepseek_v4_compressor_header = "src/cuda/deepseek_v4_compressor.cuh";
     println!("cargo:rerun-if-changed={cu_src}");
+    println!("cargo:rerun-if-changed={deepseek_v4_hc_header}");
+    println!("cargo:rerun-if-changed={deepseek_v4_attention_header}");
+    println!("cargo:rerun-if-changed={deepseek_v4_compressor_header}");
     if !std::path::Path::new(cu_src).exists() {
         println!("cargo:warning=decode_kernels.cu not found — GPU decode kernels disabled");
         return;
@@ -203,7 +209,15 @@ fn compile_cuda_kernels() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let ptx_path = format!("{out_dir}/decode_kernels.ptx");
 
-    if is_output_fresh(&[cu_src], &[&ptx_path]) {
+    if is_output_fresh(
+        &[
+            cu_src,
+            deepseek_v4_hc_header,
+            deepseek_v4_attention_header,
+            deepseek_v4_compressor_header,
+        ],
+        &[&ptx_path],
+    ) {
         println!("cargo:rustc-cfg=has_decode_kernels");
         println!("cargo:warning=Reusing cached GPU decode kernels at {ptx_path}");
         return;
@@ -222,15 +236,23 @@ fn compile_cuda_kernels() {
         cu_src,
     ])
     .args(nvcc_host_compiler_args());
-    let status = run_status_timed(cmd, "nvcc decode PTX compile");
+    let start = std::time::Instant::now();
+    let output = cmd.output();
+    log_build_timing("nvcc decode PTX compile", start.elapsed());
 
-    match status {
-        Ok(s) if s.success() => {
+    match output {
+        Ok(output) if output.status.success() => {
             println!("cargo:rustc-cfg=has_decode_kernels");
             println!("cargo:warning=Compiled GPU decode kernels to PTX ({ptx_path})");
         }
-        Ok(s) => {
-            println!("cargo:warning=nvcc failed with status {s} — GPU decode kernels disabled");
+        Ok(output) => {
+            for line in String::from_utf8_lossy(&output.stderr).lines() {
+                println!("cargo:warning=nvcc decode: {line}");
+            }
+            println!(
+                "cargo:warning=nvcc failed with status {} — GPU decode kernels disabled",
+                output.status
+            );
         }
         Err(e) => {
             println!("cargo:warning=nvcc execution error: {e} — GPU decode kernels disabled");
@@ -241,8 +263,14 @@ fn compile_cuda_kernels() {
 fn compile_prefill_kernels() {
     let cu_src = "src/cuda/prefill_kernels.cu";
     let shim_header = "src/cuda/prefill_shim.h";
+    let deepseek_v4_hc_header = "src/cuda/deepseek_v4_hc.cuh";
+    let deepseek_v4_attention_header = "src/cuda/deepseek_v4_attention.cuh";
+    let deepseek_v4_compressor_header = "src/cuda/deepseek_v4_compressor.cuh";
     println!("cargo:rerun-if-changed={cu_src}");
     println!("cargo:rerun-if-changed={shim_header}");
+    println!("cargo:rerun-if-changed={deepseek_v4_hc_header}");
+    println!("cargo:rerun-if-changed={deepseek_v4_attention_header}");
+    println!("cargo:rerun-if-changed={deepseek_v4_compressor_header}");
     if !std::path::Path::new(cu_src).exists() {
         println!("cargo:warning=prefill_kernels.cu not found — GPU prefill kernels disabled");
         return;
@@ -257,7 +285,16 @@ fn compile_prefill_kernels() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let ptx_path = format!("{out_dir}/prefill_kernels.ptx");
 
-    if is_output_fresh(&[cu_src, shim_header], &[&ptx_path]) {
+    if is_output_fresh(
+        &[
+            cu_src,
+            shim_header,
+            deepseek_v4_hc_header,
+            deepseek_v4_attention_header,
+            deepseek_v4_compressor_header,
+        ],
+        &[&ptx_path],
+    ) {
         println!("cargo:rustc-cfg=has_prefill_kernels");
         println!("cargo:warning=Reusing cached GPU prefill kernels at {ptx_path}");
         return;

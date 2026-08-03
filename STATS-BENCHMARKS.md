@@ -13,6 +13,7 @@ Detailed benchmark logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](
 
 | Hardware | Model | Params | Active params | Attention + KV | Prefill | Decode | HTTP round trip | Peak system RAM | HCS | Min free VRAM |
 |---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|
+| 1x RTX PRO 6000 Blackwell 96GB, AMD EPYC 7742 | [DeepSeek-V4-Flash-0731](benchmarks/BENCHMARKS.md#deepseek-v4-flash-0731-learned-index-gemm-default-operational-baseline--2026-08-03) | 304.2B checkpoint / 284B main | 13B main | INT4/BF16/BF16 KV | 152.2 @1K / 320.6 @2K / 906.3 @8.6K / 1,328.2 @23K / 1,204.3 @62K tok/s | 29.38/28.20/28.49 @1K (50/100/250 outputs); 19.41 @62K tok/s | 54.05/35.97/30.60 @1K; 19.41 @62K tok/s | 145.5 GB process RAM (benchmark report) | 6440/11008 (58.5%) | 650 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ4/k4v4 | 10,670.1 tok/s | 117.20 tok/s | 241.78 tok/s | 23.5 GB max RSS (22.4 GiB) | 10240/10240 (100.0%) | 10,186 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ6/k6v6 | 9,693.6 tok/s | 115.50 tok/s | 234.29 tok/s | 23.7 GB max RSS (22.6 GiB) | 10240/10240 (100.0%) | 9,882 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Ornith-1.0-35B | 35B class | 3B class | INT4/HQQ4/k4v4 | 10,575.7 tok/s | 117.63 tok/s | 240.91 tok/s | 22.9 GB max RSS (21.8 GiB) | 10240/10240 (100.0%) | 10,186 MB |
@@ -42,6 +43,14 @@ Detailed benchmark logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Nemotron-3-Nano-30B-A3B | 31.6B total | 3.2B | INT4/HQQ6/k6v6 | 8,748.2 tok/s | 127.75 tok/s | 274.83 tok/s | 19.4 GB max RSS (18.5 GiB) | 2944/2944 (100.0%) | 10,454 MB |
 
 Notes:
+
+- DeepSeek-V4-Flash-0731 uses INT4 routed experts with BF16 attention and KV.
+  Its accepted curve is context-stated because both prefill and decode change
+  materially with prompt length. The learned-index GEMM traded the preceding
+  runtime's 193.0 tok/s at 1K for 152.2 tok/s, but reaches 906.3/1,328.2/
+  1,204.3 tok/s at 8.6K/23K/62K. The timing-disabled standard and large-prompt
+  logs are linked from the model name; both used the exact approved p80, HCS
+  6,440/11,008, and held at least 650 MB free VRAM.
 
 - Qwen3.6 parameters are counted from the loaded safetensors. Text weights are
   35.5B parameters; active parameters exclude the LM head.

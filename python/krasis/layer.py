@@ -215,6 +215,157 @@ class NativeMLAWeights:
         )
 
 
+class NativeDeepseekV4Weights:
+    """Setup-only DeepSeek-V4 attention/HC tensor contract."""
+
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        layer_idx: int,
+        attention: Dict,
+        hyper_connection: Dict[str, torch.Tensor],
+    ):
+        if not cfg.is_deepseek_v4:
+            raise ValueError("DeepSeek-V4 weights used for another architecture")
+        self.cfg = cfg
+        self.layer_idx = layer_idx
+        self.compress_ratio = cfg.compress_ratios[layer_idx]
+
+        expected_attention = {
+            "attn_sink": (cfg.num_attention_heads,),
+            "q_norm": (cfg.q_lora_rank,),
+            "kv_norm": (cfg.attention_head_dim,),
+            "wq_a": (cfg.q_lora_rank, cfg.hidden_size),
+            "wq_b": (
+                cfg.num_attention_heads * cfg.attention_head_dim,
+                cfg.q_lora_rank,
+            ),
+            "wkv": (cfg.attention_head_dim, cfg.hidden_size),
+            "wo_a": (
+                cfg.o_groups * cfg.o_lora_rank,
+                cfg.num_attention_heads * cfg.attention_head_dim // cfg.o_groups,
+            ),
+            "wo_b": (cfg.hidden_size, cfg.o_groups * cfg.o_lora_rank),
+        }
+        self._validate_tensors(
+            f"DeepSeek-V4 layer {layer_idx} attention",
+            attention,
+            expected_attention,
+        )
+
+        mix_width = (2 + cfg.hc_mult) * cfg.hc_mult
+        hc_input = cfg.hc_mult * cfg.hidden_size
+        expected_hc = {
+            "hc_attn_fn": (mix_width, hc_input),
+            "hc_attn_base": (mix_width,),
+            "hc_attn_scale": (3,),
+            "hc_ffn_fn": (mix_width, hc_input),
+            "hc_ffn_base": (mix_width,),
+            "hc_ffn_scale": (3,),
+        }
+        self._validate_tensors(
+            f"DeepSeek-V4 layer {layer_idx} hyper-connection",
+            hyper_connection,
+            expected_hc,
+            expected_dtype=torch.float32,
+        )
+
+        if self.compress_ratio > 0:
+            compressor = attention.get("compressor")
+            if not isinstance(compressor, dict):
+                raise KeyError(
+                    f"DeepSeek-V4 layer {layer_idx} has ratio "
+                    f"{self.compress_ratio} but no compressor"
+                )
+            self._validate_compressor(
+                compressor,
+                head_dim=cfg.attention_head_dim,
+                label=f"layer {layer_idx} attention compressor",
+            )
+        elif "compressor" in attention:
+            raise ValueError(
+                f"DeepSeek-V4 layer {layer_idx} ratio 0 unexpectedly loaded a compressor"
+            )
+
+        if self.compress_ratio == 4:
+            indexer = attention.get("indexer")
+            if not isinstance(indexer, dict):
+                raise KeyError(
+                    f"DeepSeek-V4 layer {layer_idx} ratio 4 has no indexer"
+                )
+            self._validate_tensors(
+                f"DeepSeek-V4 layer {layer_idx} indexer",
+                indexer,
+                {
+                    "wq_b": (
+                        cfg.index_n_heads * cfg.index_head_dim,
+                        cfg.q_lora_rank,
+                    ),
+                    "weights_proj": (cfg.index_n_heads, cfg.hidden_size),
+                },
+            )
+            index_compressor = indexer.get("compressor")
+            if not isinstance(index_compressor, dict):
+                raise KeyError(
+                    f"DeepSeek-V4 layer {layer_idx} indexer has no compressor"
+                )
+            self._validate_compressor(
+                index_compressor,
+                head_dim=cfg.index_head_dim,
+                label=f"layer {layer_idx} indexer compressor",
+            )
+        elif "indexer" in attention:
+            raise ValueError(
+                f"DeepSeek-V4 layer {layer_idx} ratio {self.compress_ratio} "
+                "unexpectedly loaded an indexer"
+            )
+
+        self.attention = attention
+        self.hyper_connection = hyper_connection
+
+    @staticmethod
+    def _validate_tensors(
+        label: str,
+        tensors: Dict,
+        expected_shapes: Dict[str, tuple],
+        expected_dtype: torch.dtype | None = None,
+    ) -> None:
+        missing = sorted(set(expected_shapes) - set(tensors))
+        if missing:
+            raise KeyError(f"{label} missing tensors: {', '.join(missing)}")
+        for name, shape in expected_shapes.items():
+            tensor = tensors[name]
+            if tuple(tensor.shape) != shape:
+                raise ValueError(
+                    f"{label} {name} shape {tuple(tensor.shape)} != {shape}"
+                )
+            if expected_dtype is not None and tensor.dtype != expected_dtype:
+                raise ValueError(
+                    f"{label} {name} dtype {tensor.dtype} != {expected_dtype}"
+                )
+
+    def _validate_compressor(
+        self, tensors: Dict, head_dim: int, label: str
+    ) -> None:
+        copies = 2 if self.compress_ratio == 4 else 1
+        output_dim = copies * head_dim
+        self._validate_tensors(
+            f"DeepSeek-V4 {label}",
+            tensors,
+            {
+                "ape": (self.compress_ratio, output_dim),
+                "wkv": (output_dim, self.cfg.hidden_size),
+                "wgate": (output_dim, self.cfg.hidden_size),
+                "norm": (head_dim,),
+            },
+        )
+
+    def forward(self, *_args, **_kwargs):
+        raise RuntimeError(
+            "DeepSeek-V4 inference must run through the native Rust/CUDA runtime"
+        )
+
+
 class TransformerLayer:
     """One transformer layer: attention + MLP (dense or MoE)."""
 
@@ -265,6 +416,14 @@ class TransformerLayer:
             from krasis.linear_attention import GatedDeltaNetAttention
             self.attention = GatedDeltaNetAttention(cfg, layer_idx, weights["linear_attention"], device)
             self.mamba2_weights = None
+        elif cfg.is_deepseek_v4:
+            self.attention = NativeDeepseekV4Weights(
+                cfg,
+                layer_idx,
+                weights["attention"],
+                weights["hyper_connection"],
+            )
+            self.mamba2_weights = None
         elif cfg.is_gqa or cfg.is_nemotron_h:
             # GQA attention is handled by Rust prefill engine — no Python attention object needed
             # Store raw weights dict for decode store registration (q_proj, k_proj, etc.)
@@ -288,6 +447,7 @@ class TransformerLayer:
             self.gate_weight = weights["gate"]["weight"]  # [n_experts, hidden]
             self.gate_bias = weights["gate"].get("bias")  # [n_experts] or None (GPT OSS)
             self.e_score_correction_bias = weights["gate"].get("e_score_correction_bias")
+            self.router_tid2eid = weights["gate"].get("tid2eid")
             self.router_input_scale = weights["gate"].get("input_scale")
             self.router_per_expert_scale = weights["gate"].get("per_expert_scale")
             self.shared_expert = weights.get("shared_expert")  # {gate_proj, up_proj, down_proj}
@@ -318,6 +478,7 @@ class TransformerLayer:
             self.shared_expert = None
             self.router_input_scale = None
             self.router_per_expert_scale = None
+            self.router_tid2eid = None
 
         # Krasis CPU engine for routed experts
         self.krasis_engine = krasis_engine
@@ -584,6 +745,10 @@ class TransformerLayer:
             if self._gate_bias_f32 is not None:
                 router_logits = router_logits + self._gate_bias_f32
 
+            if self.cfg.is_deepseek_v4:
+                raise RuntimeError(
+                    "DeepSeek-V4 routing must run through the native Rust/CUDA runtime"
+                )
             if self.cfg.swiglu_limit > 0:
                 # GPT OSS: topk on raw logits, softmax on selected values
                 topk_weights, topk_ids = torch.topk(
@@ -795,6 +960,10 @@ class TransformerLayer:
 
         topk = self.cfg.num_experts_per_tok
 
+        if self.cfg.is_deepseek_v4:
+            raise RuntimeError(
+                "DeepSeek-V4 routing must run through the native Rust/CUDA runtime"
+            )
         if self.cfg.swiglu_limit > 0:
             topk_weights, topk_ids = torch.topk(router_logits, topk, dim=-1)
             topk_weights = torch.softmax(topk_weights, dim=-1)
@@ -851,6 +1020,10 @@ class TransformerLayer:
 
         topk = self.cfg.num_experts_per_tok
 
+        if self.cfg.is_deepseek_v4:
+            raise RuntimeError(
+                "DeepSeek-V4 MoE must run through the native Rust/CUDA runtime"
+            )
         if self.cfg.swiglu_limit > 0:
             # GPT OSS routing: topk on raw logits, then softmax on selected values
             topk_weights, topk_ids = torch.topk(router_logits, topk, dim=-1)

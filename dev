@@ -93,6 +93,7 @@
 #   q235        -> testconfigs/q235-4-4-a16.conf
 #   v2lite      -> testconfigs/v2lite-4-4-a16.conf
 #   deepseek-vl -> testconfigs/deepseek-vl2-4-4-a16.conf
+#   dsv4        -> testconfigs/deepseek-v4-flash-0731-4-4-a16.conf
 #   qwen35      -> testconfigs/qwen35-4-4-a16.conf
 #   gemma       -> tests/gemma-4-4-a16.conf
 #   minimax     -> tests/minimax-m2-4-4-a16.conf
@@ -229,6 +230,8 @@ resolve_config() {
         q235)               echo "$SCRIPT_DIR/testconfigs/q235-4-4-a16.conf" ;;
         v2lite|V2-Lite)     echo "$SCRIPT_DIR/testconfigs/v2lite-4-4-a16.conf" ;;
         deepseek-vl|vl2)    echo "$SCRIPT_DIR/testconfigs/deepseek-vl2-4-4-a16.conf" ;;
+        dsv4|deepseek-v4|deepseek-v4-flash|dsv4-0731|deepseek-v4-0731|deepseek-v4-flash-0731)
+                            echo "$SCRIPT_DIR/testconfigs/deepseek-v4-flash-0731-4-4-a16.conf" ;;
         qwen35|Qwen3.5)     echo "$SCRIPT_DIR/testconfigs/qwen35-4-4-a16.conf" ;;
         gemma|Gemma)        echo "$SCRIPT_DIR/tests/gemma-4-4-a16.conf" ;;
         minimax|MiniMax)    echo "$SCRIPT_DIR/tests/minimax-m2-4-4-a16.conf" ;;
@@ -242,7 +245,7 @@ resolve_config() {
                 echo "$SCRIPT_DIR/tests/$name"
             else
                 err "Unknown config: $name
-  Available: qcn, q235, v2lite, deepseek-vl, qwen35, gemma, minimax
+  Available: qcn, q235, v2lite, deepseek-vl, dsv4, qwen35, gemma, minimax
   Or pass a path to a .conf file."
             fi
             ;;
@@ -255,6 +258,7 @@ resolve_model_name() {
         qwen35|QWEN35|q35b|Q35B|Qwen3.5-35B-A3B) echo "Qwen3.5-35B-A3B" ;;
         q122b|Q122B|Qwen3.5-122B-A10B) echo "Qwen3.5-122B-A10B" ;;
         q235|Q235|Qwen3-235B-A22B) echo "Qwen3-235B-A22B" ;;
+        dsv4|deepseek-v4|deepseek-v4-flash|dsv4-0731|deepseek-v4-0731|deepseek-v4-flash-0731) echo "DeepSeek-V4-Flash-0731" ;;
         *) echo "$1" ;;
     esac
 }
@@ -1433,7 +1437,7 @@ do_decode_harness() {
 }
 
 do_perplexity() {
-    [[ $# -lt 1 ]] && err "Usage: ./dev perplexity <config> [--dataset wikitext-2] [--max-tokens N]"
+    [[ $# -lt 1 ]] && err "Usage: ./dev perplexity <config> [--dataset wikitext-2] [--max-tokens N] [--max-windows N]"
     local conf
     conf=$(resolve_config "$1")
     shift
@@ -1609,6 +1613,12 @@ do_test_kernels() {
             filter="gpu_decode::dsa_registration_tests::shared_w2_ksplit_reduce_matches_reference"
         elif [[ "$1" == "route_prep_rmsnorm" ]]; then
             filter="gpu_decode::dsa_registration_tests::route_prep_wide_rmsnorm_matches_established_launch"
+        elif [[ "$1" == "deepseek_v4_weights" ]]; then
+            filter="weights::tests::test_deepseek_v4"
+        elif [[ "$1" == "deepseek_v4_math" ]]; then
+            filter="deepseek_v4_"
+        elif [[ "$1" == "deepseek_v4_grouped_wo_a" ]]; then
+            filter="gpu_decode::dsa_registration_tests::deepseek_v4_grouped_wo_a_batched_gemv_matches_individual_within_one_bf16_ulp"
         elif [[ "$1" == "context_window" ]]; then
             filter="server::tests::context_window_accounts_for_prompt_and_requested_output"
         elif [[ "$1" == "cpu_tail" ]]; then
@@ -1904,9 +1914,19 @@ witness_model_paths() {
             echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/input-sources/GLM-5.2/glm52_witness_input_tokens.json"
             echo "$HOME/.krasis/witness-gguf/GLM-5.2-bf16.gguf"
             ;;
+        dsv4-preview|deepseek-v4-preview|deepseek-v4-flash-preview)
+            echo "$HOME/.krasis/models/deepseek-ai/DeepSeek-V4-Flash"
+            echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/input-sources/DeepSeek-V4-Flash/deepseek_v4_witness_input_tokens.json"
+            echo "$HOME/.krasis/witness-gguf/DeepSeek-V4-Flash-native-source.gguf"
+            ;;
+        dsv4|deepseek-v4|deepseek-v4-flash|dsv4-0731|deepseek-v4-0731|deepseek-v4-flash-0731)
+            echo "$HOME/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-0731"
+            echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/input-sources/DeepSeek-V4-Flash-0731/deepseek_v4_0731_witness_input_tokens.json"
+            echo "$HOME/.krasis/witness-gguf/DeepSeek-V4-Flash-0731-native-source.gguf"
+            ;;
         *)
             err "Unknown witness model: $model
-  Available: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
+  Available: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, dsv4, dsv4-0731, dsv4-preview"
             ;;
     esac
 }
@@ -1926,7 +1946,7 @@ do_witness_model_check() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         echo "Usage: ./dev witness-model-check <model> [--hash]"
         echo "  Checks local readiness for BF16 llama-witness capture."
-        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
+        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, dsv4, dsv4-0731"
         echo "  --hash computes the GGUF SHA-256 when the expected BF16 file exists."
         return 0
     fi
@@ -2367,7 +2387,7 @@ do_witness_gguf_preflight() {
         echo "  Preflights BF16 GGUF witness conversion without starting conversion."
         echo "  Records source files, expected output, resource estimates, converter command, and support gates."
         echo "  --converter-dry-run traverses the converter and tensor mappings without writing output data."
-        echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
+        echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, dsv4, dsv4-0731"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16] [--converter-dry-run]"
@@ -2396,7 +2416,7 @@ do_witness_gguf_preflight() {
                 echo "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16] [--converter-dry-run]"
                 echo "  Preflights BF16 GGUF witness conversion without starting conversion."
                 echo "  --converter-dry-run traverses the converter and tensor mappings without writing output data."
-                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
+                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, dsv4, dsv4-0731"
                 return 0
                 ;;
             *)
@@ -2455,6 +2475,11 @@ do_witness_gguf_preflight() {
             expected_model_type="glm_moe_dsa"
             expected_text_model_type=""
             ;;
+        dsv4|deepseek-v4|deepseek-v4-flash|dsv4-0731|deepseek-v4-0731|deepseek-v4-flash-0731)
+            expected_arch="DeepseekV4ForCausalLM"
+            expected_model_type="deepseek_v4"
+            expected_text_model_type=""
+            ;;
         step37|step3.7|step3p7|step-3.7-flash|step-3.7-flash-bf16)
             expected_arch="Step3p7ForConditionalGeneration"
             expected_model_type="step3p7"
@@ -2485,6 +2510,29 @@ do_witness_gguf_preflight() {
 
     local converter_supported=false gguf_supported=false runtime_supported=false
     case "$model_key" in
+        dsv4|deepseek-v4|deepseek-v4-flash|dsv4-0731|deepseek-v4-0731|deepseek-v4-flash-0731)
+            local deepseek_converter="$WITNESS_REPO/conversion/deepseek.py"
+            if [[ -f "$deepseek_converter" ]] \
+                && rg -q 'DeepseekV4ForCausalLM' "$deepseek_converter" \
+                && rg -q 'class DeepseekV4Model' "$deepseek_converter" \
+                && rg -q 'MODEL_ARCH.DEEPSEEK4' "$deepseek_converter"; then
+                converter_supported=true
+            else
+                status=1
+            fi
+            if rg -q 'DEEPSEEK4' "$WITNESS_REPO/gguf-py/gguf/constants.py"; then
+                gguf_supported=true
+            else
+                status=1
+            fi
+            if rg -q 'LLM_ARCH_DEEPSEEK4' "$WITNESS_REPO/src/llama-arch.h" \
+                && rg -q 'llama_model_deepseek4' "$WITNESS_REPO/src/llama-model.cpp" \
+                && [[ -f "$WITNESS_REPO/src/models/deepseek4.cpp" ]]; then
+                runtime_supported=true
+            else
+                status=1
+            fi
+            ;;
         glm47|glm4.7|glm47-flash|glm4.7-flash|glm-4.7-flash)
             if rg -q 'Glm4MoeLiteForCausalLM' "$converter" \
                 && rg -q 'class Glm4MoeLiteModel' "$converter" \
@@ -2819,7 +2867,7 @@ do_witness_gguf_convert() {
         echo "  Converts a local safetensors model to BF16 GGUF only after the built preflight gate passes."
         echo "  Writes logs and conversion manifest under logs/witness-gguf-convert_*."
         echo "  Refuses to overwrite an existing expected output unless --force is supplied."
-        echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
+        echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, dsv4, dsv4-0731"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-gguf-convert <model> [--output PATH] [--outtype bf16] [--force]"
@@ -2847,7 +2895,7 @@ do_witness_gguf_convert() {
             --help|-h)
                 echo "Usage: ./dev witness-gguf-convert <model> [--output PATH] [--outtype bf16] [--force]"
                 echo "  Converts a local safetensors model to BF16 GGUF only after the built preflight gate passes."
-                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
+                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, dsv4, dsv4-0731"
                 return 0
                 ;;
             *)
@@ -3823,7 +3871,7 @@ case "$cmd" in
         echo "    KRASIS_TRACE=1 KRASIS_TRACE_COMPONENTS=config_contract ./dev reference-inventory"
         echo "    ./dev trace-diff /tmp/expected.log /tmp/actual.log --components config_contract --contexts reference_test_single --phases artifact,validation"
         echo ""
-        echo "Configs: qcn, q235, v2lite, deepseek-vl, qwen35, gemma, minimax"
+        echo "Configs: qcn, q235, v2lite, deepseek-vl, dsv4, qwen35, gemma, minimax"
         echo "         (or path to .conf file)"
         echo "Standard speed benchmark config: tests/qcn-k4v4-hqq8-int4-benchmark.conf"
         echo ""

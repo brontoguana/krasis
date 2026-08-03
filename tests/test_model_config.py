@@ -11,13 +11,15 @@ from pathlib import Path
 import torch
 
 from krasis.config import ModelConfig
-from krasis.kv_cache import MLA_CKV_KERNEL_MIN_DIM
+from krasis.kv_cache import MLA_CKV_KERNEL_MIN_DIM, PagedKVCache
 from krasis.layer import (
+    NativeDeepseekV4Weights,
     NativeDsaIndexerWeights,
     NativeMLAWeights,
     TransformerLayer,
 )
 from krasis.model import (
+    KrasisModel,
     _apply_max_context_limit,
     _dsa_owner_layers_for_segment,
     _dsa_resource_layers_for_segment,
@@ -77,7 +79,319 @@ def _glm_dsa_config() -> dict:
     }
 
 
+def _deepseek_v4_config() -> dict:
+    return {
+        "model_type": "deepseek_v4",
+        "architectures": ["DeepseekV4ForCausalLM"],
+        "hidden_size": 4096,
+        "intermediate_size": None,
+        "moe_intermediate_size": 2048,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 1,
+        "vocab_size": 129280,
+        "q_lora_rank": 1024,
+        "o_lora_rank": 1024,
+        "o_groups": 8,
+        "head_dim": 512,
+        "qk_rope_head_dim": 64,
+        "index_topk": 512,
+        "index_head_dim": 128,
+        "index_n_heads": 64,
+        "compress_ratios": [0, 4, 128, 0, 0],
+        "compress_rope_theta": 160000,
+        "num_hash_layers": 3,
+        "hc_mult": 4,
+        "hc_sinkhorn_iters": 20,
+        "hc_eps": 1e-6,
+        "n_routed_experts": 256,
+        "num_experts_per_tok": 6,
+        "n_shared_experts": 1,
+        "first_k_dense_replace": None,
+        "routed_scaling_factor": 1.5,
+        "scoring_func": "sqrtsoftplus",
+        "topk_method": "noaux_tc",
+        "norm_topk_prob": True,
+        "expert_dtype": "fp4",
+        "swiglu_limit": 10.0,
+        "sliding_window": 128,
+        "dspark_block_size": 5,
+        "dspark_noise_token_id": 128799,
+        "dspark_target_layer_ids": [1, 2, 3],
+        "dspark_markov_rank": 256,
+    }
+
+
 class ModelConfigContractTests(unittest.TestCase):
+    def _compact_deepseek_v4_config(self) -> ModelConfig:
+        raw = _deepseek_v4_config()
+        raw.update(
+            hidden_size=16,
+            intermediate_size=None,
+            moe_intermediate_size=8,
+            num_attention_heads=4,
+            vocab_size=32,
+            q_lora_rank=4,
+            o_lora_rank=4,
+            o_groups=2,
+            head_dim=8,
+            qk_rope_head_dim=2,
+            index_topk=4,
+            index_head_dim=4,
+            index_n_heads=4,
+            hc_mult=2,
+            dspark_noise_token_id=1,
+            dspark_markov_rank=4,
+        )
+        return ModelConfig.from_model_path(_write_config(self, raw))
+
+    @staticmethod
+    def _deepseek_v4_layer_tensors(
+        cfg: ModelConfig, layer_idx: int
+    ) -> tuple[dict, dict]:
+        bf16 = torch.bfloat16
+        attention = {
+            "attn_sink": torch.empty(cfg.num_attention_heads, dtype=torch.float32),
+            "q_norm": torch.empty(cfg.q_lora_rank, dtype=bf16),
+            "kv_norm": torch.empty(cfg.attention_head_dim, dtype=bf16),
+            "wq_a": torch.empty(cfg.q_lora_rank, cfg.hidden_size, dtype=bf16),
+            "wq_b": torch.empty(
+                cfg.num_attention_heads * cfg.attention_head_dim,
+                cfg.q_lora_rank,
+                dtype=bf16,
+            ),
+            "wkv": torch.empty(cfg.attention_head_dim, cfg.hidden_size, dtype=bf16),
+            "wo_a": torch.empty(
+                cfg.o_groups * cfg.o_lora_rank,
+                cfg.num_attention_heads * cfg.attention_head_dim // cfg.o_groups,
+                dtype=bf16,
+            ),
+            "wo_b": torch.empty(
+                cfg.hidden_size, cfg.o_groups * cfg.o_lora_rank, dtype=bf16
+            ),
+        }
+        ratio = cfg.compress_ratios[layer_idx]
+
+        def compressor(head_dim: int) -> dict:
+            copies = 2 if ratio == 4 else 1
+            output_dim = copies * head_dim
+            return {
+                "ape": torch.empty(ratio, output_dim, dtype=torch.float32),
+                "wkv": torch.empty(output_dim, cfg.hidden_size, dtype=bf16),
+                "wgate": torch.empty(output_dim, cfg.hidden_size, dtype=bf16),
+                "norm": torch.empty(head_dim, dtype=bf16),
+            }
+
+        if ratio > 0:
+            attention["compressor"] = compressor(cfg.attention_head_dim)
+        if ratio == 4:
+            attention["indexer"] = {
+                "wq_b": torch.empty(
+                    cfg.index_n_heads * cfg.index_head_dim,
+                    cfg.q_lora_rank,
+                    dtype=bf16,
+                ),
+                "weights_proj": torch.empty(
+                    cfg.index_n_heads, cfg.hidden_size, dtype=bf16
+                ),
+                "compressor": compressor(cfg.index_head_dim),
+            }
+
+        mix_width = (2 + cfg.hc_mult) * cfg.hc_mult
+        hc_input = cfg.hc_mult * cfg.hidden_size
+        hyper_connection = {
+            "hc_attn_fn": torch.empty(mix_width, hc_input),
+            "hc_attn_base": torch.empty(mix_width),
+            "hc_attn_scale": torch.empty(3),
+            "hc_ffn_fn": torch.empty(mix_width, hc_input),
+            "hc_ffn_base": torch.empty(mix_width),
+            "hc_ffn_scale": torch.empty(3),
+        }
+        return attention, hyper_connection
+
+    def test_deepseek_v4_architecture_contract(self) -> None:
+        root = _write_config(self, _deepseek_v4_config())
+        Path(root, "model.safetensors.index.json").write_text(
+            json.dumps(
+                {
+                    "weight_map": {
+                        "layers.0.attn.wq_a.weight": "model-00001-of-00001.safetensors"
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        cfg = ModelConfig.from_model_path(root)
+
+        self.assertTrue(cfg.is_deepseek_v4)
+        self.assertFalse(cfg.is_mla)
+        self.assertFalse(cfg.is_gqa)
+        self.assertEqual(cfg.attention_type, "deepseek_v4")
+        self.assertEqual(cfg.intermediate_size, 2048)
+        self.assertEqual(cfg.first_k_dense_replace, 0)
+        self.assertEqual(cfg.head_dim, 512)
+        self.assertEqual(cfg.rotary_dim, 64)
+        self.assertEqual(cfg.q_lora_rank, 1024)
+        self.assertEqual(cfg.o_lora_rank, 1024)
+        self.assertEqual(cfg.o_groups, 8)
+        self.assertEqual(cfg.compress_ratios, [0, 4, 128, 0, 0])
+        self.assertEqual(cfg.num_hash_layers, 3)
+        self.assertEqual(cfg.expert_quant_method, "fp4")
+        self.assertEqual(cfg.layers_prefix, "")
+        self.assertEqual(cfg.tensor_name("embed.weight"), "embed.weight")
+        self.assertEqual(cfg.layer_tensor_prefix(2), "layers.2")
+
+    def test_deepseek_v4_kv_budget_matches_raw_compressed_and_state_layout(self) -> None:
+        cfg = self._compact_deepseek_v4_config()
+        cache = PagedKVCache.__new__(PagedKVCache)
+        cache.cfg = cfg
+        cache.page_size = 16
+        cache.dsv4_compress_ratios = [
+            cfg.compress_ratios[layer_idx] for layer_idx in range(cfg.num_hidden_layers)
+        ]
+
+        # Four raw windows plus one ratio-4 main/index cache and state, plus
+        # one ratio-128 main cache and state. The arithmetic is deliberately
+        # independent of PagedKVCache._dsv4_bytes_for_pages.
+        raw = 4 * 128 * 8 * 2
+        ratio4_main_cache = 32 * 8 * 2
+        ratio4_main_state = (8 * 16 * 4) * 2
+        ratio4_index_cache = 32 * 4 * 2
+        ratio4_index_state = (8 * 8 * 4) * 2
+        ratio128_main_cache = 1 * 8 * 2
+        ratio128_main_state = (128 * 8 * 4) * 2
+        expected = (
+            raw
+            + ratio4_main_cache
+            + ratio4_main_state
+            + ratio4_index_cache
+            + ratio4_index_state
+            + ratio128_main_cache
+            + ratio128_main_state
+        )
+        self.assertEqual(cache._dsv4_bytes_for_pages(8), expected)
+
+    def test_deepseek_v4_rejects_incomplete_or_invalid_metadata(self) -> None:
+        mutations = (
+            ("compress_ratios", [0, 4], r"compress_ratios length"),
+            ("qk_rope_head_dim", 513, r"head_dim must exceed"),
+            ("num_hash_layers", 5, r"num_hash_layers 5 outside"),
+            ("expert_dtype", "bf16", r"requires expert_dtype='fp4'"),
+            ("scoring_func", "sigmoid", r"requires scoring_func='sqrtsoftplus'"),
+            ("n_shared_experts", 2, r"exactly one shared expert"),
+            ("dspark_target_layer_ids", [4], r"out-of-range layer 4"),
+        )
+        for key, value, message in mutations:
+            with self.subTest(key=key, value=value):
+                raw = _deepseek_v4_config()
+                raw[key] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    ModelConfig.from_model_path(_write_config(self, raw))
+
+    def test_deepseek_v4_fp8_dense_dequant_uses_e8m0_blocks(self) -> None:
+        cfg = ModelConfig.from_model_path(
+            _write_config(self, _deepseek_v4_config())
+        )
+        weight = torch.tensor(
+            [[1.0] * 128 + [2.0], [0.5] * 128 + [-1.0]],
+            dtype=torch.float32,
+        ).to(torch.float8_e4m3fn)
+        scale = torch.tensor(
+            [[2.0, 4.0]], dtype=torch.float32
+        ).to(torch.float8_e8m0fnu)
+        tensors = {
+            "layers.0.attn.wq_a.weight": weight,
+            "layers.0.attn.wq_a.scale": scale,
+        }
+        loader = WeightLoader.__new__(WeightLoader)
+        loader.cfg = cfg
+        loader._weight_map = {name: "synthetic" for name in tensors}
+        loader._read_tensor = tensors.__getitem__
+
+        actual = loader._read_and_dequant("layers.0.attn.wq_a.weight")
+        expected = weight.float()
+        expected[:, :128] *= 2.0
+        expected[:, 128:] *= 4.0
+        torch.testing.assert_close(actual.float(), expected, rtol=0, atol=0)
+
+        loader._weight_map.pop("layers.0.attn.wq_a.scale")
+        with self.assertRaisesRegex(KeyError, r"has no block scale"):
+            loader._read_and_dequant("layers.0.attn.wq_a.weight")
+
+    def test_deepseek_v4_checkpoint_inventory_separates_mtp(self) -> None:
+        cfg = ModelConfig.from_model_path(
+            _write_config(self, _deepseek_v4_config())
+        )
+        loader = WeightLoader.__new__(WeightLoader)
+        loader.cfg = cfg
+        loader._weight_map = {
+            **{f"layers.{idx}.attn.weight": "fixture" for idx in range(4)},
+            "embed.weight": "fixture",
+            "norm.weight": "fixture",
+            "head.weight": "fixture",
+            "hc_head_base": "fixture",
+            "hc_head_fn": "fixture",
+            "hc_head_scale": "fixture",
+            "mtp.0.attn.weight": "fixture",
+            "mtp.1.attn.weight": "fixture",
+            "mtp.2.attn.weight": "fixture",
+        }
+        loader._validate_deepseek_v4_checkpoint_inventory()
+
+        loader._weight_map["vision.encoder.weight"] = "fixture"
+        with self.assertRaisesRegex(ValueError, r"unexpected tensor namespace"):
+            loader._validate_deepseek_v4_checkpoint_inventory()
+        del loader._weight_map["vision.encoder.weight"]
+
+        del loader._weight_map["mtp.1.attn.weight"]
+        with self.assertRaisesRegex(ValueError, r"contiguous from zero"):
+            loader._validate_deepseek_v4_checkpoint_inventory()
+
+    def test_deepseek_v4_layer_contract_covers_all_compression_modes(self) -> None:
+        cfg = self._compact_deepseek_v4_config()
+        for layer_idx in (0, 1, 2):
+            with self.subTest(layer_idx=layer_idx):
+                attention, hyper_connection = self._deepseek_v4_layer_tensors(
+                    cfg, layer_idx
+                )
+                native = NativeDeepseekV4Weights(
+                    cfg, layer_idx, attention, hyper_connection
+                )
+                self.assertEqual(native.compress_ratio, cfg.compress_ratios[layer_idx])
+
+    def test_deepseek_v4_layer_extraction_preserves_hash_and_nested_weights(self) -> None:
+        cfg = self._compact_deepseek_v4_config()
+        attention, hyper_connection = self._deepseek_v4_layer_tensors(cfg, 0)
+        hash_table = torch.arange(
+            cfg.vocab_size * cfg.num_experts_per_tok, dtype=torch.int64
+        ).reshape(cfg.vocab_size, cfg.num_experts_per_tok)
+        weights = {
+            "norms": {
+                "input_layernorm": torch.empty(cfg.hidden_size, dtype=torch.bfloat16),
+                "post_attention_layernorm": torch.empty(
+                    cfg.hidden_size, dtype=torch.bfloat16
+                ),
+            },
+            "attention": attention,
+            "hyper_connection": hyper_connection,
+            "gate": {
+                "weight": torch.empty(
+                    cfg.n_routed_experts, cfg.hidden_size, dtype=torch.bfloat16
+                ),
+                "tid2eid": hash_table,
+            },
+            "is_moe": True,
+            "layer_type": "full_attention",
+        }
+        layer = TransformerLayer(cfg, 0, weights, torch.device("cpu"))
+        extracted = KrasisModel._extract_layer_weights(layer, torch.device("cpu"))
+        self.assertIs(extracted["attention"]["wq_a"], attention["wq_a"])
+        self.assertIs(
+            extracted["hyper_connection"]["hc_attn_fn"],
+            hyper_connection["hc_attn_fn"],
+        )
+        self.assertIs(extracted["gate"]["tid2eid"], hash_table)
+
     def test_dsa_topk_candidate_capacity_matches_native_hierarchy(self) -> None:
         self.assertEqual(_dsa_topk_candidate_capacity(1537, 2048), 0)
         self.assertEqual(_dsa_topk_candidate_capacity(2049, 2048), 0)

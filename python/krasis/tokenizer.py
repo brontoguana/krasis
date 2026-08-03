@@ -10,6 +10,35 @@ from transformers import AutoTokenizer, PreTrainedTokenizerFast
 logger = logging.getLogger(__name__)
 
 
+def _checkpoint_model_type(model_path: str) -> Optional[str]:
+    config_path = os.path.join(model_path, "config.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        return None
+    model_type = config.get("model_type")
+    if isinstance(model_type, str):
+        return model_type
+    text_config = config.get("text_config")
+    if isinstance(text_config, dict) and isinstance(text_config.get("model_type"), str):
+        return text_config["model_type"]
+    return None
+
+
+def _bundled_chat_template(model_path: str) -> Optional[str]:
+    """Return an architecture-owned template when the checkpoint ships none."""
+    if _checkpoint_model_type(model_path) != "deepseek_v4":
+        return None
+    template_path = os.path.join(
+        os.path.dirname(__file__), "chat_templates", "deepseek_v4.jinja"
+    )
+    with open(template_path, "r", encoding="utf-8") as f:
+        # The bundled text file has a conventional final newline; it is not part
+        # of DeepSeek's canonical template identity.
+        return f.read().rstrip("\r\n")
+
+
 def _load_hf_tokenizer(model_path: str, cfg: dict, tokenizer_kwargs: dict):
     """Load the tokenizer declared by the checkpoint without changing its backend."""
     tokenizer_class = cfg.get("tokenizer_class")
@@ -54,7 +83,16 @@ def load_hf_tokenizer(model_path: str):
             )
     except FileNotFoundError:
         pass
-    return _load_hf_tokenizer(model_path, cfg, tokenizer_kwargs)
+    tokenizer = _load_hf_tokenizer(model_path, cfg, tokenizer_kwargs)
+    if not getattr(tokenizer, "chat_template", None):
+        template = _bundled_chat_template(model_path)
+        if template is not None:
+            tokenizer.chat_template = template
+            logger.info(
+                "Checkpoint ships no Jinja template; loaded the bundled %s template",
+                _checkpoint_model_type(model_path),
+            )
+    return tokenizer
 
 
 class Tokenizer:

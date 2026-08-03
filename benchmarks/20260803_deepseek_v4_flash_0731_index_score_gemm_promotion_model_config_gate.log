@@ -1,0 +1,9 @@
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+.DeepSeek-V4 checkpoint namespace inventory: 4 layers.* main tensors across 4 layers; 3 mtp.* auxiliary tensors across blocks [0, 1, 2] explicitly skipped; 6 root main tensors; unexpected=0
+................
+----------------------------------------------------------------------
+Ran 17 tests in 0.027s
+
+OK

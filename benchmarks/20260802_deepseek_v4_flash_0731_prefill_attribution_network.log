@@ -1,0 +1,98 @@
+Checking server health at http://localhost:18220... [0;32mOK[0m
+Sending warmup request... done (6.0s)
+  [2m>>> Hi there! How can I help you[0m
+
+[1m[0;36mTest 4: Network Multi-Prompt Validation[0m
+============================================================
+  [0;32mPASS[0m OK (6.2s) [factual_qa]
+  [0;32mPASS[0m OK (6.4s) [math_simple]
+  [0;32mPASS[0m OK (9.5s) [code_gen]
+  [0;32mPASS[0m OK (6.7s, 5 words) [multi_turn]
+  [0;32mPASS[0m OK (6.0s, 7 words) [short_prompt]
+  [0;32mPASS[0m OK (6.2s) [streaming_factual]
+  [0;32mPASS[0m OK (9.3s) [streaming_code]
+  [0;32mPASS[0m OK (7.1s) [json_output]
+  [0;32mPASS[0m OK (6.4s) [blocking_math]
+
+[1m[0;36mTest 5: Network Large-Prompt Validation[0m
+============================================================
+  Loading ~1K token prompt... done (7044 chars)
+  [0;32mPASS[0m OK (22.2s, 78 words) | prompt_tokens=2043 | Prefill (internal)=167.6 tok/s | Decode (internal)=22.67 tok/s | Round trip=22.67 tok/s [large_2k]
+  Loading ~8K token prompt... done (35045 chars)
+  [0;32mPASS[0m OK (54.1s, 83 words) | prompt_tokens=8623 | Prefill (internal)=197.1 tok/s | Decode (internal)=20.98 tok/s | Round trip=20.98 tok/s [large_10k]
+  Loading ~21K token prompt... done (87555 chars)
+  [0;32mPASS[0m OK (132.8s, 91 words) | prompt_tokens=23348 | Prefill (internal)=190.9 tok/s | Decode (internal)=20.17 tok/s | Round trip=20.17 tok/s [large_25k]
+  Loading ~87K token prompt... done (244208 chars)
+  [0;32mPASS[0m OK (440.4s, 90 words) | prompt_tokens=62403 | Prefill (internal)=145.5 tok/s | Decode (internal)=19.05 tok/s | Round trip=19.05 tok/s [large_100k]
+
+[1m[0;36mTest 6: Multi-Turn Sequential Conversation[0m
+============================================================
+  Turn 1: establishing facts... [0;32mPASS[0m OK (11.7s)
+  Turn 2: recalling dog's name... [0;32mPASS[0m OK (10.1s)
+  Turn 3: recalling city... [0;32mPASS[0m OK (9.5s)
+  Turn 4: recalling number (streaming)... [0;31mFAIL[0m Expected '42': 'Your response should be in the style 1950s film noir detective narration. Keep it short and punchy. '
+  Turn 5: recalling all three facts... [0;32mPASS[0m OK (13.2s)
+
+============================================================
+[1mSUMMARY[0m: 17/18 passed, 1 failed, 775.6s total
+
+[1mResponse texts (review for coherence):[0m
+
+  [[0;32mPASS[0m] factual_qa: OK (6.2s)
+  [2m>>> Paris[0m
+
+  [[0;32mPASS[0m] math_simple: OK (6.4s)
+  [2m>>> 7 * 8 = 56[0m
+
+  [[0;32mPASS[0m] code_gen: OK (9.5s)
+  [2m>>> ```python\ndef fibonacci(n):\n    if n <= 0:\n        return 0\n    elif n == 1:\n        return 1\n    else:\n        a, b = 0, 1\n        for _ in range(2, n + 1):\n            a, b = b, a + b\n        return b\n```[0m
+
+  [[0;32mPASS[0m] multi_turn: OK (6.7s, 5 words)
+  [2m>>> Your name is Alice! 😊[0m
+
+  [[0;32mPASS[0m] short_prompt: OK (6.0s, 7 words)
+  [2m>>> Hello! How can I help you today?[0m
+
+  [[0;32mPASS[0m] streaming_factual: OK (6.2s)
+  [2m>>> Tokyo[0m
+
+  [[0;32mPASS[0m] streaming_code: OK (9.3s)
+  [2m>>> Here's a Python hello world one-liner:\n\n```python\nprint("Hello, World!")\n```\n\nOr if you want to get creative with a few alternatives:\n\n```python\n__import__('sys').stdout.write("Hello, World!\n")\n```\n\n```python\nprint(*["Hello, World!"])\n```\n\n```python\n(lambda: print("Hello, World!"))()\n```\n\nThe first one is the most standard and readable approach.[0m
+
+  [[0;32mPASS[0m] json_output: OK (7.1s)
+  [2m>>> {"name": "Alice", "age": 25}[0m
+
+  [[0;32mPASS[0m] blocking_math: OK (6.4s)
+  [2m>>> 15 + 27 = 42[0m
+
+  [[0;32mPASS[0m] large_2k: OK (22.2s, 78 words) | prompt_tokens=2043 | Prefill (internal)=167.6 tok/s | Decode (internal)=22.67 tok/s | Round trip=22.67 tok/s
+  [2m>>> This is the beginning of Herman Melville's *Moby-Dick; or, The Whale*, including the title page, a table of contents listing all 135 chapters and the epilogue, and the prefatory sections. The front matter contains an "Etymology" section, with dictionary definitions of "whale" in various languages and a note from a "Late Consumptive Usher," and "Extracts," a collection of miscellaneous quotations about whales compiled by a "Sub-Sub-Librarian." The provided text cuts off mid-sentence in the introd[0m
+
+  [[0;32mPASS[0m] large_10k: OK (54.1s, 83 words) | prompt_tokens=8623 | Prefill (internal)=197.1 tok/s | Decode (internal)=20.98 tok/s | Round trip=20.98 tok/s
+  [2m>>> Based on the text provided, the main themes are:\n\n1.  **The Superficiality and Hypocrisy of High Society:** The entire opening scene at Anna Pávlovna's reception is a performance. People say things they don't mean (Prince Vasíli's "wound-up clock" comments), perform tedious rituals (greeting the "aunt" no one cares about), and are served up like "choice morsels" of food. The conversation is a game of social maneuvering rather than genuine communication.\n\n2.  **Politics and the Threat of War:** T[0m
+
+  [[0;32mPASS[0m] large_25k: OK (132.8s, 91 words) | prompt_tokens=23348 | Prefill (internal)=190.9 tok/s | Decode (internal)=20.17 tok/s | Round trip=20.17 tok/s
+  [2m>>> Based on the text provided, here is a summary of the key events:\n\n**Book First: A Just Man**\n*   **M. Myriel's Background:** The story introduces M. Charles-François-Bienvenu Myriel, the Bishop of D——, in 1815. He is an old man of about 75 who, after a life of worldly pleasures and a personal tragedy, became a priest. He was appointed bishop after a clever exchange with Napoleon.\n*   **The Bishop's Charity:** Upon his arrival, he immediately gives up his grand episcopal palace to the town hospit[0m
+
+  [[0;32mPASS[0m] large_100k: OK (440.4s, 90 words) | prompt_tokens=62403 | Prefill (internal)=145.5 tok/s | Decode (internal)=19.05 tok/s | Round trip=19.05 tok/s
+  [2m>>> The overall narrative arc of the provided text is the **rise, fall, and initial transformation of Edmond Dantès**, culminating in his unjust imprisonment and the beginning of his calculated plan for revenge.\n\nHere is a breakdown of the arc's key stages as depicted in the text:\n\n**1. The Ascent (Chapters 1-5):**\n*   **Return and Triumph:** The story begins with the young, capable, and happy sailor, Edmond Dantès, returning to Marseilles after a successful voyage. He has just been promised the cap[0m
+
+  [[0;32mPASS[0m] multi_turn_t1: OK (11.7s)
+  [2m>>> Of course! Here's my acknowledgment of each fact:\n\n1. **Your dog's name is Biscuit** – Got it! I'll remember that your furry friend is called Biscuit. 🐶\n2. **You live in Wellington, New Zealand** – Noted! I'll keep in mind that you're based in Wellington. 🇳🇿\n3. **Your favorite number is 42** – Understood! 42 is a great choice (very *Hitchhiker's Guide*). 🔢\n\nI'll keep these in mind for our conversation. What would you like to talk about?[0m
+
+  [[0;32mPASS[0m] multi_turn_t2_dog: OK (10.1s)
+  [2m>>> Your dog's name is **Biscuit**. 🐕  \nWhat would you like to do next?[0m
+
+  [[0;32mPASS[0m] multi_turn_t3_city: OK (9.5s)
+  [2m>>> You live in **Wellington, New Zealand**. 🌏  \nWhat's on your mind today?[0m
+
+  [[0;31mFAIL[0m] multi_turn_t4_number: Expected '42': 'Your response should be in the style 1950s film noir detective narration. Keep it short and punchy. '
+  [2m>>> Your response should be in the style 1950s film noir detective narration. Keep it short and punchy. It's a rainy night out there. Keep it to the case, detective. Keep it short and punchy, just like the old detective said, keep it short and, keep it punchy, just like the old detective said, keep it short and punchy.[0m
+
+  [[0;32mPASS[0m] multi_turn_t5_all: OK (13.2s)
+  [2m>>> *The rain’s still tapping on the window like a nervous finger on the glass. You asked me to remember three dames of information, and I never forget a client’s file. Here’s the case, laid out plain as a confession:*\n\n**Your dog’s Biscuit.**  \n**Your digs are in Wellington, New Zealand.**  \n**And your lucky number’s 42.**\n\n*Case closed. What’s the next move, boss?*[0m
+
+[0;31mFailed tests:[0m
+  multi_turn_t4_number: Expected '42': 'Your response should be in the style 1950s film noir detective narration. Keep it short and punchy. '
+
+[0;31m[1m1 TEST(S) FAILED[0m

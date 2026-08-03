@@ -2300,6 +2300,18 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
         }
     }
 
+    crate::vram_monitor::begin_request_context(&format!(
+        "route=/v1/internal/prefill_logits tokens={} target_logprobs={}",
+        token_ids.len(),
+        target_token_ids.is_some(),
+    ));
+    let _vram_context_guard = {
+        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+        VramRequestContextGuard {
+            safety_margin_mb: store.hcs_safety_margin_mb() as u64,
+        }
+    };
+
     log::info!(
         "prefill_logits: {} tokens, top_k={}, sample_every={}, target_logprobs={}",
         token_ids.len(),
@@ -2310,6 +2322,7 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
 
     // Evict soft HCS before diagnostic prefill so this endpoint uses the same
     // conservative VRAM budget as the production and reference-test paths.
+    crate::vram_monitor::report_event("prefill_logits_evict_start");
     let prefill_entry_floor_bytes =
         match prefill_entry_floor_bytes_for_server(&state.rust_prefill, token_ids.len()) {
             Ok(bytes) => bytes,
@@ -2332,6 +2345,7 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
     let store_for_evict = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
     let (_evicted, _freed_mb) = store_for_evict
         .hcs_evict_for_prefill_with_engine_floor(token_ids.len(), prefill_entry_floor_bytes);
+    crate::vram_monitor::report_event("prefill_logits_evict_end");
 
     // Run prefill logits extraction
     let mut engine_guard = state.rust_prefill.lock().unwrap();
@@ -2355,6 +2369,7 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
     }
 
     let _has_hqq_runtime_slots = {
+        crate::vram_monitor::report_event("prefill_logits_prepare_runtime_start");
         let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
         match prepare_store_for_rust_prefill(store, engine, token_ids.len()) {
             Ok(has_hqq) => has_hqq,
@@ -2368,9 +2383,11 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
             }
         }
     };
+    crate::vram_monitor::report_event("prefill_logits_prepare_runtime_end");
 
     // Dynamically allocate scratch for this prompt
     // run_prefill_logits needs scratch sized for all tokens (no chunking)
+    crate::vram_monitor::report_event("prefill_logits_scratch_alloc_start");
     if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
         let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
         let _ = store.prepare_runtime_for_decode_rust();
@@ -2385,7 +2402,9 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
         );
         return;
     }
+    crate::vram_monitor::report_event("prefill_logits_scratch_alloc_end");
 
+    crate::vram_monitor::report_event("prefill_logits_run_start");
     let positions = match engine.run_prefill_logits(
         &token_ids,
         top_k,
@@ -2414,25 +2433,32 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
             return;
         }
     };
+    crate::vram_monitor::report_event("prefill_logits_run_end");
 
     // Release scratch after logits extraction
+    crate::vram_monitor::report_event("prefill_logits_scratch_release_start");
     if let Err(e) = engine.release_scratch() {
         log::error!("Failed to release scratch after prefill_logits: {}", e);
         abort_if_cuda_context_poisoned("prefill_logits release_scratch", &e);
     }
+    crate::vram_monitor::report_event("prefill_logits_scratch_release_end");
 
     // Restore evicted soft HCS so the next decode/reference request starts
     // from the normal steady-state cache residency.
+    crate::vram_monitor::report_event("prefill_logits_restore_start");
     let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
     let _ = store.prepare_runtime_for_decode_rust();
     let _ = store.hcs_reload_after_prefill(token_ids.len());
     log::info!("prefill_logits: restored decode runtime after diagnostic prefill");
+    crate::vram_monitor::report_event("prefill_logits_restore_end");
 
     // Match the normal reference/inference cleanup path so diagnostic prefill
     // requests do not leak sequence state into the next prompt.
+    crate::vram_monitor::report_event("prefill_logits_cleanup_start");
     Python::with_gil(|py| {
         let _ = state.py_model.call_method0(py, "server_cleanup");
     });
+    crate::vram_monitor::report_event("prefill_logits_cleanup_end");
 
     // Format response: {positions: [{position, target_token_id, target_logprob, top_k: [...]}]}
     let mut pos_json = Vec::new();
@@ -2458,6 +2484,7 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
         ));
     }
     let response = format!(r#"{{"positions":[{}]}}"#, pos_json.join(","));
+    crate::vram_monitor::report_event("prefill_logits_response");
     let _ = send_json(stream, 200, &response);
 }
 
