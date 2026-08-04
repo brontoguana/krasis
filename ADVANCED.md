@@ -62,6 +62,35 @@ DeepSeek-V4-Flash-0731 INT4-expert, BF16-attention/KV config. GPU selection,
 layer partitioning, HCS residency, and VRAM budgets remain runtime-measured;
 the named config does not encode a particular GPU or fixed residency budget.
 
+## Tool Use
+
+The OpenAI-compatible `/v1/chat/completions` endpoint accepts `tools` in both
+streaming and non-streaming requests. Krasis derives the native output grammar
+from the loaded chat template, renders tool definitions and prior tool turns
+with that template, and translates generated calls back to OpenAI structured
+`tool_calls`. Typed arguments, multiple calls in one response, assistant
+`tool_calls` history, and `tool`-role results are supported.
+
+| Model family | Native output grammar | Krasis tool-use status |
+|---|---|---|
+| DeepSeek-V4-Flash | DSML `tool_calls` / typed `invoke` parameters | Supported |
+| Qwen3 base / Qwen3-235B | JSON inside `<tool_call>` | Supported |
+| Qwen3-Coder-Next | Function/parameter XML inside `<tool_call>` | Supported |
+| Qwen3.5 / Qwen3.6 | Function/parameter XML inside `<tool_call>` | Supported |
+| Ornith 35B / 397B | Function/parameter XML inside `<tool_call>` | Supported |
+| Step-3.7-Flash | Function/parameter XML inside `<tool_call>` | Supported |
+| Nemotron-3 Nano / Super | Function/parameter XML inside `<tool_call>` | Supported |
+| GLM-4.7 / GLM-5.2 | Function name plus `arg_key` / `arg_value` XML | Supported; model runtime remains preview |
+| Gemma 4 | Native `call:name{...}` grammar | Supported |
+| MiniMax M2.x | Native `minimax:tool_call` grammar | Supported |
+| DeepSeek-V2 / V2-Lite / VL2 | No tool grammar in the shipped fallback template | Not supported by the current template |
+
+Detection is template-contract based rather than a list of model names. This
+means a checkpoint with an absent or changed grammar fails visibly on a tools
+request instead of being passed through as raw markup or parsed as a different
+family. Malformed or truncated tool blocks remain ordinary assistant text and
+never cause a parser panic.
+
 ## Server Flags
 
 ### Core

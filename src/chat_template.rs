@@ -7,11 +7,53 @@
 
 use serde_json;
 
+/// Native tool-call grammar declared by the loaded chat template.
+///
+/// This is derived from the template contract rather than the model name so a
+/// checkpoint revision cannot silently inherit a parser for a different
+/// grammar. `Unsupported` means the template does not declare an output form
+/// that Krasis can safely translate to OpenAI structured tool calls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolCallFormat {
+    Unsupported,
+    QwenJson,
+    FunctionXml,
+    GlmXml,
+    DeepseekDsml,
+    Gemma,
+    Minimax,
+}
+
+impl ToolCallFormat {
+    pub fn start_marker(self) -> Option<&'static str> {
+        match self {
+            Self::Unsupported => None,
+            Self::QwenJson | Self::FunctionXml | Self::GlmXml => Some("<tool_call>"),
+            Self::DeepseekDsml => Some("<｜DSML｜tool_calls>"),
+            Self::Gemma => Some("<|tool_call>"),
+            Self::Minimax => Some("<minimax:tool_call>"),
+        }
+    }
+
+    /// Complete grammar tokens which may be registered as tokenizer special
+    /// tokens and therefore need selective preservation during tool requests.
+    pub fn preserved_special_tokens(self) -> &'static [&'static str] {
+        match self {
+            Self::Unsupported => &[],
+            Self::QwenJson | Self::FunctionXml | Self::GlmXml => &["<tool_call>", "</tool_call>"],
+            Self::DeepseekDsml => &["<｜DSML｜tool_calls>", "</｜DSML｜tool_calls>"],
+            Self::Gemma => &["<|tool_call>", "<tool_call|>", "<|\"|>"],
+            Self::Minimax => &["<minimax:tool_call>", "</minimax:tool_call>"],
+        }
+    }
+}
+
 /// A Jinja2 chat template engine for HuggingFace models.
 pub struct ChatTemplateEngine {
     template_source: String,
     bos_token: String,
     eos_token: String,
+    tool_call_format: ToolCallFormat,
 }
 
 // DeepSeek-V2/V2-Lite chat format (plain text User:/Assistant:)
@@ -84,18 +126,25 @@ impl ChatTemplateEngine {
         let bos_token = extract_token(&config, "bos_token").unwrap_or_default();
         let eos_token = extract_token(&config, "eos_token").unwrap_or_default();
 
+        let tool_call_format = detect_tool_call_format(&template_source);
         log::info!(
-            "ChatTemplateEngine: loaded template ({} chars), bos={:?}, eos={:?}",
+            "ChatTemplateEngine: loaded template ({} chars), bos={:?}, eos={:?}, tool_call_format={:?}",
             template_source.len(),
             bos_token,
-            eos_token
+            eos_token,
+            tool_call_format,
         );
 
         Ok(ChatTemplateEngine {
             template_source,
             bos_token,
             eos_token,
+            tool_call_format,
         })
+    }
+
+    pub fn tool_call_format(&self) -> ToolCallFormat {
+        self.tool_call_format
     }
 
     /// Apply the chat template to a list of messages.
@@ -399,6 +448,28 @@ impl ChatTemplateEngine {
     }
 }
 
+fn detect_tool_call_format(template: &str) -> ToolCallFormat {
+    if template.contains("｜DSML｜") && template.contains("invoke name=") {
+        ToolCallFormat::DeepseekDsml
+    } else if template.contains("<|tool_call>call:") {
+        ToolCallFormat::Gemma
+    } else if template.contains("<minimax:tool_call>") && template.contains("<invoke name=\"") {
+        ToolCallFormat::Minimax
+    } else if template.contains("<arg_key>") && template.contains("<arg_value>") {
+        ToolCallFormat::GlmXml
+    } else if template.contains("{\"name\": <function-name>")
+        || template.contains("{\\\"name\\\": <function-name>")
+    {
+        ToolCallFormat::QwenJson
+    } else if template.contains("<function=example_function_name>")
+        || (template.contains("<function=") && template.contains("<parameter="))
+    {
+        ToolCallFormat::FunctionXml
+    } else {
+        ToolCallFormat::Unsupported
+    }
+}
+
 fn close_initial_think_block_if_disabled(
     mut rendered: String,
     add_generation_prompt: bool,
@@ -637,7 +708,7 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::ChatTemplateEngine;
+    use super::{detect_tool_call_format, ChatTemplateEngine, ToolCallFormat};
     use std::fs;
 
     fn write_tokenizer_config(template: &str) -> String {
@@ -847,9 +918,42 @@ mod tests {
         assert!(rendered.contains(
             "<｜DSML｜parameter name=\"city\" string=\"true\">London</｜DSML｜parameter>"
         ));
-        assert!(rendered.contains(
-            "<｜DSML｜parameter name=\"days\" string=\"false\">2</｜DSML｜parameter>"
-        ));
+        assert!(rendered
+            .contains("<｜DSML｜parameter name=\"days\" string=\"false\">2</｜DSML｜parameter>"));
         assert!(rendered.contains("<｜end▁of▁sentence｜>"));
+    }
+
+    #[test]
+    fn detects_each_shipped_native_tool_call_grammar_from_template_contract() {
+        let cases = [
+            (
+                r#"<tool_call>{"name": <function-name>, "arguments": {}}</tool_call>"#,
+                ToolCallFormat::QwenJson,
+            ),
+            (
+                "<tool_call><function=example_function_name><parameter=x></parameter></function></tool_call>",
+                ToolCallFormat::FunctionXml,
+            ),
+            (
+                "<tool_call>name<arg_key>key</arg_key><arg_value>value</arg_value></tool_call>",
+                ToolCallFormat::GlmXml,
+            ),
+            (
+                "{% set dsml_token = '｜DSML｜' %}<invoke name=\"tool\">",
+                ToolCallFormat::DeepseekDsml,
+            ),
+            (
+                "<|tool_call>call:name{}<tool_call|>",
+                ToolCallFormat::Gemma,
+            ),
+            (
+                "{% set x = '<minimax:tool_call>' %}<invoke name=\"tool\">",
+                ToolCallFormat::Minimax,
+            ),
+            ("User: {{ message.content }}", ToolCallFormat::Unsupported),
+        ];
+        for (template, expected) in cases {
+            assert_eq!(detect_tool_call_format(template), expected, "{template}");
+        }
     }
 }

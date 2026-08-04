@@ -29337,6 +29337,7 @@ impl GpuDecodeStore {
             top_p,
             &stop_ids,
             &tokenizer,
+            &[],
             presence_penalty,
             0,
             None,
@@ -54808,6 +54809,7 @@ impl GpuDecodeStore {
         top_p: f32,
         stop_ids: &[usize],
         tokenizer: &tokenizers::Tokenizer,
+        preserved_tool_special_tokens: &'static [&'static str],
         presence_penalty: f32,
         logprobs_top_n: usize,
         trace_request_label: Option<String>,
@@ -54953,7 +54955,15 @@ impl GpuDecodeStore {
             }
         }
 
-        let mut detok = crate::server::StreamDetokenizer::new(tokenizer);
+        let mut detok = if !preserved_tool_special_tokens.is_empty() {
+            crate::server::StreamDetokenizer::for_tool_calls(
+                tokenizer,
+                stop_ids,
+                preserved_tool_special_tokens,
+            )
+        } else {
+            crate::server::StreamDetokenizer::new(tokenizer)
+        };
         let mut seen_tokens: std::collections::HashSet<usize> = std::collections::HashSet::new();
         seen_tokens.insert(first_token);
 
@@ -61137,6 +61147,7 @@ impl GpuDecodeStore {
         top_p: f32,
         stop_ids: &[usize],
         tokenizer: &tokenizers::Tokenizer,
+        preserved_tool_special_tokens: &'static [&'static str],
         presence_penalty: f32,
         logprobs_top_n: usize,
         trace_request_label: Option<String>,
@@ -61674,7 +61685,15 @@ impl GpuDecodeStore {
         // Streaming detokenizer: buffers incomplete UTF-8 byte sequences
         // (e.g. emojis split across multiple BPE tokens) and emits only
         // when the decoded text is complete.
-        let mut detok = crate::server::StreamDetokenizer::new(tokenizer);
+        let mut detok = if !preserved_tool_special_tokens.is_empty() {
+            crate::server::StreamDetokenizer::for_tool_calls(
+                tokenizer,
+                stop_ids,
+                preserved_tool_special_tokens,
+            )
+        } else {
+            crate::server::StreamDetokenizer::new(tokenizer)
+        };
 
         // ── Speculative decode state ──
         let use_speculative = self.draft.is_some();

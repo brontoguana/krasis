@@ -49,6 +49,9 @@ If you want to monitor Krasis during runs, [check out ktop](https://github.com/b
   Compact.
 - Provides an interactive launcher, OpenAI-compatible API, chat client,
   reproducible benchmarks, and GitHub-release based installation.
+- Translates each supported model family's native tool-call syntax into
+  OpenAI-compatible structured `tool_calls`, including streaming responses and
+  multi-turn tool results.
 
 ## Major Changes Since The Previous Stable Release
 
@@ -317,6 +320,26 @@ Useful endpoints:
 - `GET /health`
 - `GET /v1/models`
 - `POST /v1/timing`
+
+### Tool Use
+
+Send OpenAI-compatible `tools` with a chat-completions request. Krasis renders
+the tools using the loaded checkpoint's own chat template, then translates the
+model's native output grammar into structured OpenAI `tool_calls`. This works
+for streaming and non-streaming responses, multiple calls in one turn, typed
+arguments, and subsequent `tool`-role results.
+
+Supported template families include DeepSeek-V4 DSML, Qwen JSON, Qwen
+function XML (Qwen3-Coder-Next, Qwen3.5/3.6, Ornith, Step-3.7 and Nemotron),
+GLM argument XML, Gemma 4 and MiniMax. A tools request fails visibly if the
+loaded template does not declare a supported output grammar; Krasis never
+silently treats a valid native tool block as assistant text. Malformed or
+truncated blocks remain visible as text. DeepSeek-V2/V2-Lite and
+DeepSeek-VL2 currently have no tool grammar in their shipped fallback template
+and are therefore not tool-use capable.
+
+See [Advanced Configuration](ADVANCED.md#tool-use) for the per-family support
+table.
 
 ### Benchmarks
 

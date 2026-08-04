@@ -89,7 +89,7 @@
 #     KRASIS_TRACE_PY_COMPARE=1  # one first-step compare via built test endpoint during validate
 #
 # Configs are short names that map to testconfigs/*.conf:
-#   qcn         -> testconfigs/qcn-4-4-a16.conf
+#   qcn         -> tests/qcn-k4v4-hqq4-int4-benchmark.conf
 #   q235        -> testconfigs/q235-4-4-a16.conf
 #   v2lite      -> testconfigs/v2lite-4-4-a16.conf
 #   deepseek-vl -> testconfigs/deepseek-vl2-4-4-a16.conf
@@ -226,7 +226,7 @@ create_run_dir() {
 resolve_config() {
     local name="$1"
     case "$name" in
-        qcn|QCN)            echo "$SCRIPT_DIR/testconfigs/qcn-4-4-a16.conf" ;;
+        qcn|QCN)            echo "$SCRIPT_DIR/tests/qcn-k4v4-hqq4-int4-benchmark.conf" ;;
         q235)               echo "$SCRIPT_DIR/testconfigs/q235-4-4-a16.conf" ;;
         v2lite|V2-Lite)     echo "$SCRIPT_DIR/testconfigs/v2lite-4-4-a16.conf" ;;
         deepseek-vl|vl2)    echo "$SCRIPT_DIR/testconfigs/deepseek-vl2-4-4-a16.conf" ;;

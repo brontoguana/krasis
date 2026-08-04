@@ -17,6 +17,8 @@ use crate::gpu_decode::GpuDecodeStore;
 pub struct StreamDetokenizer<'a> {
     tokenizer: &'a tokenizers::Tokenizer,
     pending: Vec<u32>,
+    hidden_token_ids: std::collections::HashSet<u32>,
+    preserved_special_tokens: std::collections::HashMap<u32, &'static str>,
 }
 
 impl<'a> StreamDetokenizer<'a> {
@@ -24,12 +26,46 @@ impl<'a> StreamDetokenizer<'a> {
         Self {
             tokenizer,
             pending: Vec::new(),
+            hidden_token_ids: std::collections::HashSet::new(),
+            preserved_special_tokens: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Preserve native grammar delimiters that a model registers as special
+    /// tokens, while still suppressing the request's measured stop IDs.
+    pub fn for_tool_calls(
+        tokenizer: &'a tokenizers::Tokenizer,
+        stop_ids: &[usize],
+        grammar_tokens: &'static [&'static str],
+    ) -> Self {
+        let hidden_token_ids: std::collections::HashSet<u32> = stop_ids
+            .iter()
+            .filter_map(|&id| u32::try_from(id).ok())
+            .collect();
+        let preserved_special_tokens = grammar_tokens
+            .iter()
+            .filter_map(|&token| tokenizer.token_to_id(token).map(|id| (id, token)))
+            .filter(|(id, _)| !hidden_token_ids.contains(id))
+            .collect();
+        Self {
+            tokenizer,
+            pending: Vec::new(),
+            hidden_token_ids,
+            preserved_special_tokens,
         }
     }
 
     /// Add a token. Returns the decoded text if the sequence is complete UTF-8,
     /// or an empty string if we're still buffering incomplete bytes.
     pub fn add(&mut self, token_id: u32) -> String {
+        if self.hidden_token_ids.contains(&token_id) {
+            return self.flush();
+        }
+        if let Some(&token) = self.preserved_special_tokens.get(&token_id) {
+            let mut decoded = self.flush();
+            decoded.push_str(token);
+            return decoded;
+        }
         self.pending.push(token_id);
         let decoded = self
             .tokenizer
@@ -58,6 +94,22 @@ impl<'a> StreamDetokenizer<'a> {
             .unwrap_or_default();
         self.pending.clear();
         decoded
+    }
+}
+
+fn decode_token_preserving_tool_specials(
+    tokenizer: &tokenizers::Tokenizer,
+    token_id: u32,
+    grammar_tokens: &'static [&'static str],
+) -> String {
+    if let Some(token) = grammar_tokens
+        .iter()
+        .copied()
+        .find(|token| tokenizer.token_to_id(token) == Some(token_id))
+    {
+        token.to_string()
+    } else {
+        tokenizer.decode(&[token_id], true).unwrap_or_default()
     }
 }
 use pyo3::prelude::*;
@@ -748,100 +800,491 @@ fn format_completion(
 // ── Tool use support ──────────────────────────────────────────────
 
 /// A parsed tool call extracted from model output.
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ParsedToolCall {
     id: String,
     name: String,
     arguments_json: String,
 }
 
-/// Parse tool calls from model-generated text (Qwen XML format).
-/// Returns (content_text, tool_calls).
-/// Content is everything outside `<tool_call>...</tool_call>` blocks.
-fn parse_tool_calls(text: &str) -> (String, Vec<ParsedToolCall>) {
+type RawToolCall = (String, serde_json::Value);
+
+fn new_tool_call_id(call_idx: u64) -> String {
+    format!("call_{:016x}", {
+        let mut s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s ^= call_idx;
+        s
+    })
+}
+
+fn value_from_untyped_tool_text(value: &str) -> serde_json::Value {
+    serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
+}
+
+fn parse_delimited_tool_blocks(
+    text: &str,
+    start_marker: &str,
+    end_marker: &str,
+    parse_block: fn(&str) -> Option<Vec<RawToolCall>>,
+) -> (String, Vec<ParsedToolCall>) {
     let mut tool_calls = Vec::new();
     let mut content = String::new();
     let mut remaining = text;
     let mut call_idx = 0u64;
 
-    while let Some(start) = remaining.find("<tool_call>") {
+    while let Some(start) = remaining.find(start_marker) {
         content.push_str(&remaining[..start]);
-        remaining = &remaining[start + "<tool_call>".len()..];
+        let after_start = &remaining[start + start_marker.len()..];
 
-        if let Some(end) = remaining.find("</tool_call>") {
-            let block = remaining[..end].trim();
-            remaining = &remaining[end + "</tool_call>".len()..];
+        if let Some(end) = after_start.find(end_marker) {
+            let block = &after_start[..end];
+            let raw_end = end + end_marker.len();
+            let raw_block = &remaining[start..start + start_marker.len() + raw_end];
+            remaining = &after_start[raw_end..];
 
-            // Parse <function=name>
-            if let Some(fn_start) = block.find("<function=") {
-                let after = &block[fn_start + "<function=".len()..];
-                if let Some(fn_end) = after.find('>') {
-                    let name = after[..fn_end].to_string();
-                    let inner = &after[fn_end + 1..];
-
-                    // Find </function> boundary
-                    let params_text = if let Some(fe) = inner.find("</function>") {
-                        &inner[..fe]
-                    } else {
-                        inner
-                    };
-
-                    // Parse <parameter=name>value</parameter> pairs
-                    let mut args = serde_json::Map::new();
-                    let mut param_rem = params_text;
-                    while let Some(p_start) = param_rem.find("<parameter=") {
-                        let after_p = &param_rem[p_start + "<parameter=".len()..];
-                        if let Some(p_name_end) = after_p.find('>') {
-                            let param_name = after_p[..p_name_end].to_string();
-                            let value_text = &after_p[p_name_end + 1..];
-                            if let Some(p_end) = value_text.find("</parameter>") {
-                                let value = value_text[..p_end]
-                                    .trim_start_matches('\n')
-                                    .trim_end_matches('\n');
-                                // Try JSON parse (objects, arrays, numbers, bools)
-                                let json_value = serde_json::from_str(value).unwrap_or_else(|_| {
-                                    serde_json::Value::String(value.to_string())
-                                });
-                                args.insert(param_name, json_value);
-                                param_rem = &value_text[p_end + "</parameter>".len()..];
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-
-                    // Generate unique call ID
-                    let id = format!("call_{:016x}", {
-                        let mut s = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos() as u64;
-                        s ^= s << 13;
-                        s ^= s >> 7;
-                        s ^= s << 17;
-                        s ^= call_idx;
-                        s
-                    });
+            if let Some(parsed) = parse_block(block) {
+                for (name, arguments) in parsed {
+                    let id = new_tool_call_id(call_idx);
                     call_idx += 1;
-
                     tool_calls.push(ParsedToolCall {
                         id,
                         name,
-                        arguments_json: serde_json::Value::Object(args).to_string(),
+                        arguments_json: arguments.to_string(),
                     });
                 }
+            } else {
+                // A complete but malformed block remains visible as assistant
+                // text. Never discard model output or fabricate a tool call.
+                content.push_str(raw_block);
             }
         } else {
-            // No closing tag — treat as content
-            content.push_str("<tool_call>");
-            content.push_str(remaining);
+            // A truncated block remains visible as assistant text.
+            content.push_str(&remaining[start..]);
             remaining = "";
         }
     }
 
     content.push_str(remaining);
     (content.trim().to_string(), tool_calls)
+}
+
+fn parse_qwen_json_block(block: &str) -> Option<Vec<RawToolCall>> {
+    let value: serde_json::Value = serde_json::from_str(block.trim()).ok()?;
+    let object = value.as_object()?;
+    let name = object.get("name")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let arguments = match object.get("arguments") {
+        Some(serde_json::Value::String(encoded)) => serde_json::from_str(encoded).ok()?,
+        Some(value) => value.clone(),
+        None => serde_json::json!({}),
+    };
+    if !arguments.is_object() {
+        return None;
+    }
+    Some(vec![(name.to_string(), arguments)])
+}
+
+fn parse_function_xml_block(block: &str) -> Option<Vec<RawToolCall>> {
+    let block = block.trim();
+    let after = block.strip_prefix("<function=")?;
+    let name_end = after.find('>')?;
+    let name = after[..name_end].trim();
+    if name.is_empty() {
+        return None;
+    }
+    let inner = &after[name_end + 1..];
+    let function_end = inner.rfind("</function>")?;
+    if !inner[function_end + "</function>".len()..]
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+    let mut args = serde_json::Map::new();
+    let mut remaining = inner[..function_end].trim();
+    while !remaining.is_empty() {
+        let after_param = remaining.strip_prefix("<parameter=")?;
+        let name_end = after_param.find('>')?;
+        let param_name = after_param[..name_end].trim();
+        if param_name.is_empty() {
+            return None;
+        }
+        let value_text = &after_param[name_end + 1..];
+        let value_end = value_text.find("</parameter>")?;
+        let value = value_text[..value_end]
+            .trim_start_matches(['\n', '\r'])
+            .trim_end_matches(['\n', '\r']);
+        args.insert(param_name.to_string(), value_from_untyped_tool_text(value));
+        remaining = value_text[value_end + "</parameter>".len()..].trim();
+    }
+    Some(vec![(name.to_string(), serde_json::Value::Object(args))])
+}
+
+fn parse_glm_xml_block(block: &str) -> Option<Vec<RawToolCall>> {
+    let block = block.trim();
+    let first_arg = block.find("<arg_key>");
+    let name = block[..first_arg.unwrap_or(block.len())].trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut args = serde_json::Map::new();
+    let mut remaining = &block[first_arg.unwrap_or(block.len())..];
+    while !remaining.trim().is_empty() {
+        remaining = remaining.trim();
+        let after_key = remaining.strip_prefix("<arg_key>")?;
+        let key_end = after_key.find("</arg_key>")?;
+        let key = after_key[..key_end].trim();
+        if key.is_empty() {
+            return None;
+        }
+        let after_key = after_key[key_end + "</arg_key>".len()..].trim_start();
+        let after_value = after_key.strip_prefix("<arg_value>")?;
+        let value_end = after_value.find("</arg_value>")?;
+        let value = after_value[..value_end].trim();
+        args.insert(key.to_string(), value_from_untyped_tool_text(value));
+        remaining = &after_value[value_end + "</arg_value>".len()..];
+    }
+    Some(vec![(name.to_string(), serde_json::Value::Object(args))])
+}
+
+fn xml_attribute<'a>(opening_tag: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!(" {}=\"", name);
+    let start = opening_tag.find(&needle)? + needle.len();
+    let end = opening_tag[start..].find('"')? + start;
+    Some(&opening_tag[start..end])
+}
+
+fn parse_invoke_blocks(
+    block: &str,
+    invoke_start: &str,
+    invoke_end: &str,
+    parameter_start: &str,
+    parameter_end: &str,
+    typed_strings: bool,
+) -> Option<Vec<RawToolCall>> {
+    let mut calls = Vec::new();
+    let mut remaining = block.trim();
+    while !remaining.is_empty() {
+        let after_invoke = remaining.strip_prefix(invoke_start)?;
+        let opening_end = after_invoke.find('>')?;
+        let opening_tag = &remaining[..invoke_start.len() + opening_end + 1];
+        let name = xml_attribute(opening_tag, "name")?.trim();
+        if name.is_empty() {
+            return None;
+        }
+        let invoke_body = &after_invoke[opening_end + 1..];
+        let invoke_end_at = invoke_body.find(invoke_end)?;
+        let mut parameters = invoke_body[..invoke_end_at].trim();
+        let mut args = serde_json::Map::new();
+        while !parameters.is_empty() {
+            let after_parameter = parameters.strip_prefix(parameter_start)?;
+            let parameter_open_end = after_parameter.find('>')?;
+            let opening_tag = &parameters[..parameter_start.len() + parameter_open_end + 1];
+            let parameter_name = xml_attribute(opening_tag, "name")?.trim();
+            if parameter_name.is_empty() {
+                return None;
+            }
+            let value_text = &after_parameter[parameter_open_end + 1..];
+            let value_end = value_text.find(parameter_end)?;
+            let raw_value = &value_text[..value_end];
+            let value = if typed_strings {
+                match xml_attribute(opening_tag, "string")? {
+                    "true" => serde_json::Value::String(raw_value.to_string()),
+                    "false" => serde_json::from_str(raw_value.trim()).ok()?,
+                    _ => return None,
+                }
+            } else {
+                value_from_untyped_tool_text(raw_value.trim())
+            };
+            args.insert(parameter_name.to_string(), value);
+            parameters = value_text[value_end + parameter_end.len()..].trim();
+        }
+        calls.push((name.to_string(), serde_json::Value::Object(args)));
+        remaining = invoke_body[invoke_end_at + invoke_end.len()..].trim();
+    }
+    if calls.is_empty() {
+        None
+    } else {
+        Some(calls)
+    }
+}
+
+fn parse_deepseek_dsml_block(block: &str) -> Option<Vec<RawToolCall>> {
+    parse_invoke_blocks(
+        block,
+        "<｜DSML｜invoke",
+        "</｜DSML｜invoke>",
+        "<｜DSML｜parameter",
+        "</｜DSML｜parameter>",
+        true,
+    )
+    .or_else(|| {
+        // DeepSeek-V4-Flash can abbreviate only the inner closing/parameter
+        // tags even though its template specifies the fully-prefixed DSML
+        // grammar. The canonical outer DSML container and invoke opener still
+        // identify the grammar unambiguously. Accept that observed form while
+        // retaining fail-safe rejection for incomplete or otherwise malformed
+        // blocks.
+        parse_invoke_blocks(
+            block,
+            "<｜DSML｜invoke",
+            "</invoke>",
+            "<parameter",
+            "</parameter>",
+            false,
+        )
+    })
+}
+
+fn parse_minimax_block(block: &str) -> Option<Vec<RawToolCall>> {
+    parse_invoke_blocks(
+        block,
+        "<invoke",
+        "</invoke>",
+        "<parameter",
+        "</parameter>",
+        false,
+    )
+}
+
+struct GemmaValueParser<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
+impl<'a> GemmaValueParser<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, pos: 0 }
+    }
+
+    fn remaining(&self) -> &'a str {
+        &self.input[self.pos..]
+    }
+
+    fn skip_ws(&mut self) {
+        while let Some(ch) = self.remaining().chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            self.pos += ch.len_utf8();
+        }
+    }
+
+    fn consume(&mut self, expected: &str) -> bool {
+        self.skip_ws();
+        if self.remaining().starts_with(expected) {
+            self.pos += expected.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse_string(&mut self) -> Option<serde_json::Value> {
+        const QUOTE: &str = "<|\"|>";
+        if !self.consume(QUOTE) {
+            return None;
+        }
+        let end = self.remaining().find(QUOTE)?;
+        let value = self.remaining()[..end].to_string();
+        self.pos += end + QUOTE.len();
+        Some(serde_json::Value::String(value))
+    }
+
+    fn parse_key(&mut self) -> Option<String> {
+        self.skip_ws();
+        if self.remaining().starts_with("<|\"|>") {
+            return self.parse_string()?.as_str().map(String::from);
+        }
+        let end = self.remaining().find(':')?;
+        let key = self.remaining()[..end].trim();
+        if key.is_empty() || key.contains([',', '{', '}', '[', ']']) {
+            return None;
+        }
+        self.pos += end;
+        Some(key.to_string())
+    }
+
+    fn parse_object(&mut self) -> Option<serde_json::Value> {
+        if !self.consume("{") {
+            return None;
+        }
+        let mut object = serde_json::Map::new();
+        self.skip_ws();
+        if self.consume("}") {
+            return Some(serde_json::Value::Object(object));
+        }
+        loop {
+            let key = self.parse_key()?;
+            if !self.consume(":") {
+                return None;
+            }
+            object.insert(key, self.parse_value()?);
+            if self.consume("}") {
+                break;
+            }
+            if !self.consume(",") {
+                return None;
+            }
+        }
+        Some(serde_json::Value::Object(object))
+    }
+
+    fn parse_array(&mut self) -> Option<serde_json::Value> {
+        if !self.consume("[") {
+            return None;
+        }
+        let mut values = Vec::new();
+        self.skip_ws();
+        if self.consume("]") {
+            return Some(serde_json::Value::Array(values));
+        }
+        loop {
+            values.push(self.parse_value()?);
+            if self.consume("]") {
+                break;
+            }
+            if !self.consume(",") {
+                return None;
+            }
+        }
+        Some(serde_json::Value::Array(values))
+    }
+
+    fn parse_scalar(&mut self) -> Option<serde_json::Value> {
+        self.skip_ws();
+        let end = self
+            .remaining()
+            .find([',', '}', ']'])
+            .unwrap_or(self.remaining().len());
+        let token = self.remaining()[..end].trim();
+        if token.is_empty() {
+            return None;
+        }
+        self.pos += end;
+        serde_json::from_str(token).ok()
+    }
+
+    fn parse_value(&mut self) -> Option<serde_json::Value> {
+        self.skip_ws();
+        if self.remaining().starts_with("<|\"|>") {
+            self.parse_string()
+        } else if self.remaining().starts_with('{') {
+            self.parse_object()
+        } else if self.remaining().starts_with('[') {
+            self.parse_array()
+        } else {
+            self.parse_scalar()
+        }
+    }
+}
+
+fn parse_gemma_block(block: &str) -> Option<Vec<RawToolCall>> {
+    let body = block.trim().strip_prefix("call:")?;
+    let args_start = body.find('{')?;
+    let name = body[..args_start].trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut parser = GemmaValueParser::new(&body[args_start..]);
+    let arguments = parser.parse_object()?;
+    parser.skip_ws();
+    if !parser.remaining().is_empty() {
+        return None;
+    }
+    Some(vec![(name.to_string(), arguments)])
+}
+
+/// Parse the native tool-call grammar selected from the loaded chat template.
+/// Returns (content_text, tool_calls). Malformed or truncated blocks remain in
+/// content rather than being dropped or partially interpreted.
+fn parse_tool_calls(
+    text: &str,
+    format: crate::chat_template::ToolCallFormat,
+) -> (String, Vec<ParsedToolCall>) {
+    use crate::chat_template::ToolCallFormat;
+    match format {
+        ToolCallFormat::Unsupported => (text.to_string(), Vec::new()),
+        ToolCallFormat::QwenJson => {
+            parse_delimited_tool_blocks(text, "<tool_call>", "</tool_call>", parse_qwen_json_block)
+        }
+        ToolCallFormat::FunctionXml => parse_delimited_tool_blocks(
+            text,
+            "<tool_call>",
+            "</tool_call>",
+            parse_function_xml_block,
+        ),
+        ToolCallFormat::GlmXml => {
+            parse_delimited_tool_blocks(text, "<tool_call>", "</tool_call>", parse_glm_xml_block)
+        }
+        ToolCallFormat::DeepseekDsml => parse_delimited_tool_blocks(
+            text,
+            "<｜DSML｜tool_calls>",
+            "</｜DSML｜tool_calls>",
+            parse_deepseek_dsml_block,
+        ),
+        ToolCallFormat::Gemma => {
+            parse_delimited_tool_blocks(text, "<|tool_call>", "<tool_call|>", parse_gemma_block)
+        }
+        ToolCallFormat::Minimax => parse_delimited_tool_blocks(
+            text,
+            "<minimax:tool_call>",
+            "</minimax:tool_call>",
+            parse_minimax_block,
+        ),
+    }
+}
+
+/// Stream ordinary assistant text while retaining the shortest suffix that
+/// could still become a native tool-call marker on the next decoded token.
+/// Once the marker is complete, all remaining text is buffered for structured
+/// parsing. This handles markers split at arbitrary UTF-8 token boundaries.
+fn push_tool_stream_text(
+    marker: &str,
+    pending: &mut String,
+    captured: &mut String,
+    found_marker: &mut bool,
+    text: &str,
+) -> String {
+    if *found_marker {
+        captured.push_str(text);
+        return String::new();
+    }
+
+    pending.push_str(text);
+    if let Some(start) = pending.find(marker) {
+        let visible = pending[..start].to_string();
+        captured.push_str(&pending[start..]);
+        pending.clear();
+        *found_marker = true;
+        return visible;
+    }
+
+    let max_suffix = pending.len().min(marker.len().saturating_sub(1));
+    let mut retained = 0usize;
+    for len in (1..=max_suffix).rev() {
+        let start = pending.len() - len;
+        if pending.is_char_boundary(start)
+            && marker.is_char_boundary(len)
+            && pending[start..] == marker[..len]
+        {
+            retained = len;
+            break;
+        }
+    }
+    let visible_end = pending.len() - retained;
+    let visible = pending[..visible_end].to_string();
+    let suffix = pending[visible_end..].to_string();
+    *pending = suffix;
+    visible
 }
 
 /// Serialize a string as a complete JSON string literal, including quotes.
@@ -1243,6 +1686,15 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         _ => String::new(),
     };
     let has_tools = !tools_json.is_empty();
+    let tool_call_format = state.chat_template.tool_call_format();
+    if has_tools && tool_call_format.start_marker().is_none() {
+        let _ = send_json(
+            stream,
+            400,
+            r#"{"error":"The loaded chat template does not declare a supported native tool-call grammar"}"#,
+        );
+        return;
+    }
 
     // ── Render chat template (reused for both token estimation and Rust prefill) ──
     let rendered_result = if has_images {
@@ -2150,6 +2602,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         created,
         &overhead,
         has_tools,
+        tool_call_format,
         enable_thinking,
         logprobs_top_n,
         chat_debug_payload,
@@ -3607,6 +4060,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
             1.0, // top_p=1.0
             &stop_ids,
             tokenizer,
+            &[],
             0.0, // no presence penalty
             top_logprobs,
             Some("reference_test".to_string()),
@@ -3977,6 +4431,7 @@ fn handle_gpu_decode(
     created: u64,
     overhead: &RequestOverhead,
     has_tools: bool,
+    tool_call_format: crate::chat_template::ToolCallFormat,
     enable_thinking: bool,
     logprobs_top_n: usize,
     chat_debug_payload: Option<serde_json::Value>,
@@ -3993,6 +4448,11 @@ fn handle_gpu_decode(
     } else {
         state.thinking_end_token
     };
+    let preserved_tool_special_tokens = if has_tools {
+        tool_call_format.preserved_special_tokens()
+    } else {
+        &[]
+    };
 
     if is_stream {
         if let Err(e) = begin_sse(stream) {
@@ -4000,9 +4460,11 @@ fn handle_gpu_decode(
             return;
         }
 
-        let first_text = tokenizer
-            .decode(&[first_token as u32], true)
-            .unwrap_or_default();
+        let first_text = decode_token_preserving_tool_specials(
+            tokenizer,
+            first_token as u32,
+            preserved_tool_special_tokens,
+        );
 
         // When thinking is enabled, inject <think> at start of stream.
         // The prompt already includes <think>, but the client needs it in the
@@ -4093,32 +4555,25 @@ fn handle_gpu_decode(
         }
 
         // ── Tool call detection state ──
-        // When tools are present: stream content normally, detect <tool_call>,
-        // buffer everything from that point, then send structured tool_calls
-        // at the end.  Content before tool calls streams with full latency.
-        let mut tc_all_text = String::new();
-        let mut tc_in_tool_call = false;
+        // Stream safe content immediately, retain a possible split marker,
+        // then buffer from the first complete native marker for structured
+        // parsing after generation.
+        let tool_marker = tool_call_format.start_marker().unwrap_or("");
+        let mut tc_pending = String::new();
+        let mut tc_captured = String::new();
         let mut tc_found = false;
         let mut tc_finish = String::new();
 
         if has_tools {
-            tc_all_text.push_str(&first_text);
-            // Send first token if it's safe (doesn't contain tool call marker)
-            if first_text.contains("<tool_call>") {
-                tc_in_tool_call = true;
-                tc_found = true;
-                // Send content before the marker
-                if let Some(idx) = first_text.find("<tool_call>") {
-                    let before = &first_text[..idx];
-                    if !before.is_empty() {
-                        let chunk =
-                            format_sse_token(request_id, model_name, before, None, created, None);
-                        let _ = tx.send(format!("data: {}\n\n", chunk));
-                    }
-                }
-            } else if !first_text.is_empty() {
-                let chunk =
-                    format_sse_token(request_id, model_name, &first_text, None, created, None);
+            let visible = push_tool_stream_text(
+                tool_marker,
+                &mut tc_pending,
+                &mut tc_captured,
+                &mut tc_found,
+                &first_text,
+            );
+            if !visible.is_empty() {
+                let chunk = format_sse_token(request_id, model_name, &visible, None, created, None);
                 let _ = tx.send(format!("data: {}\n\n", chunk));
             }
         }
@@ -4158,40 +4613,27 @@ fn handle_gpu_decode(
             let visible_text = if hide_text { "" } else { text };
 
             if has_tools {
-                tc_all_text.push_str(visible_text);
                 if let Some(fr) = effective_finish {
                     tc_finish = fr.to_string();
                 }
 
-                if tc_in_tool_call {
-                    // Inside a tool call block — buffer silently
-                } else if visible_text.contains("<tool_call>") {
-                    // Entering tool call territory
-                    tc_in_tool_call = true;
-                    tc_found = true;
-                    // Send any content before the marker in this text
-                    if let Some(idx) = visible_text.find("<tool_call>") {
-                        let before = &visible_text[..idx];
-                        if !before.is_empty() {
-                            let chunk = format_sse_token(
-                                request_id, model_name, before, None, created, None,
-                            );
-                            let _ = tx.send(format!("data: {}\n\n", chunk));
-                        }
-                    }
-                } else {
-                    // Normal content — stream it (no finish_reason; handled post-generation)
-                    if !visible_text.is_empty() {
-                        let chunk = format_sse_token(
-                            request_id,
-                            model_name,
-                            visible_text,
-                            None,
-                            created,
-                            token_logprobs,
-                        );
-                        let _ = tx.send(format!("data: {}\n\n", chunk));
-                    }
+                let visible = push_tool_stream_text(
+                    tool_marker,
+                    &mut tc_pending,
+                    &mut tc_captured,
+                    &mut tc_found,
+                    visible_text,
+                );
+                if !visible.is_empty() {
+                    let chunk = format_sse_token(
+                        request_id,
+                        model_name,
+                        &visible,
+                        None,
+                        created,
+                        token_logprobs,
+                    );
+                    let _ = tx.send(format!("data: {}\n\n", chunk));
                 }
 
                 if writer_disconnected.load(Ordering::Acquire) {
@@ -4250,6 +4692,7 @@ fn handle_gpu_decode(
                 top_p,
                 stop_ids,
                 tokenizer,
+                preserved_tool_special_tokens,
                 presence_penalty,
                 logprobs_top_n,
                 Some(format!("chat_{}", request_id)),
@@ -4266,6 +4709,7 @@ fn handle_gpu_decode(
                 top_p,
                 stop_ids,
                 tokenizer,
+                preserved_tool_special_tokens,
                 presence_penalty,
                 logprobs_top_n,
                 Some(format!("chat_{}", request_id)),
@@ -4278,10 +4722,23 @@ fn handle_gpu_decode(
 
         // ── Post-generation: emit tool calls or finish ──
         if has_tools {
-            let (_content, tool_calls) = parse_tool_calls(&tc_all_text);
+            let (unstreamed_content, tool_calls) = if tc_found {
+                parse_tool_calls(&tc_captured, tool_call_format)
+            } else {
+                (tc_pending.clone(), Vec::new())
+            };
+            if !unstreamed_content.is_empty() {
+                let content_chunk = format_sse_token(
+                    request_id,
+                    model_name,
+                    &unstreamed_content,
+                    None,
+                    created,
+                    None,
+                );
+                let _ = tx.send(format!("data: {}\n\n", content_chunk));
+            }
             if !tool_calls.is_empty() {
-                // Content before tool calls was already streamed in the callback.
-                // Now send the structured tool_call chunks.
                 for (i, tc) in tool_calls.iter().enumerate() {
                     let start_chunk = format_sse_tool_call_start(
                         request_id, model_name, i, &tc.id, &tc.name, created,
@@ -4311,7 +4768,6 @@ fn handle_gpu_decode(
                     tool_calls.len()
                 );
             } else {
-                // No tool calls — send finish with original reason
                 let fr = if tc_finish.is_empty() {
                     "stop"
                 } else {
@@ -4377,9 +4833,11 @@ fn handle_gpu_decode(
         if enable_thinking && state.thinking_end_token.is_some() {
             all_text.push_str("<think>");
         }
-        let first_text = tokenizer
-            .decode(&[first_token as u32], true)
-            .unwrap_or_default();
+        let first_text = decode_token_preserving_tool_specials(
+            tokenizer,
+            first_token as u32,
+            preserved_tool_special_tokens,
+        );
         all_text.push_str(&first_text);
         let mut total_tokens = 1usize;
         let mut finish = "length".to_string();
@@ -4466,6 +4924,7 @@ fn handle_gpu_decode(
                     top_p,
                     stop_ids,
                     tokenizer,
+                    preserved_tool_special_tokens,
                     presence_penalty,
                     logprobs_top_n,
                     Some(format!("chat_{}_nosse", request_id)),
@@ -4481,6 +4940,7 @@ fn handle_gpu_decode(
                     top_p,
                     stop_ids,
                     tokenizer,
+                    preserved_tool_special_tokens,
                     presence_penalty,
                     logprobs_top_n,
                     Some(format!("chat_{}_nosse", request_id)),
@@ -4540,7 +5000,7 @@ fn handle_gpu_decode(
         }
 
         if has_tools {
-            let (content, tool_calls) = parse_tool_calls(&all_text);
+            let (content, tool_calls) = parse_tool_calls(&all_text, tool_call_format);
             if !tool_calls.is_empty() {
                 let response = format_completion_with_tool_calls(
                     request_id,
@@ -5486,6 +5946,7 @@ impl RustServer {
                 0.95, // top_p
                 &stop_ids,
                 &tokenizer,
+                &[],
                 0.0, // presence_penalty
                 0,   // logprobs_top_n
                 Some("benchmark".to_string()),
@@ -5507,6 +5968,7 @@ impl RustServer {
                 0.95, // top_p
                 &stop_ids,
                 &tokenizer,
+                &[],
                 0.0, // presence_penalty
                 0,   // logprobs_top_n
                 Some("benchmark".to_string()),
@@ -5644,8 +6106,11 @@ mod tests {
         format_completion_with_tool_calls, format_models_response, format_sse_timing,
         format_sse_token, format_sse_tool_call_args, format_sse_tool_call_start,
         hide_synthetic_think_stop_text, is_chat_completions_endpoint, is_models_endpoint,
-        ParsedToolCall, RequestOverhead,
+        parse_tool_calls, push_tool_stream_text, ParsedToolCall, RequestOverhead,
+        StreamDetokenizer,
     };
+    use crate::chat_template::{ChatTemplateEngine, ToolCallFormat};
+    use std::fs;
 
     const WINDOWS_MODEL_PATH: &str = r#"C:\Users\stoate\.krasis\models\Qwen3.6-35B-A3B"#;
 
@@ -5653,6 +6118,41 @@ mod tests {
         serde_json::from_str(body).unwrap_or_else(|e| {
             panic!("response is not valid JSON: {e}\nbody: {body}");
         })
+    }
+
+    fn parsed_arguments(call: &ParsedToolCall) -> serde_json::Value {
+        serde_json::from_str(&call.arguments_json).unwrap()
+    }
+
+    #[test]
+    fn tool_detokenizer_preserves_grammar_specials_and_hides_stop_ids() {
+        use tokenizers::models::bpe::BPE;
+        use tokenizers::{AddedToken, Tokenizer};
+
+        let mut tokenizer = Tokenizer::new(BPE::default());
+        tokenizer.add_special_tokens(&[
+            AddedToken::from("<|tool_call>", true),
+            AddedToken::from("<|\"|>", true),
+            AddedToken::from("<|channel>", true),
+            AddedToken::from("<eos>", true),
+        ]);
+        let marker = tokenizer.token_to_id("<|tool_call>").unwrap();
+        let quote = tokenizer.token_to_id("<|\"|>").unwrap();
+        let channel = tokenizer.token_to_id("<|channel>").unwrap();
+        let eos = tokenizer.token_to_id("<eos>").unwrap();
+
+        let mut ordinary = StreamDetokenizer::new(&tokenizer);
+        assert_eq!(ordinary.add(marker), "");
+
+        let mut tools = StreamDetokenizer::for_tool_calls(
+            &tokenizer,
+            &[eos as usize],
+            &["<|tool_call>", "<|\"|>"],
+        );
+        assert_eq!(tools.add(marker), "<|tool_call>");
+        assert_eq!(tools.add(quote), "<|\"|>");
+        assert_eq!(tools.add(channel), "");
+        assert_eq!(tools.add(eos), "");
     }
 
     #[test]
@@ -5850,5 +6350,273 @@ mod tests {
             json["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
             tool_calls[0].arguments_json
         );
+    }
+
+    #[test]
+    fn parses_function_xml_with_multiple_calls_and_preserves_content() {
+        let text = concat!(
+            "Before\n<tool_call><function=weather><parameter=city>\nLondon\n</parameter>",
+            "<parameter=days>2</parameter></function></tool_call>",
+            "<tool_call><function=notify></function></tool_call>\nAfter",
+        );
+        let (content, calls) = parse_tool_calls(text, ToolCallFormat::FunctionXml);
+        assert_eq!(content, "Before\n\nAfter");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "weather");
+        assert_eq!(
+            parsed_arguments(&calls[0]),
+            serde_json::json!({"city":"London","days":2})
+        );
+        assert_eq!(calls[1].name, "notify");
+        assert_eq!(parsed_arguments(&calls[1]), serde_json::json!({}));
+    }
+
+    #[test]
+    fn parses_qwen_json_and_glm_xml_grammars() {
+        let qwen =
+            r#"<tool_call>{"name":"search","arguments":{"q":"Krasis","limit":3}}</tool_call>"#;
+        let (_, qwen_calls) = parse_tool_calls(qwen, ToolCallFormat::QwenJson);
+        assert_eq!(qwen_calls.len(), 1);
+        assert_eq!(qwen_calls[0].name, "search");
+        assert_eq!(parsed_arguments(&qwen_calls[0])["limit"], 3);
+
+        let glm = concat!(
+            "<tool_call>weather",
+            "<arg_key>city</arg_key><arg_value>London</arg_value>",
+            "<arg_key>days</arg_key><arg_value>2</arg_value>",
+            "</tool_call>",
+        );
+        let (_, glm_calls) = parse_tool_calls(glm, ToolCallFormat::GlmXml);
+        assert_eq!(glm_calls.len(), 1);
+        assert_eq!(glm_calls[0].name, "weather");
+        assert_eq!(
+            parsed_arguments(&glm_calls[0]),
+            serde_json::json!({"city":"London","days":2})
+        );
+    }
+
+    #[test]
+    fn parses_deepseek_dsml_typed_parameters_and_multiple_invokes() {
+        let text = concat!(
+            "Reasoning complete.\n<｜DSML｜tool_calls>\n",
+            "<｜DSML｜invoke name=\"weather\">",
+            "<｜DSML｜parameter name=\"city\" string=\"true\">London</｜DSML｜parameter>",
+            "<｜DSML｜parameter name=\"days\" string=\"false\">2</｜DSML｜parameter>",
+            "<｜DSML｜parameter name=\"units\" string=\"false\">[\"C\",\"F\"]</｜DSML｜parameter>",
+            "</｜DSML｜invoke>\n",
+            "<｜DSML｜invoke name=\"toggle\">",
+            "<｜DSML｜parameter name=\"enabled\" string=\"false\">true</｜DSML｜parameter>",
+            "</｜DSML｜invoke>\n",
+            "</｜DSML｜tool_calls>\nAfter",
+        );
+        let (content, calls) = parse_tool_calls(text, ToolCallFormat::DeepseekDsml);
+        assert_eq!(content, "Reasoning complete.\n\nAfter");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "weather");
+        assert_eq!(
+            parsed_arguments(&calls[0]),
+            serde_json::json!({"city":"London","days":2,"units":["C","F"]})
+        );
+        assert_eq!(
+            parsed_arguments(&calls[1]),
+            serde_json::json!({"enabled":true})
+        );
+    }
+
+    #[test]
+    fn parses_deepseek_observed_abbreviated_inner_tags() {
+        let text = concat!(
+            "\n\n<｜DSML｜tool_calls>\n",
+            "<｜DSML｜invoke name=\"webfetch\">\n",
+            "<parameter name=\"url\">https://github.com/brontoguana/krasis</parameter>\n",
+            "</invoke>\n",
+            "</｜DSML｜tool_calls>",
+        );
+        let (content, calls) = parse_tool_calls(text, ToolCallFormat::DeepseekDsml);
+        assert!(content.is_empty());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "webfetch");
+        assert_eq!(
+            parsed_arguments(&calls[0]),
+            serde_json::json!({"url":"https://github.com/brontoguana/krasis"})
+        );
+    }
+
+    #[test]
+    fn parses_gemma_and_minimax_native_grammars() {
+        let gemma = concat!(
+            "<|tool_call>call:weather{city:<|\"|>London<|\"|>,days:2,",
+            "options:{units:<|\"|>C<|\"|>,alerts:true},ids:[1,2]}<tool_call|>",
+        );
+        let (_, gemma_calls) = parse_tool_calls(gemma, ToolCallFormat::Gemma);
+        assert_eq!(gemma_calls.len(), 1);
+        assert_eq!(gemma_calls[0].name, "weather");
+        assert_eq!(
+            parsed_arguments(&gemma_calls[0]),
+            serde_json::json!({
+                "city":"London", "days":2,
+                "options":{"units":"C","alerts":true}, "ids":[1,2]
+            })
+        );
+
+        let minimax = concat!(
+            "<minimax:tool_call><invoke name=\"weather\">",
+            "<parameter name=\"city\">London</parameter>",
+            "<parameter name=\"days\">2</parameter>",
+            "</invoke></minimax:tool_call>",
+        );
+        let (_, minimax_calls) = parse_tool_calls(minimax, ToolCallFormat::Minimax);
+        assert_eq!(minimax_calls.len(), 1);
+        assert_eq!(
+            parsed_arguments(&minimax_calls[0]),
+            serde_json::json!({"city":"London","days":2})
+        );
+    }
+
+    #[test]
+    fn malformed_and_truncated_blocks_remain_text() {
+        let malformed = concat!(
+            "x<｜DSML｜tool_calls><｜DSML｜invoke name=\"bad\">",
+            "<｜DSML｜parameter name=\"n\" string=\"false\">not-json</｜DSML｜parameter>",
+            "</｜DSML｜invoke></｜DSML｜tool_calls>y",
+        );
+        let (content, calls) = parse_tool_calls(malformed, ToolCallFormat::DeepseekDsml);
+        assert_eq!(content, malformed);
+        assert!(calls.is_empty());
+
+        let truncated = "x<tool_call><function=weather>";
+        let (content, calls) = parse_tool_calls(truncated, ToolCallFormat::FunctionXml);
+        assert_eq!(content, truncated);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn streaming_detector_handles_utf8_marker_split_at_every_char_boundary() {
+        let marker = "<｜DSML｜tool_calls>";
+        for split in marker.char_indices().map(|(idx, _)| idx).skip(1) {
+            let mut pending = String::new();
+            let mut captured = String::new();
+            let mut found = false;
+            let first = format!("before{}", &marker[..split]);
+            let visible =
+                push_tool_stream_text(marker, &mut pending, &mut captured, &mut found, &first);
+            assert_eq!(visible, "before");
+            assert!(!found);
+            let visible = push_tool_stream_text(
+                marker,
+                &mut pending,
+                &mut captured,
+                &mut found,
+                &format!("{}body", &marker[split..]),
+            );
+            assert!(visible.is_empty());
+            assert!(found);
+            assert_eq!(captured, format!("{}body", marker));
+        }
+    }
+
+    #[test]
+    fn bundled_deepseek_template_round_trips_tool_history_and_result() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "krasis_server_dsml_roundtrip_{}_{}",
+            std::process::id(),
+            nonce
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("config.json"),
+            serde_json::json!({"model_type":"deepseek_v4"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("tokenizer_config.json"),
+            serde_json::json!({
+                "chat_template":null,
+                "bos_token":{"content":"<｜begin▁of▁sentence｜>"},
+                "eos_token":{"content":"<｜end▁of▁sentence｜>"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let engine =
+            ChatTemplateEngine::from_config(dir.join("tokenizer_config.json").to_str().unwrap())
+                .unwrap();
+        assert_eq!(engine.tool_call_format(), ToolCallFormat::DeepseekDsml);
+        let rendered = engine
+            .apply_with_tools(
+                r#"[{"role":"user","content":"Check weather"},{"role":"assistant","content":"","tool_calls":[{"id":"call_weather","type":"function","function":{"name":"weather","arguments":"{\"city\":\"London\",\"days\":2}"}}]},{"role":"tool","tool_call_id":"call_weather","content":"sunny"}]"#,
+                r#"[{"type":"function","function":{"name":"weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"}}}}}]"#,
+                true,
+                false,
+            )
+            .unwrap();
+        assert!(rendered.contains("<tool_result>sunny</tool_result>"));
+        let (_, calls) = parse_tool_calls(&rendered, engine.tool_call_format());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "weather");
+        assert_eq!(
+            parsed_arguments(&calls[0]),
+            serde_json::json!({"city":"London","days":2})
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn template_engine_dispatches_all_supported_tool_grammars() {
+        let cases = [
+            (
+                r#"<tool_call>{"name": <function-name>, "arguments": {}}</tool_call>"#,
+                ToolCallFormat::QwenJson,
+            ),
+            (
+                "<tool_call><function=example_function_name><parameter=x></parameter></function></tool_call>",
+                ToolCallFormat::FunctionXml,
+            ),
+            (
+                "<tool_call>name<arg_key>key</arg_key><arg_value>value</arg_value></tool_call>",
+                ToolCallFormat::GlmXml,
+            ),
+            (
+                "{% set dsml_token = '｜DSML｜' %}<invoke name=\"tool\">",
+                ToolCallFormat::DeepseekDsml,
+            ),
+            (
+                "<|tool_call>call:name{}<tool_call|>",
+                ToolCallFormat::Gemma,
+            ),
+            (
+                "{% set x = '<minimax:tool_call>' %}<invoke name=\"tool\">",
+                ToolCallFormat::Minimax,
+            ),
+            ("User: {{ message.content }}", ToolCallFormat::Unsupported),
+        ];
+        for (idx, (template, expected)) in cases.into_iter().enumerate() {
+            let dir = std::env::temp_dir().join(format!(
+                "krasis_server_tool_dispatch_{}_{}",
+                std::process::id(),
+                idx
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("tokenizer_config.json"),
+                serde_json::json!({
+                    "chat_template":template,
+                    "bos_token":"<s>",
+                    "eos_token":"</s>"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let engine = ChatTemplateEngine::from_config(
+                dir.join("tokenizer_config.json").to_str().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(engine.tool_call_format(), expected, "{template}");
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 }
