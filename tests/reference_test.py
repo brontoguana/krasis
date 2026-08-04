@@ -770,27 +770,8 @@ def compute_first_token_diagnostic(ref_per_token: List[Dict], our_per_token: Lis
     }
 
 
-def judge_prompt(metrics: Dict, prefill_metrics: Dict, has_linear_attention: bool = False) -> str:
-    """Return PASS, WARN, or FAIL for a single prompt.
-
-    Primary metric: prefill top-10 containment (same input, only quant differs).
-    Secondary: first-token match and decode match run.
-    """
-    pc = prefill_metrics.get("prefill_containment")
-    if prefill_metrics.get("prefill_total", 0) > 0 and pc is not None:
-        # FAIL: prefill logits badly off — likely a code bug
-        if pc < 0.60:
-            return "FAIL"
-
-        # WARN: prefill is reasonable but not great
-        if pc < 0.80:
-            return "WARN"
-
-        # PASS: prefill logits match well (quantization noise only)
-        return "PASS"
-
-    # Decode-only fallback for artifacts that do not contain prefill snapshots.
-    # Keep this explicit so we do not silently treat missing reference data as 0%.
+def _judge_decode_sequence(metrics: Dict, has_linear_attention: bool) -> str:
+    """Judge an autoregressive reference sequence using the established gates."""
     if not metrics.get("first_match", False):
         return "FAIL"
 
@@ -808,6 +789,38 @@ def judge_prompt(metrics: Dict, prefill_metrics: Dict, has_linear_attention: boo
     if containment >= 0.75 or match_run >= 5:
         return "WARN"
     return "FAIL"
+
+
+def _worst_verdict(*verdicts: str) -> str:
+    order = {"PASS": 0, "WARN": 1, "FAIL": 2}
+    return max(verdicts, key=order.__getitem__)
+
+
+def judge_prompt(metrics: Dict, prefill_metrics: Dict, has_linear_attention: bool = False) -> str:
+    """Return PASS, WARN, or FAIL for a single prompt.
+
+    Prefill snapshots compare logits on an identical token path. Multi-token
+    artifacts additionally gate the actual autoregressive sequence: one good
+    sampled prefill position must not hide a divergent decode trajectory.
+    """
+    pc = prefill_metrics.get("prefill_containment")
+    if prefill_metrics.get("prefill_total", 0) > 0 and pc is not None:
+        if pc < 0.60:
+            prefill_verdict = "FAIL"
+        elif pc < 0.80:
+            prefill_verdict = "WARN"
+        else:
+            prefill_verdict = "PASS"
+
+        if metrics.get("ref_tokens_count", 0) > 1:
+            decode_verdict = _judge_decode_sequence(metrics, has_linear_attention)
+            return _worst_verdict(prefill_verdict, decode_verdict)
+
+        return prefill_verdict
+
+    # Decode-only fallback for artifacts that do not contain prefill snapshots.
+    # Keep this explicit so we do not silently treat missing reference data as 0%.
+    return _judge_decode_sequence(metrics, has_linear_attention)
 
 
 def judge_overall(prompt_verdicts: List[str]) -> str:

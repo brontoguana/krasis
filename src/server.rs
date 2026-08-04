@@ -932,7 +932,7 @@ fn parse_glm_xml_block(block: &str) -> Option<Vec<RawToolCall>> {
     let block = block.trim();
     let first_arg = block.find("<arg_key>");
     let name = block[..first_arg.unwrap_or(block.len())].trim();
-    if name.is_empty() {
+    if name.is_empty() || name.contains(['<', '>']) {
         return None;
     }
     let mut args = serde_json::Map::new();
@@ -953,6 +953,40 @@ fn parse_glm_xml_block(block: &str) -> Option<Vec<RawToolCall>> {
         remaining = &after_value[value_end + "</arg_value>".len()..];
     }
     Some(vec![(name.to_string(), serde_json::Value::Object(args))])
+}
+
+/// GLM can repeat its exact tool-call container special token once, producing
+/// `<tool_call><tool_call>...body...</tool_call></tool_call>`. Normalize only
+/// that complete, balanced duplicate wrapper. Incomplete or differently
+/// malformed markup remains untouched and visible under the fail-safe parser
+/// contract.
+fn parse_glm_tool_calls(text: &str) -> (String, Vec<ParsedToolCall>) {
+    const START: &str = "<tool_call>";
+    const END: &str = "</tool_call>";
+    const DOUBLE_START: &str = "<tool_call><tool_call>";
+    const DOUBLE_END: &str = "</tool_call></tool_call>";
+
+    if !text.contains(DOUBLE_START) {
+        return parse_delimited_tool_blocks(text, START, END, parse_glm_xml_block);
+    }
+
+    let mut normalized = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(start) = remaining.find(DOUBLE_START) {
+        normalized.push_str(&remaining[..start]);
+        let after_double_start = &remaining[start + DOUBLE_START.len()..];
+        let Some(end) = after_double_start.find(DOUBLE_END) else {
+            normalized.push_str(&remaining[start..]);
+            remaining = "";
+            break;
+        };
+        normalized.push_str(START);
+        normalized.push_str(&after_double_start[..end]);
+        normalized.push_str(END);
+        remaining = &after_double_start[end + DOUBLE_END.len()..];
+    }
+    normalized.push_str(remaining);
+    parse_delimited_tool_blocks(&normalized, START, END, parse_glm_xml_block)
 }
 
 fn xml_attribute<'a>(opening_tag: &'a str, name: &str) -> Option<&'a str> {
@@ -1222,9 +1256,7 @@ fn parse_tool_calls(
             "</tool_call>",
             parse_function_xml_block,
         ),
-        ToolCallFormat::GlmXml => {
-            parse_delimited_tool_blocks(text, "<tool_call>", "</tool_call>", parse_glm_xml_block)
-        }
+        ToolCallFormat::GlmXml => parse_glm_tool_calls(text),
         ToolCallFormat::DeepseekDsml => parse_delimited_tool_blocks(
             text,
             "<｜DSML｜tool_calls>",
@@ -6393,6 +6425,34 @@ mod tests {
             parsed_arguments(&glm_calls[0]),
             serde_json::json!({"city":"London","days":2})
         );
+    }
+
+    #[test]
+    fn parses_balanced_duplicate_glm_container_without_accepting_markup_as_name() {
+        let duplicated = concat!(
+            "Before<tool_call><tool_call>read",
+            "<arg_key>filePath</arg_key>",
+            "<arg_value>/tmp/proof.txt</arg_value>",
+            "</tool_call></tool_call>After",
+        );
+        let (content, calls) = parse_tool_calls(duplicated, ToolCallFormat::GlmXml);
+        assert_eq!(content, "BeforeAfter");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read");
+        assert_eq!(
+            parsed_arguments(&calls[0]),
+            serde_json::json!({"filePath":"/tmp/proof.txt"})
+        );
+
+        let malformed = concat!(
+            "Before<tool_call><tool_call>read",
+            "<arg_key>filePath</arg_key>",
+            "<arg_value>/tmp/proof.txt</arg_value>",
+            "</tool_call>After",
+        );
+        let (content, calls) = parse_tool_calls(malformed, ToolCallFormat::GlmXml);
+        assert!(calls.is_empty());
+        assert_eq!(content, malformed);
     }
 
     #[test]

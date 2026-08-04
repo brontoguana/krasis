@@ -71,25 +71,48 @@ with that template, and translates generated calls back to OpenAI structured
 `tool_calls`. Typed arguments, multiple calls in one response, assistant
 `tool_calls` history, and `tool`-role results are supported.
 
-| Model family | Native output grammar | Krasis tool-use status |
-|---|---|---|
-| DeepSeek-V4-Flash | DSML `tool_calls` / typed `invoke` parameters | Supported |
-| Qwen3 base / Qwen3-235B | JSON inside `<tool_call>` | Supported |
-| Qwen3-Coder-Next | Function/parameter XML inside `<tool_call>` | Supported |
-| Qwen3.5 / Qwen3.6 | Function/parameter XML inside `<tool_call>` | Supported |
-| Ornith 35B / 397B | Function/parameter XML inside `<tool_call>` | Supported |
-| Step-3.7-Flash | Function/parameter XML inside `<tool_call>` | Supported |
-| Nemotron-3 Nano / Super | Function/parameter XML inside `<tool_call>` | Supported |
-| GLM-4.7 / GLM-5.2 | Function name plus `arg_key` / `arg_value` XML | Supported; model runtime remains preview |
-| Gemma 4 | Native `call:name{...}` grammar | Supported |
-| MiniMax M2.x | Native `minimax:tool_call` grammar | Supported |
-| DeepSeek-V2 / V2-Lite / VL2 | No tool grammar in the shipped fallback template | Not supported by the current template |
+| Model family | Native output grammar | Transport/parser | Live client status |
+|---|---|---|---|
+| DeepSeek-V4-Flash | DSML `tool_calls` / typed `invoke` parameters | Supported | Opencode streaming round trip passed |
+| Qwen3 base / Qwen3-235B | JSON inside `<tool_call>` | Supported | Grammar/unit-tested only |
+| Qwen3-Coder-Next | Function/parameter XML inside `<tool_call>` | Supported | Opencode round trip passed in the v1.0.18 verification |
+| Qwen3.5 / Qwen3.6 | Function/parameter XML inside `<tool_call>` | Supported | Grammar/unit-tested only |
+| Ornith 35B / 397B | Function/parameter XML inside `<tool_call>` | Supported | Ornith-397B Opencode streaming and non-streaming round trips passed; 35B not live-tested |
+| Step-3.7-Flash | Function/parameter XML inside `<tool_call>` | Supported | Opencode round trip passed with a concise agent prompt |
+| Nemotron-3 Nano / Super | Function/parameter XML inside `<tool_call>` | Supported | Grammar/unit-tested; Super was live-tested but did not reliably emit a native call and has the quality limitation below; Nano not live-tested |
+| GLM-4.7 / GLM-5.2 | Function name plus `arg_key` / `arg_value` XML | Supported | GLM-4.7 Opencode and direct streaming/non-streaming round trips passed; runtime remains preview. GLM-5.2 not live-tested |
+| Gemma 4 | Native `call:name{...}` grammar | Supported | Opencode and direct non-streaming round trips passed |
+| MiniMax M2.x | Native `minimax:tool_call` grammar | Supported | Grammar/unit-tested only; the local M2.7 checkpoint is incomplete and was not downloaded for this campaign |
+| DeepSeek-V2 / V2-Lite / VL2 | No tool grammar in the shipped fallback template | Not supported | Not supported by the current template |
 
 Detection is template-contract based rather than a list of model names. This
 means a checkpoint with an absent or changed grammar fails visibly on a tools
 request instead of being passed through as raw markup or parsed as a different
 family. Malformed or truncated tool blocks remain ordinary assistant text and
 never cause a parser panic.
+
+Parser support means Krasis can render and transport the grammar; it does not
+certify that every quantized model/runtime combination will reliably choose a
+tool. The live-client column records the stricter end-to-end evidence.
+
+Nemotron-3-Super is a known model-quality limitation in the current production
+INT4/HQQ4 runtime, not a parser failure. After exact byte-for-byte parity with
+the pinned Hugging Face tool prompt was established, the model still refused
+minimal supplied tools or produced repetitive output. On the difficult
+multi-token llama-witness seed it matched 0/50 autoregressive tokens and kept
+the witness token in its top 10 for 4/50 positions, although teacher-forced
+evaluation on the witness path retained 44/50 top-1 and 50/50 top-10. Tool
+transport remains covered by contracts, but Nemotron Super should not be
+treated as reliably tool-capable until its INT4/HQQ4 generation quality is
+fixed and revalidated.
+
+Agent clients can contribute a large system policy and many tool schemas before
+the user's text. Keep the rendered prompt plus requested output within the
+model's published context. In live tests, Opencode's full Build policy and six
+schemas exceeded Gemma 4's validated context and made Step-3.7 repeat prompt
+fragments instead of selecting a tool; both models completed structured tool
+round trips with a concise agent prompt. This is a model/context boundary, not
+a reason to parse unstructured text as a tool call.
 
 ## Server Flags
 

@@ -33,7 +33,7 @@
 #                                     all models with no resume capability.
 #   ./dev launcher-test             Validate launcher config serialization and server startup parsing
 #   ./dev windows-launcher-test     Build and test the native Windows launcher logic
-#   ./dev server-test               Build and test Rust HTTP response/server contracts
+#   ./dev server-test               Test Rust HTTP/template and reference-verdict contracts
 #   ./dev reference-test <config>   Compare against stored non-HF references; HF artifacts require override
 #   ./dev reference-test --compare <model>  Comparison matrix; HF artifacts require override
 #   ./dev reference-inventory       Inventory stored reference artifacts and classify contract state
@@ -88,15 +88,10 @@
 #     KRASIS_TRACE_DUMP_DIR=/tmp/krasis-trace
 #     KRASIS_TRACE_PY_COMPARE=1  # one first-step compare via built test endpoint during validate
 #
-# Configs are short names that map to testconfigs/*.conf:
+# Configs are short names that map to validated configs:
 #   qcn         -> tests/qcn-k4v4-hqq4-int4-benchmark.conf
-#   q235        -> testconfigs/q235-4-4-a16.conf
-#   v2lite      -> testconfigs/v2lite-4-4-a16.conf
-#   deepseek-vl -> testconfigs/deepseek-vl2-4-4-a16.conf
 #   dsv4        -> testconfigs/deepseek-v4-flash-0731-4-4-a16.conf
-#   qwen35      -> testconfigs/qwen35-4-4-a16.conf
 #   gemma       -> tests/gemma-4-4-a16.conf
-#   minimax     -> tests/minimax-m2-4-4-a16.conf
 #
 set -euo pipefail
 
@@ -227,14 +222,9 @@ resolve_config() {
     local name="$1"
     case "$name" in
         qcn|QCN)            echo "$SCRIPT_DIR/tests/qcn-k4v4-hqq4-int4-benchmark.conf" ;;
-        q235)               echo "$SCRIPT_DIR/testconfigs/q235-4-4-a16.conf" ;;
-        v2lite|V2-Lite)     echo "$SCRIPT_DIR/testconfigs/v2lite-4-4-a16.conf" ;;
-        deepseek-vl|vl2)    echo "$SCRIPT_DIR/testconfigs/deepseek-vl2-4-4-a16.conf" ;;
         dsv4|deepseek-v4|deepseek-v4-flash|dsv4-0731|deepseek-v4-0731|deepseek-v4-flash-0731)
                             echo "$SCRIPT_DIR/testconfigs/deepseek-v4-flash-0731-4-4-a16.conf" ;;
-        qwen35|Qwen3.5)     echo "$SCRIPT_DIR/testconfigs/qwen35-4-4-a16.conf" ;;
         gemma|Gemma)        echo "$SCRIPT_DIR/tests/gemma-4-4-a16.conf" ;;
-        minimax|MiniMax)    echo "$SCRIPT_DIR/tests/minimax-m2-4-4-a16.conf" ;;
         *)
             # Try as a direct path
             if [[ -f "$name" ]]; then
@@ -245,7 +235,7 @@ resolve_config() {
                 echo "$SCRIPT_DIR/tests/$name"
             else
                 err "Unknown config: $name
-  Available: qcn, q235, v2lite, deepseek-vl, dsv4, qwen35, gemma, minimax
+  Available: qcn, dsv4, gemma
   Or pass a path to a .conf file."
             fi
             ;;
@@ -255,9 +245,7 @@ resolve_config() {
 resolve_model_name() {
     case "$1" in
         qcn|QCN|qwen3-coder-next|Qwen3-Coder-Next) echo "Qwen3-Coder-Next" ;;
-        qwen35|QWEN35|q35b|Q35B|Qwen3.5-35B-A3B) echo "Qwen3.5-35B-A3B" ;;
         q122b|Q122B|Qwen3.5-122B-A10B) echo "Qwen3.5-122B-A10B" ;;
-        q235|Q235|Qwen3-235B-A22B) echo "Qwen3-235B-A22B" ;;
         dsv4|deepseek-v4|deepseek-v4-flash|dsv4-0731|deepseek-v4-0731|deepseek-v4-flash-0731) echo "DeepSeek-V4-Flash-0731" ;;
         *) echo "$1" ;;
     esac
@@ -1619,6 +1607,8 @@ do_test_kernels() {
             filter="deepseek_v4_"
         elif [[ "$1" == "deepseek_v4_grouped_wo_a" ]]; then
             filter="gpu_decode::dsa_registration_tests::deepseek_v4_grouped_wo_a_batched_gemv_matches_individual_within_one_bf16_ulp"
+        elif [[ "$1" == "split_dense_scratch" ]]; then
+            filter="chunk_plan_tests::shared_intermediate_scratch"
         elif [[ "$1" == "context_window" ]]; then
             filter="server::tests::context_window_accounts_for_prompt_and_requested_output"
         elif [[ "$1" == "cpu_tail" ]]; then
@@ -1812,7 +1802,7 @@ do_reference_test() {
         shift
         [[ $# -lt 1 ]] && err "Usage: ./dev reference-test --compare <model>
   Available models: qcn, q35b, q122b
-  Single-config aliases: gemma, minimax"
+  Single-config aliases: gemma"
         local model="$1"
         shift
         cleanup_gpu
@@ -3600,7 +3590,7 @@ do_windows_launcher_test() {
 }
 
 do_server_test() {
-    info "Building and testing Rust HTTP response/server contracts"
+    info "Building and testing Rust HTTP response/server and reference verdict contracts"
     local pyver
     pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
     local pylibdir
@@ -3608,11 +3598,18 @@ do_server_test() {
     (
         cd "$SCRIPT_DIR"
         PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/server.rs
+        PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/chat_template.rs
         PYO3_PYTHON="$PYTHON" \
         LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
-        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
             cargo test --release --lib server::tests "$@"
+        PYO3_PYTHON="$PYTHON" \
+        LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
+            PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo test --release --lib chat_template::tests "$@"
+        KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_reference_judgement
     )
 }
 
@@ -3729,7 +3726,7 @@ case "$cmd" in
         echo "  reference-test --compare <model>  Comparison matrix; HF artifacts require override"
         echo "  launcher-test                  Validate launcher config serialization and server startup parsing"
         echo "  windows-launcher-test          Build and test native Windows launcher logic"
-        echo "  server-test                    Build and test Rust HTTP response/server contracts"
+        echo "  server-test                    Test Rust HTTP/template and reference-verdict contracts"
         echo "  reference-inventory            Inventory stored reference artifacts"
         echo "  witness-inputs <model>         Build stored input_token_ids from fixed prompt-source JSON"
         echo "  witness-model-check <model>    Check expected BF16 GGUF witness model readiness"
@@ -3871,7 +3868,7 @@ case "$cmd" in
         echo "    KRASIS_TRACE=1 KRASIS_TRACE_COMPONENTS=config_contract ./dev reference-inventory"
         echo "    ./dev trace-diff /tmp/expected.log /tmp/actual.log --components config_contract --contexts reference_test_single --phases artifact,validation"
         echo ""
-        echo "Configs: qcn, q235, v2lite, deepseek-vl, dsv4, qwen35, gemma, minimax"
+        echo "Configs: qcn, dsv4, gemma"
         echo "         (or path to .conf file)"
         echo "Standard speed benchmark config: tests/qcn-k4v4-hqq8-int4-benchmark.conf"
         echo ""

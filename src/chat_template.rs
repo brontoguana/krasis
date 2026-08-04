@@ -5,6 +5,7 @@
 //! request path (tokenize → prefill → decode → detokenize) can happen
 //! without Python in the per-request hot path except for prefill.
 
+use minijinja::value::{Kwargs, ValueKind};
 use serde_json;
 
 /// Native tool-call grammar declared by the loaded chat template.
@@ -251,34 +252,30 @@ impl ChatTemplateEngine {
 
         let mut env = minijinja::Environment::new();
 
-        // Add tojson filter (used by Qwen templates to serialize tool parameters)
-        env.add_filter("tojson", |value: minijinja::Value| -> String {
-            // Convert minijinja Value to serde_json Value for proper JSON serialization
-            let json_val = minijinja_value_to_json(&value);
-            serde_json::to_string(&json_val).unwrap_or_else(|_| value.to_string())
-        });
+        // Hugging Face compiles every chat template with these two Jinja
+        // whitespace options. Matching them globally is part of the template
+        // contract: otherwise indented control blocks add prompt tokens that
+        // are absent from tokenizer.apply_chat_template().
+        env.set_trim_blocks(true);
+        env.set_lstrip_blocks(true);
 
-        // DeepSeek-V4 accepts OpenAI tool-call arguments as either an object or
-        // a JSON string. Keep malformed JSON visible instead of silently
-        // rendering an invalid tool invocation.
-        env.add_filter(
-            "from_json",
-            |value: minijinja::Value| -> Result<minijinja::Value, minijinja::Error> {
-                let input = value.as_str().ok_or_else(|| {
-                    minijinja::Error::new(
-                        minijinja::ErrorKind::InvalidOperation,
-                        "from_json requires a string",
-                    )
-                })?;
-                let parsed: serde_json::Value = serde_json::from_str(input).map_err(|error| {
-                    minijinja::Error::new(
-                        minijinja::ErrorKind::InvalidOperation,
-                        format!("from_json received invalid JSON: {}", error),
-                    )
-                })?;
-                Ok(minijinja::Value::from_serialize(parsed))
-            },
-        );
+        // MiniJinja renders booleans and None with Rust spellings, while HF's
+        // Jinja environment uses Python spellings. Some shipped templates use
+        // `|string` while serializing tool schemas, so provide Python/Jinja
+        // semantics for the complete JSON-shaped value domain.
+        env.add_filter("string", python_string_filter);
+
+        // Add tojson filter (used by Qwen templates to serialize tool parameters)
+        env.add_filter("tojson", to_json_filter);
+
+        // Shipped templates accept OpenAI tool-call arguments as either an
+        // object or a JSON string. Keep malformed JSON visible instead of
+        // silently rendering an invalid tool invocation.
+        env.add_filter("from_json", from_json_filter);
+        // Some pinned Hugging Face templates use the spelling without an
+        // underscore. Both names are explicit template contracts, not a
+        // fallback from one rendering path to another.
+        env.add_filter("fromjson", from_json_filter);
 
         // Add raise_exception function (used by some templates)
         env.add_function("raise_exception", raise_exception);
@@ -634,6 +631,192 @@ fn raise_exception(msg: String) -> Result<String, minijinja::Error> {
     ))
 }
 
+/// Hugging Face templates pass Jinja2's `ensure_ascii` keyword to `tojson`.
+/// MiniJinja's built-in filter does not accept that keyword, so keep Krasis's
+/// serde conversion while implementing the declared call signature.
+fn to_json_filter(
+    value: minijinja::Value,
+    positional_indent: Option<minijinja::Value>,
+    kwargs: Kwargs,
+) -> Result<String, minijinja::Error> {
+    let ensure_ascii = kwargs.get::<Option<bool>>("ensure_ascii")?.unwrap_or(false);
+    let keyword_indent = kwargs.get::<Option<minijinja::Value>>("indent")?;
+    kwargs.assert_all_used()?;
+
+    if positional_indent.is_some() && keyword_indent.is_some() {
+        return Err(minijinja::Error::new(
+            minijinja::ErrorKind::TooManyArguments,
+            "tojson indent was supplied both positionally and by keyword",
+        ));
+    }
+
+    let indent = positional_indent.or(keyword_indent);
+    let json_value = minijinja_value_to_json(&value);
+    let mut rendered = match indent {
+        None => serde_json::to_string(&json_value),
+        Some(indent) => {
+            let width = if let Ok(enabled) = bool::try_from(indent.clone()) {
+                if enabled {
+                    2
+                } else {
+                    0
+                }
+            } else {
+                usize::try_from(indent).map_err(|_| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "tojson indent must be a boolean or non-negative integer",
+                    )
+                })?
+            };
+            if width == 0 {
+                serde_json::to_string(&json_value)
+            } else {
+                let mut output = Vec::new();
+                let indentation = " ".repeat(width);
+                let formatter =
+                    serde_json::ser::PrettyFormatter::with_indent(indentation.as_bytes());
+                let mut serializer = serde_json::Serializer::with_formatter(&mut output, formatter);
+                serde::Serialize::serialize(&json_value, &mut serializer)
+                    .map(|_| String::from_utf8(output).expect("JSON serializer emits UTF-8"))
+            }
+        }
+    }
+    .map_err(|error| {
+        minijinja::Error::new(
+            minijinja::ErrorKind::InvalidOperation,
+            format!("cannot serialize to JSON: {}", error),
+        )
+    })?;
+
+    if ensure_ascii {
+        let mut ascii = String::with_capacity(rendered.len());
+        use std::fmt::Write as _;
+        for character in rendered.chars() {
+            if character.is_ascii() {
+                ascii.push(character);
+            } else {
+                let mut encoded = [0u16; 2];
+                for unit in character.encode_utf16(&mut encoded) {
+                    write!(&mut ascii, "\\u{unit:04x}").expect("writing to String cannot fail");
+                }
+            }
+        }
+        rendered = ascii;
+    }
+
+    Ok(rendered)
+}
+
+fn from_json_filter(value: minijinja::Value) -> Result<minijinja::Value, minijinja::Error> {
+    let input = value.as_str().ok_or_else(|| {
+        minijinja::Error::new(
+            minijinja::ErrorKind::InvalidOperation,
+            "JSON parser filter requires a string",
+        )
+    })?;
+    let parsed: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+        minijinja::Error::new(
+            minijinja::ErrorKind::InvalidOperation,
+            format!("JSON parser filter received invalid JSON: {}", error),
+        )
+    })?;
+    Ok(minijinja::Value::from_serialize(parsed))
+}
+
+/// Match Python/Jinja's `string` filter for JSON-shaped template values.
+fn python_string_filter(value: minijinja::Value) -> Result<minijinja::Value, minijinja::Error> {
+    if value.is_undefined() {
+        return Err(minijinja::Error::new(
+            minijinja::ErrorKind::UndefinedError,
+            "cannot convert an undefined value to a string",
+        ));
+    }
+    if value.kind() == ValueKind::String {
+        return Ok(value);
+    }
+    Ok(minijinja::Value::from(python_value_repr(&value, false)))
+}
+
+fn python_value_repr(value: &minijinja::Value, nested: bool) -> String {
+    match value.kind() {
+        ValueKind::None => "None".to_string(),
+        ValueKind::Bool => {
+            if value.is_true() {
+                "True".to_string()
+            } else {
+                "False".to_string()
+            }
+        }
+        ValueKind::String => {
+            let text = value.as_str().unwrap_or_default();
+            if nested {
+                python_quote_string(text)
+            } else {
+                text.to_string()
+            }
+        }
+        ValueKind::Seq => {
+            let items = value
+                .try_iter()
+                .map(|iter| {
+                    iter.map(|item| python_value_repr(&item, true))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            format!("[{}]", items.join(", "))
+        }
+        ValueKind::Map => {
+            let mut items = Vec::new();
+            if let Ok(keys) = value.try_iter() {
+                for key in keys {
+                    if let Ok(item) = value.get_item(&key) {
+                        items.push(format!(
+                            "{}: {}",
+                            python_value_repr(&key, true),
+                            python_value_repr(&item, true)
+                        ));
+                    }
+                }
+            }
+            format!("{{{}}}", items.join(", "))
+        }
+        _ => value.to_string(),
+    }
+}
+
+fn python_quote_string(value: &str) -> String {
+    let quote = if value.contains('\'') && !value.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut output = String::with_capacity(value.len() + 2);
+    output.push(quote);
+    for character in value.chars() {
+        match character {
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\x08' => output.push_str("\\b"),
+            '\x0c' => output.push_str("\\f"),
+            character if character == quote => {
+                output.push('\\');
+                output.push(character);
+            }
+            character if character.is_control() => {
+                use std::fmt::Write as _;
+                write!(&mut output, "\\u{:04x}", character as u32)
+                    .expect("writing to String cannot fail");
+            }
+            character => output.push(character),
+        }
+    }
+    output.push(quote);
+    output
+}
+
 /// strftime_now function for Jinja2 templates (returns current date/time).
 fn strftime_now(fmt: String) -> String {
     // Simple implementation covering common format strings
@@ -754,6 +937,41 @@ mod tests {
     }
 
     #[test]
+    fn matches_hugging_face_jinja_whitespace_options() {
+        let config = write_tokenizer_config(
+            "start\n  {% if messages %}\n    {{ messages[0].content }}\n  {% endif %}\nend",
+        );
+        let engine = ChatTemplateEngine::from_config(&config).unwrap();
+        let rendered = engine
+            .apply(r#"[{"role":"user","content":"value"}]"#, false, false)
+            .unwrap();
+        assert_eq!(rendered, "start\n    value\nend");
+    }
+
+    #[test]
+    fn string_filter_matches_python_for_json_shaped_values() {
+        let config = write_tokenizer_config(
+            "{{ values.false|string }}|{{ values.true|string }}|{{ values.none|string }}|{{ values.number|string }}|{{ values.text|string }}|{{ values.sequence|string }}|{{ values.mapping|string }}",
+        );
+        let engine = ChatTemplateEngine::from_config(&config).unwrap();
+        let rendered = engine
+            .apply(r#"[{"role":"user","content":"unused"}]"#, false, false)
+            .unwrap_err();
+        assert!(rendered.contains("undefined"));
+
+        let config = write_tokenizer_config(
+            "{{ tools[0].function.parameters.properties.false.default|string }}|{{ tools[0].function.parameters.properties.true.default|string }}|{{ tools[0].function.parameters.properties.none.default|string }}|{{ tools[0].function.parameters.properties.number.default|string }}|{{ tools[0].function.parameters.properties.text.default|string }}|{{ tools[0].function.parameters.properties.sequence.default|string }}|{{ tools[0].function.parameters.properties.mapping.default|string }}",
+        );
+        let engine = ChatTemplateEngine::from_config(&config).unwrap();
+        let tools = r#"[{"type":"function","function":{"name":"probe","parameters":{"properties":{"false":{"default":false},"true":{"default":true},"none":{"default":null},"number":{"default":3.0},"text":{"default":"hello"},"sequence":{"default":[1,false]},"mapping":{"default":{"a":false,"b":null}}}}}}]"#;
+        let rendered = engine.apply_with_tools("[]", tools, false, false).unwrap();
+        assert_eq!(
+            rendered,
+            "False|True|None|3.0|hello|[1, False]|{'a': False, 'b': None}"
+        );
+    }
+
+    #[test]
     fn enable_thinking_is_still_passed() {
         let template = concat!(
             "{% if add_generation_prompt %}",
@@ -849,6 +1067,28 @@ mod tests {
         let messages = r#"[{"role":"assistant","content":"x","reasoning_content":"thinking"}]"#;
         let rendered = engine.apply(messages, false, false).unwrap();
         assert_eq!(rendered, "thinking");
+    }
+
+    #[test]
+    fn hf_tojson_keywords_and_fromjson_alias_render_tool_templates() {
+        let template = concat!(
+            "{% for tool in tools %}{{ tool | tojson(ensure_ascii=False) }}{% endfor %}",
+            "{{ '{\"city\":\"München\",\"days\":2}' | fromjson | tojson(ensure_ascii=False) }}",
+            "{{ tools[0] | tojson(ensure_ascii=True) }}",
+        );
+        let config_path = write_tokenizer_config(template);
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        let rendered = engine
+            .apply_with_tools(
+                r#"[{"role":"user","content":"weather"}]"#,
+                r#"[{"type":"function","function":{"name":"weather","description":"München weather","parameters":{"type":"object"}}}]"#,
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(rendered.contains("München weather"));
+        assert!(rendered.contains(r#"{"city":"München","days":2}"#));
+        assert!(rendered.contains(r#"M\u00fcnchen weather"#));
     }
 
     #[test]

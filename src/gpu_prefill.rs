@@ -7960,7 +7960,9 @@ pub struct PrefillScratch {
     pub d_moe_gathered: GpuBuf<u16>, // [fused_sorted_count, hidden] BF16 -- fused_input or gathered
     pub d_moe_expert_out: GpuBuf<u16>, // [fused_sorted_count, hidden] BF16 -- fused_output or expert_out
     pub d_moe_gate_up: GpuBuf<u16>, // [fused_sorted_count, w1_n] BF16 -- fused_inter_cache or gate_up
-    pub d_moe_inter: GpuBuf<u16>,   // [fused_sorted_count, inter] BF16 -- fused_inter2 or inter
+    /// BF16 activation scratch shared by routed-MoE sorted rows and
+    /// split-dense prompt rows; allocated to the larger runtime geometry.
+    pub d_moe_inter: GpuBuf<u16>,
     pub d_gather_src_map: GpuBuf<i32>, // [fused_sorted_count] -- sorted_token_ids or gather_src_map
     pub d_gather_weight_map: GpuBuf<f32>, // [max_tokens * topk]
     // Fused MoE sorted dispatch buffers (in scratch so both paths share VRAM)
@@ -49580,6 +49582,30 @@ impl PrefillEngine {
         let gate_buf = *self.scratch.d_scratch1.device_ptr();
         let up_buf = *self.scratch.d_scratch2.device_ptr();
         let act_buf = *self.scratch.d_moe_inter.device_ptr();
+        let dense_elements = m.checked_mul(inter).ok_or_else(|| {
+            format!(
+                "Dense layer {} activation element count overflow: tokens={} intermediate={}",
+                layer_idx, m, inter
+            )
+        })?;
+        if self.scratch.d_scratch1.len < dense_elements {
+            return Err(format!(
+                "Dense layer {} gate output requires {} BF16 elements, scratch1 capacity is {}",
+                layer_idx, dense_elements, self.scratch.d_scratch1.len
+            ));
+        }
+        if self.scratch.d_scratch2.len < dense_elements {
+            return Err(format!(
+                "Dense layer {} up output requires {} BF16 elements, scratch2 capacity is {}",
+                layer_idx, dense_elements, self.scratch.d_scratch2.len
+            ));
+        }
+        if self.scratch.d_moe_inter.len < dense_elements {
+            return Err(format!(
+                "Dense layer {} activation requires {} BF16 elements, shared activation capacity is {}",
+                layer_idx, dense_elements, self.scratch.d_moe_inter.len
+            ));
+        }
 
         self.prefill_weight_gemm(
             "dense_gate",
@@ -66192,6 +66218,22 @@ fn build_prefill_chunk_plan(total_tokens: usize, max_chunk_tokens: usize) -> Vec
     plan
 }
 
+/// `d_moe_inter` is shared by two mutually exclusive operations:
+/// routed-MoE activation over the padded/sorted token rows, and split-dense
+/// activation over the original prompt rows. Size it for whichever runtime
+/// geometry is larger. This must stay in lockstep with allocation and both
+/// VRAM estimators.
+fn shared_moe_inter_scratch_elements(
+    max_tokens: usize,
+    dense_intermediate_size: usize,
+    fused_sorted_count: usize,
+    moe_intermediate_size: usize,
+) -> usize {
+    max_tokens
+        .saturating_mul(dense_intermediate_size)
+        .max(fused_sorted_count.saturating_mul(moe_intermediate_size))
+}
+
 pub fn hqq_prefill_materialize_bf16_enabled() -> bool {
     std::env::var("KRASIS_HQQ_PREFILL_MATERIALIZE_BF16")
         .map(|value| {
@@ -66517,8 +66559,11 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     per_token += topk * h * 2;
     // d_moe_gate_up: fused_sorted_count * w1_n * 2 (fused_inter_cache or gate_up)
     per_token += topk * w1_n * 2;
-    // d_moe_inter: fused_sorted_count * moe_inter * 2 (fused_inter2 or inter)
-    per_token += topk * moe_inter * 2;
+    // d_moe_inter is shared by routed-MoE and split-dense activations. The
+    // linear budget uses the larger per-token slope; routed block padding is
+    // retained in fixed costs below, making this a safe envelope. The exact
+    // prompt estimator accounts for the piecewise maximum without overcounting.
+    per_token += (topk.saturating_mul(moe_inter)).max(inter) * 2;
     // d_gather_src_map: fused_sorted_count * 4 (sorted_token_ids or gather_src_map)
     per_token += topk * 4;
     // d_gather_weight_map: max_tokens * topk * 4 (sequential only, small)
@@ -66843,7 +66888,10 @@ fn estimate_scratch_vram_for_prompt(
     add(fsc.saturating_mul(h), 2); // moe_gathered
     add(fsc.saturating_mul(h), 2); // moe_expert_out
     add(fsc.saturating_mul(w1_n), 2); // moe_gate_up
-    add(fsc.saturating_mul(moe_inter), 2); // moe_inter
+    add(
+        shared_moe_inter_scratch_elements(max_tokens, inter, fsc, moe_inter),
+        2,
+    ); // shared routed-MoE / split-dense activation scratch
     add(fsc, 4); // gather_src_map
     add(max_tokens.saturating_mul(topk), 4); // gather_weight_map
     add(fsc / block_size_moe + n_routed, 4); // fused_expert_ids
@@ -67240,7 +67288,10 @@ pub fn allocate_scratch_for_prompt(
             };
             alloc_u16(fsc * w1_n, "moe_gate_up")?
         },
-        d_moe_inter: alloc_u16(fsc * moe_inter, "moe_inter")?,
+        d_moe_inter: alloc_u16(
+            shared_moe_inter_scratch_elements(max_tokens, inter, fsc, moe_inter),
+            "moe_inter",
+        )?,
         d_gather_src_map: alloc_i32(fsc, "gather_src_map")?,
         d_gather_weight_map: alloc_f32(max_tokens * topk, "gather_weight_map")?,
         d_fused_expert_ids: {
@@ -68110,7 +68161,7 @@ Set KRASIS_NO_FLA=1 only if you explicitly want the slower custom LA path."
 //
 #[cfg(test)]
 mod chunk_plan_tests {
-    use super::build_prefill_chunk_plan;
+    use super::{build_prefill_chunk_plan, shared_moe_inter_scratch_elements};
 
     #[test]
     fn uses_single_chunk_when_prompt_fits() {
@@ -68131,6 +68182,26 @@ mod chunk_plan_tests {
         assert_eq!(plan, vec![12_500, 12_500, 12_500, 12_500]);
         assert_eq!(plan.iter().sum::<usize>(), 50_000);
         assert!(plan.iter().all(|&chunk| chunk <= 16_640));
+    }
+
+    #[test]
+    fn shared_intermediate_scratch_covers_split_dense_geometry() {
+        let tokens = 4_699usize;
+        let fused_sorted_count = tokens * 4 + 64 * 64;
+        assert_eq!(
+            shared_moe_inter_scratch_elements(tokens, 10_240, fused_sorted_count, 1_536),
+            48_117_760
+        );
+    }
+
+    #[test]
+    fn shared_intermediate_scratch_preserves_larger_routed_geometry() {
+        let tokens = 4_699usize;
+        let fused_sorted_count = tokens * 8 + 64 * 64;
+        assert_eq!(
+            shared_moe_inter_scratch_elements(tokens, 12_288, fused_sorted_count, 2_048),
+            fused_sorted_count * 2_048
+        );
     }
 }
 

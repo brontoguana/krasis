@@ -1,0 +1,13 @@
+FROM docker.io/library/node:22-bookworm-slim
+
+ARG OPENCODE_VERSION=1.18.12
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git jq ripgrep \
+    && npm install --global "opencode-ai@${OPENCODE_VERSION}" \
+    && npm cache clean --force \
+    && rm -r /var/lib/apt/lists/*
+
+WORKDIR /opencode-data/workspace
+
+CMD ["sleep", "infinity"]

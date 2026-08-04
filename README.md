@@ -69,7 +69,9 @@ Krasis release. Highlights:
   not require FP8-capable hardware.
 - Expanded validated model coverage across DeepSeek-V4-Flash-0731,
   Qwen3-Coder-Next, Qwen3/3.5/3.6, Ornith, Step-3.7-Flash, Gemma 4, and
-  Nemotron MoE families.
+  Nemotron MoE families. See the current per-family quality and tool-use
+  limitations below rather than assuming every quantized runtime is equally
+  faithful.
 - Added and hardened HCS expert residency management: measured startup
   calibration, prompt-conditioned reload, dynamic recency tail, per-stage
   budgets, soft-tier reload caps, and safe eviction/reload paths.
@@ -338,6 +340,16 @@ truncated blocks remain visible as text. DeepSeek-V2/V2-Lite and
 DeepSeek-VL2 currently have no tool grammar in their shipped fallback template
 and are therefore not tool-use capable.
 
+Grammar transport support is distinct from live model validation. Some model
+and client combinations have runtime or context limitations. In particular,
+Nemotron-3-Super's current INT4/HQQ4 runtime does not reliably emit tool calls
+and shows substantial autoregressive degradation on a difficult llama-witness
+sequence even though the rendered tool prompt matches Hugging Face exactly.
+Large agent policies and many tool schemas can also exceed smaller models'
+contexts or degrade tool selection; Step and Gemma completed live Opencode
+round trips with concise agent prompts. The per-family table records parser
+coverage separately from current end-to-end evidence.
+
 See [Advanced Configuration](ADVANCED.md#tool-use) for the per-family support
 table.
 
@@ -381,7 +393,10 @@ accepted 1K prefill result is 152.2 tok/s, while 8.6K/23K/62K reach
 index runtime because GEMM launch overhead does not amortize at that length.
 
 The `./dev` entry point handles environment setup and is preferred for local
-development commands.
+development commands. Its general config shortcuts are `qcn`, `dsv4`, and
+`gemma`; pass an explicit validated `.conf` path for other models. Shortcuts
+that resolved to deprecated KV configurations were removed rather than kept as
+commands that fail at startup.
 
 ## Advanced Documentation
 

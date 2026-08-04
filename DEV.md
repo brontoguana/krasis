@@ -132,9 +132,9 @@ runs automatically before launching. No more stale Rust code.
 
 | Shortcut | Config file |
 |----------|------------|
-| qcn | testconfigs/qcn-4-4.conf |
-| v2lite | testconfigs/v2lite-4-4.conf |
-| deepseek-vl | testconfigs/deepseek-vl2-4-4.conf |
+| qcn | tests/qcn-k4v4-hqq4-int4-benchmark.conf |
+| dsv4 | testconfigs/deepseek-v4-flash-0731-4-4-a16.conf |
+| gemma | tests/gemma-4-4-a16.conf |
 
 Or pass a path to any .conf file directly.
 
