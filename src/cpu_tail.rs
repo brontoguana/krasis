@@ -396,6 +396,11 @@ pub(crate) fn process_allowed_cpus() -> Vec<usize> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn process_allowed_cpus() -> Vec<usize> {
+    Vec::new()
+}
+
 #[cfg(target_os = "linux")]
 fn pin_current_thread(cpu: usize) -> bool {
     unsafe {
