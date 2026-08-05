@@ -116,9 +116,9 @@ fn decode_token_preserving_tool_specials(
 use pyo3::prelude::*;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 fn abort_if_cuda_context_poisoned(context: &str, err: &str) {
@@ -205,6 +205,7 @@ struct SessionCacheRuntime {
     ram_store: Option<crate::session_cache::RamSessionStore>,
     prefill_samples: Vec<(usize, f64)>,
     restore_samples: Vec<(usize, f64)>,
+    session_locks: Arc<SessionLockTable>,
 }
 
 struct ActiveSequenceState {
@@ -447,6 +448,24 @@ fn commit_pending_boundary_snapshot(
         }
     }
     result
+}
+
+fn active_boundary_tokens_for_publication(
+    stage_required: bool,
+    pending_tokens: Option<&[u32]>,
+    stable_tokens: Option<&[u32]>,
+    sequence_start: usize,
+    has_base_snapshot: bool,
+) -> Option<Vec<u32>> {
+    if !stage_required {
+        return None;
+    }
+    if let Some(tokens) = pending_tokens {
+        return Some(tokens.to_vec());
+    }
+    stable_tokens
+        .filter(|tokens| has_base_snapshot && tokens.len() == sequence_start)
+        .map(<[u32]>::to_vec)
 }
 
 fn restore_snapshot_to_gpu(
@@ -742,6 +761,158 @@ enum ModelRequest {
     SequenceStateTransferMeasurement { stream: TcpStream, body: String },
 }
 
+struct QueuedModelRequest {
+    ticket: u64,
+    enqueued_at: Instant,
+    request: ModelRequest,
+}
+
+/// Admission is serialized only long enough to assign and send a ticket, so
+/// the unbounded model-worker channel receives requests in exact ticket order
+/// even when connection threads race. GPU execution remains single-workspace.
+struct FairModelScheduler {
+    sender: mpsc::Sender<QueuedModelRequest>,
+    next_ticket: Mutex<u64>,
+    queued: AtomicUsize,
+}
+
+impl FairModelScheduler {
+    fn new(sender: mpsc::Sender<QueuedModelRequest>) -> Self {
+        Self {
+            sender,
+            next_ticket: Mutex::new(0),
+            queued: AtomicUsize::new(0),
+        }
+    }
+
+    fn enqueue(&self, request: ModelRequest) -> Result<u64, String> {
+        let mut next = self
+            .next_ticket
+            .lock()
+            .map_err(|error| format!("model scheduler lock poisoned: {error}"))?;
+        let ticket = *next;
+        *next = next
+            .checked_add(1)
+            .ok_or_else(|| "model scheduler ticket counter exhausted".to_string())?;
+        self.queued.fetch_add(1, Ordering::AcqRel);
+        if self
+            .sender
+            .send(QueuedModelRequest {
+                ticket,
+                enqueued_at: Instant::now(),
+                request,
+            })
+            .is_err()
+        {
+            self.queued.fetch_sub(1, Ordering::AcqRel);
+            return Err("model worker is unavailable".to_string());
+        }
+        Ok(ticket)
+    }
+
+    fn mark_dequeued(&self) -> usize {
+        let previous = self.queued.fetch_sub(1, Ordering::AcqRel);
+        if previous == 0 {
+            self.queued.store(0, Ordering::Release);
+            log::error!("model scheduler queue accounting underflow");
+            0
+        } else {
+            previous - 1
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum SessionLockKey {
+    Snapshot(crate::session_cache::SnapshotId),
+    ExactBoundary(Arc<[u32]>),
+}
+
+#[derive(Default)]
+struct SessionLockTable {
+    held: Mutex<std::collections::HashSet<SessionLockKey>>,
+    changed: Condvar,
+}
+
+impl SessionLockTable {
+    fn acquire(self: &Arc<Self>, key: SessionLockKey) -> Result<SessionRequestLease, String> {
+        let mut held = self
+            .held
+            .lock()
+            .map_err(|error| format!("session lock table poisoned: {error}"))?;
+        while held.contains(&key) {
+            held = self
+                .changed
+                .wait(held)
+                .map_err(|error| format!("session lock wait poisoned: {error}"))?;
+        }
+        if !held.insert(key.clone()) {
+            return Err("session lock insertion failed".to_string());
+        }
+        Ok(SessionRequestLease {
+            table: Arc::clone(self),
+            key: Some(key),
+        })
+    }
+}
+
+struct SessionRequestLease {
+    table: Arc<SessionLockTable>,
+    key: Option<SessionLockKey>,
+}
+
+impl Drop for SessionRequestLease {
+    fn drop(&mut self) {
+        let Some(key) = self.key.take() else {
+            return;
+        };
+        match self.table.held.lock() {
+            Ok(mut held) => {
+                if !held.remove(&key) {
+                    log::error!("session request lease disappeared before release");
+                }
+                self.table.changed.notify_all();
+            }
+            Err(error) => log::error!("session lock release poisoned: {error}"),
+        }
+    }
+}
+
+fn handle_model_request(request: ModelRequest, state: &mut ServerState) {
+    match request {
+        ModelRequest::Chat { mut stream, body } => {
+            handle_chat_completion(&mut stream, &body, state)
+        }
+        ModelRequest::PrefillLogits { mut stream, body } => {
+            handle_prefill_logits(&mut stream, &body, state)
+        }
+        ModelRequest::ReferenceTest { mut stream, body } => {
+            handle_reference_test(&mut stream, &body, state)
+        }
+        ModelRequest::SequenceStateInventory { mut stream, body } => {
+            handle_sequence_state_inventory(&mut stream, &body, state)
+        }
+        ModelRequest::SequenceStateTransferMeasurement { mut stream, body } => {
+            handle_sequence_state_transfer_measurement(&mut stream, &body, state)
+        }
+    }
+}
+
+fn reject_model_request(request: ModelRequest, message: &str) {
+    let mut stream = match request {
+        ModelRequest::Chat { stream, .. }
+        | ModelRequest::PrefillLogits { stream, .. }
+        | ModelRequest::ReferenceTest { stream, .. }
+        | ModelRequest::SequenceStateInventory { stream, .. }
+        | ModelRequest::SequenceStateTransferMeasurement { stream, .. } => stream,
+    };
+    let _ = send_json(
+        &mut stream,
+        500,
+        &format!(r#"{{"error":"{}"}}"#, json_escape(message)),
+    );
+}
+
 struct VramRequestContextGuard {
     safety_margin_mb: u64,
 }
@@ -945,7 +1116,7 @@ fn format_models_response(
 fn handle_front_connection(
     mut tcp_stream: TcpStream,
     server_info: ServerInfo,
-    model_tx: mpsc::Sender<ModelRequest>,
+    scheduler: Arc<FairModelScheduler>,
     test_endpoints: bool,
 ) {
     let cloned = match tcp_stream.try_clone() {
@@ -1005,27 +1176,27 @@ fn handle_front_connection(
         }
 
         ("POST", path) if is_chat_completions_endpoint(path) => {
-            if model_tx
-                .send(ModelRequest::Chat {
-                    stream: tcp_stream,
-                    body: request.body,
-                })
-                .is_err()
-            {
-                log::error!("Model worker is not available for /v1/chat/completions");
+            if let Err(error) = scheduler.enqueue(ModelRequest::Chat {
+                stream: tcp_stream,
+                body: request.body,
+            }) {
+                log::error!(
+                    "Model worker is not available for /v1/chat/completions: {}",
+                    error
+                );
             }
         }
 
         ("POST", "/v1/internal/prefill_logits") => {
             if test_endpoints {
-                if model_tx
-                    .send(ModelRequest::PrefillLogits {
-                        stream: tcp_stream,
-                        body: request.body,
-                    })
-                    .is_err()
-                {
-                    log::error!("Model worker is not available for /v1/internal/prefill_logits");
+                if let Err(error) = scheduler.enqueue(ModelRequest::PrefillLogits {
+                    stream: tcp_stream,
+                    body: request.body,
+                }) {
+                    log::error!(
+                        "Model worker is not available for /v1/internal/prefill_logits: {}",
+                        error
+                    );
                 }
             } else {
                 let _ = send_json(
@@ -1038,14 +1209,14 @@ fn handle_front_connection(
 
         ("POST", "/v1/internal/reference_test") => {
             if test_endpoints {
-                if model_tx
-                    .send(ModelRequest::ReferenceTest {
-                        stream: tcp_stream,
-                        body: request.body,
-                    })
-                    .is_err()
-                {
-                    log::error!("Model worker is not available for /v1/internal/reference_test");
+                if let Err(error) = scheduler.enqueue(ModelRequest::ReferenceTest {
+                    stream: tcp_stream,
+                    body: request.body,
+                }) {
+                    log::error!(
+                        "Model worker is not available for /v1/internal/reference_test: {}",
+                        error
+                    );
                 }
             } else {
                 let _ = send_json(
@@ -1058,15 +1229,13 @@ fn handle_front_connection(
 
         ("POST", "/v1/internal/sequence_state_inventory") => {
             if test_endpoints {
-                if model_tx
-                    .send(ModelRequest::SequenceStateInventory {
-                        stream: tcp_stream,
-                        body: request.body,
-                    })
-                    .is_err()
-                {
+                if let Err(error) = scheduler.enqueue(ModelRequest::SequenceStateInventory {
+                    stream: tcp_stream,
+                    body: request.body,
+                }) {
                     log::error!(
-                        "Model worker is not available for /v1/internal/sequence_state_inventory"
+                        "Model worker is not available for /v1/internal/sequence_state_inventory: {}",
+                        error
                     );
                 }
             } else {
@@ -1080,15 +1249,15 @@ fn handle_front_connection(
 
         ("POST", "/v1/internal/sequence_state_transfer_measurement") => {
             if test_endpoints {
-                if model_tx
-                    .send(ModelRequest::SequenceStateTransferMeasurement {
+                if let Err(error) =
+                    scheduler.enqueue(ModelRequest::SequenceStateTransferMeasurement {
                         stream: tcp_stream,
                         body: request.body,
                     })
-                    .is_err()
                 {
                     log::error!(
-                        "Model worker is not available for /v1/internal/sequence_state_transfer_measurement"
+                        "Model worker is not available for /v1/internal/sequence_state_transfer_measurement: {}",
+                        error
                     );
                 }
             } else {
@@ -2571,7 +2740,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     let mut cache_boundary_reservation = None;
     let mut cache_boundary_incremental_base: Option<Arc<crate::session_cache::SessionSnapshot>> =
         None;
+    let mut cache_session_lease: Option<SessionRequestLease> = None;
     let mut cache_stage_reservation_extended = false;
+    let mut cache_ram_boundary_checkpoint_armed = false;
     let mut pending_boundary_snapshot: Option<PendingBoundarySnapshot> = None;
     let prefill_result: Result<
         (usize, usize, Vec<usize>, bool, Option<serde_json::Value>),
@@ -2943,6 +3114,39 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     }
                 }
             }
+            let session_lock_key = cache_base_snapshot_id
+                .or_else(|| {
+                    (cache_sequence_start > 0)
+                        .then(|| {
+                            state
+                                .session_cache
+                                .active
+                                .as_ref()
+                                .map(|active| active.snapshot_id)
+                        })
+                        .flatten()
+                })
+                .map(SessionLockKey::Snapshot)
+                .unwrap_or_else(|| {
+                    let exact_boundary = cache_stable_boundary_tokens
+                        .as_deref()
+                        .unwrap_or(token_ids.as_slice());
+                    SessionLockKey::ExactBoundary(Arc::from(exact_boundary))
+                });
+            match state.session_cache.session_locks.acquire(session_lock_key) {
+                Ok(lease) => cache_session_lease = Some(lease),
+                Err(error) => {
+                    let _ = send_json(
+                        stream,
+                        500,
+                        &format!(
+                            r#"{{"error":"Session scheduling failed closed: {}"}}"#,
+                            json_escape(&error)
+                        ),
+                    );
+                    return;
+                }
+            }
             // GPU state is mutated below. It is republished only after decode
             // and response delivery succeed.
             state.session_cache.active = None;
@@ -3212,6 +3416,34 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                                 *decode_restore_ms,
                             );
                         }
+                        let reuses_exact_stable_boundary = cache_prefill_stage_required
+                            && cache_base_snapshot_id.is_some()
+                            && cache_stable_boundary_tokens
+                                .as_ref()
+                                .is_some_and(|tokens| tokens.len() == cache_sequence_start);
+                        if reuses_exact_stable_boundary && !cache_ram_boundary_checkpoint_armed {
+                            let store =
+                                unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+                            match store.capture_pending_active_sequence_checkpoint_rust(
+                                cache_sequence_start,
+                            ) {
+                                Ok((bytes, capture_ms)) => {
+                                    cache_ram_boundary_checkpoint_armed = true;
+                                    log::info!(
+                                        "Request {} prefix cache RAM boundary device checkpoint armed: tokens={} bytes={} d2d_capture_ms={:.3}",
+                                        request_id,
+                                        cache_sequence_start,
+                                        bytes,
+                                        capture_ms,
+                                    );
+                                }
+                                Err(error) => {
+                                    break Err(format!(
+                                        "arm RAM-restored active boundary checkpoint: {error}"
+                                    ));
+                                }
+                            }
+                        }
                     }
                     Err(error) => {
                         log::info!(
@@ -3428,11 +3660,13 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         );
 
         let retain_active_stage = cache_prefill_stage_required
-            && result
-                .as_ref()
-                .ok()
-                .and_then(|(_, capture)| capture.as_ref())
-                .is_some();
+            && (cache_active_device_restore
+                || cache_ram_boundary_checkpoint_armed
+                || result
+                    .as_ref()
+                    .ok()
+                    .and_then(|(_, capture)| capture.as_ref())
+                    .is_some());
         engine.retain_active_stage_after_prefill(retain_active_stage);
 
         // Release scratch to free VRAM for decode/HCS. The exact stage K/V is
@@ -3980,10 +4214,21 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     if cache_request_eligible {
         if decode_outcome.completed {
             let mut post_snapshot_base = cache_base_snapshot_id;
-            let pending_active_boundary = pending_boundary_snapshot
-                .as_ref()
-                .filter(|_| cache_prefill_stage_required)
-                .map(|pending| pending.consumed_token_ids.clone());
+            // A duplicate continuation can reuse an already committed exact
+            // boundary, so it has no newly captured pending snapshot. In that
+            // case the base snapshot and stable token boundary are the
+            // transaction's publication source. Never infer a boundary from
+            // length alone: the lookup/active plan already exact-matched these
+            // stable tokens to the identified base snapshot.
+            let mut pending_active_boundary = active_boundary_tokens_for_publication(
+                cache_prefill_stage_required,
+                pending_boundary_snapshot
+                    .as_ref()
+                    .map(|pending| pending.consumed_token_ids.as_slice()),
+                cache_stable_boundary_tokens.as_deref(),
+                cache_sequence_start,
+                cache_base_snapshot_id.is_some(),
+            );
             if let Some(pending) = pending_boundary_snapshot.take() {
                 let boundary_tokens = pending.consumed_token_ids.len();
                 match commit_pending_boundary_snapshot(state, pending) {
@@ -4000,6 +4245,11 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                         );
                     }
                     Err(error) => {
+                        // The old base remains a valid RAM snapshot, but the
+                        // live GPU state has advanced to the new boundary and
+                        // must never be published under that old identity.
+                        pending_active_boundary = None;
+                        post_snapshot_base = None;
                         log::error!(
                             "Request {} prefix cache stable boundary commit failed: {}",
                             request_id,
@@ -4143,6 +4393,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             cleanup_pressure_final_free_mb,
         );
     }
+    // The lease covers GPU restore/prefill/decode and transactional snapshot
+    // publication. Release only after all session-visible mutation is done.
+    drop(cache_session_lease.take());
 
     let total_ms = t_request.elapsed().as_secs_f64() * 1000.0;
     log::info!(
@@ -7064,6 +7317,7 @@ impl RustServer {
                     ram_store: prefix_cache_ram_store,
                     prefill_samples: Vec::new(),
                     restore_samples: Vec::new(),
+                    session_locks: Arc::new(SessionLockTable::default()),
                 },
             };
 
@@ -7072,28 +7326,40 @@ impl RustServer {
                 max_context_tokens: state.max_context_tokens,
                 supports_vision: self.supports_vision,
             };
-            let (model_tx, model_rx) = mpsc::channel::<ModelRequest>();
+            let (model_tx, model_rx) = mpsc::channel::<QueuedModelRequest>();
+            let scheduler = Arc::new(FairModelScheduler::new(model_tx));
+            let worker_scheduler = Arc::clone(&scheduler);
             let worker_running = running.clone();
             let worker_handle = std::thread::Builder::new()
                 .name("krasis-model-worker".to_string())
                 .spawn(move || {
                     let mut state = state;
+                    let mut expected_ticket = 0u64;
                     while worker_running.load(Ordering::Acquire) {
                         match model_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                            Ok(ModelRequest::Chat { mut stream, body }) => {
-                                handle_chat_completion(&mut stream, &body, &mut state);
-                            }
-                            Ok(ModelRequest::PrefillLogits { mut stream, body }) => {
-                                handle_prefill_logits(&mut stream, &body, &mut state);
-                            }
-                            Ok(ModelRequest::ReferenceTest { mut stream, body }) => {
-                                handle_reference_test(&mut stream, &body, &mut state);
-                            }
-                            Ok(ModelRequest::SequenceStateInventory { mut stream, body }) => {
-                                handle_sequence_state_inventory(&mut stream, &body, &mut state);
-                            }
-                            Ok(ModelRequest::SequenceStateTransferMeasurement { mut stream, body }) => {
-                                handle_sequence_state_transfer_measurement(&mut stream, &body, &mut state);
+                            Ok(queued) => {
+                                let remaining = worker_scheduler.mark_dequeued();
+                                let wait_ms = queued.enqueued_at.elapsed().as_secs_f64() * 1000.0;
+                                if queued.ticket != expected_ticket {
+                                    let error = format!(
+                                        "model scheduler ticket mismatch: expected {}, received {}",
+                                        expected_ticket, queued.ticket
+                                    );
+                                    log::error!("{}", error);
+                                    reject_model_request(queued.request, &error);
+                                } else {
+                                    log::info!(
+                                        "Model scheduler dispatch: ticket={} wait_ms={:.3} remaining={}",
+                                        queued.ticket,
+                                        wait_ms,
+                                        remaining,
+                                    );
+                                    handle_model_request(queued.request, &mut state);
+                                }
+                                expected_ticket = expected_ticket.checked_add(1).unwrap_or_else(|| {
+                                    log::error!("model scheduler worker ticket counter exhausted");
+                                    u64::MAX
+                                });
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => {
                                 drain_vram_pressure_for_state(&mut state, "idle", false);
@@ -7102,24 +7368,25 @@ impl RustServer {
                         }
                     }
 
-                    while let Ok(req) = model_rx.try_recv() {
-                        match req {
-                            ModelRequest::Chat { mut stream, body } => {
-                                handle_chat_completion(&mut stream, &body, &mut state);
-                            }
-                            ModelRequest::PrefillLogits { mut stream, body } => {
-                                handle_prefill_logits(&mut stream, &body, &mut state);
-                            }
-                            ModelRequest::ReferenceTest { mut stream, body } => {
-                                handle_reference_test(&mut stream, &body, &mut state);
-                            }
-                            ModelRequest::SequenceStateInventory { mut stream, body } => {
-                                handle_sequence_state_inventory(&mut stream, &body, &mut state);
-                            }
-                            ModelRequest::SequenceStateTransferMeasurement { mut stream, body } => {
-                                handle_sequence_state_transfer_measurement(&mut stream, &body, &mut state);
-                            }
+                    while let Ok(queued) = model_rx.try_recv() {
+                        let remaining = worker_scheduler.mark_dequeued();
+                        if queued.ticket != expected_ticket {
+                            let error = format!(
+                                "model scheduler shutdown ticket mismatch: expected {}, received {}",
+                                expected_ticket, queued.ticket
+                            );
+                            log::error!("{}", error);
+                            reject_model_request(queued.request, &error);
+                        } else {
+                            log::info!(
+                                "Model scheduler shutdown dispatch: ticket={} wait_ms={:.3} remaining={}",
+                                queued.ticket,
+                                queued.enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                remaining,
+                            );
+                            handle_model_request(queued.request, &mut state);
                         }
+                        expected_ticket = expected_ticket.checked_add(1).unwrap_or(u64::MAX);
                     }
 
                     log::info!("Rust HTTP model worker stopped");
@@ -7144,12 +7411,17 @@ impl RustServer {
                             .set_read_timeout(Some(std::time::Duration::from_secs(30)))
                             .ok();
                         let info = server_info.clone();
-                        let tx = model_tx.clone();
+                        let request_scheduler = Arc::clone(&scheduler);
                         let endpoints_enabled = test_endpoints;
                         if let Err(e) = std::thread::Builder::new()
                             .name("krasis-http-connection".to_string())
                             .spawn(move || {
-                                handle_front_connection(stream, info, tx, endpoints_enabled);
+                                handle_front_connection(
+                                    stream,
+                                    info,
+                                    request_scheduler,
+                                    endpoints_enabled,
+                                );
                             })
                         {
                             log::error!("Failed to spawn connection handler: {}", e);
@@ -7166,7 +7438,7 @@ impl RustServer {
                 }
             }
 
-            drop(model_tx);
+            drop(scheduler);
             let _ = worker_handle.join();
             log::info!("Rust HTTP server stopped");
         });
@@ -7841,15 +8113,18 @@ impl RustServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        consumed_generation_boundary, context_window_fits, format_completion,
-        format_completion_with_debug, format_completion_with_tool_calls, format_models_response,
-        format_sse_timing, format_sse_token, format_sse_tool_call_args, format_sse_tool_call_start,
-        hide_synthetic_think_stop_text, is_chat_completions_endpoint, is_models_endpoint,
-        parse_tool_calls, push_tool_stream_text, ParsedToolCall, RequestOverhead,
+        active_boundary_tokens_for_publication, consumed_generation_boundary, context_window_fits,
+        format_completion, format_completion_with_debug, format_completion_with_tool_calls,
+        format_models_response, format_sse_timing, format_sse_token, format_sse_tool_call_args,
+        format_sse_tool_call_start, hide_synthetic_think_stop_text, is_chat_completions_endpoint,
+        is_models_endpoint, parse_tool_calls, push_tool_stream_text, FairModelScheduler,
+        ModelRequest, ParsedToolCall, RequestOverhead, SessionLockKey, SessionLockTable,
         StreamDetokenizer,
     };
     use crate::chat_template::{ChatTemplateEngine, ToolCallFormat};
     use std::fs;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{mpsc, Arc};
 
     const WINDOWS_MODEL_PATH: &str = r#"C:\Users\stoate\.krasis\models\Qwen3.6-35B-A3B"#;
 
@@ -7861,6 +8136,108 @@ mod tests {
 
     fn parsed_arguments(call: &ParsedToolCall) -> serde_json::Value {
         serde_json::from_str(&call.arguments_json).unwrap()
+    }
+
+    fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (server, client)
+    }
+
+    #[test]
+    fn compressed_publication_reuses_an_exact_committed_boundary() {
+        let stable = [10u32, 20, 30];
+        let selected =
+            active_boundary_tokens_for_publication(true, None, Some(&stable), stable.len(), true);
+        assert_eq!(selected.as_deref(), Some(stable.as_slice()));
+        let pending = [40u32, 50];
+        assert_eq!(
+            active_boundary_tokens_for_publication(
+                true,
+                Some(&pending),
+                Some(&stable),
+                stable.len(),
+                false,
+            )
+            .as_deref(),
+            Some(pending.as_slice()),
+        );
+
+        assert!(active_boundary_tokens_for_publication(
+            true,
+            None,
+            Some(&stable),
+            stable.len() - 1,
+            true,
+        )
+        .is_none());
+        assert!(active_boundary_tokens_for_publication(
+            true,
+            None,
+            Some(&stable),
+            stable.len(),
+            false,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn fair_model_scheduler_dispatches_concurrent_admission_in_ticket_order() {
+        let (sender, receiver) = mpsc::channel();
+        let scheduler = Arc::new(FairModelScheduler::new(sender));
+        let mut peers = Vec::new();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let (stream, peer) = tcp_pair();
+            peers.push(peer);
+            let scheduler = Arc::clone(&scheduler);
+            handles.push(std::thread::spawn(move || {
+                scheduler
+                    .enqueue(ModelRequest::Chat {
+                        stream,
+                        body: String::new(),
+                    })
+                    .unwrap()
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let mut tickets = Vec::new();
+        for expected_remaining in (0..8).rev() {
+            let queued = receiver.recv().unwrap();
+            tickets.push(queued.ticket);
+            assert_eq!(scheduler.mark_dequeued(), expected_remaining);
+        }
+        assert_eq!(tickets, (0..8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn exact_session_lease_excludes_same_session_until_commit_boundary() {
+        let table = Arc::new(SessionLockTable::default());
+        let key = SessionLockKey::ExactBoundary(Arc::from([1u32, 2, 3].as_slice()));
+        let first = table.acquire(key.clone()).unwrap();
+        let (attempted_tx, attempted_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let waiting_table = Arc::clone(&table);
+        let waiting_key = key.clone();
+        let handle = std::thread::spawn(move || {
+            attempted_tx.send(()).unwrap();
+            let lease = waiting_table.acquire(waiting_key).unwrap();
+            acquired_tx.send(()).unwrap();
+            lease
+        });
+        attempted_rx.recv().unwrap();
+        assert!(acquired_rx.try_recv().is_err());
+
+        let unrelated = table
+            .acquire(SessionLockKey::ExactBoundary(Arc::from([9u32].as_slice())))
+            .unwrap();
+        drop(unrelated);
+        drop(first);
+        acquired_rx.recv().unwrap();
+        drop(handle.join().unwrap());
     }
 
     #[test]
