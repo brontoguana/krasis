@@ -16928,6 +16928,55 @@ impl GpuDecodeStore {
                 (used_bytes > 0).then(|| (allocation.clone(), used_bytes))
             })
             .collect();
+        self.snapshot_sequence_allocations_incremental_rust(
+            allocations,
+            previous_logical_tokens,
+            logical_tokens,
+            previous_blobs,
+        )
+    }
+
+    /// Incrementally snapshot temporary sequence allocations, preserving the
+    /// exact pageable prefix and transferring only appended token rows. Fixed
+    /// recurrent state is still transferred in full.
+    pub fn snapshot_external_sequence_state_incremental_rust(
+        &mut self,
+        allocations: &[crate::session_cache::SequenceStateAllocation],
+        previous_logical_tokens: usize,
+        logical_tokens: usize,
+        previous_blobs: &[&crate::session_cache::SequenceStateBlob],
+    ) -> Result<(Vec<crate::session_cache::SequenceStateBlob>, f64), String> {
+        if logical_tokens < previous_logical_tokens {
+            return Err(format!(
+                "incremental external snapshot cannot rewind from {} to {} tokens",
+                previous_logical_tokens, logical_tokens
+            ));
+        }
+        let allocations = allocations
+            .iter()
+            .map(|allocation| {
+                allocation.validate()?;
+                Ok((allocation.clone(), allocation.used_bytes(logical_tokens)))
+            })
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .filter(|(_, used_bytes)| *used_bytes > 0)
+            .collect();
+        self.snapshot_sequence_allocations_incremental_rust(
+            allocations,
+            previous_logical_tokens,
+            logical_tokens,
+            previous_blobs,
+        )
+    }
+
+    fn snapshot_sequence_allocations_incremental_rust(
+        &mut self,
+        allocations: Vec<(crate::session_cache::SequenceStateAllocation, usize)>,
+        previous_logical_tokens: usize,
+        logical_tokens: usize,
+        previous_blobs: &[&crate::session_cache::SequenceStateBlob],
+    ) -> Result<(Vec<crate::session_cache::SequenceStateBlob>, f64), String> {
         if previous_blobs.len() != allocations.len() {
             return Err(format!(
                 "incremental snapshot has {} previous blobs but runtime requires {}",
@@ -17068,7 +17117,31 @@ impl GpuDecodeStore {
                 }
             }
         }
-        Ok((blobs, started.elapsed().as_secs_f64() * 1000.0))
+        let transferred_bytes = transfers.iter().try_fold(
+            0usize,
+            |total, (_, _, bytes)| {
+                total
+                    .checked_add(*bytes)
+                    .ok_or_else(|| "incremental transfer byte count overflow".to_string())
+            },
+        )?;
+        let snapshot_bytes = blobs.iter().try_fold(0usize, |total, blob| {
+            total
+                .checked_add(blob.bytes.len())
+                .ok_or_else(|| "incremental snapshot byte count overflow".to_string())
+        })?;
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        log::info!(
+            "Incremental sequence snapshot: previous_tokens={} tokens={} allocations={} snapshot_bytes={} d2h_bytes={} pageable_prefix_bytes={} save_ms={:.3}",
+            previous_logical_tokens,
+            logical_tokens,
+            blobs.len(),
+            snapshot_bytes,
+            transferred_bytes,
+            snapshot_bytes.saturating_sub(transferred_bytes),
+            elapsed_ms,
+        );
+        Ok((blobs, elapsed_ms))
     }
 
     /// Restore a pageable snapshot through the same bounded pinned window.

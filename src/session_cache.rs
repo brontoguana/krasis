@@ -1058,7 +1058,7 @@ pub struct RamSessionStoreStats {
 }
 
 struct RamSessionEntry {
-    snapshot: SessionSnapshot,
+    snapshot: Arc<SessionSnapshot>,
     memory_cost_bytes: usize,
     last_access: u64,
 }
@@ -1262,7 +1262,7 @@ impl RamSessionStore {
         self.entries.insert(
             id,
             RamSessionEntry {
-                snapshot,
+                snapshot: Arc::new(snapshot),
                 memory_cost_bytes: actual_bytes,
                 last_access: self.access_clock,
             },
@@ -1333,18 +1333,30 @@ impl RamSessionStore {
         Ok(())
     }
 
-    pub fn get(&mut self, id: SnapshotId) -> Result<Option<&SessionSnapshot>, String> {
+    /// Return a cheap immutable lease on a canonical pageable snapshot.
+    /// The store keeps its accounting and prefix-index entry until eviction;
+    /// eviction refuses to remove a snapshot while any runtime lease exists.
+    pub fn get(&mut self, id: SnapshotId) -> Result<Option<Arc<SessionSnapshot>>, String> {
         if !self.entries.contains_key(&id) {
             return Ok(None);
         }
         self.touch(id)?;
-        Ok(self.entries.get(&id).map(|entry| &entry.snapshot))
+        Ok(self
+            .entries
+            .get(&id)
+            .map(|entry| Arc::clone(&entry.snapshot)))
     }
 
     pub fn remove(&mut self, id: SnapshotId) -> Result<Option<SessionSnapshot>, String> {
         let Some(entry) = self.entries.get(&id) else {
             return Ok(None);
         };
+        if Arc::strong_count(&entry.snapshot) != 1 {
+            return Err(format!(
+                "session snapshot {} is leased by an active request",
+                id.0
+            ));
+        }
         let next_resident_bytes = self
             .resident_bytes
             .checked_sub(entry.memory_cost_bytes)
@@ -1356,7 +1368,9 @@ impl RamSessionStore {
             .remove(&id)
             .ok_or_else(|| format!("session snapshot {} disappeared during removal", id.0))?;
         self.resident_bytes = next_resident_bytes;
-        Ok(Some(entry.snapshot))
+        let snapshot = Arc::try_unwrap(entry.snapshot)
+            .map_err(|_| format!("session snapshot {} acquired a lease during removal", id.0))?;
+        Ok(Some(snapshot))
     }
 
     fn evict_lru_excluding(&mut self, protected: &[SnapshotId]) -> Result<SnapshotId, String> {
@@ -1364,12 +1378,14 @@ impl RamSessionStore {
         let id = self
             .entries
             .iter()
-            .filter(|(id, _)| !protected.contains(id))
+            .filter(|(id, entry)| {
+                !protected.contains(id) && Arc::strong_count(&entry.snapshot) == 1
+            })
             .min_by_key(|(id, entry)| (entry.last_access, id.0))
             .map(|(id, _)| *id)
             .ok_or_else(|| {
                 format!(
-                    "session RAM budget is exhausted by {} reserved bytes; no unprotected committed snapshot can be evicted",
+                    "session RAM budget is exhausted by {} reserved bytes; no unprotected, unleased committed snapshot can be evicted",
                     self.reserved_bytes,
                 )
             })?;
@@ -1628,6 +1644,26 @@ mod tests {
         assert!(store.get(first).unwrap().is_some());
         assert!(store.get(third).unwrap().is_some());
         assert_eq!(store.stats().evictions, 1);
+    }
+
+    #[test]
+    fn snapshot_lease_blocks_eviction_until_request_releases_it() {
+        let first_snapshot = snapshot(1, 256);
+        let cost = first_snapshot.memory_cost_bytes();
+        let probe = Arc::new(TestMemoryProbe::new((cost * 2) as u64));
+        let mut store = RamSessionStore::new(1.0, probe).unwrap();
+        let first = commit_snapshot(&mut store, first_snapshot);
+        let second = commit_snapshot(&mut store, snapshot(3, 256));
+        let lease = store.get(first).unwrap().unwrap();
+
+        let third = commit_snapshot(&mut store, snapshot(5, 256));
+        assert!(store.get(first).unwrap().is_some());
+        assert!(store.get(second).unwrap().is_none());
+        assert!(store.get(third).unwrap().is_some());
+        assert!(store.remove(first).unwrap_err().contains("leased"));
+
+        drop(lease);
+        assert!(store.remove(first).unwrap().is_some());
     }
 
     #[test]

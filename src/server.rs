@@ -619,7 +619,11 @@ fn snapshot_current_sequence_to_ram(
             .ok_or_else(|| "RAM session store is unavailable".to_string())?
             .get(id)?
             .ok_or_else(|| "newly committed session snapshot disappeared".to_string())?;
-        restore_snapshot_to_gpu(state.gpu_store_addr, &state.aux_gpu_store_addrs, snapshot)?
+        restore_snapshot_to_gpu(
+            state.gpu_store_addr,
+            &state.aux_gpu_store_addrs,
+            snapshot.as_ref(),
+        )?
     };
     state
         .session_cache
@@ -642,8 +646,11 @@ fn restore_snapshot_by_id(
             .ok_or_else(|| "selected RAM session snapshot was evicted".to_string())?;
         let tokens = snapshot.consumed_token_ids.clone();
         let bytes = snapshot.memory_cost_bytes();
-        let restore_ms =
-            restore_snapshot_to_gpu(state.gpu_store_addr, &state.aux_gpu_store_addrs, snapshot)?;
+        let restore_ms = restore_snapshot_to_gpu(
+            state.gpu_store_addr,
+            &state.aux_gpu_store_addrs,
+            snapshot.as_ref(),
+        )?;
         (tokens, bytes, restore_ms)
     };
     Ok((tokens, bytes, restore_ms))
@@ -2562,6 +2569,8 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     let mut cache_prefill_stage_required = false;
     let mut cache_stable_boundary_tokens: Option<Vec<u32>> = None;
     let mut cache_boundary_reservation = None;
+    let mut cache_boundary_incremental_base: Option<Arc<crate::session_cache::SessionSnapshot>> =
+        None;
     let mut cache_stage_reservation_extended = false;
     let mut pending_boundary_snapshot: Option<PendingBoundarySnapshot> = None;
     let prefill_result: Result<
@@ -2968,6 +2977,59 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 }
             }
         }
+        if cache_boundary_reservation.is_some() {
+            if let Some(base_id) = cache_base_snapshot_id {
+                let base_result = state
+                    .session_cache
+                    .ram_store
+                    .as_mut()
+                    .ok_or_else(|| "RAM session store is unavailable".to_string())
+                    .and_then(|store| {
+                        store.get(base_id)?.ok_or_else(|| {
+                            "protected incremental boundary base was evicted".to_string()
+                        })
+                    })
+                    .and_then(|base| {
+                        let boundary_tokens =
+                            cache_stable_boundary_tokens.as_ref().ok_or_else(|| {
+                                "incremental boundary has no exact token IDs".to_string()
+                            })?;
+                        if base.consumed_token_ids.len() > boundary_tokens.len()
+                            || base.consumed_token_ids.as_slice()
+                                != &boundary_tokens[..base.consumed_token_ids.len()]
+                        {
+                            return Err("incremental boundary base is not an exact token prefix"
+                                .to_string());
+                        }
+                        Ok(base)
+                    });
+                match base_result {
+                    Ok(base) => cache_boundary_incremental_base = Some(base),
+                    Err(error) => {
+                        cancel_boundary_reservation(
+                            &mut state.session_cache,
+                            &mut cache_boundary_reservation,
+                        );
+                        if let Ok(mut engine_guard) = state.rust_prefill.lock() {
+                            if let Some(engine) = engine_guard.as_mut() {
+                                engine.discard_active_stage_state();
+                            }
+                        }
+                        let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+                        store.discard_active_sequence_checkpoint_rust();
+                        let _ = send_json(
+                            stream,
+                            500,
+                            &format!(
+                                r#"{{"error":"Incremental prefix-cache boundary failed closed: {}"}}"#,
+                                json_escape(&error)
+                            ),
+                        );
+                        return;
+                    }
+                }
+            }
+        }
         if debug_first_token_boundary {
             chat_debug_input_token_ids = Some(token_ids.clone());
         }
@@ -3133,7 +3195,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                             .ok_or_else(|| {
                                 "RAM-restored continuation snapshot was evicted".to_string()
                             })?;
-                        engine.restore_stage_exact_sequence_state(snapshot)
+                        engine.restore_stage_exact_sequence_state(snapshot.as_ref())
                     });
                 match stage_restore {
                     Ok(stage_ms) => {
@@ -3252,12 +3314,14 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                         &token_ids[sequence_start..],
                         sequence_start,
                         boundary,
+                        cache_boundary_incremental_base.as_deref(),
                         temperature,
                         &suppress_tokens,
                     ),
                 (0, Some(boundary)) => engine.run_prefill_capturing_boundary(
                     &token_ids,
                     boundary,
+                    cache_boundary_incremental_base.as_deref(),
                     temperature,
                     &suppress_tokens,
                 ),
@@ -3500,6 +3564,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             }
         }
     };
+    // Boundary capture is complete. Release the old snapshot lease before
+    // decode/post-generation admission so normal LRU policy can reclaim it.
+    drop(cache_boundary_incremental_base.take());
 
     if !cache_request_eligible {
         rollback_pending_boundary_snapshot(

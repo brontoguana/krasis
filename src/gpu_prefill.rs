@@ -20735,6 +20735,7 @@ impl PrefillEngine {
     fn capture_stage_exact_sequence_state(
         &mut self,
         logical_tokens: usize,
+        incremental_base: Option<&crate::session_cache::SessionSnapshot>,
     ) -> Result<(Vec<crate::session_cache::SequenceStateBlob>, f64), String> {
         if !self.prefill_kv_active {
             return Ok((Vec::new(), 0.0));
@@ -20748,7 +20749,24 @@ impl PrefillEngine {
         let device_ordinal = usize::try_from(store.device_ordinal())
             .map_err(|_| "stage-exact device ordinal is negative".to_string())?;
         let allocations = self.stage_exact_sequence_allocations(device_ordinal)?;
-        store.snapshot_external_sequence_state_rust(&allocations, logical_tokens)
+        if let Some(base) = incremental_base {
+            let previous_blobs: Vec<_> = base
+                .state_blobs
+                .iter()
+                .filter(|blob| {
+                    blob.device_ordinal == device_ordinal
+                        && crate::session_cache::is_prefill_stage_kind(&blob.kind)
+                })
+                .collect();
+            store.snapshot_external_sequence_state_incremental_rust(
+                &allocations,
+                base.consumed_token_ids.len(),
+                logical_tokens,
+                &previous_blobs,
+            )
+        } else {
+            store.snapshot_external_sequence_state_rust(&allocations, logical_tokens)
+        }
     }
 
     /// Restore an exact prefill-stage prefix after `prepare_for_prefill` has
@@ -22000,7 +22018,15 @@ impl PrefillEngine {
         temperature: f32,
         suppress_tokens: &[u32],
     ) -> Result<PrefillResult, String> {
-        self.run_prefill_from_state(token_ids, 0, true, None, temperature, suppress_tokens)
+        self.run_prefill_from_state(
+            token_ids,
+            0,
+            true,
+            None,
+            None,
+            temperature,
+            suppress_tokens,
+        )
             .map(|(result, _)| result)
     }
 
@@ -22012,6 +22038,7 @@ impl PrefillEngine {
         &mut self,
         token_ids: &[u32],
         capture_boundary: usize,
+        incremental_base: Option<&crate::session_cache::SessionSnapshot>,
         temperature: f32,
         suppress_tokens: &[u32],
     ) -> Result<(PrefillResult, Option<PrefillSequenceBoundaryCapture>), String> {
@@ -22020,6 +22047,7 @@ impl PrefillEngine {
             0,
             true,
             Some(capture_boundary),
+            incremental_base,
             temperature,
             suppress_tokens,
         )
@@ -22044,6 +22072,7 @@ impl PrefillEngine {
             sequence_start,
             false,
             None,
+            None,
             temperature,
             suppress_tokens,
         )
@@ -22055,6 +22084,7 @@ impl PrefillEngine {
         token_ids: &[u32],
         sequence_start: usize,
         capture_boundary: usize,
+        incremental_base: Option<&crate::session_cache::SessionSnapshot>,
         temperature: f32,
         suppress_tokens: &[u32],
     ) -> Result<(PrefillResult, Option<PrefillSequenceBoundaryCapture>), String> {
@@ -22066,6 +22096,7 @@ impl PrefillEngine {
             sequence_start,
             false,
             Some(capture_boundary),
+            incremental_base,
             temperature,
             suppress_tokens,
         )
@@ -22077,6 +22108,7 @@ impl PrefillEngine {
         sequence_start: usize,
         reset_sequence_state: bool,
         capture_boundary: Option<usize>,
+        incremental_base: Option<&crate::session_cache::SessionSnapshot>,
         temperature: f32,
         suppress_tokens: &[u32],
     ) -> Result<(PrefillResult, Option<PrefillSequenceBoundaryCapture>), String> {
@@ -22099,6 +22131,24 @@ impl PrefillEngine {
                 "prefill state contract mismatch: sequence_start={} reset_state={}",
                 sequence_start, reset_sequence_state
             ));
+        }
+        if let Some(base) = incremental_base {
+            let boundary = capture_boundary.ok_or_else(|| {
+                "incremental boundary base supplied without a capture boundary".to_string()
+            })?;
+            if base.consumed_token_ids.len() != sequence_start {
+                return Err(format!(
+                    "incremental boundary base has {} tokens but continuation starts at {}",
+                    base.consumed_token_ids.len(),
+                    sequence_start
+                ));
+            }
+            if sequence_start >= boundary {
+                return Err(format!(
+                    "incremental boundary {} must advance beyond base {}",
+                    boundary, sequence_start
+                ));
+            }
         }
         if total_prompt_tokens > self.kv_max_seq {
             return Err(format!(
@@ -25187,10 +25237,27 @@ impl PrefillEngine {
                 };
                 store.set_kv_position_rust(chunk_end);
                 let position = store.sequence_position_rust()?;
-                let (mut persistent_blobs, mut save_ms) =
-                    store.snapshot_sequence_state_rust(chunk_end)?;
+                let (mut persistent_blobs, mut save_ms) = if let Some(base) = incremental_base {
+                    let device_ordinal = usize::try_from(store.device_ordinal())
+                        .map_err(|_| "boundary device ordinal is negative".to_string())?;
+                    let previous_blobs: Vec<_> = base
+                        .state_blobs
+                        .iter()
+                        .filter(|blob| {
+                            blob.device_ordinal == device_ordinal
+                                && !crate::session_cache::is_prefill_stage_kind(&blob.kind)
+                        })
+                        .collect();
+                    store.snapshot_sequence_state_incremental_rust(
+                        base.consumed_token_ids.len(),
+                        chunk_end,
+                        &previous_blobs,
+                    )?
+                } else {
+                    store.snapshot_sequence_state_rust(chunk_end)?
+                };
                 let (mut stage_blobs, stage_save_ms) =
-                    self.capture_stage_exact_sequence_state(chunk_end)?;
+                    self.capture_stage_exact_sequence_state(chunk_end, incremental_base)?;
                 let blob_count = persistent_blobs
                     .len()
                     .checked_add(stage_blobs.len())
