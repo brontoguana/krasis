@@ -249,6 +249,8 @@ enum ModelRequest {
     Chat { stream: TcpStream, body: String },
     PrefillLogits { stream: TcpStream, body: String },
     ReferenceTest { stream: TcpStream, body: String },
+    SequenceStateInventory { stream: TcpStream, body: String },
+    SequenceStateTransferMeasurement { stream: TcpStream, body: String },
 }
 
 struct VramRequestContextGuard {
@@ -565,10 +567,175 @@ fn handle_front_connection(
             }
         }
 
+        ("POST", "/v1/internal/sequence_state_inventory") => {
+            if test_endpoints {
+                if model_tx
+                    .send(ModelRequest::SequenceStateInventory {
+                        stream: tcp_stream,
+                        body: request.body,
+                    })
+                    .is_err()
+                {
+                    log::error!(
+                        "Model worker is not available for /v1/internal/sequence_state_inventory"
+                    );
+                }
+            } else {
+                let _ = send_json(
+                    &mut tcp_stream,
+                    404,
+                    r#"{"error":"Test endpoints not enabled. Start server with --test-endpoints"}"#,
+                );
+            }
+        }
+
+        ("POST", "/v1/internal/sequence_state_transfer_measurement") => {
+            if test_endpoints {
+                if model_tx
+                    .send(ModelRequest::SequenceStateTransferMeasurement {
+                        stream: tcp_stream,
+                        body: request.body,
+                    })
+                    .is_err()
+                {
+                    log::error!(
+                        "Model worker is not available for /v1/internal/sequence_state_transfer_measurement"
+                    );
+                }
+            } else {
+                let _ = send_json(
+                    &mut tcp_stream,
+                    404,
+                    r#"{"error":"Test endpoints not enabled. Start server with --test-endpoints"}"#,
+                );
+            }
+        }
+
         _ => {
             let _ = send_json(&mut tcp_stream, 404, r#"{"error":"Not found"}"#);
         }
     }
+}
+
+fn handle_sequence_state_inventory(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
+    let request: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(error) => {
+            let response = serde_json::json!({"error": format!("invalid JSON: {}", error)});
+            let _ = send_json(stream, 400, &response.to_string());
+            return;
+        }
+    };
+    let logical_tokens = match request.get("logical_tokens") {
+        Some(value) => match value.as_u64().and_then(|value| usize::try_from(value).ok()) {
+            Some(value) => value,
+            None => {
+                let response = serde_json::json!({
+                    "error": "logical_tokens must be a non-negative platform-sized integer"
+                });
+                let _ = send_json(stream, 400, &response.to_string());
+                return;
+            }
+        },
+        None => {
+            let response = serde_json::json!({"error": "logical_tokens is required"});
+            let _ = send_json(stream, 400, &response.to_string());
+            return;
+        }
+    };
+    let mut devices = Vec::with_capacity(1 + state.aux_gpu_store_addrs.len());
+    if state.gpu_store_addr != 0 {
+        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+        devices.push(store.sequence_state_inventory_value(logical_tokens));
+    }
+    for &address in &state.aux_gpu_store_addrs {
+        if address == 0 {
+            continue;
+        }
+        let store = unsafe { &*(address as *const GpuDecodeStore) };
+        devices.push(store.sequence_state_inventory_value(logical_tokens));
+    }
+    let response = serde_json::json!({
+        "logical_tokens": logical_tokens,
+        "device_count": devices.len(),
+        "allocated_bytes": devices.iter().filter_map(|device| device.get("allocated_bytes").and_then(|value| value.as_u64())).sum::<u64>(),
+        "used_bytes": devices.iter().filter_map(|device| device.get("used_bytes").and_then(|value| value.as_u64())).sum::<u64>(),
+        "devices": devices,
+    });
+    let _ = send_json(stream, 200, &response.to_string());
+}
+
+fn handle_sequence_state_transfer_measurement(
+    stream: &mut TcpStream,
+    body: &str,
+    state: &mut ServerState,
+) {
+    let request: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(error) => {
+            let response = serde_json::json!({"error": format!("invalid JSON: {}", error)});
+            let _ = send_json(stream, 400, &response.to_string());
+            return;
+        }
+    };
+    let parse_positive = |name: &str| -> Result<usize, String> {
+        request
+            .get(name)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| format!("{} must be a positive platform-sized integer", name))
+    };
+    let logical_tokens = match parse_positive("logical_tokens") {
+        Ok(value) => value,
+        Err(error) => {
+            let response = serde_json::json!({"error": error});
+            let _ = send_json(stream, 400, &response.to_string());
+            return;
+        }
+    };
+    let iterations = match parse_positive("iterations") {
+        Ok(value) => value,
+        Err(error) => {
+            let response = serde_json::json!({"error": error});
+            let _ = send_json(stream, 400, &response.to_string());
+            return;
+        }
+    };
+
+    let mut devices = Vec::with_capacity(1 + state.aux_gpu_store_addrs.len());
+    if state.gpu_store_addr != 0 {
+        let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+        match store.sequence_state_transfer_measurement_value(logical_tokens, iterations) {
+            Ok(value) => devices.push(value),
+            Err(error) => {
+                let response = serde_json::json!({"error": error});
+                let _ = send_json(stream, 500, &response.to_string());
+                return;
+            }
+        }
+    }
+    for &address in &state.aux_gpu_store_addrs {
+        if address == 0 {
+            continue;
+        }
+        let store = unsafe { &mut *(address as *mut GpuDecodeStore) };
+        match store.sequence_state_transfer_measurement_value(logical_tokens, iterations) {
+            Ok(value) => devices.push(value),
+            Err(error) => {
+                let response = serde_json::json!({"error": error});
+                let _ = send_json(stream, 500, &response.to_string());
+                return;
+            }
+        }
+    }
+    let response = serde_json::json!({
+        "logical_tokens": logical_tokens,
+        "iterations": iterations,
+        "device_count": devices.len(),
+        "devices": devices,
+    });
+    let _ = send_json(stream, 200, &response.to_string());
 }
 
 fn fnv1a_token_hash(token_ids: &[u32]) -> u64 {
@@ -5394,6 +5561,12 @@ impl RustServer {
                             Ok(ModelRequest::ReferenceTest { mut stream, body }) => {
                                 handle_reference_test(&mut stream, &body, &mut state);
                             }
+                            Ok(ModelRequest::SequenceStateInventory { mut stream, body }) => {
+                                handle_sequence_state_inventory(&mut stream, &body, &mut state);
+                            }
+                            Ok(ModelRequest::SequenceStateTransferMeasurement { mut stream, body }) => {
+                                handle_sequence_state_transfer_measurement(&mut stream, &body, &mut state);
+                            }
                             Err(mpsc::RecvTimeoutError::Timeout) => {
                                 drain_vram_pressure_for_state(&mut state, "idle", false);
                             }
@@ -5411,6 +5584,12 @@ impl RustServer {
                             }
                             ModelRequest::ReferenceTest { mut stream, body } => {
                                 handle_reference_test(&mut stream, &body, &mut state);
+                            }
+                            ModelRequest::SequenceStateInventory { mut stream, body } => {
+                                handle_sequence_state_inventory(&mut stream, &body, &mut state);
+                            }
+                            ModelRequest::SequenceStateTransferMeasurement { mut stream, body } => {
+                                handle_sequence_state_transfer_measurement(&mut stream, &body, &mut state);
                             }
                         }
                     }

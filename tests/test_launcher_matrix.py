@@ -147,6 +147,22 @@ def _run_server_start_smoke(config_path: Path, scenario: str, expected_fragments
 
 
 class LauncherMatrixTest(unittest.TestCase):
+    def test_dev_benchmark_cleanup_uses_selected_gpu_override(self):
+        dev_source = (REPO_ROOT / "dev").read_text(encoding="utf-8")
+        benchmark_start = dev_source.index("do_benchmark() {")
+        benchmark_end = dev_source.index("\nsummarize_dynamic_hcs_from_log() {", benchmark_start)
+        benchmark_source = dev_source[benchmark_start:benchmark_end]
+
+        self.assertIn(
+            'selected_gpus_override=$(extract_selected_gpus_arg "$@")',
+            benchmark_source,
+        )
+        self.assertIn(
+            'cleanup_gpu "$conf" "$selected_gpus_override"',
+            benchmark_source,
+        )
+        self.assertNotIn('cleanup_gpu "$conf"\n', benchmark_source)
+
     maxDiff = None
 
     def test_native_windows_console_key_decoding(self) -> None:

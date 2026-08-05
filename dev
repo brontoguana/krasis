@@ -1262,13 +1262,18 @@ do_benchmark() {
     local conf
     conf=$(resolve_config "$1")
     shift
-    cleanup_gpu "$conf"
+    local selected_gpus_override
+    selected_gpus_override=$(extract_selected_gpus_arg "$@")
+    cleanup_gpu "$conf" "$selected_gpus_override"
     auto_rebuild
     local run_dir
     run_dir=$(create_run_dir "dev-benchmark")
     local logfile
     logfile="$run_dir/benchmark_stdout.log"
     info "Running standard benchmark: $conf"
+    if [[ -n "$selected_gpus_override" ]]; then
+        info "Selected GPU override: $selected_gpus_override"
+    fi
     info "Run dir: $run_dir"
     info "Log: $logfile"
     verify_repo_imports
@@ -3599,6 +3604,7 @@ do_server_test() {
         cd "$SCRIPT_DIR"
         PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/server.rs
         PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/chat_template.rs
+        PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/session_cache.rs
         PYO3_PYTHON="$PYTHON" \
         LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
@@ -3609,6 +3615,11 @@ do_server_test() {
         RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
             PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
             cargo test --release --lib chat_template::tests "$@"
+        PYO3_PYTHON="$PYTHON" \
+        LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
+            PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo test --release --lib session_cache::tests "$@"
         KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_reference_judgement
     )
 }

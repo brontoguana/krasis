@@ -4848,6 +4848,7 @@ class KrasisModel:
         layer: TransformerLayer,
         target_device: torch.device,
         keepalive: list,
+        sequence_state_registrations: list | None = None,
     ) -> dict:
         layer_kind = self._hqq_layer_kind(layer)
         if layer_kind == "gqa":
@@ -4966,6 +4967,25 @@ class KrasisModel:
             kpe_cache = self._move_hqq_tensor_to_device(
                 kpe_layer, target_device, keepalive
             )
+            if sequence_state_registrations is not None:
+                sequence_state_registrations.extend(
+                    [
+                        (
+                            f"layer{layer_idx}.mla.compressed",
+                            "mla_compressed_kv",
+                            layer_idx,
+                            ckv_cache,
+                            1,
+                        ),
+                        (
+                            f"layer{layer_idx}.mla.position",
+                            "mla_positional_k",
+                            layer_idx,
+                            kpe_cache,
+                            1,
+                        ),
+                    ]
+                )
             q_a_norm_ptr = 0
             if attn.has_q_lora:
                 attn._hqq_q_a_norm = self._move_hqq_tensor_to_device(
@@ -5043,6 +5063,25 @@ class KrasisModel:
             attn._hqq_recur_state = self._move_hqq_tensor_to_device(
                 attn._recurrent_state.squeeze(0).float().contiguous(), target_device, keepalive
             )
+            if sequence_state_registrations is not None:
+                sequence_state_registrations.extend(
+                    [
+                        (
+                            f"layer{layer_idx}.linear.conv",
+                            "linear_attention_conv_state",
+                            layer_idx,
+                            attn._hqq_conv_state,
+                            0,
+                        ),
+                        (
+                            f"layer{layer_idx}.linear.recurrent",
+                            "linear_attention_recurrent_state",
+                            layer_idx,
+                            attn._hqq_recur_state,
+                            0,
+                        ),
+                    ]
+                )
             return {
                 "num_k_heads": int(attn.num_k_heads),
                 "num_v_heads": int(attn.num_v_heads),
@@ -5260,6 +5299,7 @@ class KrasisModel:
         store,
         target_device: torch.device,
         keepalive: list,
+        sequence_state_registrations: list | None = None,
     ) -> int:
         manifest = getattr(self, "_hqq_manifest", None)
         if not manifest or not manifest.get("complete"):
@@ -5298,7 +5338,11 @@ class KrasisModel:
 
             layer_kind = self._hqq_layer_kind(layer)
             layer_meta = self._hqq_layer_meta(
-                layer_idx, layer, target_device, keepalive
+                layer_idx,
+                layer,
+                target_device,
+                keepalive,
+                sequence_state_registrations,
             )
 
             tensor_names = sorted(runtime.keys())
@@ -8734,6 +8778,242 @@ class KrasisModel:
                     f"DeepSeek-V4 non-hash layer {layer_idx} unexpectedly has tid2eid"
                 )
 
+    @staticmethod
+    def _register_sequence_state_tensor(
+        store,
+        *,
+        name: str,
+        kind: str,
+        layer_idx: int,
+        tensor: torch.Tensor,
+        logical_tokens_per_row: int = 0,
+    ) -> None:
+        """Register metadata read from one real sequence-state tensor.
+
+        This runs only during model setup. The registry and all request-time
+        inventory/snapshot operations live in Rust.
+        """
+        if not isinstance(tensor, torch.Tensor) or not tensor.is_cuda:
+            raise RuntimeError(f"Sequence-state tensor {name} must be a CUDA tensor")
+        if not tensor.is_contiguous():
+            raise RuntimeError(
+                f"Sequence-state tensor {name} must retain its registered contiguous layout; "
+                f"shape={tuple(tensor.shape)} stride={tuple(tensor.stride())}"
+            )
+        element_size = int(tensor.element_size())
+        storage_bytes = int(tensor.numel()) * element_size
+        if logical_tokens_per_row > 0:
+            if tensor.dim() < 2:
+                raise RuntimeError(
+                    f"Token-growing sequence-state tensor {name} must have rank >= 2"
+                )
+            if tensor.dim() >= 3:
+                capacity_rows = int(tensor.shape[0]) * int(tensor.shape[1])
+            else:
+                capacity_rows = int(tensor.shape[0])
+            row_view = tensor.reshape(capacity_rows, -1)
+            row_bytes = int(row_view.shape[1]) * element_size
+            shape = [int(dim) for dim in row_view.shape]
+            strides_bytes = [int(stride) * element_size for stride in row_view.stride()]
+            growth_mode = "token_rows"
+        else:
+            capacity_rows = 0
+            row_bytes = 0
+            shape = [int(dim) for dim in tensor.shape]
+            strides_bytes = [int(stride) * element_size for stride in tensor.stride()]
+            growth_mode = "fixed"
+        store.register_sequence_state_allocation(
+            name=name,
+            kind=kind,
+            layer_idx=int(layer_idx),
+            ptr=int(tensor.data_ptr()),
+            storage_bytes=storage_bytes,
+            dtype=str(tensor.dtype).removeprefix("torch."),
+            element_size=element_size,
+            shape=shape,
+            strides_bytes=strides_bytes,
+            growth_mode=growth_mode,
+            logical_tokens_per_row=int(logical_tokens_per_row),
+            capacity_rows=capacity_rows,
+            row_bytes=row_bytes,
+        )
+
+    @staticmethod
+    def _sequence_state_plane_layers(value, count: int):
+        if value is None:
+            return []
+        if isinstance(value, torch.Tensor):
+            if value.shape[0] != count:
+                raise RuntimeError(
+                    f"Sequence-state plane has {value.shape[0]} layers, expected {count}"
+                )
+            return [value[offset] for offset in range(count)]
+        if isinstance(value, list):
+            if len(value) != count:
+                raise RuntimeError(
+                    f"Sequence-state plane has {len(value)} layers, expected {count}"
+                )
+            return value
+        raise RuntimeError(f"Unsupported sequence-state plane type {type(value).__name__}")
+
+    def _register_primary_sequence_state_inventory(self, store, device: torch.device) -> int:
+        """Populate the primary store from actual loaded sequence allocations."""
+        device_ordinal = int(device.index or 0)
+
+        def on_store(tensor) -> bool:
+            return (
+                isinstance(tensor, torch.Tensor)
+                and tensor.is_cuda
+                and int(tensor.device.index or 0) == device_ordinal
+            )
+
+        registered = 0
+
+        def register(name, kind, layer_idx, tensor, tokens_per_row=0):
+            nonlocal registered
+            if tensor is None or not on_store(tensor):
+                return
+            self._register_sequence_state_tensor(
+                store,
+                name=name,
+                kind=kind,
+                layer_idx=layer_idx,
+                tensor=tensor,
+                logical_tokens_per_row=tokens_per_row,
+            )
+            registered += 1
+
+        for cache_idx, cache in enumerate(self.kv_caches):
+            if cache is None:
+                continue
+            layer_indices = list(cache.layer_indices)
+            layer_count = len(layer_indices)
+            if cache.attention_type == "deepseek_v4":
+                for offset, layer_idx in enumerate(layer_indices):
+                    ratio = int(cache.dsv4_compress_ratios[offset])
+                    register(
+                        f"gpu{device_ordinal}.layer{layer_idx}.deepseek_v4.raw",
+                        "deepseek_v4_raw_ring",
+                        layer_idx,
+                        cache.dsv4_raw_cache[offset],
+                    )
+                    if ratio == 0:
+                        continue
+                    register(
+                        f"gpu{device_ordinal}.layer{layer_idx}.deepseek_v4.compressed",
+                        "deepseek_v4_compressed_kv",
+                        layer_idx,
+                        cache.dsv4_compressed_cache[offset],
+                        ratio,
+                    )
+                    register(
+                        f"gpu{device_ordinal}.layer{layer_idx}.deepseek_v4.compressor_kv",
+                        "deepseek_v4_compressor_kv_state",
+                        layer_idx,
+                        cache.dsv4_compressor_kv_state[offset],
+                    )
+                    register(
+                        f"gpu{device_ordinal}.layer{layer_idx}.deepseek_v4.compressor_score",
+                        "deepseek_v4_compressor_score_state",
+                        layer_idx,
+                        cache.dsv4_compressor_score_state[offset],
+                    )
+                    if ratio == 4:
+                        register(
+                            f"gpu{device_ordinal}.layer{layer_idx}.deepseek_v4.index",
+                            "deepseek_v4_index_cache",
+                            layer_idx,
+                            cache.dsv4_index_cache[offset],
+                            ratio,
+                        )
+                        register(
+                            f"gpu{device_ordinal}.layer{layer_idx}.deepseek_v4.index_kv",
+                            "deepseek_v4_index_kv_state",
+                            layer_idx,
+                            cache.dsv4_index_kv_state[offset],
+                        )
+                        register(
+                            f"gpu{device_ordinal}.layer{layer_idx}.deepseek_v4.index_score",
+                            "deepseek_v4_index_score_state",
+                            layer_idx,
+                            cache.dsv4_index_score_state[offset],
+                        )
+                continue
+
+            planes = [
+                ("k", "gqa_k", cache.k_cache),
+                ("v", "gqa_v", cache.v_cache),
+                ("k_scale", "gqa_k_scale", cache.k_radius_cache),
+                ("k_packed", "gqa_k_packed", cache.k_angles_cache),
+                ("v_scale", "gqa_v_scale", cache.v_radius_cache),
+                ("v_packed", "gqa_v_packed", cache.v_angles_cache),
+                ("compressed", "mla_compressed_kv", cache.ckv_cache),
+                ("position", "mla_positional_k", cache.kpe_cache),
+                ("combined", "mla_combined_kv", cache.kv_cache),
+            ]
+            for suffix, kind, plane in planes:
+                if plane is None:
+                    continue
+                for offset, tensor in enumerate(
+                    self._sequence_state_plane_layers(plane, layer_count)
+                ):
+                    if tensor is None:
+                        continue
+                    layer_idx = layer_indices[offset]
+                    register(
+                        f"gpu{device_ordinal}.layer{layer_idx}.{suffix}",
+                        kind,
+                        layer_idx,
+                        tensor,
+                        1,
+                    )
+
+        hqq_active = is_hqq_attention(self.quant_cfg.attention)
+        for layer_idx, layer in enumerate(self.layers):
+            attn = layer.attention
+            if layer.layer_type == "linear_attention" and attn is not None:
+                if hqq_active:
+                    conv_state = getattr(attn, "_hqq_conv_state", None)
+                    recur_state = getattr(attn, "_hqq_recur_state", None)
+                else:
+                    conv_state = getattr(attn, "_rust_conv_state", None)
+                    recur_state = getattr(attn, "_rust_recur_state", None)
+                register(
+                    f"gpu{device_ordinal}.layer{layer_idx}.linear.conv",
+                    "linear_attention_conv_state",
+                    layer_idx,
+                    conv_state,
+                )
+                register(
+                    f"gpu{device_ordinal}.layer{layer_idx}.linear.recurrent",
+                    "linear_attention_recurrent_state",
+                    layer_idx,
+                    recur_state,
+                )
+            elif layer.layer_type == "mamba2":
+                states = getattr(self, "_mamba2_decode_states", {}).get(layer_idx, {})
+                register(
+                    f"gpu{device_ordinal}.layer{layer_idx}.mamba.conv",
+                    "mamba2_conv_state",
+                    layer_idx,
+                    states.get("conv_state"),
+                )
+                register(
+                    f"gpu{device_ordinal}.layer{layer_idx}.mamba.ssm",
+                    "mamba2_ssm_state",
+                    layer_idx,
+                    states.get("ssm_state"),
+                )
+
+        required = int(store.finalize_sequence_state_inventory())
+        logger.info(
+            "Sequence-state inventory on cuda:%d: registered=%d required=%d",
+            device_ordinal,
+            registered,
+            required,
+        )
+        return registered
+
     def setup_gpu_decode_store(self) -> "GpuDecodeStore":
         """Create and configure a GpuDecodeStore for Rust-native GPU decode.
 
@@ -10048,6 +10328,8 @@ class KrasisModel:
         logger.info("GPU decode store configured: %d layers, store_addr=%d",
                      len(self.layers), store.gpu_store_addr())
 
+        self._register_primary_sequence_state_inventory(store, device)
+
         # Single-slot AWQ: Marlin data is in the GPU slots from registration.
         # PyTorch tensors stay on GPU permanently (they ARE the slots).
         # Rust handles swapping slot contents between Marlin and simple INT4.
@@ -10198,6 +10480,25 @@ class KrasisModel:
         primary_device = torch.device(self.ranks[0].device)
 
         store = GpuDecodeStore(gpu_idx)
+        # Sequence-state metadata is collected from the exact tensors allocated
+        # for this pipeline segment, then transferred once into the Rust-owned
+        # registry after every attention backend has finalized its pointers.
+        # Tuple: (local name, semantic kind, layer, tensor, logical tokens/row).
+        aux_sequence_state = []
+
+        def remember_sequence_state(name, kind, layer_idx, tensor, tokens_per_row=0):
+            if not isinstance(tensor, torch.Tensor) or not tensor.is_cuda:
+                raise RuntimeError(
+                    f"Aux sequence-state tensor {name} must be a CUDA tensor"
+                )
+            if int(tensor.device.index or 0) != int(aux_device.index or 0):
+                raise RuntimeError(
+                    f"Aux sequence-state tensor {name} is on {tensor.device}, "
+                    f"expected {aux_device}"
+                )
+            aux_sequence_state.append(
+                (name, kind, int(layer_idx), tensor, int(tokens_per_row))
+            )
 
         # Same configure as primary
         max_qkv = self.cfg.hidden_size * 3
@@ -10497,6 +10798,18 @@ class KrasisModel:
                     attn._aux_a_log = attn.A_log.float().contiguous().to(aux_device)
                     attn._aux_dt_bias = attn.dt_bias.float().contiguous().to(aux_device)
                     self._aux_decode_weights.extend([conv_w, attn._aux_conv_state, attn._aux_norm_weight, attn._aux_recur_state, attn._aux_a_log, attn._aux_dt_bias])
+                    remember_sequence_state(
+                        f"layer{layer_idx}.linear.conv",
+                        "linear_attention_conv_state",
+                        layer_idx,
+                        attn._aux_conv_state,
+                    )
+                    remember_sequence_state(
+                        f"layer{layer_idx}.linear.recurrent",
+                        "linear_attention_recurrent_state",
+                        layer_idx,
+                        attn._aux_recur_state,
+                    )
 
                     store.register_la_layer(
                         layer_idx=layer_idx,
@@ -10608,6 +10921,20 @@ class KrasisModel:
                     if not hasattr(self, '_aux_mla_caches'):
                         self._aux_mla_caches = []
                     self._aux_mla_caches.extend([ckv_aux, kpe_aux])
+                    remember_sequence_state(
+                        f"layer{layer_idx}.mla.compressed",
+                        "mla_compressed_kv",
+                        layer_idx,
+                        ckv_aux,
+                        1,
+                    )
+                    remember_sequence_state(
+                        f"layer{layer_idx}.mla.position",
+                        "mla_positional_k",
+                        layer_idx,
+                        kpe_aux,
+                        1,
+                    )
                     max_seq = cache.max_pages * cache.page_size
 
                     store.register_mla_layer(
@@ -10907,6 +11234,15 @@ class KrasisModel:
                             self._aux_kv_caches = []
                         self._aux_kv_caches.extend([kn_aux, ki_aux, vm_aux, vi_aux, signs_aux])
                         self._aux_tq4_sign_refs.append(signs_aux)
+                        for suffix, kind, tensor in (
+                            ("k_scale", "gqa_k_scale", kn_aux),
+                            ("k_packed", "gqa_k_packed", ki_aux),
+                            ("v_scale", "gqa_v_scale", vm_aux),
+                            ("v_packed", "gqa_v_packed", vi_aux),
+                        ):
+                            remember_sequence_state(
+                                f"layer{layer_idx}.{suffix}", kind, layer_idx, tensor, 1
+                            )
                         tq4_ptrs.append((layer_idx,
                                          kn_aux.data_ptr(), ki_aux.data_ptr(),
                                          vm_aux.data_ptr(), vi_aux.data_ptr(),
@@ -10949,6 +11285,15 @@ class KrasisModel:
                         if not hasattr(self, '_aux_kv_caches'):
                             self._aux_kv_caches = []
                         self._aux_kv_caches.extend([kr_aux, ka_aux, vr_aux, va_aux])
+                        for suffix, kind, tensor in (
+                            ("k_scale", "gqa_k_scale", kr_aux),
+                            ("k_packed", "gqa_k_packed", ka_aux),
+                            ("v_scale", "gqa_v_scale", vr_aux),
+                            ("v_packed", "gqa_v_packed", va_aux),
+                        ):
+                            remember_sequence_state(
+                                f"layer{layer_idx}.{suffix}", kind, layer_idx, tensor, 1
+                            )
                         kintv4_ptrs.append((layer_idx,
                                             kr_aux.data_ptr(), ka_aux.data_ptr(),
                                             vr_aux.data_ptr(), va_aux.data_ptr()))
@@ -11000,6 +11345,14 @@ class KrasisModel:
                         if not hasattr(self, '_aux_kv_caches'):
                             self._aux_kv_caches = []
                         self._aux_kv_caches.extend([k_aux, vr_aux, va_aux])
+                        for suffix, kind, tensor in (
+                            ("k", "gqa_k", k_aux),
+                            ("v_scale", "gqa_v_scale", vr_aux),
+                            ("v_packed", "gqa_v_packed", va_aux),
+                        ):
+                            remember_sequence_state(
+                                f"layer{layer_idx}.{suffix}", kind, layer_idx, tensor, 1
+                            )
                         k8v4_ptrs.append((layer_idx,
                                           k_aux.data_ptr(),
                                           vr_aux.data_ptr(), va_aux.data_ptr()))
@@ -11035,6 +11388,15 @@ class KrasisModel:
                         if not hasattr(self, '_aux_kv_caches'):
                             self._aux_kv_caches = []
                         self._aux_kv_caches.extend([kr_aux, vr_aux, ka_aux, va_aux])
+                        for suffix, kind, tensor in (
+                            ("k_scale", "gqa_k_scale", kr_aux),
+                            ("k_packed", "gqa_k_packed", ka_aux),
+                            ("v_scale", "gqa_v_scale", vr_aux),
+                            ("v_packed", "gqa_v_packed", va_aux),
+                        ):
+                            remember_sequence_state(
+                                f"layer{layer_idx}.{suffix}", kind, layer_idx, tensor, 1
+                            )
                         polar4_ptrs.append((layer_idx,
                                             kr_aux.data_ptr(), vr_aux.data_ptr(),
                                             ka_aux.data_ptr(), va_aux.data_ptr()))
@@ -11067,6 +11429,12 @@ class KrasisModel:
                         if not hasattr(self, '_aux_kv_caches'):
                             self._aux_kv_caches = []
                         self._aux_kv_caches.extend([k_aux, v_aux])
+                        remember_sequence_state(
+                            f"layer{layer_idx}.k", "gqa_k", layer_idx, k_aux, 1
+                        )
+                        remember_sequence_state(
+                            f"layer{layer_idx}.v", "gqa_v", layer_idx, v_aux, 1
+                        )
                         kv_ptrs.append((layer_idx, k_aux.data_ptr(), v_aux.data_ptr()))
                     else:
                         k_layer = cache.k_cache[gqa_cache_idx]
@@ -11091,7 +11459,10 @@ class KrasisModel:
         self._aux_gpu_decode_stores.append(store)
         if hqq_active:
             registered_layers = self._register_hqq_attention_layers_on_store(
-                store, aux_device, self._aux_decode_weights
+                store,
+                aux_device,
+                self._aux_decode_weights,
+                aux_sequence_state,
             )
             logger.info(
                 "HQQ aux execution descriptors restored after shared decode setup on cuda:%d: %d layers registered.",
@@ -11118,6 +11489,30 @@ class KrasisModel:
                 split_layer,
                 layer_end,
             )
+
+        registered_sequence_state = 0
+        for name, kind, layer_idx, tensor, tokens_per_row in aux_sequence_state:
+            if not (split_layer <= layer_idx < layer_end):
+                continue
+            self._register_sequence_state_tensor(
+                store,
+                name=f"gpu{gpu_idx}.{name}",
+                kind=kind,
+                layer_idx=layer_idx,
+                tensor=tensor,
+                logical_tokens_per_row=tokens_per_row,
+            )
+            registered_sequence_state += 1
+        required_sequence_state = int(store.finalize_sequence_state_inventory())
+        logger.info(
+            "Aux sequence-state inventory on cuda:%d for layers [%d,%d): "
+            "registered=%d required=%d",
+            gpu_idx,
+            split_layer,
+            layer_end,
+            registered_sequence_state,
+            required_sequence_state,
+        )
 
         self._aux_decode_weights_all.extend(self._aux_decode_weights)
         self._aux_shared_gate_refs_all.extend(self._aux_shared_gate_refs)

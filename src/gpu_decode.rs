@@ -20,7 +20,9 @@ use std::sync::Arc;
 use cudarc::cublas::result as cublas_result;
 use cudarc::cublas::{sys as cublas_sys, CudaBlas};
 use cudarc::driver::sys as cuda_sys;
-use cudarc::driver::{CudaDevice, CudaSlice, DevicePtr, LaunchAsync, LaunchConfig};
+use cudarc::driver::{
+    CudaDevice, CudaSlice, DevicePtr, DeviceSlice, LaunchAsync, LaunchConfig,
+};
 
 use crate::adaptive_cold_drop::{AdaptiveColdDropRuntime, AdaptiveColdDropShadow};
 use crate::cpu_tail::{
@@ -13958,6 +13960,47 @@ struct CudaStream(cuda_sys::CUstream);
 unsafe impl Send for CudaStream {}
 unsafe impl Sync for CudaStream {}
 
+/// Reusable page-locked host buffer for sequence-state DMA.  Its size is
+/// selected from the live runtime inventory; this type deliberately has no
+/// model- or device-specific default capacity.
+struct SequenceStatePinnedBuffer {
+    ptr: *mut u8,
+    bytes: usize,
+}
+
+impl SequenceStatePinnedBuffer {
+    fn new(bytes: usize) -> Result<Self, String> {
+        if bytes == 0 {
+            return Err("sequence-state pinned buffer must not be empty".to_string());
+        }
+        let mut ptr = std::ptr::null_mut();
+        let result = unsafe { cuda_sys::lib().cuMemHostAlloc(&mut ptr, bytes, 0) };
+        if result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "allocate {} byte sequence-state pinned buffer: {:?}",
+                bytes, result
+            ));
+        }
+        unsafe {
+            std::ptr::write_bytes(ptr as *mut u8, 0xa5, bytes);
+        }
+        Ok(Self {
+            ptr: ptr as *mut u8,
+            bytes,
+        })
+    }
+}
+
+impl Drop for SequenceStatePinnedBuffer {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                let _ = cuda_sys::lib().cuMemFreeHost(self.ptr.cast());
+            }
+        }
+    }
+}
+
 struct CudaEvent(cuda_sys::CUevent);
 unsafe impl Send for CudaEvent {}
 unsafe impl Sync for CudaEvent {}
@@ -16224,9 +16267,285 @@ pub struct GpuDecodeStore {
     debug_decode_early_max_steps_once: u64,
     debug_decode_early_detail_dims_once: Vec<usize>,
     debug_hcs_transition_trace_once: bool,
+    /// Exact metadata for every per-sequence GPU allocation owned by this
+    /// device split. Populated once from real tensor metadata during setup;
+    /// request-time cache paths consume it entirely in Rust.
+    sequence_state_registry: crate::session_cache::SequenceStateRegistry,
 }
 
 impl GpuDecodeStore {
+    pub fn sequence_state_inventory_value(
+        &self,
+        logical_tokens: usize,
+    ) -> serde_json::Value {
+        let mut value = match serde_json::to_value(
+            self.sequence_state_registry.inventory(logical_tokens),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                return serde_json::json!({
+                    "error": format!("serialize sequence-state inventory: {}", error)
+                })
+            }
+        };
+        let Some(graph) = self.graph.as_ref() else {
+            return serde_json::json!({"error": "GPU decode graph is not configured"});
+        };
+        let rope_absolute_position = i64::try_from(graph.kv_current_pos)
+            .ok()
+            .and_then(|position| position.checked_add(i64::from(graph.rope_position_delta)));
+        let Some(object) = value.as_object_mut() else {
+            return serde_json::json!({"error": "sequence-state inventory did not serialize as an object"});
+        };
+        object.insert(
+            "device_ordinal".to_string(),
+            serde_json::json!(self.device.ordinal()),
+        );
+        object.insert(
+            "owned_layer_start".to_string(),
+            serde_json::json!(graph.decode_layer_start),
+        );
+        object.insert(
+            "owned_layer_end".to_string(),
+            serde_json::json!(graph.decode_layer_end),
+        );
+        object.insert(
+            "kv_absolute_position".to_string(),
+            serde_json::json!(graph.kv_current_pos),
+        );
+        object.insert(
+            "rope_position_delta".to_string(),
+            serde_json::json!(graph.rope_position_delta),
+        );
+        object.insert(
+            "rope_absolute_position".to_string(),
+            serde_json::json!(rope_absolute_position),
+        );
+        value
+    }
+
+    /// Measure lossless state transfers over the exact live allocation ranges.
+    ///
+    /// Every D2H sample is followed by an H2D copy of the identical bytes, so
+    /// this instrumentation never mutates model state.  Both pageable and
+    /// page-locked host memory are measured because the session store's
+    /// canonical copy will be pageable while DMA uses reusable pinned staging.
+    pub fn sequence_state_transfer_measurement_value(
+        &mut self,
+        logical_tokens: usize,
+        iterations: usize,
+    ) -> Result<serde_json::Value, String> {
+        if iterations == 0 {
+            return Err("sequence-state transfer measurement requires iterations > 0".to_string());
+        }
+        self.device
+            .bind_to_thread()
+            .map_err(|error| format!("bind CUDA context for transfer measurement: {error}"))?;
+        let active: Vec<_> = self
+            .sequence_state_registry
+            .allocations()
+            .iter()
+            .filter_map(|allocation| {
+                let used_bytes = allocation.used_bytes(logical_tokens);
+                (used_bytes > 0).then(|| (allocation.clone(), used_bytes))
+            })
+            .collect();
+        let staging_bytes = active
+            .iter()
+            .map(|(_, used_bytes)| *used_bytes)
+            .max()
+            .ok_or_else(|| {
+                format!(
+                    "GPU {} has no live sequence-state bytes at {} logical tokens",
+                    self.device.ordinal(),
+                    logical_tokens
+                )
+            })?;
+
+        let mut pageable = vec![0u8; staging_bytes];
+        // Ensure page commitment is outside the timed region.
+        pageable.fill(0x5a);
+        let pinned = SequenceStatePinnedBuffer::new(staging_bytes)?;
+        let stream = self.copy_stream.0;
+
+        let check = |operation: &str, result: cuda_sys::CUresult| -> Result<(), String> {
+            if result == cuda_sys::CUresult::CUDA_SUCCESS {
+                Ok(())
+            } else {
+                Err(format!(
+                    "GPU {} sequence-state {} failed: {:?}",
+                    self.device.ordinal(),
+                    operation,
+                    result
+                ))
+            }
+        };
+        check(
+            "initial context synchronize",
+            unsafe { cuda_sys::lib().cuCtxSynchronize() },
+        )?;
+
+        let mut allocation_results = Vec::with_capacity(active.len());
+        let mut total_bytes_per_direction = 0usize;
+        let mut pageable_d2h_ns = 0u128;
+        let mut pageable_h2d_ns = 0u128;
+        let mut pinned_d2h_ns = 0u128;
+        let mut pinned_h2d_ns = 0u128;
+        let mut pinned_to_pageable_ns = 0u128;
+        let mut pageable_to_pinned_ns = 0u128;
+
+        for (allocation, used_bytes) in active {
+            let mut item_pageable_d2h = Vec::with_capacity(iterations);
+            let mut item_pageable_h2d = Vec::with_capacity(iterations);
+            let mut item_pinned_d2h = Vec::with_capacity(iterations);
+            let mut item_pinned_h2d = Vec::with_capacity(iterations);
+            let mut item_pinned_to_pageable = Vec::with_capacity(iterations);
+            let mut item_pageable_to_pinned = Vec::with_capacity(iterations);
+            if used_bytes > pinned.bytes {
+                return Err(format!(
+                    "GPU {} sequence-state allocation '{}' requires {} staging bytes but the live-derived pinned buffer has {}",
+                    self.device.ordinal(),
+                    allocation.name,
+                    used_bytes,
+                    pinned.bytes
+                ));
+            }
+            for _ in 0..iterations {
+                let started = std::time::Instant::now();
+                check(
+                    "pageable D2H",
+                    unsafe {
+                        cuda_sys::lib().cuMemcpyDtoH_v2(
+                            pageable.as_mut_ptr().cast(),
+                            allocation.ptr,
+                            used_bytes,
+                        )
+                    },
+                )?;
+                let elapsed = started.elapsed().as_nanos();
+                item_pageable_d2h.push(elapsed);
+                pageable_d2h_ns = pageable_d2h_ns.saturating_add(elapsed);
+
+                let started = std::time::Instant::now();
+                check(
+                    "pageable H2D",
+                    unsafe {
+                        cuda_sys::lib().cuMemcpyHtoD_v2(
+                            allocation.ptr,
+                            pageable.as_ptr().cast(),
+                            used_bytes,
+                        )
+                    },
+                )?;
+                let elapsed = started.elapsed().as_nanos();
+                item_pageable_h2d.push(elapsed);
+                pageable_h2d_ns = pageable_h2d_ns.saturating_add(elapsed);
+
+                let started = std::time::Instant::now();
+                check(
+                    "pinned D2H enqueue",
+                    unsafe {
+                        cuda_sys::lib().cuMemcpyDtoHAsync_v2(
+                            pinned.ptr.cast(),
+                            allocation.ptr,
+                            used_bytes,
+                            stream,
+                        )
+                    },
+                )?;
+                check(
+                    "pinned D2H synchronize",
+                    unsafe { cuda_sys::lib().cuStreamSynchronize(stream) },
+                )?;
+                let elapsed = started.elapsed().as_nanos();
+                item_pinned_d2h.push(elapsed);
+                pinned_d2h_ns = pinned_d2h_ns.saturating_add(elapsed);
+
+                // Canonical snapshots live in pageable RAM. Measure both CPU
+                // staging directions explicitly so restore/save crossover
+                // decisions include the full path rather than only DMA.
+                let started = std::time::Instant::now();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        pinned.ptr,
+                        pageable.as_mut_ptr(),
+                        used_bytes,
+                    );
+                }
+                let elapsed = started.elapsed().as_nanos();
+                item_pinned_to_pageable.push(elapsed);
+                pinned_to_pageable_ns = pinned_to_pageable_ns.saturating_add(elapsed);
+
+                let started = std::time::Instant::now();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        pageable.as_ptr(),
+                        pinned.ptr,
+                        used_bytes,
+                    );
+                }
+                let elapsed = started.elapsed().as_nanos();
+                item_pageable_to_pinned.push(elapsed);
+                pageable_to_pinned_ns = pageable_to_pinned_ns.saturating_add(elapsed);
+
+                let started = std::time::Instant::now();
+                check(
+                    "pinned H2D enqueue",
+                    unsafe {
+                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            allocation.ptr,
+                            pinned.ptr.cast(),
+                            used_bytes,
+                            stream,
+                        )
+                    },
+                )?;
+                check(
+                    "pinned H2D synchronize",
+                    unsafe { cuda_sys::lib().cuStreamSynchronize(stream) },
+                )?;
+                let elapsed = started.elapsed().as_nanos();
+                item_pinned_h2d.push(elapsed);
+                pinned_h2d_ns = pinned_h2d_ns.saturating_add(elapsed);
+                total_bytes_per_direction = total_bytes_per_direction.saturating_add(used_bytes);
+            }
+            allocation_results.push(serde_json::json!({
+                "name": allocation.name,
+                "kind": allocation.kind,
+                "layer_idx": allocation.layer_idx,
+                "device_ordinal": allocation.device_ordinal,
+                "used_bytes": used_bytes,
+                "pageable_d2h_ns": item_pageable_d2h,
+                "pageable_h2d_ns": item_pageable_h2d,
+                "pinned_d2h_ns": item_pinned_d2h,
+                "pinned_h2d_ns": item_pinned_h2d,
+                "pinned_to_pageable_ns": item_pinned_to_pageable,
+                "pageable_to_pinned_ns": item_pageable_to_pinned,
+            }));
+        }
+        check(
+            "final context synchronize",
+            unsafe { cuda_sys::lib().cuCtxSynchronize() },
+        )?;
+        Ok(serde_json::json!({
+            "device_ordinal": self.device.ordinal(),
+            "logical_tokens": logical_tokens,
+            "iterations": iterations,
+            "allocation_count": allocation_results.len(),
+            "staging_bytes": staging_bytes,
+            "total_bytes_per_direction": total_bytes_per_direction,
+            "totals_ns": {
+                "pageable_d2h": pageable_d2h_ns,
+                "pageable_h2d": pageable_h2d_ns,
+                "pinned_d2h": pinned_d2h_ns,
+                "pinned_h2d": pinned_h2d_ns,
+                "pinned_to_pageable": pinned_to_pageable_ns,
+                "pageable_to_pinned": pageable_to_pinned_ns,
+            },
+            "allocations": allocation_results,
+        }))
+    }
+
     fn cuda_graph_unsupported_reason_for_graph(
         graph: &GpuDecodeGraph,
         layer_range: Option<(usize, usize)>,
@@ -19014,7 +19333,302 @@ impl GpuDecodeStore {
             debug_decode_early_max_steps_once: 3,
             debug_decode_early_detail_dims_once: Vec::new(),
             debug_hcs_transition_trace_once: false,
+            sequence_state_registry: crate::session_cache::SequenceStateRegistry::default(),
         })
+    }
+
+    /// Register exact metadata for one per-sequence CUDA allocation.
+    ///
+    /// The metadata is read from the real tensor during one-time model setup.
+    /// CUDA independently verifies that the supplied byte range belongs to
+    /// this store's device. Request-time inventory and caching never call
+    /// Python.
+    #[pyo3(signature = (
+        name, kind, layer_idx, ptr, storage_bytes, dtype, element_size,
+        shape, strides_bytes, growth_mode="fixed", logical_tokens_per_row=0,
+        capacity_rows=0, row_bytes=0
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn register_sequence_state_allocation(
+        &mut self,
+        name: String,
+        kind: String,
+        layer_idx: Option<usize>,
+        ptr: usize,
+        storage_bytes: usize,
+        dtype: String,
+        element_size: usize,
+        shape: Vec<usize>,
+        strides_bytes: Vec<usize>,
+        growth_mode: &str,
+        logical_tokens_per_row: usize,
+        capacity_rows: usize,
+        row_bytes: usize,
+    ) -> PyResult<()> {
+        let ptr_u64 = ptr as u64;
+        let mut cuda_device_ordinal = -1i32;
+        let mut range_start = 0u64;
+        let mut range_size = 0usize;
+        unsafe {
+            let ordinal_rc = cuda_sys::lib().cuPointerGetAttribute(
+                &mut cuda_device_ordinal as *mut i32 as *mut std::ffi::c_void,
+                cuda_sys::CUpointer_attribute_enum::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
+                ptr_u64,
+            );
+            if ordinal_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "{}: CUDA could not resolve device pointer {:#x}: {:?}",
+                    name, ptr_u64, ordinal_rc
+                )));
+            }
+            let range_start_rc = cuda_sys::lib().cuPointerGetAttribute(
+                &mut range_start as *mut u64 as *mut std::ffi::c_void,
+                cuda_sys::CUpointer_attribute_enum::CU_POINTER_ATTRIBUTE_RANGE_START_ADDR,
+                ptr_u64,
+            );
+            let range_size_rc = cuda_sys::lib().cuPointerGetAttribute(
+                &mut range_size as *mut usize as *mut std::ffi::c_void,
+                cuda_sys::CUpointer_attribute_enum::CU_POINTER_ATTRIBUTE_RANGE_SIZE,
+                ptr_u64,
+            );
+            if range_start_rc != cuda_sys::CUresult::CUDA_SUCCESS
+                || range_size_rc != cuda_sys::CUresult::CUDA_SUCCESS
+            {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "{}: CUDA allocation-range query failed: start={:?} size={:?}",
+                    name, range_start_rc, range_size_rc
+                )));
+            }
+        }
+        if cuda_device_ordinal < 0 || cuda_device_ordinal as usize != self.device.ordinal() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{}: allocation belongs to GPU {}, but store owns GPU {}",
+                name,
+                cuda_device_ordinal,
+                self.device.ordinal()
+            )));
+        }
+        let range_end = range_start.checked_add(range_size as u64).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "{}: CUDA allocation range overflows",
+                name
+            ))
+        })?;
+        let state_end = ptr_u64
+            .checked_add(storage_bytes as u64)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "{}: sequence-state range overflows",
+                    name
+                ))
+            })?;
+        if ptr_u64 < range_start || state_end > range_end {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{}: tensor range [{:#x}, {:#x}) is outside CUDA allocation [{:#x}, {:#x})",
+                name, ptr_u64, state_end, range_start, range_end
+            )));
+        }
+
+        let growth = match growth_mode {
+            "fixed" => crate::session_cache::SequenceStateGrowth::Fixed,
+            "token_rows" => crate::session_cache::SequenceStateGrowth::TokenRows {
+                logical_tokens_per_row,
+                capacity_rows,
+                row_bytes,
+            },
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "{}: unsupported sequence-state growth mode {:?}",
+                    name, other
+                )))
+            }
+        };
+        self.sequence_state_registry
+            .register(crate::session_cache::SequenceStateAllocation {
+                name,
+                kind,
+                layer_idx,
+                device_ordinal: self.device.ordinal(),
+                ptr: ptr_u64,
+                storage_bytes,
+                dtype,
+                element_size,
+                shape,
+                strides_bytes,
+                growth,
+            })
+            .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+
+    fn clear_sequence_state_inventory(&mut self) {
+        self.sequence_state_registry.clear();
+    }
+
+    #[pyo3(signature = (logical_tokens=None))]
+    fn sequence_state_inventory_json(&self, logical_tokens: Option<usize>) -> PyResult<String> {
+        let current_position = self
+            .graph
+            .as_ref()
+            .map(|graph| graph.kv_current_pos)
+            .unwrap_or(0);
+        serde_json::to_string_pretty(
+            &self.sequence_state_inventory_value(logical_tokens.unwrap_or(current_position)),
+        )
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+    }
+
+    /// Fail closed unless every state pointer consumed by the configured
+    /// architecture is present in the exact runtime inventory.
+    fn finalize_sequence_state_inventory(&self) -> PyResult<usize> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        let mut required: Vec<(String, u64)> = Vec::new();
+        for (layer_idx, layer) in graph.layers.iter().enumerate() {
+            if layer_idx < graph.decode_layer_start || layer_idx >= graph.decode_layer_end {
+                continue;
+            }
+            match &layer.attn {
+                GpuAttnConfig::LinearAttention {
+                    conv_state_ptr,
+                    recur_state_ptr,
+                    ..
+                } => {
+                    required.push((format!("layer{}.linear.conv", layer_idx), *conv_state_ptr));
+                    required.push((
+                        format!("layer{}.linear.recurrent", layer_idx),
+                        *recur_state_ptr,
+                    ));
+                }
+                GpuAttnConfig::MLA {
+                    ckv_cache_ptr,
+                    kpe_cache_ptr,
+                    ..
+                } => {
+                    required.push((format!("layer{}.mla.compressed", layer_idx), *ckv_cache_ptr));
+                    required.push((format!("layer{}.mla.position", layer_idx), *kpe_cache_ptr));
+                }
+                GpuAttnConfig::Mamba2 {
+                    conv_state_ptr,
+                    ssm_state_ptr,
+                    ..
+                } => {
+                    required.push((format!("layer{}.mamba.conv", layer_idx), *conv_state_ptr));
+                    required.push((format!("layer{}.mamba.ssm", layer_idx), *ssm_state_ptr));
+                }
+                GpuAttnConfig::GQA { num_heads, .. } if *num_heads > 0 => match graph.kv_format {
+                    0 | 1 => {
+                        required.push((
+                            format!("layer{}.gqa.k", layer_idx),
+                            graph.kv_k_ptrs.get(layer_idx).copied().unwrap_or(0),
+                        ));
+                        required.push((
+                            format!("layer{}.gqa.v", layer_idx),
+                            graph.kv_v_ptrs.get(layer_idx).copied().unwrap_or(0),
+                        ));
+                    }
+                    3 => {
+                        required.push((
+                            format!("layer{}.gqa.k", layer_idx),
+                            graph.kv_k_ptrs.get(layer_idx).copied().unwrap_or(0),
+                        ));
+                        required.push((
+                            format!("layer{}.gqa.v_scale", layer_idx),
+                            graph.kv_v_radius_ptrs.get(layer_idx).copied().unwrap_or(0),
+                        ));
+                        required.push((
+                            format!("layer{}.gqa.v_packed", layer_idx),
+                            graph.kv_v_angles_ptrs.get(layer_idx).copied().unwrap_or(0),
+                        ));
+                    }
+                    2 | 4 | 5 | 6 | 7 | 8 | 9 => {
+                        for (suffix, pointers) in [
+                            ("k_scale", &graph.kv_k_radius_ptrs),
+                            ("k_packed", &graph.kv_k_angles_ptrs),
+                            ("v_scale", &graph.kv_v_radius_ptrs),
+                            ("v_packed", &graph.kv_v_angles_ptrs),
+                        ] {
+                            required.push((
+                                format!("layer{}.gqa.{}", layer_idx, suffix),
+                                pointers.get(layer_idx).copied().unwrap_or(0),
+                            ));
+                        }
+                    }
+                    other => {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "unsupported KV format {} in sequence-state inventory",
+                            other
+                        )))
+                    }
+                },
+                GpuAttnConfig::GQA { .. } => {}
+            }
+            if let Some(v4) = layer.deepseek_v4.as_ref() {
+                required.push((format!("layer{}.deepseek_v4.raw", layer_idx), v4.raw_cache_ptr));
+                if let Some(compressor) = v4.compressor.as_ref() {
+                    required.extend([
+                        (
+                            format!("layer{}.deepseek_v4.compressed", layer_idx),
+                            compressor.cache_ptr,
+                        ),
+                        (
+                            format!("layer{}.deepseek_v4.compressor_kv", layer_idx),
+                            compressor.kv_state_ptr,
+                        ),
+                        (
+                            format!("layer{}.deepseek_v4.compressor_score", layer_idx),
+                            compressor.score_state_ptr,
+                        ),
+                    ]);
+                }
+                if let Some(indexer) = v4.indexer.as_ref() {
+                    let compressor = &indexer.compressor;
+                    required.extend([
+                        (
+                            format!("layer{}.deepseek_v4.index", layer_idx),
+                            compressor.cache_ptr,
+                        ),
+                        (
+                            format!("layer{}.deepseek_v4.index_kv", layer_idx),
+                            compressor.kv_state_ptr,
+                        ),
+                        (
+                            format!("layer{}.deepseek_v4.index_score", layer_idx),
+                            compressor.score_state_ptr,
+                        ),
+                    ]);
+                }
+            }
+        }
+        for owner in &graph.dsa_indexer_owners {
+            required.push((
+                format!("dsa.owner{}.key_cache", owner.owner_layer_idx),
+                *owner.d_key_cache.device_ptr(),
+            ));
+        }
+        let missing: Vec<_> = required
+            .iter()
+            .filter(|(_, ptr)| *ptr == 0 || !self.sequence_state_registry.contains_ptr(*ptr))
+            .map(|(name, ptr)| format!("{}={:#x}", name, ptr))
+            .collect();
+        if !missing.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "sequence-state inventory is incomplete on GPU {}: {}",
+                self.device.ordinal(),
+                missing.join(", ")
+            )));
+        }
+        self.sequence_state_registry
+            .validate_complete_names()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        log::info!(
+            "Sequence-state inventory finalized on GPU {}: {} allocations, {} required pointers",
+            self.device.ordinal(),
+            self.sequence_state_registry.allocations().len(),
+            required.len(),
+        );
+        Ok(required.len())
     }
 
     pub fn set_trace_request_label(&mut self, label: String) {
@@ -19312,6 +19926,7 @@ impl GpuDecodeStore {
         moe_intermediate_size: usize,
         shared_expert_intermediate_size: usize,
     ) -> PyResult<()> {
+        self.sequence_state_registry.clear();
         let adaptive_cold_drop_shadow =
             AdaptiveColdDropShadow::from_env().map_err(pyo3::exceptions::PyValueError::new_err)?;
         let adaptive_cold_drop =
@@ -26166,6 +26781,31 @@ impl GpuDecodeStore {
                     owner_layer_idx, topk_capacity, error
                 ))
             })?;
+
+        let key_ptr = *d_key_cache.device_ptr();
+        let key_elements = d_key_cache.len();
+        self.sequence_state_registry
+            .register(crate::session_cache::SequenceStateAllocation {
+                name: format!("dsa.owner{}.key_cache", owner_layer_idx),
+                kind: "dsa_key_cache".to_string(),
+                layer_idx: Some(owner_layer_idx),
+                device_ordinal: self.device.ordinal(),
+                ptr: key_ptr,
+                storage_bytes: key_elements * std::mem::size_of::<u16>(),
+                dtype: "bfloat16".to_string(),
+                element_size: std::mem::size_of::<u16>(),
+                shape: vec![max_context_tokens, registration.index_head_dim],
+                strides_bytes: vec![
+                    registration.index_head_dim * std::mem::size_of::<u16>(),
+                    std::mem::size_of::<u16>(),
+                ],
+                growth: crate::session_cache::SequenceStateGrowth::TokenRows {
+                    logical_tokens_per_row: 1,
+                    capacity_rows: max_context_tokens,
+                    row_bytes: registration.index_head_dim * std::mem::size_of::<u16>(),
+                },
+            })
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
         let graph = self
             .graph

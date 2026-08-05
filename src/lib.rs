@@ -13,6 +13,7 @@ pub mod kernel;
 pub mod moe;
 pub mod numa;
 pub mod server;
+pub mod session_cache;
 mod synthetic_repack;
 pub mod syscheck;
 pub mod text_only_messages;

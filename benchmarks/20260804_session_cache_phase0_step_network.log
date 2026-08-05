@@ -1,0 +1,95 @@
+Checking server health at http://localhost:18019... [0;32mOK[0m
+Sending warmup request... done (2.3s)
+  [2m>>> Hi! How can I help you today[0m
+
+[1m[0;36mTest 4: Network Multi-Prompt Validation[0m
+============================================================
+  [0;32mPASS[0m OK (2.1s) [factual_qa]
+  [0;32mPASS[0m OK (2.5s) [math_simple]
+  [0;32mPASS[0m OK (3.6s) [code_gen]
+  [0;32mPASS[0m OK (2.6s, 4 words) [multi_turn]
+  [0;32mPASS[0m OK (2.2s, 7 words) [short_prompt]
+  [0;32mPASS[0m OK (2.1s) [streaming_factual]
+  [0;32mPASS[0m OK (3.1s) [streaming_code]
+  [0;32mPASS[0m OK (2.8s) [json_output]
+  [0;32mPASS[0m OK (2.5s) [blocking_math]
+
+[1m[0;36mTest 5: Network Large-Prompt Validation[0m
+============================================================
+  Loading ~1K token prompt... done (7044 chars)
+  [0;32mPASS[0m OK (4.9s, 48 words) | prompt_tokens=2053 | Prefill (internal)=1440.2 tok/s | Decode (internal)=30.47 tok/s | Round trip=30.47 tok/s [large_2k]
+  Loading ~8K token prompt... done (35045 chars)
+  [0;32mPASS[0m OK (13.3s, 43 words) | prompt_tokens=8633 | Prefill (internal)=4095.4 tok/s | Decode (internal)=12.77 tok/s | Round trip=12.77 tok/s [large_10k]
+  Loading ~21K token prompt... done (87555 chars)
+  [0;32mPASS[0m Correctly rejected over-context prompt (23358>18192) (0.0s) [large_25k]
+  Loading ~87K token prompt... done (244208 chars)
+  [0;32mPASS[0m Correctly rejected over-context prompt (62413>18192) (0.1s) [large_100k]
+
+[1m[0;36mTest 6: Multi-Turn Sequential Conversation[0m
+============================================================
+  Turn 1: establishing facts... [0;32mPASS[0m OK (3.4s)
+  Turn 2: recalling dog's name... [0;32mPASS[0m OK (2.7s)
+  Turn 3: recalling city... [0;32mPASS[0m OK (2.6s)
+  Turn 4: recalling number (streaming)... [0;32mPASS[0m OK (2.6s)
+  Turn 5: recalling all three facts... [0;32mPASS[0m OK (3.3s)
+
+============================================================
+[1mSUMMARY[0m: 18/18 passed, 0 failed, 58.9s total
+
+[1mResponse texts (review for coherence):[0m
+
+  [[0;32mPASS[0m] factual_qa: OK (2.1s)
+  [2m>>> Paris[0m
+
+  [[0;32mPASS[0m] math_simple: OK (2.5s)
+  [2m>>> 56[0m
+
+  [[0;32mPASS[0m] code_gen: OK (3.6s)
+  [2m>>> ```python\ndef fibonacci(n):\n    if n <= 1:\n        return n\n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b\n```[0m
+
+  [[0;32mPASS[0m] multi_turn: OK (2.6s, 4 words)
+  [2m>>> Your name is Alice.[0m
+
+  [[0;32mPASS[0m] short_prompt: OK (2.2s, 7 words)
+  [2m>>> Hello! How can I help you today?[0m
+
+  [[0;32mPASS[0m] streaming_factual: OK (2.1s)
+  [2m>>> Tokyo[0m
+
+  [[0;32mPASS[0m] streaming_code: OK (3.1s)
+  [2m>>> Here is the standard one-liner:\n\n```python\nprint("Hello, World!")\n```\n\nIf you want to be fancy and avoid using the `print` function explicitly, you can use this one:\n\n```python\nimport sys; sys.stdout.write("Hello, World!")\n```[0m
+
+  [[0;32mPASS[0m] json_output: OK (2.8s)
+  [2m>>> ```json\n{"name": "Bob", "age": 30}\n```[0m
+
+  [[0;32mPASS[0m] blocking_math: OK (2.5s)
+  [2m>>> 42[0m
+
+  [[0;32mPASS[0m] large_2k: OK (4.9s, 48 words) | prompt_tokens=2053 | Prefill (internal)=1440.2 tok/s | Decode (internal)=30.47 tok/s | Round trip=30.47 tok/s
+  [2m>>> </think>\nThe provided text is the table of contents and the beginning of the etymology and "Extracts" from the opening of Herman Melville's *Moby-Dick*, a novel that follows the crew of the **Moby-Dick**, which is a novel by Herman Melville, which is a novel by Herman Melville's *M[0m
+
+  [[0;32mPASS[0m] large_10k: OK (13.3s, 43 words) | prompt_tokens=8633 | Prefill (internal)=4095.4 tok/s | Decode (internal)=12.77 tok/s | Round trip=12.77 tok/s
+  [2m>>> Based     the  (and the  (and  (and  (and 院  (and  the  (and  the  (and  the  (and  the  (and 院  (and 院  (and 院  (院  (院  (院   (  (  (  the  以此\n  (院   以此 以此  clamp (    (  the \n    (         (   the \n    (         the \n    (  [0m
+
+  [[0;32mPASS[0m] large_25k: Correctly rejected over-context prompt (23358>18192) (0.0s)
+  [2m>>> (no response text captured)[0m
+
+  [[0;32mPASS[0m] large_100k: Correctly rejected over-context prompt (62413>18192) (0.1s)
+  [2m>>> (no response text captured)[0m
+
+  [[0;32mPASS[0m] multi_turn_t1: OK (3.4s)
+  [2m>>> Got it! I've noted all three facts:\n\n1. Your dog's name is Biscuit.\n2. You live in Wellington, New Zealand.\n3. Your favorite number is 42.\n\nI'll keep these in mind for our conversation.[0m
+
+  [[0;32mPASS[0m] multi_turn_t2_dog: OK (2.7s)
+  [2m>>> Your dog's name is Biscuit.[0m
+
+  [[0;32mPASS[0m] multi_turn_t3_city: OK (2.6s)
+  [2m>>> You live in Wellington, New Zealand.[0m
+
+  [[0;32mPASS[0m] multi_turn_t4_number: OK (2.6s)
+  [2m>>> Your favorite number is 42.[0m
+
+  [[0;32mPASS[0m] multi_turn_t5_all: OK (3.3s)
+  [2m>>> Here are the three facts you shared at the start:\n\n1. Your dog's name is Biscuit.\n2. You live in Wellington, New Zealand.\n3. Your favorite number is 42.[0m
+
+[0;32m[1mALL TESTS PASSED[0m

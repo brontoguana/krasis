@@ -1,0 +1,101 @@
+Checking server health at http://localhost:18023... [0;32mOK[0m
+Sending warmup request... done (0.4s)
+  [2m>>> Hello there, how can I assist you[0m
+
+[1m[0;36mTest 4: Network Multi-Prompt Validation[0m
+============================================================
+  [0;32mPASS[0m OK (0.3s) [factual_qa]
+  [0;32mPASS[0m OK (0.8s) [math_simple]
+  [0;32mPASS[0m OK (3.8s) [code_gen]
+  [0;32mPASS[0m OK (0.5s, 12 words) [multi_turn]
+  [0;32mPASS[0m OK (0.6s, 23 words) [short_prompt]
+  [0;32mPASS[0m OK (0.8s) [streaming_factual]
+  [0;32mPASS[0m OK (1.9s) [streaming_code]
+  [0;32mPASS[0m OK (0.4s) [json_output]
+  [0;32mPASS[0m OK (0.4s) [blocking_math]
+
+[1m[0;36mTest 5: Network Large-Prompt Validation[0m
+============================================================
+  Loading ~1K token prompt... done (7044 chars)
+  [0;32mPASS[0m OK (1.7s, 91 words) | prompt_tokens=2259 | Prefill (internal)=5483.7 tok/s | Decode (internal)=112.95 tok/s | Round trip=112.94 tok/s [large_2k]
+  Loading ~8K token prompt... done (35045 chars)
+  [0;32mPASS[0m OK (2.6s, 68 words) | prompt_tokens=8696 | Prefill (internal)=9233.4 tok/s | Decode (internal)=68.74 tok/s | Round trip=68.74 tok/s [large_10k]
+  Loading ~21K token prompt... done (87555 chars)
+  [0;32mPASS[0m OK (5.5s, 73 words) | prompt_tokens=24228 | Prefill (internal)=10404.9 tok/s | Decode (internal)=35.42 tok/s | Round trip=35.41 tok/s [large_25k]
+  Loading ~87K token prompt... done (244208 chars)
+  [0;32mPASS[0m OK (31.1s, 90 words) | prompt_tokens=62781 | Prefill (internal)=2727.9 tok/s | Decode (internal)=16.07 tok/s | Round trip=16.07 tok/s [large_100k]
+
+[1m[0;36mTest 6: Multi-Turn Sequential Conversation[0m
+============================================================
+  Turn 1: establishing facts... [0;32mPASS[0m OK (1.2s)
+  Turn 2: recalling dog's name... [0;31mFAIL[0m Expected 'Biscuit': 'I’m not seeing a clear, specific answer in the conversation you’ve described.\u202fThe only thing shown i'
+  Turn 3: recalling city... [0;31mFAIL[0m Expected 'Wellington': 'I don’t have any way to determine the answer. \n\nIf you\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u2003\u202f\u202f\u202f\u202f\u202f\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200bThe request in the pa'
+  Turn 4: recalling number (streaming)... [0;31mFAIL[0m Expected '42': 'I’m not\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f'
+  Turn 5: recalling all three facts... [0;31mFAIL[0m Missing: Biscuit, Wellington, 42 in: 'I’m sorry\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f—\u202f but I don’t have a record of the answers to your\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f \u202fquestions. Without the underlying\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f'
+
+============================================================
+[1mSUMMARY[0m: 14/18 passed, 4 failed, 60.2s total
+
+[1mResponse texts (review for coherence):[0m
+
+  [[0;32mPASS[0m] factual_qa: OK (0.3s)
+  [2m>>> Paris.[0m
+
+  [[0;32mPASS[0m] math_simple: OK (0.8s)
+  [2m>>> 56... Let me check: 8*4 is 32, and 6-0 is just 8... so 6 is the number, 7 is in the middle? Ups: As as as... 10 of 2 while  9 is... awful. 0.[0m
+
+  [[0;32mPASS[0m] code_gen: OK (3.8s)
+  [2m>>> Here’s a simple, efficient implementation that uses an iterative approach (runs in O(n) time and O(1) space). It handles edge cases correctly like `0`, negative numbers, and non-f H strings, adheres to Lean and Lean 2’s requirements, and handles all test cases.\n\n```python\ndef fib(n):\n    def onnonziyp. . hspecial(f H n h (n-1)\nndestn in   place.-run= -3\n  ] f(   � le ‑Cziiistepn cuh8b zlpm(n-1 \n Leon(an)pe\n...\n```) \nHowever, I need to provide the **actual correct solution**. Since the problem is[0m
+
+  [[0;32mPASS[0m] multi_turn: OK (0.5s, 12 words)
+  [2m>>> Your name is Alice. I just picked 30 Al 5 up, 3[0m
+
+  [[0;32mPASS[0m] short_prompt: OK (0.6s, 23 words)
+  [2m>>> Hello! �3 How can I assist you today? I'm ready to help and engage in our wonderful Venture. Let's explore the possibilities together![0m
+
+  [[0;32mPASS[0m] streaming_factual: OK (0.8s)
+  [2m>>> Tokyo) The capital of Japan is Tokyo. Should keep one of five tools… and three of them are tofu, c organisation, and o cat. but a has v… all four questions: 1. What is the name of the artist? 2. 3\n\nThe answer is: "Tokyo"[0m
+
+  [[0;32mPASS[0m] streaming_code: OK (1.9s)
+  [2m>>> Here's a simple Python one-liner that prints "Hello, World":\n\n```python\nprint("Hello")\n```\n\nThis will print `Hello` to the console. The program is a single executable that takes no arguments and runs in a continuous language environment. \n\nHowever, if you have a file named `python` (like in some Python distributions), and you run `python` in the terminal, the `--85, R, long]` will always one-piner one's one of one which has one of the most‑h". \n\nThe line I. O The sentence's That's one of the 5 o[0m
+
+  [[0;32mPASS[0m] json_output: OK (0.4s)
+  [2m>>> {"name": "Alice", "age": 25}[0m
+
+  [[0;32mPASS[0m] blocking_math: OK (0.4s)
+  [2m>>> 42[0m
+
+  [[0;32mPASS[0m] large_2k: OK (1.7s, 91 words) | prompt_tokens=2259 | Prefill (internal)=5483.7 tok/s | Decode (internal)=112.95 tok/s | Round trip=112.94 tok/s
+  [2m>>> The provided texts are a complex, intricate, and highly specialized collection of texts that span various literary, linguistic, and narrative expressions. These works, particularly the stylized and often obscurely interpreted texts, weave a rich tapestra of narrative, scholarly interpretation, and narrative exploration. \n\nThese works delicately weave through the whirce of an ancient course, incorporating six vtext entities that are recurrently acknowledged and have pondered 47 such the most elus[0m
+
+  [[0;32mPASS[0m] large_10k: OK (2.6s, 68 words) | prompt_tokens=8696 | Prefill (internal)=9233.4 tok/s | Decode (internal)=68.74 tok/s | Round trip=68.74 tok/s
+  [2m>>> The text is a complex collection of literary allusions and historical all‑effects, composed of three passages which are all in a an Age R Upup Willow so Win Nine. H VII Hi w/w --wh -p (r) sju(3)^ U  w  opportunity 2 I) p 8 3  h  a w while looking with the here a little do 63 Fonn* has class X of the  I may m  third year. [0m
+
+  [[0;32mPASS[0m] large_25k: OK (5.5s, 73 words) | prompt_tokens=24228 | Prefill (internal)=10404.9 tok/s | Decode (internal)=35.42 tok/s | Round trip=35.41 tok/s
+  [2m>>> The text describes a series of topics and topics related to an\nagreement with a number of phases and many more. It includes a number of \nstatements, including the mention of a name "M. de B", a character in the\nnarratation that represents the "Bishop in Bishop' and a man on the 1's -\nanf.1 The story of the "The Man of the W'," for\nexample, p.3, is a name that also\nta-[0m
+
+  [[0;32mPASS[0m] large_100k: OK (31.1s, 90 words) | prompt_tokens=62781 | Prefill (internal)=2727.9 tok/s | Decode (internal)=16.07 tok/s | Round trip=16.07 tok/s
+  [2m>>> The passage describes a series of narrative threads involving various characters, historical contexts, and plotlines. Here's a structured breakdown of the key elements:\n\n1. **Context and Context**: \n   - The text describes a series of narrative threads involving political, social, and narrative elements. \n   - It involves a series of events involving a "village-road' in the United World" and a "manip a" that is a “burial.”\n\n2. **The text includes a series of abstract and In the context of the po[0m
+
+  [[0;32mPASS[0m] multi_turn_t1: OK (1.2s)
+  [2m>>> Got it! You’ve outlined three key pieces:    \n\n1. **Your name**: Biscart (brought to I/O level by a neighbor)  — First/last    \n2. **Your hometown**: The same **b**‑11 hopes to come next year…  New Letter, Word Aids & a Calendar   . — “B” from **A**.*        – **In the mid‑*90s the* ***Newzet,1 you, b Imit­​on, 3 I.  **’ Min[0m
+
+  [[0;31mFAIL[0m] multi_turn_t2_dog: Expected 'Biscuit': 'I’m not seeing a clear, specific answer in the conversation you’ve described.\u202fThe only thing shown i'
+  [2m>>> I’m not seeing a clear, specific answer in the conversation you’ve described. The only thing shown is a set of text that looks like it‑maybe “Im” or “In” but that’s just a fragment—not a proper answer.\n\nIf I had to guess, the only way to get a concrete answer is to have the exact text that produced the answer you received. If you can share the surrounding text (or the part that was shown on a screen), then I can look at the surrounding context and figure out what the “answer” actually is. Often,[0m
+
+  [[0;31mFAIL[0m] multi_turn_t3_city: Expected 'Wellington': 'I don’t have any way to determine the answer. \n\nIf you\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u2003\u202f\u202f\u202f\u202f\u202f\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200bThe request in the pa'
+  [2m>>> I don’t have any way to determine the answer. \n\nIf you                 ​​​​​​​​The request in the particular    one of these     as  the the  the   a  5.56  —  【   wh  —  d  ].\n\nLet’s see the   as if they don ‘ t                        b   �     .  \n   —  -  1,       0    -   -     #### 354  In                    3  \n  **      \n-   - 30  -  13   —   \n    \n   \n  \n   \n   \n     **so the[0m
+
+  [[0;31mFAIL[0m] multi_turn_t4_number: Expected '42': 'I’m not\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f'
+  [2m>>> I’m not                                                                                                                                                                                                                                                             [0m
+
+  [[0;31mFAIL[0m] multi_turn_t5_all: Missing: Biscuit, Wellington, 42 in: 'I’m sorry\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f—\u202f but I don’t have a record of the answers to your\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f \u202fquestions. Without the underlying\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f'
+  [2m>>> I’m sorry           —  but I don’t have a record of the answers to your                                                        questions. Without the underlying                                       [0m
+
+[0;31mFailed tests:[0m
+  multi_turn_t2_dog: Expected 'Biscuit': 'I’m not seeing a clear, specific answer in the conversation you’ve described.\u202fThe only thing shown i'
+  multi_turn_t3_city: Expected 'Wellington': 'I don’t have any way to determine the answer. \n\nIf you\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u2003\u202f\u202f\u202f\u202f\u202f\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200bThe request in the pa'
+  multi_turn_t4_number: Expected '42': 'I’m not\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f'
+  multi_turn_t5_all: Missing: Biscuit, Wellington, 42 in: 'I’m sorry\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f—\u202f but I don’t have a record of the answers to your\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f \u202fquestions. Without the underlying\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f'
+
+[0;31m[1m4 TEST(S) FAILED[0m

@@ -1,5 +1,243 @@
 # Krasis Benchmark Results
 
+## RAM-backed session cache Phase 0 — Nemotron Nano Mamba measurement — 2026-08-05
+
+This instrumentation-enabled run used the validated Nemotron Nano HQQ4/k4v4
+configuration solely to measure its runtime Mamba/GQA state. The exact registry
+contained 70 allocations: convolution and SSM tensors for 23 Mamba2 layers plus
+four k4v4 planes for six GQA layers. Fixed recurrent state was 50,495,488 bytes;
+allocated capacity was 553,811,968 bytes.
+
+| Live tokens | Snapshot bytes | Save: GPU→pinned→pageable | Restore: pageable→pinned→GPU |
+|---:|---:|---:|---:|
+| 500 | 51,455,488 | 6.58 ms | 5.37 ms |
+| 2,048 | 54,427,648 | 6.41 ms | 4.58 ms |
+| 8,192 | 66,224,128 | 7.72 ms | 5.57 ms |
+| 32,768 | 113,410,048 | 12.50 ms | 9.10 ms |
+| 100,000 | 242,495,488 | 25.04 ms | 23.15 ms |
+
+The large-prompt run measured full-prefill times of approximately
+0.412/0.942/2.328/23.014 seconds at 2,259/8,696/24,228/62,781 tokens, so Mamba
+restore is decisively cheaper than recomputation. The network suite itself was
+14/18 because the already-documented Nemotron quantized-quality problem caused
+four multi-turn recall failures; this is not accepted model-quality evidence.
+Startup derived a 638 MiB decode floor against the 600 MiB contract.
+
+Evidence: [server/calibration](20260805_session_cache_phase0_nemotron_nano_server.log),
+[network](20260805_session_cache_phase0_nemotron_nano_network.log), inventories
+at [500](20260805_session_cache_phase0_nemotron_nano_inventory_500.json),
+[2,048](20260805_session_cache_phase0_nemotron_nano_inventory_2048.json),
+[8,192](20260805_session_cache_phase0_nemotron_nano_inventory_8192.json),
+[32,768](20260805_session_cache_phase0_nemotron_nano_inventory_32768.json), and
+[100,000](20260805_session_cache_phase0_nemotron_nano_inventory_100000.json),
+with corresponding transfer files using the same names with `transfer`.
+
+## RAM-backed session cache Phase 0 — Ornith-397B hybrid-state measurement — 2026-08-05
+
+This instrumentation-enabled run used the validated Ornith-397B HQQ4/k4v4
+configuration. Its exact registry contained 150 allocations: four growing
+k4v4 planes for each of 15 GQA layers plus fixed convolution and recurrent
+tensors for all 45 linear-attention layers. Fixed state was 197,591,040 bytes;
+allocated capacity was 1,770,455,040 bytes.
+
+| Live tokens | Snapshot bytes | Save: GPU→pinned→pageable | Restore: pageable→pinned→GPU |
+|---:|---:|---:|---:|
+| 500 | 202,391,040 | 21.07 ms | 17.88 ms |
+| 2,048 | 217,251,840 | 22.09 ms | 18.06 ms |
+| 8,192 | 276,234,240 | 29.33 ms | 22.57 ms |
+| 32,768 | 512,163,840 | 54.72 ms | 49.80 ms |
+| 100,000 | 1,157,591,040 | 117.78 ms | 109.99 ms |
+
+The loaded server passed `./dev network 18021 --large` 18/18. Actual
+full-prefill times were 6.000/7.537/11.825/31.310 seconds at
+2,346/8,706/23,207/63,472 tokens, so restore is decisively cheaper throughout.
+Startup calibration derived a 686 MiB decode floor against the required 600
+MiB safety margin. Lore remained HTTP 200 and physical GPU 1 returned to 2
+MiB.
+
+Evidence: [server log](20260805_session_cache_phase0_ornith397_server.log),
+[network log](20260805_session_cache_phase0_ornith397_network.log),
+[8,192-token inventory](20260805_session_cache_phase0_ornith397_inventory_8192.json), and
+[8,192-token transfer](20260805_session_cache_phase0_ornith397_transfer_8192.json).
+
+## RAM-backed session cache Phase 0 — Qwen3.5 hybrid-state measurement — 2026-08-05
+
+This instrumentation-enabled run used Qwen3.5-122B HQQ6/k4v4. The exact
+registry contained 120 allocations: four growing k4v4 planes for each of 12
+GQA layers, plus fixed convolution and recurrent tensors for all 36
+linear-attention layers. Fixed state was 158,072,832 bytes and total allocated
+capacity was 2,171,338,752 bytes.
+
+| Live tokens | Snapshot bytes | Save: GPU→pinned→pageable | Restore: pageable→pinned→GPU |
+|---:|---:|---:|---:|
+| 500 | 161,912,832 | 17.63 ms | 13.23 ms |
+| 2,048 | 173,801,472 | 18.91 ms | 13.79 ms |
+| 8,192 | 220,987,392 | 23.74 ms | 17.29 ms |
+| 32,768 | 409,731,072 | 43.86 ms | 38.47 ms |
+| 100,000 | 926,072,832 | 93.23 ms | 86.24 ms |
+
+The loaded server passed `./dev network 18020 --large` 18/18. Actual
+full-prefill times were 1.385/2.324/4.650/12.548 seconds at
+2,346/8,706/23,207/63,472 tokens. Restore is decisively cheaper throughout,
+so the Qwen3.5 hybrid architecture passes the Phase 0 crossover gate. Startup
+calibration derived a 644 MiB decode floor against the required 600 MiB safety
+margin. Lore remained HTTP 200 and physical GPU 1 returned to 2 MiB.
+
+Evidence: [server log](20260805_session_cache_phase0_qwen35_server.log),
+[network log](20260805_session_cache_phase0_qwen35_network.log),
+[8,192-token inventory](20260805_session_cache_phase0_qwen35_inventory_8192.json), and
+[8,192-token transfer](20260805_session_cache_phase0_qwen35_transfer_8192.json).
+
+## RAM-backed session cache Phase 0 — Step-3.7 state measurement — 2026-08-04
+
+This instrumentation-enabled run used the validated Step-3.7 HQQ4/k4v4
+configuration. The fail-closed inventory found 180 real allocations: packed
+K, K scale, packed V and V scale for all 45 GQA layers. Total allocated state
+capacity was 1,047,859,200 bytes.
+
+| Live tokens | Snapshot bytes | Save: GPU→pinned→pageable | Restore: pageable→pinned→GPU |
+|---:|---:|---:|---:|
+| 500 | 28,800,000 | 5.38 ms | 4.42 ms |
+| 2,048 | 117,964,800 | 16.15 ms | 10.71 ms |
+| 8,192 | 471,859,200 | 52.87 ms | 38.40 ms |
+| 14,000 | 806,400,000 | 85.36 ms | 81.23 ms |
+
+The already-loaded server then passed `./dev network 18019 --large` 18/18.
+Its real full-prefill requests took 1.43 seconds at 2,053 tokens and 2.11
+seconds at 8,633 tokens, compared with approximately 11 ms and 38 ms to
+restore the corresponding state. Step therefore passes the Phase 0
+restore-versus-recompute gate. The runtime-derived startup calibration reached
+a 618 MiB decode floor against the required 600 MiB safety margin; request
+floors were higher. Lore remained HTTP 200 and physical GPU 1 returned to 2
+MiB after teardown.
+
+Evidence: [server log](20260804_session_cache_phase0_step_server.log),
+[network log](20260804_session_cache_phase0_step_network.log),
+[8,192-token inventory](20260804_session_cache_phase0_step_inventory_8192.json), and
+[8,192-token transfer](20260804_session_cache_phase0_step_transfer_8192.json).
+
+## RAM-backed session cache Phase 0 — DeepSeek-V4 state measurement — 2026-08-04
+
+This instrumentation-enabled run covers DeepSeek-V4-Flash-0731's native
+compressed/indexed attention state. The fail-closed inventory found 229 real
+GPU allocations: 43 raw rings, 41 compressed-KV caches, 41 compressor KV
+states, 41 compressor score states, 21 index caches, 21 index KV states and 21
+index score states. Total allocated capacity was 1,048,534,016 bytes. The raw
+rings and recurrent states contributed 17,842,176 fixed bytes; token-growing
+compressed and index caches increased live state from 21,284,096 bytes at 500
+tokens to 444,414,976 bytes at 62,000 tokens.
+
+Each entry below is the mean of three lossless iterations. The save path is
+GPU→reusable pinned staging→canonical pageable RAM, and restore is the reverse:
+
+| Live tokens | Snapshot bytes | Save: GPU→pinned→pageable | Restore: pageable→pinned→GPU |
+|---:|---:|---:|---:|
+| 500 | 21,284,096 | 5.05 ms | 4.30 ms |
+| 2,048 | 31,932,416 | 6.26 ms | 5.10 ms |
+| 8,192 | 74,203,136 | 10.21 ms | 7.35 ms |
+| 32,768 | 243,286,016 | 27.41 ms | 25.64 ms |
+| 62,000 | 444,414,976 | 45.56 ms | 43.30 ms |
+
+Canonical instrumented full-prefill requests measured 6,571.5/7,836.6/
+10,259.4/15,695.5/25,462.1/28,439.0 ms at 1K/5K/10K/20K/35K/39,920
+tokens. Restore is therefore far cheaper than recomputation throughout the
+measured curve, so DeepSeek-V4 passes the Phase 0 crossover gate. Startup used
+the full fail-closed calibration ladder through 39,920 tokens, retained
+6,440/11,008 routed experts, and the completed benchmark recorded a 1,134 MiB
+minimum free-VRAM floor against the 600 MiB runtime safety margin. Lore stayed
+HTTP 200 and physical GPU 1 returned to 2 MiB after teardown.
+
+Evidence: [benchmark stdout](20260804_session_cache_phase0_dsv4_bf16_instrumented_benchmark_stdout.log),
+[benchmark report](20260804_session_cache_phase0_dsv4_bf16_instrumented_benchmark_report.log),
+[500-token inventory](20260804_session_cache_phase0_dsv4_inventory_500.json),
+[2,048-token inventory](20260804_session_cache_phase0_dsv4_inventory_2048.json),
+[8,192-token inventory](20260804_session_cache_phase0_dsv4_inventory_8192.json),
+[32,768-token inventory](20260804_session_cache_phase0_dsv4_inventory_32768.json),
+[62,000-token inventory](20260804_session_cache_phase0_dsv4_inventory_62000.json),
+[500-token transfer](20260804_session_cache_phase0_dsv4_transfer_500.json),
+[2,048-token transfer](20260804_session_cache_phase0_dsv4_transfer_2048.json),
+[8,192-token transfer](20260804_session_cache_phase0_dsv4_transfer_8192.json),
+[32,768-token transfer](20260804_session_cache_phase0_dsv4_transfer_32768.json), and
+[62,000-token transfer](20260804_session_cache_phase0_dsv4_transfer_62000.json).
+
+## RAM-backed session cache Phase 0 — Gemma-4 measurement — 2026-08-04
+
+This is instrumentation-enabled design evidence, not a speed benchmark. The
+validated Gemma-4 HQQ4/k4v4 runtime ran on physical GPU 1 while the protected
+Lore service remained on GPU 0. The fixed `./dev benchmark ...
+--selected-gpus 1` cleanup selected only GPU 1; Lore's PID survived both the
+server and benchmark launches and its endpoint remained HTTP 200.
+
+The runtime inventory found 120 real state allocations: K/V scale and packed
+planes for each of 30 GQA layers. Total allocated state was 1,047,552,000
+bytes; live bytes grew from 35,200,000 at 500 tokens to 985,600,000 at 14,000
+tokens. Three lossless iterations measured the complete intended staging path:
+
+| Live tokens | Snapshot bytes | Save: GPU→pinned→pageable | Restore: pageable→pinned→GPU |
+|---:|---:|---:|---:|
+| 500 | 35,200,000 | 5.27 ms | 3.75 ms |
+| 2,048 | 144,179,200 | 16.68 ms | 12.21 ms |
+| 8,192 | 576,716,800 | 63.24 ms | 60.81 ms |
+| 14,000 | 985,600,000 | 100.80 ms | 99.13 ms |
+
+Canonical instrumented full-prefill requests measured 329.5/760.9/1,778.4/
+2,285.8 ms at 1,000/4,999/10,000/11,824 tokens. Even conservative comparisons
+using the next larger measured snapshot (2,048-token restore versus 1,000-token
+prefill, 8,192 versus 4,999, and 14,000 versus 11,824) leave restore far below
+recomputation. This architecture therefore passes the Phase 0 crossover gate.
+The benchmark's 77,168 MiB decode floor is intentionally far above the 600 MiB
+margin because all 3,840 experts are already resident; no additional HCS can be
+loaded to consume the small model's remaining 96 GB-card headroom.
+
+Evidence: [benchmark stdout](20260804_session_cache_phase0_gemma_hqq4_k4v4_instrumented_benchmark_stdout.log),
+[benchmark report](20260804_session_cache_phase0_gemma_hqq4_k4v4_instrumented_benchmark_report.log),
+[500-token inventory](20260804_session_cache_phase0_gemma_inventory_500.json),
+[2,048-token inventory](20260804_session_cache_phase0_gemma_inventory_2048.json),
+[8,192-token inventory](20260804_session_cache_phase0_gemma_inventory_8192.json),
+[14,000-token inventory](20260804_session_cache_phase0_gemma_inventory_14000.json),
+[500-token transfer](20260804_session_cache_phase0_gemma_transfer_500.json),
+[2,048-token transfer](20260804_session_cache_phase0_gemma_transfer_2048.json),
+[8,192-token transfer](20260804_session_cache_phase0_gemma_transfer_8192.json), and
+[14,000-token transfer](20260804_session_cache_phase0_gemma_transfer_14000.json).
+
+## RAM-backed session cache Phase 0 — QCN hybrid-state measurement — 2026-08-04
+
+This instrumentation-enabled run covers Qwen3-Coder-Next's 12 GQA plus 36
+linear-attention layers. The exact registry contained 120 live allocations:
+four token-growing k4v4 planes for each GQA layer, plus fixed convolution and
+recurrent tensors for each linear-attention layer. Fixed hybrid state was
+80,216,064 bytes; total live state grew from 84,056,064 bytes at 500 tokens to
+848,216,064 bytes at 100,000 tokens.
+
+| Live tokens | Snapshot bytes | Save: GPU→pinned→pageable | Restore: pageable→pinned→GPU |
+|---:|---:|---:|---:|
+| 500 | 84,056,064 | 10.09 ms | 7.21 ms |
+| 2,048 | 95,944,704 | 11.64 ms | 8.14 ms |
+| 8,192 | 143,130,624 | 16.54 ms | 11.68 ms |
+| 32,768 | 331,874,304 | 36.80 ms | 32.73 ms |
+| 100,000 | 848,216,064 | 88.81 ms | 83.49 ms |
+
+Canonical full-prefill requests measured 463.8/734.9/1,099.9/1,885.4/
+3,182.9/3,634.3 ms at 1K/5K/10K/20K/35K/39,920 tokens. The measured restore
+curve remains far below recomputation at every point, so the mixed GQA plus
+fixed recurrent-state architecture passes the Phase 0 crossover gate. HCS was
+24,576/24,576 and the 53,156 MiB decode floor is model-fit headroom, not a
+missed opportunity to load more experts. Lore remained HTTP 200 and GPU 1
+returned to 2 MiB after teardown.
+
+Evidence: [benchmark stdout](20260804_session_cache_phase0_qcn_hqq4_k4v4_instrumented_benchmark_stdout.log),
+[benchmark report](20260804_session_cache_phase0_qcn_hqq4_k4v4_instrumented_benchmark_report.log),
+[500-token inventory](20260804_session_cache_phase0_qcn_inventory_500.json),
+[2,048-token inventory](20260804_session_cache_phase0_qcn_inventory_2048.json),
+[8,192-token inventory](20260804_session_cache_phase0_qcn_inventory_8192.json),
+[32,768-token inventory](20260804_session_cache_phase0_qcn_inventory_32768.json),
+[100,000-token inventory](20260804_session_cache_phase0_qcn_inventory_100000.json),
+[500-token transfer](20260804_session_cache_phase0_qcn_transfer_500.json),
+[2,048-token transfer](20260804_session_cache_phase0_qcn_transfer_2048.json),
+[8,192-token transfer](20260804_session_cache_phase0_qcn_transfer_8192.json),
+[32,768-token transfer](20260804_session_cache_phase0_qcn_transfer_32768.json), and
+[100,000-token transfer](20260804_session_cache_phase0_qcn_transfer_100000.json).
+
 ## DeepSeek-V4-Flash-0731 release integration gates — 2026-08-03
 
 The curated Hugging Face entry is pinned to the exact validated checkpoint
@@ -8123,3 +8361,10 @@ Default: pure CPU MoE decode (no HCS), streamed attention with double buffering.
 - Result: 18/18 network checks passed. Selection-score CUDA event time fell from 7.479 s to 1.544 s at 23,348 tokens and from 52.561 s to 9.206 s at 62,403 tokens. Total instrumented 62K prefill fell from 93.511 s to 50.101 s.
 - Rejected from advancing at this boundary: first 2K request monitor observed 578 MiB at `cleanup_end`, below the 600 MiB hard safety margin. Candidate remains opt-in pending root-cause instrumentation and a fresh-process proof.
 - Logs: `20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_component_server.log`, `20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_component_client.log`, `20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_component_runtime.log`, `20260803_deepseek_v4_flash_0731_index_score_gemm_attempt1_component_below_vram.log`.
+## Session-cache Phase 0 GLM-5.2 MLA/DSA measurement — 2026-08-05
+
+- [Server/calibration log](20260805_session_cache_phase0_glm52_server.log) and [network log](20260805_session_cache_phase0_glm52_network.log) use `tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf` on the RTX PRO 6000 with timing instrumentation and the approved GLM-5.2 heatmap. The network suite passed 18/18; the 2,037-token request prefilling took 42.64 s with timing enabled (47.8 tok/s).
+- The live Rust inventory found 177 allocations: 78 MLA compressed-KV buffers, 78 MLA positional-key buffers, and 21 DSA key caches. Exact used bytes at 500/2,048/4,000 logical tokens were 16,728,000 / 68,517,888 / 133,824,000.
+- Complete lossless pageable-RAM save/restore through bounded pinned staging averaged 3.88/3.59, 9.84/7.10, and 15.93/11.45 ms at the same token counts. Restore is therefore decisively cheaper than recomputing this MLA/DSA prefix.
+- Runtime calibration measured 1,140 MiB free at the 3,196-token long probe; the real 2,037-token network request reached the configured 600 MiB safety margin exactly. Lore remained HTTP 200 on the protected A4500, and teardown returned the RTX PRO 6000 to 2 MiB.
+- Raw inventories: [500](20260805_session_cache_phase0_glm52_inventory_500.json), [2,048](20260805_session_cache_phase0_glm52_inventory_2048.json), [4,000](20260805_session_cache_phase0_glm52_inventory_4000.json). Raw transfer measurements: [500](20260805_session_cache_phase0_glm52_transfer_500.json), [2,048](20260805_session_cache_phase0_glm52_transfer_2048.json), [4,000](20260805_session_cache_phase0_glm52_transfer_4000.json).
