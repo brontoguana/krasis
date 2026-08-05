@@ -149,6 +149,16 @@ INTERACTIVE_HQQ_AUTO_BUDGET_PCT = 10.0
 INSTALLER_URL = "https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh"
 
 
+def _validated_prefix_cache_ram_fraction(value: Any, label: str) -> float:
+    try:
+        fraction = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a finite number in (0, 1]") from exc
+    if not math.isfinite(fraction) or not 0.0 < fraction <= 1.0:
+        raise ValueError(f"{label} must be finite and in (0, 1]")
+    return fraction
+
+
 def _visible_len(s: str) -> int:
     """Length of string with ANSI escape codes stripped."""
     return len(_ANSI_RE.sub("", s))
@@ -585,7 +595,8 @@ CONFIG_KEYS = [
     "CFG_STREAM_ATTENTION", "CFG_DRAFT_MODEL", "CFG_DRAFT_K", "CFG_DRAFT_CONTEXT",
     "CFG_TEMPERATURE",
     "CFG_FORCE_LOAD", "CFG_FORCE_REBUILD_CACHE", "CFG_FORCE_REBUILD_HQQ_CACHE",
-    "CFG_BUILD_CACHE", "CFG_ENABLE_THINKING",
+    "CFG_BUILD_CACHE", "CFG_ENABLE_THINKING", "CFG_PREFIX_CACHE",
+    "CFG_PREFIX_CACHE_RAM_FRACTION",
 ]
 
 
@@ -687,6 +698,8 @@ class LauncherConfig:
         self.force_rebuild_hqq_cache: bool = False
         self.build_cache: bool = False
         self.enable_thinking: bool = True
+        self.prefix_cache: bool = False
+        self.prefix_cache_ram_fraction: float = 0.25
 
     def apply_saved(self, saved: Dict[str, str]) -> None:
         """Apply loaded config values."""
@@ -924,6 +937,13 @@ class LauncherConfig:
             self.build_cache = saved["CFG_BUILD_CACHE"] == "1"
         if "CFG_ENABLE_THINKING" in saved:
             self.enable_thinking = saved["CFG_ENABLE_THINKING"] != "0"
+        if "CFG_PREFIX_CACHE" in saved:
+            self.prefix_cache = saved["CFG_PREFIX_CACHE"] != "0"
+        if "CFG_PREFIX_CACHE_RAM_FRACTION" in saved:
+            self.prefix_cache_ram_fraction = _validated_prefix_cache_ram_fraction(
+                saved["CFG_PREFIX_CACHE_RAM_FRACTION"],
+                "CFG_PREFIX_CACHE_RAM_FRACTION",
+            )
 
     def to_save_dict(self) -> Dict[str, Any]:
         """Convert to dict for saving or launch config serialization."""
@@ -975,6 +995,8 @@ class LauncherConfig:
             "CFG_FORCE_REBUILD_HQQ_CACHE": "1" if self.force_rebuild_hqq_cache else "",
             "CFG_BUILD_CACHE": "1" if self.build_cache else "",
             "CFG_ENABLE_THINKING": "1" if self.enable_thinking else "0",
+            "CFG_PREFIX_CACHE": "1" if self.prefix_cache else "0",
+            "CFG_PREFIX_CACHE_RAM_FRACTION": str(self.prefix_cache_ram_fraction),
         }
         if self.attention_quant in ("hqq46_auto", "hqq68_auto"):
             values["CFG_HQQ_AUTO_BUDGET_PCT"] = str(self.hqq_auto_budget_pct)
@@ -1043,6 +1065,10 @@ OPTIONS = [
     ConfigOption("SSH Key Path", "ssh_key_path", opt_type="text", advanced=True),
     ConfigOption("Enable thinking", "enable_thinking",
                  choices=[True, False]),
+    ConfigOption("Conversation cache", "prefix_cache",
+                 choices=[False, True]),
+    ConfigOption("Conversation cache RAM fraction", "prefix_cache_ram_fraction",
+                 opt_type="text", advanced=True),
     ConfigOption("HCS RAM saver", "hcs_host_cache_mode",
                  choices=["source", "mirror", "auto"]),
     ConfigOption("Adaptive cold-mass pruning", "adaptive_cold_mass_pruning",
@@ -2476,6 +2502,20 @@ class Launcher:
                         else:
                             current = str(getattr(self.cfg, opt.key))
                             new_val = _edit_value(opt.label, current)
+                            if opt.key == "prefix_cache_ram_fraction":
+                                try:
+                                    new_val = _validated_prefix_cache_ram_fraction(
+                                        new_val,
+                                        "Conversation cache RAM fraction",
+                                    )
+                                except ValueError as exc:
+                                    _hide_cursor()
+                                    self._message_screen(
+                                        "Conversation cache RAM fraction",
+                                        [f"{RED}{exc}{NC}"],
+                                    )
+                                    _show_cursor()
+                                    continue
                             if opt.key == "ssh_tunnel" and new_val.strip():
                                 try:
                                     from krasis.ssh_tunnel import parse_ssh_tunnel_target
@@ -2867,6 +2907,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hcs-host-cache-mode", default=None,
                         choices=["auto", "mirror", "source"],
                         help="Soft HCS host storage: source/lower-system-RAM, mirror/fast, or auto")
+    parser.add_argument("--prefix-cache", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Enable RAM-backed multi-conversation prefix-state caching")
+    parser.add_argument("--prefix-cache-ram-fraction", type=float, default=None,
+                        help="Fraction of cgroup-aware available RAM usable by conversation snapshots")
     parser.add_argument("--force-load", action="store_true",
                         help="Override RAM safety checks and load anyway")
     parser.add_argument("--force-rebuild-cache", action="store_true",
@@ -2987,6 +3032,13 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.dynamic_hcs_tail_blocks = int(args.dynamic_hcs_tail_blocks)
     if args.hcs_host_cache_mode is not None:
         cfg.hcs_host_cache_mode = args.hcs_host_cache_mode
+    if args.prefix_cache is not None:
+        cfg.prefix_cache = bool(args.prefix_cache)
+    if args.prefix_cache_ram_fraction is not None:
+        cfg.prefix_cache_ram_fraction = _validated_prefix_cache_ram_fraction(
+            args.prefix_cache_ram_fraction,
+            "--prefix-cache-ram-fraction",
+        )
     if args.gguf_path is not None:
         cfg.gguf_path = args.gguf_path
     if args.force_load:

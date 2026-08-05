@@ -10,6 +10,7 @@ import gc
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import select
@@ -2337,6 +2338,8 @@ def main():
             "CFG_DRAFT_CONTEXT": "draft_context",
             "CFG_TEMPERATURE": "temperature",
             "CFG_ENABLE_THINKING": "enable_thinking",
+            "CFG_PREFIX_CACHE": "prefix_cache",
+            "CFG_PREFIX_CACHE_RAM_FRACTION": "prefix_cache_ram_fraction",
             "CFG_SESSION_ENABLED": None,  # Session messenger integration removed; ignore old saved configs
             "CFG_NUM_GPUS": "num_gpus",
             "CFG_CPU_DECODE": None,  # CPU decode removed, ignore config key
@@ -2348,6 +2351,7 @@ def main():
             "CFG_FORCE_REBUILD_HQQ_CACHE",
             "CFG_BUILD_CACHE",
             "CFG_ENABLE_THINKING",
+            "CFG_PREFIX_CACHE",
             "CFG_HCS",
             "CFG_MULTI_GPU_HCS",
             "CFG_DYNAMIC_HCS",
@@ -2592,10 +2596,17 @@ def main():
                         help="Enable thinking/reasoning mode (default: on)")
     parser.add_argument("--test-endpoints", action="store_true", default=False,
                         help="Enable test-only endpoints (/v1/internal/prefill_logits)")
+    parser.add_argument("--prefix-cache", action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="Enable RAM-backed multi-conversation prefix-state caching (default: off)")
+    parser.add_argument("--prefix-cache-ram-fraction", type=float, default=0.25,
+                        help="Fraction of cgroup-aware available system RAM usable by prefix snapshots")
     # Apply config file defaults, then parse CLI (CLI wins over config file)
     if config_defaults:
         parser.set_defaults(**config_defaults)
     args = parser.parse_args(remaining_argv)
+    if not math.isfinite(args.prefix_cache_ram_fraction) or not 0.0 < args.prefix_cache_ram_fraction <= 1.0:
+        parser.error("--prefix-cache-ram-fraction must be finite and in (0, 1]")
     try:
         args.dynamic_hcs_tail_blocks = int(args.dynamic_hcs_tail_blocks)
     except (TypeError, ValueError):
@@ -4608,6 +4619,8 @@ def main():
         all_multi_gpu_gqa_offsets,
         _vision_supported,
         test_endpoints=getattr(args, 'test_endpoints', False),
+        prefix_cache=bool(args.prefix_cache),
+        prefix_cache_ram_fraction=float(args.prefix_cache_ram_fraction),
     )
     ssh_tunnel = None
     if str(getattr(args, "ssh_tunnel", "") or "").strip():

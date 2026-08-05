@@ -872,6 +872,8 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.force_rebuild_hqq_cache = True
         cfg.build_cache = True
         cfg.enable_thinking = False
+        cfg.prefix_cache = True
+        cfg.prefix_cache_ram_fraction = 0.375
         with tempfile.NamedTemporaryFile("w", suffix=".conf", prefix="krasis-save-roundtrip-", delete=False) as f:
             path = Path(f.name)
         try:
@@ -922,6 +924,8 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(values.get("CFG_FORCE_REBUILD_HQQ_CACHE"), "1")
             self.assertEqual(values.get("CFG_BUILD_CACHE"), "1")
             self.assertEqual(values.get("CFG_ENABLE_THINKING"), "0")
+            self.assertEqual(values.get("CFG_PREFIX_CACHE"), "1")
+            self.assertEqual(values.get("CFG_PREFIX_CACHE_RAM_FRACTION"), "0.375")
 
             loaded = LauncherConfig()
             loaded.apply_saved(launcher_mod._load_config(str(path)))
@@ -967,6 +971,8 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertTrue(loaded.force_rebuild_hqq_cache)
             self.assertTrue(loaded.build_cache)
             self.assertFalse(loaded.enable_thinking)
+            self.assertTrue(loaded.prefix_cache)
+            self.assertEqual(loaded.prefix_cache_ram_fraction, 0.375)
         finally:
             path.unlink(missing_ok=True)
 
@@ -979,6 +985,13 @@ class LauncherMatrixTest(unittest.TestCase):
                 cfg = LauncherConfig()
                 with self.assertRaisesRegex(ValueError, message):
                     cfg.apply_saved({"CFG_MAX_CONTEXT_TOKENS": value})
+
+    def test_saved_prefix_cache_fraction_rejects_invalid_values(self) -> None:
+        for value in ("not-a-number", "nan", "inf", "0", "-0.1", "1.1"):
+            with self.subTest(value=value):
+                cfg = LauncherConfig()
+                with self.assertRaisesRegex(ValueError, "CFG_PREFIX_CACHE_RAM_FRACTION"):
+                    cfg.apply_saved({"CFG_PREFIX_CACHE_RAM_FRACTION": value})
 
     def test_interactive_load_config_preserves_saved_kv_attention_safety_and_ssh(self) -> None:
         launcher = Launcher.__new__(Launcher)

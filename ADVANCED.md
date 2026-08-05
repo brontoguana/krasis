@@ -161,6 +161,8 @@ When BF16 is selected for experts or major components, treat that run as validat
 | `--hcs-host-cache-mode MODE` | source | Soft HCS host storage: `source`, `mirror`, or `auto` |
 | `--dynamic-hcs` / `--no-dynamic-hcs` | on | Dynamic HCS: protect the high-ranked heatmap prefix and reserve a recency-adaptive tail |
 | `--dynamic-hcs-tail-blocks N` | 2 | Advanced dynamic HCS recency-tail size, measured in activated-expert blocks; valid range `1..5` |
+| `--prefix-cache` / `--no-prefix-cache` | off | Enable or disable RAM-backed exact conversation-prefix state caching |
+| `--prefix-cache-ram-fraction F` | 0.25 | Maximum fraction of live cgroup-aware available RAM admitted for pageable conversation snapshots; valid range `(0, 1]` |
 | `--vram-safety-margin N` | 600 | Reserved VRAM in MB below which warnings fire |
 | `--stream-attention` | off | Stream attention weights from CPU (for very large models) |
 | `--force-load` | — | Override RAM safety checks and load anyway |
@@ -169,6 +171,22 @@ When BF16 is selected for experts or major components, treat that run as validat
 | `--heatmap-path PATH` | — | Path to expert_heatmap.json for HCS init |
 | `--approved-heatmap-mode MODE` | auto | Approved route-heatmap lookup: `auto`, `off`, or `require` |
 | `--approved-heatmap-manifest-url URL` | GitHub manifest | Override the approved route-heatmap manifest URL |
+
+Conversation caching is disabled by default. Config files use
+`CFG_PREFIX_CACHE="1"` and `CFG_PREFIX_CACHE_RAM_FRACTION="0.25"`. The
+fraction does not become a fixed byte allowance: Krasis derives the current
+budget from cgroup-aware `MemAvailable`, accounts its own resident snapshots,
+and evicts by LRU before admission so it does not intentionally drive the host
+into swap. Exact token comparison and the model/runtime compatibility
+signature remain mandatory for every hit.
+
+`GET /v1/session-cache/stats` reports active-GPU and pageable-RAM hits; misses
+split by no match, signature mismatch, eviction, measured restore cost,
+divergence and explicit uncacheable modes; resident/reserved/budget bytes;
+evictions; and operational save/restore timing. Calibration sample counts are
+reported separately from request timing. Image-input, speculative-decode and
+multi-GPU continuation requests currently remain visibly uncacheable pending
+their architecture-specific correctness gates.
 
 Dynamic HCS uses the same physical HCS residency table as the heatmap cache.
 It does not create a second cache or allow duplicate expert residency across a

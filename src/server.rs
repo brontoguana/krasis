@@ -200,12 +200,149 @@ struct ServerState {
 #[derive(Default)]
 struct SessionCacheRuntime {
     enabled: bool,
+    ram_fraction: f64,
     active: Option<ActiveSequenceState>,
     compatibility: Option<crate::session_cache::SessionCompatibilitySignature>,
     ram_store: Option<crate::session_cache::RamSessionStore>,
     prefill_samples: Vec<(usize, f64)>,
     restore_samples: Vec<(usize, f64)>,
     session_locks: Arc<SessionLockTable>,
+    metrics: SessionCacheMetrics,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SessionCacheMissReason {
+    NoMatch,
+    SignatureMismatch,
+    Evicted,
+    RestoreNotWorthIt,
+    Divergence,
+    RequestDisabled,
+    ImageInput,
+    MultiGpuPending,
+    SpeculativeDecode,
+    NoSuffix,
+    RestoreFailed,
+}
+
+#[derive(Default)]
+struct SessionCacheMetrics {
+    active_hits: u64,
+    ram_hits: u64,
+    no_match_misses: u64,
+    signature_mismatch_misses: u64,
+    evicted_misses: u64,
+    restore_not_worth_it_misses: u64,
+    divergence_misses: u64,
+    request_disabled_misses: u64,
+    image_input_misses: u64,
+    multi_gpu_pending_misses: u64,
+    speculative_decode_misses: u64,
+    no_suffix_misses: u64,
+    restore_failed_misses: u64,
+    save_count: u64,
+    save_bytes: u64,
+    save_total_ms: f64,
+    save_last_ms: f64,
+    restore_count: u64,
+    restore_bytes: u64,
+    restore_total_ms: f64,
+    restore_last_ms: f64,
+}
+
+fn increment_metric(counter: &mut u64, name: &str) {
+    if let Some(next) = counter.checked_add(1) {
+        *counter = next;
+    } else {
+        log::error!("Session-cache metric {} exhausted u64", name);
+    }
+}
+
+impl SessionCacheMetrics {
+    fn record_hit(&mut self, ram: bool) {
+        if ram {
+            increment_metric(&mut self.ram_hits, "ram_hits");
+        } else {
+            increment_metric(&mut self.active_hits, "active_hits");
+        }
+    }
+
+    fn record_miss(&mut self, reason: SessionCacheMissReason) {
+        let (counter, name) = match reason {
+            SessionCacheMissReason::NoMatch => (&mut self.no_match_misses, "no_match_misses"),
+            SessionCacheMissReason::SignatureMismatch => (
+                &mut self.signature_mismatch_misses,
+                "signature_mismatch_misses",
+            ),
+            SessionCacheMissReason::Evicted => (&mut self.evicted_misses, "evicted_misses"),
+            SessionCacheMissReason::RestoreNotWorthIt => (
+                &mut self.restore_not_worth_it_misses,
+                "restore_not_worth_it_misses",
+            ),
+            SessionCacheMissReason::Divergence => {
+                (&mut self.divergence_misses, "divergence_misses")
+            }
+            SessionCacheMissReason::RequestDisabled => {
+                (&mut self.request_disabled_misses, "request_disabled_misses")
+            }
+            SessionCacheMissReason::ImageInput => {
+                (&mut self.image_input_misses, "image_input_misses")
+            }
+            SessionCacheMissReason::MultiGpuPending => (
+                &mut self.multi_gpu_pending_misses,
+                "multi_gpu_pending_misses",
+            ),
+            SessionCacheMissReason::SpeculativeDecode => (
+                &mut self.speculative_decode_misses,
+                "speculative_decode_misses",
+            ),
+            SessionCacheMissReason::NoSuffix => (&mut self.no_suffix_misses, "no_suffix_misses"),
+            SessionCacheMissReason::RestoreFailed => {
+                (&mut self.restore_failed_misses, "restore_failed_misses")
+            }
+        };
+        increment_metric(counter, name);
+    }
+
+    fn record_save(&mut self, bytes: usize, elapsed_ms: f64) {
+        if !elapsed_ms.is_finite() || elapsed_ms < 0.0 {
+            log::error!(
+                "Refusing non-finite or negative session-cache save timing: {} ms",
+                elapsed_ms
+            );
+            return;
+        }
+        increment_metric(&mut self.save_count, "save_count");
+        match u64::try_from(bytes)
+            .ok()
+            .and_then(|bytes| self.save_bytes.checked_add(bytes))
+        {
+            Some(total) => self.save_bytes = total,
+            None => log::error!("Session-cache save byte metric overflow"),
+        }
+        self.save_total_ms += elapsed_ms;
+        self.save_last_ms = elapsed_ms;
+    }
+
+    fn record_restore(&mut self, bytes: usize, elapsed_ms: f64) {
+        if !elapsed_ms.is_finite() || elapsed_ms < 0.0 {
+            log::error!(
+                "Refusing non-finite or negative session-cache restore timing: {} ms",
+                elapsed_ms
+            );
+            return;
+        }
+        increment_metric(&mut self.restore_count, "restore_count");
+        match u64::try_from(bytes)
+            .ok()
+            .and_then(|bytes| self.restore_bytes.checked_add(bytes))
+        {
+            Some(total) => self.restore_bytes = total,
+            None => log::error!("Session-cache restore byte metric overflow"),
+        }
+        self.restore_total_ms += elapsed_ms;
+        self.restore_last_ms = elapsed_ms;
+    }
 }
 
 struct ActiveSequenceState {
@@ -226,30 +363,10 @@ fn invalidate_active_sequence(state: &mut ServerState, reason: &str) {
     }
 }
 
-fn parse_prefix_cache_enabled() -> Result<bool, String> {
-    let value = std::env::var("KRASIS_PREFIX_CACHE")
-        .or_else(|_| std::env::var("CFG_PREFIX_CACHE"))
-        .unwrap_or_else(|_| "0".to_string());
-    match value.trim().to_ascii_lowercase().as_str() {
-        "0" | "false" | "off" => Ok(false),
-        "1" | "true" | "on" => Ok(true),
-        _ => Err(format!(
-            "KRASIS_PREFIX_CACHE/CFG_PREFIX_CACHE must be one of 0, 1, false, true, off, or on; got {:?}",
-            value
-        )),
-    }
-}
-
-fn parse_prefix_cache_ram_fraction() -> Result<f64, String> {
-    let value = std::env::var("KRASIS_PREFIX_CACHE_RAM_FRACTION")
-        .or_else(|_| std::env::var("CFG_PREFIX_CACHE_RAM_FRACTION"))
-        .unwrap_or_else(|_| "0.25".to_string());
-    let fraction = value
-        .parse::<f64>()
-        .map_err(|error| format!("parse KRASIS_PREFIX_CACHE_RAM_FRACTION={value:?}: {error}"))?;
+fn validate_prefix_cache_ram_fraction(fraction: f64) -> Result<f64, String> {
     if !fraction.is_finite() || fraction <= 0.0 || fraction > 1.0 {
         return Err(format!(
-            "KRASIS_PREFIX_CACHE_RAM_FRACTION must be finite and in (0, 1], got {fraction}"
+            "prefix_cache_ram_fraction must be finite and in (0, 1], got {fraction}"
         ));
     }
     Ok(fraction)
@@ -755,6 +872,7 @@ fn drain_vram_pressure_for_state(
 
 enum ModelRequest {
     Chat { stream: TcpStream, body: String },
+    SessionCacheStats { stream: TcpStream },
     PrefillLogits { stream: TcpStream, body: String },
     ReferenceTest { stream: TcpStream, body: String },
     SequenceStateInventory { stream: TcpStream, body: String },
@@ -883,6 +1001,9 @@ fn handle_model_request(request: ModelRequest, state: &mut ServerState) {
         ModelRequest::Chat { mut stream, body } => {
             handle_chat_completion(&mut stream, &body, state)
         }
+        ModelRequest::SessionCacheStats { mut stream } => {
+            handle_session_cache_stats(&mut stream, state)
+        }
         ModelRequest::PrefillLogits { mut stream, body } => {
             handle_prefill_logits(&mut stream, &body, state)
         }
@@ -901,6 +1022,7 @@ fn handle_model_request(request: ModelRequest, state: &mut ServerState) {
 fn reject_model_request(request: ModelRequest, message: &str) {
     let mut stream = match request {
         ModelRequest::Chat { stream, .. }
+        | ModelRequest::SessionCacheStats { stream }
         | ModelRequest::PrefillLogits { stream, .. }
         | ModelRequest::ReferenceTest { stream, .. }
         | ModelRequest::SequenceStateInventory { stream, .. }
@@ -1175,6 +1297,17 @@ fn handle_front_connection(
             let _ = send_json(&mut tcp_stream, 200, &body);
         }
 
+        ("GET", "/v1/session-cache/stats") => {
+            if let Err(error) =
+                scheduler.enqueue(ModelRequest::SessionCacheStats { stream: tcp_stream })
+            {
+                log::error!(
+                    "Model worker is not available for session-cache stats: {}",
+                    error
+                );
+            }
+        }
+
         ("POST", path) if is_chat_completions_endpoint(path) => {
             if let Err(error) = scheduler.enqueue(ModelRequest::Chat {
                 stream: tcp_stream,
@@ -1273,6 +1406,110 @@ fn handle_front_connection(
             let _ = send_json(&mut tcp_stream, 404, r#"{"error":"Not found"}"#);
         }
     }
+}
+
+fn checked_metric_sum(values: &[u64], name: &str) -> u64 {
+    match values
+        .iter()
+        .try_fold(0u64, |total, value| total.checked_add(*value))
+    {
+        Some(total) => total,
+        None => {
+            log::error!("Session-cache metric total {} overflowed u64", name);
+            u64::MAX
+        }
+    }
+}
+
+fn handle_session_cache_stats(stream: &mut TcpStream, state: &ServerState) {
+    let metrics = &state.session_cache.metrics;
+    let ram = state
+        .session_cache
+        .ram_store
+        .as_ref()
+        .map(crate::session_cache::RamSessionStore::stats)
+        .unwrap_or_default();
+    let hit_total = checked_metric_sum(&[metrics.active_hits, metrics.ram_hits], "hits");
+    let miss_values = [
+        metrics.no_match_misses,
+        metrics.signature_mismatch_misses,
+        metrics.evicted_misses,
+        metrics.restore_not_worth_it_misses,
+        metrics.divergence_misses,
+        metrics.request_disabled_misses,
+        metrics.image_input_misses,
+        metrics.multi_gpu_pending_misses,
+        metrics.speculative_decode_misses,
+        metrics.no_suffix_misses,
+        metrics.restore_failed_misses,
+    ];
+    let miss_total = checked_metric_sum(&miss_values, "misses");
+    let save_average_ms = if metrics.save_count > 0 {
+        metrics.save_total_ms / metrics.save_count as f64
+    } else {
+        0.0
+    };
+    let restore_average_ms = if metrics.restore_count > 0 {
+        metrics.restore_total_ms / metrics.restore_count as f64
+    } else {
+        0.0
+    };
+    let body = serde_json::json!({
+        "object": "krasis_session_cache_stats",
+        "enabled": state.session_cache.enabled,
+        "config": {
+            "ram_fraction": state.session_cache.ram_fraction,
+            "budget_bytes": ram.last_budget_bytes,
+            "effective_available_bytes": ram.last_effective_available_bytes,
+        },
+        "hits": {
+            "total": hit_total,
+            "active_gpu": metrics.active_hits,
+            "pageable_ram": metrics.ram_hits,
+        },
+        "misses": {
+            "total": miss_total,
+            "no_match": metrics.no_match_misses,
+            "signature_mismatch": metrics.signature_mismatch_misses,
+            "evicted": metrics.evicted_misses,
+            "restore_not_worth_it": metrics.restore_not_worth_it_misses,
+            "divergence": metrics.divergence_misses,
+            "request_disabled": metrics.request_disabled_misses,
+            "image_input_uncacheable": metrics.image_input_misses,
+            "multi_gpu_pending": metrics.multi_gpu_pending_misses,
+            "speculative_decode_uncacheable": metrics.speculative_decode_misses,
+            "no_suffix": metrics.no_suffix_misses,
+            "restore_failed": metrics.restore_failed_misses,
+        },
+        "resident": {
+            "snapshots": ram.resident_snapshots,
+            "bytes": ram.resident_bytes,
+            "reserved_bytes": ram.reserved_bytes,
+            "active_gpu_tokens": state.session_cache.active.as_ref().map_or(0, |active| active.consumed_token_ids.len()),
+        },
+        "evictions": ram.evictions,
+        "timing": {
+            "save": {
+                "count": metrics.save_count,
+                "bytes": metrics.save_bytes,
+                "total_ms": metrics.save_total_ms,
+                "last_ms": metrics.save_last_ms,
+                "average_ms": save_average_ms,
+            },
+            "restore": {
+                "count": metrics.restore_count,
+                "bytes": metrics.restore_bytes,
+                "total_ms": metrics.restore_total_ms,
+                "last_ms": metrics.restore_last_ms,
+                "average_ms": restore_average_ms,
+            },
+        },
+        "runtime_measurements": {
+            "prefill_samples": state.session_cache.prefill_samples.len(),
+            "restore_samples": state.session_cache.restore_samples.len(),
+        },
+    });
+    let _ = send_json(stream, 200, &body.to_string());
 }
 
 fn handle_sequence_state_inventory(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
@@ -2734,6 +2971,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     let mut cache_request_eligible = false;
     let mut cache_base_snapshot_id = None;
     let mut cache_ram_restore: Option<(usize, f64)> = None;
+    let mut cache_miss_reason: Option<SessionCacheMissReason> = None;
     let mut cache_active_device_restore = false;
     let mut cache_prefill_stage_required = false;
     let mut cache_stable_boundary_tokens: Option<Vec<u32>> = None;
@@ -2903,15 +3141,25 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             }
         }
         if state.session_cache.enabled && !cache_request_eligible {
-            let reason = if !request_prefix_cache {
-                "request_disabled"
+            let (reason, miss_reason) = if !request_prefix_cache {
+                ("request_disabled", SessionCacheMissReason::RequestDisabled)
             } else if has_images {
-                "image_input_uncacheable"
+                (
+                    "image_input_uncacheable",
+                    SessionCacheMissReason::ImageInput,
+                )
             } else if !state.aux_gpu_store_addrs.is_empty() {
-                "multi_gpu_active_handoff_pending"
+                (
+                    "multi_gpu_active_handoff_pending",
+                    SessionCacheMissReason::MultiGpuPending,
+                )
             } else {
-                "speculative_decode_uncacheable"
+                (
+                    "speculative_decode_uncacheable",
+                    SessionCacheMissReason::SpeculativeDecode,
+                )
             };
+            state.session_cache.metrics.record_miss(miss_reason);
             log::info!("Request {} prefix cache miss: {}", request_id, reason);
             invalidate_active_sequence(state, reason);
         }
@@ -2961,6 +3209,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                             Ok(Some(snapshot)) => Some(snapshot.memory_cost_bytes()),
                             Ok(None) => {
                                 log::info!("Request {} prefix cache miss: evicted", request_id);
+                                cache_miss_reason = Some(SessionCacheMissReason::Evicted);
                                 None
                             }
                             Err(error) => {
@@ -2969,11 +3218,13 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                                     request_id,
                                     error,
                                 );
+                                cache_miss_reason = Some(SessionCacheMissReason::RestoreFailed);
                                 None
                             }
                         },
                         None => {
                             log::error!("Request {} RAM session store is unavailable", request_id);
+                            cache_miss_reason = Some(SessionCacheMissReason::RestoreFailed);
                             None
                         }
                     };
@@ -2995,13 +3246,15 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                                     || restored_tokens.as_slice() != &token_ids[..matched_tokens]
                                 {
                                     log::error!(
-                                            "Request {} prefix cache restore exact-token verification failed",
-                                            request_id
-                                        );
+                                        "Request {} prefix cache restore exact-token verification failed",
+                                        request_id
+                                    );
+                                    cache_miss_reason = Some(SessionCacheMissReason::RestoreFailed);
                                 } else {
                                     cache_sequence_start = matched_tokens;
                                     cache_base_snapshot_id = Some(snapshot_id);
                                     cache_ram_restore = Some((bytes, measured_ms));
+                                    cache_miss_reason = None;
                                     log::info!(
                                             "Request {} prefix cache RAM hit: reused={} suffix={} bytes={} restore_ms={:.3}",
                                             request_id,
@@ -3012,13 +3265,17 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                                         );
                                 }
                             }
-                            Err(error) => log::error!(
-                                "Request {} prefix cache restore failed; using full prefill: {}",
-                                request_id,
-                                error,
-                            ),
+                            Err(error) => {
+                                cache_miss_reason = Some(SessionCacheMissReason::RestoreFailed);
+                                log::error!(
+                                    "Request {} prefix cache restore failed; using full prefill: {}",
+                                    request_id,
+                                    error,
+                                );
+                            }
                         }
                     } else {
+                        cache_miss_reason = Some(SessionCacheMissReason::RestoreNotWorthIt);
                         log::info!(
                                 "Request {} prefix cache miss: restore_not_worth_it predicted_restore_ms={:?} predicted_avoided_prefill_ms={:?}",
                                 request_id,
@@ -3033,24 +3290,32 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 ),
                 Ok(crate::session_cache::PrefixLookupResult::SignatureMismatch {
                     matched_tokens,
-                }) => log::info!(
-                    "Request {} prefix cache miss: signature_mismatch matched={}",
-                    request_id,
-                    matched_tokens,
-                ),
+                }) => {
+                    cache_miss_reason = Some(SessionCacheMissReason::SignatureMismatch);
+                    log::info!(
+                        "Request {} prefix cache miss: signature_mismatch matched={}",
+                        request_id,
+                        matched_tokens,
+                    );
+                }
                 Ok(crate::session_cache::PrefixLookupResult::NoMatch) => {
+                    cache_miss_reason.get_or_insert(SessionCacheMissReason::NoMatch);
                     log::info!("Request {} prefix cache miss: no_match", request_id)
                 }
-                Err(error) => log::error!(
-                    "Request {} prefix cache lookup failed; using full prefill: {}",
-                    request_id,
-                    error,
-                ),
+                Err(error) => {
+                    cache_miss_reason = Some(SessionCacheMissReason::RestoreFailed);
+                    log::error!(
+                        "Request {} prefix cache lookup failed; using full prefill: {}",
+                        request_id,
+                        error,
+                    );
+                }
             }
 
             if cache_sequence_start == 0 {
                 match active_plan {
                     Some(crate::session_cache::ActivePrefixPlan::Append { matched_tokens }) => {
+                        cache_miss_reason = None;
                         cache_sequence_start = matched_tokens;
                         cache_base_snapshot_id = state
                             .session_cache
@@ -3072,11 +3337,10 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                             token_ids.len().saturating_sub(matched_tokens),
                         );
                     }
-                    Some(
-                        crate::session_cache::ActivePrefixPlan::TruncateKvAndAppend {
-                            matched_tokens,
-                        },
-                    ) => {
+                    Some(crate::session_cache::ActivePrefixPlan::TruncateKvAndAppend {
+                        matched_tokens,
+                    }) => {
+                        cache_miss_reason = None;
                         cache_sequence_start = matched_tokens;
                         cache_active_device_restore = state
                             .session_cache
@@ -3093,23 +3357,29 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                             token_ids.len().saturating_sub(matched_tokens),
                         );
                     }
-                    Some(
-                        crate::session_cache::ActivePrefixPlan::RequiresBoundarySnapshot {
-                            matched_tokens,
-                        },
-                    ) => log::info!(
-                        "Request {} prefix cache miss: divergence_requires_exact_boundary_snapshot matched={}",
-                        request_id,
+                    Some(crate::session_cache::ActivePrefixPlan::RequiresBoundarySnapshot {
                         matched_tokens,
-                    ),
+                    }) => {
+                        cache_miss_reason = Some(SessionCacheMissReason::Divergence);
+                        log::info!(
+                            "Request {} prefix cache miss: divergence_requires_exact_boundary_snapshot matched={}",
+                            request_id,
+                            matched_tokens,
+                        );
+                    }
                     Some(crate::session_cache::ActivePrefixPlan::NoReusablePrefix) => {
+                        cache_miss_reason.get_or_insert(SessionCacheMissReason::NoMatch);
                         log::info!("Request {} prefix cache miss: no_match", request_id)
                     }
-                    Some(crate::session_cache::ActivePrefixPlan::NoSuffixToCompute) => log::info!(
-                        "Request {} prefix cache miss: no_suffix_to_compute",
-                        request_id,
-                    ),
+                    Some(crate::session_cache::ActivePrefixPlan::NoSuffixToCompute) => {
+                        cache_miss_reason = Some(SessionCacheMissReason::NoSuffix);
+                        log::info!(
+                            "Request {} prefix cache miss: no_suffix_to_compute",
+                            request_id,
+                        );
+                    }
                     None => {
+                        cache_miss_reason.get_or_insert(SessionCacheMissReason::NoMatch);
                         log::info!("Request {} prefix cache miss: no_active_state", request_id)
                     }
                 }
@@ -3454,6 +3724,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                         cache_sequence_start = 0;
                         cache_base_snapshot_id = None;
                         cache_ram_restore = None;
+                        cache_miss_reason = Some(SessionCacheMissReason::RestoreFailed);
                     }
                 }
             }
@@ -3904,6 +4175,24 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         return;
     }
 
+    if cache_request_eligible {
+        if cache_sequence_start > 0 {
+            let ram_hit = cache_ram_restore.is_some();
+            state.session_cache.metrics.record_hit(ram_hit);
+            if let Some((bytes, restore_ms)) = cache_ram_restore {
+                state
+                    .session_cache
+                    .metrics
+                    .record_restore(bytes, restore_ms);
+            }
+        } else {
+            state
+                .session_cache
+                .metrics
+                .record_miss(cache_miss_reason.unwrap_or(SessionCacheMissReason::NoMatch));
+        }
+    }
+
     {
         let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
         let free_now_mb = store.query_vram_free_mb();
@@ -4234,6 +4523,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 match commit_pending_boundary_snapshot(state, pending) {
                     Ok((snapshot_id, bytes, save_ms, calibration_restore_ms)) => {
                         post_snapshot_base = Some(snapshot_id);
+                        state.session_cache.metrics.record_save(bytes, save_ms);
                         log::info!(
                             "Request {} prefix cache stable boundary committed: id={:?} tokens={} bytes={} save_ms={:.3} validation_restore_ms={:.3}",
                             request_id,
@@ -4317,6 +4607,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     post_snapshot_base,
                 ) {
                     Ok((snapshot_id, bytes, save_ms, calibration_restore_ms)) => {
+                        state.session_cache.metrics.record_save(bytes, save_ms);
                         state.session_cache.active = Some(ActiveSequenceState {
                             consumed_token_ids,
                             snapshot_id,
@@ -6985,12 +7276,16 @@ pub struct RustServer {
     prefill_engine: Arc<std::sync::Mutex<Option<crate::gpu_prefill::PrefillEngine>>>,
     /// Enable test-only endpoints (/v1/internal/prefill_logits)
     test_endpoints: bool,
+    /// RAM-backed multi-conversation cache. Disabled by default.
+    prefix_cache: bool,
+    /// Fraction of live cgroup-aware host availability admitted to the cache.
+    prefix_cache_ram_fraction: f64,
 }
 
 #[pymethods]
 impl RustServer {
     #[new]
-    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true, thinking_end_token_id=0, gpu_store_addr=0, aux_gpu_store_addrs=Vec::new(), multi_gpu_split_layers=Vec::new(), multi_gpu_gqa_offsets=Vec::new(), supports_vision=false, test_endpoints=false))]
+    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true, thinking_end_token_id=0, gpu_store_addr=0, aux_gpu_store_addrs=Vec::new(), multi_gpu_split_layers=Vec::new(), multi_gpu_gqa_offsets=Vec::new(), supports_vision=false, test_endpoints=false, prefix_cache=false, prefix_cache_ram_fraction=0.25))]
     fn new(
         py_model: PyObject,
         host: String,
@@ -7006,6 +7301,8 @@ impl RustServer {
         multi_gpu_gqa_offsets: Vec<usize>,
         supports_vision: bool,
         test_endpoints: bool,
+        prefix_cache: bool,
+        prefix_cache_ram_fraction: f64,
     ) -> Self {
         // Take the pre-allocated Rust prefill engine from the decode store.
         // The engine was pre-allocated from Python (before HCS pool loading)
@@ -7056,6 +7353,8 @@ impl RustServer {
             supports_vision,
             prefill_engine: Arc::new(std::sync::Mutex::new(prefill_engine)),
             test_endpoints,
+            prefix_cache,
+            prefix_cache_ram_fraction,
         }
     }
 
@@ -7076,6 +7375,8 @@ impl RustServer {
         let multi_gpu_split_layers = self.multi_gpu_split_layers.clone();
         let multi_gpu_gqa_offsets = self.multi_gpu_gqa_offsets.clone();
         let test_endpoints = self.test_endpoints;
+        let prefix_cache_enabled = self.prefix_cache;
+        let prefix_cache_ram_fraction = self.prefix_cache_ram_fraction;
         let running = self.running.clone();
 
         // Install raw SIGINT + SIGTERM handlers BEFORE releasing the GIL.
@@ -7197,13 +7498,14 @@ impl RustServer {
                 None
             };
 
-            let prefix_cache_enabled = match parse_prefix_cache_enabled() {
-                Ok(enabled) => enabled,
-                Err(error) => {
-                    log::error!("Cannot start server: {}", error);
-                    return;
-                }
-            };
+            let prefix_cache_ram_fraction =
+                match validate_prefix_cache_ram_fraction(prefix_cache_ram_fraction) {
+                    Ok(fraction) => fraction,
+                    Err(error) => {
+                        log::error!("Cannot start server: {}", error);
+                        return;
+                    }
+                };
             log::info!(
                 "RAM-backed prefix cache: {}",
                 if prefix_cache_enabled {
@@ -7233,15 +7535,8 @@ impl RustServer {
                 None
             };
             let prefix_cache_ram_store = if prefix_cache_enabled {
-                let fraction = match parse_prefix_cache_ram_fraction() {
-                    Ok(fraction) => fraction,
-                    Err(error) => {
-                        log::error!("Cannot start RAM-backed prefix cache: {}", error);
-                        return;
-                    }
-                };
                 match crate::session_cache::RamSessionStore::new(
-                    fraction,
+                    prefix_cache_ram_fraction,
                     Arc::new(crate::session_cache::SystemMemoryAvailabilityProbe),
                 ) {
                     Ok(store) => Some(store),
@@ -7312,12 +7607,14 @@ impl RustServer {
                 reference_test_request_order: 0,
                 session_cache: SessionCacheRuntime {
                     enabled: prefix_cache_enabled,
+                    ram_fraction: prefix_cache_ram_fraction,
                     active: None,
                     compatibility: prefix_cache_compatibility,
                     ram_store: prefix_cache_ram_store,
                     prefill_samples: Vec::new(),
                     restore_samples: Vec::new(),
                     session_locks: Arc::new(SessionLockTable::default()),
+                    metrics: SessionCacheMetrics::default(),
                 },
             };
 
@@ -8117,9 +8414,10 @@ mod tests {
         format_completion, format_completion_with_debug, format_completion_with_tool_calls,
         format_models_response, format_sse_timing, format_sse_token, format_sse_tool_call_args,
         format_sse_tool_call_start, hide_synthetic_think_stop_text, is_chat_completions_endpoint,
-        is_models_endpoint, parse_tool_calls, push_tool_stream_text, FairModelScheduler,
-        ModelRequest, ParsedToolCall, RequestOverhead, SessionLockKey, SessionLockTable,
-        StreamDetokenizer,
+        is_models_endpoint, parse_tool_calls, push_tool_stream_text,
+        validate_prefix_cache_ram_fraction, FairModelScheduler, ModelRequest, ParsedToolCall,
+        RequestOverhead, SessionCacheMetrics, SessionCacheMissReason, SessionLockKey,
+        SessionLockTable, StreamDetokenizer,
     };
     use crate::chat_template::{ChatTemplateEngine, ToolCallFormat};
     use std::fs;
@@ -8180,6 +8478,46 @@ mod tests {
             false,
         )
         .is_none());
+    }
+
+    #[test]
+    fn session_cache_metrics_keep_operational_timing_separate_from_miss_reasons() {
+        let mut metrics = SessionCacheMetrics::default();
+        metrics.record_hit(false);
+        metrics.record_hit(true);
+        metrics.record_miss(SessionCacheMissReason::NoMatch);
+        metrics.record_miss(SessionCacheMissReason::SignatureMismatch);
+        metrics.record_miss(SessionCacheMissReason::Evicted);
+        metrics.record_miss(SessionCacheMissReason::RestoreNotWorthIt);
+        metrics.record_miss(SessionCacheMissReason::Divergence);
+        metrics.record_save(1_024, 2.5);
+        metrics.record_restore(768, 1.25);
+
+        assert_eq!(metrics.active_hits, 1);
+        assert_eq!(metrics.ram_hits, 1);
+        assert_eq!(metrics.no_match_misses, 1);
+        assert_eq!(metrics.signature_mismatch_misses, 1);
+        assert_eq!(metrics.evicted_misses, 1);
+        assert_eq!(metrics.restore_not_worth_it_misses, 1);
+        assert_eq!(metrics.divergence_misses, 1);
+        assert_eq!(metrics.save_count, 1);
+        assert_eq!(metrics.save_bytes, 1_024);
+        assert_eq!(metrics.save_total_ms, 2.5);
+        assert_eq!(metrics.restore_count, 1);
+        assert_eq!(metrics.restore_bytes, 768);
+        assert_eq!(metrics.restore_total_ms, 1.25);
+
+        metrics.record_save(9_999, f64::NAN);
+        metrics.record_restore(9_999, -1.0);
+        assert_eq!(metrics.save_count, 1);
+        assert_eq!(metrics.save_bytes, 1_024);
+        assert_eq!(metrics.restore_count, 1);
+        assert_eq!(metrics.restore_bytes, 768);
+
+        assert_eq!(validate_prefix_cache_ram_fraction(0.25).unwrap(), 0.25);
+        assert!(validate_prefix_cache_ram_fraction(0.0).is_err());
+        assert!(validate_prefix_cache_ram_fraction(f64::NAN).is_err());
+        assert!(validate_prefix_cache_ram_fraction(1.01).is_err());
     }
 
     #[test]
