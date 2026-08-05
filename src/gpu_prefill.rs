@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use cudarc::cublas::{result as cublas_result, sys as cublas_sys};
 use cudarc::driver::sys as cuda_sys;
-use cudarc::driver::{CudaDevice, CudaFunction, CudaSlice, DevicePtr, DeviceSlice};
+use cudarc::driver::{CudaDevice, CudaFunction, CudaSlice, DevicePtr};
 use pyo3::prelude::*;
 
 use crate::weights::marlin::{
@@ -1218,6 +1218,58 @@ fn download_device_u16(ptr: u64, len: usize) -> Result<Vec<u16>, String> {
         }
     }
     Ok(out)
+}
+
+fn prefill_state_diag_enabled(layer_idx: usize, start_pos: usize) -> bool {
+    if start_pos == 0
+        || std::env::var("KRASIS_PREFILL_STATE_DIAG")
+            .map(|value| value != "1")
+            .unwrap_or(true)
+    {
+        return false;
+    }
+    std::env::var("KRASIS_PREFILL_STATE_DIAG_LAYER")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map_or(true, |target| target == layer_idx)
+}
+
+fn emit_bf16_state_summary(label: &str, ptr: u64, len: usize) -> Result<(), String> {
+    let bits = download_device_u16(ptr, len)?;
+    let mut finite = 0usize;
+    let mut nan = 0usize;
+    let mut pos_inf = 0usize;
+    let mut neg_inf = 0usize;
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for &value_bits in &bits {
+        let value = bf16_to_f32(value_bits);
+        if value.is_nan() {
+            nan += 1;
+        } else if value == f32::INFINITY {
+            pos_inf += 1;
+        } else if value == f32::NEG_INFINITY {
+            neg_inf += 1;
+        } else {
+            finite += 1;
+            min = min.min(value);
+            max = max.max(value);
+        }
+    }
+    eprintln!(
+        "[PREFILL-STATE-DIAG] label={} ptr=0x{:x} elems={} finite={} nan={} pos_inf={} neg_inf={} min={} max={} hash=0x{:016x}",
+        label,
+        ptr,
+        len,
+        finite,
+        nan,
+        pos_inf,
+        neg_inf,
+        if finite > 0 { min } else { f32::NAN },
+        if finite > 0 { max } else { f32::NAN },
+        fnv1a_u16_hash(&bits),
+    );
+    Ok(())
 }
 
 fn download_device_u16_at(ptr: u64, index: usize, label: &str) -> Result<u16, String> {
@@ -6522,11 +6574,8 @@ fn dsa_prefill_selection_timing_finish(
     let sync_ms = sync_t0.elapsed().as_secs_f64() * 1000.0;
     let mut event_ms = 0.0f32;
     unsafe {
-        let elapsed_err = cuda_sys::lib().cuEventElapsedTime(
-            &mut event_ms,
-            events.start,
-            events.stop,
-        );
+        let elapsed_err =
+            cuda_sys::lib().cuEventElapsedTime(&mut event_ms, events.start, events.stop);
         if elapsed_err != cuda_sys::CUresult::CUDA_SUCCESS {
             return Err(format!("elapsed {label} timing event: {:?}", elapsed_err));
         }
@@ -6859,8 +6908,8 @@ fn launch_dsa_prefill_gemm_scores(
             buffers.score_temp_capacity, score_elements
         ));
     }
-    let rows_i32 = i32::try_from(rows)
-        .map_err(|_| format!("DSA prefill GEMM rows {rows} exceed i32"))?;
+    let rows_i32 =
+        i32::try_from(rows).map_err(|_| format!("DSA prefill GEMM rows {rows} exceed i32"))?;
     let context_i32 = i32::try_from(context_end)
         .map_err(|_| format!("DSA prefill GEMM context {context_end} exceeds i32"))?;
     let heads_i32 = i32::try_from(index_n_heads)
@@ -6950,7 +6999,9 @@ fn launch_dsa_prefill_gemm_scores(
                     u64::try_from(
                         head.checked_mul(index_head_dim)
                             .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
-                            .ok_or_else(|| "DSA prefill GEMM query-head offset overflow".to_string())?,
+                            .ok_or_else(|| {
+                                "DSA prefill GEMM query-head offset overflow".to_string()
+                            })?,
                     )
                     .map_err(|_| "DSA prefill GEMM query-head offset exceeds u64".to_string())?,
                 )
@@ -7021,9 +7072,8 @@ fn launch_dsa_prefill_gemm_scores(
         Ok(())
     })();
 
-    let restore_workspace = unsafe {
-        lib.cublasSetWorkspace_v2(cublas_handle, std::ptr::null_mut(), 0)
-    };
+    let restore_workspace =
+        unsafe { lib.cublasSetWorkspace_v2(cublas_handle, std::ptr::null_mut(), 0) };
     if restore_workspace != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
         return Err(format!(
             "DSA prefill GEMM failed to restore cuBLAS workspace: {restore_workspace:?}; operation={run_result:?}"
@@ -7165,11 +7215,8 @@ fn launch_dsa_prefill_selection_rows(
     let mut q6 = index_n_heads_i32;
     let mut q7 = index_head_dim_i32;
     let mut q8 = qk_rope_head_dim_i32;
-    let query_timing = dsa_prefill_selection_timing_start(
-        timing_events,
-        stream,
-        "DSA prefill selection query",
-    )?;
+    let query_timing =
+        dsa_prefill_selection_timing_start(timing_events, stream, "DSA prefill selection query")?;
     unsafe {
         launch(
             kernels.rope_query_bf16,
@@ -7205,11 +7252,8 @@ fn launch_dsa_prefill_selection_rows(
         timing,
     )?;
 
-    let score_timing = dsa_prefill_selection_timing_start(
-        timing_events,
-        stream,
-        "DSA prefill selection scores",
-    )?;
+    let score_timing =
+        dsa_prefill_selection_timing_start(timing_events, stream, "DSA prefill selection scores")?;
     match index_score_mode {
         DeepseekV4PrefillIndexScoreMode::Scalar => {
             let score_shared_bytes = index_head_dim
@@ -7370,11 +7414,7 @@ fn launch_dsa_prefill_selection_rows(
     let mut input_runs = plan.initial_runs;
     let mut input_is_a = true;
     let merge_timing = if input_runs > 1 {
-        dsa_prefill_selection_timing_start(
-            timing_events,
-            stream,
-            "DSA prefill selection merge",
-        )?
+        dsa_prefill_selection_timing_start(timing_events, stream, "DSA prefill selection merge")?
     } else {
         None
     };
@@ -8013,6 +8053,20 @@ pub struct PrefillResult {
     pub prefill_time_ms: f64,
 }
 
+/// A pageable-RAM copy of the exact sequence state at a completed prefill
+/// chunk boundary. The server keeps this unpublished until the request has
+/// completed successfully, so a failed or cancelled request cannot expose a
+/// partially mutated session snapshot.
+pub struct PrefillSequenceBoundaryCapture {
+    pub token_count: usize,
+    pub positions: Vec<crate::session_cache::DeviceSequencePosition>,
+    pub state_blobs: Vec<crate::session_cache::SequenceStateBlob>,
+    pub save_ms: f64,
+    pub restore_ms: f64,
+    pub active_device_checkpoint_bytes: usize,
+    pub active_device_checkpoint_ms: f64,
+}
+
 /// Per-position top-k logprob data from prefill logit extraction.
 pub struct PrefillLogitPosition {
     pub position: usize,
@@ -8088,6 +8142,12 @@ pub struct PrefillEngine {
     pub prefill_kv_temp_seq: usize,
     pub prefill_kv_temp_layers: usize,
     pub prefill_kv_active: bool,
+    /// Keep the exact temporary stage cache after prefill so the active
+    /// conversation can continue without a host round trip.
+    pub retain_prefill_kv_for_active: bool,
+    /// Exact active boundary whose stage rows must survive the next
+    /// `prepare_for_prefill`. Set only after an exact token-prefix match.
+    pub active_stage_prefix_tokens: Option<usize>,
     pub stream: cuda_sys::CUstream,
     pub copy_stream: cuda_sys::CUstream,
     pub cublas_handle: cudarc::cublas::sys::cublasHandle_t,
@@ -20328,7 +20388,10 @@ impl PrefillEngine {
     }
 
     fn setup_stage_exact_prefill_kv(&mut self, prompt_tokens: usize) -> Result<(), String> {
-        self.release_prefill_kv_temp();
+        let preserve_prefix = self.active_stage_prefix_tokens.take();
+        if preserve_prefix.is_none() {
+            self.release_prefill_kv_temp();
+        }
         let diag = std::env::var("KRASIS_KV_STAGE_DIAG").is_ok();
         if !kv_stage_exact_enabled() || prompt_tokens == 0 {
             if diag {
@@ -20348,6 +20411,17 @@ impl PrefillEngine {
                 );
             }
             return Ok(());
+        }
+        if let Some(prefix) = preserve_prefix {
+            if self.prefill_kv_temp_k.is_none()
+                || self.prefill_kv_temp_v.is_none()
+                || prefix > self.prefill_kv_temp_seq
+            {
+                return Err(format!(
+                    "active stage continuation cannot preserve {} tokens from live capacity {}",
+                    prefix, self.prefill_kv_temp_seq
+                ));
+            }
         }
         let mut active_layers = Vec::new();
         for layer_idx in 0..self.decode_kv_k_radius_ptrs.len() {
@@ -20411,6 +20485,60 @@ impl PrefillEngine {
                 .checked_add(layer_bytes)
                 .ok_or("stage-exact prefill KV total bytes overflow")?;
         }
+        if let Some(prefix) = preserve_prefix {
+            let layout_matches = active_layers.iter().all(|&layer_idx| {
+                self.prefill_kv_layer_offsets
+                    .get(layer_idx)
+                    .is_some_and(|offset| *offset != usize::MAX)
+                    && self
+                        .prefill_kv_layer_strides
+                        .get(layer_idx)
+                        .is_some_and(|stride| *stride == strides[layer_idx])
+            });
+            if !layout_matches || self.prefill_kv_temp_layers != active_layers.len() {
+                return Err("active stage continuation layout changed".to_string());
+            }
+            if self.prefill_kv_temp_seq >= prompt_tokens {
+                let k_base = *self
+                    .prefill_kv_temp_k
+                    .as_ref()
+                    .ok_or("active stage K cache disappeared")?
+                    .device_ptr();
+                let v_base = *self
+                    .prefill_kv_temp_v
+                    .as_ref()
+                    .ok_or("active stage V cache disappeared")?
+                    .device_ptr();
+                let ptr_count = offsets.len();
+                let mut temp_k_ptrs = vec![0u64; ptr_count];
+                let mut temp_v_ptrs = vec![0u64; ptr_count];
+                for &layer_idx in &active_layers {
+                    let offset = self.prefill_kv_layer_offsets[layer_idx];
+                    temp_k_ptrs[layer_idx] = k_base + offset as u64;
+                    temp_v_ptrs[layer_idx] = v_base + offset as u64;
+                }
+                self.prefill_kv_active = true;
+                self.kv_k_ptrs = temp_k_ptrs;
+                self.kv_v_ptrs = temp_v_ptrs;
+                self.kv_k_radius_ptrs = vec![0u64; ptr_count];
+                self.kv_v_radius_ptrs = vec![0u64; ptr_count];
+                self.kv_k_angles_ptrs = vec![0u64; ptr_count];
+                self.kv_v_angles_ptrs = vec![0u64; ptr_count];
+                self.kv_tq4_sign_ptrs = vec![0u64; ptr_count];
+                self.kv_format = 1;
+                self.kv_max_seq = self.prefill_kv_temp_seq;
+                self.kv_max_seq_by_layer = vec![self.prefill_kv_temp_seq; ptr_count];
+                self.kv_num_blocks = 0;
+                self.kv_num_blocks_by_layer = vec![0usize; ptr_count];
+                log::info!(
+                    "Stage-exact active reuse: prefix_tokens={} prompt_tokens={} capacity_tokens={} transfer_ms=0",
+                    prefix,
+                    prompt_tokens,
+                    self.prefill_kv_temp_seq,
+                );
+                return Ok(());
+            }
+        }
         let temp_k = self
             .device
             .alloc_zeros::<u8>(total_bytes)
@@ -20421,6 +20549,64 @@ impl PrefillEngine {
             .map_err(|e| format!("alloc stage-exact prefill V FP8 KV: {e}"))?;
         let k_base = *temp_k.device_ptr();
         let v_base = *temp_v.device_ptr();
+        let active_copy_started = Instant::now();
+        if let Some(prefix) = preserve_prefix {
+            let old_k_base = *self
+                .prefill_kv_temp_k
+                .as_ref()
+                .ok_or("active stage K cache disappeared before growth")?
+                .device_ptr();
+            let old_v_base = *self
+                .prefill_kv_temp_v
+                .as_ref()
+                .ok_or("active stage V cache disappeared before growth")?
+                .device_ptr();
+            for &layer_idx in &active_layers {
+                let old_offset = self.prefill_kv_layer_offsets[layer_idx];
+                let new_offset = offsets[layer_idx];
+                let copy_bytes = prefix
+                    .checked_mul(strides[layer_idx])
+                    .ok_or("active stage prefix byte count overflow")?;
+                for (label, destination, source) in [
+                    (
+                        "K",
+                        k_base + new_offset as u64,
+                        old_k_base + old_offset as u64,
+                    ),
+                    (
+                        "V",
+                        v_base + new_offset as u64,
+                        old_v_base + old_offset as u64,
+                    ),
+                ] {
+                    let result = unsafe {
+                        cuda_sys::lib().cuMemcpyDtoDAsync_v2(
+                            destination,
+                            source,
+                            copy_bytes,
+                            self.copy_stream,
+                        )
+                    };
+                    if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "active stage {} growth copy failed for layer {}: {:?}",
+                            label, layer_idx, result
+                        ));
+                    }
+                }
+            }
+            let sync = unsafe { cuda_sys::lib().cuStreamSynchronize(self.copy_stream) };
+            if sync != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("synchronize active stage growth: {sync:?}"));
+            }
+            log::info!(
+                "Stage-exact active growth: prefix_tokens={} old_capacity_tokens={} new_capacity_tokens={} transfer_ms={:.3}",
+                prefix,
+                self.prefill_kv_temp_seq,
+                prompt_tokens,
+                active_copy_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         let mut temp_k_ptrs = vec![0u64; ptr_count];
         let mut temp_v_ptrs = vec![0u64; ptr_count];
         for &layer_idx in &active_layers {
@@ -20466,7 +20652,213 @@ impl PrefillEngine {
         Ok(())
     }
 
-    pub fn finalize_stage_exact_prefill_kv(&mut self, prompt_tokens: usize) -> Result<(), String> {
+    fn stage_exact_sequence_allocations(
+        &self,
+        device_ordinal: usize,
+    ) -> Result<Vec<crate::session_cache::SequenceStateAllocation>, String> {
+        if !self.prefill_kv_active {
+            return Ok(Vec::new());
+        }
+        let k_base = *self
+            .prefill_kv_temp_k
+            .as_ref()
+            .ok_or("stage-exact allocation inventory missing temporary K cache")?
+            .device_ptr();
+        let v_base = *self
+            .prefill_kv_temp_v
+            .as_ref()
+            .ok_or("stage-exact allocation inventory missing temporary V cache")?
+            .device_ptr();
+        let mut allocations = Vec::with_capacity(self.prefill_kv_temp_layers.saturating_mul(2));
+        for layer_idx in 0..self.prefill_kv_layer_offsets.len() {
+            let offset = self.prefill_kv_layer_offsets[layer_idx];
+            if offset == usize::MAX {
+                continue;
+            }
+            let row_bytes = self.prefill_kv_layer_strides[layer_idx];
+            let storage_bytes = self
+                .prefill_kv_temp_seq
+                .checked_mul(row_bytes)
+                .ok_or("stage-exact allocation byte count overflow")?;
+            for (suffix, kind, base) in [
+                ("k", crate::session_cache::PREFILL_STAGE_K_KIND, k_base),
+                ("v", crate::session_cache::PREFILL_STAGE_V_KIND, v_base),
+            ] {
+                allocations.push(crate::session_cache::SequenceStateAllocation {
+                    name: format!("layer{}.prefill_stage.{}", layer_idx, suffix),
+                    kind: kind.to_string(),
+                    layer_idx: Some(layer_idx),
+                    device_ordinal,
+                    ptr: base
+                        .checked_add(offset as u64)
+                        .ok_or("stage-exact allocation pointer overflow")?,
+                    storage_bytes,
+                    dtype: "fp8_e4m3".to_string(),
+                    element_size: 1,
+                    shape: vec![self.prefill_kv_temp_seq, row_bytes],
+                    strides_bytes: vec![row_bytes, 1],
+                    growth: crate::session_cache::SequenceStateGrowth::TokenRows {
+                        logical_tokens_per_row: 1,
+                        capacity_rows: self.prefill_kv_temp_seq,
+                        row_bytes,
+                    },
+                });
+            }
+        }
+        Ok(allocations)
+    }
+
+    /// Exact additional pageable-RAM reservation required for the live
+    /// stage-format K/V rows. The temporary tensors have already been
+    /// allocated, so this is derived from their real pointers and shapes.
+    pub fn stage_exact_snapshot_cost_estimate(
+        &self,
+        logical_tokens: usize,
+    ) -> Result<usize, String> {
+        if !self.prefill_kv_active {
+            return Ok(0);
+        }
+        if self.prefill_hcs_store_addr == 0 {
+            return Err("stage-exact cost estimate requires a registered decode store".to_string());
+        }
+        let store =
+            unsafe { &*(self.prefill_hcs_store_addr as *const crate::gpu_decode::GpuDecodeStore) };
+        let device_ordinal = usize::try_from(store.device_ordinal())
+            .map_err(|_| "stage-exact device ordinal is negative".to_string())?;
+        let mut registry = crate::session_cache::SequenceStateRegistry::default();
+        for allocation in self.stage_exact_sequence_allocations(device_ordinal)? {
+            registry.register(allocation)?;
+        }
+        registry.snapshot_blob_memory_cost_estimate(logical_tokens)
+    }
+
+    fn capture_stage_exact_sequence_state(
+        &mut self,
+        logical_tokens: usize,
+    ) -> Result<(Vec<crate::session_cache::SequenceStateBlob>, f64), String> {
+        if !self.prefill_kv_active {
+            return Ok((Vec::new(), 0.0));
+        }
+        if self.prefill_hcs_store_addr == 0 {
+            return Err("stage-exact capture requires a registered decode store".to_string());
+        }
+        let store = unsafe {
+            &mut *(self.prefill_hcs_store_addr as *mut crate::gpu_decode::GpuDecodeStore)
+        };
+        let device_ordinal = usize::try_from(store.device_ordinal())
+            .map_err(|_| "stage-exact device ordinal is negative".to_string())?;
+        let allocations = self.stage_exact_sequence_allocations(device_ordinal)?;
+        store.snapshot_external_sequence_state_rust(&allocations, logical_tokens)
+    }
+
+    /// Restore an exact prefill-stage prefix after `prepare_for_prefill` has
+    /// allocated the current request's temporary K/V buffers.
+    pub fn restore_stage_exact_sequence_state(
+        &mut self,
+        snapshot: &crate::session_cache::SessionSnapshot,
+    ) -> Result<f64, String> {
+        let stage_blobs: Vec<_> = snapshot
+            .state_blobs
+            .iter()
+            .filter(|blob| crate::session_cache::is_prefill_stage_kind(&blob.kind))
+            .collect();
+        if !self.prefill_kv_active {
+            if stage_blobs.is_empty() {
+                return Ok(0.0);
+            }
+            return Err(
+                "snapshot contains stage-exact K/V but this request has no live stage cache"
+                    .to_string(),
+            );
+        }
+        if self.prefill_hcs_store_addr == 0 {
+            return Err("stage-exact restore requires a registered decode store".to_string());
+        }
+        let store = unsafe {
+            &mut *(self.prefill_hcs_store_addr as *mut crate::gpu_decode::GpuDecodeStore)
+        };
+        let device_ordinal = usize::try_from(store.device_ordinal())
+            .map_err(|_| "stage-exact device ordinal is negative".to_string())?;
+        let allocations = self.stage_exact_sequence_allocations(device_ordinal)?;
+        if stage_blobs.is_empty() {
+            return Err(
+                "compressed-KV continuation snapshot has no exact prefill-stage K/V".to_string(),
+            );
+        }
+        store.restore_external_sequence_state_rust(
+            &allocations,
+            snapshot.consumed_token_ids.len(),
+            &stage_blobs,
+        )
+    }
+
+    /// Measure the complete persistent + temporary-stage restore path by
+    /// restoring the exact bytes just captured at a stable prefill boundary.
+    /// The source and destination represent the same state, so this cannot
+    /// alter model results; it supplies the runtime crossover model with a
+    /// real H2D sample for compressed-stage layouts before any reuse decision.
+    fn calibrate_sequence_boundary_restore(
+        &mut self,
+        logical_tokens: usize,
+        rope_position_delta: i32,
+        blobs: &[crate::session_cache::SequenceStateBlob],
+    ) -> Result<f64, String> {
+        if self.prefill_hcs_store_addr == 0 {
+            return Err(
+                "prefill boundary restore calibration requires a registered decode store"
+                    .to_string(),
+            );
+        }
+        let device_ordinal = {
+            let store = unsafe {
+                &*(self.prefill_hcs_store_addr as *const crate::gpu_decode::GpuDecodeStore)
+            };
+            usize::try_from(store.device_ordinal())
+                .map_err(|_| "boundary restore device ordinal is negative".to_string())?
+        };
+        let stage_allocations = self.stage_exact_sequence_allocations(device_ordinal)?;
+        let persistent_blobs: Vec<_> = blobs
+            .iter()
+            .filter(|blob| !crate::session_cache::is_prefill_stage_kind(&blob.kind))
+            .collect();
+        let stage_blobs: Vec<_> = blobs
+            .iter()
+            .filter(|blob| crate::session_cache::is_prefill_stage_kind(&blob.kind))
+            .collect();
+        let store = unsafe {
+            &mut *(self.prefill_hcs_store_addr as *mut crate::gpu_decode::GpuDecodeStore)
+        };
+        let mut restore_ms = store.restore_sequence_state_rust(
+            logical_tokens,
+            &persistent_blobs,
+            rope_position_delta,
+        )?;
+        if !stage_allocations.is_empty() {
+            if stage_blobs.is_empty() {
+                return Err(
+                    "compressed prefill boundary has no exact stage blobs to calibrate".to_string(),
+                );
+            }
+            restore_ms += store.restore_external_sequence_state_rust(
+                &stage_allocations,
+                logical_tokens,
+                &stage_blobs,
+            )?;
+        } else if !stage_blobs.is_empty() {
+            return Err(
+                "prefill boundary contains exact stage blobs without live stage allocations"
+                    .to_string(),
+            );
+        }
+        Ok(restore_ms)
+    }
+
+    fn export_stage_exact_prefill_kv(
+        &mut self,
+        prompt_tokens: usize,
+        export_start_token: usize,
+        restore_decode_pointers: bool,
+    ) -> Result<(), String> {
         if !self.prefill_kv_active {
             self.restore_decode_kv_pointers();
             return Ok(());
@@ -20475,6 +20867,12 @@ impl PrefillEngine {
             return Err(format!(
                 "stage-exact KV export prompt length {} exceeds decode KV max_seq {}",
                 prompt_tokens, self.decode_kv_max_seq
+            ));
+        }
+        if export_start_token > prompt_tokens {
+            return Err(format!(
+                "stage-exact KV export start {} exceeds prompt length {}",
+                export_start_token, prompt_tokens
             ));
         }
         let k_temp = self
@@ -20533,8 +20931,11 @@ impl PrefillEngine {
                     layer_idx, temp_layer_stride, kv_stride
                 ));
             }
-            let export_tokens = prompt_tokens.min(layer_decode_max_seq);
-            let source_start = prompt_tokens - export_tokens;
+            let (source_start, export_tokens) =
+                stage_exact_export_range(prompt_tokens, export_start_token, layer_decode_max_seq)?;
+            if export_tokens == 0 {
+                continue;
+            }
             let source_elem_offset = layer_offset
                 .checked_add(
                     source_start
@@ -20562,7 +20963,7 @@ impl PrefillEngine {
             unsafe {
                 launch(
                     kernel,
-                    (prompt_tokens as u32, 1, 1),
+                    (export_tokens as u32, 1, 1),
                     (threads, 1, 1),
                     0,
                     self.stream,
@@ -20592,8 +20993,63 @@ impl PrefillEngine {
             prompt_tokens,
             ms,
         );
-        self.restore_decode_kv_pointers();
+        if restore_decode_pointers {
+            self.restore_decode_kv_pointers();
+        }
         Ok(())
+    }
+
+    /// Export an exact completed prefix from the temporary FP8 prefill cache
+    /// into the registered decode layout without ending the ongoing prefill.
+    /// This allows a mid-prefill session snapshot to capture the real runtime
+    /// KV representation. The final export still runs after all prompt tokens.
+    fn export_stage_exact_prefill_kv_boundary(
+        &mut self,
+        prompt_tokens: usize,
+        sequence_start: usize,
+    ) -> Result<(), String> {
+        self.export_stage_exact_prefill_kv(prompt_tokens, sequence_start, false)
+    }
+
+    pub fn finalize_stage_exact_prefill_kv(&mut self, prompt_tokens: usize) -> Result<(), String> {
+        self.export_stage_exact_prefill_kv(prompt_tokens, 0, true)
+    }
+
+    /// Finalize a continuation prefill without rewriting the exact restored
+    /// prefix from unwritten temporary-cache rows.
+    pub fn finalize_stage_exact_prefill_kv_continuation(
+        &mut self,
+        prompt_tokens: usize,
+        sequence_start: usize,
+    ) -> Result<(), String> {
+        self.export_stage_exact_prefill_kv(prompt_tokens, sequence_start, true)
+    }
+
+    pub fn arm_active_stage_continuation(&mut self, logical_tokens: usize) -> Result<(), String> {
+        if self.prefill_kv_temp_k.is_none()
+            || self.prefill_kv_temp_v.is_none()
+            || logical_tokens > self.prefill_kv_temp_seq
+        {
+            return Err(format!(
+                "active stage boundary {} is unavailable in live capacity {}",
+                logical_tokens, self.prefill_kv_temp_seq
+            ));
+        }
+        self.prefill_kv_active = true;
+        self.active_stage_prefix_tokens = Some(logical_tokens);
+        self.retain_prefill_kv_for_active = true;
+        Ok(())
+    }
+
+    pub fn retain_active_stage_after_prefill(&mut self, retain: bool) {
+        self.retain_prefill_kv_for_active =
+            retain && self.prefill_kv_temp_k.is_some() && self.prefill_kv_temp_v.is_some();
+    }
+
+    pub fn discard_active_stage_state(&mut self) {
+        self.active_stage_prefix_tokens = None;
+        self.retain_prefill_kv_for_active = false;
+        self.release_prefill_kv_temp();
     }
 
     /// Dynamically allocate scratch buffers sized for this prompt.
@@ -20701,7 +21157,9 @@ impl PrefillEngine {
             post_scratch_runtime_reserve_bytes = combined_runtime_reserve_bytes;
         }
         let mut skip_stage_exact_single_chunk = false;
-        if self.can_skip_stage_exact_for_single_chunk_gemma_hqq4_k4() {
+        if self.active_stage_prefix_tokens.is_none()
+            && self.can_skip_stage_exact_for_single_chunk_gemma_hqq4_k4()
+        {
             let mut free_without_stage_bytes: usize = 0;
             let mut total_without_stage_bytes: usize = 0;
             unsafe {
@@ -21488,7 +21946,9 @@ impl PrefillEngine {
         self.d_fla_final_state = None;
         self.d_fla_v_new = None;
         self.d_fla_o = None;
-        self.release_prefill_kv_temp();
+        if !self.retain_prefill_kv_for_active {
+            self.release_prefill_kv_temp();
+        }
         self.dsa_prefill_workspace = None;
         self.active_prefill_prompt_tokens = 0;
         self.active_prefill_chunk_idx = 0;
@@ -21540,16 +22000,119 @@ impl PrefillEngine {
         temperature: f32,
         suppress_tokens: &[u32],
     ) -> Result<PrefillResult, String> {
+        self.run_prefill_from_state(token_ids, 0, true, None, temperature, suppress_tokens)
+            .map(|(result, _)| result)
+    }
+
+    /// Run a fresh prefill while capturing exact sequence state at an absolute
+    /// token boundary inside the prompt. The boundary is made a real chunk end
+    /// so every model layer and recurrent state update has completed before
+    /// the capture occurs.
+    pub fn run_prefill_capturing_boundary(
+        &mut self,
+        token_ids: &[u32],
+        capture_boundary: usize,
+        temperature: f32,
+        suppress_tokens: &[u32],
+    ) -> Result<(PrefillResult, Option<PrefillSequenceBoundaryCapture>), String> {
+        self.run_prefill_from_state(
+            token_ids,
+            0,
+            true,
+            Some(capture_boundary),
+            temperature,
+            suppress_tokens,
+        )
+    }
+
+    /// Continue prefill from sequence state already resident in the registered
+    /// runtime buffers. `sequence_start` is the exact number of tokens encoded
+    /// by that state. This path never resets recurrent/convolution/compressor
+    /// state and writes token-growing cache rows at absolute positions.
+    pub fn run_prefill_continuation(
+        &mut self,
+        token_ids: &[u32],
+        sequence_start: usize,
+        temperature: f32,
+        suppress_tokens: &[u32],
+    ) -> Result<PrefillResult, String> {
+        if sequence_start == 0 {
+            return Err("continuation prefill requires a non-zero state boundary".to_string());
+        }
+        self.run_prefill_from_state(
+            token_ids,
+            sequence_start,
+            false,
+            None,
+            temperature,
+            suppress_tokens,
+        )
+        .map(|(result, _)| result)
+    }
+
+    pub fn run_prefill_continuation_capturing_boundary(
+        &mut self,
+        token_ids: &[u32],
+        sequence_start: usize,
+        capture_boundary: usize,
+        temperature: f32,
+        suppress_tokens: &[u32],
+    ) -> Result<(PrefillResult, Option<PrefillSequenceBoundaryCapture>), String> {
+        if sequence_start == 0 {
+            return Err("continuation prefill requires a non-zero state boundary".to_string());
+        }
+        self.run_prefill_from_state(
+            token_ids,
+            sequence_start,
+            false,
+            Some(capture_boundary),
+            temperature,
+            suppress_tokens,
+        )
+    }
+
+    fn run_prefill_from_state(
+        &mut self,
+        token_ids: &[u32],
+        sequence_start: usize,
+        reset_sequence_state: bool,
+        capture_boundary: Option<usize>,
+        temperature: f32,
+        suppress_tokens: &[u32],
+    ) -> Result<(PrefillResult, Option<PrefillSequenceBoundaryCapture>), String> {
         // Bind CUDA context to calling thread (needed for cross-thread use)
         self.bind_cuda_context()?;
         self.refresh_trace_config();
         let t0 = Instant::now();
         let total_m = token_ids.len();
+        let total_prompt_tokens = sequence_start
+            .checked_add(total_m)
+            .ok_or_else(|| "prefill continuation position overflows".to_string())?;
         let h = self.config.hidden_size;
         let num_hidden_layers = self.config.num_hidden_layers;
         let liveness_timing = prefill_liveness_timing_enabled();
         if total_m == 0 {
             return Err("Empty token sequence".to_string());
+        }
+        if reset_sequence_state != (sequence_start == 0) {
+            return Err(format!(
+                "prefill state contract mismatch: sequence_start={} reset_state={}",
+                sequence_start, reset_sequence_state
+            ));
+        }
+        if total_prompt_tokens > self.kv_max_seq {
+            return Err(format!(
+                "KV cache exhausted: continuation boundary {} + suffix {} exceeds capacity {}",
+                sequence_start, total_m, self.kv_max_seq
+            ));
+        }
+        if let Some(boundary) = capture_boundary {
+            if boundary <= sequence_start || boundary >= total_prompt_tokens {
+                return Err(format!(
+                    "prefill capture boundary {} must lie strictly inside absolute suffix range {}..{}",
+                    boundary, sequence_start, total_prompt_tokens
+                ));
+            }
         }
         let _ = self.first_token_margin_projection_target()?;
         let _ = self.read_only_checkpoint_config()?;
@@ -21562,8 +22125,11 @@ impl PrefillEngine {
             self.trace.as_ref(),
             "prefill",
             &format!(
-                "phase=run_start prompt_tokens={} chunk_size={} suppress_tokens={} temperature={:.3}",
+                "phase=run_start prompt_tokens={} suffix_tokens={} sequence_start={} reset_state={} chunk_size={} suppress_tokens={} temperature={:.3}",
+                total_prompt_tokens,
                 total_m,
+                sequence_start,
+                reset_sequence_state,
                 self.config.prefill_chunk_size,
                 suppress_tokens.len(),
                 temperature,
@@ -21593,7 +22159,9 @@ impl PrefillEngine {
         } else {
             self.scratch.max_tokens
         };
-        let chunk_plan = build_prefill_chunk_plan(total_m, max_chunk);
+        let capture_suffix_boundary = capture_boundary.map(|boundary| boundary - sequence_start);
+        let chunk_plan =
+            build_prefill_chunk_plan_at_boundary(total_m, max_chunk, capture_suffix_boundary)?;
         let num_chunks = chunk_plan.len();
         let chunk_size = chunk_plan.iter().copied().max().unwrap_or(0);
         self.reset_prefill_prescan_accuracy_measurement(total_m, &chunk_plan);
@@ -21644,74 +22212,79 @@ impl PrefillEngine {
             );
         }
 
-        // Zero recurrent state for fresh prefill (each prefill processes a full prompt).
-        if self.deepseek_v4_head.is_some() {
+        // Fresh prefill starts from zero. Continuation consumes the exact
+        // already-resident boundary and must preserve every fixed-size state.
+        if reset_sequence_state && self.deepseek_v4_head.is_some() {
             self.reset_deepseek_v4_compressor_states()?;
         }
-        if let Some(ref la_state_buf) = self.scratch.d_la_state {
-            let nv = self.config.la_num_v_heads;
-            let dk = self.config.la_k_head_dim;
-            let dv = self.config.la_v_head_dim;
-            let state_elems = nv * dk * dv;
-            unsafe {
-                cuda_sys::lib().cuMemsetD32Async(
-                    *la_state_buf.device_ptr(),
-                    0,
-                    state_elems,
-                    self.stream,
-                );
-            }
-        }
-        for layer_idx in 0..num_hidden_layers {
-            let lw = &self.layer_weights[layer_idx];
-            if lw.mamba2_conv_state_ptr != 0 {
-                let conv_dim = self.config.mamba_conv_dim;
-                let conv_kernel = self.config.mamba_conv_kernel;
-                unsafe {
-                    cuda_sys::lib().cuMemsetD32Async(
-                        lw.mamba2_conv_state_ptr,
-                        0,
-                        conv_dim * conv_kernel,
-                        self.stream,
-                    );
-                }
-            }
-            if lw.mamba2_ssm_state_ptr != 0 {
-                let n_heads = self.config.mamba_num_heads;
-                let head_dim = self.config.mamba_head_dim;
-                let d_state = self.config.mamba_d_state;
-                unsafe {
-                    cuda_sys::lib().cuMemsetD32Async(
-                        lw.mamba2_ssm_state_ptr,
-                        0,
-                        n_heads * head_dim * d_state,
-                        self.stream,
-                    );
-                }
-            }
-            if lw.la_conv_state_ptr != 0 {
-                let conv_dim = self.config.la_conv_dim;
-                let kernel_dim = self.config.la_conv_kernel_dim;
-                unsafe {
-                    cuda_sys::lib().cuMemsetD32Async(
-                        lw.la_conv_state_ptr,
-                        0,
-                        conv_dim * kernel_dim,
-                        self.stream,
-                    );
-                }
-            }
-            if lw.la_recur_state_ptr != 0 {
+        if reset_sequence_state {
+            if let Some(ref la_state_buf) = self.scratch.d_la_state {
                 let nv = self.config.la_num_v_heads;
                 let dk = self.config.la_k_head_dim;
                 let dv = self.config.la_v_head_dim;
+                let state_elems = nv * dk * dv;
                 unsafe {
                     cuda_sys::lib().cuMemsetD32Async(
-                        lw.la_recur_state_ptr,
+                        *la_state_buf.device_ptr(),
                         0,
-                        nv * dk * dv,
+                        state_elems,
                         self.stream,
                     );
+                }
+            }
+        }
+        if reset_sequence_state {
+            for layer_idx in 0..num_hidden_layers {
+                let lw = &self.layer_weights[layer_idx];
+                if lw.mamba2_conv_state_ptr != 0 {
+                    let conv_dim = self.config.mamba_conv_dim;
+                    let conv_kernel = self.config.mamba_conv_kernel;
+                    unsafe {
+                        cuda_sys::lib().cuMemsetD32Async(
+                            lw.mamba2_conv_state_ptr,
+                            0,
+                            conv_dim * conv_kernel,
+                            self.stream,
+                        );
+                    }
+                }
+                if lw.mamba2_ssm_state_ptr != 0 {
+                    let n_heads = self.config.mamba_num_heads;
+                    let head_dim = self.config.mamba_head_dim;
+                    let d_state = self.config.mamba_d_state;
+                    unsafe {
+                        cuda_sys::lib().cuMemsetD32Async(
+                            lw.mamba2_ssm_state_ptr,
+                            0,
+                            n_heads * head_dim * d_state,
+                            self.stream,
+                        );
+                    }
+                }
+                if lw.la_conv_state_ptr != 0 {
+                    let conv_dim = self.config.la_conv_dim;
+                    let kernel_dim = self.config.la_conv_kernel_dim;
+                    unsafe {
+                        cuda_sys::lib().cuMemsetD32Async(
+                            lw.la_conv_state_ptr,
+                            0,
+                            conv_dim * kernel_dim,
+                            self.stream,
+                        );
+                    }
+                }
+                if lw.la_recur_state_ptr != 0 {
+                    let nv = self.config.la_num_v_heads;
+                    let dk = self.config.la_k_head_dim;
+                    let dv = self.config.la_v_head_dim;
+                    unsafe {
+                        cuda_sys::lib().cuMemsetD32Async(
+                            lw.la_recur_state_ptr,
+                            0,
+                            nv * dk * dv,
+                            self.stream,
+                        );
+                    }
                 }
             }
         }
@@ -22117,11 +22690,19 @@ impl PrefillEngine {
         let mut t_embed_ms = 0.0f64;
         let mut t_other_ms = 0.0f64;
 
-        let mut chunk_start = 0usize;
+        let mut boundary_capture: Option<PrefillSequenceBoundaryCapture> = None;
+        let mut suffix_chunk_start = 0usize;
         for (chunk_idx, &planned_chunk_tokens) in chunk_plan.iter().enumerate() {
-            let chunk_end = std::cmp::min(chunk_start + planned_chunk_tokens, total_m);
-            let m = chunk_end.saturating_sub(chunk_start);
-            let chunk_tokens = &token_ids[chunk_start..chunk_end];
+            let suffix_chunk_end =
+                std::cmp::min(suffix_chunk_start + planned_chunk_tokens, total_m);
+            let m = suffix_chunk_end.saturating_sub(suffix_chunk_start);
+            let chunk_start = sequence_start
+                .checked_add(suffix_chunk_start)
+                .ok_or_else(|| "absolute prefill chunk start overflows".to_string())?;
+            let chunk_end = sequence_start
+                .checked_add(suffix_chunk_end)
+                .ok_or_else(|| "absolute prefill chunk end overflows".to_string())?;
+            let chunk_tokens = &token_ids[suffix_chunk_start..suffix_chunk_end];
             self.active_prefill_chunk_idx = chunk_idx;
             self.active_prefill_chunk_start = chunk_start;
             let chunk_tok0 = chunk_tokens.first().copied().unwrap_or(0) as usize;
@@ -22185,7 +22766,7 @@ impl PrefillEngine {
             // BF16 prompt embeddings; text-only requests use token IDs.
             if self.external_prefill_embeddings_ptr != 0 {
                 let src = self.external_prefill_embeddings_ptr
-                    + (chunk_start * h * std::mem::size_of::<u16>()) as u64;
+                    + (suffix_chunk_start * h * std::mem::size_of::<u16>()) as u64;
                 let dst = *self.scratch.d_hidden.device_ptr();
                 let bytes = (m * h * std::mem::size_of::<u16>()) as usize;
                 unsafe {
@@ -24588,7 +25169,90 @@ impl PrefillEngine {
                 "prefill_chunk",
                 &format!("phase=chunk_end chunk_tokens={}", m),
             );
-            chunk_start = chunk_end;
+            if capture_boundary == Some(chunk_end) {
+                // Stage-exact compressed KV modes write prefill K/V into a
+                // temporary FP8 cache. Materialize this exact prefix into the
+                // registered decode layout before taking the snapshot, while
+                // keeping the temporary cache active for the remaining chunks.
+                self.export_stage_exact_prefill_kv_boundary(chunk_end, sequence_start)?;
+                self.stream_sync()?;
+                if self.prefill_hcs_store_addr == 0 {
+                    return Err(
+                        "prefill boundary capture requires a registered GPU decode store"
+                            .to_string(),
+                    );
+                }
+                let store = unsafe {
+                    &mut *(self.prefill_hcs_store_addr as *mut crate::gpu_decode::GpuDecodeStore)
+                };
+                store.set_kv_position_rust(chunk_end);
+                let position = store.sequence_position_rust()?;
+                let (mut persistent_blobs, mut save_ms) =
+                    store.snapshot_sequence_state_rust(chunk_end)?;
+                let (mut stage_blobs, stage_save_ms) =
+                    self.capture_stage_exact_sequence_state(chunk_end)?;
+                let blob_count = persistent_blobs
+                    .len()
+                    .checked_add(stage_blobs.len())
+                    .ok_or("prefill boundary snapshot allocation count overflow")?;
+                // Construct the final metadata array at its exact runtime
+                // size. Appending the stage blobs directly to the full
+                // persistent vector makes Vec grow geometrically, so the RAM
+                // snapshot owns metadata capacity which was never included in
+                // the live-allocation reservation. The payload allocations
+                // themselves are unchanged; this only prevents unaccounted
+                // collection capacity.
+                let mut state_blobs = Vec::with_capacity(blob_count);
+                if state_blobs.capacity() != blob_count {
+                    return Err(format!(
+                        "prefill boundary snapshot metadata capacity {} differs from live allocation count {}",
+                        state_blobs.capacity(), blob_count
+                    ));
+                }
+                state_blobs.append(&mut persistent_blobs);
+                state_blobs.append(&mut stage_blobs);
+                save_ms += stage_save_ms;
+                let restore_ms = self.calibrate_sequence_boundary_restore(
+                    chunk_end,
+                    position.rope_position_delta,
+                    &state_blobs,
+                )?;
+                let (active_device_checkpoint_bytes, active_device_checkpoint_ms) =
+                    if self.prefill_kv_active {
+                        store.capture_pending_active_sequence_checkpoint_rust(chunk_end)?
+                    } else {
+                        (0, 0.0)
+                    };
+                boundary_capture = Some(PrefillSequenceBoundaryCapture {
+                    token_count: chunk_end,
+                    positions: vec![position],
+                    state_blobs,
+                    save_ms,
+                    restore_ms,
+                    active_device_checkpoint_bytes,
+                    active_device_checkpoint_ms,
+                });
+                trace_emit_prefill_mark(
+                    self.trace.as_ref(),
+                    chunk_idx,
+                    chunk_start,
+                    chunk_tok0,
+                    None,
+                    "prefill_chunk",
+                    &format!(
+                        "phase=session_boundary_capture boundary_tokens={} allocations={} save_ms={:.3} restore_ms={:.3} active_device_bytes={} active_device_ms={:.3}",
+                        chunk_end,
+                        boundary_capture
+                            .as_ref()
+                            .map_or(0, |capture| capture.state_blobs.len()),
+                        save_ms,
+                        restore_ms,
+                        active_device_checkpoint_bytes,
+                        active_device_checkpoint_ms,
+                    ),
+                );
+            }
+            suffix_chunk_start = suffix_chunk_end;
         }
 
         // Use last chunk's m for final processing
@@ -24614,7 +25278,7 @@ impl PrefillEngine {
                     trace_emit_prefill_mark(
                         self.trace.as_ref(),
                         num_chunks.saturating_sub(1),
-                        total_m.saturating_sub(1),
+                        total_prompt_tokens.saturating_sub(1),
                         token_ids.last().copied().unwrap_or(0) as usize,
                         None,
                         "prefill",
@@ -24677,7 +25341,7 @@ impl PrefillEngine {
         }) {
             self.trace_emit_bf16(
                 num_chunks.saturating_sub(1),
-                total_m.saturating_sub(m),
+                total_prompt_tokens.saturating_sub(m),
                 token_ids.last().copied().unwrap_or(0) as usize,
                 None,
                 "prefill",
@@ -24687,7 +25351,7 @@ impl PrefillEngine {
             );
             self.trace_emit_bf16_row(
                 num_chunks.saturating_sub(1),
-                total_m.saturating_sub(1),
+                total_prompt_tokens.saturating_sub(1),
                 token_ids.last().copied().unwrap_or(0) as usize,
                 None,
                 "prefill",
@@ -24701,7 +25365,7 @@ impl PrefillEngine {
             PDT_FINAL_HIDDEN_LAST,
             self.layer_weights.len(),
             num_chunks.saturating_sub(1),
-            total_m.saturating_sub(1),
+            total_prompt_tokens.saturating_sub(1),
             token_ids.last().copied().unwrap_or(0) as usize,
             *self.scratch.d_hidden.device_ptr(),
             m.saturating_sub(1),
@@ -24727,7 +25391,7 @@ impl PrefillEngine {
                 );
             self.trace_emit_f32_values(
                 num_chunks.saturating_sub(1),
-                total_m.saturating_sub(1),
+                total_prompt_tokens.saturating_sub(1),
                 token_id,
                 None,
                 "prefill",
@@ -24736,7 +25400,7 @@ impl PrefillEngine {
             );
             self.trace_emit_f32_values(
                 num_chunks.saturating_sub(1),
-                total_m.saturating_sub(1),
+                total_prompt_tokens.saturating_sub(1),
                 token_id,
                 None,
                 "prefill",
@@ -24764,7 +25428,7 @@ impl PrefillEngine {
                         .collect::<Vec<_>>();
                     self.trace_emit_compare_summary(
                         num_chunks.saturating_sub(1),
-                        total_m.saturating_sub(1),
+                        total_prompt_tokens.saturating_sub(1),
                         token_id,
                         None,
                         "prefill",
@@ -24776,7 +25440,7 @@ impl PrefillEngine {
                     );
                     self.trace_emit_compare_summary(
                         num_chunks.saturating_sub(1),
-                        total_m.saturating_sub(1),
+                        total_prompt_tokens.saturating_sub(1),
                         token_id,
                         None,
                         "prefill",
@@ -24791,7 +25455,7 @@ impl PrefillEngine {
                     trace_emit_prefill_mark(
                         self.trace.as_ref(),
                         num_chunks.saturating_sub(1),
-                        total_m.saturating_sub(1),
+                        total_prompt_tokens.saturating_sub(1),
                         token_id,
                         None,
                         "prefill",
@@ -24836,7 +25500,7 @@ impl PrefillEngine {
                             let actual_logits = self.h_logits.clone();
                             self.trace_emit_compare_summary(
                                 num_chunks.saturating_sub(1),
-                                total_m.saturating_sub(1),
+                                total_prompt_tokens.saturating_sub(1),
                                 token_id,
                                 None,
                                 "prefill",
@@ -24855,7 +25519,7 @@ impl PrefillEngine {
                                 {
                                     self.trace_emit_compare_summary(
                                         num_chunks.saturating_sub(1),
-                                        total_m.saturating_sub(1),
+                                        total_prompt_tokens.saturating_sub(1),
                                         token_id,
                                         None,
                                         "prefill",
@@ -24872,7 +25536,7 @@ impl PrefillEngine {
                                     trace_emit_prefill_mark(
                                         self.trace.as_ref(),
                                         num_chunks.saturating_sub(1),
-                                        total_m.saturating_sub(1),
+                                        total_prompt_tokens.saturating_sub(1),
                                         token_id,
                                         None,
                                         "prefill",
@@ -24918,7 +25582,7 @@ impl PrefillEngine {
                             trace_emit_prefill_mark(
                                 self.trace.as_ref(),
                                 num_chunks.saturating_sub(1),
-                                total_m.saturating_sub(1),
+                                total_prompt_tokens.saturating_sub(1),
                                 token_id,
                                 None,
                                 "prefill",
@@ -24936,7 +25600,7 @@ impl PrefillEngine {
                             trace_emit_prefill_mark(
                                 self.trace.as_ref(),
                                 num_chunks.saturating_sub(1),
-                                total_m.saturating_sub(1),
+                                total_prompt_tokens.saturating_sub(1),
                                 token_id,
                                 None,
                                 "prefill",
@@ -24954,7 +25618,7 @@ impl PrefillEngine {
                             trace_emit_prefill_mark(
                                 self.trace.as_ref(),
                                 num_chunks.saturating_sub(1),
-                                total_m.saturating_sub(1),
+                                total_prompt_tokens.saturating_sub(1),
                                 token_id,
                                 None,
                                 "prefill",
@@ -24967,7 +25631,7 @@ impl PrefillEngine {
                     trace_emit_prefill_mark(
                         self.trace.as_ref(),
                         num_chunks.saturating_sub(1),
-                        total_m.saturating_sub(1),
+                        total_prompt_tokens.saturating_sub(1),
                         token_id,
                         None,
                         "prefill",
@@ -24989,8 +25653,10 @@ impl PrefillEngine {
 
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         log::info!(
-            "Rust prefill: {} tok in {:.1}ms ({:.0} tok/s)",
+            "Rust prefill: computed {} suffix tok from boundary {} ({} total) in {:.1}ms ({:.0} computed tok/s)",
             total_m,
+            sequence_start,
+            total_prompt_tokens,
             ms,
             total_m as f64 / (ms / 1000.0)
         );
@@ -24998,8 +25664,8 @@ impl PrefillEngine {
             self.trace.as_ref(),
             "prefill",
             &format!(
-                "phase=run_complete prompt_tokens={} first_token={} prefill_ms={:.1}",
-                total_m, first_token, ms,
+                "phase=run_complete prompt_tokens={} computed_suffix_tokens={} sequence_start={} first_token={} prefill_ms={:.1}",
+                total_prompt_tokens, total_m, sequence_start, first_token, ms,
             ),
         );
 
@@ -25025,8 +25691,10 @@ impl PrefillEngine {
                 t_embed_ms + t_norm_ms + t_attn_ms + t_moe_ms + t_other_ms + deepseek_v4_wall_total;
             let unaccounted = (ms - total).max(0.0);
             eprintln!(
-                "[PREFILL-TIMING] {} tokens, {:.1}ms total ({:.0} tok/s)",
+                "[PREFILL-TIMING] {} suffix tokens from boundary {} ({} total), {:.1}ms total ({:.0} computed tok/s)",
                 total_m,
+                sequence_start,
+                total_prompt_tokens,
                 ms,
                 total_m as f64 / (ms / 1000.0)
             );
@@ -25752,11 +26420,20 @@ impl PrefillEngine {
             }
         }
 
-        Ok(PrefillResult {
-            first_token,
-            prompt_len: total_m,
-            prefill_time_ms: ms,
-        })
+        if capture_boundary.is_some() && boundary_capture.is_none() {
+            return Err(format!(
+                "prefill completed without capturing requested boundary {:?}",
+                capture_boundary
+            ));
+        }
+        Ok((
+            PrefillResult {
+                first_token,
+                prompt_len: total_prompt_tokens,
+                prefill_time_ms: ms,
+            },
+            boundary_capture,
+        ))
     }
 
     pub fn debug_run_gqa_prefill_layer(
@@ -30065,8 +30742,7 @@ impl PrefillEngine {
                 desc.rope_dim,
             ));
         }
-        let compressor_timing =
-            self.deepseek_v4_timing_start("deepseek_v4 indexer compressor")?;
+        let compressor_timing = self.deepseek_v4_timing_start("deepseek_v4 indexer compressor")?;
         let valid_rows = self.run_deepseek_v4_compressor_prefill(
             &format!("layer {} index", layer_idx),
             hidden,
@@ -30154,8 +30830,7 @@ impl PrefillEngine {
         let raw_queries = *self.scratch.d_q.device_ptr();
         let head_weights = *self.scratch.d_scratch1.device_ptr();
         let positions = *self.scratch.d_positions.device_ptr();
-        let query_proj_timing =
-            self.deepseek_v4_timing_start("deepseek_v4 indexer query_proj")?;
+        let query_proj_timing = self.deepseek_v4_timing_start("deepseek_v4 indexer query_proj")?;
         self.cublas_bf16_gemm(q_rank, &indexer.wq_b, raw_queries, m)?;
         self.deepseek_v4_indexer_timing_finish(
             DEEPSEEK_V4_INDEXER_TIMING_STAGE_QUERY_PROJ,
@@ -30219,8 +30894,7 @@ impl PrefillEngine {
             "deepseek_v4 indexer rope",
             rope_timing,
         )?;
-        let hadamard_timing =
-            self.deepseek_v4_timing_start("deepseek_v4 indexer hadamard")?;
+        let hadamard_timing = self.deepseek_v4_timing_start("deepseek_v4 indexer hadamard")?;
         let rotated_rows = m
             .checked_mul(indexer.index_n_heads)
             .ok_or_else(|| format!("DeepSeek-V4 layer {} rotated row count overflow", layer_idx))?;
@@ -30267,8 +30941,7 @@ impl PrefillEngine {
             "deepseek_v4 indexer hadamard",
             hadamard_timing,
         )?;
-        let fp4_qat_timing =
-            self.deepseek_v4_timing_start("deepseek_v4 indexer fp4_qat")?;
+        let fp4_qat_timing = self.deepseek_v4_timing_start("deepseek_v4 indexer fp4_qat")?;
         let quant_blocks = indexer
             .index_head_dim
             .div_ceil(DEEPSEEK_V4_FP4_QAT_BLOCK_SIZE);
@@ -30308,8 +30981,7 @@ impl PrefillEngine {
             fp4_qat_timing,
         )?;
 
-        let weights_timing =
-            self.deepseek_v4_timing_start("deepseek_v4 indexer weights")?;
+        let weights_timing = self.deepseek_v4_timing_start("deepseek_v4 indexer weights")?;
         self.cublas_bf16_gemm(hidden, &indexer.weights_proj, head_weights, m)?;
         let weight_scale = 1.0f32
             / ((indexer.index_head_dim as f32).sqrt() * (indexer.index_n_heads as f32).sqrt());
@@ -30349,8 +31021,7 @@ impl PrefillEngine {
             weights_timing,
         )?;
 
-        let causal_timing =
-            self.deepseek_v4_timing_start("deepseek_v4 indexer causal_counts")?;
+        let causal_timing = self.deepseek_v4_timing_start("deepseek_v4 indexer causal_counts")?;
         let causal_threads = 256usize;
         let mut c0 = causal_counts;
         let mut c1 = positions;
@@ -30463,21 +31134,16 @@ impl PrefillEngine {
             ),
         ] {
             self.t_deepseek_v4_indexer_wall[target].set(
-                self.t_deepseek_v4_indexer_wall[target].get()
-                    + selection_timing.wall_ms[source],
+                self.t_deepseek_v4_indexer_wall[target].get() + selection_timing.wall_ms[source],
             );
             self.t_deepseek_v4_indexer_event[target].set(
-                self.t_deepseek_v4_indexer_event[target].get()
-                    + selection_timing.event_ms[source],
+                self.t_deepseek_v4_indexer_event[target].get() + selection_timing.event_ms[source],
             );
             self.t_deepseek_v4_indexer_sync[target].set(
-                self.t_deepseek_v4_indexer_sync[target].get()
-                    + selection_timing.sync_ms[source],
+                self.t_deepseek_v4_indexer_sync[target].get() + selection_timing.sync_ms[source],
             );
-            self.deepseek_v4_indexer_calls[target].set(
-                self.deepseek_v4_indexer_calls[target].get()
-                    + selection_timing.calls[source],
-            );
+            self.deepseek_v4_indexer_calls[target]
+                .set(self.deepseek_v4_indexer_calls[target].get() + selection_timing.calls[source]);
         }
 
         // The shared DSA kernel consumed count-1 pseudo-positions. Convert the
@@ -31000,20 +31666,19 @@ impl PrefillEngine {
         let selected_elems_per_token = selected.checked_mul(head_dim).ok_or_else(|| {
             format!("DeepSeek-V4 layer {layer_idx} selected-KV tile size overflow")
         })?;
-        let query_elems_per_token = heads.checked_mul(head_dim).ok_or_else(|| {
-            format!("DeepSeek-V4 layer {layer_idx} query tile size overflow")
-        })?;
-        let score_elems_per_token = heads.checked_mul(selected).ok_or_else(|| {
-            format!("DeepSeek-V4 layer {layer_idx} score tile size overflow")
-        })?;
+        let query_elems_per_token = heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| format!("DeepSeek-V4 layer {layer_idx} query tile size overflow"))?;
+        let score_elems_per_token = heads
+            .checked_mul(selected)
+            .ok_or_else(|| format!("DeepSeek-V4 layer {layer_idx} score tile size overflow"))?;
         let operand_bytes_per_token = match mode {
-            DeepseekV4PrefillSparseScoreMode::Bf16Fp32 => selected_elems_per_token
-                .checked_mul(std::mem::size_of::<u16>()),
-            DeepseekV4PrefillSparseScoreMode::Fp32PedanticPostscale => {
-                selected_elems_per_token
-                    .checked_add(query_elems_per_token)
-                    .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+            DeepseekV4PrefillSparseScoreMode::Bf16Fp32 => {
+                selected_elems_per_token.checked_mul(std::mem::size_of::<u16>())
             }
+            DeepseekV4PrefillSparseScoreMode::Fp32PedanticPostscale => selected_elems_per_token
+                .checked_add(query_elems_per_token)
+                .and_then(|value| value.checked_mul(std::mem::size_of::<f32>())),
             DeepseekV4PrefillSparseScoreMode::ScalarQueryCached => None,
         }
         .ok_or_else(|| {
@@ -31078,11 +31743,7 @@ impl PrefillEngine {
                     cublas_sys::cublasMath_t::CUBLAS_PEDANTIC_MATH,
                 );
                 if status != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
-                    let _ = lib.cublasSetWorkspace_v2(
-                        self.cublas_handle,
-                        std::ptr::null_mut(),
-                        0,
-                    );
+                    let _ = lib.cublasSetWorkspace_v2(self.cublas_handle, std::ptr::null_mut(), 0);
                     return Err(format!(
                         "DeepSeek-V4 layer {layer_idx} cublasSetMathMode(pedantic) failed: {status:?}"
                     ));
@@ -31097,9 +31758,7 @@ impl PrefillEngine {
                     self.stream as cublas_sys::cudaStream_t,
                 )
                 .map_err(|error| {
-                    format!(
-                        "DeepSeek-V4 layer {layer_idx} gathered score set_stream: {error:?}"
-                    )
+                    format!("DeepSeek-V4 layer {layer_idx} gathered score set_stream: {error:?}")
                 })?;
             }
             let scale = 1.0f32 / (head_dim as f32).sqrt();
@@ -31111,27 +31770,21 @@ impl PrefillEngine {
                         .checked_mul(score_elems_per_token)
                         .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
                         .ok_or_else(|| {
-                            format!(
-                                "DeepSeek-V4 layer {layer_idx} score tile offset overflow"
-                            )
+                            format!("DeepSeek-V4 layer {layer_idx} score tile offset overflow")
                         })? as u64;
                 let tile_query = query
                     + token_start
                         .checked_mul(query_elems_per_token)
                         .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
                         .ok_or_else(|| {
-                            format!(
-                                "DeepSeek-V4 layer {layer_idx} query tile offset overflow"
-                            )
+                            format!("DeepSeek-V4 layer {layer_idx} query tile offset overflow")
                         })? as u64;
                 let tile_indices = indices
                     + token_start
                         .checked_mul(selected)
                         .and_then(|value| value.checked_mul(std::mem::size_of::<i32>()))
                         .ok_or_else(|| {
-                            format!(
-                                "DeepSeek-V4 layer {layer_idx} index tile offset overflow"
-                            )
+                            format!("DeepSeek-V4 layer {layer_idx} index tile offset overflow")
                         })? as u64;
 
                 let (a_ptr, b_ptr, operand_type, alpha, gather_elements) = match mode {
@@ -31139,9 +31792,7 @@ impl PrefillEngine {
                         let gather_elements = tile_tokens
                             .checked_mul(selected_elems_per_token + score_elems_per_token)
                             .ok_or_else(|| {
-                                format!(
-                                    "DeepSeek-V4 layer {layer_idx} BF16 gather work overflow"
-                                )
+                                format!("DeepSeek-V4 layer {layer_idx} BF16 gather work overflow")
                             })?;
                         let mut g0 = operand_buffer;
                         let mut g1 = tile_scores;
@@ -31208,9 +31859,7 @@ impl PrefillEngine {
                         let selected_tile_elems = tile_tokens
                             .checked_mul(selected_elems_per_token)
                             .ok_or_else(|| {
-                                format!(
-                                    "DeepSeek-V4 layer {layer_idx} FP32 selected tile overflow"
-                                )
+                                format!("DeepSeek-V4 layer {layer_idx} FP32 selected tile overflow")
                             })?;
                         let query_fp32 = operand_buffer
                             + selected_tile_elems
@@ -31222,13 +31871,13 @@ impl PrefillEngine {
                                 })? as u64;
                         let gather_elements = selected_tile_elems
                             .checked_add(
-                                tile_tokens
-                                    .checked_mul(query_elems_per_token)
-                                    .ok_or_else(|| {
+                                tile_tokens.checked_mul(query_elems_per_token).ok_or_else(
+                                    || {
                                         format!(
                                             "DeepSeek-V4 layer {layer_idx} FP32 query work overflow"
                                         )
-                                    })?,
+                                    },
+                                )?,
                             )
                             .and_then(|value| {
                                 tile_tokens
@@ -31236,9 +31885,7 @@ impl PrefillEngine {
                                     .and_then(|scores| value.checked_add(scores))
                             })
                             .ok_or_else(|| {
-                                format!(
-                                    "DeepSeek-V4 layer {layer_idx} FP32 gather work overflow"
-                                )
+                                format!("DeepSeek-V4 layer {layer_idx} FP32 gather work overflow")
                             })?;
                         let mut g0 = operand_buffer;
                         let mut g1 = query_fp32;
@@ -31310,17 +31957,14 @@ impl PrefillEngine {
                 let _ = gather_elements;
 
                 let beta = 1.0f32;
-                let selected_i32 = i32::try_from(selected).map_err(|_| {
-                    format!("DeepSeek-V4 layer {layer_idx} selected exceeds i32")
-                })?;
+                let selected_i32 = i32::try_from(selected)
+                    .map_err(|_| format!("DeepSeek-V4 layer {layer_idx} selected exceeds i32"))?;
                 let heads_i32 = i32::try_from(heads)
                     .map_err(|_| format!("DeepSeek-V4 layer {layer_idx} heads exceed i32"))?;
-                let head_dim_i32 = i32::try_from(head_dim).map_err(|_| {
-                    format!("DeepSeek-V4 layer {layer_idx} head dim exceeds i32")
-                })?;
-                let tile_i32 = i32::try_from(tile_tokens).map_err(|_| {
-                    format!("DeepSeek-V4 layer {layer_idx} tile rows exceed i32")
-                })?;
+                let head_dim_i32 = i32::try_from(head_dim)
+                    .map_err(|_| format!("DeepSeek-V4 layer {layer_idx} head dim exceeds i32"))?;
+                let tile_i32 = i32::try_from(tile_tokens)
+                    .map_err(|_| format!("DeepSeek-V4 layer {layer_idx} tile rows exceed i32"))?;
                 let selected_stride = i64::try_from(selected_elems_per_token).map_err(|_| {
                     format!("DeepSeek-V4 layer {layer_idx} selected stride exceeds i64")
                 })?;
@@ -31330,13 +31974,12 @@ impl PrefillEngine {
                 let score_stride = i64::try_from(score_elems_per_token).map_err(|_| {
                     format!("DeepSeek-V4 layer {layer_idx} score stride exceeds i64")
                 })?;
-                let compute_type = if mode
-                    == DeepseekV4PrefillSparseScoreMode::Fp32PedanticPostscale
-                {
-                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC
-                } else {
-                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F
-                };
+                let compute_type =
+                    if mode == DeepseekV4PrefillSparseScoreMode::Fp32PedanticPostscale {
+                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC
+                    } else {
+                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F
+                    };
                 unsafe {
                     cublas_result::gemm_strided_batched_ex(
                         self.cublas_handle,
@@ -31374,9 +32017,12 @@ impl PrefillEngine {
                 }
 
                 if mode == DeepseekV4PrefillSparseScoreMode::Fp32PedanticPostscale {
-                    let elements = tile_tokens.checked_mul(score_elems_per_token).ok_or_else(|| {
-                        format!("DeepSeek-V4 layer {layer_idx} score scale work overflow")
-                    })?;
+                    let elements =
+                        tile_tokens
+                            .checked_mul(score_elems_per_token)
+                            .ok_or_else(|| {
+                                format!("DeepSeek-V4 layer {layer_idx} score scale work overflow")
+                            })?;
                     let mut s0 = tile_scores;
                     let mut s1 = i32::try_from(elements).map_err(|_| {
                         format!("DeepSeek-V4 layer {layer_idx} score scale work exceeds i32")
@@ -31516,11 +32162,7 @@ impl PrefillEngine {
                 self.cublas_handle,
                 self.stream as cublas_sys::cudaStream_t,
             ) {
-                let _ = lib.cublasSetWorkspace_v2(
-                    self.cublas_handle,
-                    std::ptr::null_mut(),
-                    0,
-                );
+                let _ = lib.cublasSetWorkspace_v2(self.cublas_handle, std::ptr::null_mut(), 0);
                 return Err(format!(
                     "DeepSeek-V4 layer {layer_idx} sparse-output set_stream failed: {error:?}"
                 ));
@@ -31541,24 +32183,18 @@ impl PrefillEngine {
                 .ok_or_else(|| {
                     format!("DeepSeek-V4 layer {layer_idx} softmax shared bytes overflow")
                 })?;
-            let head_dim_i32 = i32::try_from(head_dim).map_err(|_| {
-                format!("DeepSeek-V4 layer {layer_idx} head dimension exceeds i32")
-            })?;
-            let heads_i32 = i32::try_from(heads).map_err(|_| {
-                format!("DeepSeek-V4 layer {layer_idx} heads exceed i32")
-            })?;
-            let selected_i32 = i32::try_from(selected).map_err(|_| {
-                format!("DeepSeek-V4 layer {layer_idx} selected width exceeds i32")
-            })?;
-            let value_stride = i64::try_from(value_elems_per_token).map_err(|_| {
-                format!("DeepSeek-V4 layer {layer_idx} value stride exceeds i64")
-            })?;
-            let weight_stride = i64::try_from(weight_elems_per_token).map_err(|_| {
-                format!("DeepSeek-V4 layer {layer_idx} weight stride exceeds i64")
-            })?;
-            let output_stride = i64::try_from(output_elems_per_token).map_err(|_| {
-                format!("DeepSeek-V4 layer {layer_idx} output stride exceeds i64")
-            })?;
+            let head_dim_i32 = i32::try_from(head_dim)
+                .map_err(|_| format!("DeepSeek-V4 layer {layer_idx} head dimension exceeds i32"))?;
+            let heads_i32 = i32::try_from(heads)
+                .map_err(|_| format!("DeepSeek-V4 layer {layer_idx} heads exceed i32"))?;
+            let selected_i32 = i32::try_from(selected)
+                .map_err(|_| format!("DeepSeek-V4 layer {layer_idx} selected width exceeds i32"))?;
+            let value_stride = i64::try_from(value_elems_per_token)
+                .map_err(|_| format!("DeepSeek-V4 layer {layer_idx} value stride exceeds i64"))?;
+            let weight_stride = i64::try_from(weight_elems_per_token)
+                .map_err(|_| format!("DeepSeek-V4 layer {layer_idx} weight stride exceeds i64"))?;
+            let output_stride = i64::try_from(output_elems_per_token)
+                .map_err(|_| format!("DeepSeek-V4 layer {layer_idx} output stride exceeds i64"))?;
             let alpha = 1.0f32;
             let beta = 0.0f32;
 
@@ -31620,21 +32256,19 @@ impl PrefillEngine {
                         )
                     })?;
 
-                let gather_elements = tile_tokens.checked_mul(value_elems_per_token).ok_or_else(
-                    || format!("DeepSeek-V4 layer {layer_idx} gather work overflow"),
-                )?;
+                let gather_elements = tile_tokens
+                    .checked_mul(value_elems_per_token)
+                    .ok_or_else(|| format!("DeepSeek-V4 layer {layer_idx} gather work overflow"))?;
                 let mut g0 = selected_values;
                 let mut g1 = tile_indices;
                 let mut g2 = raw_history;
                 let mut g3 = compressed_cache;
-                let mut g4 = i32::try_from(tile_tokens).map_err(|_| {
-                    format!("DeepSeek-V4 layer {layer_idx} tile tokens exceed i32")
-                })?;
+                let mut g4 = i32::try_from(tile_tokens)
+                    .map_err(|_| format!("DeepSeek-V4 layer {layer_idx} tile tokens exceed i32"))?;
                 let mut g5 = head_dim_i32;
                 let mut g6 = selected_i32;
-                let mut g7 = i32::try_from(raw_rows).map_err(|_| {
-                    format!("DeepSeek-V4 layer {layer_idx} raw rows exceed i32")
-                })?;
+                let mut g7 = i32::try_from(raw_rows)
+                    .map_err(|_| format!("DeepSeek-V4 layer {layer_idx} raw rows exceed i32"))?;
                 let mut g8 = i32::try_from(compressed_rows).map_err(|_| {
                     format!("DeepSeek-V4 layer {layer_idx} compressed rows exceed i32")
                 })?;
@@ -31643,9 +32277,7 @@ impl PrefillEngine {
                         self.kernels.deepseek_v4_prefill_gather_sparse_values_bf16,
                         (
                             u32::try_from(gather_elements.div_ceil(256)).map_err(|_| {
-                                format!(
-                                    "DeepSeek-V4 layer {layer_idx} gather grid exceeds u32"
-                                )
+                                format!("DeepSeek-V4 layer {layer_idx} gather grid exceeds u32")
                             })?,
                             1,
                             1,
@@ -31691,13 +32323,15 @@ impl PrefillEngine {
                             })?,
                             1,
                         ),
-                        (u32::try_from(softmax_threads).map_err(|_| {
-                            format!("DeepSeek-V4 layer {layer_idx} softmax block exceeds u32")
-                        })?, 1, 1),
+                        (
+                            u32::try_from(softmax_threads).map_err(|_| {
+                                format!("DeepSeek-V4 layer {layer_idx} softmax block exceeds u32")
+                            })?,
+                            1,
+                            1,
+                        ),
                         u32::try_from(softmax_shared).map_err(|_| {
-                            format!(
-                                "DeepSeek-V4 layer {layer_idx} softmax shared bytes exceed u32"
-                            )
+                            format!("DeepSeek-V4 layer {layer_idx} softmax shared bytes exceed u32")
                         })?,
                         self.stream,
                         &mut [
@@ -31748,9 +32382,8 @@ impl PrefillEngine {
             Ok(())
         })();
 
-        let restore_workspace = unsafe {
-            lib.cublasSetWorkspace_v2(self.cublas_handle, std::ptr::null_mut(), 0)
-        };
+        let restore_workspace =
+            unsafe { lib.cublasSetWorkspace_v2(self.cublas_handle, std::ptr::null_mut(), 0) };
         if restore_workspace != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
             return Err(format!(
                 "DeepSeek-V4 layer {layer_idx} failed to restore sparse-output cuBLAS workspace: {restore_workspace:?}; operation={run_result:?}"
@@ -31968,23 +32601,19 @@ impl PrefillEngine {
                 .map(|cell| cell.get())
                 .sum::<f64>();
             self.t_deepseek_v4_stage_wall[DEEPSEEK_V4_PREFILL_TIMING_STAGE_INDEXER].set(
-                self.t_deepseek_v4_stage_wall[DEEPSEEK_V4_PREFILL_TIMING_STAGE_INDEXER]
-                    .get()
+                self.t_deepseek_v4_stage_wall[DEEPSEEK_V4_PREFILL_TIMING_STAGE_INDEXER].get()
                     + t0.elapsed().as_secs_f64() * 1000.0,
             );
             self.t_deepseek_v4_stage_event[DEEPSEEK_V4_PREFILL_TIMING_STAGE_INDEXER].set(
-                self.t_deepseek_v4_stage_event[DEEPSEEK_V4_PREFILL_TIMING_STAGE_INDEXER]
-                    .get()
+                self.t_deepseek_v4_stage_event[DEEPSEEK_V4_PREFILL_TIMING_STAGE_INDEXER].get()
                     + (event_after - event_before),
             );
             self.t_deepseek_v4_stage_sync[DEEPSEEK_V4_PREFILL_TIMING_STAGE_INDEXER].set(
-                self.t_deepseek_v4_stage_sync[DEEPSEEK_V4_PREFILL_TIMING_STAGE_INDEXER]
-                    .get()
+                self.t_deepseek_v4_stage_sync[DEEPSEEK_V4_PREFILL_TIMING_STAGE_INDEXER].get()
                     + (sync_after - sync_before),
             );
             self.deepseek_v4_stage_calls[DEEPSEEK_V4_PREFILL_TIMING_STAGE_INDEXER].set(
-                self.deepseek_v4_stage_calls[DEEPSEEK_V4_PREFILL_TIMING_STAGE_INDEXER].get()
-                    + 1,
+                self.deepseek_v4_stage_calls[DEEPSEEK_V4_PREFILL_TIMING_STAGE_INDEXER].get() + 1,
             );
         }
 
@@ -32356,12 +32985,13 @@ impl PrefillEngine {
                     format!("DeepSeek-V4 layer {} query alignment overflow", layer_idx)
                 })?;
             let reduction_bytes = usize::try_from(score_threads)
-                .map_err(|_| {
-                    format!("DeepSeek-V4 layer {} score threads exceed usize", layer_idx)
-                })?
+                .map_err(|_| format!("DeepSeek-V4 layer {} score threads exceed usize", layer_idx))?
                 .checked_mul(std::mem::size_of::<f32>())
                 .ok_or_else(|| {
-                    format!("DeepSeek-V4 layer {} reduction shared size overflow", layer_idx)
+                    format!(
+                        "DeepSeek-V4 layer {} reduction shared size overflow",
+                        layer_idx
+                    )
                 })?;
             let score_smem = aligned_query_bytes
                 .checked_add(reduction_bytes)
@@ -32373,21 +33003,18 @@ impl PrefillEngine {
             let mut ss2 = raw_history;
             let mut ss3 = compressed_cache_ptr;
             let mut ss4 = indices;
-            let mut ss5 = i32::try_from(m).map_err(|_| {
-                format!("DeepSeek-V4 layer {} score rows exceed i32", layer_idx)
-            })?;
-            let mut ss6 = i32::try_from(heads).map_err(|_| {
-                format!("DeepSeek-V4 layer {} score heads exceed i32", layer_idx)
-            })?;
+            let mut ss5 = i32::try_from(m)
+                .map_err(|_| format!("DeepSeek-V4 layer {} score rows exceed i32", layer_idx))?;
+            let mut ss6 = i32::try_from(heads)
+                .map_err(|_| format!("DeepSeek-V4 layer {} score heads exceed i32", layer_idx))?;
             let mut ss7 = i32::try_from(head_dim).map_err(|_| {
                 format!(
                     "DeepSeek-V4 layer {} score dimension exceeds i32",
                     layer_idx
                 )
             })?;
-            let mut ss8 = i32::try_from(selected).map_err(|_| {
-                format!("DeepSeek-V4 layer {} score width exceeds i32", layer_idx)
-            })?;
+            let mut ss8 = i32::try_from(selected)
+                .map_err(|_| format!("DeepSeek-V4 layer {} score width exceeds i32", layer_idx))?;
             let mut ss9 = i32::try_from(end_pos)
                 .map_err(|_| format!("DeepSeek-V4 layer {} raw rows exceed i32", layer_idx))?;
             let mut ss10 = i32::try_from(compressed_rows).map_err(|_| {
@@ -32402,10 +33029,7 @@ impl PrefillEngine {
                             format!("DeepSeek-V4 layer {} head grid exceeds u32", layer_idx)
                         })?,
                         u32::try_from(m).map_err(|_| {
-                            format!(
-                                "DeepSeek-V4 layer {} score row grid exceeds u32",
-                                layer_idx
-                            )
+                            format!("DeepSeek-V4 layer {} score row grid exceeds u32", layer_idx)
                         })?,
                         1,
                     ),
@@ -32469,9 +33093,8 @@ impl PrefillEngine {
             let mut so6 = m as i32;
             let mut so7 = heads as i32;
             let mut so8 = head_dim as i32;
-            let mut so9 = i32::try_from(selected).map_err(|_| {
-                format!("DeepSeek-V4 layer {} output width exceeds i32", layer_idx)
-            })?;
+            let mut so9 = i32::try_from(selected)
+                .map_err(|_| format!("DeepSeek-V4 layer {} output width exceeds i32", layer_idx))?;
             let mut so10 = i32::try_from(end_pos).map_err(|_| {
                 format!("DeepSeek-V4 layer {} output raw rows exceed i32", layer_idx)
             })?;
@@ -32483,11 +33106,17 @@ impl PrefillEngine {
             })?;
             let output_shared_bytes = usize::try_from(output_threads)
                 .map_err(|_| {
-                    format!("DeepSeek-V4 layer {} output threads exceed usize", layer_idx)
+                    format!(
+                        "DeepSeek-V4 layer {} output threads exceed usize",
+                        layer_idx
+                    )
                 })?
                 .checked_mul(std::mem::size_of::<f32>())
                 .ok_or_else(|| {
-                    format!("DeepSeek-V4 layer {} output shared bytes overflow", layer_idx)
+                    format!(
+                        "DeepSeek-V4 layer {} output shared bytes overflow",
+                        layer_idx
+                    )
                 })?;
             unsafe {
                 launch(
@@ -34350,6 +34979,265 @@ impl PrefillEngine {
             .map_or(false, |hqq| hqq.nbits == 4)
     }
 
+    fn stage_custom_tiled_cross_chunk_kv_bf16(
+        &self,
+        layer_idx: usize,
+        k_current: u64,
+        v_current: u64,
+        layer_k_ptr: u64,
+        m: usize,
+        start_pos: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) -> Result<(u64, u64), String> {
+        let kv_stride = num_kv_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| "custom tiled KV stride overflow".to_string())?;
+        let total_kv = start_pos
+            .checked_add(m)
+            .ok_or_else(|| "custom tiled total KV length overflow".to_string())?;
+        let kv_buf_bytes = total_kv
+            .checked_mul(kv_stride)
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+            .ok_or_else(|| "custom tiled BF16 KV staging size overflow".to_string())?;
+        let required_bytes = kv_buf_bytes
+            .checked_mul(2)
+            .ok_or_else(|| "custom tiled K/V staging size overflow".to_string())?;
+        let scratch_bytes = self
+            .scratch
+            .d_fp32_scratch
+            .len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "custom tiled scratch byte size overflow".to_string())?;
+        if required_bytes > scratch_bytes {
+            return Err(format!(
+                "custom tiled cross-chunk KV format {} needs {} BF16 staging bytes for {} tokens, fp32 scratch has {}",
+                self.kv_format, required_bytes, total_kv, scratch_bytes
+            ));
+        }
+        let full_k_bf16 = *self.scratch.d_fp32_scratch.device_ptr();
+        let full_v_bf16 = full_k_bf16 + kv_buf_bytes as u64;
+        let grid = (total_kv as u32, 1, 1);
+        let kv_threads = std::cmp::max(32, ((std::cmp::min(512, kv_stride) + 31) / 32) * 32) as u32;
+
+        let require_layer_ptr = |ptrs: &[u64], label: &str| -> Result<u64, String> {
+            ptrs.get(layer_idx)
+                .copied()
+                .filter(|ptr| *ptr != 0)
+                .ok_or_else(|| {
+                    format!(
+                        "custom tiled KV format {} is missing {} for layer {}",
+                        self.kv_format, label, layer_idx
+                    )
+                })
+        };
+
+        let stage_started = Instant::now();
+        unsafe {
+            match self.kv_format {
+                2 => {
+                    let k_radius = require_layer_ptr(&self.kv_k_radius_ptrs, "K radius")?;
+                    let k_angles = require_layer_ptr(&self.kv_k_angles_ptrs, "K angles")?;
+                    let v_radius = require_layer_ptr(&self.kv_v_radius_ptrs, "V radius")?;
+                    let v_angles = require_layer_ptr(&self.kv_v_angles_ptrs, "V angles")?;
+                    let num_blocks = (kv_stride / 16) as u32;
+                    let threads =
+                        std::cmp::max(32, ((std::cmp::min(256, num_blocks) + 31) / 32) * 32);
+                    let mut start = start_pos as i32;
+                    let mut count = m as i32;
+                    let mut stride = kv_stride as i32;
+                    for (output, radius, angles, current) in [
+                        (full_k_bf16, k_radius, k_angles, k_current),
+                        (full_v_bf16, v_radius, v_angles, v_current),
+                    ] {
+                        let mut output = output;
+                        let mut radius = radius;
+                        let mut angles = angles;
+                        let mut current = current;
+                        launch(
+                            self.kernels.kv_dequant_concat_polar4,
+                            grid,
+                            (threads, 1, 1),
+                            0,
+                            self.stream,
+                            &mut [
+                                &mut output as *mut _ as *mut std::ffi::c_void,
+                                &mut radius as *mut _ as *mut std::ffi::c_void,
+                                &mut angles as *mut _ as *mut std::ffi::c_void,
+                                &mut current as *mut _ as *mut std::ffi::c_void,
+                                &mut start as *mut _ as *mut std::ffi::c_void,
+                                &mut count as *mut _ as *mut std::ffi::c_void,
+                                &mut stride as *mut _ as *mut std::ffi::c_void,
+                            ],
+                        )?;
+                    }
+                }
+                4 => {
+                    let k_radius = require_layer_ptr(&self.kv_k_radius_ptrs, "K radius")?;
+                    let k_angles = require_layer_ptr(&self.kv_k_angles_ptrs, "K angles")?;
+                    let k_signs = require_layer_ptr(&self.kv_tq4_sign_ptrs, "K signs")?;
+                    let v_radius = require_layer_ptr(&self.kv_v_radius_ptrs, "V radius")?;
+                    let v_angles = require_layer_ptr(&self.kv_v_angles_ptrs, "V angles")?;
+                    let total_grid = (total_kv as u32, num_kv_heads as u32, 1);
+                    let threads =
+                        std::cmp::max(32, ((std::cmp::min(256, head_dim) + 31) / 32) * 32) as u32;
+                    let mut start = start_pos as i32;
+                    let mut count = m as i32;
+                    let mut heads = num_kv_heads as i32;
+                    let mut dim = head_dim as i32;
+                    let mut k0 = full_k_bf16;
+                    let mut k1 = k_radius;
+                    let mut k2 = k_angles;
+                    let mut k3 = k_signs;
+                    let mut k4 = k_current;
+                    launch(
+                        self.kernels.kv_dequant_concat_tq4_k,
+                        total_grid,
+                        (threads, 1, 1),
+                        (head_dim * std::mem::size_of::<f32>()) as u32,
+                        self.stream,
+                        &mut [
+                            &mut k0 as *mut _ as *mut std::ffi::c_void,
+                            &mut k1 as *mut _ as *mut std::ffi::c_void,
+                            &mut k2 as *mut _ as *mut std::ffi::c_void,
+                            &mut k3 as *mut _ as *mut std::ffi::c_void,
+                            &mut k4 as *mut _ as *mut std::ffi::c_void,
+                            &mut start as *mut _ as *mut std::ffi::c_void,
+                            &mut count as *mut _ as *mut std::ffi::c_void,
+                            &mut heads as *mut _ as *mut std::ffi::c_void,
+                            &mut dim as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )?;
+                    let mut v0 = full_v_bf16;
+                    let mut v1 = v_radius;
+                    let mut v2 = v_angles;
+                    let mut v3 = v_current;
+                    launch(
+                        self.kernels.kv_dequant_concat_tq4_v,
+                        total_grid,
+                        (threads, 1, 1),
+                        0,
+                        self.stream,
+                        &mut [
+                            &mut v0 as *mut _ as *mut std::ffi::c_void,
+                            &mut v1 as *mut _ as *mut std::ffi::c_void,
+                            &mut v2 as *mut _ as *mut std::ffi::c_void,
+                            &mut v3 as *mut _ as *mut std::ffi::c_void,
+                            &mut start as *mut _ as *mut std::ffi::c_void,
+                            &mut count as *mut _ as *mut std::ffi::c_void,
+                            &mut heads as *mut _ as *mut std::ffi::c_void,
+                            &mut dim as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )?;
+                }
+                3 | 5 | 6 | 7 | 8 | 9 => {
+                    let mut start = start_pos as i32;
+                    let mut count = m as i32;
+                    let mut stride = kv_stride as i32;
+                    let mut k0 = full_k_bf16;
+                    let mut k1 = if self.kv_format == 3 {
+                        if layer_k_ptr == 0 {
+                            return Err(format!(
+                                "custom tiled K8V4 cache has no K allocation for layer {}",
+                                layer_idx
+                            ));
+                        }
+                        layer_k_ptr
+                    } else {
+                        require_layer_ptr(&self.kv_k_radius_ptrs, "K radius")?
+                    };
+                    let mut k2 = k_current;
+                    if self.kv_format == 3 {
+                        launch(
+                            self.kernels.kv_dequant_concat,
+                            grid,
+                            (kv_threads, 1, 1),
+                            0,
+                            self.stream,
+                            &mut [
+                                &mut k0 as *mut _ as *mut std::ffi::c_void,
+                                &mut k1 as *mut _ as *mut std::ffi::c_void,
+                                &mut k2 as *mut _ as *mut std::ffi::c_void,
+                                &mut start as *mut _ as *mut std::ffi::c_void,
+                                &mut count as *mut _ as *mut std::ffi::c_void,
+                                &mut stride as *mut _ as *mut std::ffi::c_void,
+                            ],
+                        )?;
+                    } else {
+                        let mut k_angles = require_layer_ptr(&self.kv_k_angles_ptrs, "K angles")?;
+                        let kernel = match self.kv_format {
+                            6 => self.kernels.kv_dequant_concat_k7,
+                            8 => self.kernels.kv_dequant_concat_k8,
+                            9 => self.kernels.kv_dequant_concat_k4,
+                            5 | 7 => self.kernels.kv_dequant_concat_k6,
+                            _ => unreachable!(),
+                        };
+                        launch(
+                            kernel,
+                            grid,
+                            (kv_threads, 1, 1),
+                            0,
+                            self.stream,
+                            &mut [
+                                &mut k0 as *mut _ as *mut std::ffi::c_void,
+                                &mut k1 as *mut _ as *mut std::ffi::c_void,
+                                &mut k_angles as *mut _ as *mut std::ffi::c_void,
+                                &mut k2 as *mut _ as *mut std::ffi::c_void,
+                                &mut start as *mut _ as *mut std::ffi::c_void,
+                                &mut count as *mut _ as *mut std::ffi::c_void,
+                                &mut stride as *mut _ as *mut std::ffi::c_void,
+                            ],
+                        )?;
+                    }
+
+                    let mut v0 = full_v_bf16;
+                    let mut v1 = require_layer_ptr(&self.kv_v_radius_ptrs, "V radius")?;
+                    let mut v2 = require_layer_ptr(&self.kv_v_angles_ptrs, "V angles")?;
+                    let mut v3 = v_current;
+                    let v_kernel = if self.kv_format == 7 || self.kv_format == 8 {
+                        self.kernels.kv_dequant_concat_k6
+                    } else {
+                        self.kernels.kv_dequant_concat_polar4
+                    };
+                    let num_blocks = (kv_stride / 16) as u32;
+                    let v_threads =
+                        std::cmp::max(32, ((std::cmp::min(256, num_blocks) + 31) / 32) * 32);
+                    launch(
+                        v_kernel,
+                        grid,
+                        (v_threads, 1, 1),
+                        0,
+                        self.stream,
+                        &mut [
+                            &mut v0 as *mut _ as *mut std::ffi::c_void,
+                            &mut v1 as *mut _ as *mut std::ffi::c_void,
+                            &mut v2 as *mut _ as *mut std::ffi::c_void,
+                            &mut v3 as *mut _ as *mut std::ffi::c_void,
+                            &mut start as *mut _ as *mut std::ffi::c_void,
+                            &mut count as *mut _ as *mut std::ffi::c_void,
+                            &mut stride as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )?;
+                }
+                other => {
+                    return Err(format!(
+                        "custom tiled cross-chunk BF16 staging does not support KV format {}",
+                        other
+                    ));
+                }
+            }
+        }
+        if self.gqa_timing_enabled.get() {
+            self.stream_sync()?;
+            self.record_gqa_kv_cross_stage(
+                stage_started.elapsed().as_secs_f64() * 1000.0,
+                m,
+                total_kv,
+            );
+        }
+        Ok((full_k_bf16, full_v_bf16))
+    }
+
     fn launch_custom_tiled_attn(
         &self,
         layer_idx: usize,
@@ -34544,15 +35432,31 @@ impl PrefillEngine {
             }
             (grid_x, grid_y, block_threads, smem, kv_stride)
         };
-        let (k_cache_ptr, v_cache_ptr) = {
+        let (k_cache_ptr, v_cache_ptr, cache_dtype) = {
             let event = if custom_tiled_timing.is_some() {
                 self.gqa_timing_event_start("custom_tiled cache_ptr_select")?
             } else {
                 false
             };
             let wall = Instant::now();
-            let k_cache_ptr: u64 = if start_pos > 0 { layer_k_ptr } else { 0 };
-            let v_cache_ptr: u64 = if start_pos > 0 { layer_v_ptr } else { 0 };
+            let (k_cache_ptr, v_cache_ptr, cache_dtype) = match self.kv_format {
+                _ if start_pos == 0 => (0, 0, 0i32),
+                0 => (layer_k_ptr, layer_v_ptr, 0i32),
+                1 => (layer_k_ptr, layer_v_ptr, 1i32),
+                _ => {
+                    let (k_bf16, v_bf16) = self.stage_custom_tiled_cross_chunk_kv_bf16(
+                        layer_idx,
+                        k,
+                        v,
+                        layer_k_ptr,
+                        m,
+                        start_pos,
+                        num_kv_heads,
+                        head_dim,
+                    )?;
+                    (k_bf16, v_bf16, 0i32)
+                }
+            };
             if let Some(timing) = custom_tiled_timing {
                 self.finish_gqa_custom_tiled_step(
                     GQA_CUSTOM_TILED_CACHE_PTR_SELECT,
@@ -34567,7 +35471,7 @@ impl PrefillEngine {
                     wall,
                 )?;
             }
-            (k_cache_ptr, v_cache_ptr)
+            (k_cache_ptr, v_cache_ptr, cache_dtype)
         };
         let mut a0;
         let mut a1;
@@ -34584,6 +35488,7 @@ impl PrefillEngine {
         let mut a12;
         let mut a13;
         let mut a14;
+        let mut a15;
         {
             let event = if custom_tiled_timing.is_some() {
                 self.gqa_timing_event_start("custom_tiled arg_pack")?
@@ -34605,7 +35510,8 @@ impl PrefillEngine {
             a11 = start_pos as i32;
             a12 = kv_stride;
             a13 = sliding_window.min(i32::MAX as usize) as i32;
-            a14 = if self.external_vision_block_ids_ptr != 0
+            a14 = cache_dtype;
+            a15 = if self.external_vision_block_ids_ptr != 0
                 && sliding_window > 0
                 && self.is_gemma4_layer(layer_idx)
             {
@@ -34769,6 +35675,7 @@ impl PrefillEngine {
                         &mut a12 as *mut _ as *mut std::ffi::c_void,
                         &mut a13 as *mut _ as *mut std::ffi::c_void,
                         &mut a14 as *mut _ as *mut std::ffi::c_void,
+                        &mut a15 as *mut _ as *mut std::ffi::c_void,
                     ],
                 )
             }
@@ -34884,7 +35791,8 @@ impl PrefillEngine {
             return Ok(0);
         };
         let score_buffer_count = if self.config.deepseek_v4_hc_mult > 0 {
-            self.deepseek_v4_prefill_index_score_mode.score_buffer_count()
+            self.deepseek_v4_prefill_index_score_mode
+                .score_buffer_count()
         } else {
             1
         };
@@ -34964,7 +35872,8 @@ impl PrefillEngine {
             geometry.index_topk,
             score_workspace_capacity_bytes,
             if self.config.deepseek_v4_hc_mult > 0 {
-                self.deepseek_v4_prefill_index_score_mode.score_buffer_count()
+                self.deepseek_v4_prefill_index_score_mode
+                    .score_buffer_count()
             } else {
                 1
             },
@@ -34998,7 +35907,8 @@ impl PrefillEngine {
             geometry.index_topk,
             usize::MAX,
             if self.config.deepseek_v4_hc_mult > 0 {
-                self.deepseek_v4_prefill_index_score_mode.score_buffer_count()
+                self.deepseek_v4_prefill_index_score_mode
+                    .score_buffer_count()
             } else {
                 1
             },
@@ -37227,6 +38137,37 @@ impl PrefillEngine {
             );
         }
 
+        if prefill_state_diag_enabled(layer_idx, start_pos) {
+            self.stream_sync()?;
+            emit_bf16_state_summary(
+                &format!("gqa_layer{}_q", layer_idx),
+                q,
+                m * num_q_heads * head_dim,
+            )?;
+            emit_bf16_state_summary(
+                &format!("gqa_layer{}_k_current", layer_idx),
+                k,
+                m * num_kv_heads * head_dim,
+            )?;
+            emit_bf16_state_summary(
+                &format!("gqa_layer{}_v_current", layer_idx),
+                v,
+                m * num_kv_heads * head_dim,
+            )?;
+            if self.kv_format == 0 && layer_k_ptr != 0 && layer_v_ptr != 0 {
+                emit_bf16_state_summary(
+                    &format!("gqa_layer{}_k_cache_prefix", layer_idx),
+                    layer_k_ptr,
+                    start_pos * num_kv_heads * head_dim,
+                )?;
+                emit_bf16_state_summary(
+                    &format!("gqa_layer{}_v_cache_prefix", layer_idx),
+                    layer_v_ptr,
+                    start_pos * num_kv_heads * head_dim,
+                )?;
+            }
+        }
+
         // Attention: use vendored FlashAttention-2 when available (start_pos==0),
         // otherwise fall back to custom tiled kernel for cross-chunk KV cache support.
         let mut kv_cache_already_stored = false; // Set true by FP8 cross-chunk path
@@ -38474,6 +39415,20 @@ impl PrefillEngine {
                         );
                     }
 
+                    if prefill_state_diag_enabled(layer_idx, start_pos) {
+                        self.stream_sync()?;
+                        emit_bf16_state_summary(
+                            &format!("gqa_layer{}_k_concat", layer_idx),
+                            full_k_bf16,
+                            total_kv * kv_stride,
+                        )?;
+                        emit_bf16_state_summary(
+                            &format!("gqa_layer{}_v_concat", layer_idx),
+                            full_v_bf16,
+                            total_kv * kv_stride,
+                        )?;
+                    }
+
                     let lse_ptr = self
                         .scratch
                         .d_fa2_lse
@@ -38522,8 +39477,8 @@ impl PrefillEngine {
                                 total_kv as i32,
                                 sm_scale,
                                 sliding_window_left,
-                                0,
                                 1,
+                                0,
                                 self.stream as *mut _,
                             )
                         } else {
@@ -44340,6 +45295,26 @@ impl PrefillEngine {
             .as_ref()
             .ok_or("no la_state")?
             .device_ptr();
+        if lw.la_recur_state_ptr == 0 {
+            return Err(format!(
+                "linear-attention layer {} missing registered recurrent state",
+                layer_idx
+            ));
+        }
+        let la_state_elements = nv
+            .checked_mul(dk)
+            .and_then(|value| value.checked_mul(dv))
+            .ok_or_else(|| {
+                format!(
+                    "linear-attention layer {} recurrent state size overflows",
+                    layer_idx
+                )
+            })?;
+        self.memcpy_d2d(
+            la_state,
+            lw.la_recur_state_ptr,
+            (la_state_elements * std::mem::size_of::<f32>()) as u64,
+        )?;
         let la_chunk_out = *self
             .scratch
             .d_la_chunk_out
@@ -45795,8 +46770,11 @@ impl PrefillEngine {
 
                 // DEBUG: sync before FLA to catch conv/gate/repeat kernel errors
 
-                // Zero runtime FLA scratch/state buffers that the vendor recurrence
-                // treats as zero-initialized outputs for each request.
+                // Zero per-call FLA outputs, then bridge the registered FP32
+                // recurrent state into the vendor BF16 h0 input. The registered
+                // state was zeroed once at fresh-run entry and is updated after
+                // every chunk, so continuation and ordinary multi-chunk prefill
+                // share the same exact recurrence contract.
                 unsafe {
                     let _ = cuda_sys::lib().cuMemsetD8Async(
                         a_fla,
@@ -45816,12 +46794,34 @@ impl PrefillEngine {
                         (fla_nt * nv * dk * dv * 2) as usize,
                         self.stream,
                     );
-                    let _ = cuda_sys::lib().cuMemsetD8Async(
-                        h0_fla,
+                }
+                let h0_threads = std::cmp::max(
+                    32,
+                    ((std::cmp::min(1024, la_state_elements) + 31) / 32) * 32,
+                ) as u32;
+                let mut h0_out = h0_fla;
+                let mut h0_in = lw.la_recur_state_ptr;
+                let mut h0_rows = 1i32;
+                let mut h0_cols = i32::try_from(la_state_elements).map_err(|_| {
+                    format!(
+                        "linear-attention layer {} recurrent state exceeds i32",
+                        layer_idx
+                    )
+                })?;
+                unsafe {
+                    launch(
+                        self.kernels.fp32_to_bf16_batch,
+                        (1, 1, 1),
+                        (h0_threads, 1, 1),
                         0,
-                        (nv * dk * dv * 2) as usize,
                         self.stream,
-                    );
+                        &mut [
+                            &mut h0_out as *mut _ as *mut std::ffi::c_void,
+                            &mut h0_in as *mut _ as *mut std::ffi::c_void,
+                            &mut h0_rows as *mut _ as *mut std::ffi::c_void,
+                            &mut h0_cols as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )?;
                 }
 
                 let stream_ptr = self.stream as *mut std::ffi::c_void;
@@ -49712,6 +50712,15 @@ impl PrefillEngine {
         )
         .map_err(|e| format!("gemma4 input rmsnorm layer {}: {}", layer_idx, e))?;
 
+        if prefill_state_diag_enabled(layer_idx, chunk_start) {
+            self.stream_sync()?;
+            emit_bf16_state_summary(
+                &format!("gemma4_layer{}_input_norm", layer_idx),
+                hidden,
+                m * h,
+            )?;
+        }
+
         if self.layer_weights[layer_idx].moe_gate_ptr != 0 {
             self.prefetch_dense_pointer_table_for_layer(layer_idx, chunk_idx, 0, m)?;
         }
@@ -49734,6 +50743,15 @@ impl PrefillEngine {
             2 => self.memcpy_d2d(attn_out, hidden, (m * h * 2) as u64)?,
             3 => self.forward_linear_attention(layer_idx, m, chunk_idx)?,
             _ => self.memcpy_d2d(attn_out, hidden, (m * h * 2) as u64)?,
+        }
+
+        if prefill_state_diag_enabled(layer_idx, chunk_start) {
+            self.stream_sync()?;
+            emit_bf16_state_summary(
+                &format!("gemma4_layer{}_attention_output", layer_idx),
+                attn_out,
+                m * h,
+            )?;
         }
 
         self.launch_rmsnorm(
@@ -65900,9 +66918,7 @@ impl PrefillKernels {
             )?,
             dsa_prefill_rope_query_bf16: get("dsa_prefill_rope_query_bf16_kernel")?,
             dsa_prefill_fused_scores: get("dsa_prefill_fused_scores_kernel")?,
-            dsa_prefill_accumulate_gemm_scores: get(
-                "dsa_prefill_accumulate_gemm_scores_kernel",
-            )?,
+            dsa_prefill_accumulate_gemm_scores: get("dsa_prefill_accumulate_gemm_scores_kernel")?,
             dsa_prefill_topk_sort_rows: get("dsa_prefill_topk_sort_rows_kernel")?,
             dsa_prefill_topk_merge_rows: get("dsa_prefill_topk_merge_rows_kernel")?,
             mla_pack_qkv_rope_bf16: get("mla_pack_qkv_rope_bf16_kernel")?,
@@ -66216,6 +67232,59 @@ fn build_prefill_chunk_plan(total_tokens: usize, max_chunk_tokens: usize) -> Vec
     }
     debug_assert!(plan.iter().all(|&chunk| chunk <= max_chunk));
     plan
+}
+
+/// Build the normal measured-safe chunk plan while forcing an exact internal
+/// boundary to be a chunk end. Each side is planned independently so neither
+/// side exceeds the runtime-derived maximum and no fixed prompt threshold is
+/// introduced.
+fn build_prefill_chunk_plan_at_boundary(
+    total_tokens: usize,
+    max_chunk_tokens: usize,
+    boundary: Option<usize>,
+) -> Result<Vec<usize>, String> {
+    let Some(boundary) = boundary else {
+        return Ok(build_prefill_chunk_plan(total_tokens, max_chunk_tokens));
+    };
+    if boundary == 0 || boundary >= total_tokens {
+        return Err(format!(
+            "prefill chunk boundary {} must lie strictly inside 0..{}",
+            boundary, total_tokens
+        ));
+    }
+    let mut plan = build_prefill_chunk_plan(boundary, max_chunk_tokens);
+    plan.extend(build_prefill_chunk_plan(
+        total_tokens - boundary,
+        max_chunk_tokens,
+    ));
+    debug_assert_eq!(plan.iter().sum::<usize>(), total_tokens);
+    debug_assert!(plan
+        .iter()
+        .scan(0usize, |sum, &chunk| {
+            *sum += chunk;
+            Some(*sum)
+        })
+        .any(|end| end == boundary));
+    Ok(plan)
+}
+
+fn stage_exact_export_range(
+    prompt_tokens: usize,
+    newly_computed_start: usize,
+    decode_max_seq: usize,
+) -> Result<(usize, usize), String> {
+    if decode_max_seq == 0 {
+        return Err("stage-exact export decode capacity must be positive".to_string());
+    }
+    if newly_computed_start > prompt_tokens {
+        return Err(format!(
+            "stage-exact export start {} exceeds prompt length {}",
+            newly_computed_start, prompt_tokens
+        ));
+    }
+    let ring_start = prompt_tokens.saturating_sub(decode_max_seq);
+    let source_start = ring_start.max(newly_computed_start);
+    Ok((source_start, prompt_tokens - source_start))
 }
 
 /// `d_moe_inter` is shared by two mutually exclusive operations:
@@ -68161,7 +69230,10 @@ Set KRASIS_NO_FLA=1 only if you explicitly want the slower custom LA path."
 //
 #[cfg(test)]
 mod chunk_plan_tests {
-    use super::{build_prefill_chunk_plan, shared_moe_inter_scratch_elements};
+    use super::{
+        build_prefill_chunk_plan, build_prefill_chunk_plan_at_boundary,
+        shared_moe_inter_scratch_elements, stage_exact_export_range,
+    };
 
     #[test]
     fn uses_single_chunk_when_prompt_fits() {
@@ -68182,6 +69254,43 @@ mod chunk_plan_tests {
         assert_eq!(plan, vec![12_500, 12_500, 12_500, 12_500]);
         assert_eq!(plan.iter().sum::<usize>(), 50_000);
         assert!(plan.iter().all(|&chunk| chunk <= 16_640));
+    }
+
+    #[test]
+    fn preserves_exact_session_boundary() {
+        let plan = build_prefill_chunk_plan_at_boundary(50_000, 16_640, Some(23_417)).unwrap();
+        assert_eq!(plan.iter().sum::<usize>(), 50_000);
+        assert!(plan.iter().all(|&chunk| chunk <= 16_640));
+        let ends: Vec<_> = plan
+            .iter()
+            .scan(0usize, |sum, &chunk| {
+                *sum += chunk;
+                Some(*sum)
+            })
+            .collect();
+        assert!(ends.contains(&23_417));
+    }
+
+    #[test]
+    fn rejects_non_internal_session_boundary() {
+        assert!(build_prefill_chunk_plan_at_boundary(100, 128, Some(0)).is_err());
+        assert!(build_prefill_chunk_plan_at_boundary(100, 128, Some(100)).is_err());
+    }
+
+    #[test]
+    fn continuation_stage_export_preserves_restored_prefix() {
+        assert_eq!(
+            stage_exact_export_range(8_000, 6_000, 16_000).unwrap(),
+            (6_000, 2_000)
+        );
+        assert_eq!(
+            stage_exact_export_range(20_000, 10_000, 8_000).unwrap(),
+            (12_000, 8_000)
+        );
+        assert_eq!(
+            stage_exact_export_range(8_000, 0, 16_000).unwrap(),
+            (0, 8_000)
+        );
     }
 
     #[test]
@@ -68743,6 +69852,7 @@ mod expert_hqq_prefill_output_consumption_gate_tests {
 #[cfg(has_prefill_kernels)]
 mod kernel_tests {
     use super::*;
+    use cudarc::driver::DeviceSlice;
     use std::path::PathBuf;
 
     #[test]
@@ -70374,8 +71484,7 @@ mod kernel_tests {
     fn test_deepseek_v4_prefill_sparse_output_gemm_matches_scalar_bound() {
         let ctx = GpuTestCtx::new();
         let scalar = ctx.get_kernel("deepseek_v4_sparse_output_bf16x2_kernel");
-        let gather =
-            ctx.get_kernel("deepseek_v4_prefill_gather_sparse_values_bf16_kernel");
+        let gather = ctx.get_kernel("deepseek_v4_prefill_gather_sparse_values_bf16_kernel");
         let softmax = ctx.get_kernel("deepseek_v4_prefill_softmax_weights_bf16_kernel");
         let handle = cublas_result::create_handle().expect("create sparse-output cuBLAS handle");
         unsafe {
@@ -70388,14 +71497,10 @@ mod kernel_tests {
             (3usize, 3usize, 37usize, 7usize, 3usize, 3usize),
         ] {
             let raw_bits = (0..raw_rows * head_dim)
-                .map(|index| {
-                    half::bf16::from_f32((index as f32 * 0.0137).cos() * 0.375).to_bits()
-                })
+                .map(|index| half::bf16::from_f32((index as f32 * 0.0137).cos() * 0.375).to_bits())
                 .collect::<Vec<_>>();
             let compressed_bits = (0..compressed_rows * head_dim)
-                .map(|index| {
-                    half::bf16::from_f32((index as f32 * 0.0091).sin() * 0.3125).to_bits()
-                })
+                .map(|index| half::bf16::from_f32((index as f32 * 0.0091).sin() * 0.3125).to_bits())
                 .collect::<Vec<_>>();
             let mut indices = Vec::with_capacity(tokens * topk);
             for token in 0..tokens {
@@ -70414,8 +71519,7 @@ mod kernel_tests {
                     let selected = index % topk;
                     let token = index / (heads * topk);
                     if indices[token * topk + selected] < 0
-                        || indices[token * topk + selected] as usize
-                            >= raw_rows + compressed_rows
+                        || indices[token * topk + selected] as usize >= raw_rows + compressed_rows
                     {
                         f32::NEG_INFINITY
                     } else {
@@ -70620,26 +71724,21 @@ mod kernel_tests {
         ] {
             let selected = raw_rows + compressed_rows + 2;
             let query_bits = (0..tokens * heads * head_dim)
-                .map(|index| {
-                    half::bf16::from_f32((index as f32 * 0.0173).sin() * 0.25).to_bits()
-                })
+                .map(|index| half::bf16::from_f32((index as f32 * 0.0173).sin() * 0.25).to_bits())
                 .collect::<Vec<_>>();
             let raw_bits = (0..raw_rows * head_dim)
-                .map(|index| {
-                    half::bf16::from_f32((index as f32 * 0.0137).cos() * 0.375).to_bits()
-                })
+                .map(|index| half::bf16::from_f32((index as f32 * 0.0137).cos() * 0.375).to_bits())
                 .collect::<Vec<_>>();
             let compressed_bits = (0..compressed_rows * head_dim)
-                .map(|index| {
-                    half::bf16::from_f32((index as f32 * 0.0091).sin() * 0.3125).to_bits()
-                })
+                .map(|index| half::bf16::from_f32((index as f32 * 0.0091).sin() * 0.3125).to_bits())
                 .collect::<Vec<_>>();
             let mut indices = Vec::with_capacity(tokens * selected);
             for token in 0..tokens {
                 indices.push(-1);
-                indices.extend((0..raw_rows + compressed_rows).map(|index| {
-                    ((index + token) % (raw_rows + compressed_rows)) as i32
-                }));
+                indices.extend(
+                    (0..raw_rows + compressed_rows)
+                        .map(|index| ((index + token) % (raw_rows + compressed_rows)) as i32),
+                );
                 indices.push((raw_rows + compressed_rows + token + 3) as i32);
             }
 
@@ -70732,8 +71831,8 @@ mod kernel_tests {
                 )
                 .unwrap();
 
-                let fp32_work = tokens
-                    * (selected * head_dim + heads * head_dim + heads * selected);
+                let fp32_work =
+                    tokens * (selected * head_dim + heads * head_dim + heads * selected);
                 let mut f0 = *d_selected_fp32.device_ptr() as u64;
                 let mut f1 = *d_query_fp32.device_ptr() as u64;
                 let mut f2 = *d_fp32.device_ptr() as u64;
@@ -70808,10 +71907,7 @@ mod kernel_tests {
                 )
                 .unwrap();
                 assert_eq!(
-                    lib.cublasSetMathMode(
-                        handle,
-                        cublas_sys::cublasMath_t::CUBLAS_PEDANTIC_MATH,
-                    ),
+                    lib.cublasSetMathMode(handle, cublas_sys::cublasMath_t::CUBLAS_PEDANTIC_MATH,),
                     cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS,
                 );
                 let one = 1.0f32;
@@ -70897,7 +71993,6 @@ mod kernel_tests {
             cublas_result::destroy_handle(handle).expect("destroy test cuBLAS handle");
         }
     }
-
 
     #[test]
     fn test_deepseek_v4_tail_rope_matches_adjacent_complex_equation() {
@@ -72093,11 +73188,15 @@ mod kernel_tests {
         assert_eq!(short_prefix.score_tile_rows, 8);
         assert_eq!(short_prefix.score_tile_count, 16);
 
-        assert!(
-            plan_dsa_prefill_selection(2048, long_context, 2048, long_workspace_row_bytes - 1, 1)
-                .unwrap_err()
-                .contains("cannot hold one causal row")
-        );
+        assert!(plan_dsa_prefill_selection(
+            2048,
+            long_context,
+            2048,
+            long_workspace_row_bytes - 1,
+            1
+        )
+        .unwrap_err()
+        .contains("cannot hold one causal row"));
         assert!(
             plan_dsa_prefill_selection(513, 512, 2048, partial_row_bytes, 1)
                 .unwrap_err()
@@ -72111,9 +73210,7 @@ mod kernel_tests {
         let kernels = DsaPrefillSelectionKernels {
             rope_query_bf16: ctx.get_kernel("dsa_prefill_rope_query_bf16_kernel"),
             fused_scores: ctx.get_kernel("dsa_prefill_fused_scores_kernel"),
-            accumulate_gemm_scores: ctx.get_kernel(
-                "dsa_prefill_accumulate_gemm_scores_kernel",
-            ),
+            accumulate_gemm_scores: ctx.get_kernel("dsa_prefill_accumulate_gemm_scores_kernel"),
             topk_sort_rows: ctx.get_kernel("dsa_prefill_topk_sort_rows_kernel"),
             topk_merge_rows: ctx.get_kernel("dsa_prefill_topk_merge_rows_kernel"),
         };
@@ -72399,9 +73496,7 @@ mod kernel_tests {
         let kernels = DsaPrefillSelectionKernels {
             rope_query_bf16: ctx.get_kernel("dsa_prefill_rope_query_bf16_kernel"),
             fused_scores: ctx.get_kernel("dsa_prefill_fused_scores_kernel"),
-            accumulate_gemm_scores: ctx.get_kernel(
-                "dsa_prefill_accumulate_gemm_scores_kernel",
-            ),
+            accumulate_gemm_scores: ctx.get_kernel("dsa_prefill_accumulate_gemm_scores_kernel"),
             topk_sort_rows: ctx.get_kernel("dsa_prefill_topk_sort_rows_kernel"),
             topk_merge_rows: ctx.get_kernel("dsa_prefill_topk_merge_rows_kernel"),
         };
@@ -72413,7 +73508,14 @@ mod kernel_tests {
         let round_bf16 = |value: f32| half::bf16::from_f32(value).to_f32();
 
         for (rows, context_end, num_heads, head_dim, configured_topk, positions_host) in [
-            (2usize, 1024usize, 64usize, 128usize, 640usize, vec![511i32, 1023]),
+            (
+                2usize,
+                1024usize,
+                64usize,
+                128usize,
+                640usize,
+                vec![511i32, 1023],
+            ),
             (3usize, 37usize, 3usize, 7usize, 7usize, vec![-1i32, 5, 99]),
         ] {
             let raw_queries_host = (0..rows * num_heads * head_dim)
@@ -72511,10 +73613,11 @@ mod kernel_tests {
                 .dtoh_sync_copy(&d_selected)
                 .expect("index selection D2H");
 
-            let gamma_dim = (head_dim as f32 * f32::EPSILON)
-                / (1.0 - head_dim as f32 * f32::EPSILON);
+            let gamma_dim =
+                (head_dim as f32 * f32::EPSILON) / (1.0 - head_dim as f32 * f32::EPSILON);
             for row in 0..rows {
-                let causal_context = (positions_host[row] + 1).clamp(0, context_end as i32) as usize;
+                let causal_context =
+                    (positions_host[row] + 1).clamp(0, context_end as i32) as usize;
                 let mut row_actual = Vec::with_capacity(causal_context);
                 for token in 0..causal_context {
                     let mut expected = 0.0f32;
@@ -72525,8 +73628,8 @@ mod kernel_tests {
                         let mut dot = 0.0f32;
                         let mut sum_abs = 0.0f32;
                         for dim in 0..head_dim {
-                            let product = raw_queries_host[query_base + dim]
-                                * key_cache_host[key_base + dim];
+                            let product =
+                                raw_queries_host[query_base + dim] * key_cache_host[key_base + dim];
                             dot += product;
                             sum_abs += product.abs();
                         }
@@ -74180,6 +75283,7 @@ mod kernel_tests {
         let mut start_pos_i32: i32 = 0;
         let mut kv_stride_i32 = kv_stride;
         let mut sliding_window_i32: i32 = 0;
+        let mut cache_dtype_i32: i32 = 0;
         let mut vision_block_ids_ptr: u64 = 0;
 
         unsafe {
@@ -74216,6 +75320,7 @@ mod kernel_tests {
                 &mut start_pos_i32 as *mut _ as *mut _,
                 &mut kv_stride_i32 as *mut _ as *mut _,
                 &mut sliding_window_i32 as *mut _ as *mut _,
+                &mut cache_dtype_i32 as *mut _ as *mut _,
                 &mut vision_block_ids_ptr as *mut _ as *mut _,
             ];
             launch(
@@ -74288,6 +75393,7 @@ mod kernel_tests {
         let mut start_pos_i32 = cached_len as i32;
         let mut kv_stride_i32 = kv_stride;
         let mut sliding_window_i32: i32 = 0;
+        let mut cache_dtype_i32: i32 = 1;
         let mut vision_block_ids_ptr: u64 = 0;
 
         unsafe {
@@ -74322,6 +75428,7 @@ mod kernel_tests {
                 &mut start_pos_i32 as *mut _ as *mut _,
                 &mut kv_stride_i32 as *mut _ as *mut _,
                 &mut sliding_window_i32 as *mut _ as *mut _,
+                &mut cache_dtype_i32 as *mut _ as *mut _,
                 &mut vision_block_ids_ptr as *mut _ as *mut _,
             ];
             launch(

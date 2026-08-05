@@ -7,6 +7,7 @@
 //! Single-request at a time (matches our hardware constraint).
 
 use crate::gpu_decode::GpuDecodeStore;
+use sha2::{Digest, Sha256};
 
 /// Streaming detokenizer that buffers incomplete UTF-8 sequences.
 ///
@@ -191,6 +192,487 @@ struct ServerState {
     eos_stop_ids: Vec<usize>,
     /// Monotonic order for /v1/internal/reference_test requests.
     reference_test_request_order: u64,
+    /// Rust-owned active GPU sequence boundary. Inactive RAM snapshots are
+    /// added by the next phase; this entry is the zero-transfer fast path.
+    session_cache: SessionCacheRuntime,
+}
+
+#[derive(Default)]
+struct SessionCacheRuntime {
+    enabled: bool,
+    active: Option<ActiveSequenceState>,
+    compatibility: Option<crate::session_cache::SessionCompatibilitySignature>,
+    ram_store: Option<crate::session_cache::RamSessionStore>,
+    prefill_samples: Vec<(usize, f64)>,
+    restore_samples: Vec<(usize, f64)>,
+}
+
+struct ActiveSequenceState {
+    consumed_token_ids: Vec<u32>,
+    snapshot_id: crate::session_cache::SnapshotId,
+    requires_device_checkpoint: bool,
+}
+
+struct PendingBoundarySnapshot {
+    reservation: crate::session_cache::RamReservationId,
+    consumed_token_ids: Vec<u32>,
+    capture: crate::gpu_prefill::PrefillSequenceBoundaryCapture,
+}
+
+fn invalidate_active_sequence(state: &mut ServerState, reason: &str) {
+    if state.session_cache.active.take().is_some() {
+        log::info!("Prefix cache active GPU state invalidated: {}", reason);
+    }
+}
+
+fn parse_prefix_cache_enabled() -> Result<bool, String> {
+    let value = std::env::var("KRASIS_PREFIX_CACHE")
+        .or_else(|_| std::env::var("CFG_PREFIX_CACHE"))
+        .unwrap_or_else(|_| "0".to_string());
+    match value.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "off" => Ok(false),
+        "1" | "true" | "on" => Ok(true),
+        _ => Err(format!(
+            "KRASIS_PREFIX_CACHE/CFG_PREFIX_CACHE must be one of 0, 1, false, true, off, or on; got {:?}",
+            value
+        )),
+    }
+}
+
+fn parse_prefix_cache_ram_fraction() -> Result<f64, String> {
+    let value = std::env::var("KRASIS_PREFIX_CACHE_RAM_FRACTION")
+        .or_else(|_| std::env::var("CFG_PREFIX_CACHE_RAM_FRACTION"))
+        .unwrap_or_else(|_| "0.25".to_string());
+    let fraction = value
+        .parse::<f64>()
+        .map_err(|error| format!("parse KRASIS_PREFIX_CACHE_RAM_FRACTION={value:?}: {error}"))?;
+    if !fraction.is_finite() || fraction <= 0.0 || fraction > 1.0 {
+        return Err(format!(
+            "KRASIS_PREFIX_CACHE_RAM_FRACTION must be finite and in (0, 1], got {fraction}"
+        ));
+    }
+    Ok(fraction)
+}
+
+fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn build_session_compatibility_signature(
+    model_name: &str,
+    tokenizer_path: &str,
+    chat_template: &crate::chat_template::ChatTemplateEngine,
+    gpu_store_addr: usize,
+    aux_gpu_store_addrs: &[usize],
+) -> Result<crate::session_cache::SessionCompatibilitySignature, String> {
+    if gpu_store_addr == 0 {
+        return Err("session cache requires a configured GPU decode store".to_string());
+    }
+    let tokenizer_bytes = std::fs::read(tokenizer_path)
+        .map_err(|error| format!("read tokenizer for session signature: {error}"))?;
+    let model_dir = std::path::Path::new(tokenizer_path)
+        .parent()
+        .ok_or_else(|| "tokenizer path has no model directory".to_string())?;
+    let config_path = model_dir.join("config.json");
+    let config_bytes = std::fs::read(&config_path).map_err(|error| {
+        format!(
+            "read model config {} for session signature: {error}",
+            config_path.display()
+        )
+    })?;
+
+    let mut materials = Vec::with_capacity(aux_gpu_store_addrs.len() + 1);
+    let primary = unsafe { &*(gpu_store_addr as *const GpuDecodeStore) };
+    materials.push(primary.session_compatibility_material_rust()?);
+    for &address in aux_gpu_store_addrs {
+        if address == 0 {
+            return Err(
+                "session cache topology contains a zero auxiliary store address".to_string(),
+            );
+        }
+        let store = unsafe { &*(address as *const GpuDecodeStore) };
+        materials.push(store.session_compatibility_material_rust()?);
+    }
+    let first = materials
+        .first()
+        .ok_or_else(|| "session cache has no compatibility material".to_string())?;
+    for material in materials.iter().skip(1) {
+        if material.model_num_layers != first.model_num_layers
+            || material.expert_quantization != first.expert_quantization
+            || material.attention_quantization != first.attention_quantization
+            || material.kv_format != first.kv_format
+            || material.kv_key_bits != first.kv_key_bits
+            || material.kv_value_bits != first.kv_value_bits
+        {
+            return Err(format!(
+                "session cache runtime configuration disagrees between GPU {} and GPU {}",
+                first.ownership.device_ordinal, material.ownership.device_ordinal
+            ));
+        }
+    }
+    let topology = materials
+        .iter()
+        .map(|material| material.ownership.clone())
+        .collect();
+    let state_layout = serde_json::to_vec(
+        &materials
+            .iter()
+            .map(|material| &material.state_layout)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| format!("serialize session state layout: {error}"))?;
+    let model_config_sha256 = sha256_bytes(&config_bytes);
+    let mut signature = crate::session_cache::SessionCompatibilitySignature {
+        snapshot_format_version: crate::session_cache::SESSION_SNAPSHOT_FORMAT_VERSION,
+        runtime_version: env!("CARGO_PKG_VERSION").to_string(),
+        model_identity: format!("{}:{:02x?}", model_name, model_config_sha256),
+        model_revision: None,
+        tokenizer_sha256: sha256_bytes(&tokenizer_bytes),
+        chat_template_sha256: sha256_bytes(chat_template.compatibility_source().as_bytes()),
+        expert_quantization: first.expert_quantization.clone(),
+        attention_quantization: first.attention_quantization.clone(),
+        kv_format: first.kv_format.clone(),
+        kv_key_bits: first.kv_key_bits,
+        kv_value_bits: first.kv_value_bits,
+        model_num_layers: first.model_num_layers,
+        topology,
+        state_layout_sha256: sha256_bytes(&state_layout),
+    };
+    signature.topology.sort_by_key(|owner| owner.layer_start);
+    signature.validate()?;
+    Ok(signature)
+}
+
+fn session_snapshot_reservation_bytes(
+    state: &ServerState,
+    consumed_token_count: usize,
+) -> Result<usize, String> {
+    let compatibility = state
+        .session_cache
+        .compatibility
+        .as_ref()
+        .ok_or_else(|| "session cache compatibility signature is unavailable".to_string())?;
+    let mut bytes = std::mem::size_of::<crate::session_cache::SessionSnapshot>()
+        .checked_add(compatibility.heap_bytes())
+        .and_then(|value| {
+            value.checked_add(consumed_token_count.saturating_mul(std::mem::size_of::<u32>()))
+        })
+        .and_then(|value| {
+            value.checked_add(
+                compatibility
+                    .topology
+                    .len()
+                    .saturating_mul(std::mem::size_of::<
+                        crate::session_cache::DeviceSequencePosition,
+                    >()),
+            )
+        })
+        .ok_or_else(|| "session snapshot reservation estimate overflow".to_string())?;
+    for address in
+        std::iter::once(state.gpu_store_addr).chain(state.aux_gpu_store_addrs.iter().copied())
+    {
+        let store = unsafe { &*(address as *const GpuDecodeStore) };
+        bytes = bytes
+            .checked_add(store.sequence_state_snapshot_cost_estimate_rust(consumed_token_count)?)
+            .ok_or_else(|| "session snapshot reservation estimate overflow".to_string())?;
+    }
+    Ok(bytes)
+}
+
+fn cancel_boundary_reservation(
+    session_cache: &mut SessionCacheRuntime,
+    reservation: &mut Option<crate::session_cache::RamReservationId>,
+) {
+    let Some(reservation_id) = reservation.take() else {
+        return;
+    };
+    if let Some(store) = session_cache.ram_store.as_mut() {
+        if let Err(error) = store.cancel_reservation(reservation_id) {
+            log::error!(
+                "Failed to cancel prefix-cache boundary reservation {:?}: {}",
+                reservation_id,
+                error,
+            );
+        }
+    }
+}
+
+fn rollback_pending_boundary_snapshot(
+    state: &mut ServerState,
+    pending: &mut Option<PendingBoundarySnapshot>,
+    reservation: &mut Option<crate::session_cache::RamReservationId>,
+) {
+    if let Some(pending) = pending.take() {
+        *reservation = Some(pending.reservation);
+    }
+    cancel_boundary_reservation(&mut state.session_cache, reservation);
+}
+
+fn commit_pending_boundary_snapshot(
+    state: &mut ServerState,
+    pending: PendingBoundarySnapshot,
+) -> Result<(crate::session_cache::SnapshotId, usize, f64, f64), String> {
+    let reservation = pending.reservation;
+    let save_ms = pending.capture.save_ms;
+    let restore_ms = pending.capture.restore_ms;
+    let result = (|| {
+        let snapshot = crate::session_cache::SessionSnapshot {
+            compatibility: state
+                .session_cache
+                .compatibility
+                .as_ref()
+                .ok_or_else(|| "session cache compatibility signature is unavailable".to_string())?
+                .clone(),
+            consumed_token_ids: pending.consumed_token_ids,
+            positions: pending.capture.positions,
+            state_blobs: pending.capture.state_blobs,
+        };
+        snapshot.validate()?;
+        let actual_bytes = snapshot.memory_cost_bytes();
+        let snapshot_id = state
+            .session_cache
+            .ram_store
+            .as_mut()
+            .ok_or_else(|| "RAM session store is unavailable".to_string())?
+            .commit(reservation, snapshot)?;
+        state
+            .session_cache
+            .restore_samples
+            .push((actual_bytes, restore_ms));
+        Ok((snapshot_id, actual_bytes, save_ms, restore_ms))
+    })();
+    if result.is_err() {
+        if let Some(store) = state.session_cache.ram_store.as_mut() {
+            let _ = store.cancel_reservation(reservation);
+        }
+    }
+    result
+}
+
+fn restore_snapshot_to_gpu(
+    gpu_store_addr: usize,
+    aux_gpu_store_addrs: &[usize],
+    snapshot: &crate::session_cache::SessionSnapshot,
+) -> Result<f64, String> {
+    let mut total_ms = 0.0f64;
+    for address in std::iter::once(gpu_store_addr).chain(aux_gpu_store_addrs.iter().copied()) {
+        let store = unsafe { &mut *(address as *mut GpuDecodeStore) };
+        let device_ordinal = usize::try_from(store.device_ordinal()).map_err(|_| {
+            format!(
+                "CUDA device ordinal is negative: {}",
+                store.device_ordinal()
+            )
+        })?;
+        let position = snapshot
+            .positions
+            .iter()
+            .find(|position| position.device_ordinal == device_ordinal)
+            .ok_or_else(|| {
+                format!(
+                    "snapshot has no position for CUDA device {}",
+                    store.device_ordinal()
+                )
+            })?;
+        let blobs: Vec<_> = snapshot
+            .state_blobs
+            .iter()
+            .filter(|blob| {
+                blob.device_ordinal == device_ordinal
+                    && !crate::session_cache::is_prefill_stage_kind(&blob.kind)
+            })
+            .collect();
+        total_ms += store.restore_sequence_state_rust(
+            snapshot.consumed_token_ids.len(),
+            &blobs,
+            position.rope_position_delta,
+        )?;
+    }
+    Ok(total_ms)
+}
+
+fn snapshot_current_sequence_to_ram(
+    state: &mut ServerState,
+    consumed_token_ids: &[u32],
+    previous_snapshot_id: Option<crate::session_cache::SnapshotId>,
+) -> Result<(crate::session_cache::SnapshotId, usize, f64, f64), String> {
+    let previous_token_count = if let Some(id) = previous_snapshot_id {
+        let previous = state
+            .session_cache
+            .ram_store
+            .as_mut()
+            .ok_or_else(|| "RAM session store is unavailable".to_string())?
+            .get(id)?
+            .ok_or_else(|| "incremental snapshot base was evicted".to_string())?;
+        if previous.consumed_token_ids.len() > consumed_token_ids.len()
+            || previous.consumed_token_ids.as_slice()
+                != &consumed_token_ids[..previous.consumed_token_ids.len()]
+        {
+            return Err("incremental snapshot base is not an exact token prefix".to_string());
+        }
+        Some(previous.consumed_token_ids.len())
+    } else {
+        None
+    };
+    let required_bytes = session_snapshot_reservation_bytes(state, consumed_token_ids.len())?;
+    let reservation = state
+        .session_cache
+        .ram_store
+        .as_mut()
+        .ok_or_else(|| "RAM session store is unavailable".to_string())?
+        .reserve_protecting(
+            required_bytes,
+            previous_snapshot_id
+                .as_ref()
+                .map_or(&[], std::slice::from_ref),
+        )?;
+    let result = (|| {
+        let addresses: Vec<_> = std::iter::once(state.gpu_store_addr)
+            .chain(state.aux_gpu_store_addrs.iter().copied())
+            .collect();
+        let allocation_count = addresses.iter().try_fold(0usize, |count, &address| {
+            let store = unsafe { &*(address as *const GpuDecodeStore) };
+            count
+                .checked_add(store.sequence_state_allocation_count_rust())
+                .ok_or_else(|| "session snapshot allocation count overflow".to_string())
+        })?;
+        let mut positions = Vec::with_capacity(addresses.len());
+        let mut state_blobs = Vec::with_capacity(allocation_count);
+        let mut save_ms = 0.0f64;
+        for address in addresses {
+            let store = unsafe { &mut *(address as *mut GpuDecodeStore) };
+            let device_ordinal = usize::try_from(store.device_ordinal()).map_err(|_| {
+                format!(
+                    "CUDA device ordinal is negative: {}",
+                    store.device_ordinal()
+                )
+            })?;
+            store.set_kv_position_rust(consumed_token_ids.len());
+            positions.push(store.sequence_position_rust()?);
+            let (mut blobs, device_save_ms) = if let (Some(id), Some(previous_tokens)) =
+                (previous_snapshot_id, previous_token_count)
+            {
+                let previous = state
+                    .session_cache
+                    .ram_store
+                    .as_mut()
+                    .ok_or_else(|| "RAM session store is unavailable".to_string())?
+                    .get(id)?
+                    .ok_or_else(|| "incremental snapshot base was evicted".to_string())?;
+                let previous_blobs: Vec<_> = previous
+                    .state_blobs
+                    .iter()
+                    .filter(|blob| blob.device_ordinal == device_ordinal)
+                    .collect();
+                store.snapshot_sequence_state_incremental_rust(
+                    previous_tokens,
+                    consumed_token_ids.len(),
+                    &previous_blobs,
+                )?
+            } else {
+                store.snapshot_sequence_state_rust(consumed_token_ids.len())?
+            };
+            save_ms += device_save_ms;
+            state_blobs.append(&mut blobs);
+        }
+        let snapshot = crate::session_cache::SessionSnapshot {
+            compatibility: state
+                .session_cache
+                .compatibility
+                .as_ref()
+                .ok_or_else(|| "session cache compatibility signature is unavailable".to_string())?
+                .clone(),
+            consumed_token_ids: consumed_token_ids.to_vec(),
+            positions,
+            state_blobs,
+        };
+        snapshot.validate()?;
+        let actual_bytes = snapshot.memory_cost_bytes();
+        let id = state
+            .session_cache
+            .ram_store
+            .as_mut()
+            .ok_or_else(|| "RAM session store is unavailable".to_string())?
+            .commit(reservation, snapshot)?;
+        Ok((id, actual_bytes, save_ms))
+    })();
+    let (id, actual_bytes, save_ms) = match result {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = state
+                .session_cache
+                .ram_store
+                .as_mut()
+                .ok_or_else(|| "RAM session store is unavailable".to_string())?
+                .cancel_reservation(reservation);
+            return Err(error);
+        }
+    };
+
+    // The first restore of each real layout is also the runtime H2D
+    // calibration point. It restores identical bytes to the just-snapshotted
+    // state and therefore cannot change model outputs.
+    let restore_ms = {
+        let snapshot = state
+            .session_cache
+            .ram_store
+            .as_mut()
+            .ok_or_else(|| "RAM session store is unavailable".to_string())?
+            .get(id)?
+            .ok_or_else(|| "newly committed session snapshot disappeared".to_string())?;
+        restore_snapshot_to_gpu(state.gpu_store_addr, &state.aux_gpu_store_addrs, snapshot)?
+    };
+    state
+        .session_cache
+        .restore_samples
+        .push((actual_bytes, restore_ms));
+    Ok((id, actual_bytes, save_ms, restore_ms))
+}
+
+fn restore_snapshot_by_id(
+    state: &mut ServerState,
+    id: crate::session_cache::SnapshotId,
+) -> Result<(Vec<u32>, usize, f64), String> {
+    let (tokens, bytes, restore_ms) = {
+        let snapshot = state
+            .session_cache
+            .ram_store
+            .as_mut()
+            .ok_or_else(|| "RAM session store is unavailable".to_string())?
+            .get(id)?
+            .ok_or_else(|| "selected RAM session snapshot was evicted".to_string())?;
+        let tokens = snapshot.consumed_token_ids.clone();
+        let bytes = snapshot.memory_cost_bytes();
+        let restore_ms =
+            restore_snapshot_to_gpu(state.gpu_store_addr, &state.aux_gpu_store_addrs, snapshot)?;
+        (tokens, bytes, restore_ms)
+    };
+    Ok((tokens, bytes, restore_ms))
+}
+
+fn predicted_restore_ms(samples: &[(usize, f64)], bytes: usize) -> Option<f64> {
+    samples
+        .iter()
+        .filter(|(sample_bytes, sample_ms)| *sample_bytes > 0 && *sample_ms > 0.0)
+        .min_by_key(|(sample_bytes, _)| sample_bytes.abs_diff(bytes))
+        .map(|(sample_bytes, sample_ms)| *sample_ms * bytes as f64 / *sample_bytes as f64)
+}
+
+fn predicted_avoided_prefill_ms(
+    samples: &[(usize, f64)],
+    prompt_tokens: usize,
+    reused_tokens: usize,
+) -> Option<f64> {
+    if prompt_tokens == 0 || reused_tokens == 0 {
+        return None;
+    }
+    samples
+        .iter()
+        .filter(|(sample_tokens, sample_ms)| *sample_tokens > 0 && *sample_ms > 0.0)
+        .min_by_key(|(sample_tokens, _)| sample_tokens.abs_diff(prompt_tokens))
+        .map(|(sample_tokens, sample_ms)| {
+            let full_ms = *sample_ms * prompt_tokens as f64 / *sample_tokens as f64;
+            full_ms * reused_tokens as f64 / prompt_tokens as f64
+        })
 }
 
 #[derive(Clone)]
@@ -1804,6 +2286,20 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         .get("debug_first_token_boundary")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let request_prefix_cache = match req.get("prefix_cache") {
+        Some(value) => match value.as_bool() {
+            Some(enabled) => enabled,
+            None => {
+                let _ = send_json(
+                    stream,
+                    400,
+                    r#"{"error":"prefix_cache must be a boolean when provided"}"#,
+                );
+                return;
+            }
+        },
+        None => true,
+    };
 
     let request_id = format!("chatcmpl-{:016x}", {
         let mut s = std::time::SystemTime::now()
@@ -1923,6 +2419,31 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             return;
         }
     };
+    // A later turn normally replaces the assistant-generation suffix rather
+    // than appending after it. Render the same text-only request without that
+    // suffix so the cache can capture a template-stable state boundary during
+    // prefill. Tokenization below still proves the exact shared token prefix;
+    // rendering alone is never treated as a correctness guarantee.
+    let stable_rendered = if state.session_cache.enabled && request_prefix_cache && !has_images {
+        match state.chat_template.apply_with_tools(
+            &messages_json,
+            &tools_json,
+            false,
+            enable_thinking,
+        ) {
+            Ok(stable) => Some(stable),
+            Err(error) => {
+                log::error!(
+                    "Request {} prefix cache miss: stable_template_render_failed error={}",
+                    request_id,
+                    error,
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let estimated_tokens = if has_images {
         log::info!(
             "Soft HCS: image request pre-evicting for configured context window {} (rendered_len={})",
@@ -2032,6 +2553,17 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
 
     let mut prompt_hcs_snapshot: Option<(Vec<u64>, usize, usize, usize)> = None;
     let mut chat_debug_input_token_ids: Option<Vec<u32>> = None;
+    let mut request_token_ids: Vec<u32> = Vec::new();
+    let mut cache_sequence_start = 0usize;
+    let mut cache_request_eligible = false;
+    let mut cache_base_snapshot_id = None;
+    let mut cache_ram_restore: Option<(usize, f64)> = None;
+    let mut cache_active_device_restore = false;
+    let mut cache_prefill_stage_required = false;
+    let mut cache_stable_boundary_tokens: Option<Vec<u32>> = None;
+    let mut cache_boundary_reservation = None;
+    let mut cache_stage_reservation_extended = false;
+    let mut pending_boundary_snapshot: Option<PendingBoundarySnapshot> = None;
     let prefill_result: Result<
         (usize, usize, Vec<usize>, bool, Option<serde_json::Value>),
         String,
@@ -2147,11 +2679,350 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 }
             }
         };
+        request_token_ids.clone_from(&token_ids);
+        cache_request_eligible = state.session_cache.enabled
+            && request_prefix_cache
+            && !has_images
+            && state.aux_gpu_store_addrs.is_empty()
+            && {
+                let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+                !store.speculative_decode_enabled_rust()
+            };
+        if cache_request_eligible {
+            if let Some(stable_rendered) = stable_rendered.as_ref() {
+                match state.tokenizer.encode(stable_rendered.as_str(), false) {
+                    Ok(encoding) => {
+                        let stable_ids = encoding.get_ids();
+                        let boundary =
+                            crate::session_cache::common_token_prefix(stable_ids, &token_ids);
+                        if boundary > 0 && boundary < token_ids.len() {
+                            cache_stable_boundary_tokens = Some(token_ids[..boundary].to_vec());
+                            log::info!(
+                                "Request {} prefix cache stable boundary: tokens={} stable_render_tokens={} full_prompt_tokens={}",
+                                request_id,
+                                boundary,
+                                stable_ids.len(),
+                                token_ids.len(),
+                            );
+                        } else {
+                            log::info!(
+                                "Request {} prefix cache miss: no_internal_stable_template_boundary matched={} stable_render_tokens={} full_prompt_tokens={}",
+                                request_id,
+                                boundary,
+                                stable_ids.len(),
+                                token_ids.len(),
+                            );
+                        }
+                    }
+                    Err(error) => log::error!(
+                        "Request {} prefix cache miss: stable_template_tokenize_failed error={}",
+                        request_id,
+                        error,
+                    ),
+                }
+            }
+        }
+        if state.session_cache.enabled && !cache_request_eligible {
+            let reason = if !request_prefix_cache {
+                "request_disabled"
+            } else if has_images {
+                "image_input_uncacheable"
+            } else if !state.aux_gpu_store_addrs.is_empty() {
+                "multi_gpu_active_handoff_pending"
+            } else {
+                "speculative_decode_uncacheable"
+            };
+            log::info!("Request {} prefix cache miss: {}", request_id, reason);
+            invalidate_active_sequence(state, reason);
+        }
+        if cache_request_eligible {
+            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+            let active_plan = state.session_cache.active.as_ref().map(|active| {
+                crate::session_cache::plan_active_prefix(
+                    &active.consumed_token_ids,
+                    &token_ids,
+                    store.sequence_state_has_non_rewindable_rust(),
+                )
+            });
+            let active_reusable_tokens = match active_plan {
+                Some(crate::session_cache::ActivePrefixPlan::Append { matched_tokens })
+                | Some(crate::session_cache::ActivePrefixPlan::TruncateKvAndAppend {
+                    matched_tokens,
+                }) => matched_tokens,
+                _ => 0,
+            };
+
+            // Active GPU state and inactive RAM snapshots must compete on the
+            // longest exact prefix. A tiny shared chat-template prefix in the
+            // active conversation must never hide a much longer RAM match.
+            let compatibility =
+                state.session_cache.compatibility.clone().ok_or_else(|| {
+                    "session cache compatibility signature is unavailable".to_string()
+                });
+            match compatibility.and_then(|compatibility| {
+                state
+                    .session_cache
+                    .ram_store
+                    .as_mut()
+                    .ok_or_else(|| "RAM session store is unavailable".to_string())?
+                    .longest_prefix(&token_ids, &compatibility)
+            }) {
+                Ok(crate::session_cache::PrefixLookupResult::Hit {
+                    snapshot_id,
+                    matched_tokens,
+                }) if matched_tokens < token_ids.len()
+                    && crate::session_cache::ram_prefix_is_longer(
+                        active_reusable_tokens,
+                        matched_tokens,
+                    ) =>
+                {
+                    let snapshot_bytes = match state.session_cache.ram_store.as_mut() {
+                        Some(ram_store) => match ram_store.get(snapshot_id) {
+                            Ok(Some(snapshot)) => Some(snapshot.memory_cost_bytes()),
+                            Ok(None) => {
+                                log::info!("Request {} prefix cache miss: evicted", request_id);
+                                None
+                            }
+                            Err(error) => {
+                                log::error!(
+                                    "Request {} prefix cache snapshot lookup failed: {}",
+                                    request_id,
+                                    error,
+                                );
+                                None
+                            }
+                        },
+                        None => {
+                            log::error!("Request {} RAM session store is unavailable", request_id);
+                            None
+                        }
+                    };
+                    let restore_ms = snapshot_bytes.and_then(|bytes| {
+                        predicted_restore_ms(&state.session_cache.restore_samples, bytes)
+                    });
+                    let avoided_ms = predicted_avoided_prefill_ms(
+                        &state.session_cache.prefill_samples,
+                        token_ids.len(),
+                        matched_tokens,
+                    );
+                    if restore_ms
+                        .zip(avoided_ms)
+                        .is_some_and(|(restore, avoided)| restore < avoided)
+                    {
+                        match restore_snapshot_by_id(state, snapshot_id) {
+                            Ok((restored_tokens, bytes, measured_ms)) => {
+                                if restored_tokens.len() != matched_tokens
+                                    || restored_tokens.as_slice() != &token_ids[..matched_tokens]
+                                {
+                                    log::error!(
+                                            "Request {} prefix cache restore exact-token verification failed",
+                                            request_id
+                                        );
+                                } else {
+                                    cache_sequence_start = matched_tokens;
+                                    cache_base_snapshot_id = Some(snapshot_id);
+                                    cache_ram_restore = Some((bytes, measured_ms));
+                                    log::info!(
+                                            "Request {} prefix cache RAM hit: reused={} suffix={} bytes={} restore_ms={:.3}",
+                                            request_id,
+                                            matched_tokens,
+                                            token_ids.len().saturating_sub(matched_tokens),
+                                            bytes,
+                                            measured_ms,
+                                        );
+                                }
+                            }
+                            Err(error) => log::error!(
+                                "Request {} prefix cache restore failed; using full prefill: {}",
+                                request_id,
+                                error,
+                            ),
+                        }
+                    } else {
+                        log::info!(
+                                "Request {} prefix cache miss: restore_not_worth_it predicted_restore_ms={:?} predicted_avoided_prefill_ms={:?}",
+                                request_id,
+                                restore_ms,
+                                avoided_ms,
+                            );
+                    }
+                }
+                Ok(crate::session_cache::PrefixLookupResult::Hit { .. }) => log::info!(
+                    "Request {} prefix cache RAM candidate not longer than active state",
+                    request_id,
+                ),
+                Ok(crate::session_cache::PrefixLookupResult::SignatureMismatch {
+                    matched_tokens,
+                }) => log::info!(
+                    "Request {} prefix cache miss: signature_mismatch matched={}",
+                    request_id,
+                    matched_tokens,
+                ),
+                Ok(crate::session_cache::PrefixLookupResult::NoMatch) => {
+                    log::info!("Request {} prefix cache miss: no_match", request_id)
+                }
+                Err(error) => log::error!(
+                    "Request {} prefix cache lookup failed; using full prefill: {}",
+                    request_id,
+                    error,
+                ),
+            }
+
+            if cache_sequence_start == 0 {
+                match active_plan {
+                    Some(crate::session_cache::ActivePrefixPlan::Append { matched_tokens }) => {
+                        cache_sequence_start = matched_tokens;
+                        cache_base_snapshot_id = state
+                            .session_cache
+                            .active
+                            .as_ref()
+                            .map(|active| active.snapshot_id);
+                        cache_active_device_restore = state
+                            .session_cache
+                            .active
+                            .as_ref()
+                            .is_some_and(|active| active.requires_device_checkpoint);
+                        if !cache_active_device_restore {
+                            store.set_kv_position_rust(matched_tokens);
+                        }
+                        log::info!(
+                            "Request {} prefix cache active hit: reused={} suffix={}",
+                            request_id,
+                            matched_tokens,
+                            token_ids.len().saturating_sub(matched_tokens),
+                        );
+                    }
+                    Some(
+                        crate::session_cache::ActivePrefixPlan::TruncateKvAndAppend {
+                            matched_tokens,
+                        },
+                    ) => {
+                        cache_sequence_start = matched_tokens;
+                        cache_active_device_restore = state
+                            .session_cache
+                            .active
+                            .as_ref()
+                            .is_some_and(|active| active.requires_device_checkpoint);
+                        if !cache_active_device_restore {
+                            store.set_kv_position_rust(matched_tokens);
+                        }
+                        log::info!(
+                            "Request {} prefix cache active KV truncation: reused={} suffix={}",
+                            request_id,
+                            matched_tokens,
+                            token_ids.len().saturating_sub(matched_tokens),
+                        );
+                    }
+                    Some(
+                        crate::session_cache::ActivePrefixPlan::RequiresBoundarySnapshot {
+                            matched_tokens,
+                        },
+                    ) => log::info!(
+                        "Request {} prefix cache miss: divergence_requires_exact_boundary_snapshot matched={}",
+                        request_id,
+                        matched_tokens,
+                    ),
+                    Some(crate::session_cache::ActivePrefixPlan::NoReusablePrefix) => {
+                        log::info!("Request {} prefix cache miss: no_match", request_id)
+                    }
+                    Some(crate::session_cache::ActivePrefixPlan::NoSuffixToCompute) => log::info!(
+                        "Request {} prefix cache miss: no_suffix_to_compute",
+                        request_id,
+                    ),
+                    None => {
+                        log::info!("Request {} prefix cache miss: no_active_state", request_id)
+                    }
+                }
+            }
+            // GPU state is mutated below. It is republished only after decode
+            // and response delivery succeed.
+            state.session_cache.active = None;
+        }
+        let capture_boundary = cache_stable_boundary_tokens
+            .as_ref()
+            .map(Vec::len)
+            .filter(|&boundary| boundary > cache_sequence_start && boundary < token_ids.len());
+        if let Some(boundary) = capture_boundary {
+            match session_snapshot_reservation_bytes(state, boundary).and_then(|required_bytes| {
+                state
+                    .session_cache
+                    .ram_store
+                    .as_mut()
+                    .ok_or_else(|| "RAM session store is unavailable".to_string())?
+                    .reserve_protecting(
+                        required_bytes,
+                        cache_base_snapshot_id
+                            .as_ref()
+                            .map_or(&[], std::slice::from_ref),
+                    )
+            }) {
+                Ok(reservation) => cache_boundary_reservation = Some(reservation),
+                Err(error) => {
+                    cache_stable_boundary_tokens = None;
+                    log::info!(
+                        "Request {} prefix cache miss: stable_boundary_reservation_failed boundary={} error={}",
+                        request_id,
+                        boundary,
+                        error,
+                    );
+                }
+            }
+        }
         if debug_first_token_boundary {
             chat_debug_input_token_ids = Some(token_ids.clone());
         }
         let mut engine_guard = state.rust_prefill.lock().unwrap();
         let engine = engine_guard.as_mut().unwrap();
+        if cache_active_device_restore {
+            if let Err(error) = engine.arm_active_stage_continuation(cache_sequence_start) {
+                let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+                store.discard_active_sequence_checkpoint_rust();
+                engine.discard_active_stage_state();
+                cancel_boundary_reservation(
+                    &mut state.session_cache,
+                    &mut cache_boundary_reservation,
+                );
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(
+                        r#"{{"error":"Active prefix-cache stage restore failed closed: {}"}}"#,
+                        json_escape(&error)
+                    ),
+                );
+                return;
+            }
+            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+            match store.restore_active_sequence_checkpoint_rust(cache_sequence_start) {
+                Ok(restore_ms) => log::info!(
+                    "Request {} prefix cache active device restore: reused={} d2d_restore_ms={:.3}",
+                    request_id,
+                    cache_sequence_start,
+                    restore_ms,
+                ),
+                Err(error) => {
+                    store.discard_active_sequence_checkpoint_rust();
+                    engine.discard_active_stage_state();
+                    cancel_boundary_reservation(
+                        &mut state.session_cache,
+                        &mut cache_boundary_reservation,
+                    );
+                    let _ = send_json(
+                        stream,
+                        500,
+                        &format!(
+                            r#"{{"error":"Active prefix-cache device restore failed closed: {}"}}"#,
+                            json_escape(&error)
+                        ),
+                    );
+                    return;
+                }
+            }
+        } else {
+            engine.discard_active_stage_state();
+            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+            store.discard_active_sequence_checkpoint_rust();
+        }
         // Warmup/calibration calls disable prefill pinning through the shared engine.
         // Normal request prefill must not inherit that one-shot state.
         engine.set_prefill_pinning_disabled(false);
@@ -2172,6 +3043,12 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 Ok(has_hqq) => has_hqq,
                 Err(e) => {
                     engine.clear_external_prefill_inputs();
+                    engine.discard_active_stage_state();
+                    store.discard_active_sequence_checkpoint_rust();
+                    cancel_boundary_reservation(
+                        &mut state.session_cache,
+                        &mut cache_boundary_reservation,
+                    );
                     if has_images {
                         Python::with_gil(|py| {
                             let _ = state
@@ -2197,13 +3074,23 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             engine.set_prefill_runtime_chunk_cap(retry_cap);
 
             // Dynamically allocate scratch sized for this prompt.
+            // Scratch contains prompt-wide state for several attention
+            // backends even when only a suffix is computed. Size it from the
+            // exact logical sequence length; run_prefill_from below still
+            // executes only the uncached suffix.
             if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
                 engine.clear_external_prefill_inputs();
                 engine.clear_prefill_hcs_guard_store_addr();
                 engine.set_optional_pinning_budget_mb(None);
                 engine.clear_prefill_runtime_chunk_cap();
+                engine.discard_active_stage_state();
                 let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+                store.discard_active_sequence_checkpoint_rust();
                 let _ = store.prepare_runtime_for_decode_rust();
+                cancel_boundary_reservation(
+                    &mut state.session_cache,
+                    &mut cache_boundary_reservation,
+                );
                 if has_images {
                     Python::with_gil(|py| {
                         let _ = state
@@ -2225,6 +3112,110 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e),
                 );
                 return;
+            }
+            cache_prefill_stage_required = match engine.stage_exact_snapshot_cost_estimate(1) {
+                Ok(bytes) => bytes > 0,
+                Err(error) => {
+                    break Err(format!("inspect live prefill-stage state: {error}"));
+                }
+            };
+
+            if cache_sequence_start > 0 && cache_ram_restore.is_some() {
+                let stage_restore = cache_base_snapshot_id
+                    .ok_or_else(|| "RAM-restored continuation has no base snapshot ID".to_string())
+                    .and_then(|snapshot_id| {
+                        let snapshot = state
+                            .session_cache
+                            .ram_store
+                            .as_mut()
+                            .ok_or_else(|| "RAM session store is unavailable".to_string())?
+                            .get(snapshot_id)?
+                            .ok_or_else(|| {
+                                "RAM-restored continuation snapshot was evicted".to_string()
+                            })?;
+                        engine.restore_stage_exact_sequence_state(snapshot)
+                    });
+                match stage_restore {
+                    Ok(stage_ms) => {
+                        if let Some((bytes, decode_restore_ms)) = cache_ram_restore.as_mut() {
+                            *decode_restore_ms += stage_ms;
+                            state
+                                .session_cache
+                                .restore_samples
+                                .push((*bytes, *decode_restore_ms));
+                            log::info!(
+                                "Request {} prefix cache exact stage restore: stage_ms={:.3} total_restore_ms={:.3}",
+                                request_id,
+                                stage_ms,
+                                *decode_restore_ms,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        log::info!(
+                            "Request {} prefix cache miss: exact_stage_restore_failed error={}",
+                            request_id,
+                            error,
+                        );
+                        cache_sequence_start = 0;
+                        cache_base_snapshot_id = None;
+                        cache_ram_restore = None;
+                    }
+                }
+            }
+
+            if !cache_stage_reservation_extended {
+                if let (Some(reservation), Some(boundary)) = (
+                    cache_boundary_reservation,
+                    cache_stable_boundary_tokens.as_ref().map(Vec::len),
+                ) {
+                    let extra_bytes = match engine.stage_exact_snapshot_cost_estimate(boundary) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            break Err(format!(
+                                "measure exact prefill-stage snapshot size: {error}"
+                            ));
+                        }
+                    };
+                    if extra_bytes > 0 {
+                        let protected = cache_base_snapshot_id
+                            .as_ref()
+                            .map_or(&[][..], std::slice::from_ref);
+                        let extension = match state.session_cache.ram_store.as_mut() {
+                            Some(store) => {
+                                store.extend_reservation(reservation, extra_bytes, protected)
+                            }
+                            None => Err("RAM session store is unavailable".to_string()),
+                        };
+                        if let Err(error) = extension {
+                            if let Some(reservation_id) = cache_boundary_reservation.take() {
+                                if let Some(ram_store) = state.session_cache.ram_store.as_mut() {
+                                    if let Err(cancel_error) =
+                                        ram_store.cancel_reservation(reservation_id)
+                                    {
+                                        log::error!(
+                                        "Request {} failed to cancel exact-stage reservation: {}",
+                                        request_id,
+                                        cancel_error,
+                                    );
+                                    }
+                                }
+                            }
+                            cache_stable_boundary_tokens = None;
+                            log::info!(
+                            "Request {} prefix cache miss: exact_stage_reservation_failed boundary={} additional_bytes={} error={}",
+                            request_id,
+                            boundary,
+                            extra_bytes,
+                            error,
+                        );
+                        } else {
+                            cache_stage_reservation_extended = true;
+                        }
+                    } else {
+                        cache_stage_reservation_extended = true;
+                    }
+                }
             }
             let pinning_budget_mb = {
                 let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
@@ -2251,18 +3242,61 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 engine.clear_external_prefill_inputs();
             }
 
-            let attempt_result = match engine.run_prefill(&token_ids, temperature, &suppress_tokens)
-            {
-                Ok(r) => match engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
-                    Ok(()) => Ok(r),
+            let capture_boundary = cache_boundary_reservation
+                .is_some()
+                .then(|| cache_stable_boundary_tokens.as_ref().map(Vec::len))
+                .flatten();
+            let attempt_result = match match (cache_sequence_start, capture_boundary) {
+                (sequence_start, Some(boundary)) if sequence_start > 0 => engine
+                    .run_prefill_continuation_capturing_boundary(
+                        &token_ids[sequence_start..],
+                        sequence_start,
+                        boundary,
+                        temperature,
+                        &suppress_tokens,
+                    ),
+                (0, Some(boundary)) => engine.run_prefill_capturing_boundary(
+                    &token_ids,
+                    boundary,
+                    temperature,
+                    &suppress_tokens,
+                ),
+                (sequence_start, None) if sequence_start > 0 => engine
+                    .run_prefill_continuation(
+                        &token_ids[sequence_start..],
+                        sequence_start,
+                        temperature,
+                        &suppress_tokens,
+                    )
+                    .map(|result| (result, None)),
+                (_, None) => engine
+                    .run_prefill(&token_ids, temperature, &suppress_tokens)
+                    .map(|result| (result, None)),
+                (_, Some(_)) => unreachable!(),
+            } {
+                Ok((r, capture)) => match if cache_sequence_start > 0 {
+                    engine.finalize_stage_exact_prefill_kv_continuation(
+                        r.prompt_len,
+                        cache_sequence_start,
+                    )
+                } else {
+                    engine.finalize_stage_exact_prefill_kv(r.prompt_len)
+                } {
+                    Ok(()) => Ok((r, capture)),
                     Err(e) => Err(format!("KV stage export failed: {}", e)),
                 },
                 Err(e) => Err(e),
             };
 
             match attempt_result {
-                Ok(r) => break Ok(r),
+                Ok(result) => break Ok(result),
                 Err(e) => {
+                    if cache_sequence_start > 0 {
+                        break Err(format!(
+                            "continuation prefill failed after mutating live sequence state; retry requires the committed boundary snapshot: {}",
+                            e
+                        ));
+                    }
                     let current_chunk = engine.scratch.max_tokens;
                     let next_retry_cap = engine.cold_staging_retry_chunk_cap();
                     if let Some(next_cap) = next_retry_cap {
@@ -2329,7 +3363,16 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             prefill_min_free_mb,
         );
 
-        // Release scratch to free VRAM for decode/HCS
+        let retain_active_stage = cache_prefill_stage_required
+            && result
+                .as_ref()
+                .ok()
+                .and_then(|(_, capture)| capture.as_ref())
+                .is_some();
+        engine.retain_active_stage_after_prefill(retain_active_stage);
+
+        // Release scratch to free VRAM for decode/HCS. The exact stage K/V is
+        // retained only when a transactional active boundary was captured.
         if let Err(e) = engine.release_scratch() {
             log::error!("Failed to release scratch: {}", e);
             abort_if_cuda_context_poisoned("chat release_scratch", &e);
@@ -2365,7 +3408,35 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         }
 
         match result {
-            Ok(r) => {
+            Ok((r, capture)) => {
+                if let Some(capture) = capture {
+                    match (
+                        cache_boundary_reservation.take(),
+                        cache_stable_boundary_tokens
+                            .as_ref()
+                            .filter(|tokens| tokens.len() == capture.token_count)
+                            .cloned(),
+                    ) {
+                        (Some(reservation), Some(consumed_token_ids)) => {
+                            pending_boundary_snapshot = Some(PendingBoundarySnapshot {
+                                reservation,
+                                consumed_token_ids,
+                                capture,
+                            });
+                        }
+                        (reservation, _) => {
+                            cache_boundary_reservation = reservation;
+                            cache_request_eligible = false;
+                            log::error!(
+                                "Request {} prefix cache boundary capture contract failed: capture_tokens={} stable_boundary={:?} reservation_present={}",
+                                request_id,
+                                capture.token_count,
+                                cache_stable_boundary_tokens.as_ref().map(Vec::len),
+                                cache_boundary_reservation.is_some(),
+                            );
+                        }
+                    }
+                }
                 let debug_payload = if debug_first_token_boundary {
                     let debug_ids = chat_debug_input_token_ids.clone().unwrap_or_default();
                     let selected_token_text = state
@@ -2430,6 +3501,14 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         }
     };
 
+    if !cache_request_eligible {
+        rollback_pending_boundary_snapshot(
+            state,
+            &mut pending_boundary_snapshot,
+            &mut cache_boundary_reservation,
+        );
+    }
+
     let prefill_gil_ms = t_prefill_gil.elapsed().as_secs_f64() * 1000.0;
     crate::vram_monitor::report_event("prefill_end");
 
@@ -2437,6 +3516,11 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     {
         Ok(v) => v,
         Err(e) => {
+            rollback_pending_boundary_snapshot(
+                state,
+                &mut pending_boundary_snapshot,
+                &mut cache_boundary_reservation,
+            );
             let err_str = e.to_string();
             log::error!("Prefill failed: {}", err_str);
             abort_if_cuda_context_poisoned("chat prefill", &err_str);
@@ -2486,9 +3570,20 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             return;
         }
     };
+    if cache_request_eligible && cache_sequence_start == 0 && prefill_gil_ms > 0.0 {
+        state
+            .session_cache
+            .prefill_samples
+            .push((prompt_len, prefill_gil_ms));
+    }
 
     // If prompt exceeded Rust KV cache, return error (not a silent 200 with truncated output)
     if kv_overflow {
+        rollback_pending_boundary_snapshot(
+            state,
+            &mut pending_boundary_snapshot,
+            &mut cache_boundary_reservation,
+        );
         log::error!(
             "Request {}: prompt {} tokens exceeds Rust KV cache capacity",
             request_id,
@@ -2544,6 +3639,11 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
 
     // Check context length
     if !context_window_fits(prompt_len, max_tokens, state.max_context_tokens) {
+        rollback_pending_boundary_snapshot(
+            state,
+            &mut pending_boundary_snapshot,
+            &mut cache_boundary_reservation,
+        );
         let requested_total = prompt_len.saturating_add(max_tokens);
         let _ = send_json(
             stream,
@@ -2576,8 +3676,6 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         "route=/v1/chat/completions request_id={} model={} prompt_tokens={} max_new={} stream={} phase=decode_setup",
         request_id, state.model_name, prompt_len, max_tokens, is_stream,
     ));
-
-    let tokenizer = &state.tokenizer;
 
     // ── Reload soft HCS after prefill ──
     // Always attempt reload — soft pool may have been cancelled by a prior operation
@@ -2780,9 +3878,11 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         store.set_min_new_tokens_ext(min_stop_suppress_steps, min_stop_suppress_ids);
     }
 
+    let tokenizer = &state.tokenizer;
+
     // ── GPU decode: GIL-free Rust decode via GpuDecodeStore ──
     crate::vram_monitor::report_event("decode_start");
-    handle_gpu_decode(
+    let decode_outcome = handle_gpu_decode(
         stream,
         is_stream,
         state,
@@ -2808,13 +3908,163 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     );
     crate::vram_monitor::report_event("decode_end");
 
-    // ── Cleanup (GIL required) ──
-    let t_cleanup_gil = Instant::now();
-    Python::with_gil(|py| {
-        let _ = state.py_model.call_method0(py, "server_cleanup");
-    });
-    let cleanup_gil_ms = t_cleanup_gil.elapsed().as_secs_f64() * 1000.0;
+    // ── Transactional sequence-state publication and cleanup ──
+    let t_cleanup = Instant::now();
+    if cache_request_eligible {
+        if decode_outcome.completed {
+            let mut post_snapshot_base = cache_base_snapshot_id;
+            let pending_active_boundary = pending_boundary_snapshot
+                .as_ref()
+                .filter(|_| cache_prefill_stage_required)
+                .map(|pending| pending.consumed_token_ids.clone());
+            if let Some(pending) = pending_boundary_snapshot.take() {
+                let boundary_tokens = pending.consumed_token_ids.len();
+                match commit_pending_boundary_snapshot(state, pending) {
+                    Ok((snapshot_id, bytes, save_ms, calibration_restore_ms)) => {
+                        post_snapshot_base = Some(snapshot_id);
+                        log::info!(
+                            "Request {} prefix cache stable boundary committed: id={:?} tokens={} bytes={} save_ms={:.3} validation_restore_ms={:.3}",
+                            request_id,
+                            snapshot_id,
+                            boundary_tokens,
+                            bytes,
+                            save_ms,
+                            calibration_restore_ms,
+                        );
+                    }
+                    Err(error) => {
+                        log::error!(
+                            "Request {} prefix cache stable boundary commit failed: {}",
+                            request_id,
+                            error,
+                        );
+                    }
+                }
+            } else {
+                cancel_boundary_reservation(
+                    &mut state.session_cache,
+                    &mut cache_boundary_reservation,
+                );
+            }
+            let mut consumed_token_ids = request_token_ids;
+            consumed_token_ids.extend_from_slice(&decode_outcome.consumed_generation_tokens);
+            if cache_prefill_stage_required {
+                let publish_active = pending_active_boundary
+                    .zip(post_snapshot_base)
+                    .ok_or_else(|| {
+                        "compressed-stage request completed without a committed active boundary"
+                            .to_string()
+                    })
+                    .and_then(|(boundary_tokens, snapshot_id)| {
+                        let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+                        let checkpoint_bytes =
+                            store.commit_active_sequence_checkpoint_rust(boundary_tokens.len())?;
+                        Ok((boundary_tokens, snapshot_id, checkpoint_bytes))
+                    });
+                match publish_active {
+                    Ok((boundary_tokens, snapshot_id, checkpoint_bytes)) => {
+                        let boundary_len = boundary_tokens.len();
+                        state.session_cache.active = Some(ActiveSequenceState {
+                            consumed_token_ids: boundary_tokens,
+                            snapshot_id,
+                            requires_device_checkpoint: true,
+                        });
+                        log::info!(
+                            "Request {} prefix cache active compressed boundary committed: id={:?} tokens={} device_checkpoint_bytes={} host_transfer_bytes=0",
+                            request_id,
+                            snapshot_id,
+                            boundary_len,
+                            checkpoint_bytes,
+                        );
+                    }
+                    Err(error) => {
+                        state.session_cache.active = None;
+                        let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+                        store.discard_active_sequence_checkpoint_rust();
+                        if let Ok(mut engine_guard) = state.rust_prefill.lock() {
+                            if let Some(engine) = engine_guard.as_mut() {
+                                engine.discard_active_stage_state();
+                            }
+                        }
+                        log::error!(
+                            "Request {} prefix cache active compressed boundary publication failed: {}",
+                            request_id,
+                            error,
+                        );
+                    }
+                }
+            } else {
+                match snapshot_current_sequence_to_ram(
+                    state,
+                    &consumed_token_ids,
+                    post_snapshot_base,
+                ) {
+                    Ok((snapshot_id, bytes, save_ms, calibration_restore_ms)) => {
+                        state.session_cache.active = Some(ActiveSequenceState {
+                            consumed_token_ids,
+                            snapshot_id,
+                            requires_device_checkpoint: false,
+                        });
+                        log::info!(
+                        "Request {} prefix cache snapshot committed: id={:?} bytes={} save_ms={:.3} validation_restore_ms={:.3}",
+                        request_id,
+                        snapshot_id,
+                        bytes,
+                        save_ms,
+                        calibration_restore_ms,
+                    );
+                    }
+                    Err(error) => {
+                        state.session_cache.active = None;
+                        log::error!(
+                        "Request {} prefix cache post-generation snapshot failed; any committed stable boundary remains valid: {}",
+                        request_id,
+                        error,
+                    );
+                    }
+                }
+            }
+        } else {
+            state.session_cache.active = None;
+            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+            store.discard_active_sequence_checkpoint_rust();
+            if let Ok(mut engine_guard) = state.rust_prefill.lock() {
+                if let Some(engine) = engine_guard.as_mut() {
+                    engine.discard_active_stage_state();
+                }
+            }
+            rollback_pending_boundary_snapshot(
+                state,
+                &mut pending_boundary_snapshot,
+                &mut cache_boundary_reservation,
+            );
+            log::warn!(
+                "Request {} prefix cache transaction rolled back: {}",
+                request_id,
+                decode_outcome
+                    .failure_reason
+                    .as_deref()
+                    .unwrap_or("request did not complete"),
+            );
+        }
+        let cleanup_store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+        if let Err(error) = cleanup_store.swap_to_marlin_rust() {
+            state.session_cache.active = None;
+            log::error!(
+                "Request {} Rust cleanup failed; active state invalidated: {}",
+                request_id,
+                error,
+            );
+        }
+    } else {
+        Python::with_gil(|py| {
+            let _ = state.py_model.call_method0(py, "server_cleanup");
+        });
+        state.session_cache.active = None;
+    }
+    let cleanup_gil_ms = t_cleanup.elapsed().as_secs_f64() * 1000.0;
     crate::vram_monitor::report_event("cleanup_end");
+    let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
     let (cleanup_pressure_evicted, cleanup_pressure_freed_mb, cleanup_pressure_final_free_mb) =
         store.hcs_drain_vram_pressure("request_cleanup_end", true);
     if cleanup_pressure_evicted > 0 {
@@ -2837,6 +4087,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
 /// Handle /v1/internal/prefill_logits endpoint.
 /// Runs a full prefill pass and extracts top-k logprobs at sampled positions.
 fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
+    invalidate_active_sequence(state, "prefill_logits_request");
     // Parse request
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -3144,6 +4395,7 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
 /// Accepts raw input_token_ids, runs greedy prefill + decode, returns output tokens with logprobs.
 /// Used for comparing engine output against BF16 reference data.
 fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
+    invalidate_active_sequence(state, "reference_test_request");
     let t_start = Instant::now();
     state.reference_test_request_order = state.reference_test_request_order.saturating_add(1);
     let reference_request_order = state.reference_test_request_order;
@@ -4610,6 +5862,49 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
 
 /// GPU decode: GIL-free Rust decode loop via GpuDecodeStore.
 /// Pure Rust, zero Python per token.
+#[derive(Debug)]
+struct DecodeTransactionOutcome {
+    /// Tokens which were actually consumed by decode and are therefore
+    /// represented by the live GPU sequence state. The final emitted token is
+    /// intentionally absent because it has not yet been fed back into decode.
+    consumed_generation_tokens: Vec<u32>,
+    completed: bool,
+    failure_reason: Option<String>,
+}
+
+impl DecodeTransactionOutcome {
+    fn failed(reason: impl Into<String>) -> Self {
+        Self {
+            consumed_generation_tokens: Vec::new(),
+            completed: false,
+            failure_reason: Some(reason.into()),
+        }
+    }
+}
+
+fn consumed_generation_boundary(
+    first_token: usize,
+    emitted_token_ids: &[u32],
+    reported_generated: usize,
+) -> Result<Vec<u32>, String> {
+    if reported_generated != emitted_token_ids.len() {
+        return Err(format!(
+            "decode reported {} generated tokens but callback observed {}",
+            reported_generated,
+            emitted_token_ids.len()
+        ));
+    }
+    if reported_generated == 0 {
+        return Ok(Vec::new());
+    }
+    let first_token = u32::try_from(first_token)
+        .map_err(|_| format!("first generated token ID {first_token} exceeds u32"))?;
+    let mut consumed = Vec::with_capacity(reported_generated);
+    consumed.push(first_token);
+    consumed.extend_from_slice(&emitted_token_ids[..reported_generated - 1]);
+    Ok(consumed)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_gpu_decode(
     stream: &mut TcpStream,
@@ -4634,7 +5929,7 @@ fn handle_gpu_decode(
     enable_thinking: bool,
     logprobs_top_n: usize,
     chat_debug_payload: Option<serde_json::Value>,
-) {
+) -> DecodeTransactionOutcome {
     let mut chat_debug_payload = chat_debug_payload;
     // Resolve thinking end token early — used by both streaming and non-streaming paths
     let think_end_id = if enable_thinking {
@@ -4656,7 +5951,7 @@ fn handle_gpu_decode(
     if is_stream {
         if let Err(e) = begin_sse(stream) {
             log::error!("Failed to send SSE headers: {}", e);
-            return;
+            return DecodeTransactionOutcome::failed(format!("send SSE headers: {e}"));
         }
 
         let first_text = decode_token_preserving_tool_specials(
@@ -4671,14 +5966,22 @@ fn handle_gpu_decode(
         if think_end_id.is_some() {
             let think_chunk =
                 format_sse_token(request_id, model_name, "<think>", None, created, None);
-            let _ = send_sse_chunk(stream, &think_chunk);
+            if let Err(error) = send_sse_chunk(stream, &think_chunk) {
+                return DecodeTransactionOutcome::failed(format!(
+                    "send initial thinking SSE chunk: {error}"
+                ));
+            }
         }
 
         // When tool use is active, buffer first token (might need tool call parsing).
         // Otherwise send immediately for lowest latency.
         if !has_tools {
             let chunk = format_sse_token(request_id, model_name, &first_text, None, created, None);
-            let _ = send_sse_chunk(stream, &chunk);
+            if let Err(error) = send_sse_chunk(stream, &chunk) {
+                return DecodeTransactionOutcome::failed(format!(
+                    "send initial token SSE chunk: {error}"
+                ));
+            }
         }
 
         let (tx, rx) = mpsc::channel::<String>();
@@ -4689,7 +5992,7 @@ fn handle_gpu_decode(
             Ok(s) => s,
             Err(e) => {
                 log::error!("Failed to clone stream for writer: {}", e);
-                return;
+                return DecodeTransactionOutcome::failed(format!("clone SSE stream: {e}"));
             }
         };
 
@@ -4728,8 +6031,11 @@ fn handle_gpu_decode(
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         if !buf.is_empty() {
-                            let _ = writer_stream.write_all(buf.as_bytes());
-                            let _ = writer_stream.flush();
+                            if writer_stream.write_all(buf.as_bytes()).is_err()
+                                || writer_stream.flush().is_err()
+                            {
+                                writer_disc_clone.store(true, Ordering::Release);
+                            }
                         }
                         return;
                     }
@@ -4739,6 +6045,8 @@ fn handle_gpu_decode(
 
         let decode_start = Instant::now();
         let mut decode_token_count = 0usize;
+        let mut emitted_token_ids = Vec::new();
+        let mut delivery_failed = false;
 
         // ── Thinking budget tracking ──
         // When thinking is enabled, tokens inside <think>...</think> are exempt
@@ -4773,7 +6081,9 @@ fn handle_gpu_decode(
             );
             if !visible.is_empty() {
                 let chunk = format_sse_token(request_id, model_name, &visible, None, created, None);
-                let _ = tx.send(format!("data: {}\n\n", chunk));
+                if tx.send(format!("data: {}\n\n", chunk)).is_err() {
+                    delivery_failed = true;
+                }
             }
         }
 
@@ -4784,6 +6094,7 @@ fn handle_gpu_decode(
                             token_logprobs: Option<&[(u32, f32)]>|
          -> bool {
             decode_token_count += 1;
+            emitted_token_ids.push(token_id as u32);
 
             // ── Track thinking state ──
             // Tokens before </think> are "thinking" and don't count against max_tokens.
@@ -4832,7 +6143,10 @@ fn handle_gpu_decode(
                         created,
                         token_logprobs,
                     );
-                    let _ = tx.send(format!("data: {}\n\n", chunk));
+                    if tx.send(format!("data: {}\n\n", chunk)).is_err() {
+                        delivery_failed = true;
+                        return false;
+                    }
                 }
 
                 if writer_disconnected.load(Ordering::Acquire) {
@@ -4854,6 +6168,7 @@ fn handle_gpu_decode(
                 );
                 let formatted = format!("data: {}\n\n", chunk);
                 if tx.send(formatted).is_err() || writer_disconnected.load(Ordering::Acquire) {
+                    delivery_failed = true;
                     return false;
                 }
                 // Stop if answer limit reached
@@ -4877,7 +6192,7 @@ fn handle_gpu_decode(
             .saturating_sub(1);
         let decode_budget = requested_decode_budget.min(context_decode_budget);
 
-        if !state.aux_gpu_store_addrs.is_empty() {
+        let generated = if !state.aux_gpu_store_addrs.is_empty() {
             // Multi-GPU decode: pipeline across N GPUs
             store.gpu_generate_stream_multi(
                 &state.aux_gpu_store_addrs,
@@ -4896,7 +6211,7 @@ fn handle_gpu_decode(
                 logprobs_top_n,
                 Some(format!("chat_{}", request_id)),
                 &mut on_token,
-            );
+            )
         } else {
             // Single-GPU decode
             store.gpu_generate_stream(
@@ -4912,9 +6227,9 @@ fn handle_gpu_decode(
                 presence_penalty,
                 logprobs_top_n,
                 Some(format!("chat_{}", request_id)),
-                on_token,
-            );
-        }
+                &mut on_token,
+            )
+        };
 
         // Capture decode timing BEFORE post-generation processing (tool call parsing etc.)
         let decode_elapsed = decode_start.elapsed().as_secs_f64();
@@ -4935,14 +6250,18 @@ fn handle_gpu_decode(
                     created,
                     None,
                 );
-                let _ = tx.send(format!("data: {}\n\n", content_chunk));
+                if tx.send(format!("data: {}\n\n", content_chunk)).is_err() {
+                    delivery_failed = true;
+                }
             }
             if !tool_calls.is_empty() {
                 for (i, tc) in tool_calls.iter().enumerate() {
                     let start_chunk = format_sse_tool_call_start(
                         request_id, model_name, i, &tc.id, &tc.name, created,
                     );
-                    let _ = tx.send(format!("data: {}\n\n", start_chunk));
+                    if tx.send(format!("data: {}\n\n", start_chunk)).is_err() {
+                        delivery_failed = true;
+                    }
                     let args_chunk = format_sse_tool_call_args(
                         request_id,
                         model_name,
@@ -4950,7 +6269,9 @@ fn handle_gpu_decode(
                         &tc.arguments_json,
                         created,
                     );
-                    let _ = tx.send(format!("data: {}\n\n", args_chunk));
+                    if tx.send(format!("data: {}\n\n", args_chunk)).is_err() {
+                        delivery_failed = true;
+                    }
                 }
                 let finish_chunk = format_sse_token(
                     request_id,
@@ -4960,7 +6281,9 @@ fn handle_gpu_decode(
                     created,
                     None,
                 );
-                let _ = tx.send(format!("data: {}\n\n", finish_chunk));
+                if tx.send(format!("data: {}\n\n", finish_chunk)).is_err() {
+                    delivery_failed = true;
+                }
                 log::info!(
                     "Request {}: {} tool call(s) detected",
                     request_id,
@@ -4974,7 +6297,9 @@ fn handle_gpu_decode(
                 };
                 let finish_chunk =
                     format_sse_token(request_id, model_name, "", Some(fr), created, None);
-                let _ = tx.send(format!("data: {}\n\n", finish_chunk));
+                if tx.send(format!("data: {}\n\n", finish_chunk)).is_err() {
+                    delivery_failed = true;
+                }
             }
         }
 
@@ -5015,16 +6340,50 @@ fn handle_gpu_decode(
             overhead_total_ms,
             overhead,
         );
-        let _ = tx.send(format!("data: {}\n\n", timing_chunk));
-        let _ = tx.send("data: [DONE]\n\n".to_string());
+        if tx.send(format!("data: {}\n\n", timing_chunk)).is_err() {
+            delivery_failed = true;
+        }
+        if tx.send("data: [DONE]\n\n".to_string()).is_err() {
+            delivery_failed = true;
+        }
         drop(tx);
         let _ = writer_handle.join();
+
+        let engine_failure = store.last_stream_failure_rust().map(str::to_string);
+        let disconnected = writer_disconnected.load(Ordering::Acquire);
+        let consumed_boundary =
+            consumed_generation_boundary(first_token, &emitted_token_ids, generated);
+        let completed = engine_failure.is_none()
+            && !delivery_failed
+            && !disconnected
+            && consumed_boundary.is_ok();
+        let failure_reason = if let Some(failure) = engine_failure {
+            Some(failure)
+        } else if delivery_failed {
+            Some("SSE response delivery failed".to_string())
+        } else if disconnected {
+            Some("client disconnected during SSE response".to_string())
+        } else if let Err(error) = consumed_boundary.as_ref() {
+            Some(error.clone())
+        } else {
+            None
+        };
+        let consumed_generation_tokens = if completed {
+            consumed_boundary.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         log::info!(
             "Request {} complete: decode={:.2}s ({} tok, {:.1} tok/s) | overhead={:.0}ms (parse={:.1} evict={:.1} prefill={:.0} reload={:.0})",
             request_id, elapsed, total_gen, decode_tok_s,
             overhead_total_ms, overhead.parse_ms, overhead.evict_ms, overhead.prefill_ms, overhead.reload_ms
         );
+        DecodeTransactionOutcome {
+            consumed_generation_tokens,
+            completed,
+            failure_reason,
+        }
     } else {
         // ── Non-streaming path ──
         let mut all_text = String::new();
@@ -5039,6 +6398,8 @@ fn handle_gpu_decode(
         );
         all_text.push_str(&first_text);
         let mut total_tokens = 1usize;
+        let mut emitted_token_ids = Vec::new();
+        let decode_reported_generated;
         let mut finish = "length".to_string();
         let mut debug_output_tokens: Vec<(usize, Vec<(u32, f32)>)> = Vec::new();
         if chat_debug_payload.is_some() {
@@ -5074,6 +6435,7 @@ fn handle_gpu_decode(
                                 finish_reason: Option<&str>,
                                 token_logprobs: Option<&[(u32, f32)]>|
              -> bool {
+                emitted_token_ids.push(token_id as u32);
                 let hide_text =
                     hide_synthetic_think_stop_text(token_id, finish_reason, hidden_think_stop_id);
                 if !hide_text {
@@ -5110,7 +6472,7 @@ fn handle_gpu_decode(
 
                 true
             };
-            if !state.aux_gpu_store_addrs.is_empty() {
+            decode_reported_generated = if !state.aux_gpu_store_addrs.is_empty() {
                 store.gpu_generate_stream_multi(
                     &state.aux_gpu_store_addrs,
                     &state.multi_gpu_split_layers,
@@ -5128,7 +6490,7 @@ fn handle_gpu_decode(
                     logprobs_top_n,
                     Some(format!("chat_{}_nosse", request_id)),
                     &mut on_token,
-                );
+                )
             } else {
                 store.gpu_generate_stream(
                     first_token,
@@ -5143,7 +6505,15 @@ fn handle_gpu_decode(
                     presence_penalty,
                     logprobs_top_n,
                     Some(format!("chat_{}_nosse", request_id)),
-                    on_token,
+                    &mut on_token,
+                )
+            };
+
+            if decode_reported_generated != emitted_token_ids.len() {
+                log::error!(
+                    "decode reported {} generated tokens but callback observed {}",
+                    decode_reported_generated,
+                    emitted_token_ids.len()
                 );
             }
         }
@@ -5198,7 +6568,7 @@ fn handle_gpu_decode(
             );
         }
 
-        if has_tools {
+        let response_delivery = if has_tools {
             let (content, tool_calls) = parse_tool_calls(&all_text, tool_call_format);
             if !tool_calls.is_empty() {
                 let response = format_completion_with_tool_calls(
@@ -5210,12 +6580,13 @@ fn handle_gpu_decode(
                     total_tokens,
                     created,
                 );
-                let _ = send_json(stream, 200, &response);
+                let delivered = send_json(stream, 200, &response);
                 log::info!(
                     "Request {}: {} tool call(s) (non-streaming)",
                     request_id,
                     tool_calls.len()
                 );
+                delivered
             } else {
                 let response = format_completion_with_debug(
                     request_id,
@@ -5227,7 +6598,7 @@ fn handle_gpu_decode(
                     created,
                     chat_debug_payload.as_ref(),
                 );
-                let _ = send_json(stream, 200, &response);
+                send_json(stream, 200, &response)
             }
         } else {
             let response = format_completion_with_debug(
@@ -5240,7 +6611,32 @@ fn handle_gpu_decode(
                 created,
                 chat_debug_payload.as_ref(),
             );
-            let _ = send_json(stream, 200, &response);
+            send_json(stream, 200, &response)
+        };
+
+        let engine_failure = store.last_stream_failure_rust().map(str::to_string);
+        let consumed_boundary = consumed_generation_boundary(
+            first_token,
+            &emitted_token_ids,
+            decode_reported_generated,
+        );
+        let completed =
+            engine_failure.is_none() && consumed_boundary.is_ok() && response_delivery.is_ok();
+        let consumed_generation_tokens = if completed {
+            consumed_boundary.as_ref().cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        DecodeTransactionOutcome {
+            consumed_generation_tokens,
+            completed,
+            failure_reason: engine_failure
+                .or_else(|| {
+                    response_delivery
+                        .err()
+                        .map(|error| format!("send JSON response: {error}"))
+                })
+                .or_else(|| consumed_boundary.err()),
         }
     }
 }
@@ -5481,6 +6877,63 @@ impl RustServer {
                 None
             };
 
+            let prefix_cache_enabled = match parse_prefix_cache_enabled() {
+                Ok(enabled) => enabled,
+                Err(error) => {
+                    log::error!("Cannot start server: {}", error);
+                    return;
+                }
+            };
+            log::info!(
+                "RAM-backed prefix cache: {}",
+                if prefix_cache_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            let prefix_cache_compatibility = if prefix_cache_enabled {
+                match build_session_compatibility_signature(
+                    &model_name,
+                    &tokenizer_path,
+                    &chat_template,
+                    gpu_store_addr,
+                    &aux_gpu_store_addrs,
+                ) {
+                    Ok(signature) => Some(signature),
+                    Err(error) => {
+                        log::error!(
+                            "Cannot start server with RAM-backed prefix cache enabled: {}",
+                            error
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let prefix_cache_ram_store = if prefix_cache_enabled {
+                let fraction = match parse_prefix_cache_ram_fraction() {
+                    Ok(fraction) => fraction,
+                    Err(error) => {
+                        log::error!("Cannot start RAM-backed prefix cache: {}", error);
+                        return;
+                    }
+                };
+                match crate::session_cache::RamSessionStore::new(
+                    fraction,
+                    Arc::new(crate::session_cache::SystemMemoryAvailabilityProbe),
+                ) {
+                    Ok(store) => Some(store),
+                    Err(error) => {
+                        log::error!("Cannot start RAM-backed prefix cache: {}", error);
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+
             // Share the prefill engine from the RustServer via Arc clone.
             // If RustServer::new() took the pre-allocated engine (it should have),
             // it's already in the shared Mutex. If not, try the decode store.
@@ -5537,6 +6990,14 @@ impl RustServer {
                 rust_prefill,
                 eos_stop_ids,
                 reference_test_request_order: 0,
+                session_cache: SessionCacheRuntime {
+                    enabled: prefix_cache_enabled,
+                    active: None,
+                    compatibility: prefix_cache_compatibility,
+                    ram_store: prefix_cache_ram_store,
+                    prefill_samples: Vec::new(),
+                    restore_samples: Vec::new(),
+                },
             };
 
             let server_info = ServerInfo {
@@ -6313,9 +7774,9 @@ impl RustServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        context_window_fits, format_completion, format_completion_with_debug,
-        format_completion_with_tool_calls, format_models_response, format_sse_timing,
-        format_sse_token, format_sse_tool_call_args, format_sse_tool_call_start,
+        consumed_generation_boundary, context_window_fits, format_completion,
+        format_completion_with_debug, format_completion_with_tool_calls, format_models_response,
+        format_sse_timing, format_sse_token, format_sse_tool_call_args, format_sse_tool_call_start,
         hide_synthetic_think_stop_text, is_chat_completions_endpoint, is_models_endpoint,
         parse_tool_calls, push_tool_stream_text, ParsedToolCall, RequestOverhead,
         StreamDetokenizer,
@@ -6333,6 +7794,23 @@ mod tests {
 
     fn parsed_arguments(call: &ParsedToolCall) -> serde_json::Value {
         serde_json::from_str(&call.arguments_json).unwrap()
+    }
+
+    #[test]
+    fn transaction_boundary_excludes_the_unconsumed_final_token() {
+        assert_eq!(
+            consumed_generation_boundary(10, &[], 0).unwrap(),
+            Vec::<u32>::new()
+        );
+        assert_eq!(
+            consumed_generation_boundary(10, &[11], 1).unwrap(),
+            vec![10]
+        );
+        assert_eq!(
+            consumed_generation_boundary(10, &[11, 12, 13], 3).unwrap(),
+            vec![10, 11, 12]
+        );
+        assert!(consumed_generation_boundary(10, &[11, 12], 1).is_err());
     }
 
     #[test]

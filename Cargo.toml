@@ -31,6 +31,7 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 rand = "0.8"
 cudarc = { version = "0.12", features = ["driver", "cublas", "f16", "cuda-12060"], optional = true }
 minijinja = "2"
+sha2 = "0.10"
 
 [build-dependencies]
 cc = "1"

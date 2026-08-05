@@ -7,12 +7,18 @@
 //! back into Python.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub const SESSION_SNAPSHOT_FORMAT_VERSION: u32 = 1;
+pub const SESSION_SNAPSHOT_FORMAT_VERSION: u32 = 2;
+pub const PREFILL_STAGE_K_KIND: &str = "gqa_prefill_stage_k";
+pub const PREFILL_STAGE_V_KIND: &str = "gqa_prefill_stage_v";
+
+pub fn is_prefill_stage_kind(kind: &str) -> bool {
+    kind == PREFILL_STAGE_K_KIND || kind == PREFILL_STAGE_V_KIND
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -60,7 +66,7 @@ impl SequenceStateAllocation {
         }
     }
 
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.name.trim().is_empty() {
             return Err("sequence-state allocation name must not be empty".to_string());
         }
@@ -212,6 +218,75 @@ impl SequenceStateRegistry {
             .any(|allocation| allocation.ptr == ptr)
     }
 
+    pub fn has_non_rewindable_state(&self) -> bool {
+        self.allocations
+            .iter()
+            .any(|allocation| matches!(allocation.growth, SequenceStateGrowth::Fixed))
+    }
+
+    pub fn compatibility_layout_value(&self) -> serde_json::Value {
+        serde_json::Value::Array(
+            self.allocations
+                .iter()
+                .map(|allocation| {
+                    serde_json::json!({
+                        "name": allocation.name,
+                        "kind": allocation.kind,
+                        "layer_idx": allocation.layer_idx,
+                        "device_ordinal": allocation.device_ordinal,
+                        "storage_bytes": allocation.storage_bytes,
+                        "dtype": allocation.dtype,
+                        "element_size": allocation.element_size,
+                        "shape": allocation.shape,
+                        "strides_bytes": allocation.strides_bytes,
+                        "growth": allocation.growth,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    pub fn snapshot_blob_memory_cost_estimate(
+        &self,
+        logical_tokens: usize,
+    ) -> Result<usize, String> {
+        self.allocations
+            .iter()
+            .try_fold(0usize, |total, allocation| {
+                let used_bytes = allocation.used_bytes(logical_tokens);
+                if used_bytes == 0 {
+                    return Ok(total);
+                }
+                let metadata = std::mem::size_of::<SequenceStateBlob>()
+                    .checked_add(allocation.name.len())
+                    .and_then(|value| value.checked_add(allocation.kind.len()))
+                    .and_then(|value| value.checked_add(allocation.dtype.len()))
+                    .and_then(|value| {
+                        value.checked_add(
+                            allocation
+                                .shape
+                                .len()
+                                .saturating_mul(std::mem::size_of::<usize>()),
+                        )
+                    })
+                    .and_then(|value| {
+                        value.checked_add(
+                            allocation
+                                .strides_bytes
+                                .len()
+                                .saturating_mul(std::mem::size_of::<usize>()),
+                        )
+                    })
+                    .and_then(|value| value.checked_add(used_bytes))
+                    .ok_or_else(|| {
+                        format!("{} snapshot memory-cost estimate overflow", allocation.name)
+                    })?;
+                total.checked_add(metadata).ok_or_else(|| {
+                    "sequence-state snapshot memory-cost estimate overflow".to_string()
+                })
+            })
+    }
+
     pub fn validate_complete_names(&self) -> Result<(), String> {
         let unique: HashSet<&str> = self
             .allocations
@@ -258,6 +333,18 @@ pub struct LayerOwnership {
     pub total_memory_bytes: u64,
     pub layer_start: usize,
     pub layer_end: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DeviceCompatibilityMaterial {
+    pub ownership: LayerOwnership,
+    pub model_num_layers: usize,
+    pub expert_quantization: String,
+    pub attention_quantization: String,
+    pub kv_format: String,
+    pub kv_key_bits: u8,
+    pub kv_value_bits: u8,
+    pub state_layout: serde_json::Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -370,7 +457,7 @@ impl SessionCompatibilitySignature {
         Ok(())
     }
 
-    fn heap_bytes(&self) -> usize {
+    pub fn heap_bytes(&self) -> usize {
         let mut bytes = self.runtime_version.capacity()
             + self.model_identity.capacity()
             + self
@@ -413,7 +500,7 @@ pub struct SequenceStateBlob {
 }
 
 impl SequenceStateBlob {
-    fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), String> {
         if self.allocation_name.trim().is_empty()
             || self.kind.trim().is_empty()
             || self.dtype.trim().is_empty()
@@ -608,6 +695,162 @@ pub struct SnapshotId(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RamReservationId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefixLookupResult {
+    Hit {
+        snapshot_id: SnapshotId,
+        matched_tokens: usize,
+    },
+    SignatureMismatch {
+        matched_tokens: usize,
+    },
+    NoMatch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivePrefixPlan {
+    Append { matched_tokens: usize },
+    TruncateKvAndAppend { matched_tokens: usize },
+    RequiresBoundarySnapshot { matched_tokens: usize },
+    NoReusablePrefix,
+    NoSuffixToCompute,
+}
+
+pub fn common_token_prefix(left: &[u32], right: &[u32]) -> usize {
+    left.iter()
+        .zip(right)
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+pub fn plan_active_prefix(
+    active_tokens: &[u32],
+    request_tokens: &[u32],
+    has_non_rewindable_state: bool,
+) -> ActivePrefixPlan {
+    let matched_tokens = common_token_prefix(active_tokens, request_tokens);
+    if matched_tokens == 0 {
+        return ActivePrefixPlan::NoReusablePrefix;
+    }
+    if matched_tokens == request_tokens.len() {
+        return ActivePrefixPlan::NoSuffixToCompute;
+    }
+    if matched_tokens == active_tokens.len() {
+        return ActivePrefixPlan::Append { matched_tokens };
+    }
+    if has_non_rewindable_state {
+        ActivePrefixPlan::RequiresBoundarySnapshot { matched_tokens }
+    } else {
+        ActivePrefixPlan::TruncateKvAndAppend { matched_tokens }
+    }
+}
+
+pub fn ram_prefix_is_longer(active_reusable_tokens: usize, ram_matched_tokens: usize) -> bool {
+    ram_matched_tokens > active_reusable_tokens
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct PrefixFingerprint {
+    token_count: usize,
+    hash: u64,
+}
+
+const PREFIX_HASH_OFFSET: u64 = 0xcbf29ce484222325;
+const PREFIX_HASH_PRIME: u64 = 0x100000001b3;
+
+fn prefix_hash_extend(mut hash: u64, token: u32) -> u64 {
+    for byte in token.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PREFIX_HASH_PRIME);
+    }
+    hash
+}
+
+fn token_fingerprint(tokens: &[u32]) -> PrefixFingerprint {
+    let hash = tokens.iter().fold(PREFIX_HASH_OFFSET, |hash, &token| {
+        prefix_hash_extend(hash, token)
+    });
+    PrefixFingerprint {
+        token_count: tokens.len(),
+        hash,
+    }
+}
+
+#[derive(Default)]
+struct PrefixIndex {
+    candidates: HashMap<PrefixFingerprint, Vec<SnapshotId>>,
+    indexed_lengths: BTreeMap<usize, usize>,
+}
+
+impl PrefixIndex {
+    fn insert(&mut self, id: SnapshotId, tokens: &[u32]) {
+        let fingerprint = token_fingerprint(tokens);
+        self.candidates.entry(fingerprint).or_default().push(id);
+        *self.indexed_lengths.entry(tokens.len()).or_default() += 1;
+    }
+
+    fn remove(&mut self, id: SnapshotId, tokens: &[u32]) -> Result<(), String> {
+        let fingerprint = token_fingerprint(tokens);
+        let candidates = self.candidates.get(&fingerprint).ok_or_else(|| {
+            format!(
+                "session prefix index is missing fingerprint for snapshot {}",
+                id.0
+            )
+        })?;
+        let position = candidates
+            .iter()
+            .position(|candidate| *candidate == id)
+            .ok_or_else(|| format!("session prefix index is missing snapshot {}", id.0))?;
+        let count = *self.indexed_lengths.get(&tokens.len()).ok_or_else(|| {
+            format!(
+                "session prefix index is missing token length {}",
+                tokens.len()
+            )
+        })?;
+        let next_count = count
+            .checked_sub(1)
+            .ok_or_else(|| "session prefix length accounting underflow".to_string())?;
+
+        let candidates = self
+            .candidates
+            .get_mut(&fingerprint)
+            .ok_or_else(|| "session prefix index changed during removal".to_string())?;
+        candidates.swap_remove(position);
+        if candidates.is_empty() {
+            self.candidates.remove(&fingerprint);
+        }
+        if next_count == 0 {
+            self.indexed_lengths.remove(&tokens.len());
+        } else if let Some(count) = self.indexed_lengths.get_mut(&tokens.len()) {
+            *count = next_count;
+        }
+        Ok(())
+    }
+
+    fn query_fingerprints(&self, tokens: &[u32]) -> Vec<PrefixFingerprint> {
+        let mut fingerprints = Vec::with_capacity(self.indexed_lengths.len());
+        let mut lengths = self
+            .indexed_lengths
+            .range(..=tokens.len())
+            .map(|(&length, _)| length)
+            .peekable();
+        let mut next_length = lengths.next();
+        let mut hash = PREFIX_HASH_OFFSET;
+        for (index, &token) in tokens.iter().enumerate() {
+            hash = prefix_hash_extend(hash, token);
+            let token_count = index + 1;
+            if next_length == Some(token_count) {
+                fingerprints.push(PrefixFingerprint { token_count, hash });
+                next_length = lengths.next();
+                if next_length.is_none() {
+                    break;
+                }
+            }
+        }
+        fingerprints
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MemoryAvailability {
@@ -825,6 +1068,7 @@ pub struct RamSessionStore {
     budget_fraction: f64,
     initial_budget_bytes: usize,
     entries: HashMap<SnapshotId, RamSessionEntry>,
+    prefix_index: PrefixIndex,
     reservations: HashMap<RamReservationId, usize>,
     resident_bytes: usize,
     reserved_bytes: usize,
@@ -857,6 +1101,7 @@ impl RamSessionStore {
             budget_fraction,
             initial_budget_bytes,
             entries: HashMap::new(),
+            prefix_index: PrefixIndex::default(),
             reservations: HashMap::new(),
             resident_bytes: 0,
             reserved_bytes: 0,
@@ -884,6 +1129,14 @@ impl RamSessionStore {
     }
 
     pub fn reserve(&mut self, required_bytes: usize) -> Result<RamReservationId, String> {
+        self.reserve_protecting(required_bytes, &[])
+    }
+
+    pub fn reserve_protecting(
+        &mut self,
+        required_bytes: usize,
+        protected: &[SnapshotId],
+    ) -> Result<RamReservationId, String> {
         if required_bytes == 0 {
             return Err("session cache reservation must be positive".to_string());
         }
@@ -900,7 +1153,7 @@ impl RamSessionStore {
             .saturating_add(required_bytes)
             > budget
         {
-            self.evict_lru()?;
+            self.evict_lru_excluding(protected)?;
         }
         let id = RamReservationId(self.next_reservation_id);
         let next_reservation_id = self
@@ -926,6 +1179,49 @@ impl RamSessionStore {
             .reserved_bytes
             .checked_sub(bytes)
             .ok_or_else(|| "session reservation byte accounting underflow".to_string())?;
+        Ok(())
+    }
+
+    /// Increase an existing reservation after a temporary runtime allocation
+    /// exposes an additional exact state size. This keeps admission based on
+    /// current cgroup-aware availability and evicts only through the normal LRU
+    /// policy; callers must extend before allocating the pageable snapshot.
+    pub fn extend_reservation(
+        &mut self,
+        id: RamReservationId,
+        additional_bytes: usize,
+        protected: &[SnapshotId],
+    ) -> Result<(), String> {
+        if additional_bytes == 0 {
+            return Ok(());
+        }
+        let existing = *self
+            .reservations
+            .get(&id)
+            .ok_or_else(|| format!("unknown session cache reservation {}", id.0))?;
+        let expanded = existing
+            .checked_add(additional_bytes)
+            .ok_or_else(|| "session reservation byte accounting overflow".to_string())?;
+        let budget = self.refresh_budget()?;
+        if expanded > budget {
+            return Err(format!(
+                "expanded session snapshot requires {} bytes but the runtime RAM budget is {} bytes",
+                expanded, budget
+            ));
+        }
+        while self
+            .resident_bytes
+            .saturating_add(self.reserved_bytes)
+            .saturating_add(additional_bytes)
+            > budget
+        {
+            self.evict_lru_excluding(protected)?;
+        }
+        self.reservations.insert(id, expanded);
+        self.reserved_bytes = self
+            .reserved_bytes
+            .checked_add(additional_bytes)
+            .ok_or_else(|| "session reservation byte accounting overflow".to_string())?;
         Ok(())
     }
 
@@ -962,6 +1258,7 @@ impl RamSessionStore {
         self.cancel_reservation(reservation)?;
         self.access_clock = next_access_clock;
         self.next_snapshot_id = next_snapshot_id;
+        self.prefix_index.insert(id, &snapshot.consumed_token_ids);
         self.entries.insert(
             id,
             RamSessionEntry {
@@ -974,35 +1271,106 @@ impl RamSessionStore {
         Ok(id)
     }
 
-    pub fn get(&mut self, id: SnapshotId) -> Option<&SessionSnapshot> {
-        let next = self.access_clock.checked_add(1)?;
-        let entry = self.entries.get_mut(&id)?;
+    pub fn longest_prefix(
+        &mut self,
+        tokens: &[u32],
+        compatibility: &SessionCompatibilitySignature,
+    ) -> Result<PrefixLookupResult, String> {
+        let fingerprints = self.prefix_index.query_fingerprints(tokens);
+        let mut incompatible_match = None;
+        let mut hit = None;
+        for fingerprint in fingerprints.into_iter().rev() {
+            let Some(candidates) = self.prefix_index.candidates.get(&fingerprint) else {
+                continue;
+            };
+            for &id in candidates.iter().rev() {
+                let Some(entry) = self.entries.get(&id) else {
+                    continue;
+                };
+                if entry.snapshot.consumed_token_ids.as_slice()
+                    != &tokens[..fingerprint.token_count]
+                {
+                    continue;
+                }
+                if &entry.snapshot.compatibility == compatibility {
+                    hit = Some((id, fingerprint.token_count));
+                    break;
+                }
+                incompatible_match = Some(
+                    incompatible_match
+                        .unwrap_or(0usize)
+                        .max(fingerprint.token_count),
+                );
+            }
+            if hit.is_some() {
+                break;
+            }
+        }
+        if let Some((snapshot_id, matched_tokens)) = hit {
+            self.touch(snapshot_id)?;
+            Ok(PrefixLookupResult::Hit {
+                snapshot_id,
+                matched_tokens,
+            })
+        } else if let Some(matched_tokens) = incompatible_match {
+            Ok(PrefixLookupResult::SignatureMismatch { matched_tokens })
+        } else {
+            Ok(PrefixLookupResult::NoMatch)
+        }
+    }
+
+    fn touch(&mut self, id: SnapshotId) -> Result<(), String> {
+        let next = self
+            .access_clock
+            .checked_add(1)
+            .ok_or_else(|| "session cache access clock exhausted".to_string())?;
+        let entry = self
+            .entries
+            .get_mut(&id)
+            .ok_or_else(|| format!("unknown session snapshot {}", id.0))?;
         self.access_clock = next;
         entry.last_access = next;
-        Some(&entry.snapshot)
+        Ok(())
+    }
+
+    pub fn get(&mut self, id: SnapshotId) -> Result<Option<&SessionSnapshot>, String> {
+        if !self.entries.contains_key(&id) {
+            return Ok(None);
+        }
+        self.touch(id)?;
+        Ok(self.entries.get(&id).map(|entry| &entry.snapshot))
     }
 
     pub fn remove(&mut self, id: SnapshotId) -> Result<Option<SessionSnapshot>, String> {
-        let Some(entry) = self.entries.remove(&id) else {
+        let Some(entry) = self.entries.get(&id) else {
             return Ok(None);
         };
-        self.resident_bytes = self
+        let next_resident_bytes = self
             .resident_bytes
             .checked_sub(entry.memory_cost_bytes)
             .ok_or_else(|| "session resident byte accounting underflow".to_string())?;
+        self.prefix_index
+            .remove(id, &entry.snapshot.consumed_token_ids)?;
+        let entry = self
+            .entries
+            .remove(&id)
+            .ok_or_else(|| format!("session snapshot {} disappeared during removal", id.0))?;
+        self.resident_bytes = next_resident_bytes;
         Ok(Some(entry.snapshot))
     }
 
-    fn evict_lru(&mut self) -> Result<SnapshotId, String> {
+    fn evict_lru_excluding(&mut self, protected: &[SnapshotId]) -> Result<SnapshotId, String> {
+        let protected: HashSet<_> = protected.iter().copied().collect();
         let id = self
             .entries
             .iter()
+            .filter(|(id, _)| !protected.contains(id))
             .min_by_key(|(id, entry)| (entry.last_access, id.0))
             .map(|(id, _)| *id)
             .ok_or_else(|| {
                 format!(
-                    "session RAM budget is exhausted by {} reserved bytes; no committed snapshot can be evicted",
-                    self.reserved_bytes
+                    "session RAM budget is exhausted by {} reserved bytes; no unprotected committed snapshot can be evicted",
+                    self.reserved_bytes,
                 )
             })?;
         self.remove(id)?
@@ -1171,6 +1539,14 @@ mod tests {
         }
     }
 
+    fn snapshot_with_tokens(tokens: &[u32], payload_bytes: usize) -> SessionSnapshot {
+        let mut value = snapshot(tokens[0], payload_bytes);
+        value.consumed_token_ids = tokens.to_vec();
+        value.positions[0].kv_absolute_position = tokens.len();
+        value.positions[0].rope_absolute_position = tokens.len() as i64;
+        value
+    }
+
     fn commit_snapshot(store: &mut RamSessionStore, snapshot: SessionSnapshot) -> SnapshotId {
         let bytes = snapshot.memory_cost_bytes();
         let reservation = store.reserve(bytes).unwrap();
@@ -1246,12 +1622,117 @@ mod tests {
         let first = commit_snapshot(&mut store, sample);
         let second = commit_snapshot(&mut store, snapshot(3, 256));
         assert_eq!(store.stats().resident_snapshots, 2);
-        assert!(store.get(first).is_some());
+        assert!(store.get(first).unwrap().is_some());
         let third = commit_snapshot(&mut store, snapshot(5, 256));
-        assert!(store.get(second).is_none());
-        assert!(store.get(first).is_some());
-        assert!(store.get(third).is_some());
+        assert!(store.get(second).unwrap().is_none());
+        assert!(store.get(first).unwrap().is_some());
+        assert!(store.get(third).unwrap().is_some());
         assert_eq!(store.stats().evictions, 1);
+    }
+
+    #[test]
+    fn incremental_reservation_never_evicts_its_base_snapshot() {
+        let first_snapshot = snapshot(1, 256);
+        let cost = first_snapshot.memory_cost_bytes();
+        let probe = Arc::new(TestMemoryProbe::new((cost * 2) as u64));
+        let mut store = RamSessionStore::new(1.0, probe).unwrap();
+        let first = commit_snapshot(&mut store, first_snapshot);
+        let second = commit_snapshot(&mut store, snapshot(3, 256));
+
+        let reservation = store.reserve_protecting(cost, &[first]).unwrap();
+        assert!(store.get(first).unwrap().is_some());
+        assert!(store.get(second).unwrap().is_none());
+        assert!(store.reserve_protecting(cost, &[first]).is_err());
+        store.cancel_reservation(reservation).unwrap();
+    }
+
+    #[test]
+    fn extending_reservation_uses_live_budget_and_preserves_protected_snapshot() {
+        let first_snapshot = snapshot(1, 256);
+        let cost = first_snapshot.memory_cost_bytes();
+        let budget = cost * 5 / 2;
+        let probe = Arc::new(TestMemoryProbe::new(budget as u64));
+        let mut store = RamSessionStore::new(1.0, probe).unwrap();
+        let first = commit_snapshot(&mut store, first_snapshot);
+        let second = commit_snapshot(&mut store, snapshot(3, 256));
+
+        let initial = cost / 4;
+        let additional = cost / 2;
+        let reservation = store.reserve_protecting(initial, &[first]).unwrap();
+        store
+            .extend_reservation(reservation, additional, &[first])
+            .unwrap();
+
+        assert!(store.get(first).unwrap().is_some());
+        assert!(store.get(second).unwrap().is_none());
+        assert_eq!(store.stats().reserved_bytes, initial + additional);
+        assert_eq!(store.stats().evictions, 1);
+        store.cancel_reservation(reservation).unwrap();
+        assert_eq!(store.stats().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn prefix_index_selects_longest_exact_compatible_boundary() {
+        let short = snapshot_with_tokens(&[1, 2], 64);
+        let long = snapshot_with_tokens(&[1, 2, 3, 4], 64);
+        let cost = short.memory_cost_bytes() + long.memory_cost_bytes();
+        let probe = Arc::new(TestMemoryProbe::new((cost * 4) as u64));
+        let mut store = RamSessionStore::new(1.0, probe).unwrap();
+        let short_id = commit_snapshot(&mut store, short);
+        let long_id = commit_snapshot(&mut store, long);
+
+        assert_eq!(
+            store.longest_prefix(&[1, 2, 3, 4, 5], &signature()),
+            Ok(PrefixLookupResult::Hit {
+                snapshot_id: long_id,
+                matched_tokens: 4,
+            })
+        );
+        let mut incompatible = signature();
+        incompatible.model_identity = "other-model".to_string();
+        assert_eq!(
+            store.longest_prefix(&[1, 2, 3, 4, 5], &incompatible),
+            Ok(PrefixLookupResult::SignatureMismatch { matched_tokens: 4 })
+        );
+        store.remove(long_id).unwrap().unwrap();
+        assert_eq!(
+            store.longest_prefix(&[1, 2, 3, 4, 5], &signature()),
+            Ok(PrefixLookupResult::Hit {
+                snapshot_id: short_id,
+                matched_tokens: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn active_prefix_plan_never_rewinds_recurrent_state() {
+        assert_eq!(
+            plan_active_prefix(&[1, 2], &[1, 2, 3], true),
+            ActivePrefixPlan::Append { matched_tokens: 2 }
+        );
+        assert_eq!(
+            plan_active_prefix(&[1, 2, 9], &[1, 2, 3], false),
+            ActivePrefixPlan::TruncateKvAndAppend { matched_tokens: 2 }
+        );
+        assert_eq!(
+            plan_active_prefix(&[1, 2, 9], &[1, 2, 3], true),
+            ActivePrefixPlan::RequiresBoundarySnapshot { matched_tokens: 2 }
+        );
+        assert_eq!(
+            plan_active_prefix(&[1, 2, 3], &[1, 2], false),
+            ActivePrefixPlan::NoSuffixToCompute
+        );
+        assert_eq!(
+            plan_active_prefix(&[1, 2], &[9, 2], false),
+            ActivePrefixPlan::NoReusablePrefix
+        );
+    }
+
+    #[test]
+    fn ram_prefix_must_beat_active_shared_template_prefix() {
+        assert!(ram_prefix_is_longer(4, 4_150));
+        assert!(!ram_prefix_is_longer(4_150, 4));
+        assert!(!ram_prefix_is_longer(4_150, 4_150));
     }
 
     #[test]

@@ -148,6 +148,10 @@ impl ChatTemplateEngine {
         self.tool_call_format
     }
 
+    pub fn compatibility_source(&self) -> &str {
+        &self.template_source
+    }
+
     /// Apply the chat template to a list of messages.
     ///
     /// `messages_json` is a JSON array of {role, content} objects.

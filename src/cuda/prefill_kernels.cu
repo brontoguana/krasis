@@ -10082,7 +10082,7 @@ extern "C" __global__ void la_split_conv_output_kernel(
  * ═══════════════════════════════════════════════════════════════════════
  *
  * Uses WMMA (Warp Matrix Multiply-Accumulate) for Q*K^T and P*V products.
- * Supports cross-chunk attention: reads from FP8 KV cache for
+ * Supports cross-chunk attention: reads from BF16 or FP8 KV cache for
  * positions [0, start_pos) and from BF16 GEMM output for the current
  * chunk [start_pos, start_pos + M).
  *
@@ -10122,12 +10122,13 @@ __device__ __forceinline__ float fp8e4m3_to_float(__nv_fp8_e4m3 x) {
 extern "C" __global__ void flash_attn_tiled_kernel(
     __nv_bfloat16* __restrict__ out,
     const __nv_bfloat16* __restrict__ q,       /* [M, num_q_heads, head_dim] */
-    const __nv_fp8_e4m3* __restrict__ k_cache, /* [max_seq, kv_stride] FP8 or null */
-    const __nv_fp8_e4m3* __restrict__ v_cache, /* [max_seq, kv_stride] FP8 or null */
+    const void* __restrict__ k_cache, /* [max_seq, kv_stride] BF16/FP8 or null */
+    const void* __restrict__ v_cache, /* [max_seq, kv_stride] BF16/FP8 or null */
     const __nv_bfloat16* __restrict__ k_cur,   /* [M, kv_stride] BF16 current chunk */
     const __nv_bfloat16* __restrict__ v_cur,   /* [M, kv_stride] BF16 current chunk */
     int M, int num_q_heads, int num_kv_heads, int head_dim,
     float softmax_scale, int start_pos, int kv_stride, int sliding_window,
+    int cache_dtype, /* 0=BF16, 1=FP8 E4M3 */
     const int* __restrict__ vision_block_ids)
 {
     int q_base = blockIdx.x * FA_BR;
@@ -10190,8 +10191,15 @@ extern "C" __global__ void flash_attn_tiled_kernel(
                 int abs_pos = kv_start + ki;
                 if (abs_pos < start_pos && k_cache != nullptr) {
                     int64_t off = (int64_t)abs_pos * kv_stride + kv_h * head_dim + d;
-                    kval = float_to_bf16(fp8e4m3_to_float(k_cache[off]));
-                    vval = float_to_bf16(fp8e4m3_to_float(v_cache[off]));
+                    if (cache_dtype == 0) {
+                        kval = static_cast<const __nv_bfloat16*>(k_cache)[off];
+                        vval = static_cast<const __nv_bfloat16*>(v_cache)[off];
+                    } else {
+                        kval = float_to_bf16(fp8e4m3_to_float(
+                            static_cast<const __nv_fp8_e4m3*>(k_cache)[off]));
+                        vval = float_to_bf16(fp8e4m3_to_float(
+                            static_cast<const __nv_fp8_e4m3*>(v_cache)[off]));
+                    }
                 } else {
                     int cp = abs_pos - start_pos;
                     if (cp >= 0 && cp < M) {
