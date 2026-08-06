@@ -11,6 +11,14 @@ Initial scope: measured supported models at `INT4/HQQ4/k4v4` and
 
 Detailed benchmark logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](benchmarks/BENCHMARKS.md).
 
+The RAM-backed session cache's fixed interleaved agent benchmark uses two
+canonical ~10K-token conversations with four turns each and forces six real
+pageable-RAM restores. On Qwen3-Coder-Next with one RTX PRO 6000, cache-on
+reduced the six continuation turns from a 20.306-second cache-off bracket mean
+to 17.945 seconds (**1.132x**) and the complete workload from 27.071 to 25.360
+seconds (**1.067x**). Completion text and token counts matched exactly, with six RAM
+hits and zero restore failures. [Protocol and raw evidence](benchmarks/BENCHMARKS.md#ram-backed-session-cache-interleaved-agent-conversations--2026-08-06).
+
 The RAM-backed session-cache final regression gate compared the exact v1.0.20
 runtime with the final feature source using the timing-disabled fixed
 `./dev speed-test` workload on one RTX PRO 6000. Internal decode changed by

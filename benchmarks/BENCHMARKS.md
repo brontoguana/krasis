@@ -1,5 +1,39 @@
 # Krasis Benchmark Results
 
+## RAM-backed session cache interleaved agent conversations — 2026-08-06
+
+This timing-disabled end-to-end benchmark used Qwen3-Coder-Next INT4 with
+HQQ4 attention and K4V4 KV on one RTX PRO 6000 96GB. The fixed Rust client was
+run through `./dev session-cache-benchmark 18050` against a server launched
+through `./dev run tests/qcn-rtx6000-96gb-hqq4-k4v4-int4-benchmark.conf
+--selected-gpus 1 --port 18050 --prefix-cache`. No Krasis
+component timing or trace instrumentation was enabled.
+
+The workload interleaves two conversations built from the first 40,000
+characters of the canonical Moby Dick and War and Peace prompts. Each has four
+eight-token turns, scheduled A1/B1/A2/B2, so all six continuation turns must
+switch conversations and restore from pageable RAM. A cache-off run before and
+after brackets the cache-on run in the same process. The client requires exact
+completion text and token-count identity across all three runs, no cache-off
+snapshot growth, at least six RAM hits and zero restore failures.
+
+| Measurement | Cache off | Cache on | Speedup |
+|---|---:|---:|---:|
+| Complete two-conversation workload | 27.071 s bracket mean | 25.360 s | **1.067x** |
+| Six continuation turns only | 20.306 s bracket mean | 17.945 s | **1.132x** |
+
+All response-contract identity checks passed. Cache-on recorded exactly six pageable-RAM hits,
+zero active hits and zero restore failures. The eight committed snapshots used
+3,275,812,416 payload bytes. Runtime counters measured six restores averaging
+45.155 ms and eight transactional saves averaging 231.207 ms; these costs are
+already included in the wall-clock totals. QCN retained all 24,576 routed
+experts. Its high free-VRAM floor is expected because no additional HCS
+residency is available.
+
+Evidence: [machine-readable result](20260806_session_cache_agent_qcn_result.json),
+[client command/build stderr](20260806_session_cache_agent_qcn_client_stderr.log),
+and [complete server/calibration log](20260806_session_cache_agent_qcn_server.log).
+
 ## RAM-backed session cache timing-disabled regression gate — 2026-08-05
 
 The required `./dev speed-test` comparison used the command's fixed

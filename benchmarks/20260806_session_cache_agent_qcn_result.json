@@ -1,0 +1,236 @@
+{
+  "benchmark": "ram_backed_interleaved_agent_conversations_v1",
+  "cache_evidence": {
+    "active_gpu_hit_delta": 0,
+    "expected_minimum_pageable_ram_hits": 6,
+    "pageable_ram_hit_delta": 6,
+    "restore_failures_delta": 0
+  },
+  "identity": {
+    "completion_text_equal_on_all_three_runs": true,
+    "completion_token_counts_equal_on_all_three_runs": true
+  },
+  "model": "Qwen3-Coder-Next",
+  "turns": {
+    "cache_off_after": [
+      {
+        "completion_tokens": 8,
+        "conversation": "A",
+        "conversation_turn": 1,
+        "elapsed_ms": 3427.796169,
+        "input_tokens": 10695,
+        "schedule_index": 0
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "B",
+        "conversation_turn": 1,
+        "elapsed_ms": 3311.059569,
+        "input_tokens": 9625,
+        "schedule_index": 1
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "A",
+        "conversation_turn": 2,
+        "elapsed_ms": 3425.653074,
+        "input_tokens": 10722,
+        "schedule_index": 2
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "B",
+        "conversation_turn": 2,
+        "elapsed_ms": 3315.1911059999998,
+        "input_tokens": 9651,
+        "schedule_index": 3
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "A",
+        "conversation_turn": 3,
+        "elapsed_ms": 3420.205289,
+        "input_tokens": 10751,
+        "schedule_index": 4
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "B",
+        "conversation_turn": 3,
+        "elapsed_ms": 3319.7287890000002,
+        "input_tokens": 9682,
+        "schedule_index": 5
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "A",
+        "conversation_turn": 4,
+        "elapsed_ms": 3453.316542,
+        "input_tokens": 10777,
+        "schedule_index": 6
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "B",
+        "conversation_turn": 4,
+        "elapsed_ms": 3321.967362,
+        "input_tokens": 9711,
+        "schedule_index": 7
+      }
+    ],
+    "cache_off_before": [
+      {
+        "completion_tokens": 8,
+        "conversation": "A",
+        "conversation_turn": 1,
+        "elapsed_ms": 3454.056873,
+        "input_tokens": 10695,
+        "schedule_index": 0
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "B",
+        "conversation_turn": 1,
+        "elapsed_ms": 3336.538126,
+        "input_tokens": 9625,
+        "schedule_index": 1
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "A",
+        "conversation_turn": 2,
+        "elapsed_ms": 3441.773516,
+        "input_tokens": 10722,
+        "schedule_index": 2
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "B",
+        "conversation_turn": 2,
+        "elapsed_ms": 3340.767495,
+        "input_tokens": 9651,
+        "schedule_index": 3
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "A",
+        "conversation_turn": 3,
+        "elapsed_ms": 3441.5427720000002,
+        "input_tokens": 10751,
+        "schedule_index": 4
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "B",
+        "conversation_turn": 3,
+        "elapsed_ms": 3354.681711,
+        "input_tokens": 9682,
+        "schedule_index": 5
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "A",
+        "conversation_turn": 4,
+        "elapsed_ms": 3435.800879,
+        "input_tokens": 10777,
+        "schedule_index": 6
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "B",
+        "conversation_turn": 4,
+        "elapsed_ms": 3341.2831,
+        "input_tokens": 9711,
+        "schedule_index": 7
+      }
+    ],
+    "cache_on": [
+      {
+        "completion_tokens": 8,
+        "conversation": "A",
+        "conversation_turn": 1,
+        "elapsed_ms": 3778.227415,
+        "input_tokens": 10695,
+        "schedule_index": 0
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "B",
+        "conversation_turn": 1,
+        "elapsed_ms": 3637.3230670000003,
+        "input_tokens": 9625,
+        "schedule_index": 1
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "A",
+        "conversation_turn": 2,
+        "elapsed_ms": 3095.174594,
+        "input_tokens": 10722,
+        "schedule_index": 2
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "B",
+        "conversation_turn": 2,
+        "elapsed_ms": 2979.413138,
+        "input_tokens": 9651,
+        "schedule_index": 3
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "A",
+        "conversation_turn": 3,
+        "elapsed_ms": 3066.307419,
+        "input_tokens": 10751,
+        "schedule_index": 4
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "B",
+        "conversation_turn": 3,
+        "elapsed_ms": 2899.162777,
+        "input_tokens": 9682,
+        "schedule_index": 5
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "A",
+        "conversation_turn": 4,
+        "elapsed_ms": 3051.2873210000002,
+        "input_tokens": 10777,
+        "schedule_index": 6
+      },
+      {
+        "completion_tokens": 8,
+        "conversation": "B",
+        "conversation_turn": 4,
+        "elapsed_ms": 2853.387708,
+        "input_tokens": 9711,
+        "schedule_index": 7
+      }
+    ]
+  },
+  "wall_clock_ms": {
+    "cache_off_after_total": 26994.9179,
+    "cache_off_before_total": 27146.444472,
+    "cache_off_bracket_mean_continuations": 20305.9558175,
+    "cache_off_bracket_mean_total": 27070.681186,
+    "cache_on_continuations": 17944.732957,
+    "cache_on_total": 25360.283439,
+    "continuation_speedup": 1.1315830592830816,
+    "whole_session_speedup": 1.0674439523167825
+  },
+  "workload": {
+    "cache_off_bracketing": true,
+    "canonical_prompts": [
+      "benchmarks/prompts/prompt1_moby_dick.txt",
+      "benchmarks/prompts/prompt2_war_and_peace.txt"
+    ],
+    "completion_tokens_per_turn": 8,
+    "conversations": 2,
+    "prompt_chars_each": 40000,
+    "schedule": "interleaved A1,B1,A2,B2,...",
+    "turns_per_conversation": 4
+  }
+}

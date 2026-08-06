@@ -1559,6 +1559,16 @@ do_session_cache_operations() {
         --port "$port" "$@"
 }
 
+do_session_cache_benchmark() {
+    [[ $# -ne 1 ]] && err "Usage: ./dev session-cache-benchmark <port>"
+    local port="$1"
+    (
+        cd "$SCRIPT_DIR"
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --quiet --bin session-cache-benchmark -- "$port"
+    )
+}
+
 do_test_kernels() {
     info "Running CUDA kernel unit tests..."
     # First ensure test data exists
@@ -3621,6 +3631,7 @@ do_server_test() {
         PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/server.rs
         PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/chat_template.rs
         PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/session_cache.rs
+        PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/bin/session-cache-benchmark.rs
         PYO3_PYTHON="$PYTHON" \
         LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
@@ -3718,6 +3729,7 @@ case "$cmd" in
     network)        do_network "$@" ;;
     session-cache-test) do_session_cache_test "$@" ;;
     session-cache-operations) do_session_cache_operations "$@" ;;
+    session-cache-benchmark) do_session_cache_benchmark "$@" ;;
     test-kernels)   do_test_kernels "$@" ;;
     cpu-tail-calibrate) do_cpu_tail_calibrate "$@" ;;
     validate)       do_validate "$@" ;;
@@ -3758,6 +3770,7 @@ case "$cmd" in
         echo "  network <port> [--large]       Run network tests against a running server"
         echo "  session-cache-test <port>      Compare active/RAM cached continuations with full prefill"
         echo "  session-cache-operations <port> Test eviction, branches, cancellation and concurrency"
+        echo "  session-cache-benchmark <port> Benchmark interleaved agent conversations cache off/on"
         echo "  validate <config>              Validate against stored non-HF references; HF artifacts require override"
         echo "  reference-test <config>        Compare against stored non-HF references; HF artifacts require override"
         echo "  reference-test --compare <model>  Comparison matrix; HF artifacts require override"
