@@ -15,9 +15,35 @@ use std::sync::Arc;
 pub const SESSION_SNAPSHOT_FORMAT_VERSION: u32 = 2;
 pub const PREFILL_STAGE_K_KIND: &str = "gqa_prefill_stage_k";
 pub const PREFILL_STAGE_V_KIND: &str = "gqa_prefill_stage_v";
+pub const RUNTIME_KV_FORMAT_BF16: u32 = 0;
+pub const RUNTIME_KV_FORMAT_K4V4: u32 = 9;
+
+pub fn synthetic_boundary_capture_is_lossless(
+    _runtime_kv_format: u32,
+    _has_non_rewindable_state: bool,
+    _has_deepseek_v4_state: bool,
+) -> bool {
+    // A synthetic split changes request-local GEMM dimensions. Live QCN
+    // measurement proved that this can change BF16 projection results even
+    // when KV/state formats themselves are lossless and the split is aligned
+    // to the recurrent kernel block. No current execution path has a runtime
+    // proof that every upstream operation is shape-invariant, so synthetic
+    // mid-prefill capture must remain fail-closed. Terminal states are captured
+    // from the ordinary unsplit prefill path instead.
+    false
+}
 
 pub fn is_prefill_stage_kind(kind: &str) -> bool {
     kind == PREFILL_STAGE_K_KIND || kind == PREFILL_STAGE_V_KIND
+}
+
+pub fn align_exact_boundary_down(matched_tokens: usize, alignment: usize) -> Option<usize> {
+    if alignment == 0 {
+        return None;
+    }
+    matched_tokens
+        .checked_div(alignment)
+        .and_then(|blocks| blocks.checked_mul(alignment))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -559,6 +585,40 @@ impl SequenceStateBlob {
     }
 }
 
+/// Validate the portion of a snapshot blob which will be restored into a live
+/// allocation. Token-row state is append-only, so a snapshot captured later in
+/// the same sequence may safely supply an exact shorter prefix. Fixed state is
+/// not rewindable and must always match in full.
+pub(crate) fn snapshot_blob_can_restore(
+    allocation: &SequenceStateAllocation,
+    required_bytes: usize,
+    blob: &SequenceStateBlob,
+) -> bool {
+    let common_layout_matches = blob.allocation_name == allocation.name
+        && blob.kind == allocation.kind
+        && blob.layer_idx == allocation.layer_idx
+        && blob.device_ordinal == allocation.device_ordinal
+        && blob.dtype == allocation.dtype
+        && blob.element_size == allocation.element_size
+        && blob.strides_bytes == allocation.strides_bytes
+        && blob.shape.len() == allocation.shape.len();
+    if !common_layout_matches {
+        return false;
+    }
+
+    match allocation.growth {
+        SequenceStateGrowth::Fixed => {
+            blob.shape == allocation.shape && blob.bytes.len() == required_bytes
+        }
+        SequenceStateGrowth::TokenRows { row_bytes, .. } => {
+            blob.shape.get(1..) == allocation.shape.get(1..)
+                && required_bytes % row_bytes == 0
+                && blob.bytes.len() % row_bytes == 0
+                && blob.bytes.len() >= required_bytes
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub compatibility: SessionCompatibilitySignature,
@@ -781,6 +841,229 @@ fn token_fingerprint(tokens: &[u32]) -> PrefixFingerprint {
 struct PrefixIndex {
     candidates: HashMap<PrefixFingerprint, Vec<SnapshotId>>,
     indexed_lengths: BTreeMap<usize, usize>,
+    radix: PrefixRadixNode,
+}
+
+fn hash_map_heap_bytes<K, V>(map: &HashMap<K, V>) -> usize {
+    // Hashbrown's table allocation contains at least one key/value bucket and
+    // one control byte per reported capacity slot. Counting the control byte
+    // deliberately rounds the allocator-owned table upward rather than
+    // pretending that only the Rust values consume RAM.
+    map.capacity()
+        .saturating_mul(std::mem::size_of::<(K, V)>().saturating_add(1))
+}
+
+impl PrefixIndex {
+    fn heap_bytes(&self) -> usize {
+        hash_map_heap_bytes(&self.candidates)
+            .saturating_add(
+                self.candidates
+                    .values()
+                    .map(|ids| {
+                        ids.capacity()
+                            .saturating_mul(std::mem::size_of::<SnapshotId>())
+                    })
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.indexed_lengths
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(usize, usize)>())
+                    // BTree nodes also own links and allocator bookkeeping.
+                    // Charging three pointer widths per live entry is a
+                    // conservative runtime-derived upper account, not a
+                    // token/model formula.
+                    .saturating_add(
+                        self.indexed_lengths
+                            .len()
+                            .saturating_mul(3usize.saturating_mul(std::mem::size_of::<usize>())),
+                    ),
+            )
+            .saturating_add(self.radix.heap_bytes())
+    }
+}
+
+#[derive(Default)]
+struct PrefixRadixNode {
+    /// Compressed token edge from the parent to this node. The root edge is
+    /// empty. Tokens are duplicated only once per compressed branch, never
+    /// once per prefix position.
+    edge: Vec<u32>,
+    /// Every snapshot below this node. This lets a lookup select a compatible
+    /// snapshot when several signatures share the same exact token prefix.
+    members: Vec<SnapshotId>,
+    terminal: Vec<SnapshotId>,
+    children: HashMap<u32, Box<PrefixRadixNode>>,
+}
+
+impl PrefixRadixNode {
+    fn heap_bytes(&self) -> usize {
+        self.edge
+            .capacity()
+            .saturating_mul(std::mem::size_of::<u32>())
+            .saturating_add(
+                self.members
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<SnapshotId>()),
+            )
+            .saturating_add(
+                self.terminal
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<SnapshotId>()),
+            )
+            .saturating_add(hash_map_heap_bytes(&self.children))
+            .saturating_add(
+                self.children
+                    .values()
+                    .map(|child| {
+                        std::mem::size_of::<PrefixRadixNode>().saturating_add(child.heap_bytes())
+                    })
+                    .sum::<usize>(),
+            )
+    }
+
+    fn insert_root(&mut self, id: SnapshotId, tokens: &[u32]) {
+        self.members.push(id);
+        self.insert_below(id, tokens);
+    }
+
+    fn insert_below(&mut self, id: SnapshotId, tokens: &[u32]) {
+        if tokens.is_empty() {
+            self.terminal.push(id);
+            return;
+        }
+        let first = tokens[0];
+        let Some(child) = self.children.get_mut(&first) else {
+            self.children.insert(
+                first,
+                Box::new(PrefixRadixNode {
+                    edge: tokens.to_vec(),
+                    members: vec![id],
+                    terminal: vec![id],
+                    children: HashMap::new(),
+                }),
+            );
+            return;
+        };
+
+        let shared = common_token_prefix(&child.edge, tokens);
+        if shared == child.edge.len() {
+            child.members.push(id);
+            child.insert_below(id, &tokens[shared..]);
+            return;
+        }
+
+        let old_suffix = child.edge.split_off(shared);
+        let old_members = std::mem::take(&mut child.members);
+        let mut parent_members = old_members.clone();
+        parent_members.push(id);
+        let old_child = PrefixRadixNode {
+            edge: old_suffix,
+            members: old_members,
+            terminal: std::mem::take(&mut child.terminal),
+            children: std::mem::take(&mut child.children),
+        };
+        child.members = parent_members;
+        child
+            .children
+            .insert(old_child.edge[0], Box::new(old_child));
+        if shared == tokens.len() {
+            child.terminal.push(id);
+        } else {
+            let new_suffix = tokens[shared..].to_vec();
+            child.children.insert(
+                new_suffix[0],
+                Box::new(PrefixRadixNode {
+                    edge: new_suffix,
+                    members: vec![id],
+                    terminal: vec![id],
+                    children: HashMap::new(),
+                }),
+            );
+        }
+    }
+
+    fn remove_root(&mut self, id: SnapshotId, tokens: &[u32]) -> Result<(), String> {
+        remove_snapshot_id(&mut self.members, id, "radix root")?;
+        self.remove_below(id, tokens)
+    }
+
+    fn remove_below(&mut self, id: SnapshotId, tokens: &[u32]) -> Result<(), String> {
+        if tokens.is_empty() {
+            return remove_snapshot_id(&mut self.terminal, id, "radix terminal");
+        }
+        let first = tokens[0];
+        let remove_child;
+        {
+            let child = self
+                .children
+                .get_mut(&first)
+                .ok_or_else(|| format!("session radix index has no edge for snapshot {}", id.0))?;
+            if !tokens.starts_with(&child.edge) {
+                return Err(format!(
+                    "session radix edge disagrees with snapshot {} tokens",
+                    id.0
+                ));
+            }
+            remove_snapshot_id(&mut child.members, id, "radix branch")?;
+            child.remove_below(id, &tokens[child.edge.len()..])?;
+            remove_child = child.members.is_empty();
+            if !remove_child {
+                child.compact();
+            }
+        }
+        if remove_child {
+            self.children.remove(&first);
+        }
+        Ok(())
+    }
+
+    fn compact(&mut self) {
+        while self.terminal.is_empty() && self.children.len() == 1 {
+            let key = *self.children.keys().next().expect("one radix child");
+            let child = *self.children.remove(&key).expect("radix child exists");
+            self.edge.extend_from_slice(&child.edge);
+            self.members = child.members;
+            self.terminal = child.terminal;
+            self.children = child.children;
+        }
+    }
+
+    fn common_candidate_levels<'a>(&'a self, tokens: &[u32]) -> Vec<(usize, &'a [SnapshotId])> {
+        let mut node = self;
+        let mut remaining = tokens;
+        let mut matched = 0usize;
+        let mut levels = Vec::new();
+        while let Some((&first, _)) = remaining.split_first() {
+            let Some(child) = node.children.get(&first) else {
+                break;
+            };
+            let edge_match = common_token_prefix(&child.edge, remaining);
+            matched = matched.saturating_add(edge_match);
+            if edge_match > 0 {
+                levels.push((matched, child.members.as_slice()));
+            }
+            if edge_match < child.edge.len() || edge_match == remaining.len() {
+                break;
+            }
+            remaining = &remaining[edge_match..];
+            node = child;
+        }
+        levels
+    }
+}
+
+fn remove_snapshot_id(
+    ids: &mut Vec<SnapshotId>,
+    id: SnapshotId,
+    location: &str,
+) -> Result<(), String> {
+    let index = ids
+        .iter()
+        .position(|candidate| *candidate == id)
+        .ok_or_else(|| format!("session {location} is missing snapshot {}", id.0))?;
+    ids.swap_remove(index);
+    Ok(())
 }
 
 impl PrefixIndex {
@@ -788,6 +1071,7 @@ impl PrefixIndex {
         let fingerprint = token_fingerprint(tokens);
         self.candidates.entry(fingerprint).or_default().push(id);
         *self.indexed_lengths.entry(tokens.len()).or_default() += 1;
+        self.radix.insert_root(id, tokens);
     }
 
     fn remove(&mut self, id: SnapshotId, tokens: &[u32]) -> Result<(), String> {
@@ -825,6 +1109,7 @@ impl PrefixIndex {
         } else if let Some(count) = self.indexed_lengths.get_mut(&tokens.len()) {
             *count = next_count;
         }
+        self.radix.remove_root(id, tokens)?;
         Ok(())
     }
 
@@ -1051,6 +1336,8 @@ impl MemoryAvailabilityProbe for SystemMemoryAvailabilityProbe {
 pub struct RamSessionStoreStats {
     pub resident_snapshots: usize,
     pub resident_bytes: usize,
+    pub snapshot_bytes: usize,
+    pub index_bytes: usize,
     pub reserved_bytes: usize,
     pub evictions: u64,
     pub last_effective_available_bytes: u64,
@@ -1063,13 +1350,18 @@ struct RamSessionEntry {
     last_access: u64,
 }
 
+struct RamReservation {
+    bytes: usize,
+    protected: Vec<SnapshotId>,
+}
+
 pub struct RamSessionStore {
     probe: Arc<dyn MemoryAvailabilityProbe>,
     budget_fraction: f64,
     initial_budget_bytes: usize,
     entries: HashMap<SnapshotId, RamSessionEntry>,
     prefix_index: PrefixIndex,
-    reservations: HashMap<RamReservationId, usize>,
+    reservations: HashMap<RamReservationId, RamReservation>,
     resident_bytes: usize,
     reserved_bytes: usize,
     access_clock: u64,
@@ -1081,6 +1373,23 @@ pub struct RamSessionStore {
 }
 
 impl RamSessionStore {
+    fn snapshot_bytes(&self) -> usize {
+        self.entries
+            .values()
+            .map(|entry| entry.memory_cost_bytes)
+            .sum()
+    }
+
+    fn metadata_heap_bytes(&self) -> usize {
+        hash_map_heap_bytes(&self.entries).saturating_add(self.prefix_index.heap_bytes())
+    }
+
+    fn recompute_resident_bytes(&mut self) {
+        self.resident_bytes = self
+            .snapshot_bytes()
+            .saturating_add(self.metadata_heap_bytes());
+    }
+
     pub fn new(
         budget_fraction: f64,
         probe: Arc<dyn MemoryAvailabilityProbe>,
@@ -1128,6 +1437,22 @@ impl RamSessionStore {
         Ok(budget)
     }
 
+    fn ensure_transaction_staging_available(&self, additional_bytes: usize) -> Result<(), String> {
+        let required = self
+            .reserved_bytes
+            .checked_add(additional_bytes)
+            .ok_or_else(|| "session reservation byte accounting overflow".to_string())?;
+        let available =
+            usize::try_from(self.last_availability.effective_available_bytes).unwrap_or(usize::MAX);
+        if required > available {
+            return Err(format!(
+                "session snapshot transaction requires {} staging bytes but runtime cgroup-aware available memory is {} bytes",
+                required, available
+            ));
+        }
+        Ok(())
+    }
+
     pub fn reserve(&mut self, required_bytes: usize) -> Result<RamReservationId, String> {
         self.reserve_protecting(required_bytes, &[])
     }
@@ -1147,14 +1472,11 @@ impl RamSessionStore {
                 required_bytes, budget
             ));
         }
-        while self
-            .resident_bytes
-            .saturating_add(self.reserved_bytes)
-            .saturating_add(required_bytes)
-            > budget
-        {
-            self.evict_lru_excluding(protected)?;
-        }
+        // A reservation belongs to an uncommitted request. Evicting here
+        // would make cancellation mutate the visible cache even though the
+        // new snapshot is rolled back. Bound temporary staging against live,
+        // cgroup-aware available memory and defer LRU admission to commit.
+        self.ensure_transaction_staging_available(required_bytes)?;
         let id = RamReservationId(self.next_reservation_id);
         let next_reservation_id = self
             .next_reservation_id
@@ -1164,28 +1486,35 @@ impl RamSessionStore {
             .reserved_bytes
             .checked_add(required_bytes)
             .ok_or_else(|| "session reservation byte accounting overflow".to_string())?;
-        self.reservations.insert(id, required_bytes);
+        self.reservations.insert(
+            id,
+            RamReservation {
+                bytes: required_bytes,
+                protected: protected.to_vec(),
+            },
+        );
         self.next_reservation_id = next_reservation_id;
         self.reserved_bytes = next_reserved_bytes;
         Ok(id)
     }
 
     pub fn cancel_reservation(&mut self, id: RamReservationId) -> Result<(), String> {
-        let bytes = self
+        let reservation = self
             .reservations
             .remove(&id)
             .ok_or_else(|| format!("unknown session cache reservation {}", id.0))?;
         self.reserved_bytes = self
             .reserved_bytes
-            .checked_sub(bytes)
+            .checked_sub(reservation.bytes)
             .ok_or_else(|| "session reservation byte accounting underflow".to_string())?;
         Ok(())
     }
 
     /// Increase an existing reservation after a temporary runtime allocation
-    /// exposes an additional exact state size. This keeps admission based on
-    /// current cgroup-aware availability and evicts only through the normal LRU
-    /// policy; callers must extend before allocating the pageable snapshot.
+    /// exposes an additional exact state size. This keeps staging based on
+    /// current cgroup-aware availability; LRU admission remains deferred until
+    /// successful commit. Callers must extend before allocating the pageable
+    /// snapshot.
     pub fn extend_reservation(
         &mut self,
         id: RamReservationId,
@@ -1195,10 +1524,17 @@ impl RamSessionStore {
         if additional_bytes == 0 {
             return Ok(());
         }
-        let existing = *self
+        let reservation_state = self
             .reservations
             .get(&id)
             .ok_or_else(|| format!("unknown session cache reservation {}", id.0))?;
+        let existing = reservation_state.bytes;
+        let mut all_protected = reservation_state.protected.clone();
+        for &snapshot_id in protected {
+            if !all_protected.contains(&snapshot_id) {
+                all_protected.push(snapshot_id);
+            }
+        }
         let expanded = existing
             .checked_add(additional_bytes)
             .ok_or_else(|| "session reservation byte accounting overflow".to_string())?;
@@ -1209,15 +1545,13 @@ impl RamSessionStore {
                 expanded, budget
             ));
         }
-        while self
-            .resident_bytes
-            .saturating_add(self.reserved_bytes)
-            .saturating_add(additional_bytes)
-            > budget
-        {
-            self.evict_lru_excluding(protected)?;
-        }
-        self.reservations.insert(id, expanded);
+        self.ensure_transaction_staging_available(additional_bytes)?;
+        let reservation = self
+            .reservations
+            .get_mut(&id)
+            .ok_or_else(|| format!("unknown session cache reservation {}", id.0))?;
+        reservation.bytes = expanded;
+        reservation.protected = all_protected;
         self.reserved_bytes = self
             .reserved_bytes
             .checked_add(additional_bytes)
@@ -1232,10 +1566,12 @@ impl RamSessionStore {
     ) -> Result<SnapshotId, String> {
         snapshot.validate()?;
         let actual_bytes = snapshot.memory_cost_bytes();
-        let reserved = *self
+        let reservation_state = self
             .reservations
             .get(&reservation)
             .ok_or_else(|| format!("unknown session cache reservation {}", reservation.0))?;
+        let reserved = reservation_state.bytes;
+        let mut admission_protected = reservation_state.protected.clone();
         if actual_bytes > reserved {
             return Err(format!(
                 "completed session snapshot owns {} bytes but reservation {} covers only {} bytes",
@@ -1247,14 +1583,11 @@ impl RamSessionStore {
             .checked_add(1)
             .ok_or_else(|| "session cache access clock exhausted".to_string())?;
         let id = SnapshotId(self.next_snapshot_id);
+        admission_protected.push(id);
         let next_snapshot_id = self
             .next_snapshot_id
             .checked_add(1)
             .ok_or_else(|| "session snapshot ID exhausted".to_string())?;
-        let next_resident_bytes = self
-            .resident_bytes
-            .checked_add(actual_bytes)
-            .ok_or_else(|| "session resident byte accounting overflow".to_string())?;
         self.cancel_reservation(reservation)?;
         self.access_clock = next_access_clock;
         self.next_snapshot_id = next_snapshot_id;
@@ -1267,7 +1600,68 @@ impl RamSessionStore {
                 last_access: self.access_clock,
             },
         );
-        self.resident_bytes = next_resident_bytes;
+        self.recompute_resident_bytes();
+        let mut staged_evictions = Vec::new();
+        let admission = (|| {
+            let budget = self.refresh_budget()?;
+            while self.resident_bytes.saturating_add(self.reserved_bytes) > budget {
+                let protected: HashSet<_> = admission_protected.iter().copied().collect();
+                let victim = self
+                    .entries
+                    .iter()
+                    .filter(|(candidate_id, entry)| {
+                        !protected.contains(candidate_id)
+                            && Arc::strong_count(&entry.snapshot) == 1
+                    })
+                    .min_by_key(|(candidate_id, entry)| {
+                        (entry.last_access, candidate_id.0)
+                    })
+                    .map(|(candidate_id, _)| *candidate_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "session RAM budget is exhausted by {} reserved bytes; no unprotected, unleased committed snapshot can be evicted",
+                            self.reserved_bytes,
+                        )
+                    })?;
+                let victim_tokens = self
+                    .entries
+                    .get(&victim)
+                    .ok_or_else(|| {
+                        format!("session snapshot {} disappeared during admission", victim.0)
+                    })?
+                    .snapshot
+                    .consumed_token_ids
+                    .clone();
+                self.prefix_index.remove(victim, &victim_tokens)?;
+                let entry = self.entries.remove(&victim).ok_or_else(|| {
+                    format!("session snapshot {} disappeared during admission", victim.0)
+                })?;
+                staged_evictions.push((victim, entry));
+                self.recompute_resident_bytes();
+            }
+            Ok::<(), String>(())
+        })();
+        if let Err(error) = admission {
+            // Commit is transactional: an entry that cannot fit once the
+            // real index allocations are accounted must never remain visible,
+            // and admission failure must not publish any staged LRU eviction.
+            self.remove(id)?.ok_or_else(|| {
+                format!(
+                    "new session snapshot {} disappeared during admission rollback",
+                    id.0
+                )
+            })?;
+            for (restored_id, entry) in staged_evictions {
+                self.prefix_index
+                    .insert(restored_id, &entry.snapshot.consumed_token_ids);
+                self.entries.insert(restored_id, entry);
+            }
+            self.recompute_resident_bytes();
+            return Err(format!(
+                "session snapshot admission including index metadata failed: {error}"
+            ));
+        }
+        self.evictions = self.evictions.saturating_add(staged_evictions.len() as u64);
         Ok(id)
     }
 
@@ -1276,10 +1670,59 @@ impl RamSessionStore {
         tokens: &[u32],
         compatibility: &SessionCompatibilitySignature,
     ) -> Result<PrefixLookupResult, String> {
+        let result = self.select_longest_prefix(tokens, compatibility, false, false)?;
+        if let PrefixLookupResult::Hit { snapshot_id, .. } = result {
+            self.touch(snapshot_id)?;
+        }
+        Ok(result)
+    }
+
+    /// Select the longest exact stored prefix which leaves at least one request
+    /// token to execute. This is the continuation lookup for recurrent/fixed
+    /// state: divergent longer snapshots cannot be rewound, while a snapshot
+    /// equal to the complete request cannot produce first-token logits.
+    pub fn longest_proper_prefix(
+        &mut self,
+        tokens: &[u32],
+        compatibility: &SessionCompatibilitySignature,
+    ) -> Result<PrefixLookupResult, String> {
+        let result = self.select_longest_prefix(tokens, compatibility, false, true)?;
+        if let PrefixLookupResult::Hit { snapshot_id, .. } = result {
+            self.touch(snapshot_id)?;
+        }
+        Ok(result)
+    }
+
+    /// Find the longest exact shared token prefix, including a snapshot whose
+    /// committed sequence extends beyond the shared boundary. Callers may use
+    /// this only when every registered sequence-state allocation is rewindable
+    /// by changing its logical token position (ordinary KV rows).
+    pub fn longest_rewindable_prefix(
+        &mut self,
+        tokens: &[u32],
+        compatibility: &SessionCompatibilitySignature,
+    ) -> Result<PrefixLookupResult, String> {
+        let result = self.select_longest_prefix(tokens, compatibility, true, true)?;
+        if let PrefixLookupResult::Hit { snapshot_id, .. } = result {
+            self.touch(snapshot_id)?;
+        }
+        Ok(result)
+    }
+
+    fn select_longest_prefix(
+        &self,
+        tokens: &[u32],
+        compatibility: &SessionCompatibilitySignature,
+        allow_rewindable_divergence: bool,
+        require_suffix: bool,
+    ) -> Result<PrefixLookupResult, String> {
         let fingerprints = self.prefix_index.query_fingerprints(tokens);
         let mut incompatible_match = None;
         let mut hit = None;
         for fingerprint in fingerprints.into_iter().rev() {
+            if require_suffix && fingerprint.token_count >= tokens.len() {
+                continue;
+            }
             let Some(candidates) = self.prefix_index.candidates.get(&fingerprint) else {
                 continue;
             };
@@ -1306,8 +1749,62 @@ impl RamSessionStore {
                 break;
             }
         }
+        if allow_rewindable_divergence {
+            // Continuation prefill must execute at least one suffix token to
+            // produce first-token logits. An exact snapshot of the complete
+            // request is therefore not a usable continuation source; keep
+            // searching the radix for the next-shorter proper prefix.
+            if require_suffix && hit.is_some_and(|(_, exact_tokens)| exact_tokens >= tokens.len()) {
+                hit = None;
+            }
+            for (matched_tokens, candidates) in self
+                .prefix_index
+                .radix
+                .common_candidate_levels(tokens)
+                .into_iter()
+                .rev()
+            {
+                // A snapshot that extends an exact copy of the whole request
+                // cannot supply the first-token logits: there is no suffix to
+                // execute. Continue to the next shorter proper prefix.
+                if matched_tokens >= tokens.len() {
+                    continue;
+                }
+                let mut compatible_candidate = None;
+                let mut has_incompatible = false;
+                for &id in candidates {
+                    let Some(entry) = self.entries.get(&id) else {
+                        continue;
+                    };
+                    if entry.snapshot.consumed_token_ids.len() <= matched_tokens {
+                        continue;
+                    }
+                    if &entry.snapshot.compatibility == compatibility {
+                        let candidate_key = (entry.last_access, id.0);
+                        if compatible_candidate
+                            .as_ref()
+                            .is_none_or(|(_, key)| candidate_key > *key)
+                        {
+                            compatible_candidate = Some((id, candidate_key));
+                        }
+                    } else {
+                        has_incompatible = true;
+                    }
+                }
+                if let Some((id, _)) = compatible_candidate {
+                    if hit.is_none_or(|(_, exact_tokens)| matched_tokens > exact_tokens) {
+                        hit = Some((id, matched_tokens));
+                    }
+                } else if hit.is_none() && has_incompatible {
+                    incompatible_match =
+                        Some(incompatible_match.unwrap_or(0usize).max(matched_tokens));
+                }
+                if hit.is_some_and(|(_, selected_tokens)| selected_tokens >= matched_tokens) {
+                    break;
+                }
+            }
+        }
         if let Some((snapshot_id, matched_tokens)) = hit {
-            self.touch(snapshot_id)?;
             Ok(PrefixLookupResult::Hit {
                 snapshot_id,
                 matched_tokens,
@@ -1357,48 +1854,26 @@ impl RamSessionStore {
                 id.0
             ));
         }
-        let next_resident_bytes = self
-            .resident_bytes
-            .checked_sub(entry.memory_cost_bytes)
-            .ok_or_else(|| "session resident byte accounting underflow".to_string())?;
         self.prefix_index
             .remove(id, &entry.snapshot.consumed_token_ids)?;
         let entry = self
             .entries
             .remove(&id)
             .ok_or_else(|| format!("session snapshot {} disappeared during removal", id.0))?;
-        self.resident_bytes = next_resident_bytes;
+        self.recompute_resident_bytes();
         let snapshot = Arc::try_unwrap(entry.snapshot)
             .map_err(|_| format!("session snapshot {} acquired a lease during removal", id.0))?;
         Ok(Some(snapshot))
     }
 
-    fn evict_lru_excluding(&mut self, protected: &[SnapshotId]) -> Result<SnapshotId, String> {
-        let protected: HashSet<_> = protected.iter().copied().collect();
-        let id = self
-            .entries
-            .iter()
-            .filter(|(id, entry)| {
-                !protected.contains(id) && Arc::strong_count(&entry.snapshot) == 1
-            })
-            .min_by_key(|(id, entry)| (entry.last_access, id.0))
-            .map(|(id, _)| *id)
-            .ok_or_else(|| {
-                format!(
-                    "session RAM budget is exhausted by {} reserved bytes; no unprotected, unleased committed snapshot can be evicted",
-                    self.reserved_bytes,
-                )
-            })?;
-        self.remove(id)?
-            .ok_or_else(|| format!("session snapshot {} disappeared during LRU eviction", id.0))?;
-        self.evictions = self.evictions.saturating_add(1);
-        Ok(id)
-    }
-
     pub fn stats(&self) -> RamSessionStoreStats {
+        let snapshot_bytes = self.snapshot_bytes();
+        let index_bytes = self.metadata_heap_bytes();
         RamSessionStoreStats {
             resident_snapshots: self.entries.len(),
-            resident_bytes: self.resident_bytes,
+            resident_bytes: snapshot_bytes.saturating_add(index_bytes),
+            snapshot_bytes,
+            index_bytes,
             reserved_bytes: self.reserved_bytes,
             evictions: self.evictions,
             last_effective_available_bytes: self.last_availability.effective_available_bytes,
@@ -1421,6 +1896,38 @@ fn fraction_bytes(available: u64, fraction: f64) -> Result<usize, String> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn synthetic_boundary_requires_lossless_rewindable_runtime_state() {
+        assert!(!synthetic_boundary_capture_is_lossless(
+            RUNTIME_KV_FORMAT_BF16,
+            false,
+            false,
+        ));
+        assert!(!synthetic_boundary_capture_is_lossless(
+            RUNTIME_KV_FORMAT_K4V4,
+            false,
+            false,
+        ));
+        assert!(!synthetic_boundary_capture_is_lossless(
+            RUNTIME_KV_FORMAT_BF16,
+            true,
+            false,
+        ));
+        assert!(!synthetic_boundary_capture_is_lossless(
+            RUNTIME_KV_FORMAT_BF16,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn exact_boundary_alignment_recomputes_only_the_unaligned_tail() {
+        assert_eq!(align_exact_boundary_down(3_576, 64), Some(3_520));
+        assert_eq!(align_exact_boundary_down(64, 64), Some(64));
+        assert_eq!(align_exact_boundary_down(63, 64), Some(0));
+        assert_eq!(align_exact_boundary_down(10, 0), None);
+    }
 
     fn rows(name: &str, ptr: u64) -> SequenceStateAllocation {
         SequenceStateAllocation {
@@ -1461,6 +1968,54 @@ mod tests {
         assert_eq!(allocation.used_bytes(1), 256);
         assert_eq!(allocation.used_bytes(4), 256);
         assert_eq!(allocation.used_bytes(5), 512);
+    }
+
+    #[test]
+    fn token_row_snapshot_can_restore_only_an_exact_available_prefix() {
+        let allocation = rows("layer3.k", 0x1000);
+        let blob = SequenceStateBlob {
+            allocation_name: allocation.name.clone(),
+            kind: allocation.kind.clone(),
+            layer_idx: allocation.layer_idx,
+            device_ordinal: allocation.device_ordinal,
+            dtype: allocation.dtype.clone(),
+            element_size: allocation.element_size,
+            shape: vec![12, 256],
+            strides_bytes: allocation.strides_bytes.clone(),
+            bytes: vec![0; 12 * 256],
+        };
+        assert!(snapshot_blob_can_restore(&allocation, 7 * 256, &blob));
+        assert!(snapshot_blob_can_restore(&allocation, 12 * 256, &blob));
+        assert!(!snapshot_blob_can_restore(&allocation, 13 * 256, &blob));
+    }
+
+    #[test]
+    fn fixed_snapshot_cannot_be_partially_restored() {
+        let mut allocation = rows("layer3.recurrent", 0x1000);
+        allocation.growth = SequenceStateGrowth::Fixed;
+        let mut blob = SequenceStateBlob {
+            allocation_name: allocation.name.clone(),
+            kind: allocation.kind.clone(),
+            layer_idx: allocation.layer_idx,
+            device_ordinal: allocation.device_ordinal,
+            dtype: allocation.dtype.clone(),
+            element_size: allocation.element_size,
+            shape: allocation.shape.clone(),
+            strides_bytes: allocation.strides_bytes.clone(),
+            bytes: vec![0; allocation.storage_bytes],
+        };
+        assert!(snapshot_blob_can_restore(
+            &allocation,
+            allocation.storage_bytes,
+            &blob,
+        ));
+        blob.shape[0] -= 1;
+        blob.bytes.truncate(blob.bytes.len() - 256);
+        assert!(!snapshot_blob_can_restore(
+            &allocation,
+            blob.bytes.len(),
+            &blob,
+        ));
     }
 
     #[test]
@@ -1631,15 +2186,15 @@ mod tests {
 
     #[test]
     fn ram_store_reserves_before_allocation_and_evicts_true_lru() {
-        let sample = snapshot(1, 256);
+        let sample = snapshot(1, 8192);
         let cost = sample.memory_cost_bytes();
-        let probe = Arc::new(TestMemoryProbe::new((cost * 2) as u64));
+        let probe = Arc::new(TestMemoryProbe::new((cost * 5 / 2) as u64));
         let mut store = RamSessionStore::new(1.0, probe).unwrap();
         let first = commit_snapshot(&mut store, sample);
-        let second = commit_snapshot(&mut store, snapshot(3, 256));
+        let second = commit_snapshot(&mut store, snapshot(3, 8192));
         assert_eq!(store.stats().resident_snapshots, 2);
         assert!(store.get(first).unwrap().is_some());
-        let third = commit_snapshot(&mut store, snapshot(5, 256));
+        let third = commit_snapshot(&mut store, snapshot(5, 8192));
         assert!(store.get(second).unwrap().is_none());
         assert!(store.get(first).unwrap().is_some());
         assert!(store.get(third).unwrap().is_some());
@@ -1648,15 +2203,15 @@ mod tests {
 
     #[test]
     fn snapshot_lease_blocks_eviction_until_request_releases_it() {
-        let first_snapshot = snapshot(1, 256);
+        let first_snapshot = snapshot(1, 8192);
         let cost = first_snapshot.memory_cost_bytes();
-        let probe = Arc::new(TestMemoryProbe::new((cost * 2) as u64));
+        let probe = Arc::new(TestMemoryProbe::new((cost * 5 / 2) as u64));
         let mut store = RamSessionStore::new(1.0, probe).unwrap();
         let first = commit_snapshot(&mut store, first_snapshot);
-        let second = commit_snapshot(&mut store, snapshot(3, 256));
+        let second = commit_snapshot(&mut store, snapshot(3, 8192));
         let lease = store.get(first).unwrap().unwrap();
 
-        let third = commit_snapshot(&mut store, snapshot(5, 256));
+        let third = commit_snapshot(&mut store, snapshot(5, 8192));
         assert!(store.get(first).unwrap().is_some());
         assert!(store.get(second).unwrap().is_none());
         assert!(store.get(third).unwrap().is_some());
@@ -1668,29 +2223,32 @@ mod tests {
 
     #[test]
     fn incremental_reservation_never_evicts_its_base_snapshot() {
-        let first_snapshot = snapshot(1, 256);
+        let first_snapshot = snapshot(1, 8192);
         let cost = first_snapshot.memory_cost_bytes();
-        let probe = Arc::new(TestMemoryProbe::new((cost * 2) as u64));
+        let probe = Arc::new(TestMemoryProbe::new((cost * 5 / 2) as u64));
         let mut store = RamSessionStore::new(1.0, probe).unwrap();
         let first = commit_snapshot(&mut store, first_snapshot);
-        let second = commit_snapshot(&mut store, snapshot(3, 256));
+        let second = commit_snapshot(&mut store, snapshot(3, 8192));
 
         let reservation = store.reserve_protecting(cost, &[first]).unwrap();
         assert!(store.get(first).unwrap().is_some());
-        assert!(store.get(second).unwrap().is_none());
-        assert!(store.reserve_protecting(cost, &[first]).is_err());
+        assert!(store.get(second).unwrap().is_some());
+        assert_eq!(store.stats().evictions, 0);
         store.cancel_reservation(reservation).unwrap();
+        assert!(store.get(first).unwrap().is_some());
+        assert!(store.get(second).unwrap().is_some());
+        assert_eq!(store.stats().resident_snapshots, 2);
     }
 
     #[test]
     fn extending_reservation_uses_live_budget_and_preserves_protected_snapshot() {
-        let first_snapshot = snapshot(1, 256);
+        let first_snapshot = snapshot(1, 8192);
         let cost = first_snapshot.memory_cost_bytes();
         let budget = cost * 5 / 2;
         let probe = Arc::new(TestMemoryProbe::new(budget as u64));
         let mut store = RamSessionStore::new(1.0, probe).unwrap();
         let first = commit_snapshot(&mut store, first_snapshot);
-        let second = commit_snapshot(&mut store, snapshot(3, 256));
+        let second = commit_snapshot(&mut store, snapshot(3, 8192));
 
         let initial = cost / 4;
         let additional = cost / 2;
@@ -1700,11 +2258,64 @@ mod tests {
             .unwrap();
 
         assert!(store.get(first).unwrap().is_some());
-        assert!(store.get(second).unwrap().is_none());
+        assert!(store.get(second).unwrap().is_some());
         assert_eq!(store.stats().reserved_bytes, initial + additional);
-        assert_eq!(store.stats().evictions, 1);
+        assert_eq!(store.stats().evictions, 0);
         store.cancel_reservation(reservation).unwrap();
         assert_eq!(store.stats().reserved_bytes, 0);
+        assert_eq!(store.stats().resident_snapshots, 2);
+    }
+
+    #[test]
+    fn cancelled_reservation_never_evicts_committed_snapshots() {
+        let first_snapshot = snapshot(1, 8192);
+        let cost = first_snapshot.memory_cost_bytes();
+        let probe = Arc::new(TestMemoryProbe::new((cost * 5 / 2) as u64));
+        let mut store = RamSessionStore::new(1.0, probe).unwrap();
+        let first = commit_snapshot(&mut store, first_snapshot);
+        let second = commit_snapshot(&mut store, snapshot(3, 8192));
+
+        let reservation = store.reserve(cost).unwrap();
+        assert_eq!(store.stats().resident_snapshots, 2);
+        assert_eq!(store.stats().evictions, 0);
+        store.cancel_reservation(reservation).unwrap();
+
+        assert!(store.get(first).unwrap().is_some());
+        assert!(store.get(second).unwrap().is_some());
+        assert_eq!(store.stats().resident_snapshots, 2);
+        assert_eq!(store.stats().reserved_bytes, 0);
+        assert_eq!(store.stats().evictions, 0);
+    }
+
+    #[test]
+    fn failed_commit_restores_every_staged_lru_victim() {
+        let small = snapshot(1, 8192);
+        let small_cost = small.memory_cost_bytes();
+        let large = snapshot(7, 16384);
+        let large_cost = large.memory_cost_bytes();
+        let probe = Arc::new(TestMemoryProbe::new((small_cost * 10) as u64));
+        let mut store = RamSessionStore::new(0.5, probe.clone()).unwrap();
+        let first = commit_snapshot(&mut store, small);
+        let second = commit_snapshot(&mut store, snapshot(3, 8192));
+        let third = commit_snapshot(&mut store, snapshot(5, 8192));
+
+        // Shrink live availability after the committed cache is populated.
+        // The new snapshot itself is reservable, but it cannot coexist with
+        // both protected entries even after the only unprotected LRU victim is
+        // staged. Admission must fail without publishing that staged eviction.
+        probe.available.store(large_cost as u64, Ordering::SeqCst);
+        let reservation = store
+            .reserve_protecting(large_cost, &[first, second])
+            .unwrap();
+        let error = store.commit(reservation, large).unwrap_err();
+        assert!(error.contains("no unprotected, unleased committed snapshot"));
+
+        assert!(store.get(first).unwrap().is_some());
+        assert!(store.get(second).unwrap().is_some());
+        assert!(store.get(third).unwrap().is_some());
+        assert_eq!(store.stats().resident_snapshots, 3);
+        assert_eq!(store.stats().reserved_bytes, 0);
+        assert_eq!(store.stats().evictions, 0);
     }
 
     #[test]
@@ -1735,6 +2346,100 @@ mod tests {
             store.longest_prefix(&[1, 2, 3, 4, 5], &signature()),
             Ok(PrefixLookupResult::Hit {
                 snapshot_id: short_id,
+                matched_tokens: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn radix_index_selects_and_removes_longest_rewindable_divergence() {
+        let branch_a = snapshot_with_tokens(&[1, 2, 3, 9, 10], 64);
+        let branch_b = snapshot_with_tokens(&[1, 2, 4, 8], 64);
+        let exact_request_completion = snapshot_with_tokens(&[1, 2, 3, 7, 99], 64);
+        let no_suffix_snapshot = snapshot_with_tokens(&[1, 2, 3, 7], 64);
+        let cost = branch_a.memory_cost_bytes()
+            + branch_b.memory_cost_bytes()
+            + exact_request_completion.memory_cost_bytes()
+            + no_suffix_snapshot.memory_cost_bytes();
+        let probe = Arc::new(TestMemoryProbe::new((cost * 4) as u64));
+        let mut store = RamSessionStore::new(1.0, probe).unwrap();
+        let branch_a_id = commit_snapshot(&mut store, branch_a);
+        let branch_b_id = commit_snapshot(&mut store, branch_b);
+        let exact_request_completion_id = commit_snapshot(&mut store, exact_request_completion);
+        let no_suffix_snapshot_id = commit_snapshot(&mut store, no_suffix_snapshot);
+
+        assert_eq!(
+            store.longest_rewindable_prefix(&[1, 2, 3, 7], &signature()),
+            Ok(PrefixLookupResult::Hit {
+                snapshot_id: no_suffix_snapshot_id,
+                matched_tokens: 3,
+            })
+        );
+        store.remove(no_suffix_snapshot_id).unwrap().unwrap();
+        store.remove(exact_request_completion_id).unwrap().unwrap();
+        assert_eq!(
+            store.longest_rewindable_prefix(&[1, 2, 3, 7], &signature()),
+            Ok(PrefixLookupResult::Hit {
+                snapshot_id: branch_a_id,
+                matched_tokens: 3,
+            })
+        );
+        assert_eq!(
+            store.longest_rewindable_prefix(&[1, 2, 7], &signature()),
+            Ok(PrefixLookupResult::Hit {
+                snapshot_id: branch_a_id,
+                matched_tokens: 2,
+            })
+        );
+        store.remove(branch_a_id).unwrap().unwrap();
+        assert_eq!(
+            store.longest_rewindable_prefix(&[1, 2, 3, 7], &signature()),
+            Ok(PrefixLookupResult::Hit {
+                snapshot_id: branch_b_id,
+                matched_tokens: 2,
+            })
+        );
+        store.remove(branch_b_id).unwrap().unwrap();
+        assert_eq!(
+            store.longest_rewindable_prefix(&[1, 2, 3, 7], &signature()),
+            Ok(PrefixLookupResult::NoMatch)
+        );
+    }
+
+    #[test]
+    fn non_rewindable_continuation_skips_zero_suffix_snapshot() {
+        let proper_prefix = snapshot_with_tokens(&[1, 2, 3], 64);
+        let exact_request = snapshot_with_tokens(&[1, 2, 3, 4], 64);
+        let cost = proper_prefix.memory_cost_bytes() + exact_request.memory_cost_bytes();
+        let probe = Arc::new(TestMemoryProbe::new((cost * 4) as u64));
+        let mut store = RamSessionStore::new(1.0, probe).unwrap();
+        let proper_prefix_id = commit_snapshot(&mut store, proper_prefix);
+        commit_snapshot(&mut store, exact_request);
+
+        assert_eq!(
+            store.longest_proper_prefix(&[1, 2, 3, 4], &signature()),
+            Ok(PrefixLookupResult::Hit {
+                snapshot_id: proper_prefix_id,
+                matched_tokens: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn radix_divergence_never_overrides_a_compatible_exact_prefix_with_bad_signature() {
+        let exact = snapshot_with_tokens(&[1, 2], 64);
+        let mut incompatible_branch = snapshot_with_tokens(&[1, 2, 3, 9], 64);
+        incompatible_branch.compatibility.model_identity = "other-model".to_string();
+        let cost = exact.memory_cost_bytes() + incompatible_branch.memory_cost_bytes();
+        let probe = Arc::new(TestMemoryProbe::new((cost * 4) as u64));
+        let mut store = RamSessionStore::new(1.0, probe).unwrap();
+        let exact_id = commit_snapshot(&mut store, exact);
+        commit_snapshot(&mut store, incompatible_branch);
+
+        assert_eq!(
+            store.longest_rewindable_prefix(&[1, 2, 3, 7], &signature()),
+            Ok(PrefixLookupResult::Hit {
+                snapshot_id: exact_id,
                 matched_tokens: 2,
             })
         );

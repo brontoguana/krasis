@@ -16340,6 +16340,24 @@ impl GpuDecodeStore {
         self.draft.is_some()
     }
 
+    /// Whether a synthetic mid-prefill split preserves this execution path's
+    /// normal numerical shape. Paths that return false remain cacheable at
+    /// their transactionally completed post-generation sequence boundary.
+    pub fn exact_mid_prefill_boundary_capture_supported_rust(&self) -> bool {
+        self.exact_mid_prefill_boundary_alignment_rust().is_some()
+    }
+
+    /// Absolute token alignment for a proven lossless internal boundary.
+    ///
+    /// Kernel-block alignment is insufficient: changing the request-local
+    /// GEMM dimensions can change BF16 projections upstream of recurrent and
+    /// convolution state. Until a runtime path can capture an internal state
+    /// without splitting ordinary prefill, no synthetic boundary is claimed.
+    /// The cache remains available through exact terminal prefill snapshots.
+    pub fn exact_mid_prefill_boundary_alignment_rust(&self) -> Option<usize> {
+        None
+    }
+
     pub fn sequence_state_has_non_rewindable_rust(&self) -> bool {
         self.sequence_state_registry.has_non_rewindable_state()
     }
@@ -17208,15 +17226,11 @@ impl GpuDecodeStore {
         }
         for ((allocation, used_bytes), &blob) in allocations.iter().zip(blobs) {
             blob.validate()?;
-            if blob.allocation_name != allocation.name
-                || blob.kind != allocation.kind
-                || blob.layer_idx != allocation.layer_idx
-                || blob.device_ordinal != allocation.device_ordinal
-                || blob.dtype != allocation.dtype
-                || blob.element_size != allocation.element_size
-                || blob.strides_bytes != allocation.strides_bytes
-                || blob.bytes.len() != *used_bytes
-            {
+            if !crate::session_cache::snapshot_blob_can_restore(
+                allocation,
+                *used_bytes,
+                blob,
+            ) {
                 return Err(format!(
                     "snapshot allocation {:?} is incompatible with live allocation {:?}",
                     blob.allocation_name, allocation.name
@@ -37270,6 +37284,7 @@ impl GpuDecodeStore {
             prefill_kv_layer_strides: Vec::new(),
             prefill_kv_temp_seq: 0,
             prefill_kv_temp_layers: 0,
+            prefill_kv_temp_format: 1,
             prefill_kv_active: false,
             retain_prefill_kv_for_active: false,
             active_stage_prefix_tokens: None,
@@ -37542,7 +37557,6 @@ impl GpuDecodeStore {
             d_fla_w: None,
             d_fla_u: None,
             d_fla_h: None,
-            d_fla_h0: None,
             d_fla_final_state: None,
             d_fla_v_new: None,
             d_fla_o: None,
@@ -38494,6 +38508,7 @@ impl GpuDecodeStore {
                         scale,
                         conv_state_ptr,
                         recur_state_ptr,
+                        ..
                     } => {
                         let hqq_la_exec = match &layer.hqq_exec {
                             Some(HqqExecutionDescriptor::LinearAttention(desc))
@@ -42570,6 +42585,7 @@ impl GpuDecodeStore {
                             scale,
                             conv_state_ptr,
                             recur_state_ptr,
+                            ..
                         } => {
                             let hqq_la_exec = match &layer.hqq_exec {
                                 Some(HqqExecutionDescriptor::LinearAttention(desc))
@@ -50959,6 +50975,7 @@ impl GpuDecodeStore {
                     scale,
                     conv_state_ptr,
                     recur_state_ptr,
+                    ..
                 } => {
                     let hqq_la_exec = match &layer.hqq_exec {
                         Some(HqqExecutionDescriptor::LinearAttention(desc))
@@ -57673,6 +57690,7 @@ impl GpuDecodeStore {
                     scale,
                     conv_state_ptr,
                     recur_state_ptr,
+                    ..
                 } => {
                     let hqq_la_exec = match &graph.layers[layer_idx].hqq_exec {
                         Some(HqqExecutionDescriptor::LinearAttention(desc))

@@ -1,5 +1,79 @@
 # Krasis Benchmark Results
 
+## RAM-backed session cache timing-disabled regression gate — 2026-08-05
+
+The required `./dev speed-test` comparison used the command's fixed
+`tests/qcn-k4v4-hqq4-int4-benchmark.conf` workload on one RTX PRO 6000 96GB with timing and
+trace instrumentation disabled. Both runs used the same explicit
+`--selected-gpus 1` override so cleanup and execution stayed on the RTX PRO
+6000 and did not disturb the Lore service on physical GPU 0. The before run
+used exact release commit `565ea1ecaa83fa4c90f1963bd53cc3c1bb5f79d7`
+(`v1.0.20`); its detached harness contained only the GPU-cleanup isolation fix.
+The after run used the final session-cache source. Prefix caching is off by
+default in this benchmark, as it will be for existing users. A second after
+run was made after the final transactional-admission review; it changed only
+cache-store code that is unreachable while the feature is disabled, but is
+reported here so the performance evidence matches the exact committed source.
+
+| Measurement | Before | After | Change |
+|---|---:|---:|---:|
+| Prefill 1K | 2,115.8 tok/s | 2,179.7 tok/s | +3.020% |
+| Prefill 5K | 6,721.5 tok/s | 6,838.5 tok/s | +1.741% |
+| Prefill 10K | 9,041.2 tok/s | 9,118.9 tok/s | +0.859% |
+| Prefill 20K | 10,592.1 tok/s | 10,612.0 tok/s | +0.188% |
+| Prefill 35K | 11,019.1 tok/s | 11,031.6 tok/s | +0.113% |
+| Prefill 39,920 | 11,012.9 tok/s | 10,978.1 tok/s | -0.316% |
+| Internal decode 50 | 89.88 tok/s | 89.77 tok/s | -0.122% |
+| Internal decode 100 | 89.85 tok/s | 89.87 tok/s | +0.022% |
+| Internal decode 250 | 88.37 tok/s | 88.38 tok/s | +0.011% |
+| HTTP round trip 50 | 159.35 tok/s | 159.08 tok/s | -0.169% |
+| HTTP round trip 100 | 114.63 tok/s | 114.45 tok/s | -0.157% |
+| HTTP round trip 250 | 96.55 tok/s | 96.50 tok/s | -0.052% |
+
+The exact final-review rerun measured:
+
+| Measurement | v1.0.20 before | Final review | Change |
+|---|---:|---:|---:|
+| Prefill 1K | 2,115.8 tok/s | 2,139.0 tok/s | +1.097% |
+| Prefill 5K | 6,721.5 tok/s | 6,749.2 tok/s | +0.412% |
+| Prefill 10K | 9,041.2 tok/s | 9,018.0 tok/s | -0.257% |
+| Prefill 20K | 10,592.1 tok/s | 10,553.1 tok/s | -0.368% |
+| Prefill 35K | 11,019.1 tok/s | 10,971.6 tok/s | -0.431% |
+| Prefill 39,920 | 11,012.9 tok/s | 10,910.6 tok/s | -0.929% |
+| Internal decode 50 | 89.88 tok/s | 89.64 tok/s | -0.267% |
+| Internal decode 100 | 89.85 tok/s | 89.68 tok/s | -0.189% |
+| Internal decode 250 | 88.37 tok/s | 88.19 tok/s | -0.204% |
+| HTTP round trip 50 | 159.35 tok/s | 158.83 tok/s | -0.326% |
+| HTTP round trip 100 | 114.63 tok/s | 114.22 tok/s | -0.358% |
+| HTTP round trip 250 | 96.55 tok/s | 96.27 tok/s | -0.290% |
+
+The result is performance-neutral within ordinary run variance: internal
+decode changed by -0.122% to +0.022%, while five of six prefill points improved
+and the remaining point changed by -0.316%. Both runs retained all
+24,576/24,576 routed experts. Decode low-water free VRAM was 53,156 MB before
+and 53,200 MB after; this is intentionally far above the 600 MiB safety margin
+because the complete expert set fits, so there is no additional HCS residency
+available to buy with that free memory.
+
+The post-review rerun remains within 0.93% of v1.0.20 at every prefill point
+and within 0.36% for decode and HTTP. It also retained all 24,576 experts,
+recorded zero HCS copy failures, and measured the same 53,200 MB decode
+low-water. Together, the two independent final-source runs bound ordinary
+run-to-run variation without hiding the exact final result.
+
+Evidence: before [stdout](20260805_session_cache_speed_before_v1020_benchmark_stdout.log),
+[report](20260805_session_cache_speed_before_v1020_benchmark_report.log),
+[server](20260805_session_cache_speed_before_v1020_krasis.log), and
+[complete command/build log](20260805_session_cache_speed_before_v1020_full.log);
+after [stdout](20260805_session_cache_speed_after_final_benchmark_stdout.log),
+[report](20260805_session_cache_speed_after_final_benchmark_report.log),
+[server](20260805_session_cache_speed_after_final_krasis.log), and
+[complete command/build log](20260805_session_cache_speed_after_final_full.log).
+Post-review final-source rerun: [stdout](20260806_session_cache_speed_after_final_review_benchmark_stdout.log),
+[report](20260806_session_cache_speed_after_final_review_benchmark_report.log),
+[server](20260806_session_cache_speed_after_final_review_krasis.log), and
+[complete command log](20260806_session_cache_speed_after_final_review_full.log).
+
 ## RAM-backed session cache Phase 0 — Nemotron Nano Mamba measurement — 2026-08-05
 
 This instrumentation-enabled run used the validated Nemotron Nano HQQ4/k4v4

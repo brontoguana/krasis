@@ -787,7 +787,34 @@ extern "C" __global__ void deepseek_v4_store_raw_kv_kernel(
     int position = start_pos + token;
     __nv_bfloat16 value = input[linear];
     history[(int64_t)position * head_dim + dim] = value;
-    ring[((int64_t)(position % window) * head_dim) + dim] = value;
+    // A prompt chunk may span the ring more than once. Only the last token in
+    // this chunk for a physical slot may publish it; otherwise parallel writes
+    // race and an older absolute row can win nondeterministically.
+    if ((int64_t)token + window >= tokens) {
+        ring[((int64_t)(position % window) * head_dim) + dim] = value;
+    }
+}
+
+// Rebuild the request-scoped chronological prefix from the persistent modulo
+// ring before a cached continuation. The ring is the canonical sequence state;
+// chronological history is derived prefill scratch and is intentionally not
+// included in host snapshots.
+extern "C" __global__ void deepseek_v4_restore_raw_history_kernel(
+    __nv_bfloat16* __restrict__ history,
+    const __nv_bfloat16* __restrict__ ring,
+    int end_pos,
+    int head_dim,
+    int window)
+{
+    int retained = min(end_pos, window);
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = (int64_t)retained * head_dim;
+    if (linear >= total || end_pos <= 0 || head_dim <= 0 || window <= 0) return;
+    int row = (int)(linear / head_dim);
+    int dim = (int)(linear % head_dim);
+    int position = end_pos - retained + row;
+    history[(int64_t)position * head_dim + dim] =
+        ring[((int64_t)(position % window) * head_dim) + dim];
 }
 
 // Decode writes one normalized/QAT KV row into the physical sliding ring. The

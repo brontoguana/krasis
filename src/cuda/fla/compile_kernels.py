@@ -133,7 +133,7 @@ KERNEL_SPECS = [
         "symbol_base": "chunk_gated_delta_rule_fwd_kernel_h_blockdim64",
         "signature": {
             "k": "*bf16", "v": "*bf16", "w": "*bf16", "v_new": "*bf16",
-            "g": "*fp32", "gk": "*bf16", "h": "*bf16", "h0": "*bf16",
+            "g": "*fp32", "gk": "*bf16", "h": "*bf16", "h0": "*fp32",
             "ht": "*fp32", "cu_seqlens": "*i32", "chunk_offsets": "*i32",
             "T": "i32",
         },
@@ -159,7 +159,7 @@ KERNEL_SPECS = [
         "symbol_base": "chunk_gated_delta_rule_fwd_kernel_h_blockdim64_bv64",
         "signature": {
             "k": "*bf16", "v": "*bf16", "w": "*bf16", "v_new": "*bf16",
-            "g": "*fp32", "gk": "*bf16", "h": "*bf16", "h0": "*bf16",
+            "g": "*fp32", "gk": "*bf16", "h": "*bf16", "h0": "*fp32",
             "ht": "*fp32", "cu_seqlens": "*i32", "chunk_offsets": "*i32",
             "T": "i32",
         },

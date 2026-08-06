@@ -1543,6 +1543,22 @@ do_network() {
     exec_repo_python "$SCRIPT_DIR/tests/test_network.py" --port "$port" "$@"
 }
 
+do_session_cache_test() {
+    [[ $# -lt 1 ]] && err "Usage: ./dev session-cache-test <port> [--prompt-chars N] [--vision-uncacheable]"
+    local port="$1"
+    shift
+    KRASIS_DEV_SCRIPT=1 exec_repo_python "$SCRIPT_DIR/tests/test_session_cache_live.py" \
+        --port "$port" "$@"
+}
+
+do_session_cache_operations() {
+    [[ $# -lt 1 ]] && err "Usage: ./dev session-cache-operations <port>"
+    local port="$1"
+    shift
+    KRASIS_DEV_SCRIPT=1 exec_repo_python "$SCRIPT_DIR/tests/test_session_cache_operations.py" \
+        --port "$port" "$@"
+}
+
 do_test_kernels() {
     info "Running CUDA kernel unit tests..."
     # First ensure test data exists
@@ -3621,6 +3637,7 @@ do_server_test() {
             PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
             cargo test --release --lib session_cache::tests "$@"
         KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_reference_judgement
+        KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_session_cache_gate
     )
 }
 
@@ -3694,6 +3711,8 @@ case "$cmd" in
     quality-ppl)    do_quality_ppl "$@" ;;
     awq-calibrate)  do_awq_calibrate "$@" ;;
     network)        do_network "$@" ;;
+    session-cache-test) do_session_cache_test "$@" ;;
+    session-cache-operations) do_session_cache_operations "$@" ;;
     test-kernels)   do_test_kernels "$@" ;;
     cpu-tail-calibrate) do_cpu_tail_calibrate "$@" ;;
     validate)       do_validate "$@" ;;
@@ -3732,6 +3751,8 @@ case "$cmd" in
         echo "  test <config>                  Short model test (benchmark + network tests)"
         echo "  test <config> --thorough       Thorough test (+ stress + large prompts)"
         echo "  network <port> [--large]       Run network tests against a running server"
+        echo "  session-cache-test <port>      Compare active/RAM cached continuations with full prefill"
+        echo "  session-cache-operations <port> Test eviction, branches, cancellation and concurrency"
         echo "  validate <config>              Validate against stored non-HF references; HF artifacts require override"
         echo "  reference-test <config>        Compare against stored non-HF references; HF artifacts require override"
         echo "  reference-test --compare <model>  Comparison matrix; HF artifacts require override"

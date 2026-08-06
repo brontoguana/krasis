@@ -173,7 +173,8 @@ struct ServerState {
     /// Token ID for `</think>` — when set, thinking tokens are exempt from max_tokens.
     thinking_end_token: Option<usize>,
     /// Raw pointer to a GpuDecodeStore instance (set from Python during server init).
-    /// Safety: single-request guarantee means no concurrent access.
+    /// Safety: the fair model worker serializes all requests that can touch
+    /// the shared GPU workspace, so no concurrent raw-pointer access occurs.
     gpu_store_addr: usize,
     /// When set, write full request JSON to this directory for debugging IDE clients.
     /// Enabled by KRASIS_LOG_REQUESTS=1 (writes to logs/requests/).
@@ -248,6 +249,7 @@ struct SessionCacheMetrics {
     restore_bytes: u64,
     restore_total_ms: f64,
     restore_last_ms: f64,
+    mid_prefill_boundary_skipped: u64,
 }
 
 fn increment_metric(counter: &mut u64, name: &str) {
@@ -583,6 +585,34 @@ fn active_boundary_tokens_for_publication(
     stable_tokens
         .filter(|tokens| has_base_snapshot && tokens.len() == sequence_start)
         .map(<[u32]>::to_vec)
+}
+
+fn active_plan_requires_device_checkpoint(
+    plan: crate::session_cache::ActivePrefixPlan,
+    published_requires_device_checkpoint: bool,
+) -> bool {
+    published_requires_device_checkpoint
+        && matches!(plan, crate::session_cache::ActivePrefixPlan::Append { .. })
+}
+
+fn active_plan_requires_stage_restore(
+    plan: crate::session_cache::ActivePrefixPlan,
+    published_requires_device_checkpoint: bool,
+) -> bool {
+    published_requires_device_checkpoint
+        && matches!(
+            plan,
+            crate::session_cache::ActivePrefixPlan::Append { .. }
+                | crate::session_cache::ActivePrefixPlan::TruncateKvAndAppend { .. }
+        )
+}
+
+fn internal_capture_boundary(
+    snapshot_boundary: Option<usize>,
+    sequence_start: usize,
+    request_tokens: usize,
+) -> Option<usize> {
+    snapshot_boundary.filter(|&boundary| boundary > sequence_start && boundary < request_tokens)
 }
 
 fn restore_snapshot_to_gpu(
@@ -1462,6 +1492,13 @@ fn handle_session_cache_stats(stream: &mut TcpStream, state: &ServerState) {
             "budget_bytes": ram.last_budget_bytes,
             "effective_available_bytes": ram.last_effective_available_bytes,
         },
+        "capabilities": {
+            "exact_mid_prefill_boundary_capture": unsafe {
+                (&*(state.gpu_store_addr as *const GpuDecodeStore))
+                    .exact_mid_prefill_boundary_capture_supported_rust()
+            },
+            "mid_prefill_boundary_skipped": metrics.mid_prefill_boundary_skipped,
+        },
         "hits": {
             "total": hit_total,
             "active_gpu": metrics.active_hits,
@@ -1484,6 +1521,8 @@ fn handle_session_cache_stats(stream: &mut TcpStream, state: &ServerState) {
         "resident": {
             "snapshots": ram.resident_snapshots,
             "bytes": ram.resident_bytes,
+            "snapshot_bytes": ram.snapshot_bytes,
+            "index_bytes": ram.index_bytes,
             "reserved_bytes": ram.reserved_bytes,
             "active_gpu_tokens": state.session_cache.active.as_ref().map_or(0, |active| active.consumed_token_ids.len()),
         },
@@ -2969,12 +3008,18 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     let mut request_token_ids: Vec<u32> = Vec::new();
     let mut cache_sequence_start = 0usize;
     let mut cache_request_eligible = false;
+    // The restore source may extend beyond a rewindable shared KV boundary.
+    // Keep it separate from the incremental writeback base, which must be an
+    // exact prefix of the newly published branch.
+    let mut cache_restore_snapshot_id = None;
     let mut cache_base_snapshot_id = None;
     let mut cache_ram_restore: Option<(usize, f64)> = None;
     let mut cache_miss_reason: Option<SessionCacheMissReason> = None;
     let mut cache_active_device_restore = false;
+    let mut cache_active_stage_restore = false;
     let mut cache_prefill_stage_required = false;
     let mut cache_stable_boundary_tokens: Option<Vec<u32>> = None;
+    let mut cache_image_miss_recorded = false;
     let mut cache_boundary_reservation = None;
     let mut cache_boundary_incremental_base: Option<Arc<crate::session_cache::SessionSnapshot>> =
         None;
@@ -2986,6 +3031,20 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         (usize, usize, Vec<usize>, bool, Option<serde_json::Value>),
         String,
     > = {
+        // Image/recurrent multimodal state does not yet have an exact host
+        // snapshot contract. Record that limitation before Python image
+        // preparation so even a fail-closed setup error remains observable.
+        if state.session_cache.enabled && request_prefix_cache && has_images {
+            state
+                .session_cache
+                .metrics
+                .record_miss(SessionCacheMissReason::ImageInput);
+            cache_image_miss_recorded = true;
+            log::info!(
+                "Request {} prefix cache miss: image_input_uncacheable",
+                request_id,
+            );
+        }
         // ── Rust prefill: text requests stay token-id only; image requests
         // build BF16 inputs_embeds once before the Rust prefill run.
         let mut multimodal_inputs: Option<MultimodalPrefillInputs> = None;
@@ -3108,35 +3167,67 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             };
         if cache_request_eligible {
             if let Some(stable_rendered) = stable_rendered.as_ref() {
-                match state.tokenizer.encode(stable_rendered.as_str(), false) {
-                    Ok(encoding) => {
-                        let stable_ids = encoding.get_ids();
-                        let boundary =
-                            crate::session_cache::common_token_prefix(stable_ids, &token_ids);
-                        if boundary > 0 && boundary < token_ids.len() {
-                            cache_stable_boundary_tokens = Some(token_ids[..boundary].to_vec());
-                            log::info!(
-                                "Request {} prefix cache stable boundary: tokens={} stable_render_tokens={} full_prompt_tokens={}",
-                                request_id,
-                                boundary,
-                                stable_ids.len(),
-                                token_ids.len(),
-                            );
-                        } else {
-                            log::info!(
-                                "Request {} prefix cache miss: no_internal_stable_template_boundary matched={} stable_render_tokens={} full_prompt_tokens={}",
-                                request_id,
-                                boundary,
-                                stable_ids.len(),
-                                token_ids.len(),
-                            );
+                let exact_boundary_alignment = {
+                    let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+                    store.exact_mid_prefill_boundary_alignment_rust()
+                };
+                if let Some(boundary_alignment) = exact_boundary_alignment {
+                    match state.tokenizer.encode(stable_rendered.as_str(), false) {
+                        Ok(encoding) => {
+                            let stable_ids = encoding.get_ids();
+                            let matched_boundary =
+                                crate::session_cache::common_token_prefix(stable_ids, &token_ids);
+                            let boundary = crate::session_cache::align_exact_boundary_down(
+                                matched_boundary,
+                                boundary_alignment,
+                            )
+                            .unwrap_or(0);
+                            if boundary > 0 && boundary < token_ids.len() {
+                                cache_stable_boundary_tokens =
+                                    Some(token_ids[..boundary].to_vec());
+                                log::info!(
+                                    "Request {} prefix cache stable boundary: tokens={} matched_tokens={} alignment={} stable_render_tokens={} full_prompt_tokens={}",
+                                    request_id,
+                                    boundary,
+                                    matched_boundary,
+                                    boundary_alignment,
+                                    stable_ids.len(),
+                                    token_ids.len(),
+                                );
+                            } else {
+                                log::info!(
+                                    "Request {} prefix cache miss: no_internal_stable_template_boundary matched={} aligned={} alignment={} stable_render_tokens={} full_prompt_tokens={}",
+                                    request_id,
+                                    matched_boundary,
+                                    boundary,
+                                    boundary_alignment,
+                                    stable_ids.len(),
+                                    token_ids.len(),
+                                );
+                            }
                         }
+                        Err(error) => log::error!(
+                            "Request {} prefix cache miss: stable_template_tokenize_failed error={}",
+                            request_id,
+                            error,
+                        ),
                     }
-                    Err(error) => log::error!(
-                        "Request {} prefix cache miss: stable_template_tokenize_failed error={}",
+                } else {
+                    increment_metric(
+                        &mut state.session_cache.metrics.mid_prefill_boundary_skipped,
+                        "mid_prefill_boundary_skipped",
+                    );
+                    // Preserve the ordinary model-math path for lossy stage
+                    // formats: snapshot the exact terminal prefill state
+                    // after the normal chunk plan instead of introducing a
+                    // synthetic internal split. A later divergent request may
+                    // rewind token-row state from this longer snapshot.
+                    cache_stable_boundary_tokens = Some(token_ids.clone());
+                    log::info!(
+                        "Request {} prefix cache internal boundary skipped: runtime prefill path is not exact across synthetic chunk splits; terminal prefill boundary planned at {} tokens",
                         request_id,
-                        error,
-                    ),
+                        token_ids.len(),
+                    );
                 }
             }
         }
@@ -3159,7 +3250,11 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     SessionCacheMissReason::SpeculativeDecode,
                 )
             };
-            state.session_cache.metrics.record_miss(miss_reason);
+            if !(cache_image_miss_recorded
+                && matches!(miss_reason, SessionCacheMissReason::ImageInput))
+            {
+                state.session_cache.metrics.record_miss(miss_reason);
+            }
             log::info!("Request {} prefix cache miss: {}", request_id, reason);
             invalidate_active_sequence(state, reason);
         }
@@ -3188,12 +3283,16 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     "session cache compatibility signature is unavailable".to_string()
                 });
             match compatibility.and_then(|compatibility| {
-                state
+                let ram_store = state
                     .session_cache
                     .ram_store
                     .as_mut()
-                    .ok_or_else(|| "RAM session store is unavailable".to_string())?
-                    .longest_prefix(&token_ids, &compatibility)
+                    .ok_or_else(|| "RAM session store is unavailable".to_string())?;
+                if store.sequence_state_has_non_rewindable_rust() {
+                    ram_store.longest_proper_prefix(&token_ids, &compatibility)
+                } else {
+                    ram_store.longest_rewindable_prefix(&token_ids, &compatibility)
+                }
             }) {
                 Ok(crate::session_cache::PrefixLookupResult::Hit {
                     snapshot_id,
@@ -3204,9 +3303,12 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                         matched_tokens,
                     ) =>
                 {
-                    let snapshot_bytes = match state.session_cache.ram_store.as_mut() {
+                    let snapshot_meta = match state.session_cache.ram_store.as_mut() {
                         Some(ram_store) => match ram_store.get(snapshot_id) {
-                            Ok(Some(snapshot)) => Some(snapshot.memory_cost_bytes()),
+                            Ok(Some(snapshot)) => Some((
+                                snapshot.memory_cost_bytes(),
+                                snapshot.consumed_token_ids.len(),
+                            )),
                             Ok(None) => {
                                 log::info!("Request {} prefix cache miss: evicted", request_id);
                                 cache_miss_reason = Some(SessionCacheMissReason::Evicted);
@@ -3228,7 +3330,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                             None
                         }
                     };
-                    let restore_ms = snapshot_bytes.and_then(|bytes| {
+                    let restore_ms = snapshot_meta.map(|(bytes, _)| bytes).and_then(|bytes| {
                         predicted_restore_ms(&state.session_cache.restore_samples, bytes)
                     });
                     let avoided_ms = predicted_avoided_prefill_ms(
@@ -3242,8 +3344,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     {
                         match restore_snapshot_by_id(state, snapshot_id) {
                             Ok((restored_tokens, bytes, measured_ms)) => {
-                                if restored_tokens.len() != matched_tokens
-                                    || restored_tokens.as_slice() != &token_ids[..matched_tokens]
+                                if restored_tokens.len() < matched_tokens
+                                    || restored_tokens[..matched_tokens]
+                                        != token_ids[..matched_tokens]
                                 {
                                     log::error!(
                                         "Request {} prefix cache restore exact-token verification failed",
@@ -3251,15 +3354,28 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                                     );
                                     cache_miss_reason = Some(SessionCacheMissReason::RestoreFailed);
                                 } else {
+                                    let rewound = restored_tokens.len() > matched_tokens;
+                                    if rewound {
+                                        for address in std::iter::once(state.gpu_store_addr)
+                                            .chain(state.aux_gpu_store_addrs.iter().copied())
+                                        {
+                                            let restored_store =
+                                                unsafe { &mut *(address as *mut GpuDecodeStore) };
+                                            restored_store.set_kv_position_rust(matched_tokens);
+                                        }
+                                    }
                                     cache_sequence_start = matched_tokens;
-                                    cache_base_snapshot_id = Some(snapshot_id);
+                                    cache_restore_snapshot_id = Some(snapshot_id);
+                                    cache_base_snapshot_id = (!rewound).then_some(snapshot_id);
                                     cache_ram_restore = Some((bytes, measured_ms));
                                     cache_miss_reason = None;
                                     log::info!(
-                                            "Request {} prefix cache RAM hit: reused={} suffix={} bytes={} restore_ms={:.3}",
+                                            "Request {} prefix cache RAM hit: reused={} suffix={} restored_tokens={} rewound={} bytes={} restore_ms={:.3}",
                                             request_id,
                                             matched_tokens,
                                             token_ids.len().saturating_sub(matched_tokens),
+                                            restored_tokens.len(),
+                                            rewound,
                                             bytes,
                                             measured_ms,
                                         );
@@ -3284,9 +3400,16 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                             );
                     }
                 }
-                Ok(crate::session_cache::PrefixLookupResult::Hit { .. }) => log::info!(
-                    "Request {} prefix cache RAM candidate not longer than active state",
+                Ok(crate::session_cache::PrefixLookupResult::Hit {
+                    snapshot_id,
+                    matched_tokens,
+                }) => log::info!(
+                    "Request {} prefix cache RAM candidate not selected: snapshot={:?} matched={} active_reusable={} request_tokens={}",
                     request_id,
+                    snapshot_id,
+                    matched_tokens,
+                    active_reusable_tokens,
+                    token_ids.len(),
                 ),
                 Ok(crate::session_cache::PrefixLookupResult::SignatureMismatch {
                     matched_tokens,
@@ -3322,11 +3445,22 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                             .active
                             .as_ref()
                             .map(|active| active.snapshot_id);
-                        cache_active_device_restore = state
-                            .session_cache
-                            .active
-                            .as_ref()
-                            .is_some_and(|active| active.requires_device_checkpoint);
+                        cache_active_device_restore = active_plan_requires_device_checkpoint(
+                            crate::session_cache::ActivePrefixPlan::Append { matched_tokens },
+                            state
+                                .session_cache
+                                .active
+                                .as_ref()
+                                .is_some_and(|active| active.requires_device_checkpoint),
+                        );
+                        cache_active_stage_restore = active_plan_requires_stage_restore(
+                            crate::session_cache::ActivePrefixPlan::Append { matched_tokens },
+                            state
+                                .session_cache
+                                .active
+                                .as_ref()
+                                .is_some_and(|active| active.requires_device_checkpoint),
+                        );
                         if !cache_active_device_restore {
                             store.set_kv_position_rust(matched_tokens);
                         }
@@ -3342,11 +3476,26 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     }) => {
                         cache_miss_reason = None;
                         cache_sequence_start = matched_tokens;
-                        cache_active_device_restore = state
-                            .session_cache
-                            .active
-                            .as_ref()
-                            .is_some_and(|active| active.requires_device_checkpoint);
+                        cache_active_device_restore = active_plan_requires_device_checkpoint(
+                            crate::session_cache::ActivePrefixPlan::TruncateKvAndAppend {
+                                matched_tokens,
+                            },
+                            state
+                                .session_cache
+                                .active
+                                .as_ref()
+                                .is_some_and(|active| active.requires_device_checkpoint),
+                        );
+                        cache_active_stage_restore = active_plan_requires_stage_restore(
+                            crate::session_cache::ActivePrefixPlan::TruncateKvAndAppend {
+                                matched_tokens,
+                            },
+                            state
+                                .session_cache
+                                .active
+                                .as_ref()
+                                .is_some_and(|active| active.requires_device_checkpoint),
+                        );
                         if !cache_active_device_restore {
                             store.set_kv_position_rust(matched_tokens);
                         }
@@ -3384,7 +3533,8 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     }
                 }
             }
-            let session_lock_key = cache_base_snapshot_id
+            let session_lock_key = cache_restore_snapshot_id
+                .or(cache_base_snapshot_id)
                 .or_else(|| {
                     (cache_sequence_start > 0)
                         .then(|| {
@@ -3421,11 +3571,11 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             // and response delivery succeed.
             state.session_cache.active = None;
         }
-        let capture_boundary = cache_stable_boundary_tokens
+        let snapshot_boundary = cache_stable_boundary_tokens
             .as_ref()
             .map(Vec::len)
-            .filter(|&boundary| boundary > cache_sequence_start && boundary < token_ids.len());
-        if let Some(boundary) = capture_boundary {
+            .filter(|&boundary| boundary > cache_sequence_start && boundary <= token_ids.len());
+        if let Some(boundary) = snapshot_boundary {
             match session_snapshot_reservation_bytes(state, boundary).and_then(|required_bytes| {
                 state
                     .session_cache
@@ -3451,6 +3601,14 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 }
             }
         }
+        let capture_boundary = internal_capture_boundary(
+            cache_boundary_reservation
+                .is_some()
+                .then_some(snapshot_boundary)
+                .flatten(),
+            cache_sequence_start,
+            token_ids.len(),
+        );
         if cache_boundary_reservation.is_some() {
             if let Some(base_id) = cache_base_snapshot_id {
                 let base_result = state
@@ -3509,7 +3667,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         }
         let mut engine_guard = state.rust_prefill.lock().unwrap();
         let engine = engine_guard.as_mut().unwrap();
-        if cache_active_device_restore {
+        if cache_active_stage_restore {
             if let Err(error) = engine.arm_active_stage_continuation(cache_sequence_start) {
                 let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
                 store.discard_active_sequence_checkpoint_rust();
@@ -3528,6 +3686,10 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 );
                 return;
             }
+        } else {
+            engine.discard_active_stage_state();
+        }
+        if cache_active_device_restore {
             let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
             match store.restore_active_sequence_checkpoint_rust(cache_sequence_start) {
                 Ok(restore_ms) => log::info!(
@@ -3555,7 +3717,6 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 }
             }
         } else {
-            engine.discard_active_stage_state();
             let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
             store.discard_active_sequence_checkpoint_rust();
         }
@@ -3614,7 +3775,12 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             // backends even when only a suffix is computed. Size it from the
             // exact logical sequence length; run_prefill_from below still
             // executes only the uncached suffix.
-            if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
+            let prepare_result = if cache_request_eligible {
+                engine.prepare_for_prefill_session_cache_exact(token_ids.len())
+            } else {
+                engine.prepare_for_prefill(token_ids.len())
+            };
+            if let Err(e) = prepare_result {
                 engine.clear_external_prefill_inputs();
                 engine.clear_prefill_hcs_guard_store_addr();
                 engine.set_optional_pinning_budget_mb(None);
@@ -3657,7 +3823,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             };
 
             if cache_sequence_start > 0 && cache_ram_restore.is_some() {
-                let stage_restore = cache_base_snapshot_id
+                let stage_restore = cache_restore_snapshot_id
                     .ok_or_else(|| "RAM-restored continuation has no base snapshot ID".to_string())
                     .and_then(|snapshot_id| {
                         let snapshot = state
@@ -3669,7 +3835,10 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                             .ok_or_else(|| {
                                 "RAM-restored continuation snapshot was evicted".to_string()
                             })?;
-                        engine.restore_stage_exact_sequence_state(snapshot.as_ref())
+                        engine.restore_stage_exact_sequence_state(
+                            snapshot.as_ref(),
+                            cache_sequence_start,
+                        )
                     });
                 match stage_restore {
                     Ok(stage_ms) => {
@@ -3807,10 +3976,6 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 engine.clear_external_prefill_inputs();
             }
 
-            let capture_boundary = cache_boundary_reservation
-                .is_some()
-                .then(|| cache_stable_boundary_tokens.as_ref().map(Vec::len))
-                .flatten();
             let attempt_result = match match (cache_sequence_start, capture_boundary) {
                 (sequence_start, Some(boundary)) if sequence_start > 0 => engine
                     .run_prefill_continuation_capturing_boundary(
@@ -3841,17 +4006,46 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     .map(|result| (result, None)),
                 (_, Some(_)) => unreachable!(),
             } {
-                Ok((r, capture)) => match if cache_sequence_start > 0 {
-                    engine.finalize_stage_exact_prefill_kv_continuation(
-                        r.prompt_len,
-                        cache_sequence_start,
-                    )
-                } else {
-                    engine.finalize_stage_exact_prefill_kv(r.prompt_len)
-                } {
-                    Ok(()) => Ok((r, capture)),
-                    Err(e) => Err(format!("KV stage export failed: {}", e)),
-                },
+                Ok((r, capture)) => {
+                    let terminal_capture_planned = capture.is_none()
+                        && cache_boundary_reservation.is_some()
+                        && cache_stable_boundary_tokens
+                            .as_ref()
+                            .is_some_and(|tokens| tokens.len() == r.prompt_len);
+                    if terminal_capture_planned {
+                        engine
+                            .capture_completed_prefill_boundary(
+                                r.prompt_len,
+                                cache_sequence_start,
+                                cache_boundary_incremental_base.as_deref(),
+                            )
+                            .map(|terminal| {
+                                log::info!(
+                                    "Request {} prefix cache terminal prefill boundary captured: tokens={} allocations={} save_ms={:.3} restore_ms={:.3} active_device_bytes={} active_device_ms={:.3}",
+                                    request_id,
+                                    terminal.token_count,
+                                    terminal.state_blobs.len(),
+                                    terminal.save_ms,
+                                    terminal.restore_ms,
+                                    terminal.active_device_checkpoint_bytes,
+                                    terminal.active_device_checkpoint_ms,
+                                );
+                                (r, Some(terminal))
+                            })
+                    } else {
+                        let finalize = if cache_sequence_start > 0 {
+                            engine.finalize_stage_exact_prefill_kv_continuation(
+                                r.prompt_len,
+                                cache_sequence_start,
+                            )
+                        } else {
+                            engine.finalize_stage_exact_prefill_kv(r.prompt_len)
+                        };
+                        finalize
+                            .map(|()| (r, capture))
+                            .map_err(|e| format!("KV stage export failed: {}", e))
+                    }
+                }
                 Err(e) => Err(e),
             };
 
@@ -3931,7 +4125,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         );
 
         let retain_active_stage = cache_prefill_stage_required
-            && (cache_active_device_restore
+            && (cache_active_stage_restore
                 || cache_ram_boundary_checkpoint_armed
                 || result
                     .as_ref()
@@ -4555,7 +4749,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             }
             let mut consumed_token_ids = request_token_ids;
             consumed_token_ids.extend_from_slice(&decode_outcome.consumed_generation_tokens);
-            if cache_prefill_stage_required {
+            if cache_prefill_stage_required && cache_stable_boundary_tokens.is_some() {
                 let publish_active = pending_active_boundary
                     .zip(post_snapshot_base)
                     .ok_or_else(|| {
@@ -7514,26 +7708,6 @@ impl RustServer {
                     "disabled"
                 }
             );
-            let prefix_cache_compatibility = if prefix_cache_enabled {
-                match build_session_compatibility_signature(
-                    &model_name,
-                    &tokenizer_path,
-                    &chat_template,
-                    gpu_store_addr,
-                    &aux_gpu_store_addrs,
-                ) {
-                    Ok(signature) => Some(signature),
-                    Err(error) => {
-                        log::error!(
-                            "Cannot start server with RAM-backed prefix cache enabled: {}",
-                            error
-                        );
-                        return;
-                    }
-                }
-            } else {
-                None
-            };
             let prefix_cache_ram_store = if prefix_cache_enabled {
                 match crate::session_cache::RamSessionStore::new(
                     prefix_cache_ram_fraction,
@@ -7587,6 +7761,27 @@ impl RustServer {
                         }
                     }
                 }
+            };
+
+            let prefix_cache_compatibility = if prefix_cache_enabled {
+                match build_session_compatibility_signature(
+                    &model_name,
+                    &tokenizer_path,
+                    &chat_template,
+                    gpu_store_addr,
+                    &aux_gpu_store_addrs,
+                ) {
+                    Ok(signature) => Some(signature),
+                    Err(error) => {
+                        log::error!(
+                            "Cannot start server with RAM-backed prefix cache enabled: {}",
+                            error
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
             };
 
             let state = ServerState {
@@ -8410,11 +8605,12 @@ impl RustServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_boundary_tokens_for_publication, consumed_generation_boundary, context_window_fits,
+        active_boundary_tokens_for_publication, active_plan_requires_device_checkpoint,
+        active_plan_requires_stage_restore, consumed_generation_boundary, context_window_fits,
         format_completion, format_completion_with_debug, format_completion_with_tool_calls,
         format_models_response, format_sse_timing, format_sse_token, format_sse_tool_call_args,
-        format_sse_tool_call_start, hide_synthetic_think_stop_text, is_chat_completions_endpoint,
-        is_models_endpoint, parse_tool_calls, push_tool_stream_text,
+        format_sse_tool_call_start, hide_synthetic_think_stop_text, internal_capture_boundary,
+        is_chat_completions_endpoint, is_models_endpoint, parse_tool_calls, push_tool_stream_text,
         validate_prefix_cache_ram_fraction, FairModelScheduler, ModelRequest, ParsedToolCall,
         RequestOverhead, SessionCacheMetrics, SessionCacheMissReason, SessionLockKey,
         SessionLockTable, StreamDetokenizer,
@@ -8425,6 +8621,44 @@ mod tests {
     use std::sync::{mpsc, Arc};
 
     const WINDOWS_MODEL_PATH: &str = r#"C:\Users\stoate\.krasis\models\Qwen3.6-35B-A3B"#;
+
+    #[test]
+    fn terminal_snapshot_never_enters_internal_boundary_path() {
+        assert_eq!(internal_capture_boundary(Some(64), 0, 128), Some(64));
+        assert_eq!(internal_capture_boundary(Some(128), 0, 128), None);
+        assert_eq!(internal_capture_boundary(Some(64), 64, 128), None);
+        assert_eq!(internal_capture_boundary(None, 0, 128), None);
+    }
+
+    #[test]
+    fn kv_truncation_never_restores_a_longer_device_checkpoint() {
+        use crate::session_cache::ActivePrefixPlan;
+
+        assert!(active_plan_requires_device_checkpoint(
+            ActivePrefixPlan::Append { matched_tokens: 32 },
+            true,
+        ));
+        assert!(!active_plan_requires_device_checkpoint(
+            ActivePrefixPlan::TruncateKvAndAppend { matched_tokens: 4 },
+            true,
+        ));
+        assert!(!active_plan_requires_device_checkpoint(
+            ActivePrefixPlan::Append { matched_tokens: 32 },
+            false,
+        ));
+        assert!(active_plan_requires_stage_restore(
+            ActivePrefixPlan::Append { matched_tokens: 32 },
+            true,
+        ));
+        assert!(active_plan_requires_stage_restore(
+            ActivePrefixPlan::TruncateKvAndAppend { matched_tokens: 4 },
+            true,
+        ));
+        assert!(!active_plan_requires_stage_restore(
+            ActivePrefixPlan::TruncateKvAndAppend { matched_tokens: 4 },
+            false,
+        ));
+    }
 
     fn parse_response(body: &str) -> serde_json::Value {
         serde_json::from_str(body).unwrap_or_else(|e| {

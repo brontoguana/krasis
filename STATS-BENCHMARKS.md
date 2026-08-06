@@ -11,6 +11,17 @@ Initial scope: measured supported models at `INT4/HQQ4/k4v4` and
 
 Detailed benchmark logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](benchmarks/BENCHMARKS.md).
 
+The RAM-backed session-cache final regression gate compared the exact v1.0.20
+runtime with the final feature source using the timing-disabled fixed
+`./dev speed-test` workload on one RTX PRO 6000. Internal decode changed by
+-0.122% to +0.022%; five of six prefill points improved and the remaining 39,920-token
+point changed by -0.316%. Both runs retained all 24,576 routed experts. The
+[complete comparison and raw logs](benchmarks/BENCHMARKS.md#ram-backed-session-cache-timing-disabled-regression-gate--2026-08-05)
+show no measurable performance regression with the feature disabled by default.
+A second exact-final-review run remained within 0.93% of v1.0.20 at every
+prefill point and within 0.36% for internal decode and HTTP, again with all
+experts resident and zero HCS copy failures.
+
 | Hardware | Model | Params | Active params | Attention + KV | Prefill | Decode | HTTP round trip | Peak system RAM | HCS | Min free VRAM |
 |---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|
 | 1x RTX PRO 6000 Blackwell 96GB, AMD EPYC 7742 | [DeepSeek-V4-Flash-0731](benchmarks/BENCHMARKS.md#deepseek-v4-flash-0731-learned-index-gemm-default-operational-baseline--2026-08-03) | 304.2B checkpoint / 284B main | 13B main | INT4/BF16/BF16 KV | 152.2 @1K / 320.6 @2K / 906.3 @8.6K / 1,328.2 @23K / 1,204.3 @62K tok/s | 29.38/28.20/28.49 @1K (50/100/250 outputs); 19.41 @62K tok/s | 54.05/35.97/30.60 @1K; 19.41 @62K tok/s | 145.5 GB process RAM (benchmark report) | 6440/11008 (58.5%) | 650 MB |
