@@ -284,7 +284,7 @@ Common options:
 - `--gpu-expert-bits 4` or `8`
 - `--vram-safety-margin 600`
 - `--dynamic-hcs` / `--no-dynamic-hcs`
-- `--prefix-cache` / `--no-prefix-cache`
+- `--prefix-cache` / `--no-prefix-cache` (enabled by default)
 - `--prefix-cache-ram-fraction 0.25`
 - `--ssh-tunnel user@host`
 - `--ssh-key-path ~/.ssh/id_ed25519`

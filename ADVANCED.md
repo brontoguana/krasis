@@ -161,7 +161,7 @@ When BF16 is selected for experts or major components, treat that run as validat
 | `--hcs-host-cache-mode MODE` | source | Soft HCS host storage: `source`, `mirror`, or `auto` |
 | `--dynamic-hcs` / `--no-dynamic-hcs` | on | Dynamic HCS: protect the high-ranked heatmap prefix and reserve a recency-adaptive tail |
 | `--dynamic-hcs-tail-blocks N` | 2 | Advanced dynamic HCS recency-tail size, measured in activated-expert blocks; valid range `1..5` |
-| `--prefix-cache` / `--no-prefix-cache` | off | Enable or disable RAM-backed exact conversation-prefix state caching |
+| `--prefix-cache` / `--no-prefix-cache` | on | Enable or disable RAM-backed exact conversation-prefix state caching |
 | `--prefix-cache-ram-fraction F` | 0.25 | Maximum fraction of live cgroup-aware available RAM admitted for pageable conversation snapshots; valid range `(0, 1]` |
 | `--vram-safety-margin N` | 600 | Reserved VRAM in MB below which warnings fire |
 | `--stream-attention` | off | Stream attention weights from CPU (for very large models) |

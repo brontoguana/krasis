@@ -7492,7 +7492,7 @@ pub struct RustServer {
 #[pymethods]
 impl RustServer {
     #[new]
-    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true, thinking_end_token_id=0, gpu_store_addr=0, aux_gpu_store_addrs=Vec::new(), multi_gpu_split_layers=Vec::new(), multi_gpu_gqa_offsets=Vec::new(), supports_vision=false, test_endpoints=false, prefix_cache=false, prefix_cache_ram_fraction=0.25))]
+    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true, thinking_end_token_id=0, gpu_store_addr=0, aux_gpu_store_addrs=Vec::new(), multi_gpu_split_layers=Vec::new(), multi_gpu_gqa_offsets=Vec::new(), supports_vision=false, test_endpoints=false, prefix_cache=true, prefix_cache_ram_fraction=0.25))]
     fn new(
         py_model: PyObject,
         host: String,

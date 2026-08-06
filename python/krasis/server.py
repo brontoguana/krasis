@@ -2597,8 +2597,8 @@ def main():
     parser.add_argument("--test-endpoints", action="store_true", default=False,
                         help="Enable test-only endpoints (/v1/internal/prefill_logits)")
     parser.add_argument("--prefix-cache", action=argparse.BooleanOptionalAction,
-                        default=False,
-                        help="Enable RAM-backed multi-conversation prefix-state caching (default: off)")
+                        default=True,
+                        help="Enable RAM-backed multi-conversation prefix-state caching (default: on)")
     parser.add_argument("--prefix-cache-ram-fraction", type=float, default=0.25,
                         help="Fraction of cgroup-aware available system RAM usable by prefix snapshots")
     # Apply config file defaults, then parse CLI (CLI wins over config file)

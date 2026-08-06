@@ -1,5 +1,42 @@
 # Krasis Benchmark Results
 
+## Conversation cache enabled-by-default speed gate — 2026-08-06
+
+This final timing-disabled `./dev speed-test --selected-gpus 1` run used the
+fixed Qwen3-Coder-Next INT4/HQQ4/K4V4 workload on one RTX PRO 6000 96GB after
+RAM-backed conversation caching became the runtime default. No component timing
+or trace instrumentation was enabled. The cache remained available through the
+normal production request path; the benchmark's independent prompts did not
+manufacture cache hits.
+
+| Measurement | Exact v1.0.20 | Cache default on | Change |
+|---|---:|---:|---:|
+| Prefill 1K | 2,115.8 tok/s | 2,159.7 tok/s | +2.075% |
+| Prefill 5K | 6,721.5 tok/s | 6,781.8 tok/s | +0.897% |
+| Prefill 10K | 9,041.2 tok/s | 9,095.9 tok/s | +0.605% |
+| Prefill 20K | 10,592.1 tok/s | 10,618.1 tok/s | +0.245% |
+| Prefill 35K | 11,019.1 tok/s | 11,037.5 tok/s | +0.167% |
+| Prefill 39,920 | 11,012.9 tok/s | 10,991.2 tok/s | -0.197% |
+| Internal decode 50 | 89.88 tok/s | 89.84 tok/s | -0.045% |
+| Internal decode 100 | 89.85 tok/s | 89.80 tok/s | -0.056% |
+| Internal decode 250 | 88.37 tok/s | 88.35 tok/s | -0.023% |
+| HTTP round trip 50 | 159.35 tok/s | 159.05 tok/s | -0.188% |
+| HTTP round trip 100 | 114.63 tok/s | 114.50 tok/s | -0.113% |
+| HTTP round trip 250 | 96.55 tok/s | 96.45 tok/s | -0.104% |
+
+All decode and HTTP measurements are within 0.19% of exact v1.0.20. Five of
+six prefill points improved; the remaining 39,920-token point changed by
+-0.197%. Against the immediately preceding final-review run, every prefill,
+decode and HTTP point improved. Both comparisons therefore show no measurable
+regression from enabling the cache by default. HCS retained all 24,576 routed
+experts, recorded zero copy failures and measured a 53,200 MB free-VRAM floor;
+the large floor is expected because no additional experts remain to load.
+
+Evidence: [complete command/build log](20260806_session_cache_default_on_speed_full.log),
+[benchmark stdout](20260806_session_cache_default_on_speed_stdout.log),
+[report](20260806_session_cache_default_on_speed_report.log), and
+[server/calibration log](20260806_session_cache_default_on_speed_server.log).
+
 ## RAM-backed session cache interleaved agent conversations — 2026-08-06
 
 This timing-disabled end-to-end benchmark used Qwen3-Coder-Next INT4 with
@@ -43,8 +80,8 @@ trace instrumentation disabled. Both runs used the same explicit
 6000 and did not disturb the Lore service on physical GPU 0. The before run
 used exact release commit `565ea1ecaa83fa4c90f1963bd53cc3c1bb5f79d7`
 (`v1.0.20`); its detached harness contained only the GPU-cleanup isolation fix.
-The after run used the final session-cache source. Prefix caching is off by
-default in this benchmark, as it will be for existing users. A second after
+The after run used the then-final session-cache source with prefix caching
+explicitly off, before the later default-on gate above. A second after
 run was made after the final transactional-admission review; it changed only
 cache-store code that is unreachable while the feature is disabled, but is
 reported here so the performance evidence matches the exact committed source.

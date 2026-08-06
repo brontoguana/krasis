@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import torch
 
@@ -992,6 +993,19 @@ class LauncherMatrixTest(unittest.TestCase):
                 cfg = LauncherConfig()
                 with self.assertRaisesRegex(ValueError, "CFG_PREFIX_CACHE_RAM_FRACTION"):
                     cfg.apply_saved({"CFG_PREFIX_CACHE_RAM_FRACTION": value})
+
+    def test_conversation_cache_defaults_on_and_saved_zero_disables_it(self) -> None:
+        cfg = LauncherConfig()
+        self.assertTrue(cfg.prefix_cache)
+        cfg.apply_saved({"CFG_PREFIX_CACHE": "0"})
+        self.assertFalse(cfg.prefix_cache)
+
+    def test_no_prefix_cache_cli_explicitly_disables_default(self) -> None:
+        with mock.patch.object(sys, "argv", ["krasis", "--no-prefix-cache"]):
+            args = launcher_mod.parse_args()
+        cfg = LauncherConfig()
+        launcher_mod._apply_cli_overrides(cfg, args)
+        self.assertFalse(cfg.prefix_cache)
 
     def test_interactive_load_config_preserves_saved_kv_attention_safety_and_ssh(self) -> None:
         launcher = Launcher.__new__(Launcher)

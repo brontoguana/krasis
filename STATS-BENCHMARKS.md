@@ -11,6 +11,15 @@ Initial scope: measured supported models at `INT4/HQQ4/k4v4` and
 
 Detailed benchmark logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](benchmarks/BENCHMARKS.md).
 
+RAM-backed conversation caching is enabled by default. The final
+timing-disabled `./dev speed-test` default-on gate on one RTX PRO 6000 retained
+the established baseline: internal decode was `89.84/89.80/88.35 tok/s`, peak
+prefill was `11,037.5 tok/s`, and HTTP was `159.05/114.50/96.45 tok/s`.
+Compared with exact v1.0.20, decode and HTTP changed by at most 0.19%; five of
+six prefill points improved and the remaining 39,920-token point changed by
+-0.197%. All 24,576 experts remained resident and HCS recorded zero copy
+failures. [Default-on comparison and raw evidence](benchmarks/BENCHMARKS.md#conversation-cache-enabled-by-default-speed-gate--2026-08-06).
+
 The RAM-backed session cache's fixed interleaved agent benchmark uses two
 canonical ~10K-token conversations with four turns each and forces six real
 pageable-RAM restores. On Qwen3-Coder-Next with one RTX PRO 6000, cache-on
@@ -25,7 +34,7 @@ runtime with the final feature source using the timing-disabled fixed
 -0.122% to +0.022%; five of six prefill points improved and the remaining 39,920-token
 point changed by -0.316%. Both runs retained all 24,576 routed experts. The
 [complete comparison and raw logs](benchmarks/BENCHMARKS.md#ram-backed-session-cache-timing-disabled-regression-gate--2026-08-05)
-show no measurable performance regression with the feature disabled by default.
+showed no measurable performance regression in the earlier explicit-off gate.
 A second exact-final-review run remained within 0.93% of v1.0.20 at every
 prefill point and within 0.36% for internal decode and HTTP, again with all
 experts resident and zero HCS copy failures.

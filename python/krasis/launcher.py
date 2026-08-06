@@ -698,7 +698,7 @@ class LauncherConfig:
         self.force_rebuild_hqq_cache: bool = False
         self.build_cache: bool = False
         self.enable_thinking: bool = True
-        self.prefix_cache: bool = False
+        self.prefix_cache: bool = True
         self.prefix_cache_ram_fraction: float = 0.25
 
     def apply_saved(self, saved: Dict[str, str]) -> None:
@@ -1066,7 +1066,7 @@ OPTIONS = [
     ConfigOption("Enable thinking", "enable_thinking",
                  choices=[True, False]),
     ConfigOption("Conversation cache", "prefix_cache",
-                 choices=[False, True]),
+                 choices=[True, False]),
     ConfigOption("Conversation cache RAM fraction", "prefix_cache_ram_fraction",
                  opt_type="text", advanced=True),
     ConfigOption("HCS RAM saver", "hcs_host_cache_mode",
