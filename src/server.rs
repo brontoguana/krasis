@@ -374,6 +374,13 @@ fn validate_prefix_cache_ram_fraction(fraction: f64) -> Result<f64, String> {
     Ok(fraction)
 }
 
+fn session_cache_multi_gpu_pending(
+    prefix_cache_enabled: bool,
+    aux_gpu_store_addrs: &[usize],
+) -> bool {
+    prefix_cache_enabled && !aux_gpu_store_addrs.is_empty()
+}
+
 fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
@@ -1497,6 +1504,10 @@ fn handle_session_cache_stats(stream: &mut TcpStream, state: &ServerState) {
                 (&*(state.gpu_store_addr as *const GpuDecodeStore))
                     .exact_mid_prefill_boundary_capture_supported_rust()
             },
+            "multi_gpu_pending": session_cache_multi_gpu_pending(
+                state.session_cache.enabled,
+                &state.aux_gpu_store_addrs,
+            ),
             "mid_prefill_boundary_skipped": metrics.mid_prefill_boundary_skipped,
         },
         "hits": {
@@ -3166,10 +3177,14 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             }
         };
         request_token_ids.clone_from(&token_ids);
+        let multi_gpu_pending = session_cache_multi_gpu_pending(
+            state.session_cache.enabled,
+            &state.aux_gpu_store_addrs,
+        );
         cache_request_eligible = state.session_cache.enabled
             && request_prefix_cache
             && !has_images
-            && state.aux_gpu_store_addrs.is_empty()
+            && !multi_gpu_pending
             && {
                 let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
                 !store.speculative_decode_enabled_rust()
@@ -3252,7 +3267,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     "image_input_uncacheable",
                     SessionCacheMissReason::ImageInput,
                 )
-            } else if !state.aux_gpu_store_addrs.is_empty() {
+            } else if multi_gpu_pending {
                 (
                     "multi_gpu_active_handoff_pending",
                     SessionCacheMissReason::MultiGpuPending,
@@ -7721,6 +7736,11 @@ impl RustServer {
                     "disabled"
                 }
             );
+            if session_cache_multi_gpu_pending(prefix_cache_enabled, &aux_gpu_store_addrs) {
+                log::warn!(
+                    "Conversation caching is enabled but unavailable on this multi-GPU pipeline configuration; every request will miss (stats counter: misses.multi_gpu_pending)."
+                );
+            }
             let prefix_cache_ram_store = if prefix_cache_enabled {
                 match crate::session_cache::RamSessionStore::new(
                     prefix_cache_ram_fraction,
@@ -8624,9 +8644,9 @@ mod tests {
         format_models_response, format_sse_timing, format_sse_token, format_sse_tool_call_args,
         format_sse_tool_call_start, hide_synthetic_think_stop_text, internal_capture_boundary,
         is_chat_completions_endpoint, is_models_endpoint, parse_tool_calls, push_tool_stream_text,
-        validate_prefix_cache_ram_fraction, FairModelScheduler, ModelRequest, ParsedToolCall,
-        RequestOverhead, SessionCacheMetrics, SessionCacheMissReason, SessionLockKey,
-        SessionLockTable, StreamDetokenizer,
+        session_cache_multi_gpu_pending, validate_prefix_cache_ram_fraction, FairModelScheduler,
+        ModelRequest, ParsedToolCall, RequestOverhead, SessionCacheMetrics, SessionCacheMissReason,
+        SessionLockKey, SessionLockTable, StreamDetokenizer,
     };
     use crate::chat_template::{ChatTemplateEngine, ToolCallFormat};
     use std::fs;
@@ -8765,6 +8785,14 @@ mod tests {
         assert!(validate_prefix_cache_ram_fraction(0.0).is_err());
         assert!(validate_prefix_cache_ram_fraction(f64::NAN).is_err());
         assert!(validate_prefix_cache_ram_fraction(1.01).is_err());
+    }
+
+    #[test]
+    fn session_cache_multi_gpu_pending_uses_auxiliary_store_topology() {
+        assert!(!session_cache_multi_gpu_pending(true, &[]));
+        assert!(!session_cache_multi_gpu_pending(false, &[0x1234]));
+        assert!(session_cache_multi_gpu_pending(true, &[0x1234]));
+        assert!(session_cache_multi_gpu_pending(true, &[0x1234, 0x5678]));
     }
 
     #[test]
