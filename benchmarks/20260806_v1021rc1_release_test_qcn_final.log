@@ -1,0 +1,858 @@
+[0;36m[1m=>[0m Waiting for GPU memory to clear...
+[0;32m[1mOK[0m All GPUs clear.
+[0;36m[1m=>[0m Starting release test for model: Qwen3-Coder-Next
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+[0;36m[1m=>[0m Running launcher config matrix test
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/launcher-matrix
+............................
+----------------------------------------------------------------------
+Ran 28 tests in 33.049s
+
+OK
+[0;36m[1m=>[0m Model: Qwen3-Coder-Next (48 layers, ~78B params)
+[0;36m[1m=>[0m GPU: NVIDIA RTX PRO 6000 Blackwell Workstation Edition (97887 MB, index 1)
+[0;36m[1m=>[0m All GPUs: NVIDIA RTX PRO 6000 Blackwell Workstation Edition (97887 MB), NVIDIA RTX A4500 (20470 MB)
+[0;36m[1m=>[0m Krasis: /home/main/miniconda3/envs/ktransformers/bin/krasis
+[0;36m[1m=>[0m Configs: 3 variants
+[0;36m[1m=>[0m Report: /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/release_test.html
+
+[0;36m[1m=>[0m Cleaning GPU before starting...
+[0;32m[1mOK[0m GPU clear.
+
+================================================================
+[0;36m[1m=>[0m Phase 0: Building expert caches (if needed)
+================================================================
+
+[0;32m[1mOK[0m INT4 cache already exists — skipping build
+[0;32m[1mOK[0m INT8 cache already exists — skipping build
+[0;32m[1mOK[0m All caches ready
+
+
+================================================================
+[0;36m[1m=>[0m Config 1/3: INT4 k4v4 HQQ4
+================================================================
+
+[0;36m[1m=>[0m Config: /tmp/krasis-release-s1fxgzl0.conf
+[0;36m[1m=>[0m Launching: krasis --config ... --benchmark
+[0;36m[1m=>[0m PID: 547507 | Log: /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/config1-INT4-k4v4-HQQ4_20260806_131917/server_stdout.log
+[0;36m[1m=>[0m Waiting for benchmark to complete (may take several minutes)...
+[0;32m[1mOK[0m Benchmark complete.
+[0;32m[1mOK[0m Server healthy. Running HTTP tests.
+[0;36m[1m=>[0m Warmup HTTP request...
+[0;36m[1m=>[0m Phase 2: Sanity test prompts
+
+  [1mSanity Test[0m — 8 conversations (14 prompts), 3 multi-turn
+  [2mServer: Qwen3-Coder-Next @ http://127.0.0.1:8012[0m
+  [2mOutput: /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/config1-INT4-k4v4-HQQ4_20260806_131917/sanity.txt[0m
+
+  [1m━━━ Conversation 1 (3 turns) ━━━[0m
+  [0;32mPrompt:[0m Hi [turn 1/3]
+  [0;36mResponse:[0m Hello! How can I help you today? 😊
+  [2m(pp: 9t 451ms 20t/s - tg: 12t 123ms 89.6t/s)[0m
+
+  [0;32mPrompt:[0m What's your name? [turn 2/3]
+  [0;36mResponse:[0m I'm Qwen! 🌟  
+I'm a large language model developed by Alibaba Cloud. Nice to meet you! 😊  
+What would you like to chat about or work on together?
+  [2m(pp: 35t 456ms 77t/s - tg: 41t 456ms 87.7t/s)[0m
+
+  [0;32mPrompt:[0m Who trained you? [turn 3/3]
+  [0;36mResponse:[0m I was trained by the Tongyi Lab team at Alibaba Group. 🌐  
+This team consists of many talented researchers and engineers who worked hard to develop me—Qwen—so I can help with tasks like answering questions, writing stories, coding, logical reasoning, and more.
+
+Fun fact: I’m part of the Qwen series, which includes several versions (like Qwen1, Qwen2, Qwen3, and specialized variants like Qwen-Audio, Qwen-VL, etc.)—each getting better and more capable! 🚀
+
+Want to know how I work, or what I can do? 😊
+  [2m(pp: 89t 464ms 192t/s - tg: 131t 1.5s 85.8t/s)[0m
+
+  [1m━━━ Conversation 2 (3 turns) ━━━[0m
+  [0;32mPrompt:[0m What is 2+2? [turn 1/3]
+  [0;36mResponse:[0m 2 + 2 = **4**
+  [2m(pp: 15t 434ms 34t/s - tg: 9t 100ms 80.3t/s)[0m
+
+  [0;32mPrompt:[0m Now multiply that by 10 [turn 2/3]
+  [0;36mResponse:[0m 4 × 10 = **40**
+  [2m(pp: 40t 446ms 90t/s - tg: 11t 121ms 82.7t/s)[0m
+
+  [0;32mPrompt:[0m And divide the result by 5 [turn 3/3]
+  [0;36mResponse:[0m 40 ÷ 5 = **8**
+  [2m(pp: 67t 447ms 150t/s - tg: 11t 122ms 82.1t/s)[0m
+
+  [1m━━━ Prompt 7/14 ━━━[0m
+  [0;32mPrompt:[0m What is the largest animal in the world?
+  [0;36mResponse:[0m The **blue whale** (*Balaenoptera musculus*) is the largest animal known to have ever lived on Earth.
+
+- **Length**: Up to **29.9 meters** (98 feet), with some historical reports suggesting even longer individuals.
+- **Weight**: Up to **173 tonnes** (190 short tons), though most adults range between 100–150 tonnes.
+- **Heart**: About the size of a small car (~180 kg / 400 lbs).
+- **Tongue**: Weighs as much as an elephant (~2.7 tonnes).
+- **Diet**: Primarily krill—consuming up to 4 tons per day during feeding season.
+
+Despite its massive size, the blue whale feeds by filtering tiny shrimp-like crustaceans from seawater using baleen plates—a remarkable example of efficient filter feeding.
+
+⚠️ Note: While the *Argentinosaurus* and other sauropod dinosaurs may have rivaled or slightly exceeded the blue whale in *length*, current estimates suggest the blue whale remains the **heaviest** and most massive animal in Earth's history.
+  [2m(pp: 17t 445ms 38t/s - tg: 240t 2.7s 87.2t/s)[0m
+
+  [1m━━━ Prompt 8/14 ━━━[0m
+  [0;32mPrompt:[0m What is the largest body of water in the world?
+  [0;36mResponse:[0m The **Pacific Ocean** is the largest body of water in the world.
+
+- **Area**: Approximately **165.25 million square kilometers** (63.8 million square miles).  
+- **Volume**: About **714 million cubic kilometers**, which is more than half of the world’s total ocean water.  
+- **Size comparison**: It’s larger than all of Earth’s landmasses combined.
+
+The Pacific Ocean spans from the Arctic in the north to the Southern Ocean in the south, and from the Americas in the east to Asia and Australia in the west.
+  [2m(pp: 19t 444ms 43t/s - tg: 120t 1.3s 88.2t/s)[0m
+
+  [1m━━━ Prompt 9/14 ━━━[0m
+  [0;32mPrompt:[0m Describe the binary chop algorithm in depth
+  [0;36mResponse:[0m The **binary chop algorithm**, more commonly known today as **binary search**, is a highly efficient algorithm for finding a target value within a **sorted** array (or list). Its name “binary chop” emphasizes how it repeatedly *divides the search space in half*—like chopping a stick in two, then keeping one half and discarding the other—until the target is found or the search space is empty.
+
+Below is a comprehensive, in-depth explanation covering principles, mechanics, variants, complexity, edge cases, and practical considerations.
+
+---
+
+## 🔍 Core Idea
+
+Given a **sorted** sequence (ascending or descending), binary search exploits the ordering to eliminate half of the remaining candidates with each comparison. This is fundamentally different from **linear search**, which checks elements sequentially.
+
+### Key Prerequisites
+- ✅ The data **must be sorted** (e.g., ascending order).
+- ✅ Random access to elements (e.g., array, not a linked list).
+
+---
+
+## 🧠 Algorithm Overview (Iterative)
+
+### Pseudocode
+```
+binary_search(array A, target T):
+    low  = 0
+    high = length(A) - 1
+
+    while low ≤ high:
+        mid = low + floor((high - low)
+  [2m(pp: 15t 442ms 34t/s - tg: 256t 2.9s 86.8t/s)[0m
+
+  [1m━━━ Prompt 10/14 ━━━[0m
+  [0;32mPrompt:[0m If it takes 4 hours for 4 towels to dry on a clothesline in the sun, how long does it take for 20 towels to dry under the exact same conditions?
+  [0;36mResponse:[0m This is a classic riddle that tests understanding of **independent processes**.
+
+### Key Insight:
+Drying time for towels in the sun **does not depend on the number of towels**, assuming:
+- There’s enough space on the clothesline (so adding more towels doesn’t crowd them or block sun/airflow),
+- All towels are identical and exposed to the same conditions (sun, wind, humidity, etc.),
+- Each towel dries independently.
+
+> 🌞 If 4 towels take 4 hours to dry, that means **each towel individually takes 4 hours** to dry under those conditions.
+
+So, whether you have 2, 4, or 20 towels — as long as they’re all drying simultaneously and independently under the same conditions — **each one still takes 4 hours** to dry.
+
+### ✅ Answer:
+**4 hours**
+
+Let me know if you'd like to explore variations (e.g., limited clothesline space)!
+  [2m(pp: 46t 448ms 103t/s - tg: 198t 2.3s 86.7t/s)[0m
+
+  [1m━━━ Conversation 7 (3 turns) ━━━[0m
+  [0;32mPrompt:[0m Tell me facts about the blue whale [turn 1/3]
+  [0;36mResponse:[0m Here are some fascinating and scientifically verified facts about the blue whale (*Balaenoptera musculus*):
+
+### 🐋 **Basic Classification & Size**
+- **Largest animal ever known** to have lived on Earth—larger than any dinosaur.
+- **Length**: Up to **29.9 meters (98 feet)**, with historical reports (unverified) of up to 33.6 m (110 ft).
+- **Weight**: Up to **173 tonnes** (190 short tons); average adults weigh 100–150 tonnes.
+- **Heart**: ~180 kg (400 lbs), about the size of a small car—pumps ~220 liters (58 gallons) of blood per beat.
+- **Tongue**: Weighs as much as an elephant (~2.7 tonnes).
+- **Aorta**: Up to 23 cm (9 inches) in diameter—large enough for a small child to crawl through.
+
+### 🐋 **Feeding & Diet**
+- **Feeding method**: Lunge feeding—accelerates upward through dense krill swarms with mouth open, engulfing up to **110,0
+  [2m(pp: 15t 442ms 34t/s - tg: 256t 2.9s 87.0t/s)[0m
+
+  [0;32mPrompt:[0m Tell me more about whales in general [turn 2/3]
+  [0;36mResponse:[0m Certainly! Whales are among the most fascinating and intelligent mammals on Earth. Here's a comprehensive overview of whales in general, covering their biology, behavior, diversity, and conservation:
+
+---
+
+### 🐋 **What Are Whales?**
+- Whales are **marine mammals** belonging to the order **Cetacea**, which also includes dolphins and porpoises.
+- They evolved from land-dwelling ancestors ~50 million years ago (e.g., *Pakicetus*), gradually adapting to aquatic life.
+- Key adaptations include:
+  - Streamlined bodies and flippers (modified limbs)
+  - Blowholes (modified nostrils on top of the head)
+  - Thick blubber for insulation and energy storage
+  - Echolocation (in toothed whales)
+  - Complex social structures and communication
+
+---
+
+### 🐋 **Two Main Suborders**
+
+#### 1. **Mysticeti (Baleen Whales)**
+- **Filter feeders** using baleen plates (keratin-based "curtains") in their mouths to strain food from water.
+- **No teeth**—instead, they have 200–400 baleen plates hanging from the upper jaw.
+- **Two blow
+  [2m(pp: 288t 479ms 601t/s - tg: 256t 3.2s 80.5t/s)[0m
+
+  [0;32mPrompt:[0m Where do whales live geographically? [turn 3/3]
+  [0;36mResponse:[0m Whales are **cosmopolitan**—they inhabit **all major oceans**, from the Arctic to the Antarctic—and some even enter freshwater rivers (rarely). Their distribution depends on species, season, food availability, and breeding needs. Here's a breakdown by region and behavior:
+
+---
+
+### 🌍 **Global Distribution by Habitat Type**
+
+#### 🧊 **Polar Regions (Summer Feeding Grounds)**
+- **Arctic & Subarctic Oceans**: Bowhead whales, belugas, and narwhals thrive here year-round or seasonally.
+- **Antarctic Waters**: During Southern Hemisphere summer (Nov–Mar), blue, humpback, fin, and minke whales migrate here to feed on massive krill blooms.
+- *Why?* Cold, nutrient-rich waters support dense prey populations.
+
+#### 🌊 **Temperate Zones (Migration Corridors & Seasonal Habitats)**
+- Many species (e.g., gray, humpback, right whales) travel **thousands of kilometers** between polar feeding grounds and tropical/subtropical breeding grounds.
+- Example: Gray whales migrate ~10,000–12,000 miles annually—the longest migration of any mammal (from Alaska to
+  [2m(pp: 561t 487ms 1152t/s - tg: 256t 3.4s 74.6t/s)[0m
+
+  [1m━━━ Prompt 14/14 ━━━[0m
+  [0;32mPrompt:[0m Write me a quicksort implementation in Rust
+  [0;36mResponse:[0m Here's a clean, idiomatic implementation of quicksort in Rust that uses in-place partitioning and avoids unnecessary allocations:
+
+```rust
+fn quicksort<T: Ord + Copy>(arr: &mut [T]) {
+    if arr.len() <= 1 {
+        return;
+    }
+
+    let pivot_index = partition(arr);
+    
+    // Recursively sort the two partitions
+    let (left, right) = arr.split_at_mut(pivot_index);
+    quicksort(left);
+    quicksort(&mut right[1..]); // Skip the pivot element
+}
+
+fn partition<T: Ord + Copy>(arr: &mut [T]) -> usize {
+    let len = arr.len();
+    let pivot_index = len - 1; // Choose last element as pivot
+    let pivot = arr[pivot_index];
+    
+    // i is the index of the smaller element's position
+    let mut i = 0;
+    
+    for j in 0..pivot_index {
+        if arr[j] <= pivot {
+            arr.swap(i, j);
+            i += 1;
+        }
+    }
+    
+    // Place pivot in its correct position
+    arr.swap(i, pivot_index);
+    i
+}
+
+fn main() {
+    let mut data = [3
+  [2m(pp: 16t 443ms 36t/s - tg: 256t 2.9s 86.8t/s)[0m
+
+  [1mResults saved to:[0m /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/config1-INT4-k4v4-HQQ4_20260806_131917/sanity.txt
+[0;36m[1m=>[0m Phase 3: Large prompt validation
+[0;36m[1m=>[0m   ~2K tokens (7,044 chars, prompt1_moby_dick.txt)
+[0;32m[1mOK[0m     TTFT 1.5s | prefill 3403 tok/s | decode 53.2 tok/s | 5.7s — The provided text is the table of contents and introductory sections—“Etymology” and “Extracts”—from Herman Melville’s *
+[0;36m[1m=>[0m   ~10K tokens (35,045 chars, prompt2_war_and_peace.txt)
+[0;32m[1mOK[0m     TTFT 2.6s | prefill 6812 tok/s | decode 24.9 tok/s | 12.0s — Based on the provided text (the beginning of *War and Peace*, specifically Books One through the First Epilogue), the ma
+[0;36m[1m=>[0m   ~25K tokens (87,555 chars, prompt3_les_miserables.txt)
+[0;32m[1mOK[0m     TTFT 5.1s | prefill 8360 tok/s | decode 11.3 tok/s | 25.7s — Based on the provided text (Preface and Book First, Chapters I–VIII of *Les Misérables*), here are the key events and th
+[0;36m[1m=>[0m Phase 4: Reference validation (4 prompts)
+[0;36m[1m=>[0m Model: Qwen3-Coder-Next
+[0;36m[1m=>[0m Config: /tmp/krasis-release-s1fxgzl0.conf
+[0;36m[1m=>[0m Attention: quantized (min match: 3 tokens)
+[0;36m[1m=>[0m Validation layers: L1:tokens
+[0;36m[1m=>[0m Prompt cap: 4
+[0;36m[1m=>[0m Reference data: /home/main/Documents/Claude/krasis-internal/reference-outputs/output/Qwen3-Coder-Next/llama_witness_stage3_qcn_expanded.json
+[0;36m[1m=>[0m Reference: 4 prompts from 2026-04-25T08:35:00Z
+[0;36m[1m=>[0m Reference runtime: llama-witness llama.cpp-witness
+[0;36m[1m=>[0m Reference decode diagnostics: coverage=first_token steps=1 top_k=10
+[0;36m[1m=>[0m Loading tokenizer from /home/main/.krasis/models/Qwen3-Coder-Next...
+[0;36m[1m=>[0m Reference capture settings: template_mode=enable_thinking_false, enable_thinking=False, source=reference_contract, profile=llama_witness_stage3_qcn_expanded
+[0;36m[1m=>[0m Reference artifact: state=explicit_valid, format_version=6, file=llama_witness_stage3_qcn_expanded.json
+[0;36m[1m=>[0m Using existing server on port 8012
+
+  [1m[1/4][0m Hi
+    [2mReference: 1 tokens[0m
+    [0;32mL1 tokens: MATCH reference prefix 1/1 identical[0m
+
+  [1m[2/4][0m What is 2+2?
+    [2mReference: 1 tokens[0m
+    [0;32mL1 tokens: MATCH reference prefix 1/1 identical[0m
+
+  [1m[3/4][0m Write a quicksort implementation in Rust
+    [2mReference: 1 tokens[0m
+    [0;32mL1 tokens: MATCH reference prefix 1/1 identical[0m
+
+  [1m[4/4][0m Describe the binary chop algorithm in depth
+    [2mReference: 1 tokens[0m
+    [0;32mL1 tokens: MATCH reference prefix 1/1 identical[0m
+
+  [1m==================================================[0m
+  [1mResults: 4 MATCH, 0 DIVERGE (tolerated), 0 FAIL[0m
+  [1mWeights: quantized (INT4/INT8) — divergence in top-k = expected drift[0m
+
+  [0;32m[1mVALIDATION PASSED[0m
+[0;32m[1mOK[0m Config 1 complete.
+[0;36m[1m=>[0m Stopping server...
+[0;36m[1m=>[0m Waiting for GPU memory to clear...
+[0;32m[1mOK[0m GPU clear.
+
+================================================================
+[0;36m[1m=>[0m Config 2/3: INT4 k6v6 HQQ6+8
+================================================================
+
+[0;36m[1m=>[0m Config: /tmp/krasis-release-cxf6gokl.conf
+[0;36m[1m=>[0m Launching: krasis --config ... --benchmark
+[0;36m[1m=>[0m PID: 551158 | Log: /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/config2-INT4-k6v6-HQQ6-8_20260806_132316/server_stdout.log
+[0;36m[1m=>[0m Waiting for benchmark to complete (may take several minutes)...
+[0;32m[1mOK[0m Benchmark complete.
+[0;32m[1mOK[0m Server healthy. Running HTTP tests.
+[0;36m[1m=>[0m Warmup HTTP request...
+[0;36m[1m=>[0m Phase 2: Sanity test prompts
+
+  [1mSanity Test[0m — 8 conversations (14 prompts), 3 multi-turn
+  [2mServer: Qwen3-Coder-Next @ http://127.0.0.1:8012[0m
+  [2mOutput: /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/config2-INT4-k6v6-HQQ6-8_20260806_132316/sanity.txt[0m
+
+  [1m━━━ Conversation 1 (3 turns) ━━━[0m
+  [0;32mPrompt:[0m Hi [turn 1/3]
+  [0;36mResponse:[0m Hello! How can I help you today? 😊
+  [2m(pp: 9t 573ms 16t/s - tg: 12t 123ms 89.2t/s)[0m
+
+  [0;32mPrompt:[0m What's your name? [turn 2/3]
+  [0;36mResponse:[0m I'm Qwen! 😊  
+I'm a large language model developed by Alibaba Cloud. I can help with answering questions, writing stories, coding, logical reasoning, and more—just let me know what you need! 🌟
+  [2m(pp: 35t 577ms 61t/s - tg: 49t 549ms 87.5t/s)[0m
+
+  [0;32mPrompt:[0m Who trained you? [turn 3/3]
+  [0;36mResponse:[0m I was trained by the Tongyi Lab team at Alibaba Group. 🌐  
+The team consists of researchers and engineers who specialize in artificial intelligence, natural language processing, and machine learning. They designed and trained me using vast amounts of text data (following strict safety and ethical guidelines) to help me understand and generate human-like language across many topics and languages.
+
+If you're curious about my training process, capabilities, or how I stay helpful and harmless, I'm happy to share more! 😊
+  [2m(pp: 97t 587ms 165t/s - tg: 101t 1.2s 86.5t/s)[0m
+
+  [1m━━━ Conversation 2 (3 turns) ━━━[0m
+  [0;32mPrompt:[0m What is 2+2? [turn 1/3]
+  [0;36mResponse:[0m 2 + 2 = **4**.
+  [2m(pp: 15t 575ms 26t/s - tg: 10t 109ms 82.7t/s)[0m
+
+  [0;32mPrompt:[0m Now multiply that by 10 [turn 2/3]
+  [0;36mResponse:[0m 4 × 10 = **40**.
+  [2m(pp: 41t 581ms 71t/s - tg: 12t 132ms 83.2t/s)[0m
+
+  [0;32mPrompt:[0m And divide the result by 5 [turn 3/3]
+  [0;36mResponse:[0m 40 ÷ 5 = **8**.
+  [2m(pp: 69t 583ms 118t/s - tg: 12t 133ms 82.7t/s)[0m
+
+  [1m━━━ Prompt 7/14 ━━━[0m
+  [0;32mPrompt:[0m What is the largest animal in the world?
+  [0;36mResponse:[0m The **blue whale** (*Balaenoptera musculus*) is the largest animal known to have ever lived on Earth.
+
+- **Length**: Up to about **30 meters** (98 feet), with the longest reliably measured specimen being 29.9 meters (98 feet).
+- **Weight**: Up to approximately **173 tonnes** (190 short tons), though some unconfirmed reports suggest individuals may have reached 180–200 tonnes.
+- **Heart**: About the size of a small car (up to 180 kg / 400 lbs).
+- **Tongue**: Weighs as much as an elephant.
+- **Diet**: Primarily krill—consuming up to 4 tons per day during feeding season.
+
+Despite their massive size, blue whales feed by filter-feeding: they take in huge mouthfuls of water and krill, then push the water out through baleen plates, trapping the prey.
+
+Their conservation status is **Endangered** (IUCN Red List), mainly due to historical commercial whaling and ongoing threats like ship strikes, entanglement in fishing gear, and habitat degradation.
+  [2m(pp: 17t 579ms 29t/s - tg: 247t 2.8s 87.2t/s)[0m
+
+  [1m━━━ Prompt 8/14 ━━━[0m
+  [0;32mPrompt:[0m What is the largest body of water in the world?
+  [0;36mResponse:[0m The **Pacific Ocean** is the largest body of water in the world.
+
+- **Area**: Approximately **165.25 million square kilometers** (63.8 million square miles).  
+- **Volume**: About **714 million cubic kilometers** (171 million cubic miles)—more than half of Earth’s total ocean water.  
+- **Size comparison**: It’s larger than all of Earth’s landmasses combined.
+
+The Pacific Ocean spans from the Arctic in the north to the Southern Ocean in the south, and from Asia and Australia in the west to the Americas in the east. It contains the Mariana Trench—the deepest known point on Earth (Challenger Deep, ~10.9 km or 6.8 miles deep).
+  [2m(pp: 19t 580ms 33t/s - tg: 158t 1.8s 87.9t/s)[0m
+
+  [1m━━━ Prompt 9/14 ━━━[0m
+  [0;32mPrompt:[0m Describe the binary chop algorithm in depth
+  [0;36mResponse:[0m The **binary chop algorithm**, more commonly known today as **binary search**, is a highly efficient algorithm for finding a target value within a **sorted** collection (typically an array or list). Its name “binary chop” emphasizes the algorithm’s strategy of repeatedly dividing the search space in half—“chopping” it into two halves—until the target is found or the space is exhausted.
+
+Below is a comprehensive, in-depth explanation covering its principles, mechanics, correctness, complexity, variations, and practical considerations.
+
+---
+
+## 🔍 Core Idea
+
+Given a **sorted** sequence (ascending or descending), binary search exploits the ordering to eliminate half of the remaining candidates at each step. Instead of scanning linearly (O(n)), it reduces the problem size exponentially.
+
+### Key Requirements:
+- The data must be **sorted** (e.g., ascending order for standard implementation).
+- Random access to elements (e.g., array, not linked list) for O(1) indexing.
+
+---
+
+## 🧠 Algorithm Steps (Iterative Version)
+
+Let the array be `A[0 … n−1]`, and target be `x`.
+
+1. Initialize two pointers:
+   - `low = 0` (start index)
+   - `high = n − 1`
+  [2m(pp: 15t 578ms 26t/s - tg: 256t 2.9s 86.9t/s)[0m
+
+  [1m━━━ Prompt 10/14 ━━━[0m
+  [0;32mPrompt:[0m If it takes 4 hours for 4 towels to dry on a clothesline in the sun, how long does it take for 20 towels to dry under the exact same conditions?
+  [0;36mResponse:[0m This is a classic riddle that tests whether you assume drying time depends on *number of items*, when in fact it often depends on *conditions* (sun, wind, humidity, etc.) and *drying method*.
+
+**Key insight:**  
+If all towels are drying **simultaneously** on the same clothesline under the **same conditions**, and there’s enough space and airflow so that adding more towels doesn’t reduce drying efficiency (e.g., they’re not overlapping or blocking sun/air), then **drying time does not depend on the number of towels**.
+
+So, if 4 towels take 4 hours to dry, and the 20 towels are all exposed to the same sun/air conditions (e.g., on a long enough line, spaced properly), then:
+
+✅ **20 towels also take 4 hours to dry.**
+
+> ⚠️ Caveat: In real life, overcrowding *could* slow drying (less airflow, shading), but the problem says “exact same conditions,” implying optimal setup where number doesn’t affect time.
+
+**Answer: 4 hours.**
+  [2m(pp: 46t 584ms 79t/s - tg: 229t 2.6s 86.7t/s)[0m
+
+  [1m━━━ Conversation 7 (3 turns) ━━━[0m
+  [0;32mPrompt:[0m Tell me facts about the blue whale [turn 1/3]
+  [0;36mResponse:[0m Here are some fascinating and scientifically verified facts about the **blue whale** (*Balaenoptera musculus*):
+
+### 🐋 **Size & Weight**
+- **Largest animal ever known to have lived on Earth**—even larger than the biggest dinosaurs.
+- Adults typically reach **24–27 meters (78–89 feet)** in length.
+- The largest confirmed blue whale was **29.9 meters (98 feet)** long, caught in Antarctica in 1909.
+- Weighs up to **173 tonnes** (190 short tons), with some historical reports suggesting up to 181 tonnes—though modern estimates usually cap at ~150–170 tonnes.
+
+### 🫀 **Heart & Circulation**
+- Heart weighs **~180 kg (400 lbs)**—about the size of a small car.
+- Heartbeat slows to **as low as 2 beats per minute** during diving.
+- A human baby could theoretically crawl through the **aorta** (main artery), which is about **23 cm (9 inches)** in diameter.
+
+### 🫁 **Lungs & Breathing**
+- Lungs can hold **~5
+  [2m(pp: 15t 578ms 26t/s - tg: 256t 2.9s 87.0t/s)[0m
+
+  [0;32mPrompt:[0m Tell me more about whales in general [turn 2/3]
+  [0;36mResponse:[0m Absolutely! Whales are among the most fascinating and intelligent mammals on Earth. Here's a comprehensive overview of **whales in general**, covering their biology, behavior, diversity, and conservation:
+
+---
+
+### 🐋 **What Are Whales?**
+- Whales are **marine mammals** belonging to the order **Cetacea**, which also includes **dolphins and porpoises**.
+- They evolved from land-dwelling ancestors ~50 million years ago (e.g., *Pakicetus*, a wolf-sized ungulate).
+- Key adaptations for aquatic life: streamlined bodies, flippers, tail flukes, blowholes, and blubber for insulation.
+
+---
+
+### 🐋 **Two Main Suborders**
+
+#### 1. **Mysticeti — Baleen Whales**
+- Filter-feeders with **baleen plates** (made of keratin) instead of teeth.
+- Use baleen to strain krill, copepods, and small fish from seawater.
+- Include: blue whale, humpback whale, gray whale, right whale, minke whale.
+- Often have **two blowholes** (V-shaped spray).
+- Tend to be larger and slower-moving than toothed whales.
+
+#### 2
+  [2m(pp: 288t 616ms 468t/s - tg: 256t 3.0s 84.6t/s)[0m
+
+  [0;32mPrompt:[0m Where do whales live geographically? [turn 3/3]
+  [0;36mResponse:[0m Whales are found in **all major oceans and seas** around the world—from the Arctic to the Antarctic—and even in some **freshwater rivers** (though rarely). Their distribution depends on species, season, food availability, and reproductive needs. Here's a breakdown:
+
+---
+
+### 🌍 **Global Distribution by Region**
+
+#### 🧊 **Polar Regions**
+- **Arctic Ocean**: Bowhead whales, belugas, and narwhals are year-round residents. They thrive under sea ice and use breathing holes to surface.
+- **Southern (Antarctic) Ocean**: Summer feeding grounds for many baleen whales—especially **blue**, **fin**, **humpback**, and **minke whales**— drawn by massive krill swarms.
+
+#### 🌊 **Temperate Zones (Spring–Autumn)**
+- Many whales migrate through temperate waters (e.g., North Atlantic, North Pacific) during migration.
+- Examples:
+  - **Gray whales** travel ~10,000–12,000 miles round-trip between Alaska (summer feeding) and Baja California (winter breeding).
+  - **Humpbacks** migrate from polar feeding grounds to tropical/subtropical breeding areas.
+
+#### �
+  [2m(pp: 561t 626ms 897t/s - tg: 256t 3.0s 84.3t/s)[0m
+
+  [1m━━━ Prompt 14/14 ━━━[0m
+  [0;32mPrompt:[0m Write me a quicksort implementation in Rust
+  [0;36mResponse:[0m Here's a clean, idiomatic in-place quicksort implementation in Rust:
+
+```rust
+fn quicksort<T: Ord + Clone>(arr: &mut [T]) {
+    if arr.len() <= 1 {
+        return;
+    }
+    
+    let pivot_index = partition(arr);
+    let (left, right) = arr.split_at_mut(pivot_index);
+    quicksort(left);
+    quicksort(&mut right[1..]); // Skip the pivot element
+}
+
+fn partition<T: Ord + Clone>(arr: &mut [T]) -> usize {
+    let len = arr.len();
+    let pivot_index = len - 1;
+    let mut i = 0;
+    
+    for j in 0..pivot_index {
+        if arr[j] <= arr[pivot_index] {
+            arr.swap(i, j);
+            i += 1;
+        }
+    }
+    arr.swap(i, pivot_index);
+    i
+}
+
+fn main() {
+    let mut data = [3, 6, 8, 10, 1, 2, 1];
+    quicksort(&mut data);
+    println!("{:?}", data); // [1, 1, 2, 3, 6, 8, 
+  [2m(pp: 16t 580ms 28t/s - tg: 256t 2.9s 87.0t/s)[0m
+
+  [1mResults saved to:[0m /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/config2-INT4-k6v6-HQQ6-8_20260806_132316/sanity.txt
+[0;36m[1m=>[0m Phase 3: Large prompt validation
+[0;36m[1m=>[0m   ~2K tokens (7,044 chars, prompt1_moby_dick.txt)
+[0;32m[1mOK[0m     TTFT 1.6s | prefill 2768 tok/s | decode 83.3 tok/s | 3.0s — The provided text is the table of contents and introductory sections—including the “ETYMOLOGY” and “EXTRACTS”—from Herma
+[0;36m[1m=>[0m   ~10K tokens (35,045 chars, prompt2_war_and_peace.txt)
+[0;32m[1mOK[0m     TTFT 2.2s | prefill 5921 tok/s | decode 80.8 tok/s | 5.0s — Based on the provided text (the beginning of *War and Peace*, specifically Books One–Fifteen and the Epilogues), the mai
+[0;36m[1m=>[0m   ~25K tokens (87,555 chars, prompt3_les_miserables.txt)
+[0;32m[1mOK[0m     TTFT 3.9s | prefill 7625 tok/s | decode 72.2 tok/s | 7.0s — Based on the provided text (Preface through the end of Chapter VIII, Book First, Volume I), here is a summary of the key
+[0;36m[1m=>[0m Phase 4: Reference validation (4 prompts)
+[0;36m[1m=>[0m Model: Qwen3-Coder-Next
+[0;36m[1m=>[0m Config: /tmp/krasis-release-cxf6gokl.conf
+[0;36m[1m=>[0m Attention: quantized (min match: 3 tokens)
+[0;36m[1m=>[0m Validation layers: L1:tokens
+[0;36m[1m=>[0m Prompt cap: 4
+[0;36m[1m=>[0m Reference data: /home/main/Documents/Claude/krasis-internal/reference-outputs/output/Qwen3-Coder-Next/llama_witness_stage3_qcn_expanded.json
+[0;36m[1m=>[0m Reference: 4 prompts from 2026-04-25T08:35:00Z
+[0;36m[1m=>[0m Reference runtime: llama-witness llama.cpp-witness
+[0;36m[1m=>[0m Reference decode diagnostics: coverage=first_token steps=1 top_k=10
+[0;36m[1m=>[0m Loading tokenizer from /home/main/.krasis/models/Qwen3-Coder-Next...
+[0;36m[1m=>[0m Reference capture settings: template_mode=enable_thinking_false, enable_thinking=False, source=reference_contract, profile=llama_witness_stage3_qcn_expanded
+[0;36m[1m=>[0m Reference artifact: state=explicit_valid, format_version=6, file=llama_witness_stage3_qcn_expanded.json
+[0;36m[1m=>[0m Using existing server on port 8012
+
+  [1m[1/4][0m Hi
+    [2mReference: 1 tokens[0m
+    [0;32mL1 tokens: MATCH reference prefix 1/1 identical[0m
+
+  [1m[2/4][0m What is 2+2?
+    [2mReference: 1 tokens[0m
+    [0;32mL1 tokens: MATCH reference prefix 1/1 identical[0m
+
+  [1m[3/4][0m Write a quicksort implementation in Rust
+    [2mReference: 1 tokens[0m
+    [0;32mL1 tokens: MATCH reference prefix 1/1 identical[0m
+
+  [1m[4/4][0m Describe the binary chop algorithm in depth
+    [2mReference: 1 tokens[0m
+    [0;32mL1 tokens: MATCH reference prefix 1/1 identical[0m
+
+  [1m==================================================[0m
+  [1mResults: 4 MATCH, 0 DIVERGE (tolerated), 0 FAIL[0m
+  [1mWeights: quantized (INT4/INT8) — divergence in top-k = expected drift[0m
+
+  [0;32m[1mVALIDATION PASSED[0m
+[0;32m[1mOK[0m Config 2 complete.
+[0;36m[1m=>[0m Stopping server...
+[0;36m[1m=>[0m Waiting for GPU memory to clear...
+[0;32m[1mOK[0m GPU clear.
+
+================================================================
+[0;36m[1m=>[0m Config 3/3: INT8 k6v6 HQQ6+8 Multi-GPU
+================================================================
+
+[0;36m[1m=>[0m Config: /tmp/krasis-release-i257_mv8.conf
+[0;36m[1m=>[0m Launching: krasis --config ... --benchmark
+[0;36m[1m=>[0m PID: 555196 | Log: /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/config3-INT8-k6v6-HQQ6-8-Multi-GPU_20260806_132807/server_stdout.log
+[0;36m[1m=>[0m Waiting for benchmark to complete (may take several minutes)...
+[0;32m[1mOK[0m Benchmark complete.
+[0;32m[1mOK[0m Server healthy. Running HTTP tests.
+[0;36m[1m=>[0m Warmup HTTP request...
+[0;36m[1m=>[0m Phase 2: Sanity test prompts
+
+  [1mSanity Test[0m — 8 conversations (14 prompts), 3 multi-turn
+  [2mServer: Qwen3-Coder-Next @ http://127.0.0.1:8012[0m
+  [2mOutput: /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/config3-INT8-k6v6-HQQ6-8-Multi-GPU_20260806_132807/sanity.txt[0m
+
+  [1m━━━ Conversation 1 (3 turns) ━━━[0m
+  [0;32mPrompt:[0m Hi [turn 1/3]
+  [0;36mResponse:[0m Hello! How can I help you today? 😊
+  [2m(pp: 9t 522ms 17t/s - tg: 12t 191ms 57.5t/s)[0m
+
+  [0;32mPrompt:[0m What's your name? [turn 2/3]
+  [0;36mResponse:[0m I'm Qwen! 😊  
+I'm a large-scale language model developed by Alibaba Cloud's Tongyi Lab. I can help with answering questions, writing, logical reasoning, programming, and more—just let me know what you need! 🌟
+  [2m(pp: 35t 593ms 59t/s - tg: 53t 945ms 55.0t/s)[0m
+
+  [0;32mPrompt:[0m Who trained you? [turn 3/3]
+  [0;36mResponse:[0m I was trained by the **Tongyi Lab** at **Alibaba Group**, specifically by researchers and engineers from Alibaba Cloud. My development involved large-scale machine learning, natural language processing, and deep learning techniques, using vast amounts of text data (with strict adherence to privacy, safety, and ethical guidelines).
+
+While I don’t have personal experiences or consciousness, I’m designed to be helpful, honest, and harmless—and to assist you in the best way possible! 🌱
+
+Let me know if you'd like to know more about my training, capabilities, or limitations! 😊
+  [2m(pp: 101t 1.1s 94t/s - tg: 119t 2.1s 55.6t/s)[0m
+
+  [1m━━━ Conversation 2 (3 turns) ━━━[0m
+  [0;32mPrompt:[0m What is 2+2? [turn 1/3]
+  [0;36mResponse:[0m 2 + 2 = **4**
+  [2m(pp: 15t 556ms 27t/s - tg: 9t 150ms 53.5t/s)[0m
+
+  [0;32mPrompt:[0m Now multiply that by 10 [turn 2/3]
+  [0;36mResponse:[0m 4 × 10 = **40**
+  [2m(pp: 40t 1.1s 38t/s - tg: 11t 186ms 53.8t/s)[0m
+
+  [0;32mPrompt:[0m And divide the result by 5 [turn 3/3]
+  [0;36mResponse:[0m 40 ÷ 5 = **8**
+  [2m(pp: 67t 1.1s 63t/s - tg: 11t 185ms 53.9t/s)[0m
+
+  [1m━━━ Prompt 7/14 ━━━[0m
+  [0;32mPrompt:[0m What is the largest animal in the world?
+  [0;36mResponse:[0m The largest animal in the world is the **Antarctic blue whale** (*Balaenoptera musculus intermedia*).  
+
+- **Maximum length**: Up to **29.9 meters** (98 feet), though most adults average 24–27 meters (79–89 feet).  
+- **Maximum weight**: Estimated up to **173 tonnes** (190 short tons), with historical records suggesting some individuals may have reached **181 tonnes** (200 short tons).  
+
+For comparison:  
+- A blue whale’s heart alone can weigh around **180 kg** (400 lbs) and be about the size of a small car.  
+- Its tongue can weigh as much as an elephant.  
+- A newborn calf is already about **7 meters** (23 feet) long and weighs **2.5–3 tonnes**.  
+
+Blue whales are not only the largest animals alive today—they are the **largest animals known to have ever existed**, surpassing even the largest dinosaurs.
+  [2m(pp: 17t 558ms 30t/s - tg: 220t 3.9s 55.9t/s)[0m
+
+  [1m━━━ Prompt 8/14 ━━━[0m
+  [0;32mPrompt:[0m What is the largest body of water in the world?
+  [0;36mResponse:[0m The **Pacific Ocean** is the largest body of water in the world.
+
+- **Surface area**: Approximately **165.25 million square kilometers** (63.8 million square miles).  
+- **Volume**: About **714 million cubic kilometers** (171 million cubic miles), containing more than half of Earth’s free water.
+
+It spans from the Arctic in the north to the Southern Ocean in the south, and from Asia and Australia in the west to the Americas in the east. Its vast size makes it larger than all of Earth’s landmasses combined.
+  [2m(pp: 19t 551ms 34t/s - tg: 121t 2.1s 56.3t/s)[0m
+
+  [1m━━━ Prompt 9/14 ━━━[0m
+  [0;32mPrompt:[0m Describe the binary chop algorithm in depth
+  [0;36mResponse:[0m The **binary chop algorithm**, more commonly known as **binary search**, is a highly efficient algorithm for finding a target value within a **sorted** sequence (typically an array or list). Its name “binary chop” emphasizes how it repeatedly divides the search space in half—like chopping a log in two—until the target is found or the search space is exhausted.
+
+Below is a comprehensive, in-depth explanation covering its principles, mechanics, variants, correctness, complexity, implementation details, and applications.
+
+---
+
+## 🔍 Core Idea
+
+Given a **sorted** array `A` of length `n`, and a target value `T`, binary search repeatedly:
+1. Compares `T` to the middle element of the current search interval.
+2. If equal → success.
+3. If `T` is smaller → continue in the left half.
+4. If `T` is larger → continue in the right half.
+
+This halving strategy reduces the problem size exponentially, leading to logarithmic time complexity.
+
+---
+
+## 🧠 Algorithmic Steps (Iterative)
+
+```
+binary_search(A, n, T):
+    low  = 0
+    high = n - 1
+
+    while low ≤ high:
+        mid = low + (high - low) //
+  [2m(pp: 15t 562ms 27t/s - tg: 256t 4.6s 55.3t/s)[0m
+
+  [1m━━━ Prompt 10/14 ━━━[0m
+  [0;32mPrompt:[0m If it takes 4 hours for 4 towels to dry on a clothesline in the sun, how long does it take for 20 towels to dry under the exact same conditions?
+  [0;36mResponse:[0m This is a classic riddle or trick question!
+
+The key is understanding **how drying works on a clothesline**.
+
+If 4 towels take 4 hours to dry in the sun, that implies that **each towel dries independently**, assuming they’re all exposed to the same sunlight and airflow.
+
+So, whether you have 4 towels or 20 towels, **each towel still needs 4 hours to dry**, *as long as*:
+
+- They’re all spread out and not overlapping (so each gets equal sun/air),
+- The clothesline is long enough to hold them all without crowding,
+- Weather conditions (sun intensity, humidity, wind) remain the same.
+
+✅ Therefore, **20 towels also take 4 hours to dry**, under the same conditions.
+
+> 🌞 **Answer: 4 hours**
+
+*(This assumes ideal drying conditions where drying time per towel is independent of the number of other towels — which is usually the intended interpretation of this riddle.)*
+  [2m(pp: 46t 1.1s 44t/s - tg: 203t 3.6s 55.6t/s)[0m
+
+  [1m━━━ Conversation 7 (3 turns) ━━━[0m
+  [0;32mPrompt:[0m Tell me facts about the blue whale [turn 1/3]
+  [0;36mResponse:[0m Here are some fascinating and scientifically verified facts about the blue whale (*Balaenoptera musculus*):
+
+### 🐋 Size & Scale
+- **Largest animal ever known**: Blue whales reach lengths of up to **29.9 meters (98 feet)** and weights of **173 tonnes (190 short tons)**—though most average 24–27 m (79–89 ft) and 100–150 tonnes.
+- **Heart**: About the size of a **small car** (≈180 kg / 400 lbs), it beats only **8–10 times per minute** at rest.
+- **Tongue**: Weighs as much as an **elephant** (≈2.7 tonnes).
+- **Aorta**: The main artery is large enough for a **human child to crawl through**.
+
+### 🐋 Feeding & Diet
+- **Filter feeders**: Use **baleen plates** (keratin-based, hanging from the upper jaw) to strain food from water.
+- **Primary prey**: **Krill**—tiny shrimp-like crustaceans (5–6 mm long). A single blue whale can consume **
+  [2m(pp: 15t 556ms 27t/s - tg: 256t 4.6s 55.3t/s)[0m
+
+  [0;32mPrompt:[0m Tell me more about whales in general [turn 2/3]
+  [0;36mResponse:[0m Absolutely! Whales are among the most remarkable mammals on Earth—majestic, intelligent, and deeply interconnected with ocean health. Here’s a comprehensive overview of whales in general:
+
+---
+
+### 🐋 **What Are Whales?**
+- Whales are **marine mammals** belonging to the order **Cetacea**, which also includes **dolphins and porpoises**.
+- They evolved from land-dwelling ancestors ~50 million years ago (e.g., *Pakicetus*, a wolf-sized mammal that lived near water).
+- Unlike fish, whales:
+  - Breathe air through **lungs** (must surface to breathe via blowholes).
+  - Are **warm-blooded** (maintain internal body temperature).
+  - Give birth to live young and nurse them with **milk**.
+  - Have **hair** (usually just a few sensory bristles on the snout).
+
+---
+
+### 🐬 **Two Main Suborders**
+
+#### 1. **Mysticeti (Baleen Whales)**
+- **Filter feeders** with baleen plates instead of teeth.
+- Have **two blowholes** (V-shaped).
+- Include:
+  - Blue whale (largest animal ever)
+ 
+  [2m(pp: 288t 1.1s 262t/s - tg: 256t 4.6s 55.2t/s)[0m
+
+  [0;32mPrompt:[0m Where do whales live geographically? [turn 3/3]
+  [0;36mResponse:[0m Whales are found in **all of the world’s oceans**, from the icy poles to tropical seas—but their distribution varies significantly by species, season, and life stage (e.g., breeding vs. feeding). Here’s a detailed breakdown:
+
+---
+
+### 🌍 **Global Distribution Overview**
+
+#### 🧊 **Polar & Subpolar Regions**
+- **Arctic & Antarctic**: Home to cold-adapted species like:
+  - **Bowhead whale** – Lives year-round in Arctic waters (under sea ice).
+  - **Beluga whale** – Found in Arctic and sub-Arctic seas (e.g., Hudson Bay, Svalbard).
+  - **Minke whale** – Common in both Arctic and Antarctic waters.
+  - **Blue, fin, and humpback whales** – Migrate to polar regions in summer to feed on abundant krill and fish.
+
+#### 🌊 **Temperate Zones**
+- Seasonal hotspots for migration and feeding:
+  - **North Pacific**: Gray whales (breeding in Baja California, feeding in Alaska), humpbacks (Alaska to Mexico), blues (California to Alaska).
+  - **North Atlantic**: Humpbacks (Iceland, Norway, Caribbean), fin whales (Gulf
+  [2m(pp: 561t 1.1s 510t/s - tg: 256t 4.6s 55.5t/s)[0m
+
+  [1m━━━ Prompt 14/14 ━━━[0m
+  [0;32mPrompt:[0m Write me a quicksort implementation in Rust
+  [0;36mResponse:[0m Here's a clean, idiomatic in-place quicksort implementation in Rust:
+
+```rust
+fn quicksort<T: Ord + Copy>(arr: &mut [T]) {
+    if arr.len() <= 1 {
+        return;
+    }
+
+    let pivot_index = partition(arr);
+    let (left, right) = arr.split_at_mut(pivot_index);
+    quicksort(left);
+    quicksort(&mut right[1..]); // Skip the pivot element
+}
+
+fn partition<T: Ord + Copy>(arr: &mut [T]) -> usize {
+    let len = arr.len();
+    let pivot_index = len - 1;
+    let mut i = 0;
+
+    for j in 0..pivot_index {
+        if arr[j] <= arr[pivot_index] {
+            arr.swap(i, j);
+            i += 1;
+        }
+    }
+    arr.swap(i, pivot_index);
+    i
+}
+
+fn main() {
+    let mut data = [3, 6, 8, 10, 1, 2, 1];
+    quicksort(&mut data);
+    println!("{:?}", data); // [1, 1, 2, 3, 6, 8, 10
+  [2m(pp: 16t 545ms 29t/s - tg: 256t 4.6s 55.5t/s)[0m
+
+  [1mResults saved to:[0m /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/config3-INT8-k6v6-HQQ6-8-Multi-GPU_20260806_132807/sanity.txt
+[0;36m[1m=>[0m Phase 3: Large prompt validation
+[0;36m[1m=>[0m   ~2K tokens (7,044 chars, prompt1_moby_dick.txt)
+[0;32m[1mOK[0m     TTFT 2.2s | prefill 1787 tok/s | decode 54.7 tok/s | 5.4s — The provided text is the table of contents and opening sections—including the “Etymology” and “Extracts”—of Herman Melvi
+[0;36m[1m=>[0m   ~10K tokens (35,045 chars, prompt2_war_and_peace.txt)
+[0;32m[1mOK[0m     TTFT 2.6s | prefill 5729 tok/s | decode 52.1 tok/s | 7.0s — Based on the provided excerpt from *War and Peace* (Books One–Fifteen and Epilogues, plus the opening chapters of Book O
+[0;36m[1m=>[0m   ~25K tokens (87,555 chars, prompt3_les_miserables.txt)
+[0;32m[1mOK[0m     TTFT 3.8s | prefill 8440 tok/s | decode 46.2 tok/s | 8.9s — Based on the provided text (the Preface and the first eight chapters of *Les Misérables*, Volume I), here is a summary o
+[0;36m[1m=>[0m Phase 4: Reference validation (4 prompts)
+[0;36m[1m=>[0m Model: Qwen3-Coder-Next
+[0;36m[1m=>[0m Config: /tmp/krasis-release-i257_mv8.conf
+[0;36m[1m=>[0m Attention: quantized (min match: 3 tokens)
+[0;36m[1m=>[0m Validation layers: L1:tokens
+[0;36m[1m=>[0m Prompt cap: 4
+[0;36m[1m=>[0m Reference data: /home/main/Documents/Claude/krasis-internal/reference-outputs/output/Qwen3-Coder-Next/llama_witness_stage3_qcn_expanded.json
+[0;36m[1m=>[0m Reference: 4 prompts from 2026-04-25T08:35:00Z
+[0;36m[1m=>[0m Reference runtime: llama-witness llama.cpp-witness
+[0;36m[1m=>[0m Reference decode diagnostics: coverage=first_token steps=1 top_k=10
+[0;36m[1m=>[0m Loading tokenizer from /home/main/.krasis/models/Qwen3-Coder-Next...
+[0;36m[1m=>[0m Reference capture settings: template_mode=enable_thinking_false, enable_thinking=False, source=reference_contract, profile=llama_witness_stage3_qcn_expanded
+[0;36m[1m=>[0m Reference artifact: state=explicit_valid, format_version=6, file=llama_witness_stage3_qcn_expanded.json
+[0;36m[1m=>[0m Using existing server on port 8012
+
+  [1m[1/4][0m Hi
+    [2mReference: 1 tokens[0m
+    [0;32mL1 tokens: MATCH reference prefix 1/1 identical[0m
+
+  [1m[2/4][0m What is 2+2?
+    [2mReference: 1 tokens[0m
+    [0;32mL1 tokens: MATCH reference prefix 1/1 identical[0m
+
+  [1m[3/4][0m Write a quicksort implementation in Rust
+    [2mReference: 1 tokens[0m
+    [0;32mL1 tokens: MATCH reference prefix 1/1 identical[0m
+
+  [1m[4/4][0m Describe the binary chop algorithm in depth
+    [2mReference: 1 tokens[0m
+    [0;32mL1 tokens: MATCH reference prefix 1/1 identical[0m
+
+  [1m==================================================[0m
+  [1mResults: 4 MATCH, 0 DIVERGE (tolerated), 0 FAIL[0m
+  [1mWeights: quantized (INT4/INT8) — divergence in top-k = expected drift[0m
+
+  [0;32m[1mVALIDATION PASSED[0m
+[0;32m[1mOK[0m Config 3 complete.
+[0;36m[1m=>[0m Stopping server...
+[0;36m[1m=>[0m Waiting for GPU memory to clear...
+[0;32m[1mOK[0m GPU clear.
+
+================================================================
+[0;36m[1m=>[0m Generating report...
+[0;32m[1mOK[0m Report: /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/release_test.html
+
+[1mRelease Test Summary — Qwen3-Coder-Next[0m
+────────────────────────────────────────────────
+  Config 1 (INT4 k4v4 HQQ4): [0;32mOK[0m
+  Config 2 (INT4 k6v6 HQQ6+8): [0;32mOK[0m
+  Config 3 (INT8 k6v6 HQQ6+8 Multi-GPU): [0;32mOK[0m
+────────────────────────────────────────────────
+Report: /home/main/Documents/Claude/krasis/logs/release-test_20260806_131833/release_test.html
+
+EXIT_CODE=0

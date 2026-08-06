@@ -1,0 +1,62 @@
+{
+  "capabilities": {
+    "exact_mid_prefill_boundary_capture": false,
+    "mid_prefill_boundary_skipped": 0,
+    "multi_gpu_pending": true
+  },
+  "config": {
+    "budget_bytes": 0,
+    "effective_available_bytes": 0,
+    "ram_fraction": 0.25
+  },
+  "enabled": true,
+  "evictions": 0,
+  "hits": {
+    "active_gpu": 0,
+    "pageable_ram": 0,
+    "total": 0
+  },
+  "misses": {
+    "divergence": 0,
+    "evicted": 0,
+    "image_input_uncacheable": 0,
+    "multi_gpu_pending": 3,
+    "no_match": 0,
+    "no_suffix": 0,
+    "request_disabled": 0,
+    "restore_failed": 0,
+    "restore_not_worth_it": 0,
+    "signature_mismatch": 0,
+    "speculative_decode_uncacheable": 0,
+    "total": 3
+  },
+  "object": "krasis_session_cache_stats",
+  "resident": {
+    "active_gpu_tokens": 0,
+    "bytes": 0,
+    "index_bytes": 0,
+    "reserved_bytes": 0,
+    "snapshot_bytes": 0,
+    "snapshots": 0
+  },
+  "runtime_measurements": {
+    "prefill_samples": 0,
+    "restore_samples": 0
+  },
+  "timing": {
+    "restore": {
+      "average_ms": 0.0,
+      "bytes": 0,
+      "count": 0,
+      "last_ms": 0.0,
+      "total_ms": 0.0
+    },
+    "save": {
+      "average_ms": 0.0,
+      "bytes": 0,
+      "count": 0,
+      "last_ms": 0.0,
+      "total_ms": 0.0
+    }
+  }
+}

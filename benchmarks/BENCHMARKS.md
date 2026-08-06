@@ -1,5 +1,40 @@
 # Krasis Benchmark Results
 
+## v1.0.21-rc.1 QCN release matrix — 2026-08-06
+
+The final `./dev release-test QCN` prerelease gate ran in tmux from the exact
+`1.0.21-rc.1` source with decode timing and trace instrumentation disabled.
+The command first passed the 28-test launcher matrix, then completed all three
+production configurations with their benchmark, 14-prompt HTTP suite,
+canonical Gutenberg 2K/10K/25K prompts, and authoritative llama-witness gate.
+Every witness run passed 4/4 first-token and 4/4 prefill-argmax agreement.
+
+| Configuration | Peak prefill | Internal decode | HTTP round trip | HCS | Minimum free VRAM |
+|---|---:|---:|---:|---:|---:|
+| INT4, HQQ4, K4V4, one GPU | 10,991.5 tok/s | 89.76 tok/s | 158.94 tok/s | 24,576/24,576 | 53,276 MB |
+| INT4, HQQ68_AUTO, K6V6, one GPU | 10,175.1 tok/s | 89.50 tok/s | 158.25 tok/s | 24,576/24,576 | 52,778 MB |
+| INT8, HQQ68_AUTO, K6V6, two GPUs | 8,879.5 tok/s | 57.72 tok/s | 118.71 tok/s | 24,576/24,576 | 28,346 MB primary; 1,202 MiB auxiliary |
+
+The first two full attempts were retained in the internal debug record because
+they found two real multi-GPU startup defects: an undefined auxiliary segment
+boundary and materialization of a session-cache runtime for a topology whose
+reuse path is deliberately unimplemented. The final run proves both fixes on
+live hardware. Multi-GPU model execution and decode passed, while the cache
+stats endpoint reported `enabled=true`,
+`capabilities.multi_gpu_pending=true`, a zero-byte cache budget, zero resident
+snapshots, and visible `multi_gpu_pending` misses. No partial RAM/signature
+runtime or silent cache hit was created. All three configurations completed
+without HCS copy failures or below-safety warnings.
+
+Evidence: [complete release-test log](20260806_v1021rc1_release_test_qcn_final.log),
+[INT4 HQQ4/K4V4 report](20260806_v1021rc1_qcn_int4_hqq4_k4v4_benchmark_report.log),
+[server log](20260806_v1021rc1_qcn_int4_hqq4_k4v4_server.log),
+[INT4 HQQ68/K6V6 report](20260806_v1021rc1_qcn_int4_hqq68_k6v6_benchmark_report.log),
+[server log](20260806_v1021rc1_qcn_int4_hqq68_k6v6_server.log),
+[two-GPU INT8 report](20260806_v1021rc1_qcn_int8_hqq68_k6v6_multigpu_benchmark_report.log),
+[server log](20260806_v1021rc1_qcn_int8_hqq68_k6v6_multigpu_server.log), and
+[captured cache stats](20260806_v1021rc1_qcn_multigpu_cache_stats.json).
+
 ## Conversation cache enabled-by-default speed gate — 2026-08-06
 
 This final timing-disabled `./dev speed-test --selected-gpus 1` run used the
