@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """No-GPU model configuration contract tests."""
 
+import ast
+import inspect
 import json
 import os
 import shutil
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -123,6 +126,30 @@ def _deepseek_v4_config() -> dict:
 
 
 class ModelConfigContractTests(unittest.TestCase):
+    def test_aux_decode_hash_tables_use_exact_pipeline_segment(self) -> None:
+        """Aux registration must use the method's [split_layer, layer_end) contract."""
+        source = textwrap.dedent(
+            inspect.getsource(KrasisModel.setup_gpu_decode_store_aux)
+        )
+        tree = ast.parse(source)
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_register_deepseek_v4_hash_tables"
+        ]
+        self.assertEqual(len(calls), 1)
+        self.assertGreaterEqual(len(calls[0].args), 4)
+        layer_range = calls[0].args[3]
+        self.assertIsInstance(layer_range, ast.Call)
+        self.assertIsInstance(layer_range.func, ast.Name)
+        self.assertEqual(layer_range.func.id, "range")
+        self.assertEqual(
+            [arg.id for arg in layer_range.args if isinstance(arg, ast.Name)],
+            ["split_layer", "layer_end"],
+        )
+
     def _compact_deepseek_v4_config(self) -> ModelConfig:
         raw = _deepseek_v4_config()
         raw.update(

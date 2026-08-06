@@ -11181,7 +11181,7 @@ class KrasisModel:
                 store,
                 aux_device,
                 self._aux_decode_weights,
-                range(layer_start, layer_end),
+                range(split_layer, layer_end),
             )
             if self.cfg.swiglu_limits or self.cfg.swiglu_limits_shared:
                 for layer_idx, layer in enumerate(self.layers):

@@ -381,6 +381,14 @@ fn session_cache_multi_gpu_pending(
     prefix_cache_enabled && !aux_gpu_store_addrs.is_empty()
 }
 
+fn session_cache_runtime_materialization_enabled(
+    prefix_cache_enabled: bool,
+    aux_gpu_store_addrs: &[usize],
+) -> bool {
+    prefix_cache_enabled
+        && !session_cache_multi_gpu_pending(prefix_cache_enabled, aux_gpu_store_addrs)
+}
+
 fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
@@ -7736,12 +7744,18 @@ impl RustServer {
                     "disabled"
                 }
             );
-            if session_cache_multi_gpu_pending(prefix_cache_enabled, &aux_gpu_store_addrs) {
+            let prefix_cache_multi_gpu_pending =
+                session_cache_multi_gpu_pending(prefix_cache_enabled, &aux_gpu_store_addrs);
+            if prefix_cache_multi_gpu_pending {
                 log::warn!(
                     "Conversation caching is enabled but unavailable on this multi-GPU pipeline configuration; every request will miss (stats counter: misses.multi_gpu_pending)."
                 );
             }
-            let prefix_cache_ram_store = if prefix_cache_enabled {
+            let materialize_prefix_cache_runtime = session_cache_runtime_materialization_enabled(
+                prefix_cache_enabled,
+                &aux_gpu_store_addrs,
+            );
+            let prefix_cache_ram_store = if materialize_prefix_cache_runtime {
                 match crate::session_cache::RamSessionStore::new(
                     prefix_cache_ram_fraction,
                     Arc::new(crate::session_cache::SystemMemoryAvailabilityProbe),
@@ -7796,7 +7810,7 @@ impl RustServer {
                 }
             };
 
-            let prefix_cache_compatibility = if prefix_cache_enabled {
+            let prefix_cache_compatibility = if materialize_prefix_cache_runtime {
                 match build_session_compatibility_signature(
                     &model_name,
                     &tokenizer_path,
@@ -8644,9 +8658,10 @@ mod tests {
         format_models_response, format_sse_timing, format_sse_token, format_sse_tool_call_args,
         format_sse_tool_call_start, hide_synthetic_think_stop_text, internal_capture_boundary,
         is_chat_completions_endpoint, is_models_endpoint, parse_tool_calls, push_tool_stream_text,
-        session_cache_multi_gpu_pending, validate_prefix_cache_ram_fraction, FairModelScheduler,
-        ModelRequest, ParsedToolCall, RequestOverhead, SessionCacheMetrics, SessionCacheMissReason,
-        SessionLockKey, SessionLockTable, StreamDetokenizer,
+        session_cache_multi_gpu_pending, session_cache_runtime_materialization_enabled,
+        validate_prefix_cache_ram_fraction, FairModelScheduler, ModelRequest, ParsedToolCall,
+        RequestOverhead, SessionCacheMetrics, SessionCacheMissReason, SessionLockKey,
+        SessionLockTable, StreamDetokenizer,
     };
     use crate::chat_template::{ChatTemplateEngine, ToolCallFormat};
     use std::fs;
@@ -8793,6 +8808,17 @@ mod tests {
         assert!(!session_cache_multi_gpu_pending(false, &[0x1234]));
         assert!(session_cache_multi_gpu_pending(true, &[0x1234]));
         assert!(session_cache_multi_gpu_pending(true, &[0x1234, 0x5678]));
+
+        assert!(session_cache_runtime_materialization_enabled(true, &[]));
+        assert!(!session_cache_runtime_materialization_enabled(false, &[]));
+        assert!(!session_cache_runtime_materialization_enabled(
+            true,
+            &[0x1234]
+        ));
+        assert!(!session_cache_runtime_materialization_enabled(
+            true,
+            &[0x1234, 0x5678]
+        ));
     }
 
     #[test]
