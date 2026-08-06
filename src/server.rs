@@ -2872,25 +2872,34 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         }
     };
     // A later turn normally replaces the assistant-generation suffix rather
-    // than appending after it. Render the same text-only request without that
-    // suffix so the cache can capture a template-stable state boundary during
-    // prefill. Tokenization below still proves the exact shared token prefix;
-    // rendering alone is never treated as a correctness guarantee.
+    // than appending after it. Templates whose disabled-thinking scaffold is
+    // explicitly history-stable can safely capture the ordinary full prompt;
+    // all others render without the suffix and must prove an exact token
+    // boundary below. Rendering alone is never treated as a correctness
+    // guarantee.
     let stable_rendered = if state.session_cache.enabled && request_prefix_cache && !has_images {
-        match state.chat_template.apply_with_tools(
-            &messages_json,
-            &tools_json,
-            false,
-            enable_thinking,
-        ) {
-            Ok(stable) => Some(stable),
-            Err(error) => {
-                log::error!(
-                    "Request {} prefix cache miss: stable_template_render_failed error={}",
-                    request_id,
-                    error,
-                );
-                None
+        if !enable_thinking
+            && state
+                .chat_template
+                .disabled_thinking_generation_prompt_is_history_stable()
+        {
+            Some(rendered.clone())
+        } else {
+            match state.chat_template.apply_with_tools(
+                &messages_json,
+                &tools_json,
+                false,
+                enable_thinking,
+            ) {
+                Ok(stable) => Some(stable),
+                Err(error) => {
+                    log::error!(
+                        "Request {} prefix cache miss: stable_template_render_failed error={}",
+                        request_id,
+                        error,
+                    );
+                    None
+                }
             }
         }
     } else {
@@ -3167,24 +3176,29 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             };
         if cache_request_eligible {
             if let Some(stable_rendered) = stable_rendered.as_ref() {
-                let exact_boundary_alignment = {
-                    let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
-                    store.exact_mid_prefill_boundary_alignment_rust()
-                };
-                if let Some(boundary_alignment) = exact_boundary_alignment {
-                    match state.tokenizer.encode(stable_rendered.as_str(), false) {
-                        Ok(encoding) => {
-                            let stable_ids = encoding.get_ids();
-                            let matched_boundary =
-                                crate::session_cache::common_token_prefix(stable_ids, &token_ids);
+                match state.tokenizer.encode(stable_rendered.as_str(), false) {
+                    Ok(encoding) => {
+                        let stable_ids = encoding.get_ids();
+                        let matched_boundary =
+                            crate::session_cache::common_token_prefix(stable_ids, &token_ids);
+                        if matched_boundary == token_ids.len() && matched_boundary > 0 {
+                            cache_stable_boundary_tokens = Some(token_ids.clone());
+                            log::info!(
+                                "Request {} prefix cache terminal template-stable boundary: tokens={}",
+                                request_id,
+                                matched_boundary,
+                            );
+                        } else if let Some(boundary_alignment) = unsafe {
+                            (&*(state.gpu_store_addr as *const GpuDecodeStore))
+                                .exact_mid_prefill_boundary_alignment_rust()
+                        } {
                             let boundary = crate::session_cache::align_exact_boundary_down(
                                 matched_boundary,
                                 boundary_alignment,
                             )
                             .unwrap_or(0);
                             if boundary > 0 && boundary < token_ids.len() {
-                                cache_stable_boundary_tokens =
-                                    Some(token_ids[..boundary].to_vec());
+                                cache_stable_boundary_tokens = Some(token_ids[..boundary].to_vec());
                                 log::info!(
                                     "Request {} prefix cache stable boundary: tokens={} matched_tokens={} alignment={} stable_render_tokens={} full_prompt_tokens={}",
                                     request_id,
@@ -3205,29 +3219,28 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                                     token_ids.len(),
                                 );
                             }
+                        } else {
+                            increment_metric(
+                                &mut state.session_cache.metrics.mid_prefill_boundary_skipped,
+                                "mid_prefill_boundary_skipped",
+                            );
+                            // Preserve the ordinary model-math path for lossy
+                            // stage formats: snapshot the exact terminal
+                            // prefill state after the normal chunk plan rather
+                            // than introducing a synthetic internal split.
+                            cache_stable_boundary_tokens = Some(token_ids.clone());
+                            log::info!(
+                                "Request {} prefix cache internal boundary skipped: runtime prefill path is not exact across synthetic chunk splits; terminal prefill boundary planned at {} tokens",
+                                request_id,
+                                token_ids.len(),
+                            );
                         }
-                        Err(error) => log::error!(
-                            "Request {} prefix cache miss: stable_template_tokenize_failed error={}",
-                            request_id,
-                            error,
-                        ),
                     }
-                } else {
-                    increment_metric(
-                        &mut state.session_cache.metrics.mid_prefill_boundary_skipped,
-                        "mid_prefill_boundary_skipped",
-                    );
-                    // Preserve the ordinary model-math path for lossy stage
-                    // formats: snapshot the exact terminal prefill state
-                    // after the normal chunk plan instead of introducing a
-                    // synthetic internal split. A later divergent request may
-                    // rewind token-row state from this longer snapshot.
-                    cache_stable_boundary_tokens = Some(token_ids.clone());
-                    log::info!(
-                        "Request {} prefix cache internal boundary skipped: runtime prefill path is not exact across synthetic chunk splits; terminal prefill boundary planned at {} tokens",
+                    Err(error) => log::error!(
+                        "Request {} prefix cache miss: stable_template_tokenize_failed error={}",
                         request_id,
-                        token_ids.len(),
-                    );
+                        error,
+                    ),
                 }
             }
         }

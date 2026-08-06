@@ -21167,11 +21167,18 @@ impl PrefillEngine {
                 .ok_or("stage-exact KV export source byte offset overflow")?;
             let mut p4 = k_base + source_byte_offset as u64;
             let mut p5 = v_base + source_byte_offset as u64;
-            let mut p6 = export_tokens as i32;
-            let mut p7 = kv_stride as i32;
-            let mut p8 = layer_decode_max_seq as i32;
-            let mut p9 = self.polar4_norm_correction_mode;
-            let mut p10 = source_start as i32;
+            // CUDA ABI order is M, kv_stride, max_seq, start_pos,
+            // norm_correction. Keep construction centralized and covered by
+            // a non-zero-start regression: swapping the final two arguments
+            // silently writes an incremental export at row zero.
+            let (mut p6, mut p7, mut p8, mut p9, mut p10) =
+                stage_exact_export_launch_scalars(
+                    export_tokens,
+                    kv_stride,
+                    layer_decode_max_seq,
+                    source_start,
+                    self.polar4_norm_correction_mode,
+                );
             let kernel = match (self.prefill_kv_temp_format, self.decode_kv_format) {
                 (0, 7) => self.kernels.kv_cache_append_k6v6,
                 (0, 9) => self.kernels.kv_cache_append_k4v4,
@@ -67833,6 +67840,22 @@ fn stage_exact_export_range(
     Ok((source_start, prompt_tokens - source_start))
 }
 
+fn stage_exact_export_launch_scalars(
+    export_tokens: usize,
+    kv_stride: usize,
+    max_seq: usize,
+    source_start: usize,
+    norm_correction: i32,
+) -> (i32, i32, i32, i32, i32) {
+    (
+        export_tokens as i32,
+        kv_stride as i32,
+        max_seq as i32,
+        source_start as i32,
+        norm_correction,
+    )
+}
+
 /// `d_moe_inter` is shared by two mutually exclusive operations:
 /// routed-MoE activation over the padded/sorted token rows, and split-dense
 /// activation over the original prompt rows. Size it for whichever runtime
@@ -69776,7 +69799,8 @@ Set KRASIS_NO_FLA=1 only if you explicitly want the slower custom LA path."
 mod chunk_plan_tests {
     use super::{
         build_prefill_chunk_plan, build_prefill_chunk_plan_at_boundary,
-        shared_moe_inter_scratch_elements, stage_exact_export_range,
+        shared_moe_inter_scratch_elements, stage_exact_export_launch_scalars,
+        stage_exact_export_range,
     };
 
     #[test]
@@ -69834,6 +69858,14 @@ mod chunk_plan_tests {
         assert_eq!(
             stage_exact_export_range(8_000, 0, 16_000).unwrap(),
             (0, 8_000)
+        );
+    }
+
+    #[test]
+    fn incremental_stage_export_passes_nonzero_start_before_norm_mode() {
+        assert_eq!(
+            stage_exact_export_launch_scalars(31, 512, 262_144, 3_729, 2),
+            (31, 512, 262_144, 3_729, 2)
         );
     }
 

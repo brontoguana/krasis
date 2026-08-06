@@ -442,6 +442,7 @@ def main() -> int:
     parser.add_argument("--height-baseline-samples", type=int, default=32)
     parser.add_argument("--same-height-control-samples", type=int, default=8)
     parser.add_argument("--vision-uncacheable", action="store_true")
+    parser.add_argument("--require-cache-hits", action="store_true")
     args = parser.parse_args()
     if args.prompt_chars <= 0:
         parser.error("--prompt-chars must be positive")
@@ -601,16 +602,26 @@ def main() -> int:
     divergence_delta = int(after["misses"]["divergence"]) - int(
         before["misses"]["divergence"]
     )
-    # Some chat templates replace the generation scaffold when the assistant
-    # turn is committed. For runtimes with recurrent/SSM state this creates an
-    # exact-token divergence that cannot be rewound safely. The cache contract
-    # requires a visible full-prefill miss in that case, not a forced hit.
-    if active_delta < 1 and divergence_delta < 1:
+    if args.require_cache_hits and active_delta < 1:
+        raise RuntimeError(
+            "required a real active-GPU cache hit, observed "
+            f"active={active_delta} divergence={divergence_delta}"
+        )
+    if args.require_cache_hits and ram_delta < 1:
+        raise RuntimeError(
+            "required a real pageable-RAM cache hit, observed "
+            f"RAM={ram_delta} divergence={divergence_delta}"
+        )
+    # The general gate still supports explicit fail-closed divergence evidence
+    # for architectures whose exact recurrent boundary has not been implemented.
+    # Universal-support acceptance runs pass --require-cache-hits and cannot use
+    # this branch to turn a permanent miss into a pass.
+    if not args.require_cache_hits and active_delta < 1 and divergence_delta < 1:
         raise RuntimeError(
             "expected either an active-GPU hit or a visible exact-boundary "
             f"divergence miss, observed active={active_delta} divergence={divergence_delta}"
         )
-    if ram_delta < 1 and divergence_delta < 1:
+    if not args.require_cache_hits and ram_delta < 1 and divergence_delta < 1:
         raise RuntimeError(
             "expected either a pageable-RAM hit or a visible exact-boundary "
             f"divergence miss, observed RAM={ram_delta} divergence={divergence_delta}"

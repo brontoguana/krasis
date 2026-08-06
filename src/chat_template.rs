@@ -55,6 +55,7 @@ pub struct ChatTemplateEngine {
     bos_token: String,
     eos_token: String,
     tool_call_format: ToolCallFormat,
+    disabled_thinking_scaffold_history_stable: bool,
 }
 
 // DeepSeek-V2/V2-Lite chat format (plain text User:/Assistant:)
@@ -123,17 +124,21 @@ impl ChatTemplateEngine {
             resolve_missing_chat_template(tokenizer_config_path)?
         };
 
+        let (template_source, disabled_thinking_scaffold_history_stable) =
+            make_disabled_thinking_scaffold_history_stable(template_source);
+
         // Extract bos_token and eos_token
         let bos_token = extract_token(&config, "bos_token").unwrap_or_default();
         let eos_token = extract_token(&config, "eos_token").unwrap_or_default();
 
         let tool_call_format = detect_tool_call_format(&template_source);
         log::info!(
-            "ChatTemplateEngine: loaded template ({} chars), bos={:?}, eos={:?}, tool_call_format={:?}",
+            "ChatTemplateEngine: loaded template ({} chars), bos={:?}, eos={:?}, tool_call_format={:?}, disabled_thinking_scaffold_history_stable={}",
             template_source.len(),
             bos_token,
             eos_token,
             tool_call_format,
+            disabled_thinking_scaffold_history_stable,
         );
 
         Ok(ChatTemplateEngine {
@@ -141,6 +146,7 @@ impl ChatTemplateEngine {
             bos_token,
             eos_token,
             tool_call_format,
+            disabled_thinking_scaffold_history_stable,
         })
     }
 
@@ -150,6 +156,14 @@ impl ChatTemplateEngine {
 
     pub fn compatibility_source(&self) -> &str {
         &self.template_source
+    }
+
+    /// True when a thinking-disabled assistant generation suffix is rendered
+    /// identically when that assistant response later appears in history.
+    /// This makes the ordinary full prompt a future exact-token prefix and
+    /// permits terminal capture without a synthetic mid-prefill split.
+    pub fn disabled_thinking_generation_prompt_is_history_stable(&self) -> bool {
+        self.disabled_thinking_scaffold_history_stable
     }
 
     /// Apply the chat template to a list of messages.
@@ -446,6 +460,29 @@ impl ChatTemplateEngine {
             add_generation_prompt,
             enable_thinking,
         ))
+    }
+}
+
+/// Qwen-derived templates intentionally discard old reasoning, but when
+/// thinking is disabled Krasis has already seeded an *empty* closed thinking
+/// block in the generation prompt. Dropping those empty marker tokens on the
+/// next render destroys exact prefix reuse despite carrying no reasoning.
+///
+/// Extend only the template's existing history condition, and only for empty
+/// reasoning in thinking-disabled mode. Non-empty reasoning and thinking-on
+/// behavior remain exactly as declared by the checkpoint. Matching is on the
+/// template contract, never a model name.
+fn make_disabled_thinking_scaffold_history_stable(template: String) -> (String, bool) {
+    const HISTORY_CONDITION: &str = "{%- if loop.index0 > ns.last_query_index %}";
+    const STABLE_HISTORY_CONDITION: &str = "{%- if loop.index0 > ns.last_query_index or (enable_thinking is defined and enable_thinking is false and not reasoning_content) %}";
+    const DISABLED_SCAFFOLD: &str = "<think>\\n\\n</think>\\n\\n";
+    if template.contains(HISTORY_CONDITION) && template.contains(DISABLED_SCAFFOLD) {
+        (
+            template.replace(HISTORY_CONDITION, STABLE_HISTORY_CONDITION),
+            true,
+        )
+    } else {
+        (template, false)
     }
 }
 
@@ -938,6 +975,52 @@ mod tests {
         let messages = r#"[{"role":"assistant","content":"old reasoning"}]"#;
         let rendered = engine.apply(messages, false, false).unwrap();
         assert_eq!(rendered, "DROP:old reasoning");
+    }
+
+    #[test]
+    fn disabled_empty_thinking_scaffold_is_an_exact_future_history_prefix() {
+        let template = concat!(
+            "{%- set ns = namespace(last_query_index=messages|length - 1) %}",
+            "{%- for message in messages %}",
+            "{%- set content = message.content %}",
+            "{%- if message.role == 'user' %}",
+            "{{- '<|im_start|>user\\n' + content + '<|im_end|>\\n' }}",
+            "{%- elif message.role == 'assistant' %}",
+            "{%- set reasoning_content = '' %}",
+            "{%- if '</think>' in content %}",
+            "{%- set reasoning_content = content.split('</think>')[0].split('<think>')[-1]|trim %}",
+            "{%- set content = content.split('</think>')[-1]|trim %}",
+            "{%- endif %}",
+            "{%- if loop.index0 > ns.last_query_index %}",
+            "{{- '<|im_start|>assistant\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}",
+            "{%- else %}",
+            "{{- '<|im_start|>assistant\\n' + content }}",
+            "{%- endif %}",
+            "{{- '<|im_end|>\\n' }}",
+            "{%- endif %}",
+            "{%- endfor %}",
+            "{%- if add_generation_prompt %}",
+            "{{- '<|im_start|>assistant\\n' }}",
+            "{%- if enable_thinking is defined and enable_thinking is false %}",
+            "{{- '<think>\\n\\n</think>\\n\\n' }}",
+            "{%- else %}{{- '<think>\\n' }}{%- endif %}",
+            "{%- endif %}",
+        );
+        let config_path = write_tokenizer_config(template);
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        assert!(engine.disabled_thinking_generation_prompt_is_history_stable());
+
+        let first = engine
+            .apply(r#"[{"role":"user","content":"first"}]"#, true, false)
+            .unwrap();
+        let next = engine
+            .apply(
+                r#"[{"role":"user","content":"first"},{"role":"assistant","content":"answer"},{"role":"user","content":"next"}]"#,
+                true,
+                false,
+            )
+            .unwrap();
+        assert!(next.starts_with(&(first + "answer<|im_end|>\n")));
     }
 
     #[test]
