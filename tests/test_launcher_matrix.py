@@ -882,11 +882,13 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.hcs = False
         cfg.multi_gpu_hcs = True
         cfg.multi_gpu_mode = "peer"
+        cfg.dynamic_peer = True
         cfg.dynamic_hcs = False
         cfg.dynamic_hcs_tail_blocks = 5
         cfg.adaptive_cold_mass_pruning = "75/8"
         cfg.expert_compression = True
         cfg.expert_compression_sidecar = "~/cache/model.krec"
+        cfg.expert_compression_pipeline = "streaming"
         cfg.stream_attention = True
         cfg.draft_model = "~/models/draft"
         cfg.draft_k = 5
@@ -937,12 +939,16 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(values.get("CFG_HCS"), "0")
             self.assertEqual(values.get("CFG_MULTI_GPU_HCS"), "1")
             self.assertEqual(values.get("CFG_MULTI_GPU_MODE"), "peer")
+            self.assertEqual(values.get("CFG_DYNAMIC_PEER"), "1")
             self.assertEqual(values.get("CFG_DYNAMIC_HCS"), "0")
             self.assertEqual(values.get("CFG_DYNAMIC_HCS_TAIL_BLOCKS"), "5")
             self.assertEqual(values.get("CFG_ADAPTIVE_COLD_MASS_PRUNING"), "75/8")
             self.assertEqual(values.get("CFG_EXPERT_COMPRESSION"), "1")
             self.assertEqual(
                 values.get("CFG_EXPERT_COMPRESSION_SIDECAR"), "~/cache/model.krec"
+            )
+            self.assertEqual(
+                values.get("CFG_EXPERT_COMPRESSION_PIPELINE"), "streaming"
             )
             self.assertEqual(values.get("CFG_STREAM_ATTENTION"), "1")
             self.assertEqual(values.get("CFG_DRAFT_MODEL"), "~/models/draft")
@@ -989,6 +995,7 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertFalse(loaded.hcs)
             self.assertTrue(loaded.multi_gpu_hcs)
             self.assertEqual(loaded.multi_gpu_mode, "peer")
+            self.assertTrue(loaded.dynamic_peer)
             self.assertFalse(loaded.dynamic_hcs)
             self.assertEqual(loaded.dynamic_hcs_tail_blocks, 5)
             self.assertEqual(loaded.adaptive_cold_mass_pruning, "75/8")
@@ -997,6 +1004,7 @@ class LauncherMatrixTest(unittest.TestCase):
                 loaded.expert_compression_sidecar,
                 os.path.expanduser("~/cache/model.krec"),
             )
+            self.assertEqual(loaded.expert_compression_pipeline, "streaming")
             self.assertTrue(loaded.stream_attention)
             self.assertEqual(loaded.draft_model, os.path.expanduser("~/models/draft"))
             self.assertEqual(loaded.draft_k, 5)
@@ -1413,7 +1421,9 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.kv_dtype = "k4v4"
         cfg.dynamic_hcs = False
         cfg.dynamic_hcs_tail_blocks = 5
+        cfg.dynamic_peer = True
         cfg.adaptive_cold_mass_pruning = "75/8"
+        cfg.expert_compression_pipeline = "auto"
         cfg.enable_thinking = False
         cfg.force_load = True
         cfg.force_rebuild_cache = True
@@ -1426,7 +1436,9 @@ class LauncherMatrixTest(unittest.TestCase):
                 "CFG_ATTENTION_QUANT": "bf16",
                 "CFG_DYNAMIC_HCS": "0",
                 "CFG_DYNAMIC_HCS_TAIL_BLOCKS": "5",
+                "CFG_DYNAMIC_PEER": "1",
                 "CFG_ADAPTIVE_COLD_MASS_PRUNING": "75/8",
+                "CFG_EXPERT_COMPRESSION_PIPELINE": "auto",
                 "CFG_ENABLE_THINKING": "0",
                 "CFG_FORCE_LOAD": "1",
                 "CFG_FORCE_REBUILD_CACHE": "1",
@@ -1436,7 +1448,9 @@ class LauncherMatrixTest(unittest.TestCase):
             [
                 "attention_quant = 'bf16'",
                 "dynamic_hcs = False",
+                "dynamic_peer = True",
                 "adaptive_cold_mass_pruning = '75/8'",
+                "expert_compression_pipeline = 'auto'",
                 "enable_thinking = False",
             ],
             {"CFG_HQQ_AUTO_BUDGET_PCT", "CFG_HQQ46_AUTO_BUDGET_MB", "CFG_HQQ_SIDECAR_MANIFEST"},

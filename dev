@@ -1681,6 +1681,8 @@ do_test_kernels() {
             filter="gpu_decode::dsa_registration_tests::expert_payload_uses_all_four_component_ranges_in_cache_order"
         elif [[ "$1" == "peer_selector_check" ]]; then
             filter="gpu_decode::dsa_registration_tests::peer_selector_check_"
+        elif [[ "$1" == "dynamic_peer" ]]; then
+            filter="gpu_decode::dsa_registration_tests::dynamic_peer_demand_"
         elif [[ "$1" == "dsa_registration" ]]; then
             filter="dsa_registration_tests"
         elif [[ "$1" == "hqq4_warp_geometry" ]]; then

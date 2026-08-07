@@ -17,6 +17,10 @@ pub const CODEC_TABLES: usize = 3;
 pub const CODEC_ALPHABET: usize = 256;
 pub const CODEC_DECODE_SLOTS: usize = RANS_TOTAL as usize;
 pub const MAX_EXPERT_CHUNKS: usize = 4;
+/// Upper bound for the task-aligned streaming copy plan. This is a codec ABI
+/// bound, not a model or device choice: startup calibration selects how many
+/// of these ranges to group for the loaded payload and hardware.
+pub const MAX_STREAM_CHUNKS: usize = 16;
 pub const EXPERT_BLOB_MAGIC: u32 = u32::from_le_bytes(*b"KREC");
 pub const EXPERT_BLOB_VERSION: u32 = 1;
 const EXPERT_HEADER_WORDS: usize = 8;
@@ -28,6 +32,21 @@ pub struct ExpertChunkPlan {
     pub source_bytes: usize,
     pub task_start: usize,
     pub task_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExpertStreamPlan {
+    pub chunks: [ExpertChunkPlan; MAX_STREAM_CHUNKS],
+    pub count: usize,
+}
+
+impl Default for ExpertStreamPlan {
+    fn default() -> Self {
+        Self {
+            chunks: [ExpertChunkPlan::default(); MAX_STREAM_CHUNKS],
+            count: 0,
+        }
+    }
 }
 
 pub type CodecResult<T> = Result<T, String>;
@@ -623,6 +642,90 @@ pub fn plan_expert_chunks(
     Ok(plans)
 }
 
+/// Split an expert blob into task-aligned ranges for a single persistent GPU
+/// decoder launch. The first range carries all shared metadata; every later
+/// range is a contiguous suffix of task lane streams. Copy completion can
+/// therefore publish the exclusive task end for each range without exposing a
+/// partially available task to the decoder.
+pub fn plan_expert_stream_chunks(
+    blob: &[u8],
+    requested_chunks: usize,
+) -> CodecResult<ExpertStreamPlan> {
+    if requested_chunks == 0 || requested_chunks > MAX_STREAM_CHUNKS {
+        return Err(format!(
+            "expert streaming chunk count {requested_chunks} is outside 1..={MAX_STREAM_CHUNKS}",
+        ));
+    }
+    let header = parse_header(blob)?;
+    if header.task_count == 0 {
+        return Err("expert streaming plan requires at least one task".to_string());
+    }
+    let count = requested_chunks.min(header.task_count);
+    let task_payload_start = |task_index: usize| -> CodecResult<usize> {
+        let task = read_task(blob, header.task_offset, task_index)?;
+        let lane_word = task.lane_offsets_index as usize;
+        let lane_offset_pos = header
+            .lane_offsets_offset
+            .checked_add(
+                lane_word
+                    .checked_mul(std::mem::size_of::<u32>())
+                    .ok_or_else(|| "expert streaming lane-offset overflow".to_string())?,
+            )
+            .ok_or_else(|| "expert streaming lane-offset overflow".to_string())?;
+        Ok(read_u32(blob, lane_offset_pos)? as usize)
+    };
+
+    let mut plan = ExpertStreamPlan::default();
+    plan.count = count;
+    for chunk_index in 0..count {
+        let task_start = chunk_index * header.task_count / count;
+        let task_end = (chunk_index + 1) * header.task_count / count;
+        if task_end <= task_start {
+            return Err(format!(
+                "expert streaming chunk {chunk_index} has an empty task range",
+            ));
+        }
+        let source_offset = if chunk_index == 0 {
+            0
+        } else {
+            task_payload_start(task_start)?
+        };
+        let source_end = if chunk_index + 1 == count {
+            blob.len()
+        } else {
+            task_payload_start(task_end)?
+        };
+        if source_end <= source_offset || source_end > blob.len() {
+            return Err(format!(
+                "expert streaming chunk {chunk_index} has invalid source range {source_offset}..{source_end} for {} bytes",
+                blob.len(),
+            ));
+        }
+        plan.chunks[chunk_index] = ExpertChunkPlan {
+            source_offset,
+            source_bytes: source_end - source_offset,
+            task_start,
+            task_count: task_end - task_start,
+        };
+    }
+
+    let active = &plan.chunks[..count];
+    if active[0].source_offset != 0
+        || active
+            .windows(2)
+            .any(|pair| pair[0].source_offset + pair[0].source_bytes != pair[1].source_offset)
+        || active[count - 1].source_offset + active[count - 1].source_bytes != blob.len()
+        || active[0].task_start != 0
+        || active
+            .windows(2)
+            .any(|pair| pair[0].task_start + pair[0].task_count != pair[1].task_start)
+        || active[count - 1].task_start + active[count - 1].task_count != header.task_count
+    {
+        return Err("expert streaming ranges are not contiguous".to_string());
+    }
+    Ok(plan)
+}
+
 struct ParsedHeader {
     original_bytes: usize,
     task_count: usize,
@@ -779,5 +882,31 @@ mod tests {
             );
             assert_eq!(pair[0].task_start + pair[0].task_count, pair[1].task_start,);
         }
+
+        let stream_plan = plan_expert_stream_chunks(&encoded.blob, MAX_STREAM_CHUNKS).unwrap();
+        assert_eq!(stream_plan.count, MAX_STREAM_CHUNKS.min(encoded.task_count));
+        let active = &stream_plan.chunks[..stream_plan.count];
+        assert_eq!(active[0].source_offset, 0);
+        assert_eq!(
+            active.iter().map(|chunk| chunk.source_bytes).sum::<usize>(),
+            encoded.blob.len(),
+        );
+        assert_eq!(
+            active.iter().map(|chunk| chunk.task_count).sum::<usize>(),
+            encoded.task_count,
+        );
+        for pair in active.windows(2) {
+            assert_eq!(
+                pair[0].source_offset + pair[0].source_bytes,
+                pair[1].source_offset,
+            );
+            assert_eq!(pair[0].task_start + pair[0].task_count, pair[1].task_start);
+        }
+        assert!(plan_expert_stream_chunks(&encoded.blob, 0)
+            .unwrap_err()
+            .contains("outside"));
+        assert!(plan_expert_stream_chunks(&encoded.blob, MAX_STREAM_CHUNKS + 1)
+            .unwrap_err()
+            .contains("outside"));
     }
 }

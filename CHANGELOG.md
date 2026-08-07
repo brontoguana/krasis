@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Added opt-in live-demand peer residency and a deeper compressed-expert
+  pipeline. Dynamic peer mode learns from surviving cold routes, rate-limits
+  replacements from runtime capacity and measured copy cost, and publishes a
+  replacement only after its asynchronous copy completes. Peer ownership also
+  suppresses primary dynamic-HCS promotion while an expert is resident or has
+  a replacement pending, preserving disjoint coverage across deadline
+  fallbacks and asynchronous swaps. Requesting dynamic peer mode now fails
+  visibly unless HCS and exactly two selected GPUs are available, rather than
+  becoming an unreported no-op. Compression can now
+  use one persistent decoder across task-aligned copy ranges; startup can
+  compare it with the established grouped pipeline and select the lower-p95
+  bit-exact plan. Existing behavior remains the default pending live testing.
+- Fixed decode-kernel cache invalidation so an expert-codec CUDA edit is an
+  explicit production PTX freshness input rather than reusing stale kernels.
+  The exact final source passes the installed-path build, focused dynamic-peer
+  and codec contracts, launcher 29/29 plus planner 6/6, all Rust server groups,
+  and both Python server groups. No model or speed run was made.
+
 - Completed the fixed six-run GLM-5.2 matrix for peer-expert serving and the
   bit-exact GPU expert codec. Best internal decode improved from 4.75 tok/s
   baseline to 5.97 tok/s with peer serving, compression and `75/8` cold-mass

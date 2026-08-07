@@ -2326,6 +2326,7 @@ def main():
             "CFG_HCS": "hcs",
             "CFG_MULTI_GPU_HCS": "multi_gpu_hcs",
             "CFG_MULTI_GPU_MODE": "multi_gpu_mode",
+            "CFG_DYNAMIC_PEER": "dynamic_peer",
             "CFG_HCS_HOST_CACHE_MODE": "hcs_host_cache_mode",
             "CFG_KV_CACHE_MB": "kv_cache_mb",
             "CFG_MAX_CONTEXT_TOKENS": "max_context_tokens",
@@ -2336,6 +2337,7 @@ def main():
             "CFG_ADAPTIVE_COLD_MASS_PRUNING": "adaptive_cold_mass_pruning",
             "CFG_EXPERT_COMPRESSION": "expert_compression",
             "CFG_EXPERT_COMPRESSION_SIDECAR": "expert_compression_sidecar",
+            "CFG_EXPERT_COMPRESSION_PIPELINE": "expert_compression_pipeline",
             "CFG_STREAM_ATTENTION": "stream_attention",
             "CFG_DRAFT_MODEL": "draft_model",
             "CFG_DRAFT_K": "draft_k",
@@ -2358,6 +2360,7 @@ def main():
             "CFG_PREFIX_CACHE",
             "CFG_HCS",
             "CFG_MULTI_GPU_HCS",
+            "CFG_DYNAMIC_PEER",
             "CFG_DYNAMIC_HCS",
             "CFG_EXPERT_COMPRESSION",
             "CFG_RING_WINDOW_KV",
@@ -2561,6 +2564,12 @@ def main():
     parser.add_argument("--dynamic-hcs-tail-blocks", type=int, default=2, choices=range(1, 6),
                         help="Advanced: recency tail size in activated-expert blocks (1-5, default: 2)")
     parser.add_argument(
+        "--dynamic-peer",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Adapt peer hard-pool residency from live surviving cold routes",
+    )
+    parser.add_argument(
         "--adaptive-cold-mass-pruning",
         default=None,
         choices=list(ADAPTIVE_COLD_MASS_PRUNING_CHOICES),
@@ -2579,6 +2588,12 @@ def main():
         "--expert-compression-sidecar",
         default=None,
         help="Exact .krec sidecar built for the loaded Marlin expert cache",
+    )
+    parser.add_argument(
+        "--expert-compression-pipeline",
+        default="grouped",
+        choices=("grouped", "streaming", "auto"),
+        help="Compressed expert pipeline: established grouped, persistent streaming, or measured auto",
     )
     # NOTE: --hcs-headroom-mb removed — HCS budget is computed from 4-point VRAM calibration, not a fixed headroom
     parser.add_argument("--vram-safety-margin", type=int, default=600,
@@ -2677,10 +2692,19 @@ def main():
         if not os.path.isfile(sidecar):
             parser.error(f"expert compression sidecar not found: {sidecar}")
         os.environ["KRASIS_EXPERT_COMPRESSION_SIDECAR"] = sidecar
+        os.environ["KRASIS_EXPERT_COMPRESSION_PIPELINE"] = (
+            args.expert_compression_pipeline
+        )
     else:
         os.environ.pop("KRASIS_EXPERT_COMPRESSION_SIDECAR", None)
+        os.environ.pop("KRASIS_EXPERT_COMPRESSION_PIPELINE", None)
     if args.multi_gpu_mode == "peer" and not args.hcs:
         parser.error("--multi-gpu-mode peer requires HCS")
+    if args.dynamic_peer and not args.hcs:
+        parser.error("--dynamic-peer requires HCS")
+    if args.dynamic_peer and args.multi_gpu_mode == "layer-split":
+        parser.error("--dynamic-peer requires auto or peer multi-GPU mode")
+    os.environ["KRASIS_DYNAMIC_PEER"] = "1" if args.dynamic_peer else "0"
     if str(getattr(args, "ssh_key_path", "") or "").strip():
         args.ssh_key_path = os.path.expanduser(args.ssh_key_path.strip())
     if str(getattr(args, "ssh_tunnel", "") or "").strip():
@@ -2888,6 +2912,8 @@ def main():
     num_gpus_available = args.num_gpus or torch.cuda.device_count()
     if args.multi_gpu_mode == "peer" and num_gpus_available != 2:
         parser.error("--multi-gpu-mode peer currently requires exactly two selected GPUs")
+    if args.dynamic_peer and num_gpus_available != 2:
+        parser.error("--dynamic-peer currently requires exactly two selected GPUs")
 
     # GPU decode is the only supported serving mode here. Do not load CPU expert
     # weights or enable any CPU-side fallback path.
@@ -4173,6 +4199,7 @@ def main():
                 "Expert compression: "
                 f"{_expert_compression_calibration['compressed_bytes']:,} / "
                 f"{_expert_compression_calibration['raw_bytes']:,} bytes, "
+                f"pipeline={_expert_compression_calibration['pipeline']}, "
                 f"copies/expert={_expert_compression_calibration['copies_per_expert']}, "
                 f"decoder-streams={_expert_compression_calibration['decoder_streams']}, "
                 f"pipeline p50/p95="
@@ -4390,6 +4417,9 @@ def main():
                     "service": service,
                     "service_curve_p95": service_curve_p95,
                     "local_cold_p95_us": local_cold_p95_us,
+                    "peer_h2d_p95_us": float(
+                        _multi_gpu_service_profiles[1].h2d_p95_us
+                    ),
                     "peer_hcs_budget_mb": peer_hcs_budget_mb,
                     "predicted_residents": peer_plan.peer_residents,
                     "peer_prediction_ms": peer_prediction_ms,
@@ -4590,6 +4620,7 @@ def main():
                     list(_peer_startup["service_curve_p95"]),
                     float(_peer_startup["rtt"]["p95_us"]),
                     float(_peer_startup["local_cold_p95_us"]),
+                    float(_peer_startup["peer_h2d_p95_us"]),
                     float(_peer_startup["peer_prediction_ms"]),
                     float(_peer_startup["split_prediction_ms"]),
                     float(_peer_startup["selector_uncertainty_ms"]),

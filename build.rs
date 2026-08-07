@@ -337,6 +337,7 @@ fn compile_cuda_kernels() {
     if is_output_fresh(
         &[
             cu_src,
+            expert_codec_src,
             deepseek_v4_hc_header,
             deepseek_v4_attention_header,
             deepseek_v4_compressor_header,
