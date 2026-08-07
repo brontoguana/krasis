@@ -253,6 +253,14 @@ def validate_reference_against_config(conf_path: str, ref_data: Dict, ref_path: 
 
 # ── Server Management ───────────────────────────────────────────────
 
+def build_server_command(python: str, conf_path: str, selected_gpus: str = "") -> List[str]:
+    command = [python, "-m", "krasis.server", "--config", conf_path, "--test-endpoints"]
+    selected_gpus = selected_gpus.strip()
+    if selected_gpus:
+        command.extend(["--selected-gpus", selected_gpus])
+    return command
+
+
 def start_server(conf_path: str, script_dir: str) -> Tuple[subprocess.Popen, int]:
     """Start Krasis server with --test-endpoints and return (proc, port)."""
     cfg = parse_config(conf_path)
@@ -277,8 +285,14 @@ def start_server(conf_path: str, script_dir: str) -> Tuple[subprocess.Popen, int
     server_log_path = os.path.join(log_dir, "reference_test_server.log")
     server_log_file = open(server_log_path, "w")
 
+    server_args = build_server_command(
+        python,
+        conf_path,
+        os.environ.get("KRASIS_REFERENCE_SELECTED_GPUS", ""),
+    )
+
     proc = subprocess.Popen(
-        [python, "-m", "krasis.server", "--config", conf_path, "--test-endpoints"],
+        server_args,
         stdout=server_log_file,
         stderr=subprocess.STDOUT,
         env=env,

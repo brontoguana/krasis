@@ -2,10 +2,26 @@
 
 import unittest
 
-from tests.reference_test import judge_prompt
+from tests.reference_test import build_server_command, judge_prompt
 
 
 class ReferenceJudgementTests(unittest.TestCase):
+    def test_reference_server_command_preserves_selected_gpu_override(self) -> None:
+        command = build_server_command("/env/python", "model.conf", "1,3")
+        self.assertEqual(
+            command,
+            [
+                "/env/python",
+                "-m",
+                "krasis.server",
+                "--config",
+                "model.conf",
+                "--test-endpoints",
+                "--selected-gpus",
+                "1,3",
+            ],
+        )
+
     def test_multitoken_prefill_pass_cannot_hide_decode_failure(self) -> None:
         verdict = judge_prompt(
             {

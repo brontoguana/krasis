@@ -1,0 +1,132 @@
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (--selected-gpus override)
+Loaded config from tests/qcn-stats-hqq4-k4v4.conf: {'model_path': '/home/main/.krasis/models/Qwen3-Coder-Next', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 16, 'host': '0.0.0.0', 'port': 18151, 'enable_thinking': False, 'hcs_host_cache_mode': 'source', 'gpu_prefill_threshold': 300, 'force_load': False}
+
+[1m[36m▸ Krasis — Qwen3-Coder-Next[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (cli; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 16[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=557 MB, free=96700 MB, total=97258 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4395 MB, free=92862 MB, total=97258 MB
+  [0;32mHQQ attention artifacts validated (947 MB cached), 92862 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 48 layers...
+    GPU Marlin cache loaded: 39.9 GB in 44s
+  [0;32mExpert weights loaded in 44s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4395 MB, free=92862 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4395 MB, free=92862 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4639 MB, reserved=4660 MB, used=5395 MB, free=91862 MB, total=97258 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4639 MB, reserved=4660 MB, used=5395 MB, free=91862 MB, total=97258 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x400e6d00)[0m
+  [32mReleased redundant GPU execution source tensors (489 MB)[0m
+  [2mVRAM monitor started (startup measurement 1 ms; runtime 50 ms)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=32 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=32)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=32)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=32)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 2.4s[0m
+  [2mcuda:0 warmup:  peak 7,129 MB used / 97,258 MB total  (min free: 90,128 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 91,462 MB / 97,258 MB[0m
+  [32mCalibration prefill guard: 1,200 MB (runtime safety remains 600 MB)[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 1.48s (21.7 tok/s)  VRAM: 91412 MB free now, 91412 MB min free during decode[0m
+  [32mShort calibration: baseline=91,462 MB, prefill post-alloc=90,904 MB, prefill min=90,058 MB, decode min=91,412 MB, post-cleanup=91,412 MB[0m
+  [32mAdaptive long calibration: default target=3,120 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.4480 MB/token[0m
+  [32mAdaptive long calibration fail-closed entry check: 3,120 tokens require 2,515 MB, 91,462 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 3,120 tokens (model-estimated initial probe (projected 0.4480 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 3,120 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 1.75s (18.3 tok/s)  VRAM: 91410 MB free now, 91410 MB min free during decode[0m
+  [32mLong calibration: baseline=91,412 MB, prefill post-alloc=89,642 MB, prefill min=88,802 MB, decode min=91,410 MB, post-cleanup=91,410 MB[0m
+  [32mScratch reservation: max=22,178 MB (at 50,000 tokens)[0m
+  [32mVRAM monitor runtime cadence restored: 1 ms -> 50 ms[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 91,410 MB[0m
+  [32mTransient deltas: short prefill=1,404 MB, long prefill=2,610 MB, short decode=50 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 90,760 MB[0m
+  [32mPrefill HCS budgets: short=89,406 MB, long=88,200 MB[0m
+  [32mWorst-case prefill scratch reservation: 22,178 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [32mApproved route heatmap loaded from cache: qcn_hqq4_p00006 (manifest-approved runtime compatibility)[0m
+  [32mUsing approved route heatmap; quick startup heatmap collection skipped[0m
+  [32mHeatmap: 21,092 experts ranked from 21,092 entries[0m
+  [2mVRAM calibration: baseline 91410 MB | prefill 471.4 KB/tok, decode -18.8 KB/tok | HCS allowance prefill: short 89406 MB, long 88200 MB | decode: short 90760 MB, long 90808 MB | idle floors prefill=2004 MB decode=650 MB | decode-resident HCS budget=90760 MB[0m
+  [2mGPU0 HCS: 24576 experts (21092 ranked + 3484 unranked), reclaimable: 90,760 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/24576 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 24576 experts in 2.51s (38016.0 MB, host_mode=source) | total: 24576/24576 (100.0%) coverage[0m
+  [2mLoaded in 2.5s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mQwen3-Coder-Next[0m
+  [32mAddress:[0m  [1m0.0.0.0:18151[0m
+  [32mContext:[0m  136,528 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18151/v1[0m
+    Chat endpoint: http://127.0.0.1:18151/v1/chat/completions
+    Models:        http://127.0.0.1:18151/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mQwen3-Coder-Next[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=0:0 conv_idx=0 turn=1 prompt_sequence_index=0 input_tokens_count=9 positions=[8] prompt_prefix="Hi"
+  [36mDynamic HCS: hit=0.00% tail=960/480 protected=23616 promotions=0 evictions=0 request_promotions=0/960 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=0:0 conv_idx=0 turn=1 prompt_sequence_index=0 input_tokens_count=9 positions=[8] prompt_prefix="Hi"
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=1:0 conv_idx=1 turn=1 prompt_sequence_index=1 input_tokens_count=15 positions=[14] prompt_prefix="What is 2+2?"
+  [36mDynamic HCS: hit=0.00% tail=960/480 protected=23616 promotions=0 evictions=0 request_promotions=0/960 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=1:0 conv_idx=1 turn=1 prompt_sequence_index=1 input_tokens_count=15 positions=[14] prompt_prefix="What is 2+2?"
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=2:0 conv_idx=2 turn=1 prompt_sequence_index=2 input_tokens_count=15 positions=[14] prompt_prefix="Write a quicksort implementation in Rust"
+  [36mDynamic HCS: hit=0.00% tail=960/480 protected=23616 promotions=0 evictions=0 request_promotions=0/960 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=2:0 conv_idx=2 turn=1 prompt_sequence_index=2 input_tokens_count=15 positions=[14] prompt_prefix="Write a quicksort implementation in Rust"
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=3:0 conv_idx=3 turn=1 prompt_sequence_index=3 input_tokens_count=15 positions=[14] prompt_prefix="Describe the binary chop algorithm in depth"
+  [36mDynamic HCS: hit=0.00% tail=960/480 protected=23616 promotions=0 evictions=0 request_promotions=0/960 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=3:0 conv_idx=3 turn=1 prompt_sequence_index=3 input_tokens_count=15 positions=[14] prompt_prefix="Describe the binary chop algorithm in depth"
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=4:0 conv_idx=4 turn=1 prompt_sequence_index=4 input_tokens_count=583 positions=[582] prompt_prefix="Summarize this Moby-Dick excerpt in one sentence:\\n\\nMOBY-DICK;\r\\n\r\\nor, THE WHALE.\r\\n\r\\nBy Herman Melville\r\\n\r\\n\r\\n\r\\nCONTENTS\r\\n\r"
+  [36mDynamic HCS: hit=0.00% tail=960/480 protected=23616 promotions=0 evictions=0 request_promotions=0/960 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=4:0 conv_idx=4 turn=1 prompt_sequence_index=4 input_tokens_count=583 positions=[582] prompt_prefix="Summarize this Moby-Dick excerpt in one sentence:\\n\\nMOBY-DICK;\r\\n\r\\nor, THE WHALE.\r\\n\r\\nBy Herman Melville\r\\n\r\\n\r\\n\r\\nCONTENTS\r\\n\r"
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=5:0 conv_idx=5 turn=1 prompt_sequence_index=5 input_tokens_count=644 positions=[643] prompt_prefix="Extract the main conflict from this War and Peace excerpt:\\n\\nWAR AND PEACE\r\\n\r\\n\r\\nBy Leo Tolstoy/Tolstoi\r\\n\r\\n\r\\n    Contents\r"
+  [36mDynamic HCS: hit=0.00% tail=960/480 protected=23616 promotions=0 evictions=0 request_promotions=0/960 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=5:0 conv_idx=5 turn=1 prompt_sequence_index=5 input_tokens_count=644 positions=[643] prompt_prefix="Extract the main conflict from this War and Peace excerpt:\\n\\nWAR AND PEACE\r\\n\r\\n\r\\nBy Leo Tolstoy/Tolstoi\r\\n\r\\n\r\\n    Contents\r"
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=6:0 conv_idx=6 turn=1 prompt_sequence_index=6 input_tokens_count=1167 positions=[1166] prompt_prefix="List three concrete details from this Les Miserables excerpt:\\n\\nLES MIS\u00c9RABLES\r\\n\r\\nBy Victor Hugo\r\\n\r\\n\r\\nTranslated by Isabe"
+  [36mDynamic HCS: hit=0.00% tail=960/480 protected=23616 promotions=0 evictions=0 request_promotions=0/960 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=6:0 conv_idx=6 turn=1 prompt_sequence_index=6 input_tokens_count=1167 positions=[1166] prompt_prefix="List three concrete details from this Les Miserables excerpt:\\n\\nLES MIS\u00c9RABLES\r\\n\r\\nBy Victor Hugo\r\\n\r\\n\r\\nTranslated by Isabe"
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=7:0 conv_idx=7 turn=1 prompt_sequence_index=7 input_tokens_count=1622 positions=[1621] prompt_prefix="Identify the scene and likely stakes in this Count of Monte Cristo excerpt:\\n\\nTHE COUNT OF MONTE CRISTO\r\\n\r\\nby Alexandre D"
+  [36mDynamic HCS: hit=0.00% tail=960/480 protected=23616 promotions=0 evictions=0 request_promotions=0/960 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=7:0 conv_idx=7 turn=1 prompt_sequence_index=7 input_tokens_count=1622 positions=[1621] prompt_prefix="Identify the scene and likely stakes in this Count of Monte Cristo excerpt:\\n\\nTHE COUNT OF MONTE CRISTO\r\\n\r\\nby Alexandre D"

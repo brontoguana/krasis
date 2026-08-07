@@ -11,6 +11,14 @@ Initial scope: measured supported models at `INT4/HQQ4/k4v4` and
 
 Detailed benchmark logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](benchmarks/BENCHMARKS.md).
 
+The GLM-5.2 PCIe programme measured six final RTX PRO 6000 + A4500 rows.
+Peer serving plus bit-exact GPU expert compression and `75/8` cold-mass pruning
+improved best internal decode from `4.75` to `5.97 tok/s` (**1.257x, +25.68%**)
+and best HTTP round trip from `8.09` to `10.13 tok/s`; internal prefill remained
+within 1.3%. The pre-implementation gates correctly predicted that this
+20 GB peer and 13.74%-smaller lossless corpus could not reach the original 2x
+goal on this hardware. [Six-run matrix and raw evidence](benchmarks/BENCHMARKS.md#glm-52-peer-serving-and-gpu-expert-compression-matrix--2026-08-07).
+
 RAM-backed conversation caching is enabled by default. The final
 timing-disabled `./dev speed-test` default-on gate on one RTX PRO 6000 retained
 the established baseline: internal decode was `89.84/89.80/88.35 tok/s`, peak

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Completed the fixed six-run GLM-5.2 matrix for peer-expert serving and the
+  bit-exact GPU expert codec. Best internal decode improved from 4.75 tok/s
+  baseline to 5.97 tok/s with peer serving, compression and `75/8` cold-mass
+  pruning (1.257x, +25.68%); best HTTP round trip improved from 8.09 to 10.13
+  tok/s, while internal prefill remained within 1.3%. The result is below 2x
+  and matches the measured Phase 0 ceiling from 15.7% peer-tail coverage and a
+  13.74% whole-corpus lossless saving. Added truthful heterogeneous-GPU
+  benchmark headers and a visible first-request peer-selector validation; both
+  have focused regression tests. Full raw stdout, report and runtime logs for
+  all six rows are indexed in `benchmarks/BENCHMARKS.md`.
+- Fixed `./dev reference-test` / `witness-compare` cleanup to honor an explicit
+  `--selected-gpus` override. The final regression workflow exposed that the
+  model launch used the requested RTX PRO but pre-launch cleanup still targeted
+  every Krasis process and stopped a healthy service on the A4500. Cleanup now
+  receives the same effective selection as serving, with a launcher contract.
+- Final shared-path witness regressions pass on the reviewed binary: QCN 8/8,
+  Qwen3.5-35B 10/10, and DeepSeek-V4-0731 4/4 for both prefill argmax and first
+  token, with 100% prefill/decode top-10 containment. DeepSeek's decode floor
+  was 662 MiB against the standard 600 MiB margin. Final server contracts,
+  launcher 29/29 plus planner 6/6, and focused reporting contracts are green.
+
 - Added peer-expert serving as a measured alternative to serial layer-split
   multi-GPU decode. The primary retains canonical host experts while an
   auxiliary GPU duplicates a disjoint heat-ranked tier and returns

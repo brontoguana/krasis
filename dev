@@ -1679,6 +1679,8 @@ do_test_kernels() {
             filter="expert_sidecar::tests"
         elif [[ "$1" == "expert_compression_payload" ]]; then
             filter="gpu_decode::dsa_registration_tests::expert_payload_uses_all_four_component_ranges_in_cache_order"
+        elif [[ "$1" == "peer_selector_check" ]]; then
+            filter="gpu_decode::dsa_registration_tests::peer_selector_check_"
         elif [[ "$1" == "dsa_registration" ]]; then
             filter="dsa_registration_tests"
         elif [[ "$1" == "hqq4_warp_geometry" ]]; then
@@ -1905,6 +1907,20 @@ do_reference_test() {
 	        local conf
 	        conf=$(resolve_config "$1")
 	        shift
+	        local selected_gpus_override
+	        selected_gpus_override=$(extract_selected_gpus_arg "$@")
+	        local -a reference_args=()
+	        while [[ $# -gt 0 ]]; do
+	            case "$1" in
+	                --selected-gpus=*) shift ;;
+	                --selected-gpus)
+	                    [[ $# -ge 2 ]] || err "--selected-gpus requires a comma-separated GPU list"
+	                    shift 2
+	                    ;;
+	                *) reference_args+=("$1"); shift ;;
+	            esac
+	        done
+	        set -- "${reference_args[@]}"
 	        local no_server=false
 	        local arg
 	        for arg in "$@"; do
@@ -1916,7 +1932,7 @@ do_reference_test() {
 	        if [[ "$no_server" == true ]]; then
 	            info "Reference test using existing server; skipping GPU cleanup/rebuild"
 	        else
-	            cleanup_gpu "$conf"
+	            cleanup_gpu "$conf" "$selected_gpus_override"
 	            auto_rebuild
 	        fi
 	        local run_dir
@@ -1924,7 +1940,9 @@ do_reference_test() {
         info "Running reference test: $conf"
         info "Run dir: $run_dir"
         verify_repo_imports
-        KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="reference-test" run_repo_python "$SCRIPT_DIR/tests/reference_test.py" "$conf" "$@"
+        KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="reference-test" \
+            KRASIS_REFERENCE_SELECTED_GPUS="$selected_gpus_override" \
+            run_repo_python "$SCRIPT_DIR/tests/reference_test.py" "$conf" "$@"
     fi
 }
 

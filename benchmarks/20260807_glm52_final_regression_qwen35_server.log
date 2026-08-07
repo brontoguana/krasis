@@ -1,0 +1,139 @@
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (--selected-gpus override)
+Loaded config from tests/q35b-stats-hqq4-k4v4.conf: {'model_path': '/home/main/.krasis/models/Qwen3.5-35B-A3B', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 1000, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18155, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — Qwen3.5-35B-A3B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (cli; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=557 MB, free=96700 MB, total=97258 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3626 MB, reserved=3678 MB, used=4413 MB, free=92844 MB, total=97258 MB
+  [0;32mHQQ attention artifacts validated (789 MB cached), 92844 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 40 layers...
+    GPU Marlin cache loaded: 16.7 GB in 19s
+  [0;32mExpert weights loaded in 19s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3626 MB, reserved=3678 MB, used=4413 MB, free=92844 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3626 MB, reserved=3678 MB, used=4413 MB, free=92844 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4626 MB, reserved=4678 MB, used=5413 MB, free=91844 MB, total=97258 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4626 MB, reserved=4678 MB, used=5413 MB, free=91844 MB, total=97258 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x2ee823d0)[0m
+  [32mReleased redundant GPU execution source tensors (565 MB)[0m
+  [2mVRAM monitor started (startup measurement 1 ms; runtime 50 ms)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=32 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=32)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=32)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=32)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 1.4s[0m
+  [2mcuda:0 warmup:  peak 6,735 MB used / 97,258 MB total  (min free: 90,522 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 91,278 MB / 97,258 MB[0m
+  [32mCalibration prefill guard: 1,200 MB (runtime safety remains 600 MB)[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 1.03s (31.1 tok/s)  VRAM: 91232 MB free now, 91232 MB min free during decode[0m
+  [32mShort calibration: baseline=91,278 MB, prefill post-alloc=90,908 MB, prefill min=90,462 MB, decode min=91,232 MB, post-cleanup=91,232 MB[0m
+  [32mAdaptive long calibration: default target=3,120 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.4235 MB/token[0m
+  [32mAdaptive long calibration fail-closed entry check: 3,120 tokens require 1,937 MB, 91,278 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 3,120 tokens (model-estimated initial probe (projected 0.4235 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 3,120 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 1.26s (25.5 tok/s)  VRAM: 91230 MB free now, 91230 MB min free during decode[0m
+  [32mLong calibration: baseline=91,232 MB, prefill post-alloc=89,738 MB, prefill min=89,300 MB, decode min=91,230 MB, post-cleanup=91,230 MB[0m
+  [32mScratch reservation: max=20,878 MB (at 50,000 tokens)[0m
+  [32mVRAM monitor runtime cadence restored: 1 ms -> 50 ms[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 91,230 MB[0m
+  [32mTransient deltas: short prefill=816 MB, long prefill=1,932 MB, short decode=46 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 90,584 MB[0m
+  [32mPrefill HCS budgets: short=89,814 MB, long=88,698 MB[0m
+  [32mWorst-case prefill scratch reservation: 20,878 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [32mApproved route heatmap loaded from cache: qwen35_35b_hqq4_p00006 (manifest-approved runtime compatibility)[0m
+  [32mUsing approved route heatmap; quick startup heatmap collection skipped[0m
+  [32mHeatmap: 9,650 experts ranked from 9,650 entries[0m
+  [2mVRAM calibration: baseline 91230 MB | prefill 436.2 KB/tok, decode -17.2 KB/tok | HCS allowance prefill: short 89814 MB, long 88698 MB | decode: short 90584 MB, long 90628 MB | idle floors prefill=1416 MB decode=646 MB | decode-resident HCS budget=90584 MB[0m
+  [2mGPU0 HCS: 10240 experts (9650 ranked + 590 unranked), reclaimable: 90,584 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/10240 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 10240 experts in 1.03s (15840.0 MB, host_mode=source) | total: 10240/10240 (100.0%) coverage[0m
+  [2mLoaded in 1.1s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mQwen3.5-35B-A3B[0m
+  [32mAddress:[0m  [1m0.0.0.0:18155[0m
+  [32mContext:[0m  163,840 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18155/v1[0m
+    Chat endpoint: http://127.0.0.1:18155/v1/chat/completions
+    Models:        http://127.0.0.1:18155/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mQwen3.5-35B-A3B-vision[0m
+                   [2mvision-capable; use this same model for text and images[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=0:0 conv_idx=0 turn=1 prompt_sequence_index=0 input_tokens_count=13 positions=[12] prompt_prefix="Hi"
+  [36mDynamic HCS: hit=0.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=0:0 conv_idx=0 turn=1 prompt_sequence_index=0 input_tokens_count=13 positions=[12] prompt_prefix="Hi"
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=1:0 conv_idx=1 turn=1 prompt_sequence_index=1 input_tokens_count=37 positions=[36] prompt_prefix="What's your name?"
+  [36mDynamic HCS: hit=0.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=1:0 conv_idx=1 turn=1 prompt_sequence_index=1 input_tokens_count=37 positions=[36] prompt_prefix="What's your name?"
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=2:0 conv_idx=2 turn=1 prompt_sequence_index=2 input_tokens_count=20 positions=[19] prompt_prefix="State your model family in one sentence."
+  [36mDynamic HCS: hit=0.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=2:0 conv_idx=2 turn=1 prompt_sequence_index=2 input_tokens_count=20 positions=[19] prompt_prefix="State your model family in one sentence."
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=3:0 conv_idx=3 turn=1 prompt_sequence_index=3 input_tokens_count=28 positions=[27] prompt_prefix="What is 17 times 23? Answer with the number first."
+  [36mDynamic HCS: hit=0.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=3:0 conv_idx=3 turn=1 prompt_sequence_index=3 input_tokens_count=28 positions=[27] prompt_prefix="What is 17 times 23? Answer with the number first."
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=4:0 conv_idx=4 turn=1 prompt_sequence_index=4 input_tokens_count=28 positions=[27] prompt_prefix="Write a Rust function signature for binary search over a slice of i32."
+  [36mDynamic HCS: hit=0.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=4:0 conv_idx=4 turn=1 prompt_sequence_index=4 input_tokens_count=28 positions=[27] prompt_prefix="Write a Rust function signature for binary search over a slice of i32."
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=5:0 conv_idx=5 turn=1 prompt_sequence_index=5 input_tokens_count=31 positions=[30] prompt_prefix="In two bullet points, explain why caching a file hash must include file size and mtime."
+  [36mDynamic HCS: hit=0.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=5:0 conv_idx=5 turn=1 prompt_sequence_index=5 input_tokens_count=31 positions=[30] prompt_prefix="In two bullet points, explain why caching a file hash must include file size and mtime."
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=6:0 conv_idx=6 turn=1 prompt_sequence_index=6 input_tokens_count=510 positions=[509] prompt_prefix="Read this excerpt and identify its central subject in one sentence.\\n\\nMOBY-DICK; or, THE WHALE. By Herman Melville CONTEN"
+  [36mDynamic HCS: hit=0.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=6:0 conv_idx=6 turn=1 prompt_sequence_index=6 input_tokens_count=510 positions=[509] prompt_prefix="Read this excerpt and identify its central subject in one sentence.\\n\\nMOBY-DICK; or, THE WHALE. By Herman Melville CONTEN"
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=7:0 conv_idx=7 turn=1 prompt_sequence_index=7 input_tokens_count=316 positions=[315] prompt_prefix="Read this excerpt and identify its central subject in one sentence.\\n\\nWAR AND PEACE By Leo Tolstoy/Tolstoi Contents BOOK "
+  [36mDynamic HCS: hit=0.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=7:0 conv_idx=7 turn=1 prompt_sequence_index=7 input_tokens_count=316 positions=[315] prompt_prefix="Read this excerpt and identify its central subject in one sentence.\\n\\nWAR AND PEACE By Leo Tolstoy/Tolstoi Contents BOOK "
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=8:0 conv_idx=8 turn=1 prompt_sequence_index=8 input_tokens_count=448 positions=[447] prompt_prefix="Read this excerpt and identify its central subject in one sentence.\\n\\nLES MIS\u00c9RABLES By Victor Hugo Translated by Isabel "
+  [36mDynamic HCS: hit=0.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=8:0 conv_idx=8 turn=1 prompt_sequence_index=8 input_tokens_count=448 positions=[447] prompt_prefix="Read this excerpt and identify its central subject in one sentence.\\n\\nLES MIS\u00c9RABLES By Victor Hugo Translated by Isabel "
+[KRASIS-TRACE] event=reference_case_boundary phase=start case_key=9:0 conv_idx=9 turn=1 prompt_sequence_index=9 input_tokens_count=430 positions=[429] prompt_prefix="Read this excerpt and identify its central subject in one sentence.\\n\\nTHE COUNT OF MONTE CRISTO by Alexandre Dumas [p\u00e8re]"
+  [36mDynamic HCS: hit=0.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+[KRASIS-TRACE] event=reference_case_boundary phase=end case_key=9:0 conv_idx=9 turn=1 prompt_sequence_index=9 input_tokens_count=430 positions=[429] prompt_prefix="Read this excerpt and identify its central subject in one sentence.\\n\\nTHE COUNT OF MONTE CRISTO by Alexandre Dumas [p\u00e8re]"

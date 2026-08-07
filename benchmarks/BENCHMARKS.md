@@ -1,5 +1,63 @@
 # Krasis Benchmark Results
 
+## GLM-5.2 peer serving and GPU expert compression matrix — 2026-08-07
+
+All six rows used the same final INT4/HQQ4/K4V4 runtime, approved heatmap and
+RTX PRO 6000 primary on the same host; peer rows additionally used the A4500.
+Timing instrumentation was disabled.
+Each number is reported in benchmark order; the bold value is the best decode
+or HTTP result in that row. Cold-mass pruning used the requested `75/8`
+settings.
+
+| Mode | Internal prefill (1K/3,196) | Internal decode (50/100/250) | HTTP round trip (50/100/250) | Minimum free VRAM |
+|---|---:|---:|---:|---:|
+| Baseline, no pruning | 45.1 / 44.7 | 4.66 / **4.75** / 4.60 | **8.09** / 5.99 / 5.08 | 1,180 MiB |
+| Baseline, 75/8 | 44.7 / 44.6 | **5.27** / 5.21 / 5.05 | **8.98** / 6.67 / 5.59 | 1,180 MiB |
+| Peer, no pruning | 44.9 / 44.5 | 4.93 / **5.07** / 4.91 | **8.65** / 6.42 / 5.28 | 1,178 MiB |
+| Peer, 75/8 | 45.0 / 44.5 | 5.61 / **5.65** / 5.51 | **9.91** / 7.29 / 6.00 | 1,178 MiB |
+| Peer + compression, no pruning | 44.8 / 44.5 | 5.32 / **5.38** / 5.25 | **9.03** / 6.75 / 5.68 | 1,172 MiB |
+| Peer + compression, 75/8 | 44.9 / 44.5 | 5.89 / **5.97** / 5.75 | **10.13** / 7.61 / 6.31 | 1,172 MiB |
+
+The requested comparison improves best internal decode from 4.75 to 5.97
+tok/s: **1.257x, or 25.68%**. It does not reach 2x. This agrees with the
+pre-implementation capacity gate: this A4500 can cover only about 15.7% of the
+primary cold tail, while the accepted lossless sidecar saves 13.74% over the
+whole corpus. Prefill stayed within 1.3%. Peer deadline misses were visible and
+used the canonical cold path; unavailable fallbacks and HCS copy failures were
+zero. Compression startup additionally reads and binds the full source corpus,
+maps/pins the 322.4 GB sidecar, and took roughly ten minutes beyond the raw
+cache load; this cost is outside the timed results but operationally material.
+
+Evidence: row 1 [stdout](20260807_glm52_matrix_1_baseline_off_benchmark_stdout.log),
+[report](20260807_glm52_matrix_1_baseline_off_benchmark_report.log),
+[runtime](20260807_glm52_matrix_1_baseline_off_krasis.log); row 2
+[stdout](20260807_glm52_matrix_2_baseline_75_8_benchmark_stdout.log),
+[report](20260807_glm52_matrix_2_baseline_75_8_benchmark_report.log),
+[runtime](20260807_glm52_matrix_2_baseline_75_8_krasis.log); row 3
+[stdout](20260807_glm52_matrix_3_peer_off_benchmark_stdout.log),
+[report](20260807_glm52_matrix_3_peer_off_benchmark_report.log),
+[runtime](20260807_glm52_matrix_3_peer_off_krasis.log); row 4
+[stdout](20260807_glm52_matrix_4_peer_75_8_benchmark_stdout.log),
+[report](20260807_glm52_matrix_4_peer_75_8_benchmark_report.log),
+[runtime](20260807_glm52_matrix_4_peer_75_8_krasis.log); row 5
+[stdout](20260807_glm52_matrix_5_peer_compression_off_benchmark_stdout.log),
+[report](20260807_glm52_matrix_5_peer_compression_off_benchmark_report.log),
+[runtime](20260807_glm52_matrix_5_peer_compression_off_krasis.log); row 6
+[stdout](20260807_glm52_matrix_6_peer_compression_75_8_benchmark_stdout.log),
+[report](20260807_glm52_matrix_6_peer_compression_75_8_benchmark_report.log),
+[runtime](20260807_glm52_matrix_6_peer_compression_75_8_krasis.log).
+
+Final shared-path regressions on the same native source passed QCN (8/8
+prefill argmax and first token), Qwen3.5-35B (10/10), and DeepSeek-V4-0731
+(4/4); every run had 100% prefill and decode top-10 containment. DeepSeek's
+calibrated decode floor was 662 MiB against the 600 MiB contract. Evidence:
+[QCN witness](20260807_glm52_final_regression_qcn_witness.log),
+[Qwen3.5 witness](20260807_glm52_final_regression_qwen35_witness.log),
+[DeepSeek witness](20260807_glm52_final_regression_dsv4_witness.log),
+[server contracts](20260807_glm52_final_server_test.log),
+[launcher contracts](20260807_glm52_final_launcher_test.log), and
+[reporting contracts](20260807_glm52_final_reporting_tests.log).
+
 ## QCN speed-aware mismatched-GPU layer assignment — 2026-08-07
 
 These two timing-disabled `./dev benchmark` runs used the same current QCN

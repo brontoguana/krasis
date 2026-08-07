@@ -1,0 +1,63 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (1) to clear...
+[0;32m[1mOK[0m Selected GPUs (1) clear.
+[0;36m[1m=>[0m Running reference test: tests/q35b-stats-hqq4-k4v4.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/reference-test_20260807_212310
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Reference test: Qwen3.5-35B-A3B
+Config: tests/q35b-stats-hqq4-k4v4.conf
+Reference data: /home/main/Documents/Claude/krasis-internal/reference-outputs/output/Qwen3.5-35B-A3B/llama_witness_qwen35_expanded_thinking_off.json
+Reference artifact state: explicit_valid (format 6, llama_witness_qwen35_expanded_thinking_off.json)
+
+============================================================
+Config: INT4/HQQ4 (q35b-stats-hqq4-k4v4.conf)
+============================================================
+Starting server...
+Waiting for server on port 18155...
+Server ready.
+  Conv 1: 13 input tokens, prompt: Hi...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.002997988521566129
+  Conv 2: 37 input tokens, prompt: What's your name?...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=0.08996838246718991
+  Conv 3: 20 input tokens, prompt: State your model family in one sentence....
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=0.02222189838572455
+  Conv 4: 28 input tokens, prompt: What is 17 times 23? Answer with the number first....
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=8/10 selected_logprob_delta=0.001498993490440228
+  Conv 5: 28 input tokens, prompt: Write a Rust function signature for binary search over a sli...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.07245894588397367
+  Conv 6: 31 input tokens, prompt: In two bullet points, explain why caching a file hash must i...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=6/10 selected_logprob_delta=0.03456742843120704
+  Conv 7: 510 input tokens, prompt: Read this excerpt and identify its central subject in one se...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.006286324437152276
+  Conv 8: 316 input tokens, prompt: Read this excerpt and identify its central subject in one se...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.003502242042213527
+  Conv 9: 448 input tokens, prompt: Read this excerpt and identify its central subject in one se...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=8/10 selected_logprob_delta=0.0403988651954765
+  Conv 10: 430 input tokens, prompt: Read this excerpt and identify its central subject in one se...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.013201428609687552
+Stopping server...
+
+============================================================
+REFERENCE TEST: PASS
+============================================================
+  Prompts: 10 PASS, 0 WARN, 0 FAIL (of 10)
+  Prefill argmax match: 10/10 (100%)
+  Prefill top-10 containment: 10/10 (100%)
+  First-token match: 10/10
+  Avg match run: 1.0 tokens
+  Avg decode top-k: 100.0%
+  Duration: 77.6s
+  Report: /home/main/Documents/Claude/krasis/logs/reference-test_20260807_212310/reference_test.html
+  Summary JSON: /home/main/Documents/Claude/krasis/logs/reference-test_20260807_212310/reference_test_summary.json
+

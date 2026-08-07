@@ -164,6 +164,27 @@ class LauncherMatrixTest(unittest.TestCase):
         )
         self.assertNotIn('cleanup_gpu "$conf"\n', benchmark_source)
 
+    def test_dev_reference_cleanup_uses_selected_gpu_override(self):
+        dev_source = (REPO_ROOT / "dev").read_text(encoding="utf-8")
+        reference_start = dev_source.index("do_reference_test() {")
+        reference_end = dev_source.index("\ndo_reference_inventory() {", reference_start)
+        reference_source = dev_source[reference_start:reference_end]
+
+        self.assertIn(
+            'selected_gpus_override=$(extract_selected_gpus_arg "$@")',
+            reference_source,
+        )
+        self.assertIn(
+            'cleanup_gpu "$conf" "$selected_gpus_override"',
+            reference_source,
+        )
+        self.assertIn(
+            'KRASIS_REFERENCE_SELECTED_GPUS="$selected_gpus_override"',
+            reference_source,
+        )
+        self.assertIn('reference_args+=("$1")', reference_source)
+        self.assertNotIn('cleanup_gpu "$conf"\n', reference_source)
+
     maxDiff = None
 
     def test_native_windows_console_key_decoding(self) -> None:

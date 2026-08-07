@@ -40,6 +40,16 @@ def _section(label: str) -> str:
     return f"\n{BOLD}{CYAN}▸ {label}{NC}"
 
 
+def _format_gpu_summary(gpus: List[Dict]) -> str:
+    """Describe the selected GPUs without hiding heterogeneous hardware."""
+    names = [str(gpu.get("name", "unknown")) for gpu in gpus]
+    if not names:
+        return "none"
+    if all(name == names[0] for name in names):
+        return f"{len(names)}x {names[0]}"
+    return " + ".join(names)
+
+
 class _GpuTelemetrySampler:
     """Samples SM clock / temperature / power for all GPUs while a benchmark
     run executes, via nvidia-smi on a background thread (~1.5 s interval).
@@ -937,7 +947,7 @@ class KrasisBenchmark:
         vram_usage = self._collect_vram_usage()
 
         print(f"  Model:    {BOLD}{model_info['model_name']}{NC}")
-        print(f"  GPUs:     {len(sys_info['gpus'])}x {sys_info['gpus'][0]['name'] if sys_info['gpus'] else 'none'}")
+        print(f"  GPUs:     {_format_gpu_summary(sys_info['gpus'])}")
         print(f"  Strategy: {model_info['decode_mode']}")
 
         # 2. Build prompts

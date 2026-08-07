@@ -7933,13 +7933,31 @@ pub(crate) mod dsa_registration_tests {
 
     use super::{
         create_decode_timing_event, marlin_dispatch_for_bits, plan_dsa_topk,
-        route_prep_rmsnorm_threads, validate_dsa_indexer_registration,
-        validate_dsa_owner_weight_contract, validate_dsa_runtime_registration,
-        validate_stream_probe_outcome, DsaGraphScoreBackend, DsaIndexerOwnerResource,
-        DsaIndexerOwnerWeightIds, ExpertDataPtr, GpuDecodeStore, GpuWeight, MODULE_NAME,
+        peer_selector_check_message, route_prep_rmsnorm_threads,
+        validate_dsa_indexer_registration, validate_dsa_owner_weight_contract,
+        validate_dsa_runtime_registration, validate_stream_probe_outcome, DsaGraphScoreBackend,
+        DsaIndexerOwnerResource, DsaIndexerOwnerWeightIds, ExpertDataPtr, GpuDecodeStore,
+        GpuWeight, MODULE_NAME,
     };
 
     static DSA_CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn peer_selector_check_reports_selected_mode_when_alternative_is_slower() {
+        let (warning, message) = peer_selector_check_message(197.0, 192.0, 361.0, 2.0);
+        assert!(!warning);
+        assert!(message.starts_with("PEER SELECTOR CHECK:"));
+        assert!(message.contains("actual_ms_per_token=197.000000"));
+        assert!(message.contains("alternative_layer_split_ms=361.000000"));
+    }
+
+    #[test]
+    fn peer_selector_check_warns_when_alternative_is_materially_better() {
+        let (warning, message) = peer_selector_check_message(205.1, 190.0, 200.0, 5.0);
+        assert!(warning);
+        assert!(message.starts_with("PEER SELECTOR WARNING:"));
+        assert!(message.contains("measured result is above the alternative prediction"));
+    }
 
     #[test]
     fn expert_payload_uses_all_four_component_ranges_in_cache_order() {
@@ -12816,6 +12834,31 @@ struct PeerExpertRuntime {
     max_dispatch_elapsed_us: f64,
 }
 
+fn peer_selector_check_message(
+    actual_ms: f64,
+    predicted_peer_ms: f64,
+    alternative_split_ms: f64,
+    uncertainty_ms: f64,
+) -> (bool, String) {
+    let alternative_materially_better = actual_ms > alternative_split_ms + uncertainty_ms;
+    let label = if alternative_materially_better {
+        "PEER SELECTOR WARNING"
+    } else {
+        "PEER SELECTOR CHECK"
+    };
+    let suffix = if alternative_materially_better {
+        "; measured result is above the alternative prediction"
+    } else {
+        ""
+    };
+    (
+        alternative_materially_better,
+        format!(
+            "{label}: actual_ms_per_token={actual_ms:.6} predicted_peer_ms={predicted_peer_ms:.6} alternative_layer_split_ms={alternative_split_ms:.6} uncertainty_ms={uncertainty_ms:.6}{suffix}"
+        ),
+    )
+}
+
 fn check_peer_mode_prediction(graph: &mut GpuDecodeGraph, generated: usize, elapsed_seconds: f64) {
     if generated == 0 {
         return;
@@ -12828,25 +12871,13 @@ fn check_peer_mode_prediction(graph: &mut GpuDecodeGraph, generated: usize, elap
     }
     peer.prediction_checked = true;
     let actual_ms = elapsed_seconds / generated as f64 * 1_000.0;
-    let alternative_materially_better =
-        actual_ms > peer.alternative_split_ms_per_token + peer.selector_uncertainty_ms;
-    if alternative_materially_better {
-        log::warn!(
-            "PEER SELECTOR WARNING: actual_ms_per_token={:.6} predicted_peer_ms={:.6} alternative_layer_split_ms={:.6} uncertainty_ms={:.6}; measured result is above the alternative prediction",
-            actual_ms,
-            peer.predicted_peer_ms_per_token,
-            peer.alternative_split_ms_per_token,
-            peer.selector_uncertainty_ms,
-        );
-    } else {
-        log::info!(
-            "PEER SELECTOR CHECK: actual_ms_per_token={:.6} predicted_peer_ms={:.6} alternative_layer_split_ms={:.6} uncertainty_ms={:.6}",
-            actual_ms,
-            peer.predicted_peer_ms_per_token,
-            peer.alternative_split_ms_per_token,
-            peer.selector_uncertainty_ms,
-        );
-    }
+    let (_, message) = peer_selector_check_message(
+        actual_ms,
+        peer.predicted_peer_ms_per_token,
+        peer.alternative_split_ms_per_token,
+        peer.selector_uncertainty_ms,
+    );
+    eprintln!("{message}");
 }
 
 #[derive(Clone, Copy)]
