@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Added runtime-measured speed-aware assignment for the existing serial
+  multi-GPU decode pipeline. Startup now calibrates each selected device with
+  the loaded expert's real one-to-four-copy H2D topology and a model-derived
+  layer working set, then evaluates every valid contiguous split against the
+  model's actual layer bytes, routed-expert geometry, HCS capacity and terminal
+  weights. The existing VRAM-derived split remains the reference and wins when
+  a predicted change does not clear the measured p50-to-p95 uncertainty; no
+  GPU-name or model-name constants are used. On the mismatched RTX PRO
+  6000/A4500 pair, QCN moved from the capacity plan `[40,8]` to `[46,2]` and
+  timing-disabled internal decode improved from 72.46 to 81.02 tok/s while
+  retaining all 24,576 experts. The planner's matched-card, mismatched-card,
+  uncertainty and three-device contracts pass through `./dev launcher-test`.
+
 - Added measurement-only native Phase 0 probes for the GLM-5.2 PCIe
   cold-bandwidth programme. `./dev peer-rtt` measures the real two-GPU,
   no-P2P pinned-host-mailbox round trip with persistent CUDA kernels; on the

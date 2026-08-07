@@ -31081,6 +31081,51 @@ impl GpuDecodeStore {
         self.last_decode_elapsed
     }
 
+    /// Exact routed-expert payload bytes transferred by the normal cold path.
+    #[getter]
+    fn expert_payload_bytes(&self) -> usize {
+        self.graph
+            .as_ref()
+            .and_then(|graph| graph.moe_layers.iter().find_map(|layer| layer.as_ref()))
+            .and_then(|layer| layer.experts.first())
+            .map(|expert| {
+                if expert.contiguous_bytes > 0 {
+                    expert.contiguous_bytes
+                } else {
+                    expert.w13_packed_bytes
+                        + expert.w13_scales_bytes
+                        + expert.w2_packed_bytes
+                        + expert.w2_scales_bytes
+                }
+            })
+            .unwrap_or(0)
+    }
+
+    /// Component byte ranges used by the normal <=4-copy cold transfer path.
+    #[getter]
+    fn expert_component_bytes(&self) -> Vec<usize> {
+        self.graph
+            .as_ref()
+            .and_then(|graph| graph.moe_layers.iter().find_map(|layer| layer.as_ref()))
+            .and_then(|layer| layer.experts.first())
+            .map(|expert| {
+                if expert.contiguous_bytes > 0 {
+                    vec![expert.contiguous_bytes]
+                } else {
+                    vec![
+                        expert.w13_packed_bytes,
+                        expert.w13_scales_bytes,
+                        expert.w2_packed_bytes,
+                        expert.w2_scales_bytes,
+                    ]
+                    .into_iter()
+                    .filter(|bytes| *bytes > 0)
+                    .collect()
+                }
+            })
+            .unwrap_or_default()
+    }
+
     /// Get max sequence length of the KV cache.
     #[getter]
     fn kv_max_seq(&self) -> usize {

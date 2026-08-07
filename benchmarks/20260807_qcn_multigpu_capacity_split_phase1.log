@@ -1,0 +1,256 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (1,0) to clear...
+[0;32m[1mOK[0m Selected GPUs (1,0) clear.
+[0;36m[1m=>[0m Launching from: tests/qcn-k4v4-hqq8-int4-benchmark.conf
+[0;36m[1m=>[0m Selected GPU override: 1,0
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/dev-run_20260807_094436
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d (--selected-gpus override)
+Loaded config from tests/qcn-k4v4-hqq8-int4-benchmark.conf: {'model_path': '/home/main/.krasis/models/Qwen3-Coder-Next', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d', 'num_gpus': 2, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq8', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 16, 'host': '0.0.0.0', 'port': 18146, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'force_load': False}
+
+[1m[36m▸ Krasis — Qwen3-Coder-Next[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 2[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d (cli; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq8  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 16[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=557 MB, free=96700 MB, total=97258 MB
+  [33m[VRAM before-load][0m cuda:1: alloc=0 MB, reserved=0 MB, used=186 MB, free=19866 MB, total=20052 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4395 MB, free=92862 MB, total=97258 MB
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:1: alloc=0 MB, reserved=0 MB, used=186 MB, free=19866 MB, total=20052 MB
+  [0;32mHQQ attention artifacts validated (1789 MB cached), 92862 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 48 layers...
+    GPU Marlin cache loaded: 39.9 GB in 26s
+  [0;32mExpert weights loaded in 27s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4395 MB, free=92862 MB, total=97258 MB
+  [33m[VRAM after-phase2-expert-weights][0m cuda:1: alloc=0 MB, reserved=0 MB, used=186 MB, free=19866 MB, total=20052 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4395 MB, free=92862 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:1: alloc=0 MB, reserved=0 MB, used=186 MB, free=19866 MB, total=20052 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4639 MB, reserved=4660 MB, used=5395 MB, free=91862 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:1: alloc=0 MB, reserved=0 MB, used=186 MB, free=19866 MB, total=20052 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4639 MB, reserved=4660 MB, used=5395 MB, free=91862 MB, total=97258 MB
+  [33m[VRAM after-full-load][0m cuda:1: alloc=0 MB, reserved=0 MB, used=186 MB, free=19866 MB, total=20052 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x66480900)[0m
+  [32mReleased redundant GPU execution source tensors (489 MB)[0m
+  [2mVRAM monitor started (startup measurement 1 ms; runtime 50 ms)[0m
+  [2mcuda:0: 0 MB total[0m
+  [2mcuda:1: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=32 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=32)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=32)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=32)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 2.6s[0m
+  [2mcuda:0 warmup:  peak 7,951 MB used / 97,258 MB total  (min free: 89,306 MB)[0m
+  [2mcuda:1 warmup:  peak 290 MB used / 20,052 MB total  (min free: 19,762 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 90,646 MB / 97,258 MB[0m
+  [32mCalibration prefill guard: 1,200 MB (runtime safety remains 600 MB)[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 1.47s (21.7 tok/s)  VRAM: 90596 MB free now, 90596 MB min free during decode[0m
+  [32mShort calibration: baseline=90,646 MB, prefill post-alloc=90,088 MB, prefill min=89,240 MB, decode min=90,596 MB, post-cleanup=90,596 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.4481 MB/token[0m
+  [32mAdaptive long calibration fail-closed entry check: 4,000 tokens require 2,517 MB, 90,646 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 39,920 tokens (model-estimated initial probe (projected 0.4481 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 5.61s (5.7 tok/s)  VRAM: 90594 MB free now, 90594 MB min free during decode[0m
+  [32mLong calibration: baseline=90,596 MB, prefill post-alloc=72,042 MB, prefill min=71,198 MB, decode min=90,594 MB, post-cleanup=90,594 MB[0m
+  [32mScratch reservation: max=22,178 MB (at 50,000 tokens)[0m
+  [32mVRAM monitor runtime cadence restored: 1 ms -> 50 ms[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 90,594 MB[0m
+  [32mTransient deltas: short prefill=1,406 MB, long prefill=19,398 MB, short decode=50 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 89,944 MB[0m
+  [32mPrefill HCS budgets: short=88,588 MB, long=70,596 MB[0m
+  [32mWorst-case prefill scratch reservation: 22,178 MB at 50,000 tokens[0m
+
+[1m[36m▸ Computing multi-GPU layer split (2 GPUs)[0m
+
+[1m[36m▸ Calibrating multi-GPU device service rates[0m
+  [32m  GPU0 cuda:0: H2D p50/p95=103.1/106.3 us (15.73 GB/s), D2D p50/p95=18.8/21.0 us (86.06 GB/s)[0m
+  [32m  GPU1 cuda:1: H2D p50/p95=104.8/107.9 us (15.47 GB/s), D2D p50/p95=18.7/19.8 us (86.94 GB/s)[0m
+  [32mSpeed-aware split: reference=[40] (23.71 ms/token predicted), selected=[40] (23.71 ms/token, 0.00% reduction, retained within measurement uncertainty, uncertainty=2.69 ms)[0m
+  [32mHCS budgets: GPU0 89,944 MB, GPU1 18,507 MB = 108,451 MB total[0m
+  [32m  GPU0: layers [0..40) = 40 layers (82.9%)[0m
+  [32m  GPU1: layers [40..48) = 8 layers (17.1%)[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [32mApproved route heatmap loaded from cache: qcn_hqq8_p00006 (manifest-approved runtime compatibility)[0m
+  [32mUsing approved route heatmap; quick startup heatmap collection skipped[0m
+  [32mHeatmap: 20,821 experts ranked from 20,821 entries[0m
+  [2mVRAM calibration: baseline 90594 MB | prefill 467.4 KB/tok, decode -1.2 KB/tok | HCS allowance prefill: short 88588 MB, long 70596 MB | decode: short 89944 MB, long 89992 MB | idle floors prefill=2006 MB decode=650 MB | decode-resident HCS budget=89944 MB[0m
+  [2mGPU0 HCS: 20480 experts for layers [0..40) (17450 ranked + 3030 unranked), reclaimable: 89,944 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/24576 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 20480 experts in 2.07s (31680.0 MB, host_mode=source) | total: 20480/24576 (83.3%) coverage[0m
+  [2mLoaded in 2.1s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[36m▸ Multi-GPU decode setup (2 GPUs)[0m
+  [32m  GPU0: layers [0..40) = 40 layers (30 LA + 10 GQA, 40 MoE + 0 dense)[0m
+  [32m  GPU1: layers [40..48) = 8 layers (6 LA + 2 GQA, 8 MoE + 0 dense)[0m
+  [2m  GQA cache offsets: [10][0m
+  [2m  Attention layers are PERMANENT on each GPU (copied at setup, never evicted)[0m
+  [2mCreating aux decode store 1 on cuda:1 for layers [40..48)...[0m
+  [2m  cuda:0 after aux store setup: 58,818 MB free / 97,258 MB total[0m
+  [2m  cuda:1 after aux store setup: 18,176 MB free / 20,052 MB total[0m
+
+[1m[36m▸ Calibrating multi-GPU aux decode overhead[0m
+  [32mAux decode overhead calibration: 11 tokens generated OK[0m
+  [2m  GPU1 decode transient: baseline=18,176 MB, min=18,172 MB, current=18,172 MB, overhead=4 MB[0m
+  [2m  GPU1 HCS: 4096 experts for layers [40..48) (3371 ranked + 725 unranked)[0m
+  [32m  GPU1 HCS budget: 16,972 MB hard (aux_free=18,172 MB, decode_transient=4 MB, runtime_reserve=600 MB)[0m
+  [32m  GPU1 HCS: HCS pool: 4096/24576 experts loaded in 0.41s (16.7% coverage), 16970.8 MB VRAM, 6875 free slots, gpu_route_sync=false, mapped_reads=false | soft: 0 slots (budget too small)[0m
+
+[1m[36m▸ Validating multi-GPU decode[0m
+  [32mMulti-GPU decode validation: 11 tokens generated OK[0m
+  [2m  cuda:0 during multi-GPU decode: min_free=58,412 MB, current_free=58,812 MB / 97,258 MB total[0m
+  [2m  cuda:1 during multi-GPU decode: min_free=1,200 MB, current_free=1,200 MB / 20,052 MB total[0m
+  [2m  GPU1 (cuda:1): min_free=1200 MB during decode, current_free=1200 MB (budget safe)[0m
+
+[1m[36m▸ Multi-GPU decode ready (2 GPUs, splits=[40])[0m
+
+[1m[36m▸ VRAM allocation summary[0m
+  [32m  GPU0 (cuda:0): layers [0..40) = 40 (30LA+10GQA, 40MoE)[0m
+  [32m    Attention: 270 MB[0m
+  [32m    HCS:   reclaimable=89,944MB = 89,944 MB total[0m
+  [32m    VRAM:  38,446 MB used / 97,258 MB total (58,812 MB free)[0m
+  [32m  GPU1 (cuda:1): layers [40..48) = 8 (6LA+2GQA, 8MoE)[0m
+  [32m    Attention: 54 MB (HQQ8, permanent)[0m
+  [32m    HCS:   18,507 MB (100% hard, no prefill)[0m
+  [32m    VRAM:  18,852 MB used / 20,052 MB total (1,200 MB free)[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mQwen3-Coder-Next[0m
+  [32mAddress:[0m  [1m0.0.0.0:18146[0m
+  [32mContext:[0m  136,528 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   2-GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18146/v1[0m
+    Chat endpoint: http://127.0.0.1:18146/v1/chat/completions
+    Models:        http://127.0.0.1:18146/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mQwen3-Coder-Next[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mQwen3-Coder-Next[0m
+  GPUs:     2x NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/5K/10K/20K/35K/39,920)[0m
+  Prefill sizing:  [33mruntime-calibrated prefill cap 39,920 tokens (long probe low-water 71,196 MB, safety 600 MB)[0m
+  Warmup prefill:  3 prompts, ~25,000 tokens each
+  Timed prefill:   6 prompts at 1K/5K/10K/20K/35K/39,920 tokens
+    [1] 1,000 tokens
+    [2] 5,000 tokens
+    [3] 10,000 tokens
+    [4] 20,000 tokens
+    [5] 35,000 tokens
+    [6] 39,920 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+  [32mdecode: 7 tokens in 0.10s (68.5 tok/s)  VRAM: GPU0 58812MB min, GPU1 1166MB min[0m
+  [32mdecode: 7 tokens in 0.10s (68.0 tok/s)  VRAM: GPU0 58814MB min, GPU1 1166MB min[0m
+  Warmup complete.
+  Prefill warmup (3 runs, ~25,000 tokens each)...
+    [1/3] 25,000 tokens
+    [2/3] 25,000 tokens
+    [3/3] 25,000 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+  [32mdecode: 49 tokens in 0.67s (72.9 tok/s)  VRAM: GPU0 58814MB min, GPU1 1166MB min[0m
+    50 tokens done
+  [32mdecode: 99 tokens in 1.38s (72.0 tok/s)  VRAM: GPU0 58812MB min, GPU1 1166MB min[0m
+    100 tokens done
+  [32mdecode: 249 tokens in 3.49s (71.3 tok/s)  VRAM: GPU0 58814MB min, GPU1 1166MB min[0m
+    250 tokens done
+  Warmup complete (19.3s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K/5K/10K/20K/35K/39,920 tokens, 6 runs[0m
+  Run 1: 1,108.7 tok/s (1,000 tokens in 902.0ms)
+  Run 2: 4,736.4 tok/s (5,000 tokens in 1055.7ms)
+  Run 3: 7,342.4 tok/s (10,000 tokens in 1361.9ms)
+  Run 4: 9,672.2 tok/s (20,000 tokens in 2067.8ms)
+  Run 5: 10,542.4 tok/s (35,000 tokens in 3319.9ms)
+  Run 6: 10,621.5 tok/s (39,920 tokens in 3758.4ms)
+  [1mBest: 10,621.5 tok/s (39,920 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+  [32mdecode: 49 tokens in 0.68s (72.5 tok/s)  VRAM: GPU0 58816MB min, GPU1 1166MB min[0m
+  [32mdecode: 99 tokens in 1.36s (72.6 tok/s)  VRAM: GPU0 58814MB min, GPU1 1166MB min[0m
+  [32mdecode: 249 tokens in 3.56s (69.9 tok/s)  VRAM: GPU0 58812MB min, GPU1 1166MB min[0m
+   50 tokens: 72.33 tok/s (13.8ms/tok)
+  100 tokens: 72.46 tok/s (13.8ms/tok)
+  250 tokens: 69.84 tok/s (14.3ms/tok)
+  [1mBest: 72.46 tok/s[0m
+  HCS:  24576/24576 experts loaded (100.0%)
+  VRAM: 58812 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+  [32mprefill: 10 tokens in 0.60s (16.6 tok/s)  VRAM: 58812 MB free now, 58386 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.10s (69.4 tok/s)  VRAM: GPU0 58812MB min, GPU1 1166MB min[0m
+  [32mprefill: 57 tokens in 0.84s (68.1 tok/s)  VRAM: 58814 MB free now, 57684 MB min free during prefill[0m
+  [32mdecode: 49 tokens in 0.67s (72.6 tok/s)  VRAM: GPU0 58814MB min, GPU1 1166MB min[0m
+  [32mprefill: 62 tokens in 0.84s (73.5 tok/s)  VRAM: 58812 MB free now, 57808 MB min free during prefill[0m
+  [32mdecode: 99 tokens in 1.36s (72.5 tok/s)  VRAM: GPU0 58812MB min, GPU1 1166MB min[0m
+  [32mprefill: 57 tokens in 0.85s (67.4 tok/s)  VRAM: 58814 MB free now, 57828 MB min free during prefill[0m
+  [32mdecode: 249 tokens in 3.56s (69.9 tok/s)  VRAM: GPU0 58814MB min, GPU1 1166MB min[0m
+   50 tokens: 148.87 tok/s (1.86s total)
+  100 tokens: 97.14 tok/s (2.55s total)
+  250 tokens: 77.35 tok/s (4.76s total)
+  [1mBest: 148.87 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m[32mBENCHMARK COMPLETE[0m
+  Model:                 [1mQwen3-Coder-Next[0m
+  Config:                INT4/4 HQQ8 KV=k4v4 2 GPU
+  Prefill (internal):    [32m[1m10,621.5 tok/s[0m  (best of 1K/5K/10K/20K/35K/39,920)
+  Decode (internal):     [32m[1m72.46 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m148.87 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          24576/24576 (100.0%)
+  Min free VRAM:         58812 MB
+  Log:     [2mlogs/dev-run_20260807_094436/benchmark_report.log[0m
+
+
+[1m[32mSERVER READY: 0.0.0.0:18146[0m
+  [2mPress Q or Ctrl-C to stop[0m
+PHASE1_QCN_EXIT=0

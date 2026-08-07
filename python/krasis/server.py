@@ -3666,6 +3666,7 @@ def main():
 
         # Compute per-layer VRAM cost from actual loaded weights (not hardcoded estimates).
         _layer_vram_mb = []
+        _layer_service_bytes = []
         kv_cache = _model.kv_caches[0] if _model.kv_caches else None
         kv_total_mb = 0
         if kv_cache is not None:
@@ -3689,7 +3690,7 @@ def main():
             kv_per_layer_mb = 0
 
         from krasis.attention import MarlinWeight as _MW
-        for layer in _model.layers:
+        for layer_index, layer in enumerate(_model.layers):
             layer_bytes = 0
             layer_bytes += layer.input_norm_weight.nelement() * layer.input_norm_weight.element_size()
             layer_bytes += layer.post_attn_norm_weight.nelement() * layer.post_attn_norm_weight.element_size()
@@ -3724,6 +3725,18 @@ def main():
             if layer.layer_type != "linear_attention":
                 layer_mb += kv_per_layer_mb
             _layer_vram_mb.append(layer_mb)
+            layer_service_bytes = layer_bytes + (
+                int(kv_per_layer_mb * 1024 * 1024)
+                if layer.layer_type != "linear_attention"
+                else 0
+            )
+            if cfg.is_dsa:
+                layer_service_bytes += int(
+                    _model._dsa_indexer_resource_bytes_for_segment(
+                        layer_index, layer_index + 1
+                    )
+                )
+            _layer_service_bytes.append(layer_service_bytes)
 
         # Compute base overhead for the last aux GPU (embedding + lm_head + final_norm)
         # Only the last GPU needs the LM head; intermediate GPUs only need attention/norms.
@@ -3807,6 +3820,123 @@ def main():
             _multi_gpu_splits = new_splits
             if _multi_gpu_splits == prev_splits:
                 break  # converged
+
+        # The capacity-derived result above remains the reference assignment.
+        # Measure the selected cards now and change it only when the predicted
+        # serial-time reduction clears the observed calibration tail spread.
+        from krasis.multi_gpu_planner import (
+            measure_device_service_profiles,
+            optimize_contiguous_splits,
+        )
+
+        expert_component_bytes = [int(value) for value in gpu_store.expert_component_bytes]
+        expert_payload_bytes = sum(expert_component_bytes)
+        if expert_payload_bytes <= 0:
+            raise RuntimeError(
+                "Multi-GPU service calibration could not obtain the loaded routed-expert payload size"
+            )
+        _status("Calibrating multi-GPU device service rates")
+        _multi_gpu_service_profiles = measure_device_service_profiles(
+            device_indices,
+            expert_component_bytes,
+            max(
+                max(_layer_service_bytes),
+                expert_payload_bytes * int(cfg.num_experts_per_tok),
+            ),
+        )
+        for logical_gpu, profile in enumerate(_multi_gpu_service_profiles):
+            _detail(
+                f"  GPU{logical_gpu} cuda:{profile.gpu_index}: "
+                f"H2D p50/p95={profile.h2d_p50_us:.1f}/{profile.h2d_p95_us:.1f} us "
+                f"({1.0 / profile.h2d_seconds_per_byte / 1e9:.2f} GB/s), "
+                f"D2D p50/p95={profile.d2d_p50_us:.1f}/{profile.d2d_p95_us:.1f} us "
+                f"({1.0 / profile.d2d_seconds_per_byte / 1e9:.2f} GB/s)"
+            )
+            logger.info(
+                "Multi-GPU service calibration gpu=%d cuda=%d probe_bytes=%d "
+                "d2d_probe_bytes=%d h2d_p50_us=%.6f h2d_p95_us=%.6f h2d_gbps=%.6f "
+                "d2d_p50_us=%.6f d2d_p95_us=%.6f d2d_gbps=%.6f uncertainty=%.6f",
+                logical_gpu,
+                profile.gpu_index,
+                profile.probe_bytes,
+                profile.d2d_probe_bytes,
+                profile.h2d_p50_us,
+                profile.h2d_p95_us,
+                1.0 / profile.h2d_seconds_per_byte / 1e9,
+                profile.d2d_p50_us,
+                profile.d2d_p95_us,
+                1.0 / profile.d2d_seconds_per_byte / 1e9,
+                profile.relative_uncertainty,
+            )
+
+        preferred_splits = tuple(_multi_gpu_splits)
+
+        def _candidate_hcs_budget_bytes(gpu_ordinal, layer_start, layer_end):
+            if gpu_ordinal == 0:
+                return int(gpu0_hcs_total * 1024 * 1024)
+            aux_index = gpu_ordinal - 1
+            attention_bytes = int(sum(_layer_vram_mb[layer_start:layer_end]) * 1024 * 1024)
+            dsa_bytes = (
+                int(_model._dsa_indexer_resource_bytes_for_segment(layer_start, layer_end))
+                if cfg.is_dsa
+                else 0
+            )
+            terminal_overhead_bytes = (
+                last_gpu_base_overhead_bytes
+                if gpu_ordinal == num_gpus_available - 1
+                else 0
+            )
+            total_bytes = int(aux_totals[aux_index] * 1024 * 1024)
+            safety_bytes = int(SAFETY_MARGIN_MB * 1024 * 1024)
+            return max(
+                0,
+                total_bytes
+                - attention_bytes
+                - dsa_bytes
+                - terminal_overhead_bytes
+                - safety_bytes,
+            )
+
+        layer_is_moe = [bool(layer.is_moe) for layer in _model.layers]
+        split_plan = optimize_contiguous_splits(
+            preferred_splits=preferred_splits,
+            layer_resident_bytes=_layer_service_bytes,
+            layer_is_moe=layer_is_moe,
+            profiles=_multi_gpu_service_profiles,
+            hcs_budget_bytes=_candidate_hcs_budget_bytes,
+            expert_bytes=expert_payload_bytes,
+            experts_per_layer=int(cfg.n_routed_experts),
+            experts_per_token=int(cfg.num_experts_per_tok),
+            terminal_bytes=int(last_gpu_base_overhead_bytes),
+        )
+        _multi_gpu_splits = list(split_plan.splits)
+        predicted_improvement = (
+            (split_plan.preferred_seconds_per_token - split_plan.predicted_seconds_per_token)
+            / split_plan.preferred_seconds_per_token
+            * 100.0
+            if split_plan.preferred_seconds_per_token > 0.0
+            else 0.0
+        )
+        decision = "admitted" if split_plan.admitted else "retained within measurement uncertainty"
+        _detail(
+            f"Speed-aware split: reference={list(preferred_splits)} "
+            f"({split_plan.preferred_seconds_per_token * 1000.0:.2f} ms/token predicted), "
+            f"selected={_multi_gpu_splits} "
+            f"({split_plan.predicted_seconds_per_token * 1000.0:.2f} ms/token, "
+            f"{predicted_improvement:.2f}% reduction, {decision}, "
+            f"uncertainty={split_plan.uncertainty_seconds * 1000.0:.2f} ms)"
+        )
+        logger.info(
+            "Multi-GPU speed-aware split reference=%s selected=%s reference_ms=%.6f "
+            "selected_ms=%.6f improvement_pct=%.6f uncertainty_ms=%.6f admitted=%s",
+            list(preferred_splits),
+            _multi_gpu_splits,
+            split_plan.preferred_seconds_per_token * 1000.0,
+            split_plan.predicted_seconds_per_token * 1000.0,
+            predicted_improvement,
+            split_plan.uncertainty_seconds * 1000.0,
+            split_plan.admitted,
+        )
 
         # Compute GQA offsets for each split point
         _multi_gpu_gqa_offsets = []

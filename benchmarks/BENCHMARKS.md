@@ -1,5 +1,33 @@
 # Krasis Benchmark Results
 
+## QCN speed-aware mismatched-GPU layer assignment — 2026-08-07
+
+These two timing-disabled `./dev benchmark` runs used the same current QCN
+INT4/HQQ8/K4V4 configuration on the RTX PRO 6000 plus A4500 and retained all
+24,576 experts. The first diagnostic used the existing capacity-derived
+`[40,8]` split after an undersized D2D calibration could not resolve the cards'
+service-rate difference. The accepted run measured a model-derived 16,220,160
+byte layer working set: 836.44 GB/s on the RTX PRO and 240.11 GB/s on the
+A4500. That admitted `[46,2]` over `[40,8]`, with a predicted 7.24% serial-time
+reduction clearing the measured uncertainty bound.
+
+| Measurement | Capacity `[40,8]` | Speed-aware `[46,2]` | Change |
+|---|---:|---:|---:|
+| Peak internal prefill | 10,621.5 tok/s | 10,698.7 tok/s | +0.73% |
+| Best internal decode | 72.46 tok/s | 81.02 tok/s | +11.82% |
+| Best HTTP round trip | 148.87 tok/s | 190.67 tok/s | +28.08% |
+| Total HCS coverage | 24,576/24,576 | 24,576/24,576 | unchanged |
+
+The accepted auxiliary segment retained 1,024 experts and reached 1,168 MiB
+minimum free VRAM against the configured 600 MiB contract. The much larger
+primary free floor is expected because QCN was already at 100% aggregate HCS;
+there were no additional experts to load.
+
+Evidence: [capacity-split run](20260807_qcn_multigpu_capacity_split_phase1.log),
+[capacity-split report](20260807_qcn_multigpu_capacity_split_phase1_report.log),
+[speed-aware run](20260807_qcn_multigpu_speed_aware_phase1.log), and
+[speed-aware report](20260807_qcn_multigpu_speed_aware_phase1_report.log).
+
 ## GLM-5.2 PCIe reduction Phase 0 gates — 2026-08-07
 
 These native, measurement-only probes ran before any production implementation.
