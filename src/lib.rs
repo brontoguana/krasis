@@ -4,6 +4,8 @@ pub mod cpu_tail;
 pub mod cpu_tail_calibrate;
 pub mod decode;
 pub mod draft_model;
+pub mod expert_codec;
+pub mod expert_sidecar;
 pub mod gguf;
 pub mod gguf_kernels;
 pub mod gpu_decode;

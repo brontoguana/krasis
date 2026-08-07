@@ -3113,6 +3113,11 @@ const KERNEL_NAMES: &[&str] = &[
     "weighted_add_bf16_sigmoid_f32",
     "zero_bf16",
     "add_bf16",
+    "peer_publish_request",
+    "peer_mailbox_round_trip_loop",
+    "peer_wait_response",
+    "peer_wait_copy_bf16",
+    "add_peer_bf16_if_active",
     "sigmoid_gate_bf16",
     "scale_bf16",
     "scale_bf16_by_ptr",
@@ -3265,6 +3270,7 @@ const KERNEL_NAMES: &[&str] = &[
     "cpu_int4_to_marlin_repack_batched",
     "cpu_bf16_scales_to_marlin_repack_batched",
     "cpu_expert_to_marlin_repack_batched",
+    "decode_expert_rans",
 ];
 
 const MODULE_NAME: &str = "decode_kernels";
@@ -6994,6 +7000,12 @@ struct ExpertDataPtr {
     /// When set, DMA can use a single cuMemcpyHtoDAsync call.
     contiguous_ptr: usize,
     contiguous_bytes: usize,
+    /// Expert-contiguous entropy sidecar payload. Zero when compression is disabled.
+    compressed_ptr: usize,
+    compressed_bytes: usize,
+    compressed_tasks: usize,
+    compressed_chunks:
+        [crate::expert_codec::ExpertChunkPlan; crate::expert_codec::MAX_EXPERT_CHUNKS],
     /// GPU-accessible device pointers to mapped host memory (for zero-copy GPU reads).
     /// Set when cuMemHostRegister with CU_MEMHOSTREGISTER_DEVICEMAP succeeds.
     /// GPU SMs can read this data directly over PCIe without CPU-initiated DMA.
@@ -7001,6 +7013,45 @@ struct ExpertDataPtr {
     mapped_w13_scales_dptr: u64,
     mapped_w2_packed_dptr: u64,
     mapped_w2_scales_dptr: u64,
+}
+
+impl ExpertDataPtr {
+    fn payload_bytes(&self) -> Result<usize, String> {
+        self.w13_packed_bytes
+            .checked_add(self.w13_scales_bytes)
+            .and_then(|bytes| bytes.checked_add(self.w2_packed_bytes))
+            .and_then(|bytes| bytes.checked_add(self.w2_scales_bytes))
+            .ok_or_else(|| "expert source payload length overflow".to_string())
+    }
+
+    fn copy_payload_to_host(&self) -> Result<Vec<u8>, String> {
+        let payload_bytes = self.payload_bytes()?;
+        if payload_bytes == 0 {
+            return Err("expert source payload is empty".to_string());
+        }
+        let mut payload = Vec::with_capacity(payload_bytes);
+        for (ptr, bytes, label) in [
+            (self.w13_packed_ptr, self.w13_packed_bytes, "w13_packed"),
+            (self.w13_scales_ptr, self.w13_scales_bytes, "w13_scales"),
+            (self.w2_packed_ptr, self.w2_packed_bytes, "w2_packed"),
+            (self.w2_scales_ptr, self.w2_scales_bytes, "w2_scales"),
+        ] {
+            if ptr == 0 || bytes == 0 {
+                return Err(format!(
+                    "expert source component {label} is invalid: ptr=0x{ptr:x} bytes={bytes}",
+                ));
+            }
+            let component = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
+            payload.extend_from_slice(component);
+        }
+        if payload.len() != payload_bytes {
+            return Err(format!(
+                "expert source payload assembled {} bytes, expected {payload_bytes}",
+                payload.len(),
+            ));
+        }
+        Ok(payload)
+    }
 }
 
 fn copy_expert_to_hcs_slot_sync(dst: u64, expert: &ExpertDataPtr) -> bool {
@@ -7885,10 +7936,51 @@ pub(crate) mod dsa_registration_tests {
         route_prep_rmsnorm_threads, validate_dsa_indexer_registration,
         validate_dsa_owner_weight_contract, validate_dsa_runtime_registration,
         validate_stream_probe_outcome, DsaGraphScoreBackend, DsaIndexerOwnerResource,
-        DsaIndexerOwnerWeightIds, GpuDecodeStore, GpuWeight, MODULE_NAME,
+        DsaIndexerOwnerWeightIds, ExpertDataPtr, GpuDecodeStore, GpuWeight, MODULE_NAME,
     };
 
     static DSA_CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn expert_payload_uses_all_four_component_ranges_in_cache_order() {
+        let w13_packed = [1_u8, 2, 3];
+        let w13_scales = [4_u8, 5];
+        let w2_packed = [6_u8, 7, 8, 9];
+        let w2_scales = [10_u8];
+        let expert = ExpertDataPtr {
+            w13_packed_ptr: w13_packed.as_ptr() as usize,
+            w13_packed_bytes: w13_packed.len(),
+            w13_scales_ptr: w13_scales.as_ptr() as usize,
+            w13_scales_bytes: w13_scales.len(),
+            w2_packed_ptr: w2_packed.as_ptr() as usize,
+            w2_packed_bytes: w2_packed.len(),
+            w2_scales_ptr: w2_scales.as_ptr() as usize,
+            w2_scales_bytes: w2_scales.len(),
+            contiguous_ptr: 0,
+            contiguous_bytes: 0,
+            compressed_ptr: 0,
+            compressed_bytes: 0,
+            compressed_tasks: 0,
+            compressed_chunks: [crate::expert_codec::ExpertChunkPlan::default();
+                crate::expert_codec::MAX_EXPERT_CHUNKS],
+            mapped_w13_packed_dptr: 0,
+            mapped_w13_scales_dptr: 0,
+            mapped_w2_packed_dptr: 0,
+            mapped_w2_scales_dptr: 0,
+        };
+
+        assert_eq!(expert.payload_bytes().unwrap(), 10);
+        assert_eq!(
+            expert.copy_payload_to_host().unwrap(),
+            (1_u8..=10).collect::<Vec<_>>()
+        );
+
+        let overflow = ExpertDataPtr {
+            w13_packed_bytes: usize::MAX,
+            ..expert
+        };
+        assert!(overflow.payload_bytes().unwrap_err().contains("overflow"));
+    }
 
     #[test]
     fn marlin_dispatch_uses_the_executed_weight_bit_width() {
@@ -12578,8 +12670,17 @@ struct PinnedMapped {
 
 impl PinnedMapped {
     fn new(size: usize) -> Result<Self, String> {
+        Self::new_with_flags(size, 0x02)
+    }
+
+    fn new_portable(size: usize) -> Result<Self, String> {
+        // CU_MEMHOSTALLOC_PORTABLE | CU_MEMHOSTALLOC_DEVICEMAP.  Peer expert
+        // mailboxes must resolve inside both independently-created contexts.
+        Self::new_with_flags(size, 0x01 | 0x02)
+    }
+
+    fn new_with_flags(size: usize, flags: u32) -> Result<Self, String> {
         let mut host_ptr: *mut u8 = std::ptr::null_mut();
-        let flags = 0x02; // CU_MEMHOSTALLOC_DEVICEMAP
         unsafe {
             let err = cuda_sys::lib().cuMemHostAlloc(
                 &mut host_ptr as *mut *mut u8 as *mut *mut std::ffi::c_void,
@@ -12589,6 +12690,10 @@ impl PinnedMapped {
             if err != cuda_sys::CUresult::CUDA_SUCCESS {
                 return Err(format!("cuMemHostAlloc({} bytes): {:?}", size, err));
             }
+            // CUDA does not promise zero-filled host allocations.  Mapped
+            // mailboxes use sequence words, so initialize before either
+            // context can observe the allocation.
+            std::ptr::write_bytes(host_ptr, 0, size);
             let mut dptr: u64 = 0;
             let err = cuda_sys::lib().cuMemHostGetDevicePointer_v2(
                 &mut dptr,
@@ -12606,6 +12711,22 @@ impl PinnedMapped {
             })
         }
     }
+
+    fn device_pointer_for_current_context(&self) -> Result<u64, String> {
+        let mut dptr = 0u64;
+        let result = unsafe {
+            cuda_sys::lib().cuMemHostGetDevicePointer_v2(
+                &mut dptr,
+                self.host_ptr as *mut std::ffi::c_void,
+                0,
+            )
+        };
+        if result == cuda_sys::CUresult::CUDA_SUCCESS {
+            Ok(dptr)
+        } else {
+            Err(format!("cuMemHostGetDevicePointer: {result:?}"))
+        }
+    }
 }
 
 impl Drop for PinnedMapped {
@@ -12621,6 +12742,146 @@ impl Drop for PinnedMapped {
 // Safety: host_ptr points to pinned memory accessible from any thread
 unsafe impl Send for PinnedMapped {}
 unsafe impl Sync for PinnedMapped {}
+
+/// Protect a finite persistent peer-kernel calibration from mapped-host
+/// use-after-free.  Any error after launch conservatively leaks the small
+/// mailbox because the peer may still dereference it; successful peer
+/// synchronization disarms the guard and releases the allocation normally.
+struct PeerRttMailboxGuard {
+    mailbox: Option<PinnedMapped>,
+    peer_may_access: bool,
+}
+
+impl PeerRttMailboxGuard {
+    fn new(mailbox: PinnedMapped) -> Self {
+        Self {
+            mailbox: Some(mailbox),
+            peer_may_access: false,
+        }
+    }
+
+    fn mark_peer_active(&mut self) {
+        self.peer_may_access = true;
+    }
+
+    fn mark_peer_complete(&mut self) {
+        self.peer_may_access = false;
+    }
+}
+
+impl std::ops::Deref for PeerRttMailboxGuard {
+    type Target = PinnedMapped;
+
+    fn deref(&self) -> &Self::Target {
+        self.mailbox.as_ref().unwrap()
+    }
+}
+
+impl Drop for PeerRttMailboxGuard {
+    fn drop(&mut self) {
+        if self.peer_may_access {
+            if let Some(mailbox) = self.mailbox.take() {
+                std::mem::forget(mailbox);
+            }
+        }
+    }
+}
+
+const PEER_MAILBOX_CONTROL_BYTES: usize = 4096;
+
+struct PeerExpertRuntime {
+    store_addr: usize,
+    mailbox: PinnedMapped,
+    peer_mapping: u64,
+    d_output: cudarc::driver::CudaSlice<u16>,
+    d_active: cudarc::driver::CudaSlice<i32>,
+    sequence: u32,
+    service_p95_us_by_routes: Vec<f64>,
+    rtt_p95_us: f64,
+    local_cold_p95_us_per_expert: f64,
+    predicted_peer_ms_per_token: f64,
+    alternative_split_ms_per_token: f64,
+    selector_uncertainty_ms: f64,
+    prediction_checked: bool,
+    admitted_route_counts: Vec<bool>,
+    admitted_max_routes: usize,
+    requests: u64,
+    hits: u64,
+    misses: u64,
+    deadline_fallbacks: u64,
+    unavailable_fallbacks: u64,
+    output_bytes: u64,
+    completed_dispatches: u64,
+    total_dispatch_elapsed_us: f64,
+    max_dispatch_elapsed_us: f64,
+}
+
+fn check_peer_mode_prediction(graph: &mut GpuDecodeGraph, generated: usize, elapsed_seconds: f64) {
+    if generated == 0 {
+        return;
+    }
+    let Some(peer) = graph.peer_expert.as_mut() else {
+        return;
+    };
+    if peer.prediction_checked {
+        return;
+    }
+    peer.prediction_checked = true;
+    let actual_ms = elapsed_seconds / generated as f64 * 1_000.0;
+    let alternative_materially_better =
+        actual_ms > peer.alternative_split_ms_per_token + peer.selector_uncertainty_ms;
+    if alternative_materially_better {
+        log::warn!(
+            "PEER SELECTOR WARNING: actual_ms_per_token={:.6} predicted_peer_ms={:.6} alternative_layer_split_ms={:.6} uncertainty_ms={:.6}; measured result is above the alternative prediction",
+            actual_ms,
+            peer.predicted_peer_ms_per_token,
+            peer.alternative_split_ms_per_token,
+            peer.selector_uncertainty_ms,
+        );
+    } else {
+        log::info!(
+            "PEER SELECTOR CHECK: actual_ms_per_token={:.6} predicted_peer_ms={:.6} alternative_layer_split_ms={:.6} uncertainty_ms={:.6}",
+            actual_ms,
+            peer.predicted_peer_ms_per_token,
+            peer.alternative_split_ms_per_token,
+            peer.selector_uncertainty_ms,
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PeerRoutedExpert {
+    expert_idx: usize,
+    weight: f32,
+    batch_slot: usize,
+}
+
+struct PendingPeerDispatch {
+    routes: Vec<PeerRoutedExpert>,
+    started: std::time::Instant,
+}
+
+impl PeerExpertRuntime {
+    fn host_request_ptr(&self) -> *mut u8 {
+        unsafe { self.mailbox.host_ptr.add(PEER_MAILBOX_CONTROL_BYTES) }
+    }
+
+    fn host_response_ptr(&self, hidden_bytes: usize) -> *mut u8 {
+        unsafe { self.host_request_ptr().add(hidden_bytes) }
+    }
+
+    fn primary_control_ptr(&self) -> u64 {
+        self.mailbox.device_ptr
+    }
+
+    fn peer_control_ptr(&self) -> u64 {
+        self.peer_mapping
+    }
+
+    fn peer_request_ptr(&self) -> u64 {
+        self.peer_mapping + PEER_MAILBOX_CONTROL_BYTES as u64
+    }
+}
 
 // ── Cached kernel function handles ─────────────────────────────────────
 // Avoids HashMap lookup per kernel call (~470 lookups per token eliminated).
@@ -12676,6 +12937,11 @@ struct CachedKernels {
     deepseek_v4_index_scores_decode: cudarc::driver::CudaFunction,
     zero_bf16: cudarc::driver::CudaFunction,
     add_bf16: cudarc::driver::CudaFunction,
+    peer_publish_request: cudarc::driver::CudaFunction,
+    peer_mailbox_round_trip_loop: cudarc::driver::CudaFunction,
+    peer_wait_response: cudarc::driver::CudaFunction,
+    peer_wait_copy_bf16: cudarc::driver::CudaFunction,
+    add_peer_bf16_if_active: cudarc::driver::CudaFunction,
     weighted_add_bf16: cudarc::driver::CudaFunction,
     weighted_add_bf16_sigmoid_f32: cudarc::driver::CudaFunction,
     scale_bf16: cudarc::driver::CudaFunction,
@@ -12875,6 +13141,11 @@ struct GpuDecodeGraph {
 
     // HCS: Hot Cache Strategy state
     hcs: Option<HcsState>,
+
+    // Optional secondary-GPU expert server. The primary retains every layer;
+    // this tier only duplicates heat-ranked routed experts and contributes a
+    // weighted output through a portable pinned-host mailbox.
+    peer_expert: Option<PeerExpertRuntime>,
 
     // GPU scratch buffers
     d_hidden: cudarc::driver::CudaSlice<u16>,
@@ -13439,6 +13710,8 @@ struct GpuDecodeGraph {
     /// Default-off cache-format cost probe. Production Marlin buffers remain
     /// authoritative and the genuine repack output is discarded.
     synthetic_repack: Option<Arc<std::sync::Mutex<crate::synthetic_repack::SyntheticRepackRing>>>,
+    /// Opt-in bit-exact expert sidecar and pipelined GPU decoder.
+    expert_compression: Option<ExpertCompressionRuntime>,
     route_locality: RouteLocalityStats,
     route_shadow_logits: Vec<f32>,
     route_shadow_bias: Vec<f32>,
@@ -14059,6 +14332,477 @@ impl Drop for SequenceStatePinnedBuffer {
 struct CudaEvent(cuda_sys::CUevent);
 unsafe impl Send for CudaEvent {}
 unsafe impl Sync for CudaEvent {}
+
+struct ScopedCudaEvent(cuda_sys::CUevent);
+
+impl ScopedCudaEvent {
+    fn new(label: &str) -> Result<Self, String> {
+        let mut event = std::ptr::null_mut();
+        let result = unsafe { cuda_sys::lib().cuEventCreate(&mut event, 0) };
+        if result == cuda_sys::CUresult::CUDA_SUCCESS {
+            Ok(Self(event))
+        } else {
+            Err(format!("create {label} CUDA event: {result:?}"))
+        }
+    }
+}
+
+impl Drop for ScopedCudaEvent {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let _ = cuda_sys::lib().cuEventDestroy_v2(self.0);
+            }
+        }
+    }
+}
+
+struct ExpertCompressionRuntime {
+    // Declared before the mapping so automatic field drop unregisters every
+    // CUDA host range before ExpertSidecar unmaps it.
+    host_registrations: Vec<HostRegistration>,
+    sidecar: crate::expert_sidecar::ExpertSidecar,
+    /// Join stream for all chunk decoders. Existing graph-replay completion
+    /// events are recorded here, after waits for every independent chunk.
+    completion_stream: CudaStream,
+    /// Independent workers let component-sized chunks decode concurrently as
+    /// soon as their own H2D range arrives. The format exposes at most
+    /// `MAX_EXPERT_CHUNKS`, so this remains topology-derived rather than a
+    /// device/model-specific stream count.
+    decode_streams: Vec<CudaStream>,
+    ready_events: Vec<CudaEvent>,
+    decoded_events: Vec<CudaEvent>,
+    available_events: Vec<CudaEvent>,
+    compressed_slots: Vec<cudarc::driver::CudaSlice<u8>>,
+    d_decode_symbols: cudarc::driver::CudaSlice<u16>,
+    d_frequencies: cudarc::driver::CudaSlice<u16>,
+    d_starts: cudarc::driver::CudaSlice<u16>,
+    decode_function: CudaFunc,
+    /// Runtime-calibrated number of contiguous H2D/decode groups per expert.
+    /// One, two, and four all reconstruct identical bytes; startup selects the
+    /// measured production-pipeline winner for the loaded hardware.
+    chunks_per_expert: usize,
+    decoder_streams_per_expert: usize,
+    raw_bytes: u64,
+    compressed_bytes: u64,
+    decoded_experts: u64,
+}
+
+unsafe impl Send for ExpertCompressionRuntime {}
+unsafe impl Sync for ExpertCompressionRuntime {}
+
+struct HostRegistration {
+    ptr: *mut std::ffi::c_void,
+}
+
+unsafe impl Send for HostRegistration {}
+unsafe impl Sync for HostRegistration {}
+
+impl Drop for HostRegistration {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                let _ = cuda_sys::lib().cuMemHostUnregister(self.ptr);
+            }
+        }
+    }
+}
+
+impl ExpertCompressionRuntime {
+    fn new(
+        device: &Arc<CudaDevice>,
+        sidecar_path: &std::path::Path,
+        identity: &crate::weights::GpuCacheIdentity,
+        expert_bytes: usize,
+        expert_count: usize,
+        slots: usize,
+        max_registration_bytes: usize,
+    ) -> Result<Self, String> {
+        if slots == 0 {
+            return Err("expert compression requires at least one staging slot".to_string());
+        }
+        device
+            .bind_to_thread()
+            .map_err(|error| format!("bind compression CUDA device: {error:?}"))?;
+        let sidecar = crate::expert_sidecar::ExpertSidecar::open(
+            sidecar_path,
+            &identity.header,
+            identity.source_bytes,
+            identity.routed_expert_sha256.ok_or_else(|| {
+                "expert compression source payload identity was not measured".to_string()
+            })?,
+            expert_bytes,
+            expert_count,
+            max_registration_bytes,
+        )?;
+        let max_blob_bytes = sidecar.max_blob_bytes();
+        if max_blob_bytes == 0 {
+            return Err("expert compression sidecar has no payloads".to_string());
+        }
+        let mapped_bytes = sidecar.mapped_bytes();
+        let registration_ranges = sidecar.mapped_ranges().collect::<Vec<_>>();
+        let registration_started = std::time::Instant::now();
+        let mut host_registrations = Vec::with_capacity(registration_ranges.len());
+        for (segment_idx, (host_ptr, bytes)) in registration_ranges.iter().copied().enumerate() {
+            let ptr = host_ptr as *mut std::ffi::c_void;
+            let register = unsafe { cuda_sys::lib().cuMemHostRegister_v2(ptr, bytes, 0) };
+            if register != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "expert compression sidecar bounded mapping pin failed at segment {}/{} bytes={}: {:?}",
+                    segment_idx,
+                    registration_ranges.len(),
+                    bytes,
+                    register,
+                ));
+            }
+            host_registrations.push(HostRegistration { ptr });
+        }
+        log::info!(
+            "EXPERT COMPRESSION: pinned {} sidecar bytes in {} runtime-sized regions (max_region={} bytes) in {:.3}s",
+            mapped_bytes,
+            host_registrations.len(),
+            max_registration_bytes,
+            registration_started.elapsed().as_secs_f64(),
+        );
+
+        let create = || -> Result<cuda_sys::CUstream, String> {
+            let mut stream = std::ptr::null_mut();
+            let result = unsafe {
+                cuda_sys::lib().cuStreamCreate(
+                    &mut stream,
+                    cuda_sys::CUstream_flags::CU_STREAM_NON_BLOCKING as u32,
+                )
+            };
+            if result == cuda_sys::CUresult::CUDA_SUCCESS {
+                Ok(stream)
+            } else {
+                Err(format!("create expert decompression stream: {result:?}"))
+            }
+        };
+        let completion_stream = CudaStream(create()?);
+        let mut decode_streams = Vec::with_capacity(crate::expert_codec::MAX_EXPERT_CHUNKS);
+        for _ in 0..crate::expert_codec::MAX_EXPERT_CHUNKS {
+            decode_streams.push(CudaStream(create()?));
+        }
+        let mut ready_events =
+            Vec::with_capacity(slots.saturating_mul(crate::expert_codec::MAX_EXPERT_CHUNKS));
+        let mut decoded_events =
+            Vec::with_capacity(slots.saturating_mul(crate::expert_codec::MAX_EXPERT_CHUNKS));
+        let mut available_events = Vec::with_capacity(slots);
+        for _ in 0..slots {
+            for _ in 0..crate::expert_codec::MAX_EXPERT_CHUNKS {
+                let mut event = std::ptr::null_mut();
+                let result = unsafe {
+                    cuda_sys::lib().cuEventCreate(
+                        &mut event,
+                        cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32,
+                    )
+                };
+                if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("create expert compression ready event: {result:?}"));
+                }
+                ready_events.push(CudaEvent(event));
+
+                let mut decoded = std::ptr::null_mut();
+                let result = unsafe {
+                    cuda_sys::lib().cuEventCreate(
+                        &mut decoded,
+                        cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32,
+                    )
+                };
+                if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "create expert compression decoded event: {result:?}"
+                    ));
+                }
+                decoded_events.push(CudaEvent(decoded));
+            }
+
+            let mut available = std::ptr::null_mut();
+            let result = unsafe {
+                cuda_sys::lib().cuEventCreate(
+                    &mut available,
+                    cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32,
+                )
+            };
+            if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "create expert compression availability event: {result:?}"
+                ));
+            }
+            let record = unsafe { cuda_sys::lib().cuEventRecord(available, completion_stream.0) };
+            if record != cuda_sys::CUresult::CUDA_SUCCESS {
+                unsafe {
+                    let _ = cuda_sys::lib().cuEventDestroy_v2(available);
+                }
+                return Err(format!(
+                    "initialize expert compression availability event: {record:?}"
+                ));
+            }
+            available_events.push(CudaEvent(available));
+        }
+        let initialize_events = unsafe { cuda_sys::lib().cuStreamSynchronize(completion_stream.0) };
+        if initialize_events != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "initialize expert compression slot events: {initialize_events:?}"
+            ));
+        }
+        let mut compressed_slots = Vec::with_capacity(slots);
+        for _ in 0..slots {
+            compressed_slots.push(
+                unsafe { device.alloc::<u8>(max_blob_bytes) }
+                    .map_err(|error| format!("allocate compressed expert slot: {error:?}"))?,
+            );
+        }
+        let d_decode_symbols = device
+            .htod_sync_copy(&sidecar.tables().gpu_decode_symbols())
+            .map_err(|error| format!("upload expert decode-symbol table: {error:?}"))?;
+        let d_frequencies = device
+            .htod_sync_copy(&sidecar.tables().gpu_frequencies())
+            .map_err(|error| format!("upload expert frequency table: {error:?}"))?;
+        let d_starts = device
+            .htod_sync_copy(&sidecar.tables().gpu_starts())
+            .map_err(|error| format!("upload expert start table: {error:?}"))?;
+        let function = device
+            .get_func(MODULE_NAME, "decode_expert_rans")
+            .ok_or_else(|| "decode_expert_rans kernel is unavailable".to_string())?;
+        let decode_function = CudaFunc(extract_cu_function(&function));
+        log::info!(
+            "EXPERT COMPRESSION: sidecar={} experts={} expert_bytes={} max_blob={} lane_bytes={} slots={} compressed_scratch_bytes={}",
+            sidecar.path().display(),
+            sidecar.header().expert_count,
+            expert_bytes,
+            max_blob_bytes,
+            sidecar.header().lane_bytes,
+            slots,
+            slots.saturating_mul(max_blob_bytes),
+        );
+        Ok(Self {
+            host_registrations,
+            sidecar,
+            completion_stream,
+            decode_streams,
+            ready_events,
+            decoded_events,
+            available_events,
+            compressed_slots,
+            d_decode_symbols,
+            d_frequencies,
+            d_starts,
+            decode_function,
+            chunks_per_expert: 1,
+            decoder_streams_per_expert: 1,
+            raw_bytes: 0,
+            compressed_bytes: 0,
+            decoded_experts: 0,
+        })
+    }
+
+    fn enqueue(
+        &mut self,
+        slot: usize,
+        expert: &ExpertDataPtr,
+        output: u64,
+        copy_stream: cuda_sys::CUstream,
+    ) -> Result<(), String> {
+        let compressed_slot = self
+            .compressed_slots
+            .get(slot)
+            .ok_or_else(|| format!("expert compression slot {slot} is unavailable"))?;
+        let available = self.available_events.get(slot).ok_or_else(|| {
+            format!("expert compression availability event {slot} is unavailable")
+        })?;
+        if expert.compressed_ptr == 0
+            || expert.compressed_bytes == 0
+            || expert.compressed_tasks == 0
+            || expert.compressed_bytes > compressed_slot.len()
+            || !matches!(self.chunks_per_expert, 1 | 2 | 4)
+            || self.decoder_streams_per_expert == 0
+            || self.decoder_streams_per_expert > self.chunks_per_expert
+            || self.decoder_streams_per_expert > self.decode_streams.len()
+            || crate::expert_codec::MAX_EXPERT_CHUNKS % self.chunks_per_expert != 0
+            || expert.compressed_chunks.iter().any(|chunk| {
+                chunk.source_bytes == 0
+                    || chunk.task_count == 0
+                    || chunk.source_offset.saturating_add(chunk.source_bytes)
+                        > expert.compressed_bytes
+            })
+        {
+            return Err(format!(
+                "expert compression metadata invalid: ptr=0x{:x} bytes={} tasks={} capacity={}",
+                expert.compressed_ptr,
+                expert.compressed_bytes,
+                expert.compressed_tasks,
+                compressed_slot.len(),
+            ));
+        }
+        let blob = *compressed_slot.device_ptr();
+        let wait_available =
+            unsafe { cuda_sys::lib().cuStreamWaitEvent(copy_stream, available.0, 0) };
+        if wait_available != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "compressed expert slot availability wait failed: {wait_available:?}"
+            ));
+        }
+        let components_per_chunk = crate::expert_codec::MAX_EXPERT_CHUNKS / self.chunks_per_expert;
+        for chunk_index in 0..self.chunks_per_expert {
+            let component_start = chunk_index * components_per_chunk;
+            let component_end = component_start + components_per_chunk;
+            let first = expert.compressed_chunks[component_start];
+            let last = expert.compressed_chunks[component_end - 1];
+            let chunk = crate::expert_codec::ExpertChunkPlan {
+                source_offset: first.source_offset,
+                source_bytes: last
+                    .source_offset
+                    .checked_add(last.source_bytes)
+                    .and_then(|end| end.checked_sub(first.source_offset))
+                    .ok_or_else(|| {
+                        "expert compression grouped source range overflow".to_string()
+                    })?,
+                task_start: first.task_start,
+                task_count: last
+                    .task_start
+                    .checked_add(last.task_count)
+                    .and_then(|end| end.checked_sub(first.task_start))
+                    .ok_or_else(|| "expert compression grouped task range overflow".to_string())?,
+            };
+            let ready_index = slot
+                .checked_mul(crate::expert_codec::MAX_EXPERT_CHUNKS)
+                .and_then(|index| index.checked_add(chunk_index))
+                .ok_or_else(|| "expert compression ready-event index overflow".to_string())?;
+            let ready = self.ready_events.get(ready_index).ok_or_else(|| {
+                format!(
+                    "expert compression ready event slot={slot} chunk={chunk_index} is unavailable"
+                )
+            })?;
+            let decoded = self.decoded_events.get(ready_index).ok_or_else(|| {
+                format!(
+                    "expert compression decoded event slot={slot} chunk={chunk_index} is unavailable"
+                )
+            })?;
+            let decoder_index = chunk_index % self.decoder_streams_per_expert;
+            let decoder_stream = self.decode_streams.get(decoder_index).ok_or_else(|| {
+                format!("expert compression decoder stream {decoder_index} is unavailable")
+            })?;
+            let copy = unsafe {
+                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    blob + chunk.source_offset as u64,
+                    (expert.compressed_ptr + chunk.source_offset) as *const std::ffi::c_void,
+                    chunk.source_bytes,
+                    copy_stream,
+                )
+            };
+            if copy != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "compressed expert H2D failed at chunk {chunk_index}: {copy:?}"
+                ));
+            }
+            let record = unsafe { cuda_sys::lib().cuEventRecord(ready.0, copy_stream) };
+            if record != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "compressed expert ready event failed at chunk {chunk_index}: {record:?}"
+                ));
+            }
+            let wait = unsafe { cuda_sys::lib().cuStreamWaitEvent(decoder_stream.0, ready.0, 0) };
+            if wait != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "expert decoder wait failed at chunk {chunk_index}: {wait:?}"
+                ));
+            }
+            let mut p0 = blob;
+            let mut p1 = output;
+            let mut p2 = *self.d_decode_symbols.device_ptr();
+            let mut p3 = *self.d_frequencies.device_ptr();
+            let mut p4 = *self.d_starts.device_ptr();
+            let mut p5 = u32::try_from(chunk.task_start)
+                .map_err(|_| "expert compression task start exceeds u32".to_string())?;
+            let mut p6 = u32::try_from(chunk.task_count)
+                .map_err(|_| "expert compression task count exceeds u32".to_string())?;
+            let mut params: [*mut std::ffi::c_void; 7] = [
+                &mut p0 as *mut _ as *mut std::ffi::c_void,
+                &mut p1 as *mut _ as *mut std::ffi::c_void,
+                &mut p2 as *mut _ as *mut std::ffi::c_void,
+                &mut p3 as *mut _ as *mut std::ffi::c_void,
+                &mut p4 as *mut _ as *mut std::ffi::c_void,
+                &mut p5 as *mut _ as *mut std::ffi::c_void,
+                &mut p6 as *mut _ as *mut std::ffi::c_void,
+            ];
+            let launch = unsafe {
+                cuda_sys::lib().cuLaunchKernel(
+                    self.decode_function.0,
+                    p6,
+                    1,
+                    1,
+                    crate::expert_codec::CODEC_LANES as u32,
+                    1,
+                    1,
+                    0,
+                    decoder_stream.0,
+                    params.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if launch != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "expert decompression kernel launch failed at chunk {chunk_index}: {launch:?}"
+                ));
+            }
+            let decoded_record =
+                unsafe { cuda_sys::lib().cuEventRecord(decoded.0, decoder_stream.0) };
+            if decoded_record != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "expert decompression completion event failed at chunk {chunk_index}: {decoded_record:?}"
+                ));
+            }
+            let join = unsafe {
+                cuda_sys::lib().cuStreamWaitEvent(self.completion_stream.0, decoded.0, 0)
+            };
+            if join != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "expert decompression join failed at chunk {chunk_index}: {join:?}"
+                ));
+            }
+        }
+        let release =
+            unsafe { cuda_sys::lib().cuEventRecord(available.0, self.completion_stream.0) };
+        if release != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "expert compression slot release event failed: {release:?}"
+            ));
+        }
+        let raw_bytes = expert.payload_bytes()?;
+        self.raw_bytes = self.raw_bytes.saturating_add(raw_bytes as u64);
+        self.compressed_bytes = self
+            .compressed_bytes
+            .saturating_add(expert.compressed_bytes as u64);
+        self.decoded_experts = self.decoded_experts.saturating_add(1);
+        Ok(())
+    }
+}
+
+impl Drop for ExpertCompressionRuntime {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = cuda_sys::lib().cuStreamSynchronize(self.completion_stream.0);
+            for stream in &self.decode_streams {
+                let _ = cuda_sys::lib().cuStreamSynchronize(stream.0);
+            }
+            for event in &self.ready_events {
+                let _ = cuda_sys::lib().cuEventDestroy_v2(event.0);
+            }
+            for event in &self.decoded_events {
+                let _ = cuda_sys::lib().cuEventDestroy_v2(event.0);
+            }
+            for event in &self.available_events {
+                let _ = cuda_sys::lib().cuEventDestroy_v2(event.0);
+            }
+            for stream in &self.decode_streams {
+                let _ = cuda_sys::lib().cuStreamDestroy_v2(stream.0);
+            }
+            let _ = cuda_sys::lib().cuStreamDestroy_v2(self.completion_stream.0);
+        }
+    }
+}
 
 /// Wrapper for cublas handle to allow Send+Sync (CUDA handles are thread-safe).
 struct CublasHandle(cublas_sys::cublasHandle_t);
@@ -16326,6 +17070,14 @@ pub struct GpuDecodeStore {
     /// from pageable RAM snapshots and exists solely for the no-host-transfer
     /// continuation path.
     active_sequence_device_checkpoint: Option<ActiveSequenceDeviceCheckpoint>,
+    /// Setup mode for a peer-only expert server. Such a store never streams
+    /// canonical host weights per token, so it must not duplicate host-memory
+    /// registration or instantiate a compression sidecar.
+    expert_only_peer_store: bool,
+    /// Completion event for one in-flight peer-expert response on this store.
+    /// Only expert-only auxiliary stores use it.
+    peer_service_ready_event: Option<CudaEvent>,
+    peer_service_pending: bool,
 }
 
 impl GpuDecodeStore {
@@ -17135,14 +17887,11 @@ impl GpuDecodeStore {
                 }
             }
         }
-        let transferred_bytes = transfers.iter().try_fold(
-            0usize,
-            |total, (_, _, bytes)| {
-                total
-                    .checked_add(*bytes)
-                    .ok_or_else(|| "incremental transfer byte count overflow".to_string())
-            },
-        )?;
+        let transferred_bytes = transfers.iter().try_fold(0usize, |total, (_, _, bytes)| {
+            total
+                .checked_add(*bytes)
+                .ok_or_else(|| "incremental transfer byte count overflow".to_string())
+        })?;
         let snapshot_bytes = blobs.iter().try_fold(0usize, |total, blob| {
             total
                 .checked_add(blob.bytes.len())
@@ -17226,11 +17975,7 @@ impl GpuDecodeStore {
         }
         for ((allocation, used_bytes), &blob) in allocations.iter().zip(blobs) {
             blob.validate()?;
-            if !crate::session_cache::snapshot_blob_can_restore(
-                allocation,
-                *used_bytes,
-                blob,
-            ) {
+            if !crate::session_cache::snapshot_blob_can_restore(allocation, *used_bytes, blob) {
                 return Err(format!(
                     "snapshot allocation {:?} is incompatible with live allocation {:?}",
                     blob.allocation_name, allocation.name
@@ -20202,6 +20947,9 @@ impl GpuDecodeStore {
             sequence_state_registry: crate::session_cache::SequenceStateRegistry::default(),
             sequence_state_staging: Vec::new(),
             active_sequence_device_checkpoint: None,
+            expert_only_peer_store: false,
+            peer_service_ready_event: None,
+            peer_service_pending: false,
         })
     }
 
@@ -21141,6 +21889,7 @@ impl GpuDecodeStore {
             decode_trace: None,
             apfl: None,
             hcs: None,
+            peer_expert: None,
             d_hidden,
             d_residual,
             d_scratch,
@@ -21229,7 +21978,7 @@ impl GpuDecodeStore {
             h_logits: vec![0.0f32; vocab_size],
             pinned_topk_ids: PinnedMapped::new(max_experts_per_tok * 4).ok(),
             pinned_topk_weights: PinnedMapped::new(max_experts_per_tok * 4).ok(),
-            // GPU-side route sync: [cold_count, ready_flag, cold_ids[topk], cold_slots[topk]]
+            // GPU-side route sync: count, ready, IDs, slots, route weights, split flag.
             mapped_cold_buf: PinnedMapped::new((3 + max_experts_per_tok * 2) * 4).ok(),
             gpu_route_sync: false,
             gpu_route_sync_hot_nosync: false,
@@ -21578,6 +22327,7 @@ impl GpuDecodeStore {
             cpu_tail_compute_to_result_visible_s_by_depth: [0.0; 8],
             cpu_tail_output_copy_pending: false,
             synthetic_repack: None,
+            expert_compression: None,
             route_locality: RouteLocalityStats::from_env(),
             route_shadow_logits: Vec::new(),
             route_shadow_bias: Vec::new(),
@@ -21748,6 +22498,11 @@ impl GpuDecodeStore {
                 deepseek_v4_index_scores_decode: get("deepseek_v4_index_scores_decode_kernel")?,
                 zero_bf16: get("zero_bf16")?,
                 add_bf16: get("add_bf16")?,
+                peer_publish_request: get("peer_publish_request")?,
+                peer_mailbox_round_trip_loop: get("peer_mailbox_round_trip_loop")?,
+                peer_wait_response: get("peer_wait_response")?,
+                peer_wait_copy_bf16: get("peer_wait_copy_bf16")?,
+                add_peer_bf16_if_active: get("add_peer_bf16_if_active")?,
                 weighted_add_bf16: get("weighted_add_bf16")?,
                 weighted_add_bf16_sigmoid_f32: get("weighted_add_bf16_sigmoid_f32")?,
                 scale_bf16: get("scale_bf16")?,
@@ -25212,6 +25967,19 @@ impl GpuDecodeStore {
         self.setup_from_engine_internal(engine)
     }
 
+    /// Register routed expert metadata for a secondary expert-serving store.
+    /// Canonical host allocations remain owned and pinned by the primary; the
+    /// peer duplicates only the heat-ranked experts selected into its HCS.
+    fn setup_peer_from_engine(&mut self, engine: &crate::moe::KrasisEngine) -> PyResult<()> {
+        if self.graph.is_some() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "setup_peer_from_engine must be called on a fresh GpuDecodeStore",
+            ));
+        }
+        self.expert_only_peer_store = true;
+        self.setup_from_engine_internal(engine)
+    }
+
     /// End-to-end test: load model, set up GPU MoE, run one layer, compare to CPU.
     ///
     /// This is a fully self-contained Rust test with no Python in the loop.
@@ -25419,6 +26187,23 @@ impl GpuDecodeStore {
             hcs.total_misses,
             hcs.hit_rate() * 100.0,
         ))
+    }
+
+    /// Exact resident set used when constructing a disjoint peer tier.  The
+    /// startup planner must exclude primary-resident experts from peer capacity
+    /// using the store's published state, not a budget-derived slot estimate.
+    fn hcs_resident_pairs(&self) -> PyResult<Vec<(usize, usize)>> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        let hcs = graph
+            .hcs
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call init_hcs first"))?;
+        let mut residents = hcs.cache.keys().copied().collect::<Vec<_>>();
+        residents.sort_unstable();
+        Ok(residents)
     }
 
     /// Initialize pool-based HCS with dynamic eviction.
@@ -30618,6 +31403,1025 @@ impl GpuDecodeStore {
         self as *const GpuDecodeStore as usize
     }
 
+    /// Measure the actual portable-pinned host-bounce transport between this
+    /// primary and an expert-only peer.  Both directions carry one real hidden
+    /// vector and are ordered entirely by CUDA kernels/streams.  The returned
+    /// distribution is a startup selector input; it is never inferred from GPU
+    /// names or advertised PCIe properties.
+    fn measure_peer_round_trip_json(
+        &mut self,
+        peer_store_addr: usize,
+        warmup_samples: usize,
+        measured_samples: usize,
+        timeout_ms: u64,
+    ) -> PyResult<String> {
+        if peer_store_addr == 0 || peer_store_addr == self as *mut Self as usize {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer RTT requires a distinct live store",
+            ));
+        }
+        if measured_samples == 0 || timeout_ms == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer RTT requires non-zero samples and timeout",
+            ));
+        }
+        let iterations = warmup_samples
+            .checked_add(measured_samples)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "peer RTT sample count exceeds the mailbox sequence range",
+                )
+            })?;
+        let peer_store = unsafe { &mut *(peer_store_addr as *mut GpuDecodeStore) };
+        if !peer_store.expert_only_peer_store {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer RTT address is not an expert-only store",
+            ));
+        }
+        let (hidden_size, primary_publish, primary_wait) = {
+            let graph = self.graph.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("primary store is not configured")
+            })?;
+            let kernels = graph.kernels.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("primary kernels are not cached")
+            })?;
+            (
+                graph.hidden_size,
+                extract_cu_function(&kernels.peer_publish_request),
+                extract_cu_function(&kernels.peer_wait_response),
+            )
+        };
+        let (peer_hidden, peer_round_trip) = {
+            let graph = peer_store.graph.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("peer store is not configured")
+            })?;
+            let kernels = graph.kernels.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("peer kernels are not cached")
+            })?;
+            (
+                graph.hidden_size,
+                kernels.peer_mailbox_round_trip_loop.clone(),
+            )
+        };
+        if hidden_size != peer_hidden {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "peer RTT hidden-size mismatch: primary={hidden_size} peer={peer_hidden}",
+            )));
+        }
+        let message_bytes = hidden_size
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("peer RTT byte overflow"))?;
+        if message_bytes % std::mem::size_of::<u32>() != 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "peer RTT hidden payload is not u32 aligned",
+            ));
+        }
+
+        self.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "bind primary context for peer RTT: {error}"
+            ))
+        })?;
+        let mailbox_bytes = PEER_MAILBOX_CONTROL_BYTES
+            .checked_add(message_bytes.saturating_mul(2))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("peer RTT mailbox overflow")
+            })?;
+        let mut mailbox = PeerRttMailboxGuard::new(
+            PinnedMapped::new_portable(mailbox_bytes)
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
+        );
+        let primary_control = mailbox.device_ptr;
+        let host_request = unsafe { mailbox.host_ptr.add(PEER_MAILBOX_CONTROL_BYTES) };
+        let host_response = unsafe { host_request.add(message_bytes) };
+        let source = (0..hidden_size)
+            .map(|index| ((index.wrapping_mul(131) ^ (index >> 3)) & 0xffff) as u16)
+            .collect::<Vec<_>>();
+        let d_source = self.device.htod_sync_copy(&source).map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("upload peer RTT source: {error:?}"))
+        })?;
+        let d_result = unsafe { self.device.alloc::<u16>(hidden_size) }.map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "allocate peer RTT result: {error:?}"
+            ))
+        })?;
+
+        peer_store.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "bind peer context for peer RTT: {error}"
+            ))
+        })?;
+        let peer_mapping = mailbox
+            .device_pointer_for_current_context()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        unsafe {
+            peer_round_trip
+                .launch(
+                    cudarc::driver::LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        peer_mapping,
+                        peer_mapping + PEER_MAILBOX_CONTROL_BYTES as u64,
+                        peer_mapping + PEER_MAILBOX_CONTROL_BYTES as u64 + message_bytes as u64,
+                        (message_bytes / std::mem::size_of::<u32>()) as i32,
+                        iterations,
+                    ),
+                )
+                .map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "launch persistent peer RTT kernel: {error:?}"
+                    ))
+                })?;
+        }
+        mailbox.mark_peer_active();
+
+        self.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "restore primary context for peer RTT: {error}"
+            ))
+        })?;
+        let stream = *self.device.cu_stream();
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        let mut samples = Vec::with_capacity(measured_samples);
+        for sample in 0..iterations as usize {
+            let sequence = u32::try_from(sample + 1).unwrap();
+            let started = std::time::Instant::now();
+            let download = unsafe {
+                cuda_sys::lib().cuMemcpyDtoHAsync_v2(
+                    host_request as *mut std::ffi::c_void,
+                    *d_source.device_ptr(),
+                    message_bytes,
+                    stream,
+                )
+            };
+            if download != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "peer RTT request D2H: {download:?}"
+                )));
+            }
+            for (function, label) in [
+                (primary_publish, "publish"),
+                (primary_wait, "response wait"),
+            ] {
+                let mut control = primary_control;
+                let mut sequence_arg = sequence;
+                let mut params: [*mut std::ffi::c_void; 2] = [
+                    &mut control as *mut _ as *mut std::ffi::c_void,
+                    &mut sequence_arg as *mut _ as *mut std::ffi::c_void,
+                ];
+                let launch = unsafe {
+                    cuda_sys::lib().cuLaunchKernel(
+                        function,
+                        1,
+                        1,
+                        1,
+                        1,
+                        1,
+                        1,
+                        0,
+                        stream,
+                        params.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                    )
+                };
+                if launch != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "peer RTT {label} kernel: {launch:?}"
+                    )));
+                }
+            }
+            let upload = unsafe {
+                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    *d_result.device_ptr(),
+                    host_response as *const std::ffi::c_void,
+                    message_bytes,
+                    stream,
+                )
+            };
+            if upload != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "peer RTT response H2D: {upload:?}"
+                )));
+            }
+            loop {
+                let status = unsafe { cuda_sys::lib().cuStreamQuery(stream) };
+                if status == cuda_sys::CUresult::CUDA_SUCCESS {
+                    break;
+                }
+                if status != cuda_sys::CUresult::CUDA_ERROR_NOT_READY {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "peer RTT primary stream query: {status:?}"
+                    )));
+                }
+                if started.elapsed() >= timeout {
+                    // The peer can still own the mailbox.  Leak this small
+                    // allocation on the explicit failure path rather than
+                    // creating a mapped-host use-after-free.
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "peer RTT timed out at sequence {sequence} after {timeout_ms} ms"
+                    )));
+                }
+                std::hint::spin_loop();
+            }
+            if sample >= warmup_samples {
+                samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+            }
+        }
+        peer_store.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "bind peer for RTT completion: {error}"
+            ))
+        })?;
+        peer_store.device.synchronize().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("synchronize peer RTT: {error:?}"))
+        })?;
+        mailbox.mark_peer_complete();
+        self.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "restore primary after peer RTT: {error}"
+            ))
+        })?;
+        let returned = self.device.dtoh_sync_copy(&d_result).map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "download peer RTT result: {error:?}"
+            ))
+        })?;
+        if returned != source {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "peer RTT returned a non-identical hidden payload",
+            ));
+        }
+        samples.sort_by(|left, right| left.total_cmp(right));
+        let percentile = |quantile: f64| -> f64 {
+            let rank = quantile * (samples.len() - 1) as f64;
+            let lower = rank.floor() as usize;
+            let upper = rank.ceil() as usize;
+            let fraction = rank - lower as f64;
+            samples[lower] * (1.0 - fraction) + samples[upper] * fraction
+        };
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|value| (value - mean) * (value - mean))
+            .sum::<f64>()
+            / samples.len() as f64;
+        Ok(serde_json::json!({
+            "message_bytes_each_direction": message_bytes,
+            "warmup_samples": warmup_samples,
+            "measured_samples": measured_samples,
+            "min_us": samples[0],
+            "p50_us": percentile(0.50),
+            "p95_us": percentile(0.95),
+            "p99_us": percentile(0.99),
+            "max_us": samples[samples.len() - 1],
+            "mean_us": mean,
+            "stddev_us": variance.sqrt(),
+            "payload_bit_exact": true,
+        })
+        .to_string())
+    }
+
+    /// Measure real resident-expert service on an expert-only store.  Each
+    /// route-count distribution runs the ordinary Marlin W13/activation/W2 and
+    /// weighted-reduction kernels against actual HCS pointers.  Startup uses
+    /// this curve to cap peer work to what completes inside the local measured
+    /// layer window.
+    fn peer_service_calibration_json(
+        &mut self,
+        warmup_samples: usize,
+        measured_samples: usize,
+    ) -> PyResult<String> {
+        if !self.expert_only_peer_store {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer service calibration requires an expert-only store",
+            ));
+        }
+        if measured_samples == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer service calibration requires measured samples",
+            ));
+        }
+        self.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "bind peer service calibration context: {error}"
+            ))
+        })?;
+        let (layer_idx, resident, layer_topk, hidden_size) = {
+            let graph = self.graph.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("peer store is not configured")
+            })?;
+            let hcs = graph.hcs.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("peer HCS is not initialized")
+            })?;
+            let mut by_layer =
+                std::collections::BTreeMap::<usize, Vec<(usize, (u64, u64, u64, u64))>>::new();
+            for &(layer, expert) in hcs.cache.keys() {
+                if let Some(pointers) = hcs.get_fast(layer, expert) {
+                    by_layer.entry(layer).or_default().push((expert, pointers));
+                }
+            }
+            let mut selected = None;
+            for (layer, mut experts) in by_layer {
+                let Some(moe) = graph.moe_layers.get(layer).and_then(Option::as_ref) else {
+                    continue;
+                };
+                if experts.len() >= moe.topk {
+                    experts.sort_unstable_by_key(|entry| entry.0);
+                    selected = Some((layer, experts, moe.topk));
+                    break;
+                }
+            }
+            let (layer, experts, topk) = selected.ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "peer HCS has no layer with enough resident experts for calibration",
+                )
+            })?;
+            (layer, experts, topk, graph.hidden_size)
+        };
+        let hidden = (0..hidden_size)
+            .map(|index| half::bf16::from_f32(((index as f32 + 1.0) * 0.001).sin()).to_bits())
+            .collect::<Vec<_>>();
+        {
+            let graph = self.graph.as_ref().unwrap();
+            let upload = unsafe {
+                cuda_sys::lib().cuMemcpyHtoD_v2(
+                    *graph.d_hidden.device_ptr(),
+                    hidden.as_ptr() as *const std::ffi::c_void,
+                    hidden.len() * std::mem::size_of::<u16>(),
+                )
+            };
+            if upload != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "upload peer calibration hidden: {upload:?}"
+                )));
+            }
+        }
+
+        let start_event = ScopedCudaEvent::new("peer service start")
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let end_event = ScopedCudaEvent::new("peer service end")
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let stream = *self.device.cu_stream();
+        let mut curve = Vec::with_capacity(layer_topk);
+        for count in 1..=layer_topk {
+            {
+                let graph = self.graph.as_mut().unwrap();
+                graph.h_batch_upload.fill(0);
+                let max_ept = graph.max_experts_per_tok;
+                let ptr_stride = max_ept * std::mem::size_of::<u64>();
+                for (slot, (_, pointers)) in resident.iter().take(count).enumerate() {
+                    for (component, value) in [pointers.0, pointers.1, pointers.2, pointers.3]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let offset = component * ptr_stride + slot * 8;
+                        graph.h_batch_upload[offset..offset + 8]
+                            .copy_from_slice(&value.to_ne_bytes());
+                    }
+                    let weight = 1.0f32 / count as f32;
+                    let offset = ptr_stride * 4 + slot * std::mem::size_of::<f32>();
+                    graph.h_batch_upload[offset..offset + 4].copy_from_slice(&weight.to_ne_bytes());
+                }
+                let upload = unsafe {
+                    cuda_sys::lib().cuMemcpyHtoD_v2(
+                        *graph.d_batch_upload.device_ptr(),
+                        graph.h_batch_upload.as_ptr() as *const std::ffi::c_void,
+                        graph.h_batch_upload.len(),
+                    )
+                };
+                if upload != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "upload peer service table: {upload:?}"
+                    )));
+                }
+            }
+            let total = warmup_samples + measured_samples;
+            let mut samples = Vec::with_capacity(measured_samples);
+            for sample in 0..total {
+                let record = unsafe { cuda_sys::lib().cuEventRecord(start_event.0, stream) };
+                if record != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "record peer service start: {record:?}"
+                    )));
+                }
+                let graph = self.graph.as_ref().unwrap();
+                let weights_ptr =
+                    *graph.d_batch_upload.device_ptr() + (graph.max_experts_per_tok * 8 * 4) as u64;
+                Self::launch_batched_expert_stack(
+                    graph,
+                    layer_idx,
+                    Some(*graph.d_hidden.device_ptr()),
+                    Some(weights_ptr),
+                    Some(count),
+                    "peer calibration",
+                )
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                unsafe {
+                    graph
+                        .kernels
+                        .as_ref()
+                        .unwrap()
+                        .multi_expert_weighted_add_bf16
+                        .clone()
+                        .launch(
+                            cudarc::driver::LaunchConfig::for_num_elems(hidden_size as u32),
+                            (
+                                *graph.d_moe_out.device_ptr(),
+                                *graph.d_batch_expert_outs.device_ptr(),
+                                weights_ptr,
+                                hidden_size as i32,
+                                count as i32,
+                                1i32,
+                            ),
+                        )
+                        .map_err(|error| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "peer calibration weighted reduction: {error:?}"
+                            ))
+                        })?;
+                }
+                let record = unsafe { cuda_sys::lib().cuEventRecord(end_event.0, stream) };
+                if record != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "record peer service end: {record:?}"
+                    )));
+                }
+                let sync = unsafe { cuda_sys::lib().cuEventSynchronize(end_event.0) };
+                if sync != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "synchronize peer service event: {sync:?}"
+                    )));
+                }
+                if sample >= warmup_samples {
+                    let mut elapsed_ms = 0.0f32;
+                    let elapsed = unsafe {
+                        cuda_sys::lib().cuEventElapsedTime(
+                            &mut elapsed_ms,
+                            start_event.0,
+                            end_event.0,
+                        )
+                    };
+                    if elapsed != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "read peer service elapsed time: {elapsed:?}"
+                        )));
+                    }
+                    samples.push(elapsed_ms as f64 * 1_000.0);
+                }
+            }
+            samples.sort_by(|left, right| left.total_cmp(right));
+            let percentile = |quantile: f64| -> f64 {
+                let rank = quantile * (samples.len() - 1) as f64;
+                let lower = rank.floor() as usize;
+                let upper = rank.ceil() as usize;
+                let fraction = rank - lower as f64;
+                samples[lower] * (1.0 - fraction) + samples[upper] * fraction
+            };
+            curve.push(serde_json::json!({
+                "routes": count,
+                "min_us": samples[0],
+                "p50_us": percentile(0.50),
+                "p95_us": percentile(0.95),
+                "p99_us": percentile(0.99),
+                "max_us": samples[samples.len() - 1],
+            }));
+        }
+        Ok(serde_json::json!({
+            "layer_idx": layer_idx,
+            "resident_candidates": resident.len(),
+            "max_routes": layer_topk,
+            "hidden_size": hidden_size,
+            "curve": curve,
+        })
+        .to_string())
+    }
+
+    /// Attach an expert-only secondary store to this primary decode store.
+    /// Both latency inputs are startup measurements from this exact topology;
+    /// they define admission/deadline policy and are never inferred from a GPU
+    /// model name.
+    fn attach_peer_expert_store(
+        &mut self,
+        peer_store_addr: usize,
+        service_p95_us_by_routes: Vec<f64>,
+        rtt_p95_us: f64,
+        local_cold_p95_us_per_expert: f64,
+        predicted_peer_ms_per_token: f64,
+        alternative_split_ms_per_token: f64,
+        selector_uncertainty_ms: f64,
+    ) -> PyResult<String> {
+        if peer_store_addr == 0 || peer_store_addr == self as *mut Self as usize {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer expert store address must name a distinct live store",
+            ));
+        }
+        if service_p95_us_by_routes.is_empty()
+            || service_p95_us_by_routes
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+            || !rtt_p95_us.is_finite()
+            || rtt_p95_us <= 0.0
+            || !local_cold_p95_us_per_expert.is_finite()
+            || local_cold_p95_us_per_expert <= 0.0
+            || !predicted_peer_ms_per_token.is_finite()
+            || predicted_peer_ms_per_token <= 0.0
+            || !alternative_split_ms_per_token.is_finite()
+            || alternative_split_ms_per_token <= 0.0
+            || !selector_uncertainty_ms.is_finite()
+            || selector_uncertainty_ms < 0.0
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer service, RTT, and local cold-copy measurements must be finite and positive",
+            ));
+        }
+        let peer = unsafe { &mut *(peer_store_addr as *mut GpuDecodeStore) };
+        if !peer.expert_only_peer_store {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer address does not reference an expert-only store",
+            ));
+        }
+        let (
+            hidden_size,
+            topk,
+            expert_bits,
+            group_size,
+            peer_hidden,
+            peer_topk,
+            peer_bits,
+            peer_group,
+            peer_cached,
+        ) = {
+            let primary_graph = self.graph.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("primary store is not configured")
+            })?;
+            let peer_graph = peer.graph.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("peer store is not configured")
+            })?;
+            let primary_topk = primary_graph.max_experts_per_tok;
+            let peer_cached = peer_graph.hcs.as_ref().map_or(0, |hcs| hcs.num_cached);
+            (
+                primary_graph.hidden_size,
+                primary_topk,
+                primary_graph.expert_bits,
+                primary_graph.group_size,
+                peer_graph.hidden_size,
+                peer_graph.max_experts_per_tok,
+                peer_graph.expert_bits,
+                peer_graph.group_size,
+                peer_cached,
+            )
+        };
+        if (hidden_size, topk, expert_bits, group_size)
+            != (peer_hidden, peer_topk, peer_bits, peer_group)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "peer expert geometry mismatch: primary=({hidden_size},{topk},{expert_bits},{group_size}) peer=({peer_hidden},{peer_topk},{peer_bits},{peer_group})",
+            )));
+        }
+        if expert_bits != 4 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer expert serving currently requires production INT4 experts",
+            ));
+        }
+        if peer_cached == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer expert store has no HCS-resident experts",
+            ));
+        }
+        if service_p95_us_by_routes.len() < topk {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "peer service curve has {} route counts but layer top-k is {topk}",
+                service_p95_us_by_routes.len(),
+            )));
+        }
+        let admitted_route_counts = (1..=topk)
+            .map(|count| {
+                rtt_p95_us + service_p95_us_by_routes[count - 1]
+                    < local_cold_p95_us_per_expert * count as f64
+            })
+            .collect::<Vec<_>>();
+        let admitted_max_routes = admitted_route_counts
+            .iter()
+            .enumerate()
+            .filter(|(_, admitted)| **admitted)
+            .map(|(index, _)| index + 1)
+            .max()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "peer service curve is slower than the measured local cold path for every route count: rtt_p95_us={rtt_p95_us:.3} local_cold_p95_us_per_expert={local_cold_p95_us_per_expert:.3}",
+                ))
+            })?;
+        {
+            let graph = self.graph.as_ref().unwrap();
+            if !graph.cpu_tail_workers.is_empty() || graph.synthetic_repack.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "peer expert serving is incompatible with CPU-tail races and synthetic repack diagnostics",
+                ));
+            }
+        }
+
+        self.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "bind primary context for peer mailbox: {error}"
+            ))
+        })?;
+        let hidden_bytes = hidden_size
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("peer hidden byte overflow")
+            })?;
+        let mailbox_bytes = PEER_MAILBOX_CONTROL_BYTES
+            .checked_add(hidden_bytes.saturating_mul(2))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("peer mailbox byte overflow")
+            })?;
+        let mailbox = PinnedMapped::new_portable(mailbox_bytes)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+        peer.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "bind peer context for peer mailbox: {error}"
+            ))
+        })?;
+        let peer_mapping = mailbox
+            .device_pointer_for_current_context()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        if peer.peer_service_ready_event.is_none() {
+            let mut event = std::ptr::null_mut();
+            let result = unsafe {
+                cuda_sys::lib().cuEventCreate(
+                    &mut event,
+                    cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32,
+                )
+            };
+            if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "create peer service event: {result:?}"
+                )));
+            }
+            peer.peer_service_ready_event = Some(CudaEvent(event));
+        }
+
+        self.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "restore primary context after peer mailbox setup: {error}"
+            ))
+        })?;
+        let d_output = self
+            .device
+            .alloc_zeros::<u16>(hidden_size)
+            .map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "allocate primary peer output: {error:?}"
+                ))
+            })?;
+        let d_active = self.device.alloc_zeros::<i32>(1).map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "allocate primary peer activation flag: {error:?}"
+            ))
+        })?;
+
+        self.invalidate_cuda_graph();
+        let graph = self.graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("primary graph disappeared during attach")
+        })?;
+        // Peer selection consumes the exact host-visible weights at the same
+        // boundary used by adaptive cold-mass pruning. Keep one Rust route
+        // contract for both pruned and unpruned runs until the GPU classifier
+        // can publish peer residency directly; this does not introduce Python
+        // or per-expert synchronization.
+        graph.gpu_route_sync = false;
+        graph.gpu_route_sync_hot_nosync = false;
+        graph.gpu_route_sync_hot_full_graph = false;
+        graph.peer_expert = Some(PeerExpertRuntime {
+            store_addr: peer_store_addr,
+            mailbox,
+            peer_mapping,
+            d_output,
+            d_active,
+            sequence: 0,
+            service_p95_us_by_routes: service_p95_us_by_routes.clone(),
+            rtt_p95_us,
+            local_cold_p95_us_per_expert,
+            predicted_peer_ms_per_token,
+            alternative_split_ms_per_token,
+            selector_uncertainty_ms,
+            prediction_checked: false,
+            admitted_route_counts: admitted_route_counts.clone(),
+            admitted_max_routes,
+            requests: 0,
+            hits: 0,
+            misses: 0,
+            deadline_fallbacks: 0,
+            unavailable_fallbacks: 0,
+            output_bytes: 0,
+            completed_dispatches: 0,
+            total_dispatch_elapsed_us: 0.0,
+            max_dispatch_elapsed_us: 0.0,
+        });
+        log::info!(
+            "PEER EXPERT: attached store=0x{:x} cached={} hidden={} topk={} service_p95_us_by_routes={:?} rtt_p95_us={:.3} local_cold_p95_us_per_expert={:.3} admitted_route_counts={:?} admitted_max_routes={}",
+            peer_store_addr,
+            peer_cached,
+            hidden_size,
+            topk,
+            service_p95_us_by_routes,
+            rtt_p95_us,
+            local_cold_p95_us_per_expert,
+            admitted_route_counts,
+            admitted_max_routes,
+        );
+        Ok(format!(
+            "peer expert store attached: {peer_cached} experts, RTT p95 {rtt_p95_us:.3} us, local cold p95 {local_cold_p95_us_per_expert:.3} us/expert, admitted routes 1..{admitted_max_routes}"
+        ))
+    }
+
+    fn peer_expert_stats_json(&self) -> PyResult<String> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("store is not configured"))?;
+        let peer = graph.peer_expert.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("peer expert store is not attached")
+        })?;
+        Ok(serde_json::json!({
+            "requests": peer.requests,
+            "hits": peer.hits,
+            "misses": peer.misses,
+            "deadline_fallbacks": peer.deadline_fallbacks,
+            "unavailable_fallbacks": peer.unavailable_fallbacks,
+            "output_bytes": peer.output_bytes,
+            "completed_dispatches": peer.completed_dispatches,
+            "average_dispatch_elapsed_us": if peer.completed_dispatches > 0 {
+                peer.total_dispatch_elapsed_us / peer.completed_dispatches as f64
+            } else {
+                0.0
+            },
+            "max_dispatch_elapsed_us": peer.max_dispatch_elapsed_us,
+            "service_p95_us_by_routes": peer.service_p95_us_by_routes,
+            "rtt_p95_us": peer.rtt_p95_us,
+            "local_cold_p95_us_per_expert": peer.local_cold_p95_us_per_expert,
+            "predicted_peer_ms_per_token": peer.predicted_peer_ms_per_token,
+            "alternative_split_ms_per_token": peer.alternative_split_ms_per_token,
+            "selector_uncertainty_ms": peer.selector_uncertainty_ms,
+            "prediction_checked": peer.prediction_checked,
+            "admitted_route_counts": peer.admitted_route_counts,
+            "admitted_max_routes": peer.admitted_max_routes,
+        })
+        .to_string())
+    }
+
+    /// Measure the production compressed H2D + GPU decode path against one
+    /// real registered expert and verify the reconstructed payload byte for
+    /// byte.  The resulting p95 is used by peer admission when both features
+    /// are active, so the peer is compared with the path it would actually
+    /// replace rather than with uncompressed PCIe service.
+    fn expert_compression_calibration_json(
+        &mut self,
+        warmup_samples: usize,
+        measured_samples: usize,
+    ) -> PyResult<String> {
+        if measured_samples == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "expert compression calibration requires measured samples",
+            ));
+        }
+        self.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "bind expert compression calibration context: {error}"
+            ))
+        })?;
+        let (expert, output) = {
+            let graph = self.graph.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("store is not configured")
+            })?;
+            if graph.expert_compression.is_none() {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "expert compression is not configured",
+                ));
+            }
+            let expert = graph
+                .moe_layers
+                .iter()
+                .find_map(|layer| layer.as_ref())
+                .and_then(|layer| layer.experts.first())
+                .cloned()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "expert compression calibration found no routed expert",
+                    )
+                })?;
+            let output = graph
+                .d_graph_expert_bufs
+                .first()
+                .map(|buffer| *buffer.device_ptr())
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "expert compression calibration found no graph staging buffer",
+                    )
+                })?;
+            (expert.clone(), output)
+        };
+        // The loaded Marlin cache normally owns four per-layer component
+        // arrays, so an individual expert is not necessarily one contiguous
+        // host allocation. Assemble the canonical cache order once for this
+        // startup-only verifier; the production token path remains direct
+        // sidecar DMA plus GPU decode with no CPU work.
+        let expected = expert
+            .copy_payload_to_host()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let raw_bytes = expected.len();
+        let start =
+            create_decode_timing_event().map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let end = create_decode_timing_event().map_err(|error| {
+            unsafe {
+                let _ = cuda_sys::lib().cuEventDestroy_v2(start.0);
+            }
+            pyo3::exceptions::PyRuntimeError::new_err(error)
+        })?;
+        let copy_stream = self.copy_stream.0;
+        let calibration =
+            (|| -> Result<(Vec<serde_json::Value>, usize, usize, Vec<f64>), String> {
+                let mut candidates = Vec::new();
+                let mut selected_groups = 0_usize;
+                let mut selected_decoder_streams = 0_usize;
+                let mut selected_samples = Vec::new();
+                let mut selected_p95 = f64::INFINITY;
+                let mut selected_p50 = f64::INFINITY;
+                for groups in [1_usize, 2, crate::expert_codec::MAX_EXPERT_CHUNKS] {
+                    let mut decoder_stream_candidates = Vec::new();
+                    let mut candidate = 1_usize;
+                    while candidate <= groups {
+                        decoder_stream_candidates.push(candidate);
+                        candidate = candidate.saturating_mul(2);
+                    }
+                    if decoder_stream_candidates.last().copied() != Some(groups) {
+                        decoder_stream_candidates.push(groups);
+                    }
+                    for decoder_streams in decoder_stream_candidates {
+                        {
+                            let codec = self
+                                .graph
+                                .as_mut()
+                                .and_then(|graph| graph.expert_compression.as_mut())
+                                .ok_or_else(|| {
+                                    "expert compression disappeared during calibration".to_string()
+                                })?;
+                            codec.chunks_per_expert = groups;
+                            codec.decoder_streams_per_expert = decoder_streams;
+                        }
+                        let mut samples = Vec::with_capacity(measured_samples);
+                        for sample in 0..warmup_samples.saturating_add(measured_samples) {
+                            let start_result =
+                                unsafe { cuda_sys::lib().cuEventRecord(start.0, copy_stream) };
+                            if start_result != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(format!(
+                                    "record expert compression calibration start: {start_result:?}"
+                                ));
+                            }
+                            {
+                                let graph = self.graph.as_mut().ok_or_else(|| {
+                                    "store disappeared during expert compression calibration"
+                                        .to_string()
+                                })?;
+                                let codec = graph.expert_compression.as_mut().ok_or_else(|| {
+                                    "expert compression disappeared during calibration".to_string()
+                                })?;
+                                codec.enqueue(0, &expert, output, copy_stream)?;
+                                let end_result = unsafe {
+                                    cuda_sys::lib().cuEventRecord(end.0, codec.completion_stream.0)
+                                };
+                                if end_result != cuda_sys::CUresult::CUDA_SUCCESS {
+                                    return Err(format!(
+                                        "record expert compression calibration end: {end_result:?}"
+                                    ));
+                                }
+                            }
+                            let sync = unsafe { cuda_sys::lib().cuEventSynchronize(end.0) };
+                            if sync != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(format!(
+                                    "synchronize expert compression calibration: {sync:?}"
+                                ));
+                            }
+                            let mut elapsed_ms = 0.0f32;
+                            let elapsed = unsafe {
+                                cuda_sys::lib().cuEventElapsedTime(&mut elapsed_ms, start.0, end.0)
+                            };
+                            if elapsed != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(format!(
+                                    "time expert compression calibration: {elapsed:?}"
+                                ));
+                            }
+                            if sample >= warmup_samples {
+                                samples.push(elapsed_ms as f64 * 1_000.0);
+                            }
+                        }
+                        samples.sort_by(|left, right| left.total_cmp(right));
+                        let percentile = |quantile: f64| -> f64 {
+                            let rank = quantile * (samples.len() - 1) as f64;
+                            let lower = rank.floor() as usize;
+                            let upper = rank.ceil() as usize;
+                            let fraction = rank - lower as f64;
+                            samples[lower] * (1.0 - fraction) + samples[upper] * fraction
+                        };
+                        let p50 = percentile(0.50);
+                        let p95 = percentile(0.95);
+                        let mut reconstructed = vec![0_u8; raw_bytes];
+                        let download = unsafe {
+                            cuda_sys::lib().cuMemcpyDtoH_v2(
+                                reconstructed.as_mut_ptr() as *mut std::ffi::c_void,
+                                output,
+                                raw_bytes,
+                            )
+                        };
+                        if download != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!(
+                            "download {groups}-copy/{decoder_streams}-decoder reconstructed expert: {download:?}"
+                        ));
+                        }
+                        if reconstructed != expected {
+                            return Err(format!(
+                            "GPU expert decompression was not bit-identical with {groups} copies/{decoder_streams} decoder streams"
+                        ));
+                        }
+                        candidates.push(serde_json::json!({
+                            "copies_per_expert": groups,
+                            "decoder_streams": decoder_streams,
+                            "min_us": samples[0],
+                            "p50_us": p50,
+                            "p95_us": p95,
+                            "p99_us": percentile(0.99),
+                            "max_us": samples[samples.len() - 1],
+                            "payload_bit_exact": true,
+                        }));
+                        if p95 < selected_p95 || (p95 == selected_p95 && p50 < selected_p50) {
+                            selected_groups = groups;
+                            selected_decoder_streams = decoder_streams;
+                            selected_p95 = p95;
+                            selected_p50 = p50;
+                            selected_samples = samples;
+                        }
+                    }
+                }
+                if selected_groups == 0 || selected_decoder_streams == 0 {
+                    return Err("expert compression calibration selected no copy plan".to_string());
+                }
+                Ok((
+                    candidates,
+                    selected_groups,
+                    selected_decoder_streams,
+                    selected_samples,
+                ))
+            })();
+        unsafe {
+            let _ = cuda_sys::lib().cuEventDestroy_v2(start.0);
+            let _ = cuda_sys::lib().cuEventDestroy_v2(end.0);
+        }
+        let (candidates, selected_groups, selected_decoder_streams, samples) =
+            calibration.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        if let Some(codec) = self
+            .graph
+            .as_mut()
+            .and_then(|graph| graph.expert_compression.as_mut())
+        {
+            codec.chunks_per_expert = selected_groups;
+            codec.decoder_streams_per_expert = selected_decoder_streams;
+            // Calibration and operational traffic are separate measurement
+            // domains.  Do not let startup samples inflate request summaries.
+            codec.raw_bytes = 0;
+            codec.compressed_bytes = 0;
+            codec.decoded_experts = 0;
+        }
+        let percentile = |quantile: f64| -> f64 {
+            let rank = quantile * (samples.len() - 1) as f64;
+            let lower = rank.floor() as usize;
+            let upper = rank.ceil() as usize;
+            let fraction = rank - lower as f64;
+            samples[lower] * (1.0 - fraction) + samples[upper] * fraction
+        };
+        Ok(serde_json::json!({
+            "warmup_samples": warmup_samples,
+            "measured_samples": measured_samples,
+            "raw_bytes": raw_bytes,
+            "compressed_bytes": expert.compressed_bytes,
+            "ratio": expert.compressed_bytes as f64 / raw_bytes as f64,
+            "copies_per_expert": selected_groups,
+            "decoder_streams": selected_decoder_streams,
+            "min_us": samples[0],
+            "p50_us": percentile(0.50),
+            "p95_us": percentile(0.95),
+            "p99_us": percentile(0.99),
+            "max_us": samples[samples.len() - 1],
+            "payload_bit_exact": true,
+            "candidates": candidates,
+        })
+        .to_string())
+    }
+
     /// Get the CUDA device ordinal this store was created on.
     fn gpu_index(&self) -> usize {
         self.device.ordinal()
@@ -30813,6 +32617,9 @@ impl GpuDecodeStore {
         }
 
         let elapsed = decode_start.elapsed().as_secs_f64();
+        if let Some(graph) = self.graph.as_mut() {
+            check_peer_mode_prediction(graph, tokens.len(), elapsed);
+        }
         if !tokens.is_empty() {
             let tps = tokens.len() as f64 / elapsed;
             log::info!(
@@ -41823,6 +43630,41 @@ impl GpuDecodeStore {
                             format!("multi_expert_weighted_add[{}]: {:?}", layer_idx, e)
                         })?;
                 }
+                if let Some(peer) = graph.peer_expert.as_ref() {
+                    if expert_hs != graph.hidden_size
+                        || moe.moe_input_size != 0
+                        || moe.latent_down_wid.is_some()
+                        || moe.latent_up_wid.is_some()
+                        || gemma4_expert_layer
+                    {
+                        return Err(format!(
+                            "peer expert serving requires standard hidden-width routed experts; unsupported layer {} contract expert_hs={} hidden={} moe_input={} latent_down={} latent_up={} gemma4={}",
+                            layer_idx,
+                            expert_hs,
+                            graph.hidden_size,
+                            moe.moe_input_size,
+                            moe.latent_down_wid.is_some(),
+                            moe.latent_up_wid.is_some(),
+                            gemma4_expert_layer,
+                        ));
+                    }
+                    unsafe {
+                        k.add_peer_bf16_if_active
+                            .clone()
+                            .launch(
+                                LaunchConfig::for_num_elems(expert_hs as u32),
+                                (
+                                    *graph.d_moe_out.device_ptr(),
+                                    *peer.d_output.device_ptr(),
+                                    *peer.d_active.device_ptr(),
+                                    expert_hs as i32,
+                                ),
+                            )
+                            .map_err(|error| {
+                                format!("peer expert output add[{}]: {:?}", layer_idx, error)
+                            })?;
+                    }
+                }
                 if moe_route_clock_active {
                     let clocks = graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
                         format!("MoE/route clock buffer missing for graph {}", graph_idx)
@@ -47493,9 +49335,13 @@ impl GpuDecodeStore {
     /// (demand-cold slots are zero there and skip inside the kernels). Must use
     /// exactly the same kernel/grid/smem configuration as run_segment_kernels
     /// so per-slot results are identical to the captured path.
-    fn launch_split_hot_expert_stack(
+    fn launch_batched_expert_stack(
         graph: &GpuDecodeGraph,
         layer_idx: usize,
+        expert_input_override: Option<u64>,
+        expert_weights_override: Option<u64>,
+        expert_count_override: Option<usize>,
+        label: &str,
     ) -> Result<(), String> {
         use cudarc::driver::LaunchConfig;
         let k = graph
@@ -47518,7 +49364,13 @@ impl GpuDecodeStore {
             *graph.d_inv_weight_perm.device_ptr()
         };
         let inv_sp = *graph.d_inv_scale_perm.device_ptr();
-        let topk = moe.topk;
+        let topk = expert_count_override.unwrap_or(moe.topk);
+        if topk == 0 || topk > moe.topk || topk > graph.max_experts_per_tok {
+            return Err(format!(
+                "{label} expert count {topk} is outside layer/capacity bounds {}/{} at layer {layer_idx}",
+                moe.topk, graph.max_experts_per_tok,
+            ));
+        }
         let gated = moe.gated_experts;
         let is_relu2 = moe.activation_type == 1;
         let gemma4_expert_layer = graph
@@ -47531,7 +49383,9 @@ impl GpuDecodeStore {
         } else {
             hs
         };
-        let expert_input_ptr = if gemma4_expert_layer {
+        let expert_input_ptr = if let Some(ptr) = expert_input_override {
+            ptr
+        } else if gemma4_expert_layer {
             *graph.d_fp32_scratch.device_ptr() as u64
         } else if graph.moe_input_override_ptr != 0 {
             graph.moe_input_override_ptr
@@ -47559,7 +49413,9 @@ impl GpuDecodeStore {
         let d_w13s = d_upload_base + ptr_stride as u64;
         let d_w2p = d_upload_base + (ptr_stride * 2) as u64;
         let d_w2s = d_upload_base + (ptr_stride * 3) as u64;
-        let d_wts_hot = if graph.gpu_route_sync {
+        let d_wts_hot = if let Some(ptr) = expert_weights_override {
+            ptr
+        } else if graph.gpu_route_sync {
             d_upload_base + (ptr_stride * 4 + max_ept * 4 * 2) as u64
         } else {
             *graph
@@ -47599,7 +49455,7 @@ impl GpuDecodeStore {
                             d_wts_hot,
                         ),
                     )
-                    .map_err(|e| format!("split hot direct w13[{}]: {:?}", layer_idx, e))?;
+                    .map_err(|e| format!("{label} direct w13[{}]: {:?}", layer_idx, e))?;
             } else {
                 w13_kernel
                     .launch(
@@ -47622,7 +49478,7 @@ impl GpuDecodeStore {
                             d_wts_hot,
                         ),
                     )
-                    .map_err(|e| format!("split hot w13 v2[{}]: {:?}", layer_idx, e))?;
+                    .map_err(|e| format!("{label} w13 v2[{}]: {:?}", layer_idx, e))?;
                 k.reduce_ksplits_bf16_batched
                     .clone()
                     .launch(
@@ -47639,7 +49495,7 @@ impl GpuDecodeStore {
                             d_wts_hot,
                         ),
                     )
-                    .map_err(|e| format!("split hot reduce[{}]: {:?}", layer_idx, e))?;
+                    .map_err(|e| format!("{label} reduce[{}]: {:?}", layer_idx, e))?;
             }
         }
 
@@ -47687,7 +49543,7 @@ impl GpuDecodeStore {
                             d_wts_hot,
                         ),
                     )
-                    .map_err(|e| format!("split hot relu2_w2[{}]: {:?}", layer_idx, e))?;
+                    .map_err(|e| format!("{label} relu2_w2[{}]: {:?}", layer_idx, e))?;
             } else {
                 let w2_kernel = if is_int8 {
                     k.fused_silu_w2_int8_batched.clone()
@@ -47720,9 +49576,456 @@ impl GpuDecodeStore {
                             d_wts_hot,
                         ),
                     )
-                    .map_err(|e| format!("split hot silu_w2[{}]: {:?}", layer_idx, e))?;
+                    .map_err(|e| format!("{label} silu_w2[{}]: {:?}", layer_idx, e))?;
             }
         }
+        Ok(())
+    }
+
+    fn launch_split_hot_expert_stack(
+        graph: &GpuDecodeGraph,
+        layer_idx: usize,
+    ) -> Result<(), String> {
+        Self::launch_batched_expert_stack(graph, layer_idx, None, None, None, "split hot")
+    }
+
+    fn peer_has_expert(&self, layer_idx: usize, expert_idx: usize) -> bool {
+        self.graph
+            .as_ref()
+            .and_then(|graph| graph.hcs.as_ref())
+            .and_then(|hcs| hcs.get_fast(layer_idx, expert_idx))
+            .is_some()
+    }
+
+    fn set_peer_active(
+        graph: &GpuDecodeGraph,
+        stream: cuda_sys::CUstream,
+        active: i32,
+    ) -> Result<(), String> {
+        let Some(peer) = graph.peer_expert.as_ref() else {
+            return Ok(());
+        };
+        let result = unsafe {
+            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                *peer.d_active.device_ptr(),
+                &active as *const i32 as *const std::ffi::c_void,
+                std::mem::size_of::<i32>(),
+                stream,
+            )
+        };
+        if result == cuda_sys::CUresult::CUDA_SUCCESS {
+            Ok(())
+        } else {
+            Err(format!("upload peer activation flag: {result:?}"))
+        }
+    }
+
+    fn begin_peer_dispatch(
+        primary_device: &Arc<CudaDevice>,
+        graph: &mut GpuDecodeGraph,
+        copy_stream: cuda_sys::CUstream,
+        layer_idx: usize,
+        candidates: &[PeerRoutedExpert],
+    ) -> Result<Option<PendingPeerDispatch>, String> {
+        let Some(store_addr) = graph.peer_expert.as_ref().map(|peer| peer.store_addr) else {
+            return Ok(None);
+        };
+        let peer_store = unsafe { &mut *(store_addr as *mut GpuDecodeStore) };
+        peer_store
+            .device
+            .bind_to_thread()
+            .map_err(|error| format!("bind peer context for route lookup: {error}"))?;
+        let mut routes: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|candidate| peer_store.peer_has_expert(layer_idx, candidate.expert_idx))
+            .collect();
+        primary_device
+            .bind_to_thread()
+            .map_err(|error| format!("restore primary context after peer lookup: {error}"))?;
+        let peer = graph.peer_expert.as_mut().unwrap();
+        routes.truncate(peer.admitted_max_routes);
+        while !routes.is_empty()
+            && !peer
+                .admitted_route_counts
+                .get(routes.len() - 1)
+                .copied()
+                .unwrap_or(false)
+        {
+            routes.pop();
+        }
+        peer.misses = peer
+            .misses
+            .saturating_add((candidates.len().saturating_sub(routes.len())) as u64);
+        if routes.is_empty() {
+            return Ok(None);
+        }
+        peer.sequence = peer
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| "peer mailbox sequence exhausted".to_string())?;
+        let sequence = peer.sequence;
+        let hidden_bytes = graph.hidden_size * std::mem::size_of::<u16>();
+        let request_ptr = peer.host_request_ptr();
+        let response_ptr = peer.host_response_ptr(hidden_bytes);
+        let peer_control_ptr = peer.peer_control_ptr();
+        let peer_request_ptr = peer.peer_request_ptr();
+        // The admission deadline covers the entire operation visible to the
+        // primary: activation download, doorbell, peer service, and response.
+        // Starting after peer queue setup would systematically under-report
+        // the critical-path cost measured by startup calibration.
+        let started = std::time::Instant::now();
+
+        let download = unsafe {
+            cuda_sys::lib().cuMemcpyDtoHAsync_v2(
+                request_ptr as *mut std::ffi::c_void,
+                *graph.d_hidden.device_ptr(),
+                hidden_bytes,
+                copy_stream,
+            )
+        };
+        if download != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("queue primary hidden D2H for peer: {download:?}"));
+        }
+        let publish = graph
+            .kernels
+            .as_ref()
+            .ok_or_else(|| "primary kernels are not cached".to_string())?
+            .peer_publish_request
+            .clone();
+        let raw_publish = extract_cu_function(&publish);
+        let mut control = peer.primary_control_ptr();
+        let mut sequence_arg = sequence;
+        let mut params: [*mut std::ffi::c_void; 2] = [
+            &mut control as *mut _ as *mut std::ffi::c_void,
+            &mut sequence_arg as *mut _ as *mut std::ffi::c_void,
+        ];
+        let publish_result = unsafe {
+            cuda_sys::lib().cuLaunchKernel(
+                raw_publish,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                0,
+                copy_stream,
+                params.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        if publish_result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("queue peer request doorbell: {publish_result:?}"));
+        }
+
+        let route_pairs: Vec<(usize, f32)> = routes
+            .iter()
+            .map(|route| (route.expert_idx, route.weight))
+            .collect();
+        let queue_result = peer_store.queue_peer_expert_layer(
+            layer_idx,
+            &route_pairs,
+            sequence,
+            peer_control_ptr,
+            peer_request_ptr,
+            response_ptr,
+        );
+        if let Err(error) = queue_result {
+            peer_store.device.bind_to_thread().map_err(|bind_error| {
+                format!("bind peer after partial queue failure ({error}): {bind_error}")
+            })?;
+            peer_store.device.synchronize().map_err(|sync_error| {
+                format!("synchronize peer after partial queue failure ({error}): {sync_error:?}")
+            })?;
+            peer_store.peer_service_pending = false;
+            primary_device.bind_to_thread().map_err(|bind_error| {
+                format!("restore primary context after peer queue failure: {bind_error}")
+            })?;
+            peer.unavailable_fallbacks = peer.unavailable_fallbacks.saturating_add(1);
+            log::warn!(
+                "PEER EXPERT FALLBACK: layer={} reason=unavailable detail={} routes={}",
+                layer_idx,
+                error,
+                routes.len(),
+            );
+            return Ok(None);
+        }
+        primary_device
+            .bind_to_thread()
+            .map_err(|error| format!("restore primary context after peer queue: {error}"))?;
+        peer.requests = peer.requests.saturating_add(1);
+        Ok(Some(PendingPeerDispatch { routes, started }))
+    }
+
+    fn complete_peer_dispatch(
+        primary_device: &Arc<CudaDevice>,
+        graph: &mut GpuDecodeGraph,
+        replay_stream: cuda_sys::CUstream,
+        layer_idx: usize,
+        pending: &PendingPeerDispatch,
+    ) -> Result<bool, String> {
+        let (store_addr, deadline_us) = graph
+            .peer_expert
+            .as_ref()
+            .map(|peer| {
+                (
+                    peer.store_addr,
+                    peer.local_cold_p95_us_per_expert * pending.routes.len() as f64,
+                )
+            })
+            .ok_or_else(|| "peer dispatch completed without attached runtime".to_string())?;
+        let peer_store = unsafe { &mut *(store_addr as *mut GpuDecodeStore) };
+        peer_store
+            .device
+            .bind_to_thread()
+            .map_err(|error| format!("bind peer context for completion: {error}"))?;
+        let event = peer_store
+            .peer_service_ready_event
+            .as_ref()
+            .ok_or_else(|| "peer completion event is unavailable".to_string())?;
+        let deadline = std::time::Duration::from_secs_f64(deadline_us / 1_000_000.0);
+        let completed = loop {
+            let status = unsafe { cuda_sys::lib().cuEventQuery(event.0) };
+            if status == cuda_sys::CUresult::CUDA_SUCCESS {
+                peer_store.peer_service_pending = false;
+                break true;
+            }
+            if status != cuda_sys::CUresult::CUDA_ERROR_NOT_READY {
+                primary_device.bind_to_thread().map_err(|error| {
+                    format!("restore primary context after peer query error: {error}")
+                })?;
+                return Err(format!("peer service completion query: {status:?}"));
+            }
+            if pending.started.elapsed() >= deadline {
+                break false;
+            }
+            std::hint::spin_loop();
+        };
+        primary_device
+            .bind_to_thread()
+            .map_err(|error| format!("restore primary context after peer completion: {error}"))?;
+        if !completed {
+            let peer = graph.peer_expert.as_mut().unwrap();
+            peer.deadline_fallbacks = peer.deadline_fallbacks.saturating_add(1);
+            log::warn!(
+                "PEER EXPERT FALLBACK: layer={} reason=measured_deadline deadline_us={:.3} elapsed_us={:.3} routes={}",
+                layer_idx,
+                deadline_us,
+                pending.started.elapsed().as_secs_f64() * 1_000_000.0,
+                pending.routes.len(),
+            );
+            Self::set_peer_active(graph, replay_stream, 0)?;
+            return Ok(false);
+        }
+
+        let peer = graph.peer_expert.as_mut().unwrap();
+        peer.hits = peer.hits.saturating_add(pending.routes.len() as u64);
+        let elapsed_us = pending.started.elapsed().as_secs_f64() * 1_000_000.0;
+        peer.completed_dispatches = peer.completed_dispatches.saturating_add(1);
+        peer.total_dispatch_elapsed_us += elapsed_us;
+        peer.max_dispatch_elapsed_us = peer.max_dispatch_elapsed_us.max(elapsed_us);
+        let hidden_bytes = graph.hidden_size * std::mem::size_of::<u16>();
+        let upload = unsafe {
+            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                *peer.d_output.device_ptr(),
+                peer.host_response_ptr(hidden_bytes) as *const std::ffi::c_void,
+                hidden_bytes,
+                replay_stream,
+            )
+        };
+        if upload != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("upload peer expert partial: {upload:?}"));
+        }
+        peer.output_bytes = peer.output_bytes.saturating_add(hidden_bytes as u64);
+        Self::set_peer_active(graph, replay_stream, 1)?;
+        Ok(true)
+    }
+
+    /// Queue one peer layer without synchronizing either GPU. The peer stream
+    /// first waits on the mapped-host request doorbell, copies the hidden
+    /// vector into device memory, runs the ordinary batched Marlin stack from
+    /// peer HCS pointers, reduces a router-weighted partial, and downloads that
+    /// one BF16 vector to the shared mailbox. The caller overlaps this with
+    /// primary demand DMA and polls the completion event at the existing graph
+    /// boundary.
+    fn queue_peer_expert_layer(
+        &mut self,
+        layer_idx: usize,
+        routes: &[(usize, f32)],
+        sequence: u32,
+        peer_control_ptr: u64,
+        peer_request_ptr: u64,
+        host_response_ptr: *mut u8,
+    ) -> Result<(), String> {
+        if !self.expert_only_peer_store {
+            return Err("peer service requested from a non-peer store".to_string());
+        }
+        if routes.is_empty() {
+            return Err("peer service requires at least one routed expert".to_string());
+        }
+        self.device
+            .bind_to_thread()
+            .map_err(|error| format!("bind peer CUDA context: {error}"))?;
+        if self.peer_service_pending {
+            let event = self
+                .peer_service_ready_event
+                .as_ref()
+                .ok_or_else(|| "peer service pending without event".to_string())?;
+            let status = unsafe { cuda_sys::lib().cuEventQuery(event.0) };
+            if status == cuda_sys::CUresult::CUDA_SUCCESS {
+                self.peer_service_pending = false;
+            } else if status == cuda_sys::CUresult::CUDA_ERROR_NOT_READY {
+                return Err("peer service is still completing a previous fallback".to_string());
+            } else {
+                return Err(format!("query previous peer service: {status:?}"));
+            }
+        }
+
+        let graph = self
+            .graph
+            .as_mut()
+            .ok_or_else(|| "peer store is not configured".to_string())?;
+        let moe = graph
+            .moe_layers
+            .get(layer_idx)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| format!("peer store has no MoE metadata at layer {layer_idx}"))?;
+        if routes.len() > moe.topk || moe.topk > graph.max_experts_per_tok {
+            return Err(format!(
+                "peer route count {} exceeds layer topk {} / capacity {}",
+                routes.len(),
+                moe.topk,
+                graph.max_experts_per_tok
+            ));
+        }
+        if moe.moe_input_size != 0 || moe.latent_down_wid.is_some() || moe.latent_up_wid.is_some() {
+            return Err(format!(
+                "peer expert layer {layer_idx} has unsupported projected/latent input"
+            ));
+        }
+        let hcs = graph
+            .hcs
+            .as_ref()
+            .ok_or_else(|| "peer store has no HCS state".to_string())?;
+        let mut resident = Vec::with_capacity(routes.len());
+        for &(expert_idx, weight) in routes {
+            if !weight.is_finite() {
+                return Err(format!(
+                    "peer expert layer {layer_idx} has non-finite routing weight"
+                ));
+            }
+            let pointers = hcs
+                .get_fast(layer_idx, expert_idx)
+                .ok_or_else(|| format!("peer expert L{layer_idx}E{expert_idx} is not resident"))?;
+            resident.push((pointers, weight));
+        }
+        let padding = resident[0].0;
+        let max_ept = graph.max_experts_per_tok;
+        let ptr_stride = max_ept * std::mem::size_of::<u64>();
+        // Reuse the store's preallocated routing upload block.  Allocating and
+        // freeing a fresh Vec at every MoE layer would put the system allocator
+        // on the decode hot path and would also make pageable-copy lifetime
+        // behavior harder to audit.
+        graph.h_batch_upload.fill(0);
+        for slot in 0..moe.topk {
+            let (pointers, weight) = resident.get(slot).copied().unwrap_or((padding, 0.0));
+            let values = [pointers.0, pointers.1, pointers.2, pointers.3];
+            for (component, value) in values.into_iter().enumerate() {
+                let offset = component * ptr_stride + slot * std::mem::size_of::<u64>();
+                graph.h_batch_upload[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+            }
+            let weight_offset = ptr_stride * 4 + slot * std::mem::size_of::<f32>();
+            graph.h_batch_upload[weight_offset..weight_offset + 4]
+                .copy_from_slice(&weight.to_ne_bytes());
+        }
+        let stream = *self.device.cu_stream();
+        let upload_result = unsafe {
+            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                *graph.d_batch_upload.device_ptr(),
+                graph.h_batch_upload.as_ptr() as *const std::ffi::c_void,
+                graph.h_batch_upload.len(),
+                stream,
+            )
+        };
+        if upload_result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("upload peer expert table: {upload_result:?}"));
+        }
+
+        let wait_copy = graph
+            .kernels
+            .as_ref()
+            .ok_or_else(|| "peer kernels are not cached".to_string())?
+            .peer_wait_copy_bf16
+            .clone();
+        unsafe {
+            wait_copy
+                .launch(
+                    cudarc::driver::LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        peer_control_ptr,
+                        sequence,
+                        peer_request_ptr,
+                        *graph.d_hidden.device_ptr(),
+                        graph.hidden_size as i32,
+                    ),
+                )
+                .map_err(|error| format!("launch peer request wait/copy: {error:?}"))?;
+        }
+        let weights_ptr = *graph.d_batch_upload.device_ptr() + (ptr_stride * 4) as u64;
+        Self::launch_batched_expert_stack(
+            graph,
+            layer_idx,
+            Some(*graph.d_hidden.device_ptr()),
+            Some(weights_ptr),
+            Some(routes.len()),
+            "peer expert",
+        )?;
+        let kernels = graph
+            .kernels
+            .as_ref()
+            .ok_or_else(|| "peer kernels are not cached".to_string())?;
+        unsafe {
+            kernels
+                .multi_expert_weighted_add_bf16
+                .clone()
+                .launch(
+                    cudarc::driver::LaunchConfig::for_num_elems(graph.hidden_size as u32),
+                    (
+                        *graph.d_moe_out.device_ptr(),
+                        *graph.d_batch_expert_outs.device_ptr(),
+                        weights_ptr,
+                        graph.hidden_size as i32,
+                        routes.len() as i32,
+                        1i32,
+                    ),
+                )
+                .map_err(|error| format!("peer weighted reduction: {error:?}"))?;
+        }
+        let download = unsafe {
+            cuda_sys::lib().cuMemcpyDtoHAsync_v2(
+                host_response_ptr as *mut std::ffi::c_void,
+                *graph.d_moe_out.device_ptr(),
+                graph.hidden_size * std::mem::size_of::<u16>(),
+                stream,
+            )
+        };
+        if download != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("download peer expert partial: {download:?}"));
+        }
+        let event = self
+            .peer_service_ready_event
+            .as_ref()
+            .ok_or_else(|| "peer service event is unavailable".to_string())?;
+        let record = unsafe { cuda_sys::lib().cuEventRecord(event.0, stream) };
+        if record != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("record peer service completion: {record:?}"));
+        }
+        self.peer_service_pending = true;
         Ok(())
     }
 
@@ -48565,7 +50868,7 @@ impl GpuDecodeStore {
                                 token_idx,
                             );
                             graph.dma_cold_experts += 1;
-                            let expert = &moe_data.experts[eid];
+                            let expert = moe_data.experts[eid].clone();
 
                             if miss_count == 0 {
                                 if let Some(repack) = graph.synthetic_repack.as_ref() {
@@ -48594,53 +50897,63 @@ impl GpuDecodeStore {
                                 base + w2s_off as u64,
                             );
 
-                            // Queue DMA (contiguous or 4-call, NO per-expert sync)
-                            unsafe {
-                                if expert.contiguous_ptr != 0 {
-                                    // Contiguous DMA: single call for entire expert
-                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                        base,
-                                        expert.contiguous_ptr as *const std::ffi::c_void,
-                                        expert.contiguous_bytes,
-                                        copy_stream,
-                                    );
-                                    graph.dma_bytes_total += expert.contiguous_bytes as u64;
-                                    graph.dma_call_count += 1;
-                                    boundary_dma_bytes += expert.contiguous_bytes as u64;
-                                    boundary_dma_calls += 1;
-                                } else {
-                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                        w13p,
-                                        expert.w13_packed_ptr as *const std::ffi::c_void,
-                                        expert.w13_packed_bytes,
-                                        copy_stream,
-                                    );
-                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                        w13s,
-                                        expert.w13_scales_ptr as *const std::ffi::c_void,
-                                        expert.w13_scales_bytes,
-                                        copy_stream,
-                                    );
-                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                        w2p,
-                                        expert.w2_packed_ptr as *const std::ffi::c_void,
-                                        expert.w2_packed_bytes,
-                                        copy_stream,
-                                    );
-                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                        w2s,
-                                        expert.w2_scales_ptr as *const std::ffi::c_void,
-                                        expert.w2_scales_bytes,
-                                        copy_stream,
-                                    );
-                                    let dma_bytes = expert.w13_packed_bytes
-                                        + expert.w13_scales_bytes
-                                        + expert.w2_packed_bytes
-                                        + expert.w2_scales_bytes;
-                                    graph.dma_bytes_total += dma_bytes as u64;
-                                    graph.dma_call_count += 4;
-                                    boundary_dma_bytes += dma_bytes as u64;
-                                    boundary_dma_calls += 4;
+                            // Queue compressed-copy/decode or ordinary DMA with no
+                            // per-expert host synchronization.
+                            if let Some(codec) = graph.expert_compression.as_mut() {
+                                let copy_calls = codec.chunks_per_expert as u64;
+                                codec.enqueue(miss_count - 1, &expert, base, copy_stream)?;
+                                graph.dma_bytes_total += expert.compressed_bytes as u64;
+                                graph.dma_call_count += copy_calls;
+                                boundary_dma_bytes += expert.compressed_bytes as u64;
+                                boundary_dma_calls += copy_calls;
+                            } else {
+                                unsafe {
+                                    if expert.contiguous_ptr != 0 {
+                                        // Contiguous DMA: single call for entire expert
+                                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                            base,
+                                            expert.contiguous_ptr as *const std::ffi::c_void,
+                                            expert.contiguous_bytes,
+                                            copy_stream,
+                                        );
+                                        graph.dma_bytes_total += expert.contiguous_bytes as u64;
+                                        graph.dma_call_count += 1;
+                                        boundary_dma_bytes += expert.contiguous_bytes as u64;
+                                        boundary_dma_calls += 1;
+                                    } else {
+                                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                            w13p,
+                                            expert.w13_packed_ptr as *const std::ffi::c_void,
+                                            expert.w13_packed_bytes,
+                                            copy_stream,
+                                        );
+                                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                            w13s,
+                                            expert.w13_scales_ptr as *const std::ffi::c_void,
+                                            expert.w13_scales_bytes,
+                                            copy_stream,
+                                        );
+                                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                            w2p,
+                                            expert.w2_packed_ptr as *const std::ffi::c_void,
+                                            expert.w2_packed_bytes,
+                                            copy_stream,
+                                        );
+                                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                            w2s,
+                                            expert.w2_scales_ptr as *const std::ffi::c_void,
+                                            expert.w2_scales_bytes,
+                                            copy_stream,
+                                        );
+                                        let dma_bytes = expert.w13_packed_bytes
+                                            + expert.w13_scales_bytes
+                                            + expert.w2_packed_bytes
+                                            + expert.w2_scales_bytes;
+                                        graph.dma_bytes_total += dma_bytes as u64;
+                                        graph.dma_call_count += 4;
+                                        boundary_dma_bytes += dma_bytes as u64;
+                                        boundary_dma_calls += 4;
+                                    }
                                 }
                             }
 
@@ -48656,7 +50969,9 @@ impl GpuDecodeStore {
 
                         if miss_count > 0 {
                             let completion_stream =
-                                if let Some(repack) = graph.synthetic_repack.as_ref() {
+                                if let Some(codec) = graph.expert_compression.as_ref() {
+                                    codec.completion_stream.0
+                                } else if let Some(repack) = graph.synthetic_repack.as_ref() {
                                     let mut repack = repack.lock().map_err(|_| {
                                         "synthetic repack ring lock poisoned".to_string()
                                     })?;
@@ -48671,7 +50986,7 @@ impl GpuDecodeStore {
                                     .as_ref()
                                     .unwrap()
                                     .demand_dma
-                                    .record_end(graph_idx, copy_stream)?;
+                                    .record_end(graph_idx, completion_stream)?;
                                 demand_dma_active[graph_idx] = true;
                                 graph.graph_segment_demand_dma_bytes[graph_idx] +=
                                     boundary_dma_bytes;
@@ -48834,7 +51149,6 @@ impl GpuDecodeStore {
                     let mut cold_experts: Vec<(usize, usize, f32)> = Vec::new();
                     let mut apfl_hits = 0u32;
                     let mut apfl_misses = 0u32;
-                    let moe_data = graph.moe_layers[moe_layer_idx].as_ref().unwrap();
                     let t_padding_setup = if graph.timing_enabled {
                         Some(std::time::Instant::now())
                     } else {
@@ -48929,18 +51243,33 @@ impl GpuDecodeStore {
                         }
                     }
 
+                    let mut peer_served_count = 0usize;
+                    let mut pending_peer: Option<PendingPeerDispatch> = None;
+                    let mut peer_fallback_routes: Vec<(usize, usize, f32)> = Vec::new();
+
                     // HCS and already-complete APFL slots occupy the current
                     // prefix. Preserve that exact boundary before demand-cold
                     // slots are appended so split launch can steer the two
                     // disjoint weight masks.
                     hot_batch_count = batch_count;
 
+                    let (moe_input_size, moe_gated_experts, moe_activation_type, moe_swiglu_limit) = {
+                        let moe = graph.moe_layers[moe_layer_idx].as_ref().unwrap();
+                        (
+                            moe.moe_input_size,
+                            moe.gated_experts,
+                            moe.activation_type,
+                            moe.swiglu_limit,
+                        )
+                    };
+
                     let adaptive_cold_drop_active = graph.adaptive_cold_drop.enabled();
                     let mut adaptive_cold_drop_count = 0usize;
                     if graph.adaptive_cold_drop_shadow.enabled() || adaptive_cold_drop_active {
                         let mut demand_cold_bytes = vec![0u64; topk];
                         for &(topk_pos, eid, _) in &cold_experts {
-                            let expert = &moe_data.experts[eid];
+                            let expert =
+                                &graph.moe_layers[moe_layer_idx].as_ref().unwrap().experts[eid];
                             demand_cold_bytes[topk_pos] = if expert.contiguous_ptr != 0 {
                                 expert.contiguous_bytes as u64
                             } else {
@@ -48962,6 +51291,49 @@ impl GpuDecodeStore {
                                 plan.positions.binary_search(topk_pos).is_err()
                             });
                         }
+                    }
+
+                    // Apply the exact same cold-mass pruning plan as the
+                    // ordinary path before peer admission.  The peer then
+                    // handles only surviving demand-cold routes, preserving
+                    // the 75/8 contract used by the benchmark controls.
+                    if graph.peer_expert.is_some() && !cold_experts.is_empty() {
+                        let candidates = cold_experts
+                            .iter()
+                            .map(|&(topk_pos, eid, weight)| PeerRoutedExpert {
+                                expert_idx: eid,
+                                weight,
+                                batch_slot: topk_pos,
+                            })
+                            .collect::<Vec<_>>();
+                        pending_peer = Self::begin_peer_dispatch(
+                            &self.device,
+                            graph,
+                            copy_stream,
+                            moe_layer_idx,
+                            &candidates,
+                        )?;
+                        if let Some(pending) = pending_peer.as_ref() {
+                            for &(topk_pos, eid, weight) in &cold_experts {
+                                if pending
+                                    .routes
+                                    .iter()
+                                    .any(|route| route.batch_slot == topk_pos)
+                                {
+                                    peer_fallback_routes.push((topk_pos, eid, weight));
+                                }
+                            }
+                            cold_experts.retain(|(topk_pos, _, _)| {
+                                !pending
+                                    .routes
+                                    .iter()
+                                    .any(|route| route.batch_slot == *topk_pos)
+                            });
+                        } else {
+                            Self::set_peer_active(graph, replay_stream, 0)?;
+                        }
+                    } else if graph.peer_expert.is_some() {
+                        Self::set_peer_active(graph, replay_stream, 0)?;
                     }
 
                     graph.dma_cold_experts += cold_experts.len() as u64;
@@ -49143,18 +51515,18 @@ impl GpuDecodeStore {
                                 let claim_started =
                                     graph.timing_enabled.then(std::time::Instant::now);
                                 let (_topk_pos, eid, weight) = cold_experts[candidate_index];
-                                if moe_data.moe_input_size != 0
-                                    || !moe_data.gated_experts
-                                    || moe_data.activation_type != 0
-                                    || moe_data.swiglu_limit != 0.0
+                                if moe_input_size != 0
+                                    || !moe_gated_experts
+                                    || moe_activation_type != 0
+                                    || moe_swiglu_limit != 0.0
                                 {
                                     return Err(format!(
                                         "KRASIS_CPU_TAIL_RACE=1 requires standard unclamped gated-SiLU experts; layer={} moe_input_size={} gated={} activation_type={} swiglu_limit={}",
                                         moe_layer_idx,
-                                        moe_data.moe_input_size,
-                                        moe_data.gated_experts,
-                                        moe_data.activation_type,
-                                        moe_data.swiglu_limit,
+                                        moe_input_size,
+                                        moe_gated_experts,
+                                        moe_activation_type,
+                                        moe_swiglu_limit,
                                     ));
                                 }
                                 if graph
@@ -49170,7 +51542,9 @@ impl GpuDecodeStore {
                                             .to_string(),
                                     );
                                 }
-                                let expert = &moe_data.experts[eid];
+                                let expert =
+                                    graph.moe_layers[moe_layer_idx].as_ref().unwrap().experts[eid]
+                                        .clone();
                                 let expert_input_ptr = if graph.moe_input_override_ptr != 0 {
                                     graph.moe_input_override_ptr
                                 } else {
@@ -49216,7 +51590,7 @@ impl GpuDecodeStore {
                                         hidden_size: graph.hidden_size,
                                         intermediate_size: graph.moe_intermediate_size,
                                         group_size: graph.group_size,
-                                        swiglu_limit: moe_data.swiglu_limit,
+                                        swiglu_limit: moe_swiglu_limit,
                                         activation_alpha: 1.0,
                                     }
                                 } else {
@@ -49237,7 +51611,7 @@ impl GpuDecodeStore {
                                         hidden_size: graph.hidden_size,
                                         intermediate_size: graph.moe_intermediate_size,
                                         group_size: graph.group_size,
-                                        swiglu_limit: moe_data.swiglu_limit,
+                                        swiglu_limit: moe_swiglu_limit,
                                         activation_alpha: 1.0,
                                     }
                                 };
@@ -49329,7 +51703,8 @@ impl GpuDecodeStore {
                         }
                     }
                     for (ci, &(_topk_pos, eid, _weight)) in cold_experts.iter().enumerate() {
-                        let expert = &moe_data.experts[eid];
+                        let expert =
+                            graph.moe_layers[moe_layer_idx].as_ref().unwrap().experts[eid].clone();
 
                         let base = graph_buf_base[ci];
                         let (w13p, w13s, w2p, w2s) = (
@@ -49346,51 +51721,60 @@ impl GpuDecodeStore {
                             continue;
                         }
 
-                        unsafe {
-                            if expert.contiguous_ptr != 0 {
-                                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                    base,
-                                    expert.contiguous_ptr as *const std::ffi::c_void,
-                                    expert.contiguous_bytes,
-                                    copy_stream,
-                                );
-                                graph.dma_bytes_total += expert.contiguous_bytes as u64;
-                                graph.dma_call_count += 1;
-                                boundary_dma_bytes += expert.contiguous_bytes as u64;
-                                boundary_dma_calls += 1;
-                            } else {
-                                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                    w13p,
-                                    expert.w13_packed_ptr as *const std::ffi::c_void,
-                                    expert.w13_packed_bytes,
-                                    copy_stream,
-                                );
-                                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                    w13s,
-                                    expert.w13_scales_ptr as *const std::ffi::c_void,
-                                    expert.w13_scales_bytes,
-                                    copy_stream,
-                                );
-                                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                    w2p,
-                                    expert.w2_packed_ptr as *const std::ffi::c_void,
-                                    expert.w2_packed_bytes,
-                                    copy_stream,
-                                );
-                                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                    w2s,
-                                    expert.w2_scales_ptr as *const std::ffi::c_void,
-                                    expert.w2_scales_bytes,
-                                    copy_stream,
-                                );
-                                let dma_bytes = expert.w13_packed_bytes
-                                    + expert.w13_scales_bytes
-                                    + expert.w2_packed_bytes
-                                    + expert.w2_scales_bytes;
-                                graph.dma_bytes_total += dma_bytes as u64;
-                                graph.dma_call_count += 4;
-                                boundary_dma_bytes += dma_bytes as u64;
-                                boundary_dma_calls += 4;
+                        if let Some(codec) = graph.expert_compression.as_mut() {
+                            let copy_calls = codec.chunks_per_expert as u64;
+                            codec.enqueue(ci, &expert, base, copy_stream)?;
+                            graph.dma_bytes_total += expert.compressed_bytes as u64;
+                            graph.dma_call_count += copy_calls;
+                            boundary_dma_bytes += expert.compressed_bytes as u64;
+                            boundary_dma_calls += copy_calls;
+                        } else {
+                            unsafe {
+                                if expert.contiguous_ptr != 0 {
+                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                        base,
+                                        expert.contiguous_ptr as *const std::ffi::c_void,
+                                        expert.contiguous_bytes,
+                                        copy_stream,
+                                    );
+                                    graph.dma_bytes_total += expert.contiguous_bytes as u64;
+                                    graph.dma_call_count += 1;
+                                    boundary_dma_bytes += expert.contiguous_bytes as u64;
+                                    boundary_dma_calls += 1;
+                                } else {
+                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                        w13p,
+                                        expert.w13_packed_ptr as *const std::ffi::c_void,
+                                        expert.w13_packed_bytes,
+                                        copy_stream,
+                                    );
+                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                        w13s,
+                                        expert.w13_scales_ptr as *const std::ffi::c_void,
+                                        expert.w13_scales_bytes,
+                                        copy_stream,
+                                    );
+                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                        w2p,
+                                        expert.w2_packed_ptr as *const std::ffi::c_void,
+                                        expert.w2_packed_bytes,
+                                        copy_stream,
+                                    );
+                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                        w2s,
+                                        expert.w2_scales_ptr as *const std::ffi::c_void,
+                                        expert.w2_scales_bytes,
+                                        copy_stream,
+                                    );
+                                    let dma_bytes = expert.w13_packed_bytes
+                                        + expert.w13_scales_bytes
+                                        + expert.w2_packed_bytes
+                                        + expert.w2_scales_bytes;
+                                    graph.dma_bytes_total += dma_bytes as u64;
+                                    graph.dma_call_count += 4;
+                                    boundary_dma_bytes += dma_bytes as u64;
+                                    boundary_dma_calls += 4;
+                                }
                             }
                         }
                         boundary_dma_experts += 1;
@@ -49422,6 +51806,148 @@ impl GpuDecodeStore {
                             });
                         }
                     }
+
+                    // Local demand transfers above were queued immediately
+                    // after the peer request, so both PCIe paths and the peer
+                    // GEMVs have been progressing concurrently.  Resolve the
+                    // peer only at this existing layer boundary.  A measured
+                    // deadline miss materializes those same routes through the
+                    // ordinary canonical host-cache path and logs the fallback.
+                    if let Some(pending) = pending_peer.as_ref() {
+                        if Self::complete_peer_dispatch(
+                            &self.device,
+                            graph,
+                            replay_stream,
+                            moe_layer_idx,
+                            pending,
+                        )? {
+                            peer_served_count = pending.routes.len();
+                        } else {
+                            if !graph.cpu_tail_workers.is_empty()
+                                || graph.synthetic_repack.is_some()
+                            {
+                                return Err(
+                                    "peer fallback reached an incompatible CPU-tail/repack path"
+                                        .to_string(),
+                                );
+                            }
+                            graph.dma_cold_experts = graph
+                                .dma_cold_experts
+                                .saturating_add(peer_fallback_routes.len() as u64);
+                            for &(topk_pos, eid, weight) in &peer_fallback_routes {
+                                let ci = cold_ptrs_list.len();
+                                let base = *graph_buf_base.get(ci).ok_or_else(|| {
+                                    format!(
+                                        "peer fallback staging overflow layer={} slot={} capacity={}",
+                                        moe_layer_idx,
+                                        ci,
+                                        graph_buf_base.len(),
+                                    )
+                                })?;
+                                let expert =
+                                    graph.moe_layers[moe_layer_idx].as_ref().unwrap().experts[eid]
+                                        .clone();
+                                let (w13p, w13s, w2p, w2s) = (
+                                    base + w13p_off as u64,
+                                    base + w13s_off as u64,
+                                    base + w2p_off as u64,
+                                    base + w2s_off as u64,
+                                );
+                                if let Some(codec) = graph.expert_compression.as_mut() {
+                                    let copy_calls = codec.chunks_per_expert as u64;
+                                    codec.enqueue(ci, &expert, base, copy_stream)?;
+                                    graph.dma_bytes_total = graph
+                                        .dma_bytes_total
+                                        .saturating_add(expert.compressed_bytes as u64);
+                                    graph.dma_call_count =
+                                        graph.dma_call_count.saturating_add(copy_calls);
+                                    boundary_dma_bytes = boundary_dma_bytes
+                                        .saturating_add(expert.compressed_bytes as u64);
+                                    boundary_dma_calls =
+                                        boundary_dma_calls.saturating_add(copy_calls);
+                                } else if expert.contiguous_ptr != 0 {
+                                    let result = unsafe {
+                                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                            base,
+                                            expert.contiguous_ptr as *const std::ffi::c_void,
+                                            expert.contiguous_bytes,
+                                            copy_stream,
+                                        )
+                                    };
+                                    if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                                        return Err(format!(
+                                            "peer fallback contiguous H2D layer={} expert={}: {:?}",
+                                            moe_layer_idx, eid, result,
+                                        ));
+                                    }
+                                    graph.dma_bytes_total = graph
+                                        .dma_bytes_total
+                                        .saturating_add(expert.contiguous_bytes as u64);
+                                    graph.dma_call_count = graph.dma_call_count.saturating_add(1);
+                                    boundary_dma_bytes = boundary_dma_bytes
+                                        .saturating_add(expert.contiguous_bytes as u64);
+                                    boundary_dma_calls = boundary_dma_calls.saturating_add(1);
+                                } else {
+                                    for (destination, source, bytes) in [
+                                        (w13p, expert.w13_packed_ptr, expert.w13_packed_bytes),
+                                        (w13s, expert.w13_scales_ptr, expert.w13_scales_bytes),
+                                        (w2p, expert.w2_packed_ptr, expert.w2_packed_bytes),
+                                        (w2s, expert.w2_scales_ptr, expert.w2_scales_bytes),
+                                    ] {
+                                        let result = unsafe {
+                                            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                                destination,
+                                                source as *const std::ffi::c_void,
+                                                bytes,
+                                                copy_stream,
+                                            )
+                                        };
+                                        if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                                            return Err(format!(
+                                                "peer fallback component H2D layer={} expert={}: {:?}",
+                                                moe_layer_idx, eid, result,
+                                            ));
+                                        }
+                                        graph.dma_bytes_total =
+                                            graph.dma_bytes_total.saturating_add(bytes as u64);
+                                        graph.dma_call_count =
+                                            graph.dma_call_count.saturating_add(1);
+                                        boundary_dma_bytes =
+                                            boundary_dma_bytes.saturating_add(bytes as u64);
+                                        boundary_dma_calls = boundary_dma_calls.saturating_add(1);
+                                    }
+                                }
+                                boundary_dma_experts = boundary_dma_experts.saturating_add(1);
+                                cold_experts.push((topk_pos, eid, weight));
+                                cold_ptrs_list.push((w13p, w13s, w2p, w2s));
+                                if graph
+                                    .hcs
+                                    .as_ref()
+                                    .map(|hcs| hcs.dynamic_enabled)
+                                    .unwrap_or(false)
+                                {
+                                    dynamic_promotions.push(DynamicHcsPromotion {
+                                        source_path: "graph_replay_peer_deadline_fallback",
+                                        layer_idx: moe_layer_idx,
+                                        expert_idx: eid,
+                                        src_base: base,
+                                        src_w13p_off: w13p_off,
+                                        src_w13s_off: w13s_off,
+                                        src_w2p_off: w2p_off,
+                                        src_w2s_off: w2s_off,
+                                        w13p_host: expert.w13_packed_ptr,
+                                        w13s_host: expert.w13_scales_ptr,
+                                        w2p_host: expert.w2_packed_ptr,
+                                        w2s_host: expert.w2_scales_ptr,
+                                        w13p_bytes: expert.w13_packed_bytes,
+                                        w13s_bytes: expert.w13_scales_bytes,
+                                        w2p_bytes: expert.w2_packed_bytes,
+                                        w2s_bytes: expert.w2_scales_bytes,
+                                    });
+                                }
+                            }
+                        }
+                    }
                     for pending in &mut cpu_tail_pending {
                         pending.front_dma_bytes = boundary_dma_bytes;
                         pending.front_dma_calls = boundary_dma_calls;
@@ -49434,7 +51960,9 @@ impl GpuDecodeStore {
                     // copy only when the CPU loses.
                     if !cold_experts.is_empty() {
                         let completion_stream =
-                            if let Some(repack) = graph.synthetic_repack.as_ref() {
+                            if let Some(codec) = graph.expert_compression.as_ref() {
+                                codec.completion_stream.0
+                            } else if let Some(repack) = graph.synthetic_repack.as_ref() {
                                 let mut repack = repack.lock().map_err(|_| {
                                     "synthetic repack ring lock poisoned".to_string()
                                 })?;
@@ -49449,7 +51977,7 @@ impl GpuDecodeStore {
                                 .as_ref()
                                 .unwrap()
                                 .demand_dma
-                                .record_end(graph_idx, copy_stream)?;
+                                .record_end(graph_idx, completion_stream)?;
                             demand_dma_active[graph_idx] = true;
                             graph.graph_segment_demand_dma_bytes[graph_idx] += boundary_dma_bytes;
                             graph.graph_segment_demand_dma_calls[graph_idx] += boundary_dma_calls;
@@ -49495,7 +52023,7 @@ impl GpuDecodeStore {
                     // expert is represented by a zero-weight dummy slot: CUDA
                     // kernels preserve the batch dimensions but contribute no
                     // expert output and perform no weight GEMV for that slot.
-                    for _ in 0..adaptive_cold_drop_count {
+                    for _ in 0..adaptive_cold_drop_count.saturating_add(peer_served_count) {
                         if batch_count >= max_ept {
                             return Err(format!(
                                 "adaptive cold drop dummy overflow layer={} batch_count={} max_ept={}",
@@ -57290,6 +59818,9 @@ impl GpuDecodeStore {
         }
 
         let elapsed = decode_start.elapsed().as_secs_f64();
+        if let Some(graph) = self.graph.as_mut() {
+            check_peer_mode_prediction(graph, generated, elapsed);
+        }
         if generated > 0 {
             let tps = generated as f64 / elapsed;
 
@@ -62991,6 +65522,23 @@ impl GpuDecodeStore {
 
         let no_graph = self.cuda_graphs_disabled();
         let graph_unsupported_reason = self.cuda_graph_unsupported_reason();
+        let expert_compression_enabled = self
+            .graph
+            .as_ref()
+            .and_then(|graph| graph.expert_compression.as_ref())
+            .is_some();
+        if expert_compression_enabled && no_graph {
+            let failure = match graph_unsupported_reason {
+                Some(reason) => format!(
+                    "expert compression requires per-layer CUDA graph replay: {reason}"
+                ),
+                None => "expert compression requires per-layer CUDA graph replay; KRASIS_NO_GRAPH is enabled"
+                    .to_string(),
+            };
+            log::error!("gpu_generate_stream: {}", failure);
+            self.last_stream_failure = Some(failure);
+            return 0;
+        }
         if let Some(graph) = self.graph.as_ref() {
             let (mapped_reads_available, hcs_cached, hcs_soft_cached, hcs_soft_loaded) =
                 if let Some(hcs) = graph.hcs.as_ref() {
@@ -64182,6 +66730,13 @@ impl GpuDecodeStore {
                     if let Some(ref mut g) = self.graph {
                         g.validation_ungraphed_steps += 1;
                     }
+                    if expert_compression_enabled && step > 0 {
+                        let failure = "expert compression lost per-layer CUDA graph replay after its one-token capture warmup"
+                            .to_string();
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
+                        break;
+                    }
                     // First token (or after invalidation): run ungraphed, then capture per-layer graphs
                     if let Err(e) = self.gpu_decode_step(next_token, pos) {
                         let failure = format!("decode_step error: {}", e);
@@ -64221,6 +66776,12 @@ impl GpuDecodeStore {
                                 break;
                             }
                         }
+                    } else if step == 0 && expert_compression_enabled {
+                        let failure = "expert compression could not start because per-layer CUDA graph buffers are unavailable"
+                            .to_string();
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
+                        break;
                     }
                 }
 
@@ -64433,6 +66994,9 @@ impl GpuDecodeStore {
         }
 
         let elapsed = decode_start.elapsed().as_secs_f64();
+        if let Some(graph) = self.graph.as_mut() {
+            check_peer_mode_prediction(graph, generated, elapsed);
+        }
         if generated > 0 {
             let tps = generated as f64 / elapsed;
             // Query current VRAM free to show safety margin headroom
@@ -64469,6 +67033,51 @@ impl GpuDecodeStore {
             graph.adaptive_cold_drop_shadow.emit_summary(generated);
             graph.route_locality.emit_summary(generated);
             graph.prompt_hcs_shadow.emit_summary(generated);
+            if let Some(codec) = graph.expert_compression.as_ref() {
+                let saving_pct = if codec.raw_bytes > 0 {
+                    (1.0 - codec.compressed_bytes as f64 / codec.raw_bytes as f64) * 100.0
+                } else {
+                    0.0
+                };
+                eprintln!(
+                    "EXPERT COMPRESSION SUMMARY decoded_experts={} raw_bytes={} compressed_bytes={} saving_pct={:.6}",
+                    codec.decoded_experts,
+                    codec.raw_bytes,
+                    codec.compressed_bytes,
+                    saving_pct,
+                );
+            }
+            if let Some(peer) = graph.peer_expert.as_ref() {
+                let average_dispatch_us = if peer.completed_dispatches > 0 {
+                    peer.total_dispatch_elapsed_us / peer.completed_dispatches as f64
+                } else {
+                    0.0
+                };
+                eprintln!(
+                    "PEER EXPERT SUMMARY requests={} completed={} hits={} misses={} deadline_fallbacks={} unavailable_fallbacks={} avg_dispatch_us={:.6} max_dispatch_us={:.6} output_bytes={}",
+                    peer.requests,
+                    peer.completed_dispatches,
+                    peer.hits,
+                    peer.misses,
+                    peer.deadline_fallbacks,
+                    peer.unavailable_fallbacks,
+                    average_dispatch_us,
+                    peer.max_dispatch_elapsed_us,
+                    peer.output_bytes,
+                );
+                log::info!(
+                    "PEER EXPERT SUMMARY requests={} completed={} hits={} misses={} deadline_fallbacks={} unavailable_fallbacks={} avg_dispatch_us={:.6} max_dispatch_us={:.6} output_bytes={}",
+                    peer.requests,
+                    peer.completed_dispatches,
+                    peer.hits,
+                    peer.misses,
+                    peer.deadline_fallbacks,
+                    peer.unavailable_fallbacks,
+                    average_dispatch_us,
+                    peer.max_dispatch_elapsed_us,
+                    peer.output_bytes,
+                );
+            }
             if let Some(repack) = graph.synthetic_repack.as_ref() {
                 match repack.lock() {
                     Ok(mut repack) => {
@@ -66851,6 +69460,11 @@ impl GpuDecodeStore {
                     w2_scales_bytes: w2sb,
                     contiguous_ptr: 0,
                     contiguous_bytes: 0,
+                    compressed_ptr: 0,
+                    compressed_bytes: 0,
+                    compressed_tasks: 0,
+                    compressed_chunks: [crate::expert_codec::ExpertChunkPlan::default();
+                        crate::expert_codec::MAX_EXPERT_CHUNKS],
                     mapped_w13_packed_dptr: 0,
                     mapped_w13_scales_dptr: 0,
                     mapped_w2_packed_dptr: 0,
@@ -66872,6 +69486,11 @@ impl GpuDecodeStore {
                     w2_scales_bytes: w2sb,
                     contiguous_ptr: 0,
                     contiguous_bytes: 0,
+                    compressed_ptr: 0,
+                    compressed_bytes: 0,
+                    compressed_tasks: 0,
+                    compressed_chunks: [crate::expert_codec::ExpertChunkPlan::default();
+                        crate::expert_codec::MAX_EXPERT_CHUNKS],
                     mapped_w13_packed_dptr: 0,
                     mapped_w13_scales_dptr: 0,
                     mapped_w2_packed_dptr: 0,
@@ -72424,6 +75043,26 @@ impl GpuDecodeStore {
         );
 
         let mut max_expert_bytes = 0usize;
+        // A peer-only store never routes: the primary sends an already-selected
+        // expert list and weights.  Keep one inert routing-weight record so the
+        // shared MoE metadata contract remains valid without duplicating every
+        // layer's large gate matrix on the capacity-constrained peer.
+        let peer_dummy_gate_wid = if self.expert_only_peer_store {
+            let dummy = self.device.htod_copy(vec![0u16; 1]).map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "allocate peer dummy gate: {error:?}"
+                ))
+            })?;
+            let graph = self.graph.as_mut().unwrap();
+            let wid = graph.weights.len();
+            graph
+                .weights
+                .push(GpuWeight::new(*dummy.device_ptr(), 1, 1, 0));
+            std::mem::forget(dummy);
+            Some(wid)
+        } else {
+            None
+        };
 
         for moe_idx in 0..n_moe_layers {
             let global_moe_idx = moe_layer_start + moe_idx;
@@ -72441,12 +75080,13 @@ impl GpuDecodeStore {
 
             // Upload gate as BF16 directly (saves VRAM, enables bf16*bf16->fp32 GEMV
             // which eliminates the separate bf16_to_fp32 conversion step)
-            let d_gate = self
-                .device
-                .htod_copy(gate_bf16.to_vec())
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
-
-            let gate_wid = {
+            let gate_wid = if let Some(wid) = peer_dummy_gate_wid {
+                wid
+            } else {
+                let d_gate = self
+                    .device
+                    .htod_copy(gate_bf16.to_vec())
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
                 let graph = self.graph.as_mut().unwrap();
                 let wid = graph.weights.len();
                 graph.weights.push(GpuWeight::new(
@@ -72465,7 +75105,9 @@ impl GpuDecodeStore {
             // swiglu routing it is a pre-scoring gate bias; for Nemotron/Kimi
             // style routing it is e_score_correction_bias applied to selection
             // scores after the scoring function.
-            let correction_ptr: u64 = if let Some(bias) = correction_bias {
+            let correction_ptr: u64 = if self.expert_only_peer_store {
+                0
+            } else if let Some(bias) = correction_bias {
                 let d_bias = self
                     .device
                     .htod_copy(bias.to_vec())
@@ -72682,6 +75324,14 @@ impl GpuDecodeStore {
         // Add 20% headroom for alignment.
         let buf_size = ((max_expert_bytes as f64) * 1.2) as usize;
         self.resize_expert_buffers(buf_size.max(1024))?;
+        if self.expert_only_peer_store {
+            log::info!(
+                "Peer expert store registered {} MoE layers without duplicate host pinning or compression runtime",
+                n_moe_layers,
+            );
+            return Ok(());
+        }
+        self.setup_expert_compression(&store)?;
 
         // Step 4: Pin expert weight memory for async DMA (page-lock for full PCIe bandwidth)
         // Without pinning, CUDA must bounce through a staging buffer, halving effective bandwidth.
@@ -72884,6 +75534,126 @@ impl GpuDecodeStore {
             config.routed_scaling_factor,
         );
 
+        Ok(())
+    }
+
+    fn setup_expert_compression(&mut self, store: &crate::weights::WeightStore) -> PyResult<()> {
+        let Some(path) = std::env::var_os("KRASIS_EXPERT_COMPRESSION_SIDECAR") else {
+            return Ok(());
+        };
+        let path = std::path::PathBuf::from(path);
+        let graph = self.graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "expert compression setup requires a configured decode graph",
+            )
+        })?;
+        if graph.expert_bits != 4 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "expert compression requires routed INT4, got {} bits",
+                graph.expert_bits,
+            )));
+        }
+        if graph.synthetic_repack.is_some() || !graph.cpu_tail_workers.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "expert compression is incompatible with synthetic repack and CPU-tail races",
+            ));
+        }
+        let identity = store.gpu_cache_identity.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "expert compression requires an exact Marlin source-cache identity",
+            )
+        })?;
+        let first_expert = graph
+            .moe_layers
+            .iter()
+            .find_map(|layer| layer.as_ref())
+            .and_then(|layer| layer.experts.first())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "expert compression requires routed expert metadata",
+                )
+            })?;
+        let expert_bytes = first_expert.w13_packed_bytes
+            + first_expert.w13_scales_bytes
+            + first_expert.w2_packed_bytes
+            + first_expert.w2_scales_bytes;
+        let expert_count = store
+            .config
+            .num_moe_layers()
+            .checked_mul(store.config.n_routed_experts)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("expert compression population overflow")
+            })?;
+        let max_registration_bytes = store
+            .layer_backings_gpu
+            .iter()
+            .flat_map(|backing| {
+                [
+                    backing.w13_packed.len(),
+                    backing.w13_scales.len(),
+                    backing.w2_packed.len(),
+                    backing.w2_scales.len(),
+                ]
+            })
+            .max()
+            .filter(|bytes| *bytes > 0)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "expert compression requires measured per-layer Marlin backing geometry",
+                )
+            })?;
+        let runtime = ExpertCompressionRuntime::new(
+            &self.device,
+            &path,
+            identity,
+            expert_bytes,
+            expert_count,
+            graph.max_experts_per_tok,
+            max_registration_bytes,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+        for (local_moe_idx, _) in store.experts_gpu.iter().enumerate() {
+            let global_moe_idx = store.moe_layer_start + local_moe_idx;
+            let abs_layer_idx = store.config.moe_abs_layer(global_moe_idx);
+            let moe = graph
+                .moe_layers
+                .get_mut(abs_layer_idx)
+                .and_then(Option::as_mut)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "expert compression lost registered MoE layer {abs_layer_idx}",
+                    ))
+                })?;
+            for (expert_idx, expert) in moe.experts.iter_mut().enumerate() {
+                let ordinal = global_moe_idx * store.config.n_routed_experts + expert_idx;
+                let blob = runtime
+                    .sidecar
+                    .blob(ordinal)
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                let original_bytes = u32::from_le_bytes(blob[8..12].try_into().unwrap()) as usize;
+                let tasks = u32::from_le_bytes(blob[12..16].try_into().unwrap()) as usize;
+                if original_bytes != expert_bytes || tasks == 0 {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "expert compression blob {ordinal} declares bytes={original_bytes} tasks={tasks}; expected bytes={expert_bytes}",
+                    )));
+                }
+                expert.compressed_ptr = blob.as_ptr() as usize;
+                expert.compressed_bytes = blob.len();
+                expert.compressed_tasks = tasks;
+                expert.compressed_chunks = crate::expert_codec::plan_expert_chunks(
+                    blob,
+                    [
+                        expert.w13_packed_bytes,
+                        expert.w13_scales_bytes,
+                        expert.w2_packed_bytes,
+                        expert.w2_scales_bytes,
+                    ],
+                )
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            }
+        }
+        graph.expert_compression = Some(runtime);
         Ok(())
     }
 
@@ -75975,6 +78745,11 @@ impl Drop for GpuDecodeStore {
             }
         }
         unsafe {
+            if let Some(event) = self.peer_service_ready_event.as_ref() {
+                if !event.0.is_null() {
+                    let _ = cuda_sys::lib().cuEventDestroy_v2(event.0);
+                }
+            }
             if !self.compute_stream.0.is_null() {
                 let _ = cuda_sys::lib().cuStreamDestroy_v2(self.compute_stream.0);
             }

@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "source_cache": "/home/main/.krasis/cache/GLM-5.2/experts_marlin_int4_g128_calamax.bin",
+  "source_cache_bytes": 375172300864,
+  "model_config": "/home/main/.krasis/models/GLM-5.2/config.json",
+  "gpu_ordinal": 0,
+  "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+  "expert_ordinals": [
+    0,
+    9599,
+    19199
+  ],
+  "expert_bytes": 19464192,
+  "warmup_samples_per_expert": 3,
+  "measured_samples_per_expert": 17,
+  "pcie_gbps": 26.01,
+  "minimum_decoder_gbps": 39.015,
+  "registration_sidecar": "/home/main/.krasis/cache/GLM-5.2/experts_marlin_int4_g128_calamax_l256.krec",
+  "sidecar_registration_bytes": 3221225472,
+  "sidecar_registration_passed": true,
+  "sidecar_h2d_backing": {
+    "transfer_bytes": 19464192,
+    "file_backed_time": {
+      "min_us": 697.8240013122559,
+      "p05_us": 697.8496074676514,
+      "p50_us": 697.920024394989,
+      "p95_us": 698.8287925720215,
+      "p99_us": 698.9721488952637,
+      "max_us": 699.0079879760742,
+      "mean_us": 698.1364734032575
+    },
+    "file_backed_gbps_at_p95_time": 27.852590229378702,
+    "anonymous_time": {
+      "min_us": 697.9519724845886,
+      "p05_us": 697.9775786399841,
+      "p50_us": 698.4959840774536,
+      "p95_us": 699.0784049034119,
+      "p99_us": 699.0988898277283,
+      "max_us": 699.1040110588074,
+      "mean_us": 698.4508212874917
+    },
+    "anonymous_gbps_at_p95_time": 27.842645207570484,
+    "anonymous_hugepage_advice_succeeded": true,
+    "payload_bit_exact": true
+  },
+  "candidates": [
+    {
+      "lane_bytes": 256,
+      "original_bytes": 58392576,
+      "encoded_bytes": 49740097,
+      "encoded_ratio": 0.8518222761742863,
+      "saving_pct": 14.81777238257137,
+      "task_count": 1782,
+      "kernel_time": {
+        "min_us": 113.56800049543381,
+        "p05_us": 113.840002566576,
+        "p50_us": 115.68000167608261,
+        "p95_us": 123.31200018525124,
+        "p99_us": 123.85600060224533,
+        "max_us": 123.9359974861145,
+        "mean_us": 117.625725766023
+      },
+      "p50_decoder_gbps": 168.25891872392938,
+      "p95_time_decoder_gbps": 157.84507566789122,
+      "predicted_p95_pipeline_us": 637.4483788286557,
+      "predicted_raw_copy_us": 748.3349480968858,
+      "predicted_pipeline_speedup": 1.1739538023015916,
+      "every_cpu_round_trip_bit_exact": true,
+      "every_gpu_round_trip_bit_exact": true
+    }
+  ],
+  "selected_lane_bytes": 256,
+  "selected_p95_time_decoder_gbps": 157.84507566789122,
+  "gate_passed": true
+}

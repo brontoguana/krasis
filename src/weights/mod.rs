@@ -1506,6 +1506,14 @@ pub struct LayerExpertBacking {
     pub num_experts: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct GpuCacheIdentity {
+    pub path: PathBuf,
+    pub source_bytes: u64,
+    pub header: [u8; 64],
+    pub routed_expert_sha256: Option<[u8; 32]>,
+}
+
 /// Manages loaded expert weights for all MoE layers.
 #[pyclass]
 pub struct WeightStore {
@@ -1534,6 +1542,9 @@ pub struct WeightStore {
     /// Each entry owns the memory that experts_gpu[layer_idx] elements borrow from.
     /// Must be kept alive as long as experts_gpu references exist.
     pub layer_backings_gpu: Vec<LayerExpertBacking>,
+
+    /// Exact Marlin source cache used for `experts_gpu`, when applicable.
+    pub gpu_cache_identity: Option<GpuCacheIdentity>,
 
     /// Expert-HQQ cache/header descriptor plumbing. Runtime dispatch is not wired
     /// here; later gates must explicitly register and consume this metadata.
@@ -2402,6 +2413,7 @@ impl WeightStore {
             experts_gpu: Vec::new(),
             shared_experts_gpu: Vec::new(),
             layer_backings_gpu: Vec::new(),
+            gpu_cache_identity: None,
             expert_hqq_cache: None,
             experts_gguf: Vec::new(),
             shared_experts_gguf: Vec::new(),
@@ -2643,6 +2655,7 @@ impl WeightStore {
                 config: config.clone(),
                 group_size: 0,
                 layer_backings_gpu,
+                gpu_cache_identity: None,
                 cpu_num_bits: cpu_num_bits,
                 gpu_num_bits: 16,
             });
@@ -2651,6 +2664,7 @@ impl WeightStore {
         // Try loading the requested Marlin cache. Do not fall back to a different
         // group size: the runtime kernels are configured with this exact layout.
         let mut gpu_loaded = false;
+        let mut gpu_cache_identity = None;
         let gpu_cache_path =
             cache_path_marlin(model_dir, cache_gs, gpu_num_bits, expert_int4_calib_mode);
         if gpu_cache_path.exists() {
@@ -2674,6 +2688,7 @@ impl WeightStore {
                     experts_gpu = store.experts_gpu;
                     shared_experts_gpu = store.shared_experts_gpu;
                     layer_backings_gpu = store.layer_backings_gpu;
+                    gpu_cache_identity = store.gpu_cache_identity;
                     effective_gs = cache_gs;
                     gpu_loaded = true;
                 }
@@ -2740,6 +2755,7 @@ impl WeightStore {
                         experts_gpu = store.experts_gpu;
                         shared_experts_gpu = store.shared_experts_gpu;
                         layer_backings_gpu = store.layer_backings_gpu;
+                        gpu_cache_identity = store.gpu_cache_identity;
                         effective_gs = built_gs;
                         gpu_loaded = true;
                     }
@@ -2879,6 +2895,7 @@ impl WeightStore {
             experts_gpu,
             shared_experts_gpu,
             layer_backings_gpu,
+            gpu_cache_identity,
             expert_hqq_cache: None,
             experts_gguf: Vec::new(),
             shared_experts_gguf: Vec::new(),
@@ -3344,6 +3361,7 @@ impl WeightStore {
             experts_gpu: Vec::new(),
             shared_experts_gpu: Vec::new(),
             layer_backings_gpu: Vec::new(),
+            gpu_cache_identity: None,
             expert_hqq_cache: None,
             experts_gguf: Vec::new(),
             shared_experts_gguf: Vec::new(),
@@ -4611,6 +4629,32 @@ impl WeightStore {
         let (w13pb, w13sb, w2pb, w2sb) = marlin_expert_byte_sizes(config, group_size, gpu_bits);
         let per_routed_expert = w13pb + w13sb + w2pb + w2sb;
         let per_routed_layer = config.n_routed_experts * per_routed_expert;
+        let routed_expert_sha256 = if std::env::var_os("KRASIS_EXPERT_COMPRESSION_SIDECAR")
+            .is_some()
+        {
+            let routed_expert_count = total_moe_layers
+                .checked_mul(config.n_routed_experts)
+                .ok_or_else(|| "routed expert identity count overflow".to_string())?;
+            let routed_payload_bytes = routed_expert_count
+                .checked_mul(per_routed_expert)
+                .ok_or_else(|| "routed expert identity byte count overflow".to_string())?;
+            let routed_end = CACHE_HEADER_SIZE
+                .checked_add(routed_payload_bytes)
+                .ok_or_else(|| "routed expert identity range overflow".to_string())?;
+            let start = std::time::Instant::now();
+            let digest = crate::expert_sidecar::routed_expert_sha256(
+                &mmap[CACHE_HEADER_SIZE..routed_end],
+                per_routed_expert,
+            )?;
+            log::info!(
+                "Expert compression source identity: {} routed experts hashed in {:.3}s",
+                routed_expert_count,
+                start.elapsed().as_secs_f64(),
+            );
+            Some(digest)
+        } else {
+            None
+        };
 
         let mut offset = CACHE_HEADER_SIZE + start_moe_layer * per_routed_layer;
         let mut expected_loaded_end =
@@ -4697,6 +4741,11 @@ impl WeightStore {
             ));
         }
 
+        let cache_header: [u8; CACHE_HEADER_SIZE] = mmap[..CACHE_HEADER_SIZE]
+            .try_into()
+            .map_err(|_| "Marlin cache header truncated after load".to_string())?;
+        let cache_bytes = mmap.len();
+
         // Evict page cache — data is now copied into heap Vecs
         #[cfg(unix)]
         let _ = unsafe { mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
@@ -4727,6 +4776,12 @@ impl WeightStore {
             experts_gpu,
             shared_experts_gpu,
             layer_backings_gpu,
+            gpu_cache_identity: Some(GpuCacheIdentity {
+                path: path.to_path_buf(),
+                source_bytes: cache_bytes as u64,
+                header: cache_header,
+                routed_expert_sha256,
+            }),
             expert_hqq_cache: None,
             experts_gguf: Vec::new(),
             shared_experts_gguf: Vec::new(),
@@ -6161,6 +6216,7 @@ impl WeightStore {
             experts_gpu,
             shared_experts_gpu,
             layer_backings_gpu: Vec::new(), // GGUF path doesn't use per-layer backing yet
+            gpu_cache_identity: None,
             expert_hqq_cache: None,
             experts_gguf,
             shared_experts_gguf,

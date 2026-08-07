@@ -15,11 +15,13 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(has_prefill_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_hqq_search_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_peer_rtt_kernels)");
+    println!("cargo::rustc-check-cfg=cfg(has_expert_codec_kernels)");
 
     // Force rerun when env changes (e.g. CUDA_HOME)
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=KRASIS_BUILD_PEER_RTT_PROBE");
+    println!("cargo:rerun-if-env-changed=KRASIS_BUILD_EXPERT_CODEC_PROBE");
 
     // Probe for libnuma — link only if the library is found.
     // The runtime code (numa.rs) checks numa_available() and falls back
@@ -55,6 +57,10 @@ fn main() {
     // Compile the standalone peer-link feasibility probe. This kernel is not
     // loaded by model execution and adds no production hot-path work.
     timed_phase("peer RTT PTX", compile_peer_rtt_kernels);
+
+    // Compile the real-data GPU entropy-codec gate independently before the
+    // codec is admitted into production decode builds.
+    timed_phase("expert codec PTX", compile_expert_codec_kernels);
 
     total_timer.finish();
 }
@@ -245,12 +251,71 @@ fn compile_peer_rtt_kernels() {
     }
 }
 
+fn compile_expert_codec_kernels() {
+    if std::env::var("KRASIS_BUILD_EXPERT_CODEC_PROBE").as_deref() != Ok("1") {
+        return;
+    }
+    let cu_src = "src/cuda/expert_codec_kernels.cu";
+    println!("cargo:rerun-if-changed={cu_src}");
+    if !std::path::Path::new(cu_src).exists() {
+        println!("cargo:warning=expert_codec_kernels.cu not found — expert codec probe disabled");
+        return;
+    }
+
+    let Some(nvcc) = find_nvcc() else {
+        println!("cargo:warning=nvcc not found — expert codec probe disabled");
+        return;
+    };
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let ptx_path = format!("{out_dir}/expert_codec_kernels.ptx");
+    if is_output_fresh(&[cu_src], &[&ptx_path]) {
+        println!("cargo:rustc-cfg=has_expert_codec_kernels");
+        println!("cargo:warning=Reusing cached expert codec kernels at {ptx_path}");
+        return;
+    }
+
+    let mut cmd = std::process::Command::new(&nvcc);
+    cmd.args([
+        "-ptx",
+        "-allow-unsupported-compiler",
+        "-arch=sm_80",
+        "-O3",
+        "-o",
+        &ptx_path,
+        cu_src,
+    ])
+    .args(nvcc_host_compiler_args());
+    match cmd.output() {
+        Ok(output) if output.status.success() => {
+            println!("cargo:rustc-cfg=has_expert_codec_kernels");
+            println!("cargo:warning=Compiled expert codec kernels to PTX ({ptx_path})");
+        }
+        Ok(output) => {
+            for line in String::from_utf8_lossy(&output.stderr).lines() {
+                println!("cargo:warning=nvcc expert codec: {line}");
+            }
+            println!(
+                "cargo:warning=nvcc expert codec failed with status {} — probe disabled",
+                output.status
+            );
+        }
+        Err(error) => {
+            println!("cargo:warning=nvcc expert codec execution error: {error} — probe disabled");
+        }
+    }
+}
+
 fn compile_cuda_kernels() {
     let cu_src = "src/cuda/decode_kernels.cu";
+    let expert_codec_src = "src/cuda/expert_codec_kernels.cu";
     let deepseek_v4_hc_header = "src/cuda/deepseek_v4_hc.cuh";
     let deepseek_v4_attention_header = "src/cuda/deepseek_v4_attention.cuh";
     let deepseek_v4_compressor_header = "src/cuda/deepseek_v4_compressor.cuh";
     println!("cargo:rerun-if-changed={cu_src}");
+    // decode_kernels.cu includes the production entropy decoder directly.
+    // Track the included source independently so a codec-only edit can never
+    // reuse a stale decode cubin.
+    println!("cargo:rerun-if-changed={expert_codec_src}");
     println!("cargo:rerun-if-changed={deepseek_v4_hc_header}");
     println!("cargo:rerun-if-changed={deepseek_v4_attention_header}");
     println!("cargo:rerun-if-changed={deepseek_v4_compressor_header}");

@@ -1587,6 +1587,39 @@ do_expert_compression_probe() {
     )
 }
 
+do_expert_compression_gpu() {
+    [[ $# -lt 2 ]] && err "Usage: ./dev expert-compression-gpu <cache.bin> <config.json> [measurement options]"
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    (
+        cd "$SCRIPT_DIR"
+        KRASIS_BUILD_EXPERT_CODEC_PROBE=1 \
+        PYO3_PYTHON="$PYTHON" \
+        LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --quiet --bin expert-compression-gpu -- "$@"
+    )
+}
+
+do_expert_compression_build() {
+    [[ $# -ne 4 ]] && err "Usage: ./dev expert-compression-build <cache.bin> <config.json> <output.krec> <lane-bytes>"
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    (
+        cd "$SCRIPT_DIR"
+        PYO3_PYTHON="$PYTHON" \
+        LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --quiet --bin expert-compression-build -- "$@"
+    )
+}
+
 do_test_kernels() {
     info "Running CUDA kernel unit tests..."
     # First ensure test data exists
@@ -1640,6 +1673,12 @@ do_test_kernels() {
             filter="expert_hqq"
         elif [[ "$1" == "adaptive_cold_drop" ]]; then
             filter="adaptive_cold_drop::tests"
+        elif [[ "$1" == "expert_codec" ]]; then
+            filter="expert_codec::tests"
+        elif [[ "$1" == "expert_sidecar" ]]; then
+            filter="expert_sidecar::tests"
+        elif [[ "$1" == "expert_compression_payload" ]]; then
+            filter="gpu_decode::dsa_registration_tests::expert_payload_uses_all_four_component_ranges_in_cache_order"
         elif [[ "$1" == "dsa_registration" ]]; then
             filter="dsa_registration_tests"
         elif [[ "$1" == "hqq4_warp_geometry" ]]; then
@@ -3752,6 +3791,8 @@ case "$cmd" in
     session-cache-benchmark) do_session_cache_benchmark "$@" ;;
     peer-rtt)       do_peer_rtt "$@" ;;
     expert-compression-probe) do_expert_compression_probe "$@" ;;
+    expert-compression-gpu) do_expert_compression_gpu "$@" ;;
+    expert-compression-build) do_expert_compression_build "$@" ;;
     test-kernels)   do_test_kernels "$@" ;;
     cpu-tail-calibrate) do_cpu_tail_calibrate "$@" ;;
     validate)       do_validate "$@" ;;
@@ -3795,6 +3836,8 @@ case "$cmd" in
         echo "  session-cache-benchmark <port> Benchmark interleaved agent conversations cache off/on"
         echo "  peer-rtt <primary> <peer>      Measure pinned-host peer-GPU round-trip feasibility"
         echo "  expert-compression-probe ...  Measure real Marlin cache entropy and lossless ratio"
+        echo "  expert-compression-gpu ...    Gate bit-exact GPU entropy decode on real experts"
+        echo "  expert-compression-build ...  Build a versioned expert compression sidecar"
         echo "  validate <config>              Validate against stored non-HF references; HF artifacts require override"
         echo "  reference-test <config>        Compare against stored non-HF references; HF artifacts require override"
         echo "  reference-test --compare <model>  Comparison matrix; HF artifacts require override"

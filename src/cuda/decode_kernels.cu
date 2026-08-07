@@ -1556,6 +1556,102 @@ extern "C" __global__ void add_bf16(
     }
 }
 
+// Host-bounced peer-expert transport.  The primary queues its hidden-state
+// D2H before peer_publish_request on the same copy stream.  The peer queues
+// peer_wait_copy_bf16 before its expert stack, so this mapped-host doorbell is
+// the only cross-context ordering primitive; no Python or CPU launch sits in
+// the per-expert path.
+extern "C" __global__ void peer_publish_request(
+    volatile unsigned int* __restrict__ control,
+    unsigned int sequence
+) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        __threadfence_system();
+        control[0] = sequence;
+        __threadfence_system();
+    }
+}
+
+// Startup-only transport calibration.  The peer kernel remains resident for
+// the complete sample set; the primary wait node orders response H2D on its
+// own stream without CPU or cross-context synchronization.
+extern "C" __global__ void peer_mailbox_round_trip_loop(
+    volatile unsigned int* __restrict__ control,
+    const unsigned int* __restrict__ mapped_input,
+    unsigned int* __restrict__ mapped_output,
+    int words,
+    unsigned int iterations
+) {
+    for (unsigned int sequence = 1; sequence <= iterations; ++sequence) {
+        if (threadIdx.x == 0) {
+            while (control[0] != sequence) {
+                __nanosleep(32);
+            }
+        }
+        __syncthreads();
+        for (int index = threadIdx.x; index < words; index += blockDim.x) {
+            mapped_output[index] = mapped_input[index];
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            __threadfence_system();
+            control[1] = sequence;
+            __threadfence_system();
+        }
+        __syncthreads();
+    }
+}
+
+extern "C" __global__ void peer_wait_response(
+    volatile const unsigned int* __restrict__ control,
+    unsigned int sequence
+) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        while (control[1] != sequence) {
+            __nanosleep(32);
+        }
+    }
+}
+
+extern "C" __global__ void peer_wait_copy_bf16(
+    volatile const unsigned int* __restrict__ control,
+    unsigned int sequence,
+    const unsigned short* __restrict__ mapped_input,
+    unsigned short* __restrict__ device_input,
+    int size
+) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        while (control[0] != sequence) {
+            __nanosleep(32);
+        }
+    }
+    __syncthreads();
+    for (int index = threadIdx.x; index < size; index += blockDim.x) {
+        device_input[index] = mapped_input[index];
+    }
+}
+
+// Captured in the ordinary primary MoE graph only when a peer store is
+// attached.  The activation flag is request/layer data uploaded alongside the
+// peer result; keeping the node inside the graph avoids a second graph replay
+// synchronization point.
+extern "C" __global__ void add_peer_bf16_if_active(
+    unsigned short* __restrict__ output,
+    const unsigned short* __restrict__ peer,
+    const int* __restrict__ active,
+    int size
+) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < size && active[0] != 0) {
+        float local = __bfloat162float(
+            *reinterpret_cast<const __nv_bfloat16*>(&output[index]));
+        float remote = __bfloat162float(
+            *reinterpret_cast<const __nv_bfloat16*>(&peer[index]));
+        __nv_bfloat16 sum = __float2bfloat16(local + remote);
+        output[index] = *reinterpret_cast<unsigned short*>(&sum);
+    }
+}
+
 // Multiply BF16 by sigmoid gate: output = input * sigmoid(gate)
 // Used for shared expert gating: output = shared_expert_out * sigmoid(gate_weight @ hidden)
 extern "C" __global__ void sigmoid_gate_bf16(
@@ -13034,3 +13130,4 @@ extern "C" __global__ void record_globaltimer_u64_g(
         out[index] = t;
     }
 }
+#include "expert_codec_kernels.cu"

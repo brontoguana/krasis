@@ -1,0 +1,30 @@
+[0;36m[1m=>[0m Reference test using existing server; skipping GPU cleanup/rebuild
+[0;36m[1m=>[0m Running reference test: tests/glm52-4-4-hqq4-k4v4-sparse-4096-compression-l256.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/reference-test_20260807_174204
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Reference test: GLM-5.2
+Config: tests/glm52-4-4-hqq4-k4v4-sparse-4096-compression-l256.conf
+Reference data: /home/main/Documents/Claude/krasis-internal/reference-outputs/output/GLM-5.2/llama_witness_glm52_exact_prefix_8_tokens.json
+The tokenizer class you load from this checkpoint is not the same type as the class this function is called from. It may result in unexpected tokenization. 
+The tokenizer class you load from this checkpoint is 'TokenizersBackend'. 
+The class this function is called from is 'PreTrainedTokenizerFast'.
+Reference artifact state: explicit_valid (format 7, llama_witness_glm52_exact_prefix_8_tokens.json)
+Using existing server on port 18201
+  Conv 1: 19 input tokens, prompt: Give the chemical symbol for sodium, followed by one short s...
+    WARN: first=MATCH, run=8/8, prefill=n/a, decode-top-k=100%
+
+============================================================
+REFERENCE TEST: PASS
+============================================================
+  Prompts: 0 PASS, 1 WARN, 0 FAIL (of 1)
+  Prefill argmax match: n/a (reference artifact has no prefill snapshots)
+  Prefill top-10 containment: n/a (reference artifact has no prefill snapshots)
+  First-token match: 1/1
+  Avg match run: 8.0 tokens
+  Avg decode top-k: 100.0%
+  Duration: 17.1s
+  Report: /home/main/Documents/Claude/krasis/logs/reference-test_20260807_174204/reference_test.html
+  Summary JSON: /home/main/Documents/Claude/krasis/logs/reference-test_20260807_174204/reference_test_summary.json
+

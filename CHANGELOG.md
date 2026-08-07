@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Added an opt-in, source-bound lossless expert sidecar and GPU decoder for
+  cold Marlin INT4 experts. Sidecars are trained from the complete real cache,
+  published atomically, bound to a SHA-256 tree of the routed expert corpus,
+  and rejected on any format, geometry or source mismatch. Runtime calibration
+  measures one-, two- and four-range copy/decode plans on the loaded hardware
+  and selects the lowest bit-exact p95; no CPU work occurs per token. The
+  accepted GLM-5.2 lane-256 sidecar stores 373.71 GB in 322.37 GB (13.739%
+  whole-corpus saving), and the live two-copy plan measured 682.42 us p95 per
+  19.46 MB expert versus approximately 748.33 us for raw PCIe transfer. The
+  final llama-witness gate passed 1/1 first token, 8/8 generated tokens and
+  100% top-10 containment.
+
 - Added runtime-measured speed-aware assignment for the existing serial
   multi-GPU decode pipeline. Startup now calibrates each selected device with
   the loaded expert's real one-to-four-copy H2D topology and a model-derived
