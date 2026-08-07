@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Added measurement-only native Phase 0 probes for the GLM-5.2 PCIe
+  cold-bandwidth programme. `./dev peer-rtt` measures the real two-GPU,
+  no-P2P pinned-host-mailbox round trip with persistent CUDA kernels; on the
+  RTX PRO 6000/A4500 topology its 12 KiB request/response measured 27.601 us
+  median and 28.513 us p95 across 10,000 samples, passing the 30 us gate with
+  bit-exact payloads. `./dev expert-compression-probe` samples real Marlin v7
+  expert payloads, verifies every compression round trip byte-for-byte, and
+  computes peer coverage from actual cache geometry, heatmap counts and free
+  VRAM. On 300 nonzero-demand GLM experts, Zstd level 1 saved 16.328%; a
+  format-aware 20-stream transform saved 16.593%, while packed-nibble entropy
+  was 3.3754 bits/nibble. The measured 20 GB A4500 tier holds 1,037 experts and
+  covers 15.706% of the heatmap's post-primary cold routes. These commands do
+  not alter production builds or serving paths.
+
 - Measured the existing default-off adaptive cold-mass pruning experiment on
   GLM-5.2 with the approved 80-prompt heatmap and exact split launch. The
   `75/10` preset improved timing-disabled internal 50/100/250-token decode from

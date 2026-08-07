@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "source_cache": "/home/main/.krasis/cache/GLM-5.2/experts_marlin_int4_g128_calamax.bin",
+  "source_cache_bytes": 375172300864,
+  "model_config": "/home/main/.krasis/models/GLM-5.2/config.json",
+  "heatmap": "benchmarks/approved_heatmaps/glm52_hqq4_k4v4_approved_heatmap.json",
+  "heatmap_decode_tokens": 20437,
+  "zstd_version": "1.5.5",
+  "zstd_level": 1,
+  "header": {
+    "version": 7,
+    "hidden_size": 6144,
+    "intermediate_size": 2048,
+    "experts_per_layer": 256,
+    "moe_layers": 75,
+    "group_size": 128,
+    "config_hash": 5943034228358477982,
+    "shared_experts": 1,
+    "calibration_tag": 0
+  },
+  "experts_gated": true,
+  "expert_bytes": 19464192,
+  "stream_layout_bytes": [
+    12582912,
+    393216,
+    6291456,
+    196608
+  ],
+  "sample": {
+    "sample_count": 300,
+    "nonzero_cold_population": 14681,
+    "hottest_sample_count": 881,
+    "coldest_sample_count": 1,
+    "every_decompression_bit_exact": true
+  },
+  "generic_zstd": {
+    "original_bytes": 5839257600,
+    "compressed_bytes": 4885847680,
+    "aggregate_ratio": 0.8367241205457351,
+    "aggregate_saving_pct": 16.32758794542649,
+    "mean_expert_ratio": 0.8367241205457353,
+    "minimum_expert_ratio": 0.34995159316143204,
+    "maximum_expert_ratio": 0.8446208298808396
+  },
+  "four_native_stream_zstd": {
+    "original_bytes": 5839257600,
+    "compressed_bytes": 4885857969,
+    "aggregate_ratio": 0.8367258825847999,
+    "aggregate_saving_pct": 16.327411741520017,
+    "mean_expert_ratio": 0.8367258825847997,
+    "minimum_expert_ratio": 0.34995431611032196,
+    "maximum_expert_ratio": 0.8446102463436448
+  },
+  "format_aware_twenty_stream_zstd": {
+    "original_bytes": 5839257600,
+    "compressed_bytes": 4870321710,
+    "aggregate_ratio": 0.8340652260314736,
+    "aggregate_saving_pct": 16.59347739685264,
+    "mean_expert_ratio": 0.8340652260314728,
+    "minimum_expert_ratio": 0.3508272010469276,
+    "maximum_expert_ratio": 0.8420364945023148
+  },
+  "entropy": {
+    "aggregate_nibble_bits": 3.3754286703231045,
+    "aggregate_nibble_theoretical_packed_ratio": 0.8438571675807761,
+    "nibble_lane_bits": [
+      3.375821164205587,
+      3.3751273705878844,
+      3.3759192409027357,
+      3.3751719439444337,
+      3.375053837684631,
+      3.375618026192572,
+      3.375083883060665,
+      3.3756329394095994
+    ],
+    "scale_low_byte_bits": 6.716617564077549,
+    "scale_high_byte_bits": 0.6968144290941691
+  },
+  "peer": {
+    "primary_resident_experts": 3887,
+    "peer_free_bytes": 20831010816,
+    "safety_bytes": 629145600,
+    "peer_usable_bytes": 20201865216,
+    "peer_expert_capacity": 1037,
+    "total_heatmap_routes_per_token": 597.6513186866957,
+    "primary_heatmap_hits_per_token": 331.2926065469492,
+    "heatmap_cold_routes_before_peer_per_token": 266.35871213974656,
+    "peer_heatmap_hits_per_token": 41.834662621715516,
+    "heatmap_cold_routes_after_peer_per_token": 224.52404951803103,
+    "peer_fraction_of_primary_cold_routes": 0.15706136392402564,
+    "recorded_cold_routes_per_token": 205.9,
+    "implied_recorded_routes_caught_per_token": 32.338934831956884,
+    "implied_bytes_avoided_per_token": 629451236.6446965,
+    "implied_transfer_ms_avoided_per_token": 24.200355118981026
+  }
+}

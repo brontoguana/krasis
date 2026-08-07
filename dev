@@ -1569,6 +1569,24 @@ do_session_cache_benchmark() {
     )
 }
 
+do_peer_rtt() {
+    [[ $# -lt 2 ]] && err "Usage: ./dev peer-rtt <primary-gpu> <peer-gpu> [--message-bytes N] [--warmup N] [--samples N] [--gate-us F] [--timeout-ms N] [--output PATH]"
+    (
+        cd "$SCRIPT_DIR"
+        KRASIS_BUILD_PEER_RTT_PROBE=1 PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --quiet --bin peer-rtt -- "$@"
+    )
+}
+
+do_expert_compression_probe() {
+    [[ $# -lt 3 ]] && err "Usage: ./dev expert-compression-probe <cache.bin> <config.json> <heatmap.json> [measurement options]"
+    (
+        cd "$SCRIPT_DIR"
+        KRASIS_BUILD_PEER_RTT_PROBE=1 PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --quiet --bin expert-compression-probe -- "$@"
+    )
+}
+
 do_test_kernels() {
     info "Running CUDA kernel unit tests..."
     # First ensure test data exists
@@ -3730,6 +3748,8 @@ case "$cmd" in
     session-cache-test) do_session_cache_test "$@" ;;
     session-cache-operations) do_session_cache_operations "$@" ;;
     session-cache-benchmark) do_session_cache_benchmark "$@" ;;
+    peer-rtt)       do_peer_rtt "$@" ;;
+    expert-compression-probe) do_expert_compression_probe "$@" ;;
     test-kernels)   do_test_kernels "$@" ;;
     cpu-tail-calibrate) do_cpu_tail_calibrate "$@" ;;
     validate)       do_validate "$@" ;;
@@ -3771,6 +3791,8 @@ case "$cmd" in
         echo "  session-cache-test <port>      Compare active/RAM cached continuations with full prefill"
         echo "  session-cache-operations <port> Test eviction, branches, cancellation and concurrency"
         echo "  session-cache-benchmark <port> Benchmark interleaved agent conversations cache off/on"
+        echo "  peer-rtt <primary> <peer>      Measure pinned-host peer-GPU round-trip feasibility"
+        echo "  expert-compression-probe ...  Measure real Marlin cache entropy and lossless ratio"
         echo "  validate <config>              Validate against stored non-HF references; HF artifacts require override"
         echo "  reference-test <config>        Compare against stored non-HF references; HF artifacts require override"
         echo "  reference-test --compare <model>  Comparison matrix; HF artifacts require override"

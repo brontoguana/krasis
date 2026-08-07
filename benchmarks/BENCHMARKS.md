@@ -1,5 +1,43 @@
 # Krasis Benchmark Results
 
+## GLM-5.2 PCIe reduction Phase 0 gates — 2026-08-07
+
+These native, measurement-only probes ran before any production implementation.
+The peer test used the actual RTX PRO 6000 primary and A4500 peer with no P2P
+access or NVLink. It exchanged 12,288 bytes in each direction through a mapped
+pinned-host mailbox, ordered entirely by CUDA kernels, after 1,000 warmups.
+Across 10,000 measured round trips it recorded 24.996 us minimum, 27.601 us
+median, 28.513 us p95, 30.988 us p99, 54.561 us maximum, and 27.637 us mean.
+Payloads were bit-exact. The p95 therefore passed the mandatory 30 us gate,
+although narrowly.
+
+The compression probe sampled 300 nonzero-demand cold experts, stratified over
+the 14,681 such experts in the approved GLM heatmap. The source was 5.839 GB of
+real Marlin v7 INT4 expert data. Every decompression was byte-identical.
+
+| Layout | Compressed ratio | Saving |
+|---|---:|---:|
+| Whole-expert Zstd level 1 | 83.6724% | 16.3276% |
+| Four native Marlin streams | 83.6726% | 16.3274% |
+| 20 format-aware streams | 83.4065% | 16.5935% |
+
+The packed-weight nibble stream measured 3.37543 bits/nibble, implying an
+84.3857% entropy-only packed-weight ratio before framing or scale overhead.
+Format separation therefore found only 0.266 percentage points beyond generic
+Zstd on this sample.
+
+At measurement time the peer had 20,201,865,216 usable bytes after the normal
+600 MiB safety reserve. With the measured 19,464,192-byte expert layout it can
+hold 1,037 heat-ranked experts beyond the primary's 3,887. Those experts cover
+15.7061% of the approved heatmap's post-primary cold route tail. Applied to the
+recorded 205.9 cold routes/token, that is 32.339 routes or 629.45 MB/token,
+equivalent to 24.20 ms/token at the measured 26.01 GB/s host link.
+
+Evidence: [peer RTT JSON](20260807_glm52_peer_rtt_phase0.json),
+[peer RTT build/run log](20260807_glm52_peer_rtt_phase0_final.log),
+[compression and peer-capacity JSON](20260807_glm52_expert_compression_phase0.json),
+and [compression build/run log](20260807_glm52_expert_compression_phase0_final.log).
+
 ## v1.0.21-rc.1 QCN release matrix — 2026-08-06
 
 The final `./dev release-test QCN` prerelease gate ran in tmux from the exact

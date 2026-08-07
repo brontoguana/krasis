@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "transport": "portable_mapped_pinned_host_mailbox_gpu_ordered",
+  "message_bytes_each_direction": 12288,
+  "round_trip_payload_bytes": 24576,
+  "warmup_samples": 1000,
+  "measured_samples": 10000,
+  "timeout_ms": 1000,
+  "primary": {
+    "ordinal": 0,
+    "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "free_bytes": 101395922944,
+    "total_bytes": 101982404608,
+    "can_map_host_memory": true,
+    "unified_addressing": true,
+    "stream_memops_v1": false
+  },
+  "peer": {
+    "ordinal": 1,
+    "name": "NVIDIA RTX A4500",
+    "free_bytes": 20831010816,
+    "total_bytes": 21027028992,
+    "can_map_host_memory": true,
+    "unified_addressing": true,
+    "stream_memops_v1": false
+  },
+  "primary_can_access_peer": false,
+  "peer_can_access_primary": false,
+  "distribution": {
+    "min_us": 24.996,
+    "p01_us": 25.507,
+    "p05_us": 26.29895,
+    "p50_us": 27.601,
+    "p90_us": 28.042,
+    "p95_us": 28.512999999999998,
+    "p99_us": 30.988200000000006,
+    "max_us": 54.561,
+    "mean_us": 27.637477200000482,
+    "stddev_us": 0.8497789272982483
+  },
+  "gate_threshold_us": 30.0,
+  "gate_passed": true,
+  "payload_bit_exact": true
+}

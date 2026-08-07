@@ -14,10 +14,12 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(has_decode_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_prefill_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_hqq_search_kernels)");
+    println!("cargo::rustc-check-cfg=cfg(has_peer_rtt_kernels)");
 
     // Force rerun when env changes (e.g. CUDA_HOME)
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    println!("cargo:rerun-if-env-changed=KRASIS_BUILD_PEER_RTT_PROBE");
 
     // Probe for libnuma — link only if the library is found.
     // The runtime code (numa.rs) checks numa_available() and falls back
@@ -49,6 +51,10 @@ fn main() {
 
     // Compile diagnostic HQQ search kernels to PTX.
     timed_phase("HQQ search PTX", compile_hqq_search_kernels);
+
+    // Compile the standalone peer-link feasibility probe. This kernel is not
+    // loaded by model execution and adds no production hot-path work.
+    timed_phase("peer RTT PTX", compile_peer_rtt_kernels);
 
     total_timer.finish();
 }
@@ -182,6 +188,60 @@ fn nvcc_host_compiler_args() -> Vec<String> {
             vec!["-ccbin".to_string(), path]
         }
         _ => Vec::new(),
+    }
+}
+
+fn compile_peer_rtt_kernels() {
+    if std::env::var("KRASIS_BUILD_PEER_RTT_PROBE").as_deref() != Ok("1") {
+        return;
+    }
+    let cu_src = "src/cuda/peer_rtt_kernels.cu";
+    println!("cargo:rerun-if-changed={cu_src}");
+    if !std::path::Path::new(cu_src).exists() {
+        println!("cargo:warning=peer_rtt_kernels.cu not found — peer RTT probe disabled");
+        return;
+    }
+
+    let Some(nvcc) = find_nvcc() else {
+        println!("cargo:warning=nvcc not found — peer RTT probe disabled");
+        return;
+    };
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let ptx_path = format!("{out_dir}/peer_rtt_kernels.ptx");
+    if is_output_fresh(&[cu_src], &[&ptx_path]) {
+        println!("cargo:rustc-cfg=has_peer_rtt_kernels");
+        println!("cargo:warning=Reusing cached peer RTT kernels at {ptx_path}");
+        return;
+    }
+
+    let mut cmd = std::process::Command::new(&nvcc);
+    cmd.args([
+        "-ptx",
+        "-allow-unsupported-compiler",
+        "-arch=sm_80",
+        "-O3",
+        "-o",
+        &ptx_path,
+        cu_src,
+    ])
+    .args(nvcc_host_compiler_args());
+    match cmd.output() {
+        Ok(output) if output.status.success() => {
+            println!("cargo:rustc-cfg=has_peer_rtt_kernels");
+            println!("cargo:warning=Compiled peer RTT kernels to PTX ({ptx_path})");
+        }
+        Ok(output) => {
+            for line in String::from_utf8_lossy(&output.stderr).lines() {
+                println!("cargo:warning=nvcc peer RTT: {line}");
+            }
+            println!(
+                "cargo:warning=nvcc peer RTT failed with status {} — probe disabled",
+                output.status
+            );
+        }
+        Err(error) => {
+            println!("cargo:warning=nvcc peer RTT execution error: {error} — probe disabled");
+        }
     }
 }
 
