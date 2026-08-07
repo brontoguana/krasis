@@ -48,6 +48,20 @@ class SplitPlan:
     uncertainty_seconds: float
 
 
+@dataclass(frozen=True)
+class PeerPlan:
+    """Prediction for a primary-plus-peer expert-serving topology."""
+
+    peer_residents: tuple[tuple[int, int], ...]
+    primary_residents: tuple[tuple[int, int], ...]
+    captured_routes_per_token: float
+    cold_routes_before_per_token: float
+    cold_routes_after_per_token: float
+    captured_cold_fraction: float
+    predicted_seconds_per_token: float
+    predicted_primary_only_seconds_per_token: float
+
+
 def _percentile(values: Sequence[float], quantile: float) -> float:
     ordered = sorted(values)
     rank = quantile * (len(ordered) - 1)
@@ -326,4 +340,145 @@ def optimize_contiguous_splits(
         preferred_seconds_per_token=preferred_seconds,
         admitted=True,
         uncertainty_seconds=uncertainty_seconds,
+    )
+
+
+def _service_curve_us(expected_routes: float, curve_us: Sequence[float]) -> float:
+    """Conservatively interpolate a measured integer route-count curve."""
+    if expected_routes <= 0.0:
+        return 0.0
+    if not curve_us or any(not math.isfinite(value) or value <= 0.0 for value in curve_us):
+        raise ValueError("peer service curve must contain finite positive measurements")
+    capped = min(expected_routes, float(len(curve_us)))
+    lower_routes = max(1, math.floor(capped))
+    upper_routes = min(len(curve_us), math.ceil(capped))
+    if lower_routes == upper_routes:
+        return float(curve_us[lower_routes - 1])
+    fraction = capped - lower_routes
+    return (
+        float(curve_us[lower_routes - 1]) * (1.0 - fraction)
+        + float(curve_us[upper_routes - 1]) * fraction
+    )
+
+
+def predict_peer_expert_plan(
+    *,
+    heatmap_counts: dict[str, int],
+    total_decode_tokens: int,
+    ranking: Sequence[tuple[int, int]],
+    primary_capacity_experts: int,
+    peer_capacity_experts: int,
+    layer_resident_bytes: Sequence[int],
+    layer_is_moe: Sequence[bool],
+    primary_profile: DeviceServiceProfile,
+    expert_bytes: int,
+    service_p95_us_by_routes: Sequence[float],
+    rtt_p95_us: float,
+    terminal_bytes: int,
+    local_cold_seconds_per_expert: float | None = None,
+) -> PeerPlan:
+    """Predict peer serving from the exact approved-heatmap route counts.
+
+    The peer tier is disjoint from the primary's predicted HCS residents.  For
+    every layer, primary work and peer service overlap, so the critical-path
+    contribution is their maximum rather than their sum.  P95 transport and
+    service measurements deliberately make this a conservative admission
+    model; no advertised device specification participates.
+    """
+    if total_decode_tokens <= 0:
+        raise ValueError("heatmap total_decode_tokens must be positive")
+    if len(layer_resident_bytes) != len(layer_is_moe):
+        raise ValueError("layer byte and MoE masks differ in length")
+    if primary_capacity_experts < 0 or peer_capacity_experts < 0:
+        raise ValueError("expert capacities must be non-negative")
+    if expert_bytes <= 0 or terminal_bytes < 0:
+        raise ValueError("expert and terminal byte geometry is invalid")
+    if not math.isfinite(rtt_p95_us) or rtt_p95_us <= 0.0:
+        raise ValueError("peer RTT must be finite and positive")
+    if local_cold_seconds_per_expert is None:
+        local_cold_seconds_per_expert = (
+            expert_bytes * primary_profile.h2d_seconds_per_byte
+        )
+    if (
+        not math.isfinite(local_cold_seconds_per_expert)
+        or local_cold_seconds_per_expert <= 0.0
+    ):
+        raise ValueError("local cold-expert service time must be finite and positive")
+
+    ordered = tuple(dict.fromkeys((int(layer), int(expert)) for layer, expert in ranking))
+    primary_residents = ordered[:primary_capacity_experts]
+    primary_set = set(primary_residents)
+    peer_residents = tuple(
+        pair for pair in ordered if pair not in primary_set
+    )[:peer_capacity_experts]
+    peer_set = set(peer_residents)
+
+    layer_total = [0.0] * len(layer_resident_bytes)
+    layer_primary = [0.0] * len(layer_resident_bytes)
+    layer_peer = [0.0] * len(layer_resident_bytes)
+    for key, raw_count in heatmap_counts.items():
+        if key == "_metadata":
+            continue
+        try:
+            layer_text, expert_text = key.split(",", 1)
+            pair = (int(layer_text), int(expert_text))
+            count = int(raw_count)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid heatmap entry {key!r}: {raw_count!r}") from exc
+        layer = pair[0]
+        if layer < 0 or layer >= len(layer_resident_bytes) or count < 0:
+            raise ValueError(f"heatmap entry outside loaded geometry: {key!r}={count}")
+        per_token = count / total_decode_tokens
+        layer_total[layer] += per_token
+        if pair in primary_set:
+            layer_primary[layer] += per_token
+        elif pair in peer_set:
+            layer_peer[layer] += per_token
+
+    predicted_peer = 0.0
+    predicted_primary = 0.0
+    cold_before = 0.0
+    cold_after = 0.0
+    captured = 0.0
+    for layer, resident_bytes in enumerate(layer_resident_bytes):
+        routes = layer_total[layer]
+        primary_hot = min(routes, layer_primary[layer])
+        peer_routes = min(max(0.0, routes - primary_hot), layer_peer[layer])
+        before = max(0.0, routes - primary_hot)
+        after = max(0.0, before - peer_routes)
+        cold_before += before
+        cold_after += after
+        captured += peer_routes
+
+        primary_only_compute = resident_bytes + routes * expert_bytes
+        predicted_primary += (
+            primary_only_compute * primary_profile.d2d_seconds_per_byte
+            + before * local_cold_seconds_per_expert
+        )
+
+        local_routes = max(0.0, routes - peer_routes)
+        local_seconds = (
+            (resident_bytes + local_routes * expert_bytes)
+            * primary_profile.d2d_seconds_per_byte
+            + after * local_cold_seconds_per_expert
+        )
+        peer_seconds = 0.0
+        if peer_routes > 0.0:
+            peer_seconds = (
+                rtt_p95_us
+                + _service_curve_us(peer_routes, service_p95_us_by_routes)
+            ) / 1_000_000.0
+        predicted_peer += max(local_seconds, peer_seconds)
+
+    predicted_peer += terminal_bytes * primary_profile.d2d_seconds_per_byte
+    predicted_primary += terminal_bytes * primary_profile.d2d_seconds_per_byte
+    return PeerPlan(
+        peer_residents=peer_residents,
+        primary_residents=primary_residents,
+        captured_routes_per_token=captured,
+        cold_routes_before_per_token=cold_before,
+        cold_routes_after_per_token=cold_after,
+        captured_cold_fraction=(captured / cold_before if cold_before > 0.0 else 0.0),
+        predicted_seconds_per_token=predicted_peer,
+        predicted_primary_only_seconds_per_token=predicted_primary,
     )

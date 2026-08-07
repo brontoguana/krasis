@@ -1,6 +1,10 @@
 import unittest
 
-from krasis.multi_gpu_planner import DeviceServiceProfile, optimize_contiguous_splits
+from krasis.multi_gpu_planner import (
+    DeviceServiceProfile,
+    optimize_contiguous_splits,
+    predict_peer_expert_plan,
+)
 
 
 def _profile(gpu, h2d_gbps, d2d_gbps, tail=1.01):
@@ -90,6 +94,55 @@ class MultiGpuPlannerTest(unittest.TestCase):
         self.assertEqual(len(plan.splits), 2)
         boundaries = (0, *plan.splits, len(self.layers))
         self.assertTrue(all(b - a >= 2 for a, b in zip(boundaries, boundaries[1:])))
+
+    def test_peer_plan_uses_disjoint_heat_ranked_residents_and_overlap(self):
+        profile = _profile(0, 20, 1_000)
+        counts = {
+            "0,0": 100,
+            "0,1": 80,
+            "0,2": 60,
+            "0,3": 40,
+        }
+        plan = predict_peer_expert_plan(
+            heatmap_counts=counts,
+            total_decode_tokens=100,
+            ranking=[(0, 0), (0, 1), (0, 2), (0, 3)],
+            primary_capacity_experts=1,
+            peer_capacity_experts=2,
+            layer_resident_bytes=[16 * 1024],
+            layer_is_moe=[True],
+            primary_profile=profile,
+            expert_bytes=self.expert_bytes,
+            service_p95_us_by_routes=[20.0, 35.0, 50.0, 65.0],
+            rtt_p95_us=25.0,
+            terminal_bytes=0,
+        )
+        self.assertEqual(plan.primary_residents, ((0, 0),))
+        self.assertEqual(plan.peer_residents, ((0, 1), (0, 2)))
+        self.assertAlmostEqual(plan.cold_routes_before_per_token, 1.8)
+        self.assertAlmostEqual(plan.captured_routes_per_token, 1.4)
+        self.assertAlmostEqual(plan.cold_routes_after_per_token, 0.4)
+        self.assertLess(
+            plan.predicted_seconds_per_token,
+            plan.predicted_primary_only_seconds_per_token,
+        )
+
+    def test_peer_plan_rejects_heatmap_without_runtime_denominator(self):
+        with self.assertRaisesRegex(ValueError, "total_decode_tokens"):
+            predict_peer_expert_plan(
+                heatmap_counts={"0,0": 1},
+                total_decode_tokens=0,
+                ranking=[(0, 0)],
+                primary_capacity_experts=0,
+                peer_capacity_experts=1,
+                layer_resident_bytes=[1],
+                layer_is_moe=[True],
+                primary_profile=_profile(0, 20, 1_000),
+                expert_bytes=1,
+                service_p95_us_by_routes=[1.0],
+                rtt_p95_us=1.0,
+                terminal_bytes=0,
+            )
 
 
 if __name__ == "__main__":

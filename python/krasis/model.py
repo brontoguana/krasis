@@ -10458,6 +10458,34 @@ class KrasisModel:
         logger.info("Registered Nemotron MoE-only layer %d (MoE config deferred to post-engine setup)",
                      layer_idx)
 
+    def setup_gpu_peer_expert_store(self, gpu_idx: int) -> "GpuDecodeStore":
+        """Create a routed-expert-only store on an auxiliary GPU.
+
+        The peer has no attention, KV, embedding, LM-head, or routing role.  It
+        duplicates only the heat-ranked routed experts loaded into its own HCS;
+        canonical expert bytes remain owned by the primary engine in host RAM.
+        """
+        self._require_supported_runtime_features()
+        from krasis import GpuDecodeStore
+
+        if self.krasis_engine is None:
+            raise RuntimeError("Peer expert setup requires a loaded Krasis engine")
+        store = GpuDecodeStore(int(gpu_idx))
+        store.setup_peer_from_engine(self.krasis_engine)
+        if self.cfg.swiglu_limits or self.cfg.swiglu_limits_shared:
+            for layer_idx, layer in enumerate(self.layers):
+                if not layer.is_moe:
+                    continue
+                routed_limit = float(self.cfg.swiglu_limit_for_layer(layer_idx))
+                shared_limit = float(self.cfg.shared_swiglu_limit_for_layer(layer_idx))
+                if routed_limit or shared_limit:
+                    store.set_moe_swiglu_limits(
+                        layer_idx=layer_idx,
+                        swiglu_limit=routed_limit,
+                        shared_swiglu_limit=shared_limit,
+                    )
+        return store
+
     def setup_gpu_decode_store_aux(self, gpu_idx: int, split_layer: int, layer_end: int = 0) -> "GpuDecodeStore":
         """Create an auxiliary GpuDecodeStore for multi-GPU decode.
 

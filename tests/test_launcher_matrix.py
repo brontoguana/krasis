@@ -860,9 +860,12 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.vram_safety_margin = 900
         cfg.hcs = False
         cfg.multi_gpu_hcs = True
+        cfg.multi_gpu_mode = "peer"
         cfg.dynamic_hcs = False
         cfg.dynamic_hcs_tail_blocks = 5
         cfg.adaptive_cold_mass_pruning = "75/8"
+        cfg.expert_compression = True
+        cfg.expert_compression_sidecar = "~/cache/model.krec"
         cfg.stream_attention = True
         cfg.draft_model = "~/models/draft"
         cfg.draft_k = 5
@@ -912,9 +915,14 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(values.get("CFG_VRAM_SAFETY_MARGIN"), "900")
             self.assertEqual(values.get("CFG_HCS"), "0")
             self.assertEqual(values.get("CFG_MULTI_GPU_HCS"), "1")
+            self.assertEqual(values.get("CFG_MULTI_GPU_MODE"), "peer")
             self.assertEqual(values.get("CFG_DYNAMIC_HCS"), "0")
             self.assertEqual(values.get("CFG_DYNAMIC_HCS_TAIL_BLOCKS"), "5")
             self.assertEqual(values.get("CFG_ADAPTIVE_COLD_MASS_PRUNING"), "75/8")
+            self.assertEqual(values.get("CFG_EXPERT_COMPRESSION"), "1")
+            self.assertEqual(
+                values.get("CFG_EXPERT_COMPRESSION_SIDECAR"), "~/cache/model.krec"
+            )
             self.assertEqual(values.get("CFG_STREAM_ATTENTION"), "1")
             self.assertEqual(values.get("CFG_DRAFT_MODEL"), "~/models/draft")
             self.assertEqual(values.get("CFG_DRAFT_K"), "5")
@@ -959,9 +967,15 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(loaded.vram_safety_margin, 900)
             self.assertFalse(loaded.hcs)
             self.assertTrue(loaded.multi_gpu_hcs)
+            self.assertEqual(loaded.multi_gpu_mode, "peer")
             self.assertFalse(loaded.dynamic_hcs)
             self.assertEqual(loaded.dynamic_hcs_tail_blocks, 5)
             self.assertEqual(loaded.adaptive_cold_mass_pruning, "75/8")
+            self.assertTrue(loaded.expert_compression)
+            self.assertEqual(
+                loaded.expert_compression_sidecar,
+                os.path.expanduser("~/cache/model.krec"),
+            )
             self.assertTrue(loaded.stream_attention)
             self.assertEqual(loaded.draft_model, os.path.expanduser("~/models/draft"))
             self.assertEqual(loaded.draft_k, 5)
@@ -1418,6 +1432,7 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.ssh_key_path = "~/.ssh/id_ed25519"
         cfg.hcs = False
         cfg.multi_gpu_hcs = True
+        cfg.multi_gpu_mode = "layer-split"
         cfg.heatmap_path = "~/heatmaps/qwen36.json"
         cfg.stream_attention = True
         cfg.draft_model = "~/models/draft"
@@ -1439,6 +1454,7 @@ class LauncherMatrixTest(unittest.TestCase):
                 "CFG_SSH_KEY_PATH": "~/.ssh/id_ed25519",
                 "CFG_HCS": "0",
                 "CFG_MULTI_GPU_HCS": "1",
+                "CFG_MULTI_GPU_MODE": "layer-split",
                 "CFG_HEATMAP_PATH": "~/heatmaps/qwen36.json",
                 "CFG_STREAM_ATTENTION": "1",
                 "CFG_DRAFT_MODEL": "~/models/draft",
@@ -1455,6 +1471,7 @@ class LauncherMatrixTest(unittest.TestCase):
                 f"ssh_key_path = '{os.path.expanduser('~/.ssh/id_ed25519')}'",
                 "hcs = False",
                 "multi_gpu_hcs = True",
+                "multi_gpu_mode = 'layer-split'",
                 f"heatmap_path = '{os.path.expanduser('~/heatmaps/qwen36.json')}'",
                 "stream_attention = True",
                 f"draft_model = '{os.path.expanduser('~/models/draft')}'",

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Added peer-expert serving as a measured alternative to serial layer-split
+  multi-GPU decode. The primary retains canonical host experts while an
+  auxiliary GPU duplicates a disjoint heat-ranked tier and returns
+  router-weighted partial outputs through a persistent pinned-host mailbox.
+  Startup measures per-device service, mailbox RTT, cold route mass and peer
+  capacity, logs both mode predictions, and admits only the peer route count
+  that fits the measured local critical path. Deadline or availability misses
+  visibly use the existing canonical cold-fetch path. On GLM-5.2 with an RTX
+  PRO 6000 and A4500, p95 RTT was 29.441 us, 911 peer experts captured 36.995
+  routes/token, and startup selected peer serving over predicted 361.457 ms
+  serial layer-split. Llama-witness passed 1/1 first token, 8/8 generated
+  tokens and 100% top-10 containment, including one visible deadline fallback.
+
 - Added an opt-in, source-bound lossless expert sidecar and GPU decoder for
   cold Marlin INT4 experts. Sidecars are trained from the complete real cache,
   published atomically, bound to a SHA-256 tree of the routed expert corpus,

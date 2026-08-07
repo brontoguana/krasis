@@ -590,8 +590,9 @@ CONFIG_KEYS = [
     "CFG_SSH_TUNNEL", "CFG_SSH_KEY_PATH",
     "CFG_GPU_PREFILL_THRESHOLD", "CFG_GGUF_PATH", "CFG_HEATMAP_PATH",
     "CFG_VRAM_SAFETY_MARGIN",
-    "CFG_HCS", "CFG_MULTI_GPU_HCS", "CFG_HCS_HOST_CACHE_MODE", "CFG_DYNAMIC_HCS", "CFG_DYNAMIC_HCS_TAIL_BLOCKS",
+    "CFG_HCS", "CFG_MULTI_GPU_HCS", "CFG_MULTI_GPU_MODE", "CFG_HCS_HOST_CACHE_MODE", "CFG_DYNAMIC_HCS", "CFG_DYNAMIC_HCS_TAIL_BLOCKS",
     "CFG_ADAPTIVE_COLD_MASS_PRUNING",
+    "CFG_EXPERT_COMPRESSION", "CFG_EXPERT_COMPRESSION_SIDECAR",
     "CFG_STREAM_ATTENTION", "CFG_DRAFT_MODEL", "CFG_DRAFT_K", "CFG_DRAFT_CONTEXT",
     "CFG_TEMPERATURE",
     "CFG_FORCE_LOAD", "CFG_FORCE_REBUILD_CACHE", "CFG_FORCE_REBUILD_HQQ_CACHE",
@@ -684,10 +685,13 @@ class LauncherConfig:
         self.vram_safety_margin: int = 600
         self.hcs: bool = True
         self.multi_gpu_hcs: bool = False
+        self.multi_gpu_mode: str = "auto"
         self.hcs_host_cache_mode: str = "source"
         self.dynamic_hcs: bool = True
         self.dynamic_hcs_tail_blocks: int = 2
         self.adaptive_cold_mass_pruning: str = "off"
+        self.expert_compression: bool = False
+        self.expert_compression_sidecar: str = ""
         self.stream_attention: bool = False
         self.draft_model: str = ""
         self.draft_k: int = 3
@@ -873,6 +877,14 @@ class LauncherConfig:
             self.hcs = saved["CFG_HCS"] != "0"
         if "CFG_MULTI_GPU_HCS" in saved:
             self.multi_gpu_hcs = saved["CFG_MULTI_GPU_HCS"] == "1"
+        if "CFG_MULTI_GPU_MODE" in saved and saved["CFG_MULTI_GPU_MODE"]:
+            value = saved["CFG_MULTI_GPU_MODE"].strip().lower()
+            if value not in ("auto", "layer-split", "peer"):
+                raise ValueError(
+                    f"Unsupported saved CFG_MULTI_GPU_MODE={value!r}. "
+                    "Use one of: auto, layer-split, peer."
+                )
+            self.multi_gpu_mode = value
         if "CFG_HCS_HOST_CACHE_MODE" in saved and saved["CFG_HCS_HOST_CACHE_MODE"]:
             val = saved["CFG_HCS_HOST_CACHE_MODE"].strip().lower()
             aliases = {
@@ -908,6 +920,12 @@ class LauncherConfig:
                     f"Use one of: {', '.join(ADAPTIVE_COLD_MASS_PRUNING_CHOICES)}."
                 )
             self.adaptive_cold_mass_pruning = val
+        if "CFG_EXPERT_COMPRESSION" in saved:
+            self.expert_compression = saved["CFG_EXPERT_COMPRESSION"] == "1"
+        if "CFG_EXPERT_COMPRESSION_SIDECAR" in saved:
+            self.expert_compression_sidecar = os.path.expanduser(
+                saved["CFG_EXPERT_COMPRESSION_SIDECAR"].strip()
+            )
         if "CFG_STREAM_ATTENTION" in saved:
             self.stream_attention = saved["CFG_STREAM_ATTENTION"] == "1"
         if "CFG_DRAFT_MODEL" in saved and saved["CFG_DRAFT_MODEL"]:
@@ -981,10 +999,13 @@ class LauncherConfig:
             "CFG_VRAM_SAFETY_MARGIN": str(self.vram_safety_margin),
             "CFG_HCS": "1" if self.hcs else "0",
             "CFG_MULTI_GPU_HCS": "1" if self.multi_gpu_hcs else "0",
+            "CFG_MULTI_GPU_MODE": self.multi_gpu_mode,
             "CFG_HCS_HOST_CACHE_MODE": self.hcs_host_cache_mode,
             "CFG_DYNAMIC_HCS": "1" if self.dynamic_hcs else "0",
             "CFG_DYNAMIC_HCS_TAIL_BLOCKS": str(self.dynamic_hcs_tail_blocks),
             "CFG_ADAPTIVE_COLD_MASS_PRUNING": self.adaptive_cold_mass_pruning,
+            "CFG_EXPERT_COMPRESSION": "1" if self.expert_compression else "0",
+            "CFG_EXPERT_COMPRESSION_SIDECAR": self.expert_compression_sidecar,
             "CFG_STREAM_ATTENTION": "1" if self.stream_attention else "0",
             "CFG_DRAFT_MODEL": self.draft_model,
             "CFG_DRAFT_K": str(self.draft_k),
@@ -1071,8 +1092,14 @@ OPTIONS = [
                  opt_type="text", advanced=True),
     ConfigOption("HCS RAM saver", "hcs_host_cache_mode",
                  choices=["source", "mirror", "auto"]),
+    ConfigOption("Multi-GPU decode mode", "multi_gpu_mode",
+                 choices=["auto", "layer-split", "peer"], advanced=True),
     ConfigOption("Adaptive cold-mass pruning", "adaptive_cold_mass_pruning",
                  choices=list(ADAPTIVE_COLD_MASS_PRUNING_CHOICES)),
+    ConfigOption("Expert compression", "expert_compression",
+                 choices=[True, False], advanced=True),
+    ConfigOption("Expert compression sidecar", "expert_compression_sidecar",
+                 opt_type="text", advanced=True),
     ConfigOption("Dynamic HCS", "dynamic_hcs",
                  choices=[True, False], advanced=True),
     ConfigOption("HCS tail blocks", "dynamic_hcs_tail_blocks",
@@ -2907,6 +2934,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hcs-host-cache-mode", default=None,
                         choices=["auto", "mirror", "source"],
                         help="Soft HCS host storage: source/lower-system-RAM, mirror/fast, or auto")
+    parser.add_argument("--multi-gpu-mode", default=None,
+                        choices=["auto", "layer-split", "peer"],
+                        help="Multi-GPU decode planning: measured auto selection, serial layer split, or peer expert serving")
+    parser.add_argument("--expert-compression", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Use a bit-exact compressed expert sidecar for demand-cold DMA")
+    parser.add_argument("--expert-compression-sidecar", default=None,
+                        help="Exact .krec sidecar for the loaded Marlin expert cache")
     parser.add_argument("--prefix-cache", action=argparse.BooleanOptionalAction,
                         default=None,
                         help="Enable RAM-backed multi-conversation prefix-state caching")
@@ -3032,6 +3067,14 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.dynamic_hcs_tail_blocks = int(args.dynamic_hcs_tail_blocks)
     if args.hcs_host_cache_mode is not None:
         cfg.hcs_host_cache_mode = args.hcs_host_cache_mode
+    if args.multi_gpu_mode is not None:
+        cfg.multi_gpu_mode = args.multi_gpu_mode
+    if args.expert_compression is not None:
+        cfg.expert_compression = bool(args.expert_compression)
+    if args.expert_compression_sidecar is not None:
+        cfg.expert_compression_sidecar = os.path.expanduser(
+            args.expert_compression_sidecar.strip()
+        )
     if args.prefix_cache is not None:
         cfg.prefix_cache = bool(args.prefix_cache)
     if args.prefix_cache_ram_fraction is not None:

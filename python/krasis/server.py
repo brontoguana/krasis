@@ -689,6 +689,7 @@ def _expected_heatmap_metadata(model: KrasisModel, args, prompts: list[str]) -> 
         "kv_cache_mb": int(args.kv_cache_mb),
         "layer_group_size": int(args.layer_group_size),
         "multi_gpu_hcs": bool(args.multi_gpu_hcs),
+        "multi_gpu_mode": str(args.multi_gpu_mode),
         "hcs": bool(args.hcs),
         "quant_config": getattr(quant_cfg, "__dict__", {}) if quant_cfg is not None else {},
     }
@@ -2324,6 +2325,7 @@ def main():
             "CFG_BUILD_CACHE": "build_cache",
             "CFG_HCS": "hcs",
             "CFG_MULTI_GPU_HCS": "multi_gpu_hcs",
+            "CFG_MULTI_GPU_MODE": "multi_gpu_mode",
             "CFG_HCS_HOST_CACHE_MODE": "hcs_host_cache_mode",
             "CFG_KV_CACHE_MB": "kv_cache_mb",
             "CFG_MAX_CONTEXT_TOKENS": "max_context_tokens",
@@ -2332,6 +2334,8 @@ def main():
             "CFG_DYNAMIC_HCS": "dynamic_hcs",
             "CFG_DYNAMIC_HCS_TAIL_BLOCKS": "dynamic_hcs_tail_blocks",
             "CFG_ADAPTIVE_COLD_MASS_PRUNING": "adaptive_cold_mass_pruning",
+            "CFG_EXPERT_COMPRESSION": "expert_compression",
+            "CFG_EXPERT_COMPRESSION_SIDECAR": "expert_compression_sidecar",
             "CFG_STREAM_ATTENTION": "stream_attention",
             "CFG_DRAFT_MODEL": "draft_model",
             "CFG_DRAFT_K": "draft_k",
@@ -2355,6 +2359,7 @@ def main():
             "CFG_HCS",
             "CFG_MULTI_GPU_HCS",
             "CFG_DYNAMIC_HCS",
+            "CFG_EXPERT_COMPRESSION",
             "CFG_RING_WINDOW_KV",
             "CFG_STREAM_ATTENTION",
             "CFG_CPU_DECODE",
@@ -2538,6 +2543,15 @@ def main():
                         help="Enable Hot Cache Strategy (default: on for GPU decode, use --no-hcs to disable)")
     parser.add_argument("--multi-gpu-hcs", action="store_true", default=False,
                         help="Pin HCS experts across ALL GPUs (more capacity, but cross-device transfer)")
+    parser.add_argument(
+        "--multi-gpu-mode",
+        default="auto",
+        choices=["auto", "layer-split", "peer"],
+        help=(
+            "Multi-GPU decode planning: choose from measured startup inputs, "
+            "force the serial layer split, or force peer expert serving"
+        ),
+    )
     parser.add_argument("--hcs-host-cache-mode", default="source", choices=["auto", "mirror", "source"],
                         help="Soft HCS host storage: source/lower-system-RAM is the default, "
                              "mirror keeps the fast duplicated host chunks, auto chooses "
@@ -2554,6 +2568,17 @@ def main():
             "Approximate demand-cold expert pruning preset (launcher default: off; "
             "when omitted, existing low-level environment variables are unchanged)"
         ),
+    )
+    parser.add_argument(
+        "--expert-compression",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use a versioned bit-exact compressed expert sidecar for demand-cold DMA",
+    )
+    parser.add_argument(
+        "--expert-compression-sidecar",
+        default=None,
+        help="Exact .krec sidecar built for the loaded Marlin expert cache",
     )
     # NOTE: --hcs-headroom-mb removed — HCS budget is computed from 4-point VRAM calibration, not a fixed headroom
     parser.add_argument("--vram-safety-margin", type=int, default=600,
@@ -2645,6 +2670,17 @@ def main():
             )
         except ValueError as exc:
             parser.error(str(exc))
+    if args.expert_compression:
+        if not str(args.expert_compression_sidecar or "").strip():
+            parser.error("--expert-compression requires --expert-compression-sidecar")
+        sidecar = os.path.expanduser(args.expert_compression_sidecar)
+        if not os.path.isfile(sidecar):
+            parser.error(f"expert compression sidecar not found: {sidecar}")
+        os.environ["KRASIS_EXPERT_COMPRESSION_SIDECAR"] = sidecar
+    else:
+        os.environ.pop("KRASIS_EXPERT_COMPRESSION_SIDECAR", None)
+    if args.multi_gpu_mode == "peer" and not args.hcs:
+        parser.error("--multi-gpu-mode peer requires HCS")
     if str(getattr(args, "ssh_key_path", "") or "").strip():
         args.ssh_key_path = os.path.expanduser(args.ssh_key_path.strip())
     if str(getattr(args, "ssh_tunnel", "") or "").strip():
@@ -2850,6 +2886,8 @@ def main():
     cfg = ModelConfig.from_model_path(args.model_path)
     num_layers = cfg.num_hidden_layers
     num_gpus_available = args.num_gpus or torch.cuda.device_count()
+    if args.multi_gpu_mode == "peer" and num_gpus_available != 2:
+        parser.error("--multi-gpu-mode peer currently requires exactly two selected GPUs")
 
     # GPU decode is the only supported serving mode here. Do not load CPU expert
     # weights or enable any CPU-side fallback path.
@@ -2858,6 +2896,8 @@ def main():
     # ── Configuration summary ──
     _status(f"Krasis — {_model_name}")
     _detail(f"Decode: GPU  |  HCS: {'on' if args.hcs else 'off'}  |  GPUs: {num_gpus_available}")
+    if num_gpus_available > 1:
+        _detail(f"Multi-GPU mode: {args.multi_gpu_mode}")
     if args.hcs:
         _detail(f"HCS host cache: {args.hcs_host_cache_mode}")
     if args.selected_gpus:
@@ -3660,6 +3700,11 @@ def main():
     # Legacy compat
     _multi_gpu_split = 0
     _multi_gpu_gqa_offset = 0
+    _layer_split_plan = None
+    _multi_gpu_selected_mode = "single"
+    _peer_store = None
+    _peer_startup = None
+    _expert_compression_calibration = None
     if num_gpus_available > 1 and args.hcs:
         _status(f"Computing multi-GPU layer split ({num_gpus_available} GPUs)")
         num_layers = len(_model.layers)
@@ -3910,6 +3955,8 @@ def main():
             terminal_bytes=int(last_gpu_base_overhead_bytes),
         )
         _multi_gpu_splits = list(split_plan.splits)
+        _layer_split_plan = split_plan
+        _multi_gpu_selected_mode = "layer-split"
         predicted_improvement = (
             (split_plan.preferred_seconds_per_token - split_plan.predicted_seconds_per_token)
             / split_plan.preferred_seconds_per_token
@@ -4073,7 +4120,7 @@ def main():
                 with open(heatmap_path) as f:
                     raw_heatmap = json.load(f)
             # Strip metadata before building ranking
-            raw_heatmap.pop("_metadata", None)
+            heatmap_metadata = raw_heatmap.pop("_metadata", {})
             sorted_ranking = sorted(raw_heatmap.items(), key=lambda x: x[1], reverse=True)
             ranking = [(int(k.split(",")[0]), int(k.split(",")[1])) for k, _ in sorted_ranking]
             _detail(f"Heatmap: {len(ranking):,} experts ranked from {len(raw_heatmap):,} entries")
@@ -4112,6 +4159,247 @@ def main():
                     if layer.is_moe:
                         filtered.append((i, e))
             return filtered
+
+        if args.expert_compression:
+            _status("Calibrating production expert compression path")
+            _expert_compression_calibration = json.loads(
+                gpu_store.expert_compression_calibration_json(3, 17)
+            )
+            if not _expert_compression_calibration.get("payload_bit_exact", False):
+                raise RuntimeError(
+                    "Expert compression startup calibration did not prove bit-identical reconstruction"
+                )
+            _detail(
+                "Expert compression: "
+                f"{_expert_compression_calibration['compressed_bytes']:,} / "
+                f"{_expert_compression_calibration['raw_bytes']:,} bytes, "
+                f"copies/expert={_expert_compression_calibration['copies_per_expert']}, "
+                f"decoder-streams={_expert_compression_calibration['decoder_streams']}, "
+                f"pipeline p50/p95="
+                f"{_expert_compression_calibration['p50_us']:.2f}/"
+                f"{_expert_compression_calibration['p95_us']:.2f} us, bit-exact"
+            )
+            logger.info(
+                "Expert compression startup calibration: %s",
+                json.dumps(_expert_compression_calibration, sort_keys=True),
+            )
+
+        peer_candidate = (
+            num_gpus_available == 2
+            and args.hcs
+            and args.multi_gpu_mode in ("auto", "peer")
+        )
+        if args.multi_gpu_mode == "peer" and heuristic_hcs_init:
+            raise RuntimeError(
+                "Peer expert mode requires a validated route heatmap; heuristic HCS init has no route-mass basis"
+            )
+        if peer_candidate and heuristic_hcs_init:
+            _warn(
+                "Multi-GPU auto selector retained layer-split: peer prediction requires a validated route heatmap"
+            )
+            peer_candidate = False
+
+        if peer_candidate:
+            if _layer_split_plan is None:
+                raise RuntimeError("Peer selector has no measured layer-split comparison plan")
+            _status("Calibrating peer-expert multi-GPU mode")
+            peer_gpu_idx = device_indices[1]
+            _peer_store = _model.setup_gpu_peer_expert_store(peer_gpu_idx)
+            peer_store_addr = _peer_store.gpu_store_addr()
+
+            rtt = json.loads(
+                gpu_store.measure_peer_round_trip_json(
+                    peer_store_addr,
+                    16,
+                    128,
+                    1_000,
+                )
+            )
+            _detail(
+                "Peer host-bounce RTT: "
+                f"p50/p95/p99={rtt['p50_us']:.3f}/{rtt['p95_us']:.3f}/"
+                f"{rtt['p99_us']:.3f} us, max={rtt['max_us']:.3f} us, "
+                f"payload={rtt['message_bytes_each_direction']:,} bytes each way"
+            )
+            logger.info("Peer RTT startup calibration: %s", json.dumps(rtt, sort_keys=True))
+            peer_rtt_gate_us = 30.0
+            if rtt["p95_us"] > peer_rtt_gate_us:
+                message = (
+                    "peer p95 RTT failed the user-defined 30 us topology gate: "
+                    f"{rtt['p95_us']:.3f} us"
+                )
+                if args.multi_gpu_mode == "peer":
+                    raise RuntimeError(message)
+                _warn(f"Multi-GPU auto selector retained layer-split: {message}")
+                _peer_store = None
+                peer_candidate = False
+
+        if peer_candidate:
+            full_ranking = _full_ranking_for_layers(ranking, 0, len(_model.layers))
+            by_layer = {}
+            for pair in full_ranking:
+                by_layer.setdefault(pair[0], []).append(pair)
+            calibration_ranking = next(
+                (
+                    layer_ranking[: int(cfg.num_experts_per_tok)]
+                    for layer_ranking in by_layer.values()
+                    if len(layer_ranking) >= int(cfg.num_experts_per_tok)
+                ),
+                None,
+            )
+            if calibration_ranking is None:
+                raise RuntimeError(
+                    "Peer service calibration found no MoE layer with a complete routed top-k"
+                )
+            expert_payload_bytes = int(gpu_store.expert_payload_bytes)
+            calibration_budget_mb = math.ceil(
+                len(calibration_ranking) * expert_payload_bytes / (1024 * 1024)
+            )
+            calibration_load = _peer_store.hcs_pool_init_tiered(
+                calibration_ranking,
+                hard_budget_mb=calibration_budget_mb,
+                soft_budget_mb=0,
+                safety_margin_mb=SAFETY_MARGIN_MB,
+            )
+            _dim(f"Peer calibration HCS: {calibration_load}")
+            torch.cuda.synchronize(peer_gpu_idx)
+            vram_monitor.reset_min_free()
+            peer_service_baseline_mb = int(vram_monitor.current_free_mb(peer_gpu_idx))
+            service = json.loads(_peer_store.peer_service_calibration_json(3, 17))
+            torch.cuda.synchronize(peer_gpu_idx)
+            time.sleep(0.1)
+            peer_service_min_mb = int(vram_monitor.min_free_mb(peer_gpu_idx))
+            peer_service_transient_mb = max(
+                0, peer_service_baseline_mb - peer_service_min_mb
+            )
+            service_curve_p95 = [
+                float(point["p95_us"]) for point in service["curve"]
+            ]
+            _peer_store.hcs_reset()
+            with torch.cuda.device(peer_gpu_idx):
+                torch.cuda.empty_cache()
+            peer_free_mb = int(vram_monitor.current_free_mb(peer_gpu_idx))
+            peer_hcs_budget_mb = max(
+                0,
+                peer_free_mb - SAFETY_MARGIN_MB - peer_service_transient_mb,
+            )
+            peer_capacity_experts = (
+                peer_hcs_budget_mb * 1024 * 1024 // expert_payload_bytes
+            )
+            primary_capacity_experts = (
+                int(decode_hcs_budget) * 1024 * 1024 // expert_payload_bytes
+            )
+            if peer_capacity_experts <= 0:
+                raise RuntimeError(
+                    "Peer startup calibration left no measured HCS capacity after the safety margin"
+                )
+
+            total_decode_tokens = int(
+                heatmap_metadata.get("heatmap_build", {}).get("total_decode_tokens", 0)
+            )
+            local_cold_p95_us = float(_multi_gpu_service_profiles[0].h2d_p95_us)
+            local_cold_seconds = (
+                float(_multi_gpu_service_profiles[0].h2d_seconds_per_byte)
+                * expert_payload_bytes
+            )
+            if _expert_compression_calibration is not None:
+                local_cold_p95_us = float(
+                    _expert_compression_calibration["p95_us"]
+                )
+                local_cold_seconds = (
+                    float(_expert_compression_calibration["p50_us"]) / 1_000_000.0
+                )
+
+            from krasis.multi_gpu_planner import predict_peer_expert_plan
+
+            peer_plan = predict_peer_expert_plan(
+                heatmap_counts=raw_heatmap,
+                total_decode_tokens=total_decode_tokens,
+                ranking=full_ranking,
+                primary_capacity_experts=primary_capacity_experts,
+                peer_capacity_experts=peer_capacity_experts,
+                layer_resident_bytes=_layer_service_bytes,
+                layer_is_moe=layer_is_moe,
+                primary_profile=_multi_gpu_service_profiles[0],
+                expert_bytes=expert_payload_bytes,
+                service_p95_us_by_routes=service_curve_p95,
+                rtt_p95_us=float(rtt["p95_us"]),
+                terminal_bytes=int(last_gpu_base_overhead_bytes),
+                local_cold_seconds_per_expert=local_cold_seconds,
+            )
+            admitted_route_counts = [
+                float(rtt["p95_us"]) + service_curve_p95[count - 1]
+                < local_cold_p95_us * count
+                for count in range(1, int(cfg.num_experts_per_tok) + 1)
+            ]
+            peer_prediction_ms = peer_plan.predicted_seconds_per_token * 1_000.0
+            split_prediction_ms = (
+                _layer_split_plan.predicted_seconds_per_token * 1_000.0
+            )
+            selector_uncertainty_ms = _layer_split_plan.uncertainty_seconds * 1_000.0
+            peer_is_faster = (
+                peer_plan.predicted_seconds_per_token
+                + _layer_split_plan.uncertainty_seconds
+                < _layer_split_plan.predicted_seconds_per_token
+                and any(admitted_route_counts)
+            )
+            _detail(
+                "Multi-GPU mode predictions: "
+                f"layer-split={split_prediction_ms:.3f} ms/token, "
+                f"peer={peer_prediction_ms:.3f} ms/token, "
+                f"uncertainty={selector_uncertainty_ms:.3f} ms, "
+                f"peer_capacity={peer_capacity_experts:,} experts, "
+                f"captured_cold={peer_plan.captured_cold_fraction:.2%} "
+                f"({peer_plan.captured_routes_per_token:.3f} routes/token)"
+            )
+            logger.info(
+                "Multi-GPU mode selector layer_split_ms=%.6f peer_ms=%.6f "
+                "uncertainty_ms=%.6f peer_capacity=%d peer_budget_mb=%d "
+                "peer_service_transient_mb=%d captured_routes_per_token=%.9f "
+                "cold_routes_before=%.9f cold_routes_after=%.9f captured_cold_fraction=%.9f "
+                "admitted_route_counts=%s",
+                split_prediction_ms,
+                peer_prediction_ms,
+                selector_uncertainty_ms,
+                peer_capacity_experts,
+                peer_hcs_budget_mb,
+                peer_service_transient_mb,
+                peer_plan.captured_routes_per_token,
+                peer_plan.cold_routes_before_per_token,
+                peer_plan.cold_routes_after_per_token,
+                peer_plan.captured_cold_fraction,
+                admitted_route_counts,
+            )
+            if args.multi_gpu_mode == "peer" and not peer_is_faster:
+                raise RuntimeError(
+                    "Forced peer mode failed measured critical-path admission: "
+                    f"peer={peer_prediction_ms:.3f} ms/token, "
+                    f"layer-split={split_prediction_ms:.3f} ms/token, "
+                    f"uncertainty={selector_uncertainty_ms:.3f} ms, "
+                    f"admitted_routes={admitted_route_counts}"
+                )
+            if args.multi_gpu_mode == "peer" or peer_is_faster:
+                _multi_gpu_selected_mode = "peer"
+                _multi_gpu_splits = []
+                _multi_gpu_gqa_offsets = []
+                _multi_gpu_split = 0
+                _multi_gpu_gqa_offset = 0
+                _peer_startup = {
+                    "store_addr": peer_store_addr,
+                    "rtt": rtt,
+                    "service": service,
+                    "service_curve_p95": service_curve_p95,
+                    "local_cold_p95_us": local_cold_p95_us,
+                    "peer_hcs_budget_mb": peer_hcs_budget_mb,
+                    "predicted_residents": peer_plan.peer_residents,
+                    "peer_prediction_ms": peer_prediction_ms,
+                    "split_prediction_ms": split_prediction_ms,
+                    "selector_uncertainty_ms": selector_uncertainty_ms,
+                }
+                _status("Multi-GPU selector chose peer expert serving")
+            else:
+                _peer_store = None
+                _status("Multi-GPU selector chose serial layer split")
 
         # ── Pass calibration data to Rust ──
         if hasattr(_model, '_gpu_decode_store'):
@@ -4254,6 +4542,68 @@ def main():
                     result,
                 )
                 _model.log_vram_ledger_residency("after-hcs-init")
+
+            if _multi_gpu_selected_mode == "peer":
+                if _peer_store is None or _peer_startup is None:
+                    raise RuntimeError(
+                        "Peer mode was selected without a calibrated peer store"
+                    )
+                primary_residents = set(store.hcs_resident_pairs())
+                peer_ranking = [
+                    pair for pair in full_ranking if pair not in primary_residents
+                ]
+                _status("Loading disjoint peer expert tier")
+                peer_hcs_result = _peer_store.hcs_pool_init_tiered(
+                    peer_ranking,
+                    hard_budget_mb=int(_peer_startup["peer_hcs_budget_mb"]),
+                    soft_budget_mb=0,
+                    safety_margin_mb=SAFETY_MARGIN_MB,
+                )
+                actual_peer_residents = set(_peer_store.hcs_resident_pairs())
+                overlap = primary_residents.intersection(actual_peer_residents)
+                if overlap:
+                    raise RuntimeError(
+                        f"Peer HCS is not disjoint from primary HCS ({len(overlap)} duplicate experts)"
+                    )
+                captured_count = sum(
+                    int(raw_heatmap.get(f"{layer},{expert}", 0))
+                    for layer, expert in actual_peer_residents
+                )
+                total_decode_tokens = int(
+                    heatmap_metadata.get("heatmap_build", {}).get(
+                        "total_decode_tokens", 0
+                    )
+                )
+                captured_routes_per_token = (
+                    captured_count / total_decode_tokens
+                    if total_decode_tokens > 0
+                    else 0.0
+                )
+                _detail(f"Peer HCS: {peer_hcs_result}")
+                _detail(
+                    f"Peer residents: {len(actual_peer_residents):,}, "
+                    f"primary overlap=0, approved-heatmap capture="
+                    f"{captured_routes_per_token:.3f} routes/token"
+                )
+                attach_result = store.attach_peer_expert_store(
+                    int(_peer_startup["store_addr"]),
+                    list(_peer_startup["service_curve_p95"]),
+                    float(_peer_startup["rtt"]["p95_us"]),
+                    float(_peer_startup["local_cold_p95_us"]),
+                    float(_peer_startup["peer_prediction_ms"]),
+                    float(_peer_startup["split_prediction_ms"]),
+                    float(_peer_startup["selector_uncertainty_ms"]),
+                )
+                _detail(attach_result)
+                logger.info(
+                    "Peer expert mode ready: primary_residents=%d peer_residents=%d "
+                    "captured_routes_per_token=%.9f peer_budget_mb=%d attach=%s",
+                    len(primary_residents),
+                    len(actual_peer_residents),
+                    captured_routes_per_token,
+                    int(_peer_startup["peer_hcs_budget_mb"]),
+                    attach_result,
+                )
 
     # ── Decode validation ──
     # Rust prefill warmup already ran before HCS budgeting.
