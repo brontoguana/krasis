@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Completed the requested timing-disabled GLM-5.2 performance acceptance for
+  dynamic peer residency and the streaming compression pipeline. Dynamic peer
+  alone measured 5.10 tok/s internal decode versus the 5.07 static-peer
+  control (flat). Streaming compression alone measured 4.87 tok/s versus the
+  4.75 raw baseline, but its 702.01 us calibrated p95 was slower than the
+  accepted grouped codec's 682.55 us. Combined dynamic peer plus streaming
+  measured 5.28 tok/s and 8.87 tok/s HTTP, below static peer plus grouped
+  compression at 5.38/9.03. Streaming calibration was bit-exact; all rows
+  retained 1,172-1,178 MiB minimum free VRAM against the 600 MiB margin and
+  had zero HCS copy failures. The deeper streaming candidate is rejected on
+  this hardware; grouped remains accepted. All nine logs are indexed in
+  `benchmarks/BENCHMARKS.md`.
+
 - Added opt-in live-demand peer residency and a deeper compressed-expert
   pipeline. Dynamic peer mode learns from surviving cold routes, rate-limits
   replacements from runtime capacity and measured copy cost, and publishes a
@@ -13,12 +26,14 @@
   becoming an unreported no-op. Compression can now
   use one persistent decoder across task-aligned copy ranges; startup can
   compare it with the established grouped pipeline and select the lower-p95
-  bit-exact plan. Existing behavior remains the default pending live testing.
+  bit-exact plan. Live testing retained the grouped pipeline as the accepted
+  default and left dynamic peer opt-in because its measured gain was flat.
 - Fixed decode-kernel cache invalidation so an expert-codec CUDA edit is an
   explicit production PTX freshness input rather than reusing stale kernels.
   The exact final source passes the installed-path build, focused dynamic-peer
   and codec contracts, launcher 29/29 plus planner 6/6, all Rust server groups,
-  and both Python server groups. No model or speed run was made.
+  and both Python server groups. Those were the pre-live implementation gates;
+  the later performance results are recorded above.
 
 - Completed the fixed six-run GLM-5.2 matrix for peer-expert serving and the
   bit-exact GPU expert codec. Best internal decode improved from 4.75 tok/s

@@ -1,5 +1,46 @@
 # Krasis Benchmark Results
 
+## GLM-5.2 dynamic peer and streaming compression follow-up — 2026-08-08
+
+These three timing-disabled `./dev benchmark` runs used one unchanged source
+revision, the approved GLM heatmap, INT4/HQQ4/K4V4, and no adaptive cold-mass
+pruning. Dynamic-peer rows used the RTX PRO 6000 primary plus A4500; the
+streaming-only row used the RTX PRO. Each row forced the named candidate rather
+than relying on automatic selection.
+
+| Candidate | Internal prefill (1K/3,196) | Internal decode (50/100/250) | HTTP round trip (50/100/250) | HCS | Minimum free VRAM |
+|---|---:|---:|---:|---:|---:|
+| Dynamic peer only | 45.1 / 44.7 | **5.10** / 5.06 / 5.01 | **8.62** / 6.42 / 5.35 | 3,887 (20.2%) | 1,178 MiB |
+| Streaming compression only | 44.9 / 44.5 | 4.84 / **4.87** / 4.69 | **8.32** / 6.21 / 5.25 | 3,848 (20.0%) | 1,174 MiB |
+| Dynamic peer + streaming compression | 44.8 / 44.5 | 5.24 / **5.28** / 5.16 | **8.87** / 6.79 / 5.67 | 3,848 (20.0%) | 1,172 MiB |
+
+Dynamic peer alone is effectively flat against the accepted static-peer
+control: 5.10 versus 5.07 tok/s internally (+0.59%), while HTTP is 8.62 versus
+8.65 (-0.35%). The standard output confirms `dynamic_peer=True` was resolved,
+but its existing peer summary does not expose the nested swap counters, so no
+causal claim about replacement count is made from this run.
+
+The persistent streaming codec was bit-exact, but calibration selected 8
+chunks at 695.14/702.01 us p50/p95 alone and 4 chunks at 700.54/703.68 us in
+the combined row. Both are slower than the accepted grouped codec's
+678.46/682.55 us. Streaming-only improves best internal decode over the raw
+4.75 tok/s baseline by 2.53%, but the combined candidate scores 5.28 tok/s,
+below static peer plus grouped compression at 5.38 tok/s (-1.86%). Its three
+internal legs are 2.9-3.4 ms/token slower than the otherwise matched grouped
+control, consistent with the measured per-expert calibration penalty. The
+deeper streaming candidate is therefore rejected on this hardware; grouped
+remains the accepted codec pipeline.
+
+Evidence: dynamic peer [stdout](20260808_glm52_dynamic_peer_only_benchmark_stdout.log),
+[report](20260808_glm52_dynamic_peer_only_benchmark_report.log),
+[runtime](20260808_glm52_dynamic_peer_only_krasis.log); streaming compression
+[stdout](20260808_glm52_streaming_compression_only_benchmark_stdout.log),
+[report](20260808_glm52_streaming_compression_only_benchmark_report.log),
+[runtime](20260808_glm52_streaming_compression_only_krasis.log); combined
+[stdout](20260808_glm52_dynamic_peer_streaming_combined_benchmark_stdout.log),
+[report](20260808_glm52_dynamic_peer_streaming_combined_benchmark_report.log),
+[runtime](20260808_glm52_dynamic_peer_streaming_combined_krasis.log).
+
 ## GLM-5.2 peer serving and GPU expert compression matrix — 2026-08-07
 
 All six rows used the same final INT4/HQQ4/K4V4 runtime, approved heatmap and
