@@ -36,6 +36,122 @@ __device__ __forceinline__ void apply_swiglu_limit(float &silu_gate, float &up, 
     }
 }
 
+/* TileQ-S routed-expert prefill. The routed rows have already been sorted in
+ * 64-row expert blocks by the standard Krasis MoE dispatcher. Each output
+ * block covers eight routed rows and 64 output columns; because eight divides
+ * the dispatcher block size, every block consumes exactly one expert's
+ * residual and shared correction factors. */
+__device__ __forceinline__ int tileq_prefill_int3_value(
+    const unsigned int* __restrict__ packed,
+    int row_words,
+    int row,
+    int col)
+{
+    int bit = col * 3;
+    int word = bit >> 5;
+    int shift = bit & 31;
+    unsigned int code = packed[row * row_words + word] >> shift;
+    if (shift > 29) {
+        code |= packed[row * row_words + word + 1] << (32 - shift);
+    }
+    code &= 7u;
+    return (code & 4u) ? ((int)code - 8) : (int)code;
+}
+
+extern "C" __global__ void tileq_prefill_rank_sorted_bf16_kernel(
+    const __nv_bfloat16* __restrict__ inputs,
+    const int* __restrict__ sorted_ids,
+    const int* __restrict__ expert_ids,
+    const unsigned short* __restrict__ expert_tiles,
+    const __nv_bfloat16* __restrict__ expert_inverse_scales,
+    const __nv_bfloat16* __restrict__ left_factors,
+    float* __restrict__ rank_outputs,
+    int total_sorted,
+    int routed_rows,
+    int input_dim,
+    int rank,
+    int dispatcher_block)
+{
+    int sorted_pos = (int)blockIdx.x;
+    int r = (int)threadIdx.x;
+    if (sorted_pos >= total_sorted || r >= rank) return;
+    int routed_row = sorted_ids[sorted_pos];
+    if (routed_row < 0 || routed_row >= routed_rows) return;
+    int expert = expert_ids[sorted_pos / dispatcher_block];
+    if (expert < 0) return;
+    int tile_row = (int)expert_tiles[expert * 2];
+    const __nv_bfloat16* input = inputs + (unsigned long long)routed_row * input_dim;
+    const __nv_bfloat16* left = left_factors +
+        (unsigned long long)tile_row * input_dim * rank;
+    const __nv_bfloat16* inverse_scale = expert_inverse_scales +
+        (unsigned long long)expert * input_dim;
+    float sum = 0.0f;
+    for (int k = 0; k < input_dim; ++k) {
+        float scaled_input = bf16_to_float(input[k]) * bf16_to_float(inverse_scale[k]);
+        sum = fmaf(scaled_input, bf16_to_float(left[k * rank + r]), sum);
+    }
+    rank_outputs[(unsigned long long)routed_row * rank + r] = sum;
+}
+
+extern "C" __global__ void tileq_prefill_int3_sorted_bf16_kernel(
+    const unsigned long long* __restrict__ packed_ptrs,
+    const unsigned long long* __restrict__ scale_ptrs,
+    const __nv_bfloat16* __restrict__ inputs,
+    const float* __restrict__ rank_inputs,
+    const int* __restrict__ sorted_ids,
+    const int* __restrict__ expert_ids,
+    const unsigned short* __restrict__ expert_tiles,
+    const __nv_bfloat16* __restrict__ right_factors,
+    __nv_bfloat16* __restrict__ outputs,
+    int total_sorted,
+    int routed_rows,
+    int input_dim,
+    int output_dim,
+    int group_size,
+    int rank,
+    int dispatcher_block,
+    unsigned long long packed_byte_offset,
+    unsigned long long scale_byte_offset,
+    int output_offset,
+    int output_stride)
+{
+    const int rows_per_block = 8;
+    const int cols_per_block = 64;
+    int lane = (int)threadIdx.x;
+    int local_row = lane / cols_per_block;
+    int output_col = (int)blockIdx.x * cols_per_block + lane % cols_per_block;
+    int sorted_pos = (int)blockIdx.y * rows_per_block + local_row;
+    if (sorted_pos >= total_sorted || output_col >= output_dim) return;
+    int routed_row = sorted_ids[sorted_pos];
+    if (routed_row < 0 || routed_row >= routed_rows) return;
+    int expert = expert_ids[sorted_pos / dispatcher_block];
+    if (expert < 0) return;
+
+    const unsigned int* packed = reinterpret_cast<const unsigned int*>(
+        packed_ptrs[expert] + packed_byte_offset);
+    const __nv_bfloat16* scales = reinterpret_cast<const __nv_bfloat16*>(
+        scale_ptrs[expert] + scale_byte_offset);
+    const __nv_bfloat16* input = inputs + (unsigned long long)routed_row * input_dim;
+    int row_words = input_dim * 3 / 32;
+    int groups = input_dim / group_size;
+    float sum = 0.0f;
+    for (int k = 0; k < input_dim; ++k) {
+        int q = tileq_prefill_int3_value(packed, row_words, output_col, k);
+        float scale = bf16_to_float(scales[output_col * groups + k / group_size]);
+        sum = fmaf((float)q * scale, bf16_to_float(input[k]), sum);
+    }
+
+    int tile_col = (int)expert_tiles[expert * 2 + 1];
+    const __nv_bfloat16* right = right_factors +
+        (unsigned long long)tile_col * rank * output_dim;
+    const float* rank_input = rank_inputs + (unsigned long long)routed_row * rank;
+    for (int r = 0; r < rank; ++r) {
+        sum = fmaf(rank_input[r], bf16_to_float(right[r * output_dim + output_col]), sum);
+    }
+    outputs[(unsigned long long)routed_row * output_stride + output_offset + output_col] =
+        float_to_bf16(sum);
+}
+
 extern "C" __device__ float __nv_logf(float);
 extern "C" __device__ float __nv_expf(float);
 

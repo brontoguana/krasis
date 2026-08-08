@@ -14,6 +14,7 @@
 //! such as vendored Marlin/FlashAttention/FLA libraries.
 
 use std::cell::{Cell, RefCell};
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -5811,6 +5812,8 @@ pub struct PrefillKernels {
     moe_replicate_hidden: RawCuFunc,
     moe_scatter_fused: RawCuFunc,
     moe_scatter_weighted: RawCuFunc,
+    tileq_prefill_rank_sorted: RawCuFunc,
+    tileq_prefill_int3_sorted: RawCuFunc,
 
     // Marlin GEMM functions (loaded from vendored sidecars)
     marlin_mm: Option<MarlinMmFn>,
@@ -7947,6 +7950,26 @@ pub struct ExpertWeightPtrs {
     pub contiguous_bytes: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PrefillTileQProjectionPtrs {
+    pub expert_tiles_ptr: u64,
+    pub expert_inverse_scales_ptr: u64,
+    pub left_factors_ptr: u64,
+    pub right_factors_ptr: u64,
+    pub input_dim: usize,
+    pub output_dim: usize,
+    pub rank: usize,
+    pub grid_rows: usize,
+    pub grid_cols: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PrefillTileQLayerPtrs {
+    pub gate: PrefillTileQProjectionPtrs,
+    pub up: PrefillTileQProjectionPtrs,
+    pub down: PrefillTileQProjectionPtrs,
+}
+
 /// Per-MoE-layer expert data for prefill DMA.
 pub struct PrefillMoeLayerData {
     pub experts: Vec<ExpertWeightPtrs>,
@@ -7961,6 +7984,7 @@ pub struct PrefillMoeLayerData {
     pub bulk_w13s: (usize, usize), // w13_scales
     pub bulk_w2p: (usize, usize),  // w2_packed
     pub bulk_w2s: (usize, usize),  // w2_scales
+    pub tileq: Option<PrefillTileQLayerPtrs>,
 }
 
 pub struct PrefillScratch {
@@ -8080,6 +8104,250 @@ pub struct PrefillLogitPosition {
     pub target_logprob: Option<f32>,
 }
 
+const TILEQ_CAPTURE_MAGIC: &[u8; 4] = b"KTC1";
+const TILEQ_CAPTURE_VERSION: u32 = 2;
+
+/// Calibration-only capture of real routed expert inputs. This object is
+/// absent during ordinary inference. It performs no work unless an explicit
+/// `KRASIS_TILEQ_CAPTURE_DIR` is supplied by the built TileQ workflow.
+pub struct TileQCalibrationCapture {
+    dir: PathBuf,
+    arm_file: PathBuf,
+    max_tokens_per_layer: usize,
+    max_tokens_per_request: usize,
+    tokens_per_layer: Vec<usize>,
+}
+
+impl TileQCalibrationCapture {
+    fn from_env(config: &PrefillModelConfig, layers: &[PrefillLayerWeights]) -> Result<Option<Self>, String> {
+        let Some(raw_dir) = std::env::var_os("KRASIS_TILEQ_CAPTURE_DIR") else {
+            return Ok(None);
+        };
+        if !cfg!(target_endian = "little") {
+            return Err("TileQ calibration capture currently requires a little-endian host".to_string());
+        }
+        let dir = PathBuf::from(raw_dir);
+        if dir.as_os_str().is_empty() {
+            return Err("KRASIS_TILEQ_CAPTURE_DIR must not be empty".to_string());
+        }
+        let max_tokens_per_layer = std::env::var("KRASIS_TILEQ_CAPTURE_TOKENS")
+            .map_err(|_| "KRASIS_TILEQ_CAPTURE_TOKENS is required with KRASIS_TILEQ_CAPTURE_DIR".to_string())?
+            .parse::<usize>()
+            .map_err(|_| "KRASIS_TILEQ_CAPTURE_TOKENS must be a positive integer".to_string())?;
+        if max_tokens_per_layer == 0 {
+            return Err("KRASIS_TILEQ_CAPTURE_TOKENS must be greater than zero".to_string());
+        }
+        let max_tokens_per_request = std::env::var("KRASIS_TILEQ_CAPTURE_TOKENS_PER_REQUEST")
+            .map_err(|_| {
+                "KRASIS_TILEQ_CAPTURE_TOKENS_PER_REQUEST is required with KRASIS_TILEQ_CAPTURE_DIR"
+                    .to_string()
+            })?
+            .parse::<usize>()
+            .map_err(|_| {
+                "KRASIS_TILEQ_CAPTURE_TOKENS_PER_REQUEST must be a positive integer".to_string()
+            })?;
+        if max_tokens_per_request == 0 || max_tokens_per_request > max_tokens_per_layer {
+            return Err(
+                "KRASIS_TILEQ_CAPTURE_TOKENS_PER_REQUEST must be greater than zero and no larger than KRASIS_TILEQ_CAPTURE_TOKENS"
+                    .to_string(),
+            );
+        }
+        let calibration_sha256 = std::env::var("KRASIS_TILEQ_CALIBRATION_SHA256")
+            .map_err(|_| "KRASIS_TILEQ_CALIBRATION_SHA256 is required with KRASIS_TILEQ_CAPTURE_DIR".to_string())?;
+        if calibration_sha256.len() != 64
+            || !calibration_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err("KRASIS_TILEQ_CALIBRATION_SHA256 must be 64 hexadecimal characters".to_string());
+        }
+        let arm_file = PathBuf::from(
+            std::env::var_os("KRASIS_TILEQ_CAPTURE_ARM_FILE")
+                .ok_or_else(|| "KRASIS_TILEQ_CAPTURE_ARM_FILE is required with KRASIS_TILEQ_CAPTURE_DIR".to_string())?,
+        );
+        if arm_file.as_os_str().is_empty() || arm_file.exists() {
+            return Err(
+                "KRASIS_TILEQ_CAPTURE_ARM_FILE must name a non-existent file that the corpus client creates only after server startup"
+                    .to_string(),
+            );
+        }
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("failed to create TileQ capture directory {}: {e}", dir.display()))?;
+        if std::fs::read_dir(&dir)
+            .map_err(|e| format!("failed to inspect TileQ capture directory {}: {e}", dir.display()))?
+            .next()
+            .is_some()
+        {
+            return Err(format!(
+                "TileQ capture directory {} is not empty; use a new directory so calibration data cannot be mixed",
+                dir.display()
+            ));
+        }
+
+        let routed_layers = layers
+            .iter()
+            .enumerate()
+            .filter(|(_, layer)| layer.moe_gate_ptr != 0)
+            .map(|(model_layer, layer)| {
+                serde_json::json!({
+                    "model_layer": model_layer,
+                    "moe_layer_index": layer.moe_layer_idx,
+                    "experts": layer.moe_num_experts,
+                    "topk": layer.moe_topk,
+                    "expert_input_size": if layer.moe_input_size > 0 { layer.moe_input_size } else { config.hidden_size },
+                    "intermediate_size": config.moe_intermediate_size,
+                    "gated": layer.moe_gated,
+                    "activation": layer.moe_activation,
+                })
+            })
+            .collect::<Vec<_>>();
+        let metadata = serde_json::json!({
+            "schema_version": TILEQ_CAPTURE_VERSION,
+            "format": "KTC1",
+            "includes_router_weights": true,
+            "calibration_sha256": calibration_sha256.to_ascii_lowercase(),
+            "arm_file": arm_file,
+            "max_tokens_per_layer": max_tokens_per_layer,
+            "max_tokens_per_request": max_tokens_per_request,
+            "hidden_size": config.hidden_size,
+            "moe_intermediate_size": config.moe_intermediate_size,
+            "routed_layers": routed_layers,
+        });
+        let metadata_bytes = serde_json::to_vec_pretty(&metadata)
+            .map_err(|e| format!("failed to serialize TileQ capture metadata: {e}"))?;
+        let metadata_path = dir.join("capture.json");
+        let mut metadata_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&metadata_path)
+            .map_err(|e| format!("failed to create {}: {e}", metadata_path.display()))?;
+        metadata_file
+            .write_all(&metadata_bytes)
+            .and_then(|_| metadata_file.sync_all())
+            .map_err(|e| format!("failed to publish {}: {e}", metadata_path.display()))?;
+
+        eprintln!(
+            "[TILEQ-CAPTURE] enabled dir={} tokens_per_layer={} tokens_per_request={} calibration_sha256={}",
+            dir.display(),
+            max_tokens_per_layer,
+            max_tokens_per_request,
+            calibration_sha256.to_ascii_lowercase(),
+        );
+        Ok(Some(Self {
+            dir,
+            arm_file,
+            max_tokens_per_layer,
+            max_tokens_per_request,
+            tokens_per_layer: vec![0; layers.len()],
+        }))
+    }
+
+    fn remaining(&self, model_layer: usize, request_chunk_start: usize) -> usize {
+        if !self.arm_file.is_file() {
+            return 0;
+        }
+        let corpus_remaining = self
+            .max_tokens_per_layer
+            .saturating_sub(self.tokens_per_layer.get(model_layer).copied().unwrap_or(0));
+        let request_remaining = self
+            .max_tokens_per_request
+            .saturating_sub(request_chunk_start);
+        corpus_remaining.min(request_remaining)
+    }
+
+    fn append_chunk(
+        &mut self,
+        model_layer: usize,
+        expert_input_size: usize,
+        intermediate_size: usize,
+        topk: usize,
+        expert_count: usize,
+        expert_inputs: &[u16],
+        topk_ids: &[i32],
+        topk_weights: &[f32],
+        down_inputs: &[u16],
+    ) -> Result<(), String> {
+        let rows = if expert_input_size > 0 {
+            expert_inputs.len() / expert_input_size
+        } else {
+            0
+        };
+        if rows == 0
+            || expert_inputs.len() != rows.saturating_mul(expert_input_size)
+            || topk_ids.len() != rows.saturating_mul(topk)
+            || topk_weights.len() != rows.saturating_mul(topk)
+            || down_inputs.len() != rows.saturating_mul(topk).saturating_mul(intermediate_size)
+        {
+            return Err(format!(
+                "TileQ capture layer {model_layer} chunk geometry mismatch: rows={rows} x={} ids={} weights={} down={}",
+                expert_inputs.len(),
+                topk_ids.len(),
+                topk_weights.len(),
+                down_inputs.len()
+            ));
+        }
+        for (index, &expert) in topk_ids.iter().enumerate() {
+            if expert < 0 || expert as usize >= expert_count {
+                return Err(format!(
+                    "TileQ capture layer {model_layer} route {index} has invalid expert {expert}/{expert_count}"
+                ));
+            }
+        }
+        let existing = self.tokens_per_layer[model_layer];
+        let path = self.dir.join(format!("layer_{model_layer:05}.ktc"));
+        let mut file = if existing == 0 {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("failed to create TileQ capture {}: {e}", path.display()))?;
+            file.write_all(TILEQ_CAPTURE_MAGIC)
+                .and_then(|_| file.write_all(&TILEQ_CAPTURE_VERSION.to_le_bytes()))
+                .and_then(|_| file.write_all(&(model_layer as u32).to_le_bytes()))
+                .and_then(|_| file.write_all(&(expert_input_size as u32).to_le_bytes()))
+                .and_then(|_| file.write_all(&(intermediate_size as u32).to_le_bytes()))
+                .and_then(|_| file.write_all(&(topk as u32).to_le_bytes()))
+                .and_then(|_| file.write_all(&(expert_count as u32).to_le_bytes()))
+                .and_then(|_| file.write_all(&0u32.to_le_bytes()))
+                .map_err(|e| format!("failed to write TileQ capture header {}: {e}", path.display()))?;
+            file
+        } else {
+            OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .map_err(|e| format!("failed to append TileQ capture {}: {e}", path.display()))?
+        };
+        file.write_all(&(rows as u32).to_le_bytes())
+            .map_err(|e| format!("failed to append TileQ row count {}: {e}", path.display()))?;
+        write_native_le_slice(&mut file, expert_inputs, &path)?;
+        write_native_le_slice(&mut file, topk_ids, &path)?;
+        write_native_le_slice(&mut file, topk_weights, &path)?;
+        write_native_le_slice(&mut file, down_inputs, &path)?;
+        file.flush()
+            .map_err(|e| format!("failed to flush TileQ capture {}: {e}", path.display()))?;
+        self.tokens_per_layer[model_layer] = existing.saturating_add(rows);
+        if self.tokens_per_layer[model_layer] == self.max_tokens_per_layer {
+            file.sync_all()
+                .map_err(|e| format!("failed to sync completed TileQ capture {}: {e}", path.display()))?;
+            eprintln!(
+                "[TILEQ-CAPTURE] layer={} complete tokens={} file={}",
+                model_layer,
+                self.tokens_per_layer[model_layer],
+                path.display(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn write_native_le_slice<T: Copy>(file: &mut File, values: &[T], path: &std::path::Path) -> Result<(), String> {
+    let byte_len = values
+        .len()
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(|| format!("TileQ capture byte length overflow for {}", path.display()))?;
+    let bytes = unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, byte_len) };
+    file.write_all(bytes)
+        .map_err(|e| format!("failed to append TileQ capture {}: {e}", path.display()))
+}
+
 // ════════════════════════════════════════════════════════════════════════
 //  Prefill Engine
 // ════════════════════════════════════════════════════════════════════════
@@ -8170,6 +8438,9 @@ pub struct PrefillEngine {
     pub first_token_margin_projection_request_enabled: bool,
     pub read_only_checkpoint_request_enabled: bool,
     pub last_reference_debug_trace: Option<serde_json::Value>,
+    /// Explicit calibration-only routed activation capture. Always `None` in
+    /// ordinary model execution.
+    pub tileq_capture: Option<TileQCalibrationCapture>,
     pub reference_prefill_stage_snapshots: RefCell<Vec<serde_json::Value>>,
     pub(crate) first_token_margin_projection_layer_deltas:
         RefCell<Vec<FirstTokenMarginProjectionLayerDelta>>,
@@ -8548,6 +8819,78 @@ struct ExpertHqqRuntimePrefillSingleBlockGpuDiagnosticOutput {
 }
 
 impl PrefillEngine {
+    pub fn initialize_tileq_capture_from_env(&mut self) -> Result<(), String> {
+        if self.tileq_capture.is_some() {
+            return Err("TileQ calibration capture was initialized twice".to_string());
+        }
+        self.tileq_capture = TileQCalibrationCapture::from_env(&self.config, &self.layer_weights)?;
+        Ok(())
+    }
+
+    fn capture_tileq_routed_inputs(
+        &mut self,
+        model_layer: usize,
+        expert_input_ptr: u64,
+        topk_ids_ptr: u64,
+        topk_weights_ptr: u64,
+        down_input_ptr: u64,
+        rows: usize,
+        expert_input_size: usize,
+        intermediate_size: usize,
+        topk: usize,
+        expert_count: usize,
+    ) -> Result<(), String> {
+        let remaining = self
+            .tileq_capture
+            .as_ref()
+            .map(|capture| capture.remaining(model_layer, self.active_prefill_chunk_start))
+            .unwrap_or(0);
+        let capture_rows = rows.min(remaining);
+        if capture_rows == 0 {
+            return Ok(());
+        }
+        self.stream_sync()?;
+        let expert_inputs = download_device_u16(
+            expert_input_ptr,
+            capture_rows
+                .checked_mul(expert_input_size)
+                .ok_or_else(|| "TileQ gate/up capture length overflow".to_string())?,
+        )?;
+        let topk_ids = download_device_i32(
+            topk_ids_ptr,
+            capture_rows
+                .checked_mul(topk)
+                .ok_or_else(|| "TileQ route capture length overflow".to_string())?,
+        )?;
+        let topk_weights = download_device_f32(
+            topk_weights_ptr,
+            capture_rows
+                .checked_mul(topk)
+                .ok_or_else(|| "TileQ route-weight capture length overflow".to_string())?,
+        )?;
+        let down_inputs = download_device_u16(
+            down_input_ptr,
+            capture_rows
+                .checked_mul(topk)
+                .and_then(|v| v.checked_mul(intermediate_size))
+                .ok_or_else(|| "TileQ down capture length overflow".to_string())?,
+        )?;
+        self.tileq_capture
+            .as_mut()
+            .ok_or_else(|| "TileQ calibration capture disappeared during append".to_string())?
+            .append_chunk(
+                model_layer,
+                expert_input_size,
+                intermediate_size,
+                topk,
+                expert_count,
+                &expert_inputs,
+                &topk_ids,
+                &topk_weights,
+                &down_inputs,
+            )
+    }
+
     fn prompt_hcs_shadow_env_enabled() -> bool {
         let shadow = std::env::var("KRASIS_PROMPT_HCS_SHADOW")
             .map(|v| {
@@ -51473,6 +51816,156 @@ impl PrefillEngine {
         self.forward_moe_sequential(layer_idx, m, router_input, expert_input, output)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn launch_tileq_prefill_projection(
+        &self,
+        projection: PrefillTileQProjectionPtrs,
+        packed_ptrs: u64,
+        scale_ptrs: u64,
+        inputs: u64,
+        outputs: u64,
+        rank_scratch: u64,
+        sorted_ids: u64,
+        expert_ids: u64,
+        total_sorted: usize,
+        routed_rows: usize,
+        dispatcher_block: usize,
+        packed_byte_offset: usize,
+        scale_byte_offset: usize,
+        output_offset: usize,
+        output_stride: usize,
+    ) -> Result<(), String> {
+        if projection.rank == 0
+            || projection.rank > 1024
+            || projection.input_dim == 0
+            || projection.output_dim == 0
+            || self.config.group_size == 0
+            || projection.input_dim % self.config.group_size != 0
+            || projection.input_dim % 32 != 0
+            || dispatcher_block == 0
+            || dispatcher_block % 8 != 0
+        {
+            return Err(format!(
+                "invalid TileQ prefill geometry input={} output={} rank={} group={} dispatcher_block={} grid={}x{}",
+                projection.input_dim,
+                projection.output_dim,
+                projection.rank,
+                self.config.group_size,
+                dispatcher_block,
+                projection.grid_rows,
+                projection.grid_cols,
+            ));
+        }
+        let required_rank = routed_rows
+            .checked_mul(projection.rank)
+            .ok_or_else(|| "TileQ prefill rank scratch size overflow".to_string())?;
+        if self.scratch.d_fp32_scratch.len() < required_rank {
+            return Err(format!(
+                "TileQ prefill rank scratch too small: have={} need={} rows={} rank={}",
+                self.scratch.d_fp32_scratch.len(),
+                required_rank,
+                routed_rows,
+                projection.rank,
+            ));
+        }
+        if total_sorted > u32::MAX as usize || routed_rows > i32::MAX as usize {
+            return Err("TileQ prefill routed geometry exceeds CUDA ABI".to_string());
+        }
+
+        let mut a0 = inputs;
+        let mut a1 = sorted_ids;
+        let mut a2 = expert_ids;
+        let mut a3 = projection.expert_tiles_ptr;
+        let mut a4 = projection.expert_inverse_scales_ptr;
+        let mut a5 = projection.left_factors_ptr;
+        let mut a6 = rank_scratch;
+        let mut a7 = total_sorted as i32;
+        let mut a8 = routed_rows as i32;
+        let mut a9 = projection.input_dim as i32;
+        let mut a10 = projection.rank as i32;
+        let mut a11 = dispatcher_block as i32;
+        unsafe {
+            launch(
+                self.kernels.tileq_prefill_rank_sorted,
+                (total_sorted as u32, 1, 1),
+                (projection.rank as u32, 1, 1),
+                0,
+                self.stream,
+                &mut [
+                    &mut a0 as *mut _ as *mut _,
+                    &mut a1 as *mut _ as *mut _,
+                    &mut a2 as *mut _ as *mut _,
+                    &mut a3 as *mut _ as *mut _,
+                    &mut a4 as *mut _ as *mut _,
+                    &mut a5 as *mut _ as *mut _,
+                    &mut a6 as *mut _ as *mut _,
+                    &mut a7 as *mut _ as *mut _,
+                    &mut a8 as *mut _ as *mut _,
+                    &mut a9 as *mut _ as *mut _,
+                    &mut a10 as *mut _ as *mut _,
+                    &mut a11 as *mut _ as *mut _,
+                ],
+            )?;
+        }
+
+        let mut b0 = packed_ptrs;
+        let mut b1 = scale_ptrs;
+        let mut b2 = inputs;
+        let mut b3 = rank_scratch;
+        let mut b4 = sorted_ids;
+        let mut b5 = expert_ids;
+        let mut b6 = projection.expert_tiles_ptr;
+        let mut b7 = projection.right_factors_ptr;
+        let mut b8 = outputs;
+        let mut b9 = total_sorted as i32;
+        let mut b10 = routed_rows as i32;
+        let mut b11 = projection.input_dim as i32;
+        let mut b12 = projection.output_dim as i32;
+        let mut b13 = self.config.group_size as i32;
+        let mut b14 = projection.rank as i32;
+        let mut b15 = dispatcher_block as i32;
+        let mut b16 = packed_byte_offset as u64;
+        let mut b17 = scale_byte_offset as u64;
+        let mut b18 = output_offset as i32;
+        let mut b19 = output_stride as i32;
+        unsafe {
+            launch(
+                self.kernels.tileq_prefill_int3_sorted,
+                (
+                    projection.output_dim.div_ceil(64) as u32,
+                    total_sorted.div_ceil(8) as u32,
+                    1,
+                ),
+                (512, 1, 1),
+                0,
+                self.stream,
+                &mut [
+                    &mut b0 as *mut _ as *mut _,
+                    &mut b1 as *mut _ as *mut _,
+                    &mut b2 as *mut _ as *mut _,
+                    &mut b3 as *mut _ as *mut _,
+                    &mut b4 as *mut _ as *mut _,
+                    &mut b5 as *mut _ as *mut _,
+                    &mut b6 as *mut _ as *mut _,
+                    &mut b7 as *mut _ as *mut _,
+                    &mut b8 as *mut _ as *mut _,
+                    &mut b9 as *mut _ as *mut _,
+                    &mut b10 as *mut _ as *mut _,
+                    &mut b11 as *mut _ as *mut _,
+                    &mut b12 as *mut _ as *mut _,
+                    &mut b13 as *mut _ as *mut _,
+                    &mut b14 as *mut _ as *mut _,
+                    &mut b15 as *mut _ as *mut _,
+                    &mut b16 as *mut _ as *mut _,
+                    &mut b17 as *mut _ as *mut _,
+                    &mut b18 as *mut _ as *mut _,
+                    &mut b19 as *mut _ as *mut _,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
     /// Fused MoE forward using MarlinDefault kernel.
     /// One kernel launch handles ALL active experts per GEMM (w1, w2).
     fn forward_moe_fused(
@@ -54285,6 +54778,25 @@ impl PrefillEngine {
         let w1s_b_param = if use_ptr_table { 0 } else { w1s_base };
         let w2_b_param = if use_ptr_table { 0 } else { w2_base };
         let w2s_b_param = if use_ptr_table { 0 } else { w2s_base };
+        let tileq_layer = if bits == 3 {
+            if !use_ptr_table {
+                return Err(format!(
+                    "TileQ prefill layer {} requires the measured HCS/cold pointer-table path",
+                    layer_idx
+                ));
+            }
+            let index = moe_layer_idx.ok_or_else(|| {
+                format!("TileQ prefill layer {} has no routed-layer index", layer_idx)
+            })?;
+            self.moe_layers
+                .get(index)
+                .and_then(|entry| entry.as_ref())
+                .and_then(|entry| entry.tileq)
+                .ok_or_else(|| format!("TileQ prefill factors missing for layer {}", layer_idx))?
+                .into()
+        } else {
+            None
+        };
         let fused_block_count = total_sorted.div_ceil(block_size as usize);
         self.record_prefill_device_trace_i32_slice(
             PDT_LAYER_MLA_MOE_SORTED_IDS_FULL,
@@ -54489,8 +55001,59 @@ impl PrefillEngine {
         // w1: A = fused_input (replicated [m*topk, expert_h]), top_k=1 so kernel reads A[sorted_id] directly
         //     C written at sorted_id positions (token*topk+slot), range [0, m*topk)
         //     C_tmp also at sorted_id positions (unique, no collision in fp32_reduce)
-        unsafe {
-            fused_fn(
+        if let Some(tileq) = tileq_layer {
+            if !gated || activation != 0 || deepseek_v4_activation {
+                return Err(format!(
+                    "TileQ v1 prefill requires standard gated SiLU experts at layer {}",
+                    layer_idx
+                ));
+            }
+            let gate_packed_bytes = inter
+                .checked_mul(expert_h)
+                .and_then(|v| v.checked_mul(3))
+                .map(|v| v / 8)
+                .ok_or_else(|| "TileQ gate packed-byte overflow".to_string())?;
+            let gate_scale_bytes = inter
+                .checked_mul(expert_h / self.config.group_size)
+                .and_then(|v| v.checked_mul(2))
+                .ok_or_else(|| "TileQ gate scale-byte overflow".to_string())?;
+            self.launch_tileq_prefill_projection(
+                tileq.gate,
+                w1_ptrs_gpu,
+                w1s_ptrs_gpu,
+                fused_input_ptr,
+                fused_inter_ptr,
+                fused_c_tmp_ptr,
+                sorted_ids_val,
+                fused_expert_ids_val,
+                total_sorted,
+                m_topk,
+                block_size as usize,
+                0,
+                0,
+                0,
+                w1_n,
+            )?;
+            self.launch_tileq_prefill_projection(
+                tileq.up,
+                w1_ptrs_gpu,
+                w1s_ptrs_gpu,
+                fused_input_ptr,
+                fused_inter_ptr,
+                fused_c_tmp_ptr,
+                sorted_ids_val,
+                fused_expert_ids_val,
+                total_sorted,
+                m_topk,
+                block_size as usize,
+                gate_packed_bytes,
+                gate_scale_bytes,
+                inter,
+                w1_n,
+            )?;
+        } else {
+            unsafe {
+                fused_fn(
                 fused_input_ptr as *const _,      // A: [m*topk, K=hidden] replicated
                 w1_b_param as *const _,           // B: base ref (ptr table overrides per-expert)
                 fused_inter_ptr as *mut _,        // C: written at sorted_id positions [0..m*topk)
@@ -54539,7 +55102,8 @@ impl PrefillEngine {
                 } else {
                     std::ptr::null()
                 }, // S_expert_ptrs
-            );
+                );
+            }
         }
         let w1_output_values = m_topk
             .checked_mul(w1_n)
@@ -55502,6 +56066,18 @@ impl PrefillEngine {
         } else {
             fused_inter_ptr
         };
+        self.capture_tileq_routed_inputs(
+            layer_idx,
+            expert_input,
+            topk_ids_ptr,
+            topk_weights_ptr,
+            activation_ptr,
+            m,
+            expert_h,
+            inter,
+            topk,
+            n_experts,
+        )?;
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MLA_MOE_ACTIVATION_FULL,
             layer_idx,
@@ -55719,7 +56295,9 @@ impl PrefillEngine {
                 }),
             );
         }
-        let diag_moe_w2_lane_fns = if diag_moe_w2_lane_enabled {
+        let diag_moe_w2_lane_fns = if diag_moe_w2_lane_enabled && bits == 3 {
+            return Err("Marlin W2 lane diagnostics are unavailable for TileQ prefill".to_string());
+        } else if diag_moe_w2_lane_enabled {
             let diag_moe_w2_lane_dims_i32 = diag_moe_w2_lane_dims
                 .iter()
                 .take(4)
@@ -55750,8 +56328,27 @@ impl PrefillEngine {
         } else {
             None
         };
-        unsafe {
-            fused_fn(
+        if let Some(tileq) = tileq_layer {
+            self.launch_tileq_prefill_projection(
+                tileq.down,
+                w2_ptrs_gpu,
+                w2s_ptrs_gpu,
+                w2_input,
+                fused_output_ptr,
+                fused_c_tmp_ptr,
+                sorted_ids_val,
+                fused_expert_ids_val,
+                total_sorted,
+                m_topk,
+                block_size as usize,
+                0,
+                0,
+                0,
+                expert_h,
+            )?;
+        } else {
+            unsafe {
+                fused_fn(
                 w2_input as *const _,             // A: [m*topk, K=inter] indexed by sorted_id
                 w2_b_param as *const _,           // B: base ref (ptr table overrides per-expert)
                 fused_output_ptr as *mut _,       // C: written at sorted_id positions [0..m*topk)
@@ -55800,7 +56397,8 @@ impl PrefillEngine {
                 } else {
                     std::ptr::null()
                 }, // S_expert_ptrs
-            );
+                );
+            }
         }
         if let Some((diag_config, diag_fetch)) = diag_moe_w2_lane_fns {
             self.stream_sync()?;
@@ -67164,6 +67762,8 @@ impl PrefillKernels {
                     "moe_replicate_hidden_kernel",
                     "moe_scatter_fused_kernel",
                     "moe_scatter_weighted_kernel",
+                    "tileq_prefill_rank_sorted_bf16_kernel",
+                    "tileq_prefill_int3_sorted_bf16_kernel",
                     "moe_accum_to_bf16_kernel",
                     "moe_round_accum_bf16_inplace_kernel",
                     "kv_cache_append_fp8_kernel",
@@ -67718,6 +68318,8 @@ impl PrefillKernels {
             moe_replicate_hidden: get("moe_replicate_hidden_kernel")?,
             moe_scatter_fused: get("moe_scatter_fused_kernel")?,
             moe_scatter_weighted: get("moe_scatter_weighted_kernel")?,
+            tileq_prefill_rank_sorted: get("tileq_prefill_rank_sorted_bf16_kernel")?,
+            tileq_prefill_int3_sorted: get("tileq_prefill_int3_sorted_bf16_kernel")?,
             marlin_mm: Some(marlin_mm),
             fused_moe_fn: Some(fused_moe_fn),
             fused_moe_scatter_fn: Some(fused_moe_scatter_fn),
@@ -70732,6 +71334,8 @@ mod kernel_tests {
                     "moe_replicate_hidden_kernel",
                     "moe_scatter_fused_kernel",
                     "moe_scatter_weighted_kernel",
+                    "tileq_prefill_rank_sorted_bf16_kernel",
+                    "tileq_prefill_int3_sorted_bf16_kernel",
                 ],
             )
             .expect("Failed to load prefill kernels PTX");
@@ -70758,6 +71362,8 @@ mod kernel_tests {
                     "cpu_int4_to_marlin_repack_batched",
                     "cpu_bf16_scales_to_marlin_repack_batched",
                     "cpu_expert_to_marlin_repack_batched",
+                    "tileq_rank_project_bf16",
+                    "tileq_int3_gemv_bf16",
                 ],
             )
             .expect("Failed to load decode kernels PTX");
@@ -70998,6 +71604,306 @@ mod kernel_tests {
             panic!("{}: {} / {} elements differ", label, fail_count, n);
         }
         eprintln!("  {} PASS ({} elements, exact match)", label, n);
+    }
+
+    #[test]
+    fn test_tileq_prefill_int3_and_shared_correction_match_cpu() {
+        use crate::weights::tileq::pack_signed_int3_rows;
+
+        let ctx = GpuTestCtx::new();
+        let input_dim = 32usize;
+        let output_dim = 64usize;
+        let group_size = 32usize;
+        let rank = 2usize;
+        let routed_rows = 2usize;
+        let total_sorted = 64usize;
+        let dispatcher_block = 64usize;
+
+        let quantized: Vec<i8> = (0..output_dim)
+            .flat_map(|out| {
+                (0..input_dim).map(move |k| (((out * 5 + k * 3) % 7) as i8) - 3)
+            })
+            .collect();
+        let packed = pack_signed_int3_rows(&quantized, output_dim, input_dim).unwrap();
+        let scale_values: Vec<f32> = (0..output_dim)
+            .map(|out| 0.125 + (out % 4) as f32 * 0.03125)
+            .collect();
+        let scale_bits: Vec<u16> = scale_values
+            .iter()
+            .map(|&value| half::bf16::from_f32(value).to_bits())
+            .collect();
+        let inputs: Vec<f32> = (0..routed_rows * input_dim)
+            .map(|idx| ((idx as f32 * 0.173).sin() * 0.75) + 0.05)
+            .collect();
+        let input_bits: Vec<u16> = inputs
+            .iter()
+            .map(|&value| half::bf16::from_f32(value).to_bits())
+            .collect();
+        let left: Vec<f32> = (0..input_dim * rank)
+            .map(|idx| ((idx as f32 * 0.071).cos() * 0.125) - 0.01)
+            .collect();
+        let right: Vec<f32> = (0..rank * output_dim)
+            .map(|idx| ((idx as f32 * 0.043).sin() * 0.2) + 0.015)
+            .collect();
+        let left_bits: Vec<u16> = left
+            .iter()
+            .map(|&value| half::bf16::from_f32(value).to_bits())
+            .collect();
+        let right_bits: Vec<u16> = right
+            .iter()
+            .map(|&value| half::bf16::from_f32(value).to_bits())
+            .collect();
+        let inverse_scale_bits: Vec<u16> = (0..input_dim)
+            .map(|idx| half::bf16::from_f32(0.75 + (idx % 5) as f32 * 0.0625).to_bits())
+            .collect();
+        let sorted_ids: Vec<i32> = (0..total_sorted)
+            .map(|idx| if idx < routed_rows { idx as i32 } else { -1 })
+            .collect();
+
+        let d_packed = ctx.dev.htod_copy(packed).unwrap();
+        let d_scales = ctx.dev.htod_copy(scale_bits.clone()).unwrap();
+        let d_inputs = ctx.dev.htod_copy(input_bits.clone()).unwrap();
+        let d_left = ctx.dev.htod_copy(left_bits.clone()).unwrap();
+        let d_right = ctx.dev.htod_copy(right_bits.clone()).unwrap();
+        let d_inverse_scales = ctx.dev.htod_copy(inverse_scale_bits.clone()).unwrap();
+        let d_tiles = ctx.dev.htod_copy(vec![0u16, 0u16]).unwrap();
+        let d_sorted = ctx.dev.htod_copy(sorted_ids).unwrap();
+        let d_expert_ids = ctx.dev.htod_copy(vec![0i32]).unwrap();
+        let d_rank = ctx.dev.alloc_zeros::<f32>(routed_rows * rank).unwrap();
+        let d_outputs = ctx
+            .dev
+            .alloc_zeros::<u16>(routed_rows * output_dim)
+            .unwrap();
+        let d_packed_ptrs = ctx
+            .dev
+            .htod_copy(vec![*d_packed.device_ptr() as u64])
+            .unwrap();
+        let d_scale_ptrs = ctx
+            .dev
+            .htod_copy(vec![*d_scales.device_ptr() as u64])
+            .unwrap();
+
+        let mut a0 = *d_inputs.device_ptr() as u64;
+        let mut a1 = *d_sorted.device_ptr() as u64;
+        let mut a2 = *d_expert_ids.device_ptr() as u64;
+        let mut a3 = *d_tiles.device_ptr() as u64;
+        let mut a4 = *d_inverse_scales.device_ptr() as u64;
+        let mut a5 = *d_left.device_ptr() as u64;
+        let mut a6 = *d_rank.device_ptr() as u64;
+        let mut a7 = total_sorted as i32;
+        let mut a8 = routed_rows as i32;
+        let mut a9 = input_dim as i32;
+        let mut a10 = rank as i32;
+        let mut a11 = dispatcher_block as i32;
+        unsafe {
+            launch(
+                ctx.get_kernel("tileq_prefill_rank_sorted_bf16_kernel"),
+                (total_sorted as u32, 1, 1),
+                (rank as u32, 1, 1),
+                0,
+                ctx.stream(),
+                &mut [
+                    &mut a0 as *mut _ as *mut _,
+                    &mut a1 as *mut _ as *mut _,
+                    &mut a2 as *mut _ as *mut _,
+                    &mut a3 as *mut _ as *mut _,
+                    &mut a4 as *mut _ as *mut _,
+                    &mut a5 as *mut _ as *mut _,
+                    &mut a6 as *mut _ as *mut _,
+                    &mut a7 as *mut _ as *mut _,
+                    &mut a8 as *mut _ as *mut _,
+                    &mut a9 as *mut _ as *mut _,
+                    &mut a10 as *mut _ as *mut _,
+                    &mut a11 as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+
+        let mut b0 = *d_packed_ptrs.device_ptr() as u64;
+        let mut b1 = *d_scale_ptrs.device_ptr() as u64;
+        let mut b2 = *d_inputs.device_ptr() as u64;
+        let mut b3 = *d_rank.device_ptr() as u64;
+        let mut b4 = *d_sorted.device_ptr() as u64;
+        let mut b5 = *d_expert_ids.device_ptr() as u64;
+        let mut b6 = *d_tiles.device_ptr() as u64;
+        let mut b7 = *d_right.device_ptr() as u64;
+        let mut b8 = *d_outputs.device_ptr() as u64;
+        let mut b9 = total_sorted as i32;
+        let mut b10 = routed_rows as i32;
+        let mut b11 = input_dim as i32;
+        let mut b12 = output_dim as i32;
+        let mut b13 = group_size as i32;
+        let mut b14 = rank as i32;
+        let mut b15 = dispatcher_block as i32;
+        let mut b16 = 0u64;
+        let mut b17 = 0u64;
+        let mut b18 = 0i32;
+        let mut b19 = output_dim as i32;
+        unsafe {
+            launch(
+                ctx.get_kernel("tileq_prefill_int3_sorted_bf16_kernel"),
+                (1, total_sorted.div_ceil(8) as u32, 1),
+                (512, 1, 1),
+                0,
+                ctx.stream(),
+                &mut [
+                    &mut b0 as *mut _ as *mut _,
+                    &mut b1 as *mut _ as *mut _,
+                    &mut b2 as *mut _ as *mut _,
+                    &mut b3 as *mut _ as *mut _,
+                    &mut b4 as *mut _ as *mut _,
+                    &mut b5 as *mut _ as *mut _,
+                    &mut b6 as *mut _ as *mut _,
+                    &mut b7 as *mut _ as *mut _,
+                    &mut b8 as *mut _ as *mut _,
+                    &mut b9 as *mut _ as *mut _,
+                    &mut b10 as *mut _ as *mut _,
+                    &mut b11 as *mut _ as *mut _,
+                    &mut b12 as *mut _ as *mut _,
+                    &mut b13 as *mut _ as *mut _,
+                    &mut b14 as *mut _ as *mut _,
+                    &mut b15 as *mut _ as *mut _,
+                    &mut b16 as *mut _ as *mut _,
+                    &mut b17 as *mut _ as *mut _,
+                    &mut b18 as *mut _ as *mut _,
+                    &mut b19 as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+        self::cuda_sync();
+
+        let actual = ctx.download_bf16(&d_outputs);
+        let input_exact: Vec<f32> = input_bits
+            .iter()
+            .map(|&bits| half::bf16::from_bits(bits).to_f32())
+            .collect();
+        let left_exact: Vec<f32> = left_bits
+            .iter()
+            .map(|&bits| half::bf16::from_bits(bits).to_f32())
+            .collect();
+        let right_exact: Vec<f32> = right_bits
+            .iter()
+            .map(|&bits| half::bf16::from_bits(bits).to_f32())
+            .collect();
+        let inverse_scales_exact: Vec<f32> = inverse_scale_bits
+            .iter()
+            .map(|&bits| half::bf16::from_bits(bits).to_f32())
+            .collect();
+        let scales_exact: Vec<f32> = scale_bits
+            .iter()
+            .map(|&bits| half::bf16::from_bits(bits).to_f32())
+            .collect();
+        let mut expected = vec![0.0f32; routed_rows * output_dim];
+        for row in 0..routed_rows {
+            let mut rank_values = vec![0.0f32; rank];
+            for r in 0..rank {
+                for k in 0..input_dim {
+                    rank_values[r] +=
+                        input_exact[row * input_dim + k]
+                            * inverse_scales_exact[k]
+                            * left_exact[k * rank + r];
+                }
+            }
+            for out in 0..output_dim {
+                let mut sum = 0.0f32;
+                for k in 0..input_dim {
+                    sum += input_exact[row * input_dim + k]
+                        * quantized[out * input_dim + k] as f32
+                        * scales_exact[out];
+                }
+                for r in 0..rank {
+                    sum += rank_values[r] * right_exact[r * output_dim + out];
+                }
+                expected[row * output_dim + out] = sum;
+            }
+        }
+        assert_close_bf16(
+            &actual,
+            &f32_to_bf16_bytes(&expected),
+            4e-2,
+            4e-2,
+            "tileq_prefill_int3_shared_correction",
+        );
+
+        #[cfg(has_decode_kernels)]
+        {
+            let d_decode_rank = ctx.dev.alloc_zeros::<f32>(rank).unwrap();
+            let d_decode_output = ctx.dev.alloc_zeros::<u16>(output_dim).unwrap();
+            let mut d0 = *d_inputs.device_ptr() as u64;
+            let mut d1 = *d_tiles.device_ptr() as u64;
+            let mut d2 = *d_inverse_scales.device_ptr() as u64;
+            let mut d3 = *d_left.device_ptr() as u64;
+            let mut d4 = *d_decode_rank.device_ptr() as u64;
+            let mut d5 = 0i32;
+            let mut d6 = input_dim as i32;
+            let mut d7 = rank as i32;
+            unsafe {
+                launch(
+                    ctx.get_decode_kernel("tileq_rank_project_bf16"),
+                    (1, 1, 1),
+                    (rank as u32, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut d0 as *mut _ as *mut _,
+                        &mut d1 as *mut _ as *mut _,
+                        &mut d2 as *mut _ as *mut _,
+                        &mut d3 as *mut _ as *mut _,
+                        &mut d4 as *mut _ as *mut _,
+                        &mut d5 as *mut _ as *mut _,
+                        &mut d6 as *mut _ as *mut _,
+                        &mut d7 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+            let mut e0 = *d_packed.device_ptr() as u64;
+            let mut e1 = *d_scales.device_ptr() as u64;
+            let mut e2 = *d_inputs.device_ptr() as u64;
+            let mut e3 = *d_decode_rank.device_ptr() as u64;
+            let mut e4 = *d_tiles.device_ptr() as u64;
+            let mut e5 = *d_right.device_ptr() as u64;
+            let mut e6 = *d_decode_output.device_ptr() as u64;
+            let mut e7 = 0i32;
+            let mut e8 = input_dim as i32;
+            let mut e9 = output_dim as i32;
+            let mut e10 = group_size as i32;
+            let mut e11 = rank as i32;
+            unsafe {
+                launch(
+                    ctx.get_decode_kernel("tileq_int3_gemv_bf16"),
+                    (output_dim.div_ceil(8) as u32, 1, 1),
+                    (256, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut e0 as *mut _ as *mut _,
+                        &mut e1 as *mut _ as *mut _,
+                        &mut e2 as *mut _ as *mut _,
+                        &mut e3 as *mut _ as *mut _,
+                        &mut e4 as *mut _ as *mut _,
+                        &mut e5 as *mut _ as *mut _,
+                        &mut e6 as *mut _ as *mut _,
+                        &mut e7 as *mut _ as *mut _,
+                        &mut e8 as *mut _ as *mut _,
+                        &mut e9 as *mut _ as *mut _,
+                        &mut e10 as *mut _ as *mut _,
+                        &mut e11 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+            self::cuda_sync();
+            assert_close_bf16(
+                &ctx.download_bf16(&d_decode_output),
+                &f32_to_bf16_bytes(&expected[..output_dim]),
+                4e-2,
+                4e-2,
+                "tileq_decode_int3_shared_correction",
+            );
+        }
     }
 
     #[cfg(has_decode_kernels)]

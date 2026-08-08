@@ -9,13 +9,14 @@
 pub mod expert_hqq;
 pub mod marlin;
 pub mod safetensors_io;
+pub mod tileq;
 
 use crate::weights::marlin::{
     bf16_to_f32, f32_to_bf16, quantize_int4, quantize_int8, QuantizedBf16, QuantizedInt4,
     QuantizedInt8, DEFAULT_GROUP_SIZE,
 };
 use crate::weights::safetensors_io::{Dtype, MmapSafetensors};
-use memmap2::Mmap;
+use memmap2::{Mmap, MmapMut};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -1506,6 +1507,15 @@ pub struct LayerExpertBacking {
     pub num_experts: usize,
 }
 
+/// Bounded private TileQ component mappings for one routed layer.  Individual
+/// `UnifiedExpertWeights` are borrowed views into these four owners.
+pub struct TileQLayerBacking {
+    pub w13_packed: MmapMut,
+    pub w13_scales: MmapMut,
+    pub w2_packed: MmapMut,
+    pub w2_scales: MmapMut,
+}
+
 #[derive(Clone, Debug)]
 pub struct GpuCacheIdentity {
     pub path: PathBuf,
@@ -1542,6 +1552,12 @@ pub struct WeightStore {
     /// Each entry owns the memory that experts_gpu[layer_idx] elements borrow from.
     /// Must be kept alive as long as experts_gpu references exist.
     pub layer_backings_gpu: Vec<LayerExpertBacking>,
+
+    /// Source-backed TileQ component VMAs. Empty for Marlin/BF16 modes.
+    pub tileq_layer_backings: Vec<TileQLayerBacking>,
+
+    /// Validated TileQ manifest and factor payload. Empty for other formats.
+    pub tileq_cache: Option<tileq::TileQCache>,
 
     /// Exact Marlin source cache used for `experts_gpu`, when applicable.
     pub gpu_cache_identity: Option<GpuCacheIdentity>,
@@ -2413,6 +2429,8 @@ impl WeightStore {
             experts_gpu: Vec::new(),
             shared_experts_gpu: Vec::new(),
             layer_backings_gpu: Vec::new(),
+            tileq_layer_backings: Vec::new(),
+            tileq_cache: None,
             gpu_cache_identity: None,
             expert_hqq_cache: None,
             experts_gguf: Vec::new(),
@@ -2655,9 +2673,100 @@ impl WeightStore {
                 config: config.clone(),
                 group_size: 0,
                 layer_backings_gpu,
+                tileq_layer_backings: Vec::new(),
+                tileq_cache: None,
                 gpu_cache_identity: None,
                 cpu_num_bits: cpu_num_bits,
                 gpu_num_bits: 16,
+            });
+        }
+
+        // TileQ is an explicit source-bound format, never a fallback for a
+        // missing Marlin cache.  Its builder and native kernels replace only
+        // the routed bank; an independent shared expert remains on the normal
+        // configured INT8/BF16 path.
+        if gpu_num_bits == 3 {
+            if !gpu_only {
+                return Err(
+                    "TileQ routed experts require GPU-only decode; no CPU/Python fallback exists"
+                        .to_string(),
+                );
+            }
+            let tileq_path = std::env::var_os("KRASIS_TILEQ_CACHE")
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    "GPU expert bits=3 requires an explicit KRASIS_TILEQ_CACHE artifact"
+                        .to_string()
+                })?;
+            let (tileq_cache, tileq_layer_backings, tileq_experts) = load_tileq_experts(
+                &tileq_path,
+                model_dir,
+                &raw_json,
+                &config,
+                moe_start,
+                num_moe_layers,
+            )?;
+            let shared_experts_gpu = if config.n_shared_experts > 0 {
+                let shared_bits = std::env::var("KRASIS_TILEQ_SHARED_EXPERT_BITS")
+                    .map_err(|_| {
+                        "TileQ model has shared experts but KRASIS_TILEQ_SHARED_EXPERT_BITS is not set"
+                            .to_string()
+                    })?
+                    .parse::<u8>()
+                    .map_err(|e| {
+                        format!(
+                            "invalid KRASIS_TILEQ_SHARED_EXPERT_BITS for TileQ shared experts: {e}"
+                        )
+                    })?;
+                if shared_bits != 8 && shared_bits != 16 {
+                    return Err(format!(
+                        "TileQ shared experts require configured INT8 or BF16, got {shared_bits} bits"
+                    ));
+                }
+                Self::load_shared_experts(
+                    model_dir,
+                    &config,
+                    group_size,
+                    shared_bits,
+                    moe_start,
+                    num_moe_layers,
+                )?
+                .iter()
+                .map(|expert| {
+                    UnifiedExpertWeights::from_expert_weights_marlin(expert, shared_bits)
+                })
+                .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            log::info!(
+                "Loaded source-bound TileQ cache {} in {:.1}s: {} layers x {} routed experts + {} shared, effective residual bits=3, rank={}",
+                tileq_path.display(),
+                start.elapsed().as_secs_f64(),
+                num_moe_layers,
+                config.n_routed_experts,
+                shared_experts_gpu.len(),
+                tileq_cache.manifest().rank,
+            );
+            return Ok(WeightStore {
+                moe_layer_start: moe_start,
+                experts: Vec::new(),
+                shared_experts: Vec::new(),
+                experts_cpu: Vec::new(),
+                shared_experts_cpu: Vec::new(),
+                experts_gpu: tileq_experts,
+                shared_experts_gpu,
+                layer_backings_gpu: Vec::new(),
+                tileq_layer_backings,
+                tileq_cache: Some(tileq_cache),
+                gpu_cache_identity: None,
+                expert_hqq_cache: None,
+                experts_gguf: Vec::new(),
+                shared_experts_gguf: Vec::new(),
+                config: config.clone(),
+                group_size: group_size,
+                cpu_num_bits,
+                gpu_num_bits: 3,
             });
         }
 
@@ -2895,6 +3004,8 @@ impl WeightStore {
             experts_gpu,
             shared_experts_gpu,
             layer_backings_gpu,
+            tileq_layer_backings: Vec::new(),
+            tileq_cache: None,
             gpu_cache_identity,
             expert_hqq_cache: None,
             experts_gguf: Vec::new(),
@@ -3361,6 +3472,8 @@ impl WeightStore {
             experts_gpu: Vec::new(),
             shared_experts_gpu: Vec::new(),
             layer_backings_gpu: Vec::new(),
+            tileq_layer_backings: Vec::new(),
+            tileq_cache: None,
             gpu_cache_identity: None,
             expert_hqq_cache: None,
             experts_gguf: Vec::new(),
@@ -3422,13 +3535,14 @@ impl WeightStore {
         migrated
     }
 
-    /// Load shared expert weights from safetensors (BF16, quantized to INT4/INT8). Legacy.
-    #[allow(dead_code)]
+    /// Load an arbitrary MoE partition's independent shared-expert weights
+    /// from safetensors at the configured GPU precision.
     fn load_shared_experts(
         model_dir: &Path,
         config: &ModelConfig,
         group_size: usize,
         num_bits: u8,
+        moe_start: usize,
         num_moe_layers: usize,
     ) -> Result<Vec<ExpertWeights>, String> {
         let index_path = model_dir.join("model.safetensors.index.json");
@@ -3451,7 +3565,7 @@ impl WeightStore {
         } else {
             &["up_proj", "down_proj"]
         };
-        for moe_idx in 0..num_moe_layers {
+        for moe_idx in moe_start..(moe_start + num_moe_layers) {
             let layer_idx = config.moe_abs_layer(moe_idx);
             let prefix =
                 shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
@@ -3485,7 +3599,7 @@ impl WeightStore {
 
         let start = std::time::Instant::now();
         let mut shared = Vec::with_capacity(num_moe_layers);
-        for moe_idx in 0..num_moe_layers {
+        for moe_idx in moe_start..(moe_start + num_moe_layers) {
             let layer_idx = config.moe_abs_layer(moe_idx);
             let prefix =
                 shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
@@ -4776,6 +4890,8 @@ impl WeightStore {
             experts_gpu,
             shared_experts_gpu,
             layer_backings_gpu,
+            tileq_layer_backings: Vec::new(),
+            tileq_cache: None,
             gpu_cache_identity: Some(GpuCacheIdentity {
                 path: path.to_path_buf(),
                 source_bytes: cache_bytes as u64,
@@ -6216,6 +6332,8 @@ impl WeightStore {
             experts_gpu,
             shared_experts_gpu,
             layer_backings_gpu: Vec::new(), // GGUF path doesn't use per-layer backing yet
+            tileq_layer_backings: Vec::new(),
+            tileq_cache: None,
             gpu_cache_identity: None,
             expert_hqq_cache: None,
             experts_gguf,
@@ -7001,6 +7119,214 @@ fn write_vec_u16<W: Write>(w: &mut W, data: &[u16]) -> Result<(), String> {
         unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2) };
     w.write_all(bytes)
         .map_err(|e| format!("Write u16 error: {e}"))
+}
+
+fn load_tileq_experts(
+    cache_path: &Path,
+    model_dir: &Path,
+    raw_config: &serde_json::Value,
+    config: &ModelConfig,
+    moe_start: usize,
+    num_moe_layers: usize,
+) -> Result<
+    (
+        tileq::TileQCache,
+        Vec<TileQLayerBacking>,
+        Vec<Vec<UnifiedExpertWeights>>,
+    ),
+    String,
+> {
+    if config.moe_latent_size != 0 || config.swiglu_mode != SwiGluMode::Standard {
+        return Err(format!(
+            "TileQ v1 requires standard gated routed experts with no latent/alternate-SwiGLU path; latent={} swiglu={:?}",
+            config.moe_latent_size, config.swiglu_mode,
+        ));
+    }
+    let cache = tileq::TileQCache::open(cache_path)?;
+    let manifest = cache.manifest();
+    let model_id = model_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("model path {} has no UTF-8 basename", model_dir.display()))?;
+    let text_config = raw_config.get("text_config").unwrap_or(raw_config);
+    let architecture = text_config
+        .get("model_type")
+        .or_else(|| raw_config.get("model_type"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    if manifest.model_id != model_id
+        || manifest.architecture != architecture
+        || manifest.hidden_size != config.hidden_size
+        || manifest.intermediate_size != config.moe_intermediate_size
+        || manifest.routed_experts != config.n_routed_experts
+        || manifest.routed_layers != config.num_moe_layers()
+        || manifest.group_size == 0
+    {
+        return Err(format!(
+            "TileQ cache/model mismatch: artifact model={} arch={} h={} m={} experts={} layers={} g{}; runtime model={} arch={} h={} m={} experts={} layers={}",
+            manifest.model_id,
+            manifest.architecture,
+            manifest.hidden_size,
+            manifest.intermediate_size,
+            manifest.routed_experts,
+            manifest.routed_layers,
+            manifest.group_size,
+            model_id,
+            architecture,
+            config.hidden_size,
+            config.moe_intermediate_size,
+            config.n_routed_experts,
+            config.num_moe_layers(),
+        ));
+    }
+    if config.hidden_size % manifest.group_size != 0
+        || config.moe_intermediate_size % manifest.group_size != 0
+        || config.hidden_size % 32 != 0
+        || config.moe_intermediate_size % 32 != 0
+    {
+        return Err(format!(
+            "TileQ dimensions must be divisible by group size {} and INT3 row quantum 32: hidden={} intermediate={}",
+            manifest.group_size, config.hidden_size, config.moe_intermediate_size,
+        ));
+    }
+
+    let config_hash = tileq::combined_file_sha256(&[
+        model_dir.join("config.json"),
+        model_dir.join("model.safetensors.index.json"),
+    ])?;
+    if config_hash != manifest.source_config_sha256 {
+        return Err(format!(
+            "TileQ source config SHA-256 mismatch: artifact={} runtime={}",
+            manifest.source_config_sha256, config_hash,
+        ));
+    }
+
+    // Verify the complete routed source population, not merely filenames or
+    // mtimes. This is deliberately expensive and fail-closed because a TileQ
+    // residual is meaningful only against the exact BF16 tensors used to build
+    // its shared correction.
+    let index_bytes = std::fs::read(model_dir.join("model.safetensors.index.json"))
+        .map_err(|e| format!("failed to read TileQ source index: {e}"))?;
+    let index: SafetensorsIndex = serde_json::from_slice(&index_bytes)
+        .map_err(|e| format!("failed to parse TileQ source index: {e}"))?;
+    let mut routed_shards = index
+        .weight_map
+        .iter()
+        .filter(|(name, _)| name.contains(".mlp.experts."))
+        .map(|(_, shard)| model_dir.join(shard))
+        .collect::<Vec<_>>();
+    routed_shards.sort();
+    routed_shards.dedup();
+    if routed_shards.is_empty() {
+        return Err("TileQ source index contains no routed expert shards".to_string());
+    }
+    let routed_hash = tileq::combined_file_sha256(&routed_shards)?;
+    if routed_hash != manifest.source_routed_sha256 {
+        return Err(format!(
+            "TileQ routed source SHA-256 mismatch: artifact={} runtime={}",
+            manifest.source_routed_sha256, routed_hash,
+        ));
+    }
+
+    let mut backings = Vec::with_capacity(num_moe_layers);
+    let mut layers = Vec::with_capacity(num_moe_layers);
+    for local_moe_idx in 0..num_moe_layers {
+        let global_moe_idx = moe_start + local_moe_idx;
+        let abs_layer = config.moe_abs_layer(global_moe_idx);
+        let layer = manifest
+            .layers
+            .iter()
+            .find(|layer| layer.model_layer == abs_layer)
+            .ok_or_else(|| format!("TileQ cache is missing model layer {abs_layer}"))?;
+        let expected = [
+            config.moe_intermediate_size * config.hidden_size * 2 * 3 / 8,
+            config.moe_intermediate_size
+                * (config.hidden_size / manifest.group_size)
+                * 2
+                * 2,
+            config.hidden_size * config.moe_intermediate_size * 3 / 8,
+            config.hidden_size
+                * (config.moe_intermediate_size / manifest.group_size)
+                * 2,
+        ];
+        let actual = [
+            layer.per_expert_w13_packed as usize,
+            layer.per_expert_w13_scales as usize,
+            layer.per_expert_w2_packed as usize,
+            layer.per_expert_w2_scales as usize,
+        ];
+        if actual != expected {
+            return Err(format!(
+                "TileQ layer {abs_layer} component geometry {:?}, expected {:?}",
+                actual, expected,
+            ));
+        }
+        let backing = TileQLayerBacking {
+            w13_packed: cache.map_private(&layer.w13_packed)?,
+            w13_scales: cache.map_private(&layer.w13_scales)?,
+            w2_packed: cache.map_private(&layer.w2_packed)?,
+            w2_scales: cache.map_private(&layer.w2_scales)?,
+        };
+        let mut experts = Vec::with_capacity(config.n_routed_experts);
+        for expert_idx in 0..config.n_routed_experts {
+            let w13p = unsafe {
+                Vec::from_raw_parts(
+                    backing
+                        .w13_packed
+                        .as_ptr()
+                        .add(expert_idx * actual[0]) as *mut u32,
+                    actual[0] / 4,
+                    actual[0] / 4,
+                )
+            };
+            let w13s = unsafe {
+                Vec::from_raw_parts(
+                    backing
+                        .w13_scales
+                        .as_ptr()
+                        .add(expert_idx * actual[1]) as *mut u16,
+                    actual[1] / 2,
+                    actual[1] / 2,
+                )
+            };
+            let w2p = unsafe {
+                Vec::from_raw_parts(
+                    backing.w2_packed.as_ptr().add(expert_idx * actual[2]) as *mut u32,
+                    actual[2] / 4,
+                    actual[2] / 4,
+                )
+            };
+            let w2s = unsafe {
+                Vec::from_raw_parts(
+                    backing.w2_scales.as_ptr().add(expert_idx * actual[3]) as *mut u16,
+                    actual[3] / 2,
+                    actual[3] / 2,
+                )
+            };
+            experts.push(UnifiedExpertWeights {
+                w13_packed: w13p,
+                w13_scales: w13s,
+                w2_packed: w2p,
+                w2_scales: w2s,
+                hidden_size: config.hidden_size,
+                intermediate_size: config.moe_intermediate_size,
+                group_size: manifest.group_size,
+                num_bits: 3,
+                w2_bits: 3,
+                gate_bias: None,
+                up_bias: None,
+                down_bias: None,
+                tiled: false,
+                gated: true,
+                activation_type: 0,
+                contiguous_backing: None,
+                borrowed: true,
+            });
+        }
+        backings.push(backing);
+        layers.push(experts);
+    }
+    Ok((cache, backings, layers))
 }
 
 /// Read an entire MoE layer of experts from mmap'd Marlin cache data.

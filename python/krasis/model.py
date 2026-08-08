@@ -2210,6 +2210,20 @@ class KrasisModel:
                 "validation. Production and correctness work must use external HF "
                 "BF16 reference data plus quantized Krasis runs."
             )
+        elif gpu_bits == 3:
+            tileq_path = getattr(self.quant_cfg, "tileq_cache", None)
+            if not tileq_path:
+                raise RuntimeError("TileQ GPU experts require an explicit tileq_cache artifact")
+            tileq_path = os.path.abspath(os.path.expanduser(tileq_path))
+            if not os.path.isfile(tileq_path):
+                raise RuntimeError(f"TileQ artifact does not exist: {tileq_path}")
+            has_gpu_cache = True
+            marlin_cache_bytes = os.path.getsize(tileq_path)
+            print(
+                f"\n\033[1m\033[36m▸ Loading source-bound TileQ expert cache\033[0m",
+                flush=True,
+            )
+            logger.info("Phase 2: Loading GPU TileQ expert weights from %s", tileq_path)
         else:
             has_gpu_cache = os.path.isfile(
                 os.path.join(
@@ -6594,6 +6608,23 @@ class KrasisModel:
 
         cpu_bits = self.quant_cfg.cpu_expert_bits
         gpu_bits = self.quant_cfg.gpu_expert_bits
+        tileq_cache = getattr(self.quant_cfg, "tileq_cache", None)
+        if gpu_bits == 3:
+            if not tileq_cache:
+                raise RuntimeError("TileQ GPU experts require an explicit tileq_cache artifact")
+            os.environ["KRASIS_TILEQ_CACHE"] = os.path.abspath(os.path.expanduser(tileq_cache))
+            shared_bits = {"int8": 8, "bf16": 16}.get(self.quant_cfg.shared_expert)
+            if shared_bits is None:
+                raise RuntimeError(
+                    "TileQ shared experts require shared_expert quantization int8 or bf16, "
+                    f"got {self.quant_cfg.shared_expert!r}"
+                )
+            # TileQ replaces only the routed bank.  Keep a model's independent
+            # shared-expert path at the precision selected by the normal
+            # runtime config rather than implicitly changing it to INT3.
+            os.environ["KRASIS_TILEQ_SHARED_EXPERT_BITS"] = str(shared_bits)
+        elif tileq_cache:
+            raise RuntimeError("tileq_cache is valid only when gpu_expert_bits=3")
 
         # If model has shared_expert_gate, Python/GPU handles shared expert with gate
         # → tell Rust engine to skip shared experts to avoid double-counting

@@ -2288,7 +2288,7 @@ impl KrasisEngine {
     /// Runs startup system checks (CPU governor, hugepages, memory budget).
     ///
     /// `cpu_num_bits`: 4 or 8, quantization for CPU decode experts. Default: 4.
-    /// `gpu_num_bits`: 4 or 8 (Marlin INT4/INT8 for GPU prefill). Default: 4.
+    /// `gpu_num_bits`: 3 (TileQ), 4/8 (Marlin), or 16 (BF16 debug). Default: 4.
     /// `num_bits`: Legacy param — sets cpu_num_bits (backward compat).
     /// `gguf_path`: If set, load CPU expert weights from this GGUF file instead of
     ///              building from safetensors. GPU Marlin cache still from safetensors.
@@ -2321,9 +2321,9 @@ impl KrasisEngine {
                 "cpu_num_bits must be 4 or 8, got {cpu_bits}"
             )));
         }
-        if gpu_bits != 4 && gpu_bits != 8 && gpu_bits != 16 {
+        if gpu_bits != 3 && gpu_bits != 4 && gpu_bits != 8 && gpu_bits != 16 {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "gpu_num_bits must be 4, 8, or 16 (BF16 validation), got {gpu_bits}"
+                "gpu_num_bits must be 3 (TileQ), 4, 8, or 16 (BF16 validation), got {gpu_bits}"
             )));
         }
         let bits = cpu_bits; // For backward-compat logging and memory estimation
@@ -2353,7 +2353,13 @@ impl KrasisEngine {
                         // BF16: rows * cols * 2 bytes per projection
                         // gate+up: 2 * m * h * 2, down: h * m * 2
                         (m * h * 2.0) * 2.0 + h * m * 2.0
-                    } else if bits == 4 {
+                    } else if gpu_bits == 3 {
+                        // Dense signed INT3 residual plus one BF16 scale per
+                        // runtime-selected group, for all three projections.
+                        (m * h * 3.0 / 8.0 + m * (h / gs as f64) * 2.0) * 2.0
+                            + h * m * 3.0 / 8.0
+                            + h * (m / gs as f64) * 2.0
+                    } else if gpu_bits == 4 {
                         // INT4 packed: (h/8)*m*4 + (h/gs)*m*2 per gate/up, similar for down
                         (m * (h / 8.0) * 4.0 + m * (h / gs as f64) * 2.0) * 2.0
                             + h * (m / 8.0) * 4.0

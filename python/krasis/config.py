@@ -353,7 +353,8 @@ class QuantConfig:
     attention: str = "bf16" # "bf16", "hqq4", "hqq46", "hqq46_auto", "hqq6", "hqq68_auto", or "hqq8" (native HQQ attention; "bf16" is debug-oriented, not an oracle)
     shared_expert: str = "int8"    # "bf16" or "int8" ("bf16" remains an unvalidated debug path)
     dense_mlp: str = "int8"        # "bf16" or "int8" ("bf16" remains an unvalidated debug path)
-    gpu_expert_bits: int = 4       # 4, 8 (Marlin), or 16 (UNVALIDATED BF16 debug-only path; do not use for validation)
+    gpu_expert_bits: int = 4       # 3 (TileQ), 4/8 (Marlin), or 16 (UNVALIDATED BF16 debug-only path)
+    tileq_cache: Optional[str] = None  # explicit source-bound KTQ1 artifact when gpu_expert_bits=3
     expert_group_size: int = 128   # routed expert quantization group size; 32 matches Q8_0-style block scale granularity
     gpu_expert_int4_calib: str = "amax"  # "amax" or "search_rmse" for routed-expert GPU INT4 cache build
     cpu_expert_bits: int = 4       # 4 or 8 for CPU expert quantization

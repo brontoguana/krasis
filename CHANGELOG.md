@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Implemented an experimental, opt-in TileQ-S core for routed experts: a
+  source-bound packed signed-INT3 residual plus shared rank-32 2D-tiled
+  low-rank correction, with native Rust/CUDA decode and full-GPU prefill.
+  Ornith-1.0-397B produced a 152,922,701,824-byte artifact at 3.164897
+  effective bpw, 23.42% smaller than its 199,702,609,984-byte INT4 cache.
+  Runtime measurement admitted 16,956/30,720 experts into HCS, then evicted 54
+  under real pressure and settled at 1,302 MiB free against the 600 MiB
+  contract. The corrected global-Hessian v2 artifact scored WikiText-2 PPL
+  3.2456: 0.50% better than v1, but 0.97% worse than accepted Q4 PPL 3.2146.
+  It therefore remains experimental and no speed benchmark was accepted.
+  Existing INT4 remains unchanged/default. The paper's source repository is
+  expired, so this is explicitly Krasis's diagonal-Hessian TileQ-S core, not a
+  claim of reproducing the paper's GPTQ residual. Final review also fixed a
+  decode-graph dispatch defect that could launch Marlin W13 after the native
+  TileQ stack; graph replay now selects exactly one format path, covered by the
+  final 4/4 focused TileQ contracts. The offline capture command also requires
+  an explicit server model identifier rather than carrying an Ornith-specific
+  default into future model builds.
+
 - Completed the requested timing-disabled GLM-5.2 performance acceptance for
   dynamic peer residency and the streaming compression pipeline. Dynamic peer
   alone measured 5.10 tok/s internal decode versus the 5.07 static-peer

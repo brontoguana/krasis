@@ -48,6 +48,7 @@
 #   ./dev hqq-self-calibrate <config>  Capture self-calibration evidence / candidates only
 #   ./dev hqq-gpu-search-probe       Prototype GPU HQQ candidate-search timing/quality
 #   ./dev expert-hqq-cache-generate <manifest.json>  Generate KRHQ cache from explicit manifest
+#   ./dev tileq-build <subcommand>  Plan/build/verify source-bound KTQ1 expert caches
 #   ./dev expert-hqq-trace-compare <trace.json> <spec.json> <metrics.tsv>  Compare diagnostic HQQ trace export offline
 #   ./dev capture-box <subcommand>  ARCHIVED HF capture wrapper; requires explicit override
 #   ./dev capture-preflight         ARCHIVED HF capture host preflight; requires explicit override
@@ -1677,6 +1678,8 @@ do_test_kernels() {
             filter="expert_codec::tests"
         elif [[ "$1" == "expert_sidecar" ]]; then
             filter="expert_sidecar::tests"
+        elif [[ "$1" == "tileq" ]]; then
+            filter="tileq"
         elif [[ "$1" == "expert_compression_payload" ]]; then
             filter="gpu_decode::dsa_registration_tests::expert_payload_uses_all_four_component_ranges_in_cache_order"
         elif [[ "$1" == "peer_selector_check" ]]; then
@@ -1791,6 +1794,15 @@ do_expert_hqq_cache_generate() {
     cd "$SCRIPT_DIR"
     PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
         cargo run --release --bin expert_hqq_cache_generate -- "$manifest"
+}
+
+do_tileq_build() {
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: ./dev tileq-build <plan|inspect-capture|prepare-corpus|capture-corpus|counterfactual-test|build|verify> [args...]"
+        return 0
+    fi
+    cd "$SCRIPT_DIR"
+    KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/scripts/tileq_build.py" "$@"
 }
 
 do_expert_hqq_trace_compare() {
@@ -3793,6 +3805,7 @@ case "$cmd" in
     model-config-test) do_model_config_test "$@" ;;
     hqq-gpu-search-probe) do_hqq_gpu_search_probe "$@" ;;
     expert-hqq-cache-generate) do_expert_hqq_cache_generate "$@" ;;
+    tileq-build)    do_tileq_build "$@" ;;
     expert-hqq-trace-compare) do_expert_hqq_trace_compare "$@" ;;
     expert-hqq-row-attribution) do_expert_hqq_row_attribution "$@" ;;
     reference-inventory) do_reference_inventory "$@" ;;
@@ -3875,6 +3888,7 @@ case "$cmd" in
         echo "  hqq-attn-diff <model>          Offline HQQ attention artifact diff against BF16 source"
         echo "  hqq-self-calibrate <config>    Capture HQQ self-calibration evidence/candidates"
         echo "  expert-hqq-cache-generate <manifest.json> Generate KRHQ cache from explicit manifest"
+        echo "  tileq-build <subcommand>       Plan/build/verify source-bound KTQ1 expert caches"
         echo "  expert-hqq-trace-compare <trace.json> <spec.json> <metrics.tsv> Compare HQQ trace export offline"
         echo "  expert-hqq-row-attribution <response.json> <spec.json> <metrics.tsv> Attribute exact HQQ row capture"
         echo "  capture-box <subcommand>      ARCHIVED HF capture wrapper; requires explicit override"

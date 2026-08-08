@@ -3068,6 +3068,11 @@ const KERNEL_NAMES: &[&str] = &[
     "dual_rmsnorm_scale",
     "hqq4_dequant_bf16",
     "silu_mul",
+    "tileq_rank_project_bf16",
+    "tileq_rank_project_batched_bf16",
+    "tileq_int3_gemv_bf16",
+    "tileq_int3_gemv_batched_bf16",
+    "tileq_silu_mul_batched_bf16",
     "gelu_tanh_mul",
     "relu2_bf16",
     "apply_logit_softcap_f32",
@@ -7098,6 +7103,39 @@ fn copy_expert_to_hcs_slot_sync(dst: u64, expert: &ExpertDataPtr) -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TileQProjectionPtrs {
+    expert_tiles_ptr: u64,
+    expert_inverse_scales_ptr: u64,
+    left_factors_ptr: u64,
+    right_factors_ptr: u64,
+    input_dim: usize,
+    output_dim: usize,
+    rank: usize,
+    grid_rows: usize,
+    grid_cols: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TileQLayerPtrs {
+    gate: TileQProjectionPtrs,
+    up: TileQProjectionPtrs,
+    down: TileQProjectionPtrs,
+}
+
+struct TileQProjectionGpu {
+    expert_tiles: cudarc::driver::CudaSlice<u16>,
+    expert_inverse_scales: cudarc::driver::CudaSlice<u16>,
+    left_factors: cudarc::driver::CudaSlice<u16>,
+    right_factors: cudarc::driver::CudaSlice<u16>,
+}
+
+struct TileQLayerGpu {
+    gate: TileQProjectionGpu,
+    up: TileQProjectionGpu,
+    down: TileQProjectionGpu,
+}
+
 /// Per-layer expert data for DMA.
 struct MoeLayerData {
     experts: Vec<ExpertDataPtr>,
@@ -7136,6 +7174,8 @@ struct MoeLayerData {
     /// Expert input/output size for LatentMoE (e.g. 1024). 0 = use hidden_size (standard MoE).
     /// This is the K dimension for w13 GEMV and N dimension for w2 GEMV.
     moe_input_size: usize,
+    /// Native TileQ correction factors, present only for expert_bits=3.
+    tileq: Option<TileQLayerPtrs>,
 }
 
 // ── GPU weight descriptor ──────────────────────────────────────────────
@@ -7934,15 +7974,24 @@ pub(crate) mod dsa_registration_tests {
     use cudarc::driver::{DevicePtr, LaunchAsync, LaunchConfig};
 
     use super::{
-        create_decode_timing_event, marlin_dispatch_for_bits, plan_dsa_topk,
+        create_decode_timing_event, graph_w13_path, marlin_dispatch_for_bits, plan_dsa_topk,
         peer_selector_check_message, route_prep_rmsnorm_threads, CudaEvent, CudaStream,
         validate_dsa_indexer_registration, validate_dsa_owner_weight_contract,
         validate_dsa_runtime_registration, validate_stream_probe_outcome, DsaGraphScoreBackend,
         DsaIndexerOwnerResource, DsaIndexerOwnerWeightIds, ExpertDataPtr, GpuDecodeStore,
-        GpuWeight, PeerDemandEntry, PeerDynamicTier, MODULE_NAME,
+        GpuWeight, GraphW13Path, PeerDemandEntry, PeerDynamicTier, MODULE_NAME,
     };
 
     static DSA_CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn tileq_graph_w13_never_falls_through_to_marlin() {
+        assert_eq!(graph_w13_path(3, false), GraphW13Path::TileQ);
+        assert_eq!(graph_w13_path(3, true), GraphW13Path::TileQ);
+        assert_eq!(graph_w13_path(4, true), GraphW13Path::DirectBf16);
+        assert_eq!(graph_w13_path(4, false), GraphW13Path::Marlin);
+        assert_eq!(graph_w13_path(8, false), GraphW13Path::Marlin);
+    }
 
     #[test]
     fn peer_selector_check_reports_selected_mode_when_alternative_is_slower() {
@@ -13094,6 +13143,11 @@ struct CachedKernels {
     dual_rmsnorm_scale: cudarc::driver::CudaFunction,
     fused_add_rmsnorm: cudarc::driver::CudaFunction,
     silu_mul: cudarc::driver::CudaFunction,
+    tileq_rank_project_bf16: cudarc::driver::CudaFunction,
+    tileq_rank_project_batched_bf16: cudarc::driver::CudaFunction,
+    tileq_int3_gemv_bf16: cudarc::driver::CudaFunction,
+    tileq_int3_gemv_batched_bf16: cudarc::driver::CudaFunction,
+    tileq_silu_mul_batched_bf16: cudarc::driver::CudaFunction,
     gelu_tanh_mul: cudarc::driver::CudaFunction,
     relu2_bf16: cudarc::driver::CudaFunction,
     apply_logit_softcap_f32: cudarc::driver::CudaFunction,
@@ -13303,7 +13357,7 @@ struct GpuDecodeGraph {
     moe_intermediate_size: usize, // MoE expert intermediate (for expert kernels)
     shared_expert_intermediate_size: usize, // Shared expert intermediate (may differ from routed)
     group_size: usize,
-    /// Expert quantization bits: 4 (INT4 Marlin) or 8 (INT8 Marlin).
+    /// Expert quantization bits: 3 (TileQ), 4 (INT4 Marlin), or 8 (INT8 Marlin).
     expert_bits: u8,
     /// Shared expert quantization bits (may differ from expert_bits, e.g. INT8 shared with INT4 routed).
     shared_expert_bits: u8,
@@ -13322,6 +13376,9 @@ struct GpuDecodeGraph {
 
     // MoE layer data (expert RAM pointers, routing config)
     moe_layers: Vec<Option<MoeLayerData>>,
+    /// Owners for permanent per-layer TileQ factors. Pointer metadata lives in
+    /// `MoeLayerData`; these allocations keep it valid for the graph lifetime.
+    tileq_layers_gpu: Vec<Option<TileQLayerGpu>>,
 
     // Optional explicit KRHQ cache for runtime diagnostics only.
     // Not consumed by decode or prefill dispatch.
@@ -13424,13 +13481,14 @@ struct GpuDecodeGraph {
     h_batch_w2_packed_ptrs: Vec<u64>,
     h_batch_w2_scales_ptrs: Vec<u64>,
     h_batch_weights: Vec<f32>,
+    h_batch_expert_ids: Vec<i32>,
     max_experts_per_tok: usize,
     // Contiguous upload buffer: four pointer arrays followed by ordinary,
-    // split-full, and split-hot weight regions.
+    // split-full/split-hot weights, then routed expert IDs.
     d_batch_upload: cudarc::driver::CudaSlice<u8>,
     h_batch_upload: Vec<u8>,
     batch_upload_ptrs_bytes: usize,  // 4 * max * 8
-    batch_upload_total_bytes: usize, // 4 * max * 8 + 3 * max * 4
+    batch_upload_total_bytes: usize, // 4 * max * 8 + 4 * max * 4
 
     // GQA scratch (FP32 for Q, K, V, attention output)
     d_gqa_q: cudarc::driver::CudaSlice<f32>,
@@ -14192,6 +14250,28 @@ fn select_w13_ksplits_batched(
     batch_z: usize,
 ) -> usize {
     select_w13_ksplits_for_weights(graph, expert_hs, w13_n, batch_z, graph.expert_bits == 8)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphW13Path {
+    TileQ,
+    DirectBf16,
+    Marlin,
+}
+
+/// Select exactly one routed W13 implementation during graph replay.
+///
+/// TileQ owns the complete routed expert stack, including W13, activation and
+/// W2. It must therefore never fall through to a Marlin launch against the
+/// signed-INT3 row-major pointers after its native stack has run.
+fn graph_w13_path(expert_bits: u8, direct_w13_bf16: bool) -> GraphW13Path {
+    if expert_bits == 3 {
+        GraphW13Path::TileQ
+    } else if direct_w13_bf16 {
+        GraphW13Path::DirectBf16
+    } else {
+        GraphW13Path::Marlin
+    }
 }
 
 /// Select the Marlin kernel family and inverse weight permutation from the
@@ -22356,10 +22436,11 @@ impl GpuDecodeStore {
             .alloc_zeros::<f32>(max_ept)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
         // Contiguous upload buffer: four pointer arrays followed by ordinary,
-        // split-full, and split-hot f32 weights. Legacy replay uploads only the
-        // ordinary prefix; GPU route classification writes all three regions.
+        // split-full, and split-hot f32 weights, then routed expert IDs. Legacy
+        // replay uploads the ordinary prefix plus IDs; GPU route classification
+        // writes all regions.
         let batch_upload_ptrs_bytes = 4 * max_ept * 8; // 4 pointer arrays x max_ept x 8 bytes
-        let batch_upload_total_bytes = batch_upload_ptrs_bytes + max_ept * 4 * 3;
+        let batch_upload_total_bytes = batch_upload_ptrs_bytes + max_ept * 4 * 4;
         let d_batch_upload = self
             .device
             .alloc_zeros::<u8>(batch_upload_total_bytes)
@@ -22478,6 +22559,7 @@ impl GpuDecodeStore {
             final_norm_ptr: 0,
             final_norm_size: 0,
             moe_layers: Vec::new(),
+            tileq_layers_gpu: Vec::new(),
             expert_hqq_cache: None,
             shared_expert_vram: Vec::new(),
             decode_trace: None,
@@ -22525,6 +22607,7 @@ impl GpuDecodeStore {
             h_batch_w2_packed_ptrs: vec![0u64; max_ept],
             h_batch_w2_scales_ptrs: vec![0u64; max_ept],
             h_batch_weights: vec![0.0f32; max_ept],
+            h_batch_expert_ids: vec![0i32; max_ept],
             max_experts_per_tok: max_ept,
             d_batch_upload,
             h_batch_upload,
@@ -23035,6 +23118,11 @@ impl GpuDecodeStore {
                 dual_rmsnorm_scale: get("dual_rmsnorm_scale")?,
                 fused_add_rmsnorm: get("fused_add_rmsnorm")?,
                 silu_mul: get("silu_mul")?,
+                tileq_rank_project_bf16: get("tileq_rank_project_bf16")?,
+                tileq_rank_project_batched_bf16: get("tileq_rank_project_batched_bf16")?,
+                tileq_int3_gemv_bf16: get("tileq_int3_gemv_bf16")?,
+                tileq_int3_gemv_batched_bf16: get("tileq_int3_gemv_batched_bf16")?,
+                tileq_silu_mul_batched_bf16: get("tileq_silu_mul_batched_bf16")?,
                 gelu_tanh_mul: get("gelu_tanh_mul")?,
                 relu2_bf16: get("relu2_bf16")?,
                 apply_logit_softcap_f32: get("apply_logit_softcap_f32")?,
@@ -39476,6 +39564,24 @@ impl GpuDecodeStore {
                     bulk_w13s,
                     bulk_w2p,
                     bulk_w2s,
+                    tileq: m.tileq.map(|layer| {
+                        let projection = |p: TileQProjectionPtrs| PrefillTileQProjectionPtrs {
+                            expert_tiles_ptr: p.expert_tiles_ptr,
+                            expert_inverse_scales_ptr: p.expert_inverse_scales_ptr,
+                            left_factors_ptr: p.left_factors_ptr,
+                            right_factors_ptr: p.right_factors_ptr,
+                            input_dim: p.input_dim,
+                            output_dim: p.output_dim,
+                            rank: p.rank,
+                            grid_rows: p.grid_rows,
+                            grid_cols: p.grid_cols,
+                        };
+                        PrefillTileQLayerPtrs {
+                            gate: projection(layer.gate),
+                            up: projection(layer.up),
+                            down: projection(layer.down),
+                        }
+                    }),
                 }
             });
             moe_layers.push(prefill_layer);
@@ -39895,6 +40001,7 @@ impl GpuDecodeStore {
             first_token_margin_projection_request_enabled: false,
             read_only_checkpoint_request_enabled: false,
             last_reference_debug_trace: None,
+            tileq_capture: None,
             reference_prefill_stage_snapshots: std::cell::RefCell::new(Vec::new()),
             first_token_margin_projection_layer_deltas: std::cell::RefCell::new(Vec::new()),
             read_only_checkpoint_records: std::cell::RefCell::new(Vec::new()),
@@ -40167,6 +40274,7 @@ impl GpuDecodeStore {
             prompt_hcs_num_experts_per_layer: 0,
             prompt_hcs_prompt_tokens: 0,
         };
+        engine.initialize_tileq_capture_from_env()?;
         Ok(engine)
     }
 
@@ -43835,6 +43943,7 @@ impl GpuDecodeStore {
         let inv_sp = *graph.d_inv_scale_perm.device_ptr();
         let expert_bits = graph.expert_bits;
         let is_bf16_expert = expert_bits == 16;
+        let is_tileq = expert_bits == 3;
         let is_int8 = expert_bits == 8;
         let route_prep_dual_norm_requested = std::env::var("KRASIS_DECODE_ROUTE_PREP_DUAL_NORM")
             .map(|v| v != "0")
@@ -44016,7 +44125,8 @@ impl GpuDecodeStore {
                 let d_wts = d_upload_base + (ptr_stride * 4) as u64;
                 let direct_w13_bf16 =
                     graph.direct_w13_bf16_enabled_for_moe(moe, expert_bits, w13_ksplits_batched);
-                if direct_w13_bf16 {
+                let graph_w13_path = graph_w13_path(expert_bits, direct_w13_bf16);
+                if graph_w13_path == GraphW13Path::DirectBf16 {
                     if is_int8 || expert_bits != 4 {
                         return Err(format!(
                             "KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=1 requires INT4 experts at layer {}; expert_bits={}",
@@ -44033,7 +44143,16 @@ impl GpuDecodeStore {
                 // Batched w13 GEMV v2
                 let w13_n_tiles = (w13_n + 15) / 16;
                 let w13_smem = (expert_hs * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32;
-                if direct_w13_bf16 {
+                if graph_w13_path == GraphW13Path::TileQ {
+                    Self::launch_batched_expert_stack(
+                        graph,
+                        layer_idx,
+                        Some(expert_input_ptr),
+                        Some(d_wts),
+                        Some(topk),
+                        "graph TileQ",
+                    )?;
+                } else if graph_w13_path == GraphW13Path::DirectBf16 {
                     unsafe {
                         k.marlin_gemv_int4_v2_batched_bf16_out
                             .clone()
@@ -44110,7 +44229,7 @@ impl GpuDecodeStore {
                 // Batched reduce. Keep the same reduction kernel even when
                 // k_splits == 1 so the default graph path stays grouped for
                 // small-K expert shapes instead of falling back or failing capture.
-                if !direct_w13_bf16 {
+                if graph_w13_path == GraphW13Path::Marlin {
                     unsafe {
                         k.reduce_ksplits_bf16_batched
                             .clone()
@@ -44177,7 +44296,9 @@ impl GpuDecodeStore {
                     && !is_relu2
                     && !is_int8
                     && topk.saturating_mul(w2_n_tiles) <= graph.graph_moe_w2_clock_blocks;
-                if moe_w2_clock_active {
+                if is_tileq {
+                    // Native TileQ stack includes activation and W2.
+                } else if moe_w2_clock_active {
                     if let Some(active) = graph.graph_moe_w2_active.get_mut(graph_idx) {
                         *active = true;
                     }
@@ -50168,6 +50289,182 @@ impl GpuDecodeStore {
                 .device_ptr()
         };
 
+        if graph.expert_bits == 3 {
+            let factors = moe
+                .tileq
+                .ok_or_else(|| format!("{label}: TileQ factors missing at layer {layer_idx}"))?;
+            if !gated || is_relu2 || moe.activation_type != 0 {
+                return Err(format!(
+                    "{label}: TileQ v1 requires standard gated SiLU experts at layer {layer_idx}"
+                ));
+            }
+            let d_ids =
+                d_upload_base + (ptr_stride * 4 + max_ept * 4 * 3) as u64;
+            let rank_scratch = *graph.d_batch_partials.device_ptr();
+            let launch_projection =
+                |projection: TileQProjectionPtrs,
+                 packed_ptrs: u64,
+                 scale_ptrs: u64,
+                 input_ptr: u64,
+                 input_stride: usize,
+                 output_ptr: u64,
+                 output_stride: usize,
+                 packed_offset: usize,
+                 scale_offset: usize,
+                 output_offset: usize|
+                 -> Result<(), String> {
+                    unsafe {
+                        k.tileq_rank_project_batched_bf16
+                            .clone()
+                            .launch(
+                                LaunchConfig {
+                                    grid_dim: (1, 1, topk as u32),
+                                    block_dim: (projection.rank as u32, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                (
+                                    input_ptr,
+                                    d_ids,
+                                    d_wts_hot,
+                                    projection.expert_tiles_ptr,
+                                    projection.expert_inverse_scales_ptr,
+                                    projection.left_factors_ptr,
+                                    rank_scratch,
+                                    projection.input_dim as i32,
+                                    input_stride as i32,
+                                    projection.rank as i32,
+                                    topk as i32,
+                                ),
+                            )
+                            .map_err(|error| {
+                                format!("{label} TileQ rank layer={layer_idx}: {error:?}")
+                            })?;
+                        let mut p0 = packed_ptrs;
+                        let mut p1 = scale_ptrs;
+                        let mut p2 = input_ptr;
+                        let mut p3 = rank_scratch;
+                        let mut p4 = d_ids;
+                        let mut p5 = d_wts_hot;
+                        let mut p6 = projection.expert_tiles_ptr;
+                        let mut p7 = projection.right_factors_ptr;
+                        let mut p8 = output_ptr;
+                        let mut p9 = projection.input_dim as i32;
+                        let mut p10 = input_stride as i32;
+                        let mut p11 = projection.output_dim as i32;
+                        let mut p12 = output_stride as i32;
+                        let mut p13 = gs as i32;
+                        let mut p14 = projection.rank as i32;
+                        let mut p15 = topk as i32;
+                        let mut p16 = packed_offset as u64;
+                        let mut p17 = scale_offset as u64;
+                        let mut p18 = output_offset as i32;
+                        let mut params = vec![
+                            &mut p0 as *mut _ as *mut std::ffi::c_void,
+                            &mut p1 as *mut _ as *mut std::ffi::c_void,
+                            &mut p2 as *mut _ as *mut std::ffi::c_void,
+                            &mut p3 as *mut _ as *mut std::ffi::c_void,
+                            &mut p4 as *mut _ as *mut std::ffi::c_void,
+                            &mut p5 as *mut _ as *mut std::ffi::c_void,
+                            &mut p6 as *mut _ as *mut std::ffi::c_void,
+                            &mut p7 as *mut _ as *mut std::ffi::c_void,
+                            &mut p8 as *mut _ as *mut std::ffi::c_void,
+                            &mut p9 as *mut _ as *mut std::ffi::c_void,
+                            &mut p10 as *mut _ as *mut std::ffi::c_void,
+                            &mut p11 as *mut _ as *mut std::ffi::c_void,
+                            &mut p12 as *mut _ as *mut std::ffi::c_void,
+                            &mut p13 as *mut _ as *mut std::ffi::c_void,
+                            &mut p14 as *mut _ as *mut std::ffi::c_void,
+                            &mut p15 as *mut _ as *mut std::ffi::c_void,
+                            &mut p16 as *mut _ as *mut std::ffi::c_void,
+                            &mut p17 as *mut _ as *mut std::ffi::c_void,
+                            &mut p18 as *mut _ as *mut std::ffi::c_void,
+                        ];
+                        k.tileq_int3_gemv_batched_bf16
+                            .clone()
+                            .launch(
+                                LaunchConfig {
+                                    grid_dim: (
+                                        ((projection.output_dim + 7) / 8) as u32,
+                                        1,
+                                        topk as u32,
+                                    ),
+                                    block_dim: (256, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                &mut params,
+                            )
+                            .map_err(|error| {
+                                format!("{label} TileQ INT3 layer={layer_idx}: {error:?}")
+                            })?;
+                    }
+                    Ok(())
+                };
+            let gate_packed_bytes = intermediate * expert_hs * 3 / 8;
+            let gate_scale_bytes = intermediate * (expert_hs / gs) * 2;
+            launch_projection(
+                factors.gate,
+                d_w13p,
+                d_w13s,
+                expert_input_ptr,
+                0,
+                *graph.d_batch_gate_ups.device_ptr(),
+                2 * intermediate,
+                0,
+                0,
+                0,
+            )?;
+            launch_projection(
+                factors.up,
+                d_w13p,
+                d_w13s,
+                expert_input_ptr,
+                0,
+                *graph.d_batch_gate_ups.device_ptr(),
+                2 * intermediate,
+                gate_packed_bytes,
+                gate_scale_bytes,
+                intermediate,
+            )?;
+            unsafe {
+                k.tileq_silu_mul_batched_bf16
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (
+                                ((intermediate + 255) / 256) as u32,
+                                1,
+                                topk as u32,
+                            ),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            *graph.d_batch_gate_ups.device_ptr(),
+                            d_wts_hot,
+                            intermediate as i32,
+                            (2 * intermediate) as i32,
+                            topk as i32,
+                        ),
+                    )
+                    .map_err(|error| {
+                        format!("{label} TileQ SiLU layer={layer_idx}: {error:?}")
+                    })?;
+            }
+            launch_projection(
+                factors.down,
+                d_w2p,
+                d_w2s,
+                *graph.d_batch_gate_ups.device_ptr(),
+                2 * intermediate,
+                *graph.d_batch_expert_outs.device_ptr(),
+                expert_hs,
+                0,
+                0,
+                0,
+            )?;
+            return Ok(());
+        }
+
         let w13_n_tiles = (w13_n + 15) / 16;
         let w13_smem = (expert_hs * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32;
         let w13_kernel = if is_int8 {
@@ -52315,6 +52612,7 @@ impl GpuDecodeStore {
                                 graph.h_batch_w2_packed_ptrs[batch_count] = w2p;
                                 graph.h_batch_w2_scales_ptrs[batch_count] = w2s;
                                 graph.h_batch_weights[batch_count] = weight;
+                                graph.h_batch_expert_ids[batch_count] = eid as i32;
                                 batch_count += 1;
                                 graph.dma_hcs_experts += 1;
                             }
@@ -52357,6 +52655,7 @@ impl GpuDecodeStore {
                                     graph.h_batch_w2_packed_ptrs[batch_count] = w2p;
                                     graph.h_batch_w2_scales_ptrs[batch_count] = w2s;
                                     graph.h_batch_weights[batch_count] = weight;
+                                    graph.h_batch_expert_ids[batch_count] = eid as i32;
                                     batch_count += 1;
                                     apfl_hits += 1;
                                 }
@@ -53143,7 +53442,7 @@ impl GpuDecodeStore {
                     };
 
                     // Add cold experts to batch with their VRAM pointers
-                    for (ci, &(_topk_pos, _eid, weight)) in cold_experts.iter().enumerate() {
+                    for (ci, &(_topk_pos, eid, weight)) in cold_experts.iter().enumerate() {
                         let (w13p, w13s, w2p, w2s) = cold_ptrs_list[ci];
                         if batch_count < max_ept {
                             graph.h_batch_w13_packed_ptrs[batch_count] = w13p;
@@ -53151,6 +53450,7 @@ impl GpuDecodeStore {
                             graph.h_batch_w2_packed_ptrs[batch_count] = w2p;
                             graph.h_batch_w2_scales_ptrs[batch_count] = w2s;
                             graph.h_batch_weights[batch_count] = weight;
+                            graph.h_batch_expert_ids[batch_count] = eid as i32;
                             batch_count += 1;
                         }
                     }
@@ -53177,6 +53477,7 @@ impl GpuDecodeStore {
                         graph.h_batch_w2_packed_ptrs[batch_count] = graph.h_dummy_ptrs[2];
                         graph.h_batch_w2_scales_ptrs[batch_count] = graph.h_dummy_ptrs[3];
                         graph.h_batch_weights[batch_count] = 0.0;
+                        graph.h_batch_expert_ids[batch_count] = 0;
                         batch_count += 1;
                     }
 
@@ -53213,6 +53514,11 @@ impl GpuDecodeStore {
                         std::ptr::copy_nonoverlapping(
                             graph.h_batch_weights.as_ptr() as *const u8,
                             h.add(ptr_stride * 4),
+                            fill_count * 4,
+                        );
+                        std::ptr::copy_nonoverlapping(
+                            graph.h_batch_expert_ids.as_ptr() as *const u8,
+                            h.add(ptr_stride * 4 + max_ept * 4 * 3),
                             fill_count * 4,
                         );
 
@@ -53271,7 +53577,7 @@ impl GpuDecodeStore {
                             }
                         }
 
-                        let upload_bytes = ptr_stride * 4 + max_ept * 4;
+                        let upload_bytes = ptr_stride * 4 + max_ept * 4 * 4;
                         cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                             *graph.d_batch_upload.device_ptr(),
                             h as *const std::ffi::c_void,
@@ -70673,6 +70979,7 @@ impl GpuDecodeStore {
             latent_down_wid: None, // no latent projections for standard MoE
             latent_up_wid: None,
             moe_input_size: 0, // 0 = use hidden_size (standard MoE)
+            tileq: None,
         });
 
         // Pin shared expert in VRAM if present (Certainty Rule: always accessed, zero DMA at runtime)
@@ -71346,6 +71653,178 @@ impl GpuDecodeStore {
         }
 
         Ok(())
+    }
+
+    fn launch_tileq_projection(
+        &self,
+        packed_ptr: u64,
+        scales_ptr: u64,
+        input_ptr: u64,
+        output_ptr: u64,
+        rank_scratch_ptr: u64,
+        expert_id: usize,
+        projection: TileQProjectionPtrs,
+        group_size: usize,
+        kernels: &CachedKernels,
+    ) -> PyResult<()> {
+        use cudarc::driver::{LaunchAsync, LaunchConfig};
+        if projection.rank == 0
+            || projection.rank > 1024
+            || projection.input_dim % group_size != 0
+            || projection.input_dim % 32 != 0
+        {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "invalid TileQ projection geometry input={} output={} rank={} group={} grid={}x{}",
+                projection.input_dim,
+                projection.output_dim,
+                projection.rank,
+                group_size,
+                projection.grid_rows,
+                projection.grid_cols,
+            )));
+        }
+        unsafe {
+            kernels
+                .tileq_rank_project_bf16
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (projection.rank as u32, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        input_ptr,
+                        projection.expert_tiles_ptr,
+                        projection.expert_inverse_scales_ptr,
+                        projection.left_factors_ptr,
+                        rank_scratch_ptr,
+                        expert_id as i32,
+                        projection.input_dim as i32,
+                        projection.rank as i32,
+                    ),
+                )
+                .map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "TileQ rank projection launch: {error:?}"
+                    ))
+                })?;
+            kernels
+                .tileq_int3_gemv_bf16
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (((projection.output_dim + 7) / 8) as u32, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        packed_ptr,
+                        scales_ptr,
+                        input_ptr,
+                        rank_scratch_ptr,
+                        projection.expert_tiles_ptr,
+                        projection.right_factors_ptr,
+                        output_ptr,
+                        expert_id as i32,
+                        projection.input_dim as i32,
+                        projection.output_dim as i32,
+                        group_size as i32,
+                        projection.rank as i32,
+                    ),
+                )
+                .map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "TileQ INT3 GEMV launch: {error:?}"
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn launch_tileq_expert_compute(
+        &self,
+        w13_packed_ptr: u64,
+        w13_scales_ptr: u64,
+        w2_packed_ptr: u64,
+        w2_scales_ptr: u64,
+        input_ptr: u64,
+        gate_up_ptr: u64,
+        activation_ptr: u64,
+        output_ptr: u64,
+        rank_scratch_ptr: u64,
+        expert_id: usize,
+        factors: TileQLayerPtrs,
+        group_size: usize,
+        kernels: &CachedKernels,
+    ) -> PyResult<()> {
+        use cudarc::driver::{LaunchAsync, LaunchConfig};
+        if factors.gate.input_dim != factors.up.input_dim
+            || factors.gate.output_dim != factors.up.output_dim
+            || factors.down.input_dim != factors.gate.output_dim
+            || factors.down.output_dim != factors.gate.input_dim
+            || factors.gate.rank != factors.up.rank
+            || factors.gate.rank != factors.down.rank
+        {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "TileQ gate/up/down factor geometry is inconsistent",
+            ));
+        }
+        let hidden = factors.gate.input_dim;
+        let intermediate = factors.gate.output_dim;
+        let gate_packed_bytes = intermediate * hidden * 3 / 8;
+        let gate_scale_bytes = intermediate * (hidden / group_size) * 2;
+        self.launch_tileq_projection(
+            w13_packed_ptr,
+            w13_scales_ptr,
+            input_ptr,
+            gate_up_ptr,
+            rank_scratch_ptr,
+            expert_id,
+            factors.gate,
+            group_size,
+            kernels,
+        )?;
+        self.launch_tileq_projection(
+            w13_packed_ptr + gate_packed_bytes as u64,
+            w13_scales_ptr + gate_scale_bytes as u64,
+            input_ptr,
+            gate_up_ptr + (intermediate * 2) as u64,
+            rank_scratch_ptr,
+            expert_id,
+            factors.up,
+            group_size,
+            kernels,
+        )?;
+        unsafe {
+            kernels
+                .silu_mul
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (((intermediate + 255) / 256) as u32, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (activation_ptr, gate_up_ptr, intermediate as i32),
+                )
+                .map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "TileQ SiLU launch: {error:?}"
+                    ))
+                })?;
+        }
+        self.launch_tileq_projection(
+            w2_packed_ptr,
+            w2_scales_ptr,
+            activation_ptr,
+            output_ptr,
+            rank_scratch_ptr,
+            expert_id,
+            factors.down,
+            group_size,
+            kernels,
+        )
     }
 
     fn launch_bf16_expert_accum(
@@ -72470,6 +72949,7 @@ impl GpuDecodeStore {
         };
         let expert_bits = graph.expert_bits;
         let is_bf16_expert = expert_bits == 16;
+        let is_tileq = expert_bits == 3;
         let is_int8 = expert_bits == 8;
         let inv_wp = if is_int8 {
             *graph.d_inv_weight_perm_int8.device_ptr()
@@ -73568,6 +74048,7 @@ impl GpuDecodeStore {
                     graph.h_batch_w2_packed_ptrs[hcs_batch_count] = w2p;
                     graph.h_batch_w2_scales_ptrs[hcs_batch_count] = w2s;
                     graph.h_batch_weights[hcs_batch_count] = weight;
+                    graph.h_batch_expert_ids[hcs_batch_count] = eid as i32;
                     batch_expert_ids.push(eid);
                     batch_topk_positions.push(i);
                     batch_source_labels.push("resident_hcs");
@@ -73631,6 +74112,7 @@ impl GpuDecodeStore {
                         graph.h_batch_w2_packed_ptrs[hcs_batch_count] = w2p;
                         graph.h_batch_w2_scales_ptrs[hcs_batch_count] = w2s;
                         graph.h_batch_weights[hcs_batch_count] = weight;
+                        graph.h_batch_expert_ids[hcs_batch_count] = eid as i32;
                         batch_expert_ids.push(eid);
                         batch_topk_positions.push(i);
                         batch_source_labels.push("apfl_prefetch");
@@ -73915,7 +74397,7 @@ impl GpuDecodeStore {
 
         // ── Phase 2: Batched HCS expert compute (4 launches instead of 3*N) ──
         // Runs on default_stream while pre-queued cold DMAs proceed on copy_stream.
-        if !is_bf16_expert && hcs_batch_count >= 2 && act_type != 2 {
+        if !is_bf16_expert && !is_tileq && hcs_batch_count >= 2 && act_type != 2 {
             let t_w13 = Instant::now();
 
             // Pack all pointer arrays + weights into contiguous host buffer, then single H2D
@@ -73949,9 +74431,14 @@ impl GpuDecodeStore {
                     h.add(ptr_stride * 4),
                     hcs_batch_count * 4,
                 );
+                std::ptr::copy_nonoverlapping(
+                    graph.h_batch_expert_ids.as_ptr() as *const u8,
+                    h.add(ptr_stride * 4 + max_ept * 4 * 3),
+                    hcs_batch_count * 4,
+                );
 
                 // Single H2D copy
-                let upload_bytes = ptr_stride * 4 + max_ept * 4;
+                let upload_bytes = ptr_stride * 4 + max_ept * 4 * 4;
                 cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                     *graph.d_batch_upload.device_ptr(),
                     h as *const std::ffi::c_void,
@@ -74317,7 +74804,7 @@ impl GpuDecodeStore {
                     let out_ptr = *graph.d_batch_expert_outs.device_ptr()
                         + (bi * expert_stride * std::mem::size_of::<u16>()) as u64;
                     let w13_dequant_probe = if graph.validation_decode_steps == 0
-                        && !is_int8
+                        && graph.expert_bits == 4
                         && eid < moe.experts.len()
                     {
                         debug_decode_w13_dequant_replay_json(
@@ -74435,6 +74922,43 @@ impl GpuDecodeStore {
                 let w2p = graph.h_batch_w2_packed_ptrs[bi];
                 let w2s = graph.h_batch_w2_scales_ptrs[bi];
                 let weight = graph.h_batch_weights[bi];
+
+                if is_tileq {
+                    let eid = batch_expert_ids.get(bi).copied().ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "TileQ resident batch slot {bi} has no expert identity"
+                        ))
+                    })?;
+                    let factors = moe.tileq.ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "TileQ factors missing for layer {layer_idx}"
+                        ))
+                    })?;
+                    self.launch_tileq_expert_compute(
+                        w13p,
+                        w13s,
+                        w2p,
+                        w2s,
+                        expert_input_ptr,
+                        *graph.d_expert_gate_up.device_ptr(),
+                        *graph.d_expert_scratch.device_ptr(),
+                        *graph.d_expert_out.device_ptr(),
+                        partial_ptr,
+                        eid,
+                        factors,
+                        gs,
+                        &k,
+                    )?;
+                    self.launch_weighted_add_bf16(
+                        *graph.d_moe_out.device_ptr(),
+                        *graph.d_expert_out.device_ptr(),
+                        expert_hs,
+                        weight,
+                        0,
+                        &k,
+                    )?;
+                    continue;
+                }
 
                 if is_bf16_expert {
                     let eid = batch_expert_ids.get(bi).copied().unwrap_or(usize::MAX);
@@ -74826,7 +75350,36 @@ impl GpuDecodeStore {
                 // Compute from buf[slot]
                 let t_dma_compute = Instant::now();
                 let base = buf_base[slot];
-                if is_bf16_expert {
+                if is_tileq {
+                    let factors = moe.tileq.ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "TileQ factors missing for layer {layer_idx}"
+                        ))
+                    })?;
+                    self.launch_tileq_expert_compute(
+                        base + w13p_off as u64,
+                        base + w13s_off as u64,
+                        base + w2p_off as u64,
+                        base + w2s_off as u64,
+                        expert_input_ptr,
+                        *graph.d_expert_gate_up.device_ptr(),
+                        *graph.d_expert_scratch.device_ptr(),
+                        *graph.d_expert_out.device_ptr(),
+                        partial_ptr,
+                        eid,
+                        factors,
+                        gs,
+                        &k,
+                    )?;
+                    self.launch_weighted_add_bf16(
+                        *graph.d_moe_out.device_ptr(),
+                        *graph.d_expert_out.device_ptr(),
+                        expert_hs,
+                        weight,
+                        0,
+                        &k,
+                    )?;
+                } else if is_bf16_expert {
                     let pending_slot = bf16_pending_adds.len();
                     if pending_slot >= graph.max_experts_per_tok {
                         return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -75140,6 +75693,64 @@ impl GpuDecodeStore {
                     let ev_dma_w13 = ev_dma[0];
                     cuda_sys::lib().cuEventRecord(ev_dma_w13, copy_stream);
                     cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma_w13, 0);
+                }
+
+                if is_tileq {
+                    unsafe {
+                        let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            buf_w2_packed,
+                            expert.w2_packed_ptr as *const std::ffi::c_void,
+                            expert.w2_packed_bytes,
+                            copy_stream,
+                        );
+                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "TileQ DMA w2p[{eid}]: {err:?}"
+                            )));
+                        }
+                        let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            buf_w2_scales,
+                            expert.w2_scales_ptr as *const std::ffi::c_void,
+                            expert.w2_scales_bytes,
+                            copy_stream,
+                        );
+                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "TileQ DMA w2s[{eid}]: {err:?}"
+                            )));
+                        }
+                        cuda_sys::lib().cuEventRecord(ev_dma[1], copy_stream);
+                        cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[1], 0);
+                    }
+                    let factors = moe.tileq.ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "TileQ factors missing for layer {layer_idx}"
+                        ))
+                    })?;
+                    self.launch_tileq_expert_compute(
+                        buf_w13_packed,
+                        buf_w13_scales,
+                        buf_w2_packed,
+                        buf_w2_scales,
+                        expert_input_ptr,
+                        *graph.d_expert_gate_up.device_ptr(),
+                        *graph.d_expert_scratch.device_ptr(),
+                        *graph.d_expert_out.device_ptr(),
+                        partial_ptr,
+                        eid,
+                        factors,
+                        gs,
+                        &k,
+                    )?;
+                    self.launch_weighted_add_bf16(
+                        *graph.d_moe_out.device_ptr(),
+                        *graph.d_expert_out.device_ptr(),
+                        expert_hs,
+                        weight,
+                        0,
+                        &k,
+                    )?;
+                    continue;
                 }
 
                 if is_bf16_expert {
@@ -76462,6 +77073,9 @@ impl GpuDecodeStore {
                     }
                 }
             }
+            if store.gpu_num_bits == 3 {
+                self.upload_tileq_layer(&store, moe_idx, abs_layer_idx)?;
+            }
         }
 
         // Step 3: size expert DMA buffers (need to hold largest packed + scales)
@@ -76493,7 +77107,31 @@ impl GpuDecodeStore {
 
         // Pin per-layer backing buffers (routed experts)
         for moe_idx in 0..n_moe_layers {
-            if moe_idx < store.layer_backings_gpu.len() {
+            if moe_idx < store.tileq_layer_backings.len() {
+                let backing = &store.tileq_layer_backings[moe_idx];
+                let regions = [
+                    (backing.w13_packed.as_ptr(), backing.w13_packed.len(), "w13p"),
+                    (backing.w13_scales.as_ptr(), backing.w13_scales.len(), "w13s"),
+                    (backing.w2_packed.as_ptr(), backing.w2_packed.len(), "w2p"),
+                    (backing.w2_scales.as_ptr(), backing.w2_scales.len(), "w2s"),
+                ];
+                for (ptr, size, label) in regions {
+                    let err = unsafe {
+                        cuda_sys::lib().cuMemHostRegister_v2(
+                            ptr as *mut std::ffi::c_void,
+                            size,
+                            0,
+                        )
+                    };
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "TileQ bounded host registration failed at moe_idx={moe_idx} component={label} bytes={size}: {err:?}"
+                        )));
+                    }
+                    pinned_regions += 1;
+                    pinned_bytes += size;
+                }
+            } else if moe_idx < store.layer_backings_gpu.len() {
                 // Per-layer backing: pin 4 contiguous buffers per layer
                 let backing = &store.layer_backings_gpu[moe_idx];
                 let regions: [(&[u8], &str); 4] = [
@@ -76680,6 +77318,122 @@ impl GpuDecodeStore {
             config.routed_scaling_factor,
         );
 
+        Ok(())
+    }
+
+    fn upload_tileq_layer(
+        &mut self,
+        store: &crate::weights::WeightStore,
+        local_moe_idx: usize,
+        abs_layer_idx: usize,
+    ) -> PyResult<()> {
+        let cache = store.tileq_cache.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "TileQ expert bits are active without validated TileQ cache metadata",
+            )
+        })?;
+        let layer = cache
+            .manifest()
+            .layers
+            .iter()
+            .find(|layer| layer.model_layer == abs_layer_idx)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "TileQ cache is missing absolute layer {abs_layer_idx}"
+                ))
+            })?;
+
+        let upload_u16 = |range: &crate::weights::tileq::TileQRange,
+                          label: &str|
+         -> PyResult<cudarc::driver::CudaSlice<u16>> {
+            let bytes = cache
+                .bytes(range)
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            if bytes.len() % 2 != 0 {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "TileQ {label} has odd byte length {}",
+                    bytes.len()
+                )));
+            }
+            let values = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>();
+            self.device.htod_copy(values).map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "upload TileQ {label} for layer {abs_layer_idx}: {error:?}"
+                ))
+            })
+        };
+        let upload_projection =
+            |manifest: &crate::weights::tileq::TileQProjectionManifest,
+             label: &str|
+             -> PyResult<(TileQProjectionGpu, TileQProjectionPtrs)> {
+                let expert_tiles = upload_u16(&manifest.expert_tiles, &format!("{label}.tiles"))?;
+                let expert_inverse_scales = upload_u16(
+                    &manifest.expert_inverse_scales_bf16,
+                    &format!("{label}.inverse_scales"),
+                )?;
+                let left_factors =
+                    upload_u16(&manifest.left_factors_bf16, &format!("{label}.left"))?;
+                let right_factors =
+                    upload_u16(&manifest.right_factors_bf16, &format!("{label}.right"))?;
+                let ptrs = TileQProjectionPtrs {
+                    expert_tiles_ptr: *expert_tiles.device_ptr(),
+                    expert_inverse_scales_ptr: *expert_inverse_scales.device_ptr(),
+                    left_factors_ptr: *left_factors.device_ptr(),
+                    right_factors_ptr: *right_factors.device_ptr(),
+                    input_dim: manifest.input_dim,
+                    output_dim: manifest.output_dim,
+                    rank: manifest.rank,
+                    grid_rows: manifest.grid_rows,
+                    grid_cols: manifest.grid_cols,
+                };
+                Ok((
+                    TileQProjectionGpu {
+                        expert_tiles,
+                        expert_inverse_scales,
+                        left_factors,
+                        right_factors,
+                    },
+                    ptrs,
+                ))
+            };
+
+        let (gate_gpu, gate) = upload_projection(&layer.gate, "gate")?;
+        let (up_gpu, up) = upload_projection(&layer.up, "up")?;
+        let (down_gpu, down) = upload_projection(&layer.down, "down")?;
+        let graph = self.graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "TileQ factor upload requires a configured decode graph",
+            )
+        })?;
+        let moe = graph
+            .moe_layers
+            .get_mut(abs_layer_idx)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "TileQ factor upload lost registered MoE layer {abs_layer_idx}"
+                ))
+            })?;
+        moe.tileq = Some(TileQLayerPtrs { gate, up, down });
+        while graph.tileq_layers_gpu.len() <= abs_layer_idx {
+            graph.tileq_layers_gpu.push(None);
+        }
+        graph.tileq_layers_gpu[abs_layer_idx] = Some(TileQLayerGpu {
+            gate: gate_gpu,
+            up: up_gpu,
+            down: down_gpu,
+        });
+        log::info!(
+            "TileQ factors resident: local_moe={} abs_layer={} rank={} grid={}x{}",
+            local_moe_idx,
+            abs_layer_idx,
+            layer.gate.rank,
+            layer.gate.grid_rows,
+            layer.gate.grid_cols,
+        );
         Ok(())
     }
 

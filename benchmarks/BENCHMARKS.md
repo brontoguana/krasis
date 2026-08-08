@@ -1,5 +1,40 @@
 # Krasis Benchmark Results
 
+## Ornith-397B experimental TileQ-S quality gate — 2026-08-08
+
+Krasis built and executed a source-bound TileQ-S core on Ornith-1.0-397B. This
+is an explicit experimental signed-INT3 residual with shared rank-32 2D-tiled
+BF16 correction, not an exact reproduction of the paper's GPTQ residual: the
+paper repository has expired, and the artifact manifest records Krasis's
+diagonal-Hessian quantizer. Full GPU prefill and decode stayed in native
+Rust/CUDA; current scalar kernels are correctness implementations.
+
+| Format | Artifact/cache bytes | Effective bpw | WikiText-2 PPL | vs BF16 | vs Q4 |
+|---|---:|---:|---:|---:|---:|
+| BF16 reference | — | 16 | 3.1034 | — | -3.46% |
+| Accepted INT4 | 199,702,609,984 | 4.125 | 3.2146 | +3.58% | — |
+| TileQ v1 | 152,922,701,824 | 3.164897 | 3.2619 | +5.11% | +1.47% |
+| TileQ global-Hessian v2 | **152,922,701,824** | **3.164897** | **3.2456** | **+4.58%** | **+0.97%** |
+
+The TileQ artifact is 46,779,908,160 bytes / 23.4248% smaller than INT4. The
+same runtime VRAM policy initially admitted 16,956/30,720 HCS experts (55.2%)
+versus 13,161/30,720 (42.8%) for Q4; measured startup pressure then evicted 54
+and settled at 1,302 MiB free against the standard 600 MiB margin. V2 improves
+v1 PPL by 0.50%, but misses the predeclared no-worse-than-Q4 gate by 0.97%.
+Accordingly no exact-v2 heatmap or timing-disabled speed benchmark was run.
+The observed 18 tok/s is perplexity-workload throughput through an unoptimized
+scalar correctness kernel, not an accepted decode-speed result.
+
+Artifact SHA-256:
+`3c53d9b6bdd3d194b5bbacb247be3787ca89997e13807363b5ba6fb738437dbb`.
+Evidence: v2 [stdout](20260808_ornith397_tileq_global_v2_perplexity_stdout.log),
+[runtime](20260808_ornith397_tileq_global_v2_perplexity_runtime.log),
+[result](20260808_ornith397_tileq_global_v2_perplexity_result.log), and
+[JSON](20260808_ornith397_tileq_global_v2_perplexity_result.json); v1
+[stdout](20260808_ornith397_tileq_r32_g128_perplexity_stdout.log),
+[runtime](20260808_ornith397_tileq_r32_g128_perplexity_runtime.log), and
+[result](20260808_ornith397_tileq_r32_g128_perplexity_result.log).
+
 ## GLM-5.2 dynamic peer and streaming compression follow-up — 2026-08-08
 
 These three timing-disabled `./dev benchmark` runs used one unchanged source

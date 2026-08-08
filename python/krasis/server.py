@@ -2246,6 +2246,15 @@ def _cleanup_cuda():
         pass
 
 
+def _tileq_configuration_error(gpu_expert_bits: int, tileq_cache: Optional[str]) -> Optional[str]:
+    """Return the fail-closed TileQ configuration error, if any."""
+    if gpu_expert_bits == 3 and not tileq_cache:
+        return "--gpu-expert-bits 3 requires --tileq-cache"
+    if gpu_expert_bits != 3 and tileq_cache:
+        return "--tileq-cache is valid only with --gpu-expert-bits 3"
+    return None
+
+
 def main():
     import os # Ensure os is in local scope
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True" # Mitigate fragmentation
@@ -2290,6 +2299,7 @@ def main():
             "CFG_LAYER_GROUP_SIZE": "layer_group_size",
             "CFG_KV_DTYPE": "kv_dtype",
             "CFG_GPU_EXPERT_BITS": "gpu_expert_bits",
+            "CFG_TILEQ_CACHE": "tileq_cache",
             "CFG_EXPERT_GROUP_SIZE": "expert_group_size",
             "CFG_GPU_EXPERT_INT4_CALIB": "gpu_expert_int4_calib",
             "CFG_CPU_EXPERT_BITS": "cpu_expert_bits",
@@ -2498,8 +2508,10 @@ def main():
                         help="Limit approved heatmap capture to the first N prompts; 0 means all")
     parser.add_argument("--approved-heatmap-checkpoint-every", type=int, default=0,
                         help="Write cumulative approved heatmap checkpoints every N prompts; 0 means final artifact only")
-    parser.add_argument("--gpu-expert-bits", type=int, default=4, choices=[4, 8, 16],
-                        help="Expert weight bits for GPU prefill experts: 4/8 use Marlin cache, 16 uses direct BF16 debug mode")
+    parser.add_argument("--gpu-expert-bits", type=int, default=4, choices=[3, 4, 8, 16],
+                        help="Expert weight bits: 3 uses an explicit TileQ cache, 4/8 use Marlin, 16 is direct BF16 debug mode")
+    parser.add_argument("--tileq-cache", default=None,
+                        help="Explicit source-bound KTQ1 routed-expert artifact; required for GPU expert bits=3")
     parser.add_argument("--expert-group-size", type=int, default=128, choices=[32, 64, 128],
                         help="Expert quantization group size for routed GPU/CPU expert caches")
     parser.add_argument("--gpu-expert-int4-calib", default="amax", choices=list(GPU_EXPERT_INT4_CALIB_CHOICES),
@@ -2867,6 +2879,7 @@ def main():
         shared_expert=args.shared_expert_quant,
         dense_mlp=args.dense_mlp_quant,
         gpu_expert_bits=args.gpu_expert_bits,
+        tileq_cache=args.tileq_cache,
         expert_group_size=args.expert_group_size,
         gpu_expert_int4_calib=args.gpu_expert_int4_calib,
         cpu_expert_bits=args.cpu_expert_bits,
@@ -2892,6 +2905,13 @@ def main():
         args.gguf_path = os.path.expanduser(args.gguf_path)
     if args.expert_hqq_diagnostic_cache_spec:
         args.expert_hqq_diagnostic_cache_spec = os.path.expanduser(args.expert_hqq_diagnostic_cache_spec)
+    if args.tileq_cache:
+        args.tileq_cache = os.path.expanduser(args.tileq_cache)
+    tileq_error = _tileq_configuration_error(args.gpu_expert_bits, args.tileq_cache)
+    if tileq_error:
+        parser.error(tileq_error)
+    if args.tileq_cache:
+        os.environ["KRASIS_TILEQ_CACHE"] = args.tileq_cache
 
     if args.approved_heatmap_residency_refresh_every <= 0:
         parser.error("--approved-heatmap-residency-refresh-every must be positive")
@@ -2933,6 +2953,8 @@ def main():
         )
     if args.gpu_expert_bits == 16:
         expert_detail = "Experts: GPU BF16"
+    elif args.gpu_expert_bits == 3:
+        expert_detail = f"Experts: TileQ INT3 residual g{args.expert_group_size}"
     else:
         expert_detail = f"Experts: GPU INT{args.gpu_expert_bits} g{args.expert_group_size}"
     if args.gpu_expert_bits == 4:

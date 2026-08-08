@@ -22,4 +22,7 @@ logs/**/*.txt
 logs/**/*.md
 logs/requests/
 perplexity/datasets/
+tests/tileq-captures/
+tests/tileq-corpora/
+tests/.ornith_tileq_*.arm
 node_modules/

@@ -550,6 +550,217 @@ extern "C" __global__ void silu_mul(
     }
 }
 
+// ── TileQ signed-INT3 residual + shared tiled low-rank correction ─────
+
+__device__ __forceinline__ int tileq_int3_value(
+    const unsigned int* __restrict__ packed,
+    int row_words,
+    int row,
+    int col
+) {
+    int bit = col * 3;
+    int word = bit >> 5;
+    int shift = bit & 31;
+    unsigned int code = packed[row * row_words + word] >> shift;
+    if (shift > 29) {
+        code |= packed[row * row_words + word + 1] << (32 - shift);
+    }
+    code &= 7u;
+    return (code & 4u) ? ((int)code - 8) : (int)code;
+}
+
+__device__ __forceinline__ void tileq_rank_project_impl(
+    const __nv_bfloat16* __restrict__ input,
+    const unsigned short* __restrict__ expert_tiles,
+    const __nv_bfloat16* __restrict__ expert_inverse_scales,
+    const __nv_bfloat16* __restrict__ left_factors,
+    float* __restrict__ rank_output,
+    int expert_id,
+    int input_dim,
+    int rank
+) {
+    int r = (int)threadIdx.x;
+    if (r >= rank) return;
+    int tile_row = (int)expert_tiles[expert_id * 2];
+    const __nv_bfloat16* left = left_factors +
+        ((unsigned long long)tile_row * input_dim * rank);
+    const __nv_bfloat16* inverse_scale = expert_inverse_scales +
+        ((unsigned long long)expert_id * input_dim);
+    float sum = 0.0f;
+    for (int k = 0; k < input_dim; ++k) {
+        float scaled_input = bf16_to_f32(input[k]) * bf16_to_f32(inverse_scale[k]);
+        sum = fmaf(scaled_input, bf16_to_f32(left[k * rank + r]), sum);
+    }
+    rank_output[r] = sum;
+}
+
+extern "C" __global__ void tileq_rank_project_bf16(
+    const __nv_bfloat16* __restrict__ input,
+    const unsigned short* __restrict__ expert_tiles,
+    const __nv_bfloat16* __restrict__ expert_inverse_scales,
+    const __nv_bfloat16* __restrict__ left_factors,
+    float* __restrict__ rank_output,
+    int expert_id,
+    int input_dim,
+    int rank
+) {
+    tileq_rank_project_impl(
+        input, expert_tiles, expert_inverse_scales, left_factors, rank_output,
+        expert_id, input_dim, rank
+    );
+}
+
+extern "C" __global__ void tileq_rank_project_batched_bf16(
+    const __nv_bfloat16* __restrict__ inputs,
+    const int* __restrict__ expert_ids,
+    const float* __restrict__ active_weights,
+    const unsigned short* __restrict__ expert_tiles,
+    const __nv_bfloat16* __restrict__ expert_inverse_scales,
+    const __nv_bfloat16* __restrict__ left_factors,
+    float* __restrict__ rank_output,
+    int input_dim,
+    int input_stride,
+    int rank,
+    int batch
+) {
+    int slot = (int)blockIdx.z;
+    if (slot >= batch || active_weights[slot] == 0.0f) return;
+    tileq_rank_project_impl(
+        inputs + (unsigned long long)slot * input_stride,
+        expert_tiles,
+        expert_inverse_scales,
+        left_factors,
+        rank_output + (unsigned long long)slot * rank,
+        expert_ids[slot],
+        input_dim,
+        rank
+    );
+}
+
+__device__ __forceinline__ float tileq_warp_sum(float value) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        value += __shfl_down_sync(0xffffffff, value, offset);
+    }
+    return value;
+}
+
+__device__ __forceinline__ void tileq_int3_gemv_row(
+    const unsigned int* __restrict__ packed,
+    const __nv_bfloat16* __restrict__ scales,
+    const __nv_bfloat16* __restrict__ input,
+    const float* __restrict__ rank_input,
+    const unsigned short* __restrict__ expert_tiles,
+    const __nv_bfloat16* __restrict__ right_factors,
+    __nv_bfloat16* __restrict__ output,
+    int expert_id,
+    int input_dim,
+    int output_dim,
+    int group_size,
+    int rank,
+    int row
+) {
+    int lane = (int)threadIdx.x & 31;
+    int row_words = input_dim * 3 / 32;
+    int groups = input_dim / group_size;
+    float sum = 0.0f;
+    for (int k = lane; k < input_dim; k += 32) {
+        int q = tileq_int3_value(packed, row_words, row, k);
+        float scale = bf16_to_f32(scales[row * groups + k / group_size]);
+        sum = fmaf((float)q * scale, bf16_to_f32(input[k]), sum);
+    }
+    sum = tileq_warp_sum(sum);
+    if (lane == 0) {
+        int tile_col = (int)expert_tiles[expert_id * 2 + 1];
+        const __nv_bfloat16* right = right_factors +
+            ((unsigned long long)tile_col * rank * output_dim);
+        float correction = 0.0f;
+        for (int r = 0; r < rank; ++r) {
+            correction = fmaf(rank_input[r], bf16_to_f32(right[r * output_dim + row]), correction);
+        }
+        output[row] = f32_to_bf16(sum + correction);
+    }
+}
+
+extern "C" __global__ void tileq_int3_gemv_bf16(
+    const unsigned int* __restrict__ packed,
+    const __nv_bfloat16* __restrict__ scales,
+    const __nv_bfloat16* __restrict__ input,
+    const float* __restrict__ rank_input,
+    const unsigned short* __restrict__ expert_tiles,
+    const __nv_bfloat16* __restrict__ right_factors,
+    __nv_bfloat16* __restrict__ output,
+    int expert_id,
+    int input_dim,
+    int output_dim,
+    int group_size,
+    int rank
+) {
+    int row = (int)blockIdx.x * ((int)blockDim.x / 32) + ((int)threadIdx.x / 32);
+    if (row >= output_dim) return;
+    tileq_int3_gemv_row(
+        packed, scales, input, rank_input, expert_tiles, right_factors,
+        output, expert_id, input_dim, output_dim, group_size, rank, row
+    );
+}
+
+extern "C" __global__ void tileq_int3_gemv_batched_bf16(
+    const unsigned long long* __restrict__ packed_ptrs,
+    const unsigned long long* __restrict__ scale_ptrs,
+    const __nv_bfloat16* __restrict__ inputs,
+    const float* __restrict__ rank_inputs,
+    const int* __restrict__ expert_ids,
+    const float* __restrict__ active_weights,
+    const unsigned short* __restrict__ expert_tiles,
+    const __nv_bfloat16* __restrict__ right_factors,
+    __nv_bfloat16* __restrict__ outputs,
+    int input_dim,
+    int input_stride,
+    int output_dim,
+    int output_stride,
+    int group_size,
+    int rank,
+    int batch,
+    unsigned long long packed_byte_offset,
+    unsigned long long scale_byte_offset,
+    int output_offset
+) {
+    int slot = (int)blockIdx.z;
+    if (slot >= batch || active_weights[slot] == 0.0f) return;
+    int row = (int)blockIdx.x * ((int)blockDim.x / 32) + ((int)threadIdx.x / 32);
+    if (row >= output_dim) return;
+    tileq_int3_gemv_row(
+        reinterpret_cast<const unsigned int*>(packed_ptrs[slot] + packed_byte_offset),
+        reinterpret_cast<const __nv_bfloat16*>(scale_ptrs[slot] + scale_byte_offset),
+        inputs + (unsigned long long)slot * input_stride,
+        rank_inputs + (unsigned long long)slot * rank,
+        expert_tiles,
+        right_factors,
+        outputs + (unsigned long long)slot * output_stride + output_offset,
+        expert_ids[slot],
+        input_dim,
+        output_dim,
+        group_size,
+        rank,
+        row
+    );
+}
+
+extern "C" __global__ void tileq_silu_mul_batched_bf16(
+    __nv_bfloat16* __restrict__ gate_up,
+    const float* __restrict__ active_weights,
+    int intermediate_size,
+    int stride,
+    int batch
+) {
+    int slot = (int)blockIdx.z;
+    int index = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+    if (slot >= batch || index >= intermediate_size || active_weights[slot] == 0.0f) return;
+    __nv_bfloat16* values = gate_up + (unsigned long long)slot * stride;
+    float gate = bf16_to_f32(values[index]);
+    float up = bf16_to_f32(values[intermediate_size + index]);
+    values[index] = f32_to_bf16(silu(gate) * up);
+}
+
 extern "C" __global__ void gelu_tanh_mul(
     __nv_bfloat16* __restrict__ output,
     const __nv_bfloat16* __restrict__ gate_up,
@@ -1273,7 +1484,7 @@ extern "C" __global__ void softmax_topk_parallel_selection(
 //     [base+3] = w2_scales VRAM ptr
 //
 // d_batch_upload layout: [max_ept * 8] * 4 pointer arrays + three
-// [max_ept * 4] weight regions
+// [max_ept * 4] weight regions + one [max_ept * 4] expert-ID region
 //   Stride between arrays = max_ept * 8 bytes
 //   Array 0: w13_packed ptrs [max_ept]
 //   Array 1: w13_scales ptrs [max_ept]
@@ -1285,6 +1496,7 @@ extern "C" __global__ void softmax_topk_parallel_selection(
 //   Array 4: weights (f32)   [max_ept] at offset max_ept*8*4
 //   Array 5: split full weights (f32) [max_ept]
 //   Array 6: split hot weights (f32)  [max_ept]
+//   Array 7: routed expert IDs (int32) [max_ept]
 //
 // mapped_cold_buf layout (host-visible via PCIe BAR):
 //   [0]:       cold_count (int32) — number of cold experts
@@ -1321,6 +1533,7 @@ extern "C" __global__ void expert_classify_prepare(
     float* wts_arr = (float*)(d_batch_upload + max_ept * 4);
     float* split_weights_full = wts_arr + max_ept;
     float* split_weights_hot = split_weights_full + max_ept;
+    int* expert_ids = reinterpret_cast<int*>(split_weights_hot + max_ept);
     int split_expert_launch = mapped_cold_buf[2 + max_ept * 2] != 0;
 
     int batch_count = 0;
@@ -1341,6 +1554,7 @@ extern "C" __global__ void expert_classify_prepare(
             w13s_arr[batch_count] = d_expert_ptrs[ptr_base + 1];
             w2p_arr[batch_count]  = d_expert_ptrs[ptr_base + 2];
             w2s_arr[batch_count]  = d_expert_ptrs[ptr_base + 3];
+            expert_ids[batch_count] = eid;
             wts_arr[batch_count]  = split_expert_launch ? 0.0f : weight;
             if (split_expert_launch) {
                 split_weights_full[batch_count] = weight;
@@ -1351,6 +1565,7 @@ extern "C" __global__ void expert_classify_prepare(
             // Cold miss — record for CPU DMA
             mapped_cold_buf[2 + cold_count] = eid;
             mapped_cold_buf[2 + topk + cold_count] = batch_count;
+            expert_ids[batch_count] = eid;
             wts_arr[batch_count] = weight;
             if (split_expert_launch) {
                 split_weights_full[batch_count] = weight;
@@ -1367,6 +1582,7 @@ extern "C" __global__ void expert_classify_prepare(
         w13s_arr[i] = dummy_ptr;
         w2p_arr[i]  = dummy_ptr;
         w2s_arr[i]  = dummy_ptr;
+        expert_ids[i] = 0;
         wts_arr[i]  = 0.0f;
         if (split_expert_launch) {
             split_weights_full[i] = 0.0f;

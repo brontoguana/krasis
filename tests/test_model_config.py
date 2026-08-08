@@ -28,6 +28,7 @@ from krasis.model import (
     _dsa_resource_layers_for_segment,
     _dsa_topk_candidate_capacity,
 )
+from krasis.server import _tileq_configuration_error
 from krasis.vram_budget import _kv_bytes_per_token_per_layer
 from krasis.weight_loader import WeightLoader
 
@@ -126,6 +127,18 @@ def _deepseek_v4_config() -> dict:
 
 
 class ModelConfigContractTests(unittest.TestCase):
+    def test_tileq_configuration_requires_exact_artifact_pairing(self) -> None:
+        self.assertEqual(
+            _tileq_configuration_error(3, None),
+            "--gpu-expert-bits 3 requires --tileq-cache",
+        )
+        self.assertEqual(
+            _tileq_configuration_error(4, "/tmp/model.ktq"),
+            "--tileq-cache is valid only with --gpu-expert-bits 3",
+        )
+        self.assertIsNone(_tileq_configuration_error(3, "/tmp/model.ktq"))
+        self.assertIsNone(_tileq_configuration_error(4, None))
+
     def test_aux_decode_hash_tables_use_exact_pipeline_segment(self) -> None:
         """Aux registration must use the method's [split_layer, layer_end) contract."""
         source = textwrap.dedent(
