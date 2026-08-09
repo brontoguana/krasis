@@ -1,0 +1,50 @@
+================================================================
+Krasis Benchmark — 2026-08-10 00:05:58
+================================================================
+Model:            Qwen3-Coder-Next
+Architecture:     qwen3_next, 48 layers, 512 experts, top-10, 12 GQA + 36 linear
+PP Partition:     [48] (2 GPUs)
+
+Hardware:
+  CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
+  RAM:            995 GB total, 83.7 GB used by process
+  GPU 0 (physical 1): NVIDIA RTX PRO 6000 Blackwell Workstation Edition (97887 MB), 2620 MB allocated
+  GPU 1 (physical 0): NVIDIA RTX A4500 (20470 MB), 807 MB allocated
+
+Quantization:
+  GPU experts:    INT8 (Marlin)
+  CPU experts:    INT8
+  Attention:      HQQ68_AUTO
+  Shared expert:  INT8
+  Dense MLP:      INT8
+  LM head:        INT8
+  KV cache:       k6v6
+
+Strategy:
+  Layer group size: 2 (layer_grouped(2))
+  Prefill threshold: 1
+  Mode:           gpu_decode (layer_grouped(2))
+
+Prefill (internal) — 6 runs at different lengths:
+  Run 1:  1,320.5 tok/s (1,000 tokens in 757.3ms)
+  Run 2:  4,685.8 tok/s (5,000 tokens in 1067.0ms)
+  Run 3:  6,800.8 tok/s (10,000 tokens in 1470.4ms)
+  Run 4:  8,325.1 tok/s (20,000 tokens in 2402.4ms)
+  Run 5:  8,917.3 tok/s (35,000 tokens in 3924.9ms)
+  Run 6:  8,955.6 tok/s (39,920 tokens in 4457.6ms)
+  Best:   8,955.6 tok/s (39,920 tokens)
+
+Decode (internal) — 50/100/250 tokens, 3 separate prompts:
+   50 tokens: 66.60 tok/s (15.0ms/tok)
+  100 tokens: 66.65 tok/s (15.0ms/tok)
+  250 tokens: 65.71 tok/s (15.2ms/tok)
+  Best:    66.65 tok/s
+  HCS:     24576/24576 experts (100.0%)
+  Min free VRAM: 18984 MB
+
+Round trip (network) — 50/100/250 tokens via HTTP:
+   50 tokens: 121.97 tok/s (2.04s total)
+  100 tokens: 85.87 tok/s (2.70s total)
+  250 tokens: 72.04 tok/s (5.08s total)
+  Best:    121.97 tok/s
+================================================================

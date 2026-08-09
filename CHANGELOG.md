@@ -9,18 +9,21 @@
   to runtime OS mapping granularity: measured page size on Unix and
   `GetSystemInfo().dwAllocationGranularity` on Windows. The standalone GPU
   codec probe uses the same shared primitives. The installed Linux build and
-  focused sidecar contracts pass 3/3; Windows compilation and installer
-  lifecycle remain the authoritative cross-platform gate.
+  focused sidecar contracts pass 3/3. Exact-SHA Windows preflight
+  `31339886564` then passed the wheel, Rust contracts, native launcher,
+  private runtime, payload digest, installer, clean install/isolation/legacy
+  repair/uninstall lifecycle, provenance, and promotable-artifact upload.
 - Prepared and passed the complete `v1.0.21-rc.2` release gate on the final
-  source. Three timing-disabled fixed `./dev speed-test` runs remained within
-  the established A4500 run envelope; the final run measured 1,784.5 tok/s at
-  20K prefill, 36.67 tok/s best internal decode, 63.77 tok/s best HTTP, and a
-  756 MiB floor against the 600 MiB contract. The final
+  source, including a fourth timing-disabled fixed `./dev speed-test` after the
+  Windows portability repair. The authoritative run remained within the
+  established A4500 envelope at 1,782.7 tok/s for 20K prefill, 36.55 tok/s
+  best internal decode, 63.38 tok/s best HTTP, and a 758 MiB floor against the
+  600 MiB contract. The post-portability
   `./dev release-test QCN` passed launcher 29/29 plus planner 6/6 and all three
   INT4/INT8 production configurations. Each completed benchmark, 14 sanity
   prompts, canonical 2K/10K/25K prompts, and 4/4 llama-witness validation.
-  Peak internal results were 10,987.9/89.47 tok/s for INT4 HQQ4,
-  10,232.1/89.42 for INT4 HQQ68, and 8,941.4/66.61 for two-GPU INT8. The
+  Peak internal results were 10,998.3/89.69 tok/s for INT4 HQQ4,
+  10,235.6/89.54 for INT4 HQQ68, and 8,955.6/66.65 for two-GPU INT8. The
   constrained A4500 floor was 1,166 MiB. No HCS copy failure, CUDA error, OOM,
   or below-margin event occurred; all raw evidence is indexed in
   `benchmarks/BENCHMARKS.md`.

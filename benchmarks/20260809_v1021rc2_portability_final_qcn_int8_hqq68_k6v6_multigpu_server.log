@@ -1,0 +1,652 @@
+
+[1mKrasis Launch Configuration[0m
+  Krasis home:     /home/main/.krasis
+  Models dir:      /home/main/.krasis/models
+  Model:           Qwen3-Coder-Next
+  PP partition:    48
+  Layer group:     2 layers (double-buffered)
+  KV cache:        1,000 MB
+  Max context:     model limit
+  KV dtype:        k6v6
+  Quantization:    INT8 g128
+  Attention quant: HQQ6+25%
+  Shared expert:   int8
+  LM head quant:   int8
+  VRAM safety:     600 MB
+  HCS RAM saver:   On (lower RAM)
+  Cold-mass prune: Off
+  Server:          0.0.0.0:8012
+  GPUs:            2x [1,0]
+
+  Experts:        6,240 MB  (INT8 g128)
+  Attention:      1,471 MB  (HQQ6+25%)
+  Overhead:       3,954 MB
+  Total:   11,666 / 20,470 MB (rank 0)
+  HCS:     14,045 MB  (~19% coverage)
+  KV capacity: ~262K tokens (k6v6)
+  Expert cache: 76.0 GB / 995 GB RAM
+  Estimated peak: 12,666 MB VRAM / 76.0 GB system RAM
+
+  CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d
+
+[0;32mStarting Krasis server...[0m
+
+  Config: /tmp/krasis-qpjy0nwh.conf
+[2m$ /home/main/miniconda3/envs/ktransformers/bin/python3.11 -m krasis.server --config /tmp/krasis-qpjy0nwh.conf --benchmark --vram-report[0m
+
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d
+Loaded config from /tmp/krasis-qpjy0nwh.conf: {'model_path': '/home/main/.krasis/models/Qwen3-Coder-Next', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d', 'num_gpus': 2, 'layer_group_size': 2, 'kv_cache_mb': 1000, 'max_context_tokens': 0, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 8, 'expert_group_size': 128, 'gpu_expert_int4_calib': 'amax', 'cpu_expert_bits': 8, 'attention_quant': 'hqq68_auto', 'hqq_cache_profile': 'baseline', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 8012, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'hcs': True, 'multi_gpu_hcs': False, 'multi_gpu_mode': 'auto', 'dynamic_peer': False, 'hcs_host_cache_mode': 'source', 'dynamic_hcs': True, 'dynamic_hcs_tail_blocks': 2, 'adaptive_cold_mass_pruning': 'off', 'expert_compression': False, 'expert_compression_pipeline': 'grouped', 'stream_attention': False, 'draft_k': 3, 'draft_context': 512, 'temperature': 0.6, 'force_load': False, 'force_rebuild_cache': False, 'force_rebuild_hqq_cache': False, 'build_cache': False, 'enable_thinking': True, 'prefix_cache': True, 'prefix_cache_ram_fraction': 0.25, 'hqq_auto_budget_pct': 25.0}
+
+[1m[36m▸ Krasis — Qwen3-Coder-Next[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 2[0m
+  [32mMulti-GPU mode: auto[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d (config; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d)[0m
+  [32mExperts: GPU INT8 g128  |  Attention: hqq68_auto  |  KV: k6v6[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=557 MB, free=96700 MB, total=97258 MB
+  [33m[VRAM before-load][0m cuda:1: alloc=0 MB, reserved=0 MB, used=186 MB, free=19866 MB, total=20052 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4395 MB, free=92862 MB, total=97258 MB
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:1: alloc=0 MB, reserved=0 MB, used=186 MB, free=19866 MB, total=20052 MB
+  [0;32mHQQ attention artifacts validated (1471 MB cached), 92862 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 48 layers...
+    GPU Marlin cache loaded: 78.7 GB in 51s
+  [0;32mExpert weights loaded in 51s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4395 MB, free=92862 MB, total=97258 MB
+  [33m[VRAM after-phase2-expert-weights][0m cuda:1: alloc=0 MB, reserved=0 MB, used=186 MB, free=19866 MB, total=20052 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4395 MB, free=92862 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:1: alloc=0 MB, reserved=0 MB, used=186 MB, free=19866 MB, total=20052 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4640 MB, reserved=4664 MB, used=5399 MB, free=91858 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:1: alloc=0 MB, reserved=0 MB, used=186 MB, free=19866 MB, total=20052 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4640 MB, reserved=4664 MB, used=5399 MB, free=91858 MB, total=97258 MB
+  [33m[VRAM after-full-load][0m cuda:1: alloc=0 MB, reserved=0 MB, used=186 MB, free=19866 MB, total=20052 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x6bd70c10)[0m
+  [32mReleased redundant GPU execution source tensors (489 MB)[0m
+  [2mVRAM monitor started (startup measurement 1 ms; runtime 50 ms)[0m
+  [2mcuda:0: 0 MB total[0m
+  [2mcuda:1: 0 MB total[0m
+  [2mVRAM report enabled (periodic samples + events)[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=32 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=32)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=32)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=32)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 4.0s[0m
+  [2mcuda:0 warmup:  peak 8,811 MB used / 97,258 MB total  (min free: 88,446 MB)[0m
+  [2mcuda:1 warmup:  peak 362 MB used / 20,052 MB total  (min free: 19,690 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 90,822 MB / 97,258 MB[0m
+  [32mCalibration prefill guard: 1,200 MB (runtime safety remains 600 MB)[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 2.45s (13.1 tok/s)  VRAM: 90772 MB free now, 90772 MB min free during decode[0m
+  [32mShort calibration: baseline=90,822 MB, prefill post-alloc=89,952 MB, prefill min=88,364 MB, decode min=90,772 MB, post-cleanup=90,772 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.4481 MB/token[0m
+  [32mAdaptive long calibration fail-closed entry check: 4,000 tokens require 3,237 MB, 90,822 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 39,920 tokens (model-estimated initial probe (projected 0.4481 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 2.56s (12.5 tok/s)  VRAM: 90770 MB free now, 90770 MB min free during decode[0m
+  [32mLong calibration: baseline=90,772 MB, prefill post-alloc=71,912 MB, prefill min=70,312 MB, decode min=90,770 MB, post-cleanup=90,770 MB[0m
+  [32mScratch reservation: max=22,181 MB (at 50,000 tokens)[0m
+  [32mVRAM monitor runtime cadence restored: 1 ms -> 50 ms[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 90,770 MB[0m
+  [32mTransient deltas: short prefill=2,458 MB, long prefill=20,460 MB, short decode=50 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 90,120 MB[0m
+  [32mPrefill HCS budgets: short=87,712 MB, long=69,710 MB[0m
+  [32mWorst-case prefill scratch reservation: 22,181 MB at 50,000 tokens[0m
+
+[1m[36m▸ Computing multi-GPU layer split (2 GPUs)[0m
+
+[1m[36m▸ Calibrating multi-GPU device service rates[0m
+  [32m  GPU0 cuda:0: H2D p50/p95=181.0/187.5 us (17.65 GB/s), D2D p50/p95=18.8/20.5 us (1700.85 GB/s)[0m
+  [32m  GPU1 cuda:1: H2D p50/p95=178.1/187.3 us (17.94 GB/s), D2D p50/p95=122.5/123.8 us (260.82 GB/s)[0m
+  [32mSpeed-aware split: reference=[40] (5.70 ms/token predicted), selected=[46] (4.93 ms/token, 13.42% reduction, admitted, uncertainty=0.51 ms)[0m
+  [32mHCS budgets: GPU0 90,120 MB, GPU1 18,549 MB = 108,669 MB total[0m
+  [32m  GPU0: layers [0..46) = 46 layers (82.9%)[0m
+  [32m  GPU1: layers [46..48) = 2 layers (17.1%)[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [2mNo approved heatmap artifact matches this model/router signature and validated runtime; falling back to quick startup heatmap generation[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+  [2mQuick heatmap prompt 1/6: 31 prefill tokens + 256 decode tokens[0m
+  [2mQuick heatmap prompt 1/6 done: 257 route tokens, 20.3s (elapsed 20.3s, eta 101.4s)[0m
+  [2mQuick heatmap prompt 2/6: 39 prefill tokens + 256 decode tokens[0m
+  [2mQuick heatmap prompt 2/6 done: 257 route tokens, 22.9s (elapsed 43.1s, eta 86.3s)[0m
+  [2mQuick heatmap prompt 3/6: 31 prefill tokens + 256 decode tokens[0m
+  [2mQuick heatmap prompt 3/6 done: 257 route tokens, 20.3s (elapsed 63.4s, eta 63.4s)[0m
+  [2mQuick heatmap prompt 4/6: 25 prefill tokens + 256 decode tokens[0m
+  [2mQuick heatmap prompt 4/6 done: 257 route tokens, 20.3s (elapsed 83.7s, eta 41.9s)[0m
+  [2mQuick heatmap prompt 5/6: 37 prefill tokens + 256 decode tokens[0m
+  [2mQuick heatmap prompt 5/6 done: 257 route tokens, 20.4s (elapsed 104.1s, eta 20.8s)[0m
+  [2mQuick heatmap prompt 6/6: 42 prefill tokens + 256 decode tokens[0m
+  [2mQuick heatmap prompt 6/6 done: 257 route tokens, 22.8s (elapsed 127.0s, eta 0.0s)[0m
+  [32mHeatmap: 20,873 experts ranked from 20,873 entries[0m
+  [33mMulti-GPU auto selector retained layer-split: peer expert serving currently requires production INT4 experts[0m
+  [2mVRAM calibration: baseline 90770 MB | prefill 467.6 KB/tok, decode -1.2 KB/tok | HCS allowance prefill: short 87712 MB, long 69710 MB | decode: short 90120 MB, long 90168 MB | idle floors prefill=3058 MB decode=650 MB | decode-resident HCS budget=90120 MB[0m
+  [2mGPU0 HCS: 23552 experts for layers [0..46) (20020 ranked + 3532 unranked), reclaimable: 90,120 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/24576 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 23552 experts in 3.79s (71760.0 MB, host_mode=source) | total: 23552/24576 (95.8%) coverage[0m
+  [2mLoaded in 3.9s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[36m▸ Multi-GPU decode setup (2 GPUs)[0m
+  [32m  GPU0: layers [0..46) = 46 layers (35 LA + 11 GQA, 46 MoE + 0 dense)[0m
+  [32m  GPU1: layers [46..48) = 2 layers (1 LA + 1 GQA, 2 MoE + 0 dense)[0m
+  [2m  GQA cache offsets: [11][0m
+  [2m  Attention layers are PERMANENT on each GPU (copied at setup, never evicted)[0m
+  [2mCreating aux decode store 1 on cuda:1 for layers [46..48)...[0m
+  [2m  cuda:0 after aux store setup: 18,984 MB free / 97,258 MB total[0m
+  [2m  cuda:1 after aux store setup: 18,428 MB free / 20,052 MB total[0m
+
+[1m[36m▸ Calibrating multi-GPU aux decode overhead[0m
+  [32mAux decode overhead calibration: 11 tokens generated OK[0m
+  [2m  GPU1 decode transient: baseline=18,428 MB, min=18,424 MB, current=18,424 MB, overhead=4 MB[0m
+  [2m  GPU1 HCS: 1024 experts for layers [46..48) (853 ranked + 171 unranked)[0m
+  [32m  GPU1 HCS budget: 17,224 MB hard (aux_free=18,424 MB, decode_transient=4 MB, runtime_reserve=600 MB)[0m
+  [32m  GPU1 HCS: HCS pool: 1024/24576 experts loaded in 0.26s (4.2% coverage), 17224.0 MB VRAM, 4629 free slots, gpu_route_sync=false, mapped_reads=false | soft: 0 slots (budget too small)[0m
+
+[1m[36m▸ Validating multi-GPU decode[0m
+  [32mMulti-GPU decode validation: 11 tokens generated OK[0m
+  [2m  cuda:0 during multi-GPU decode: min_free=18,272 MB, current_free=18,984 MB / 97,258 MB total[0m
+  [2m  cuda:1 during multi-GPU decode: min_free=1,198 MB, current_free=1,198 MB / 20,052 MB total[0m
+  [2m  GPU1 (cuda:1): min_free=1198 MB during decode, current_free=1198 MB (budget safe)[0m
+
+[1m[36m▸ Multi-GPU decode ready (2 GPUs, splits=[46])[0m
+
+[1m[36m▸ VRAM allocation summary[0m
+  [32m  GPU0 (cuda:0): layers [0..46) = 46 (35LA+11GQA, 46MoE)[0m
+  [32m    Attention: 312 MB[0m
+  [32m    HCS:   reclaimable=90,120MB = 90,120 MB total[0m
+  [32m    VRAM:  78,274 MB used / 97,258 MB total (18,984 MB free)[0m
+  [32m  GPU1 (cuda:1): layers [46..48) = 2 (1LA+1GQA, 2MoE)[0m
+  [32m    Attention: 12 MB (HQQ6/8-auto, permanent)[0m
+  [32m    HCS:   18,549 MB (100% hard, no prefill)[0m
+  [32m    VRAM:  18,854 MB used / 20,052 MB total (1,198 MB free)[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mQwen3-Coder-Next[0m
+  [32mAddress:[0m  [1m0.0.0.0:8012[0m
+  [32mContext:[0m  97,520 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   2-GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:8012/v1[0m
+    Chat endpoint: http://127.0.0.1:8012/v1/chat/completions
+    Models:        http://127.0.0.1:8012/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mQwen3-Coder-Next[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mQwen3-Coder-Next[0m
+  GPUs:     NVIDIA RTX PRO 6000 Blackwell Workstation Edition + NVIDIA RTX A4500
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/5K/10K/20K/35K/39,920)[0m
+  Prefill sizing:  [33mruntime-calibrated prefill cap 39,920 tokens (long probe low-water 70,310 MB, safety 600 MB)[0m
+  Warmup prefill:  3 prompts, ~25,000 tokens each
+  Timed prefill:   6 prompts at 1K/5K/10K/20K/35K/39,920 tokens
+    [1] 1,000 tokens
+    [2] 5,000 tokens
+    [3] 10,000 tokens
+    [4] 20,000 tokens
+    [5] 35,000 tokens
+    [6] 39,920 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+  [32mdecode: 7 tokens in 0.11s (63.4 tok/s)  VRAM: GPU0 18982MB min, GPU1 1166MB min[0m
+  [32mdecode: 7 tokens in 0.11s (63.8 tok/s)  VRAM: GPU0 18982MB min, GPU1 1166MB min[0m
+  Warmup complete.
+  Prefill warmup (3 runs, ~25,000 tokens each)...
+    [1/3] 25,000 tokens
+    [2/3] 25,000 tokens
+    [3/3] 25,000 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+  [32mdecode: 49 tokens in 0.73s (66.8 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+    50 tokens done
+  [32mdecode: 99 tokens in 1.49s (66.6 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+    100 tokens done
+  [32mdecode: 249 tokens in 3.77s (66.1 tok/s)  VRAM: GPU0 18982MB min, GPU1 1166MB min[0m
+    250 tokens done
+  Warmup complete (22.0s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K/5K/10K/20K/35K/39,920 tokens, 6 runs[0m
+  Run 1: 1,320.5 tok/s (1,000 tokens in 757.3ms)
+  Run 2: 4,685.8 tok/s (5,000 tokens in 1067.0ms)
+  Run 3: 6,800.8 tok/s (10,000 tokens in 1470.4ms)
+  Run 4: 8,325.1 tok/s (20,000 tokens in 2402.4ms)
+  Run 5: 8,917.3 tok/s (35,000 tokens in 3924.9ms)
+  Run 6: 8,955.6 tok/s (39,920 tokens in 4457.6ms)
+  [1mBest: 8,955.6 tok/s (39,920 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+  [32mdecode: 49 tokens in 0.73s (66.8 tok/s)  VRAM: GPU0 18986MB min, GPU1 1166MB min[0m
+  [32mdecode: 99 tokens in 1.48s (66.7 tok/s)  VRAM: GPU0 18986MB min, GPU1 1166MB min[0m
+  [32mdecode: 249 tokens in 3.79s (65.7 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+   50 tokens: 66.60 tok/s (15.0ms/tok)
+  100 tokens: 66.65 tok/s (15.0ms/tok)
+  250 tokens: 65.71 tok/s (15.2ms/tok)
+  [1mBest: 66.65 tok/s[0m
+  HCS:  24576/24576 experts loaded (100.0%)
+  VRAM: 18984 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+  [32mprefill: 10 tokens in 0.55s (18.3 tok/s)  VRAM: 1166 MB free now, 18562 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.11s (64.2 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+  [32mprefill: 57 tokens in 0.68s (83.9 tok/s)  VRAM: 1166 MB free now, 16856 MB min free during prefill[0m
+  [32mdecode: 49 tokens in 0.73s (66.9 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+  [32mprefill: 62 tokens in 0.60s (103.7 tok/s)  VRAM: 1166 MB free now, 17150 MB min free during prefill[0m
+  [32mdecode: 99 tokens in 1.48s (66.7 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+  [32mprefill: 57 tokens in 0.67s (84.7 tok/s)  VRAM: 1166 MB free now, 17128 MB min free during prefill[0m
+  [32mdecode: 249 tokens in 3.79s (65.7 tok/s)  VRAM: GPU0 18982MB min, GPU1 1166MB min[0m
+   50 tokens: 121.97 tok/s (2.04s total)
+  100 tokens: 85.87 tok/s (2.70s total)
+  250 tokens: 72.04 tok/s (5.08s total)
+  [1mBest: 121.97 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m[32mBENCHMARK COMPLETE[0m
+  Model:                 [1mQwen3-Coder-Next[0m
+  Config:                INT8/8 HQQ68_AUTO KV=k6v6 2 GPU
+  Prefill (internal):    [32m[1m8,955.6 tok/s[0m  (best of 1K/5K/10K/20K/35K/39,920)
+  Decode (internal):     [32m[1m66.65 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m121.97 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          24576/24576 (100.0%)
+  Min free VRAM:         18984 MB
+  Log:     [2mlogs/release-test_20260809_235020/config3-INT8-k6v6-HQQ6-8-Multi-GPU_20260809_235959/benchmark_report.log[0m
+
+
+[1m[32mSERVER READY: 0.0.0.0:8012[0m
+  [2mPress Q or Ctrl-C to stop[0m
+  [32mprefill: 9 tokens in 0.56s (16.0 tok/s)  VRAM: 1166 MB free now, 18270 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.11s (62.7 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+  [32mprefill: 9 tokens in 0.54s (16.8 tok/s)  VRAM: 1166 MB free now, 18272 MB min free during prefill[0m
+  [32mdecode: 11 tokens in 0.17s (66.3 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+  [32mprefill: 35 tokens in 0.57s (61.9 tok/s)  VRAM: 1166 MB free now, 18268 MB min free during prefill[0m
+  [32mdecode: 33 tokens in 0.51s (65.2 tok/s)  VRAM: GPU0 18982MB min, GPU1 1166MB min[0m
+  [32mprefill: 82 tokens in 0.69s (118.2 tok/s)  VRAM: 1166 MB free now, 16978 MB min free during prefill[0m
+  [32mdecode: 95 tokens in 1.46s (65.0 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+  [32mprefill: 15 tokens in 0.55s (27.4 tok/s)  VRAM: 1166 MB free now, 18212 MB min free during prefill[0m
+  [32mdecode: 8 tokens in 0.13s (63.1 tok/s)  VRAM: GPU0 18982MB min, GPU1 1166MB min[0m
+  [32mprefill: 40 tokens in 0.68s (58.8 tok/s)  VRAM: 1166 MB free now, 16888 MB min free during prefill[0m
+  [32mdecode: 10 tokens in 0.16s (63.5 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+  [32mprefill: 67 tokens in 0.68s (98.2 tok/s)  VRAM: 1166 MB free now, 17038 MB min free during prefill[0m
+  [32mdecode: 10 tokens in 0.16s (63.2 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+  [32mprefill: 17 tokens in 0.55s (30.9 tok/s)  VRAM: 1166 MB free now, 18204 MB min free during prefill[0m
+  [32mdecode: 169 tokens in 2.58s (65.6 tok/s)  VRAM: GPU0 18982MB min, GPU1 1166MB min[0m
+  [32mprefill: 19 tokens in 0.53s (35.9 tok/s)  VRAM: 1166 MB free now, 18194 MB min free during prefill[0m
+  [32mdecode: 167 tokens in 2.54s (65.7 tok/s)  VRAM: GPU0 18982MB min, GPU1 1166MB min[0m
+  [32mprefill: 15 tokens in 0.53s (28.3 tok/s)  VRAM: 1166 MB free now, 18268 MB min free during prefill[0m
+  [32mdecode: 255 tokens in 3.95s (64.6 tok/s)  VRAM: GPU0 18982MB min, GPU1 1166MB min[0m
+  [32mprefill: 46 tokens in 0.66s (69.8 tok/s)  VRAM: 1166 MB free now, 16922 MB min free during prefill[0m
+  [32mdecode: 255 tokens in 3.94s (64.7 tok/s)  VRAM: GPU0 18982MB min, GPU1 1166MB min[0m
+  [32mprefill: 15 tokens in 0.55s (27.2 tok/s)  VRAM: 1166 MB free now, 18270 MB min free during prefill[0m
+  [32mdecode: 255 tokens in 3.93s (64.9 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+  [32mprefill: 288 tokens in 0.72s (401.3 tok/s)  VRAM: 1166 MB free now, 16854 MB min free during prefill[0m
+  [32mdecode: 255 tokens in 4.01s (63.6 tok/s)  VRAM: GPU0 18988MB min, GPU1 1166MB min[0m
+  [32mprefill: 561 tokens in 0.74s (762.3 tok/s)  VRAM: 1166 MB free now, 17184 MB min free during prefill[0m
+  [32mdecode: 255 tokens in 4.02s (63.5 tok/s)  VRAM: GPU0 18986MB min, GPU1 1166MB min[0m
+  [32mprefill: 16 tokens in 0.55s (29.1 tok/s)  VRAM: 1166 MB free now, 18226 MB min free during prefill[0m
+  [32mdecode: 255 tokens in 3.92s (65.0 tok/s)  VRAM: GPU0 18982MB min, GPU1 1166MB min[0m
+  [32mprefill: 2203 tokens in 0.87s (2543.3 tok/s)  VRAM: 1166 MB free now, 15960 MB min free during prefill[0m
+  [32mdecode: 187 tokens in 2.96s (63.1 tok/s)  VRAM: GPU0 18988MB min, GPU1 1166MB min[0m
+  [32mprefill: 8703 tokens in 1.36s (6411.6 tok/s)  VRAM: 1166 MB free now, 13750 MB min free during prefill[0m
+  [32mdecode: 255 tokens in 4.21s (60.5 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+  [32mprefill: 23191 tokens in 2.71s (8553.6 tok/s)  VRAM: 1166 MB free now, 7178 MB min free during prefill[0m
+  [32mdecode: 255 tokens in 4.72s (54.1 tok/s)  VRAM: GPU0 18986MB min, GPU1 1166MB min[0m
+  [32mprefill: 9 tokens in 0.56s (16.2 tok/s)  VRAM: 1166 MB free now, 18270 MB min free during prefill[0m
+  [32mdecode: 11 tokens in 0.17s (65.5 tok/s)  VRAM: GPU0 18982MB min, GPU1 1166MB min[0m
+  [32mprefill: 15 tokens in 0.55s (27.2 tok/s)  VRAM: 1166 MB free now, 18174 MB min free during prefill[0m
+  [32mdecode: 8 tokens in 0.12s (64.3 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+  [32mprefill: 15 tokens in 0.55s (27.0 tok/s)  VRAM: 1166 MB free now, 18272 MB min free during prefill[0m
+  [32mdecode: 50 tokens in 0.74s (67.9 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+  [32mprefill: 15 tokens in 0.55s (27.2 tok/s)  VRAM: 1166 MB free now, 18268 MB min free during prefill[0m
+  [32mdecode: 50 tokens in 0.74s (67.7 tok/s)  VRAM: GPU0 18984MB min, GPU1 1166MB min[0m
+
+[1m[36mVRAM REPORT SUMMARY[0m
+  Event                              Time      GPU0      GPU1
+  model_loaded                       0.0s   91140MB   19690MB
+  warmup_start                       0.5s   91076MB   19690MB
+  warmup_end                         4.5s   90822MB   19690MB
+  calibration_start                  4.5s   90822MB   19690MB
+  calibration_end                   23.2s   90770MB   19690MB
+  hcs_init_start                   172.8s   90764MB   19690MB
+  hcs_init_end                     176.7s   18984MB   19690MB
+  validation_start                 176.7s   18984MB   19690MB
+  validation_end                   176.7s   18984MB   19690MB
+  multi_gpu_setup_start            176.8s   18984MB   19690MB
+  multi_gpu_setup_end              191.2s   18984MB    1198MB
+  server_ready                     192.5s   18984MB    1198MB
+  prefill_start                    201.2s   18984MB    1198MB
+  prefill_end                      201.8s   18982MB    1198MB
+  hcs_soft_load_start              201.8s   18982MB    1198MB
+  hcs_soft_load_end                202.4s   18982MB    1198MB
+  decode_start                     202.4s   18982MB    1198MB
+  decode_end                       202.5s   18982MB    1166MB
+  prefill_start                    202.8s   18982MB    1166MB
+  prefill_end                      203.3s   18982MB    1166MB
+  hcs_soft_load_start              203.3s   18982MB    1166MB
+  hcs_soft_load_end                203.9s   18982MB    1166MB
+  decode_start                     203.9s   18982MB    1166MB
+  decode_end                       204.0s   18982MB    1166MB
+  prefill_start                    204.3s   18982MB    1166MB
+  prefill_end                      207.2s   16842MB    1166MB
+  hcs_soft_load_start              207.2s   16842MB    1166MB
+  hcs_soft_load_end                207.8s   16842MB    1166MB
+  prefill_start                    208.2s   18986MB    1166MB
+  prefill_end                      211.0s   16842MB    1166MB
+  hcs_soft_load_start              211.0s   16842MB    1166MB
+  hcs_soft_load_end                211.6s   16842MB    1166MB
+  prefill_start                    212.0s   18986MB    1166MB
+  prefill_end                      214.8s   16842MB    1166MB
+  hcs_soft_load_start              214.8s   16842MB    1166MB
+  hcs_soft_load_end                215.5s   16842MB    1166MB
+  prefill_start                    215.7s   18986MB    1166MB
+  prefill_end                      216.4s   18984MB    1166MB
+  hcs_soft_load_start              216.4s   18984MB    1166MB
+  hcs_soft_load_end                217.0s   18984MB    1166MB
+  decode_start                     217.0s   18984MB    1166MB
+  decode_end                       217.7s   18984MB    1166MB
+  prefill_start                    218.0s   18984MB    1166MB
+  prefill_end                      218.6s   18984MB    1166MB
+  hcs_soft_load_start              218.6s   18984MB    1166MB
+  hcs_soft_load_end                219.3s   18984MB    1166MB
+  decode_start                     219.3s   18984MB    1166MB
+  decode_end                       220.7s   18984MB    1166MB
+  prefill_start                    221.0s   18984MB    1166MB
+  prefill_end                      221.7s   18982MB    1166MB
+  hcs_soft_load_start              221.7s   18982MB    1166MB
+  hcs_soft_load_end                222.3s   18982MB    1166MB
+  decode_start                     222.3s   18982MB    1166MB
+  decode_end                       226.1s   18982MB    1166MB
+  prefill_start                    226.3s   18982MB    1166MB
+  prefill_end                      227.1s   18922MB    1166MB
+  hcs_soft_load_start              227.1s   18922MB    1166MB
+  hcs_soft_load_end                227.7s   18922MB    1166MB
+  prefill_start                    227.9s   18986MB    1166MB
+  prefill_end                      229.0s   18570MB    1166MB
+  hcs_soft_load_start              229.0s   18570MB    1166MB
+  hcs_soft_load_end                229.6s   18570MB    1166MB
+  prefill_start                    229.9s   18986MB    1166MB
+  prefill_end                      231.3s   18120MB    1166MB
+  hcs_soft_load_start              231.3s   18120MB    1166MB
+  hcs_soft_load_end                232.0s   18120MB    1166MB
+  prefill_start                    232.3s   18984MB    1166MB
+  prefill_end                      234.7s   17288MB    1166MB
+  hcs_soft_load_start              234.7s   17288MB    1166MB
+  hcs_soft_load_end                235.3s   17288MB    1166MB
+  prefill_start                    235.6s   20362MB    1166MB
+  prefill_end                      239.5s   17354MB    1166MB
+  hcs_soft_load_start              239.5s   17354MB    1166MB
+  hcs_soft_load_end                240.1s   15976MB    1166MB
+  prefill_start                    240.5s   22666MB    1166MB
+  prefill_end                      244.9s   19246MB    1166MB
+  hcs_soft_load_start              244.9s   19246MB    1166MB
+  hcs_soft_load_end                245.5s   15564MB    1166MB
+  prefill_start                    245.8s   18988MB    1166MB
+  prefill_end                      246.5s   18986MB    1166MB
+  hcs_soft_load_start              246.5s   18986MB    1166MB
+  hcs_soft_load_end                247.1s   18986MB    1166MB
+  decode_start                     247.1s   18986MB    1166MB
+  decode_end                       247.9s   18986MB    1166MB
+  prefill_start                    248.1s   18986MB    1166MB
+  prefill_end                      248.7s   18986MB    1166MB
+  hcs_soft_load_start              248.7s   18986MB    1166MB
+  hcs_soft_load_end                249.3s   18986MB    1166MB
+  decode_start                     249.3s   18986MB    1166MB
+  decode_end                       250.8s   18986MB    1166MB
+  prefill_start                    251.0s   18986MB    1166MB
+  prefill_end                      251.7s   18984MB    1166MB
+  hcs_soft_load_start              251.7s   18984MB    1166MB
+  hcs_soft_load_end                252.3s   18984MB    1166MB
+  decode_start                     252.3s   18984MB    1166MB
+  decode_end                       256.1s   18984MB    1166MB
+  evict_start                      256.2s   18984MB    1166MB
+  evict_end                        256.2s   18984MB    1166MB
+  prefill_start                    256.2s   18984MB    1166MB
+  prefill_end                      256.8s   18984MB    1166MB
+  reload_start                     256.8s   18984MB    1166MB
+  decode_start                     257.4s   18984MB    1166MB
+  decode_end                       257.5s   18984MB    1166MB
+  cleanup_end                      257.5s   18984MB    1166MB
+  evict_start                      257.5s   18984MB    1166MB
+  evict_end                        257.5s   18984MB    1166MB
+  prefill_start                    257.5s   18984MB    1166MB
+  prefill_end                      258.2s   18984MB    1166MB
+  reload_start                     258.2s   18984MB    1166MB
+  decode_start                     258.8s   18984MB    1166MB
+  decode_end                       259.6s   18984MB    1166MB
+  cleanup_end                      259.6s   18984MB    1166MB
+  evict_start                      259.6s   18984MB    1166MB
+  evict_end                        259.6s   18984MB    1166MB
+  prefill_start                    259.6s   18984MB    1166MB
+  prefill_end                      260.2s   18984MB    1166MB
+  reload_start                     260.2s   18984MB    1166MB
+  decode_start                     260.8s   18984MB    1166MB
+  decode_end                       262.3s   18984MB    1166MB
+  cleanup_end                      262.3s   18984MB    1166MB
+  evict_start                      262.3s   18984MB    1166MB
+  evict_end                        262.3s   18984MB    1166MB
+  prefill_start                    262.3s   18984MB    1166MB
+  prefill_end                      262.9s   18982MB    1166MB
+  reload_start                     262.9s   18982MB    1166MB
+  decode_start                     263.5s   18982MB    1166MB
+  decode_end                       267.3s   18982MB    1166MB
+  cleanup_end                      267.3s   18982MB    1166MB
+  evict_start                      268.1s   18982MB    1166MB
+  evict_end                        268.1s   18982MB    1166MB
+  prefill_start                    268.1s   18982MB    1166MB
+  prefill_end                      268.6s   18984MB    1166MB
+  reload_start                     268.6s   18984MB    1166MB
+  decode_start                     269.2s   18984MB    1166MB
+  decode_end                       269.4s   18984MB    1166MB
+  cleanup_end                      269.4s   18984MB    1166MB
+  evict_start                      269.4s   18984MB    1166MB
+  evict_end                        269.4s   18984MB    1166MB
+  prefill_start                    269.4s   18984MB    1166MB
+  prefill_end                      269.9s   18984MB    1166MB
+  reload_start                     269.9s   18984MB    1166MB
+  decode_start                     270.5s   18984MB    1166MB
+  decode_end                       270.7s   18984MB    1166MB
+  cleanup_end                      270.7s   18984MB    1166MB
+  evict_start                      270.7s   18984MB    1166MB
+  evict_end                        270.7s   18984MB    1166MB
+  prefill_start                    270.7s   18984MB    1166MB
+  prefill_end                      271.3s   18982MB    1166MB
+  reload_start                     271.3s   18982MB    1166MB
+  decode_start                     271.9s   18982MB    1166MB
+  decode_end                       272.4s   18982MB    1166MB
+  cleanup_end                      272.4s   18982MB    1166MB
+  evict_start                      272.4s   18982MB    1166MB
+  evict_end                        272.4s   18982MB    1166MB
+  prefill_start                    272.4s   18982MB    1166MB
+  prefill_end                      273.1s   18984MB    1166MB
+  reload_start                     273.1s   18984MB    1166MB
+  decode_start                     273.7s   18984MB    1166MB
+  decode_end                       275.2s   18984MB    1166MB
+  cleanup_end                      275.2s   18984MB    1166MB
+  evict_start                      275.2s   18984MB    1166MB
+  evict_end                        275.2s   18984MB    1166MB
+  prefill_start                    275.2s   18984MB    1166MB
+  prefill_end                      275.7s   18982MB    1166MB
+  reload_start                     275.7s   18982MB    1166MB
+  decode_start                     276.3s   18982MB    1166MB
+  decode_end                       276.4s   18982MB    1166MB
+  cleanup_end                      276.4s   18982MB    1166MB
+  evict_start                      276.5s   18982MB    1166MB
+  evict_end                        276.5s   18982MB    1166MB
+  prefill_start                    276.5s   18982MB    1166MB
+  prefill_end                      277.1s   18984MB    1166MB
+  reload_start                     277.1s   18984MB    1166MB
+  decode_start                     277.8s   18984MB    1166MB
+  decode_end                       277.9s   18984MB    1166MB
+  cleanup_end                      277.9s   18984MB    1166MB
+  evict_start                      277.9s   18984MB    1166MB
+  evict_end                        277.9s   18984MB    1166MB
+  prefill_start                    277.9s   18984MB    1166MB
+  prefill_end                      278.6s   18984MB    1166MB
+  reload_start                     278.6s   18984MB    1166MB
+  decode_start                     279.2s   18984MB    1166MB
+  decode_end                       279.4s   18984MB    1166MB
+  cleanup_end                      279.4s   18984MB    1166MB
+  evict_start                      279.4s   18984MB    1166MB
+  evict_end                        279.4s   18984MB    1166MB
+  prefill_start                    279.4s   18984MB    1166MB
+  prefill_end                      279.9s   18982MB    1166MB
+  reload_start                     279.9s   18982MB    1166MB
+  decode_start                     280.5s   18982MB    1166MB
+  decode_end                       283.1s   18982MB    1166MB
+  cleanup_end                      283.1s   18982MB    1166MB
+  evict_start                      283.1s   18982MB    1166MB
+  evict_end                        283.1s   18982MB    1166MB
+  prefill_start                    283.1s   18982MB    1166MB
+  prefill_end                      283.7s   18982MB    1166MB
+  reload_start                     283.7s   18982MB    1166MB
+  decode_start                     284.3s   18982MB    1166MB
+  decode_end                       286.8s   18982MB    1166MB
+  cleanup_end                      286.8s   18982MB    1166MB
+  evict_start                      286.8s   18982MB    1166MB
+  evict_end                        286.8s   18982MB    1166MB
+  prefill_start                    286.8s   18982MB    1166MB
+  prefill_end                      287.4s   18982MB    1166MB
+  reload_start                     287.4s   18982MB    1166MB
+  decode_start                     288.0s   18982MB    1166MB
+  decode_end                       291.9s   18982MB    1166MB
+  cleanup_end                      291.9s   18982MB    1166MB
+  evict_start                      291.9s   18982MB    1166MB
+  evict_end                        291.9s   18982MB    1166MB
+  prefill_start                    291.9s   18982MB    1166MB
+  prefill_end                      292.6s   18982MB    1166MB
+  reload_start                     292.6s   18982MB    1166MB
+  decode_start                     293.2s   18982MB    1166MB
+  decode_end                       297.1s   18982MB    1166MB
+  cleanup_end                      297.1s   18982MB    1166MB
+  evict_start                      297.1s   18982MB    1166MB
+  evict_end                        297.1s   18982MB    1166MB
+  prefill_start                    297.1s   18982MB    1166MB
+  prefill_end                      297.7s   18984MB    1166MB
+  reload_start                     297.7s   18984MB    1166MB
+  decode_start                     298.3s   18984MB    1166MB
+  decode_end                       302.2s   18984MB    1166MB
+  cleanup_end                      302.2s   18984MB    1166MB
+  evict_start                      302.2s   18984MB    1166MB
+  evict_end                        302.2s   18984MB    1166MB
+  prefill_start                    302.2s   18984MB    1166MB
+  prefill_end                      303.0s   18988MB    1166MB
+  reload_start                     303.0s   18988MB    1166MB
+  decode_start                     303.6s   18988MB    1166MB
+  decode_end                       307.6s   18988MB    1166MB
+  cleanup_end                      307.6s   18988MB    1166MB
+  evict_start                      307.6s   18988MB    1166MB
+  evict_end                        307.6s   18988MB    1166MB
+  prefill_start                    307.6s   18988MB    1166MB
+  prefill_end                      308.3s   18954MB    1166MB
+  reload_start                     308.3s   18954MB    1166MB
+  decode_start                     308.9s   18986MB    1166MB
+  decode_end                       313.0s   18986MB    1166MB
+  cleanup_end                      313.0s   18986MB    1166MB
+  evict_start                      313.0s   18986MB    1166MB
+  evict_end                        313.0s   18986MB    1166MB
+  prefill_start                    313.0s   18986MB    1166MB
+  prefill_end                      313.5s   18982MB    1166MB
+  reload_start                     313.5s   18982MB    1166MB
+  decode_start                     314.1s   18982MB    1166MB
+  decode_end                       318.1s   18982MB    1166MB
+  cleanup_end                      318.1s   18982MB    1166MB
+  evict_start                      318.1s   18982MB    1166MB
+  evict_end                        318.1s   18982MB    1166MB
+  prefill_start                    318.1s   18982MB    1166MB
+  prefill_end                      318.9s   18796MB    1166MB
+  reload_start                     318.9s   18796MB    1166MB
+  decode_start                     319.6s   18988MB    1166MB
+  decode_end                       322.5s   18988MB    1166MB
+  cleanup_end                      322.5s   18988MB    1166MB
+  evict_start                      322.5s   18988MB    1166MB
+  evict_end                        322.5s   18988MB    1166MB
+  prefill_start                    322.5s   18988MB    1166MB
+  prefill_end                      323.9s   18248MB    1166MB
+  reload_start                     323.9s   18248MB    1166MB
+  decode_start                     324.5s   18984MB    1166MB
+  decode_end                       328.7s   18984MB    1166MB
+  cleanup_end                      328.7s   18984MB    1166MB
+  evict_start                      328.8s   18984MB    1166MB
+  evict_end                        328.8s   18984MB    1166MB
+  prefill_start                    328.8s   18984MB    1166MB
+  prefill_end                      331.5s   17002MB    1166MB
+  reload_start                     331.5s   17002MB    1166MB
+  decode_start                     332.1s   18986MB    1166MB
+  decode_end                       336.9s   18986MB    1166MB
+  cleanup_end                      336.9s   18986MB    1166MB
+  evict_start                      337.2s   18986MB    1166MB
+  evict_end                        337.2s   18986MB    1166MB
+  prefill_start                    337.2s   18986MB    1166MB
+  prefill_end                      337.7s   18982MB    1166MB
+  reload_start                     337.7s   18982MB    1166MB
+  decode_start                     338.3s   18982MB    1166MB
+  decode_end                       338.5s   18982MB    1166MB
+  cleanup_end                      338.5s   18982MB    1166MB
+  evict_start                      338.5s   18982MB    1166MB
+  evict_end                        338.5s   18982MB    1166MB
+  prefill_start                    338.5s   18982MB    1166MB
+  prefill_end                      339.1s   18984MB    1166MB
+  reload_start                     339.1s   18984MB    1166MB
+  decode_start                     339.7s   18984MB    1166MB
+  decode_end                       339.8s   18984MB    1166MB
+  cleanup_end                      339.8s   18984MB    1166MB
+  evict_start                      339.8s   18984MB    1166MB
+  evict_end                        339.8s   18984MB    1166MB
+  prefill_start                    339.8s   18984MB    1166MB
+  prefill_end                      340.4s   18984MB    1166MB
+  reload_start                     340.4s   18984MB    1166MB
+  decode_start                     341.0s   18984MB    1166MB
+  decode_end                       341.7s   18984MB    1166MB
+  cleanup_end                      341.7s   18984MB    1166MB
+  evict_start                      341.7s   18984MB    1166MB
+  evict_end                        341.7s   18984MB    1166MB
+  prefill_start                    341.7s   18984MB    1166MB
+  prefill_end                      342.3s   18984MB    1166MB
+  reload_start                     342.3s   18984MB    1166MB
+  decode_start                     342.9s   18984MB    1166MB
+  decode_end                       343.6s   18984MB    1166MB
+  cleanup_end                      343.6s   18984MB    1166MB
+  server_shutdown                  343.7s   18984MB    1166MB
+  [2mFull report: /home/main/Documents/Claude/krasis/logs/release-test_20260809_235020/config3-INT8-k6v6-HQQ6-8-Multi-GPU_20260809_235959/vram_report.csv[0m
