@@ -9,6 +9,135 @@ from krasis import server
 
 
 class ApprovedHeatmapAutoTest(unittest.TestCase):
+    def test_peer_format_eligibility_accepts_only_production_int4(self):
+        self.assertIsNone(server._peer_expert_format_error(4))
+        self.assertEqual(
+            server._peer_expert_format_error(8),
+            "peer expert serving currently requires production INT4 experts",
+        )
+        self.assertEqual(
+            server._peer_expert_format_error(3),
+            "peer expert serving currently requires production INT4 experts",
+        )
+
+    def test_quick_heatmap_persists_measured_decode_token_denominator(self):
+        class FakeStore:
+            def hcs_init_collection(self, *args):
+                return None
+
+            def hcs_start_collecting(self):
+                return None
+
+            def rust_prefill_tokens(self, *args, **kwargs):
+                return 7, 2, False
+
+            def gpu_generate_batch(self, **kwargs):
+                return [8, 9]
+
+            def hcs_export_heatmap(self):
+                return {"0,0": 3}
+
+            def hcs_reset(self):
+                return None
+
+        model = SimpleNamespace(
+            cfg=SimpleNamespace(
+                num_hidden_layers=1,
+                n_routed_experts=1,
+                eos_token_id=99,
+                extra_stop_token_ids=[],
+            ),
+            _gpu_decode_store=FakeStore(),
+            server_cleanup=lambda: None,
+        )
+        args = SimpleNamespace()
+        metadata = {
+            "heatmap_build": {
+                "decode_params": {
+                    "temperature": 0.0,
+                    "top_k": 0,
+                    "top_p": 1.0,
+                    "presence_penalty": 0.0,
+                    "enable_thinking": False,
+                    "mode": "benchmark",
+                }
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "quick.json"
+            old_load = server._load_heatmap_prompts
+            old_assert = server._assert_heatmap_prompts_are_held_out
+            old_chat = server._chat_prompt_tokens
+            old_meta = server._expected_heatmap_metadata
+            try:
+                server._load_heatmap_prompts = lambda path=None: ["one"]
+                server._assert_heatmap_prompts_are_held_out = lambda prompts: None
+                server._chat_prompt_tokens = lambda *args, **kwargs: [1, 2]
+                server._expected_heatmap_metadata = lambda *args, **kwargs: metadata
+                server._build_heatmap(model, str(out), args)
+            finally:
+                server._load_heatmap_prompts = old_load
+                server._assert_heatmap_prompts_are_held_out = old_assert
+                server._chat_prompt_tokens = old_chat
+                server._expected_heatmap_metadata = old_meta
+
+            artifact = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(
+                artifact["_metadata"]["heatmap_build"]["total_decode_tokens"],
+                3,
+            )
+
+    def test_quick_heatmap_validation_accepts_positive_measured_denominator(self):
+        expected = {
+            "format": server.HEATMAP_FORMAT,
+            "format_version": server.HEATMAP_FORMAT_VERSION,
+            "heatmap_build": {"prompt_count": 1},
+        }
+        actual = {
+            **expected,
+            "heatmap_build": {
+                **expected["heatmap_build"],
+                "total_decode_tokens": 257,
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "quick.json"
+            path.write_text(
+                json.dumps({"0,0": 1, "_metadata": actual}),
+                encoding="utf-8",
+            )
+            loaded = server._load_validated_heatmap(str(path), expected)
+
+        self.assertEqual(
+            loaded["_metadata"]["heatmap_build"]["total_decode_tokens"],
+            257,
+        )
+
+    def test_quick_heatmap_validation_rejects_invalid_measured_denominator(self):
+        expected = {
+            "format": server.HEATMAP_FORMAT,
+            "format_version": server.HEATMAP_FORMAT_VERSION,
+            "heatmap_build": {"prompt_count": 1},
+        }
+        actual = {
+            **expected,
+            "heatmap_build": {
+                **expected["heatmap_build"],
+                "total_decode_tokens": 0,
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "quick.json"
+            path.write_text(
+                json.dumps({"0,0": 1, "_metadata": actual}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "positive measured integer"):
+                server._load_validated_heatmap(str(path), expected)
+
     def test_merge_heatmap_counts_keeps_cumulative_intervals_separate(self):
         cumulative = {"0,1": 3}
 

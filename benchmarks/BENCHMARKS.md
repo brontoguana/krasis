@@ -1,5 +1,72 @@
 # Krasis Benchmark Results
 
+## v1.0.21-rc.2 QCN release matrix — 2026-08-09
+
+The final timing-disabled `./dev release-test QCN` ran from the exact release
+candidate after both startup defects found by earlier attempts were fixed. The
+launcher and planner contracts passed 29/29 and 6/6, then all three production
+configurations completed their benchmark, 14-prompt HTTP suite, canonical
+Gutenberg 2K/10K/25K prompts, and authoritative four-prompt llama-witness gate.
+Every witness row matched 4/4 first tokens.
+
+| Configuration | Peak prefill | Internal decode | HTTP round trip | HCS | Minimum free VRAM |
+|---|---:|---:|---:|---:|---:|
+| INT4, HQQ4, K4V4, one GPU | 10,987.9 tok/s | 89.47 tok/s | 158.59 tok/s | 24,576/24,576 | 53,276 MB |
+| INT4, HQQ68_AUTO, K6V6, one GPU | 10,232.1 tok/s | 89.42 tok/s | 158.12 tok/s | 24,576/24,576 | 52,778 MB |
+| INT8, HQQ68_AUTO, K6V6, two GPUs | 8,941.4 tok/s | 66.61 tok/s | 121.94 tok/s | 24,576/24,576 | 18,984 MB primary; 1,166 MiB auxiliary |
+
+The final INT8 row consumed the exact 1,542-token quick-heatmap denominator,
+selected the measured `[46,2]` heterogeneous layer split, and visibly retained
+that mode because peer expert serving requires production INT4 experts. It did
+not perform peer RTT, store, or attach work. The auxiliary A4500 remained above
+the unchanged 600 MiB safety contract. There were no HCS copy failures,
+below-margin warnings, CUDA errors, OOMs, or incomplete test phases.
+
+Evidence: [complete release-test log](20260809_v1021rc2_release_test_qcn_final.log),
+[INT4 HQQ4/K4V4 report](20260809_v1021rc2_qcn_int4_hqq4_k4v4_benchmark_report.log),
+[server log](20260809_v1021rc2_qcn_int4_hqq4_k4v4_server.log),
+[INT4 HQQ68/K6V6 report](20260809_v1021rc2_qcn_int4_hqq68_k6v6_benchmark_report.log),
+[server log](20260809_v1021rc2_qcn_int4_hqq68_k6v6_server.log),
+[two-GPU INT8 report](20260809_v1021rc2_qcn_int8_hqq68_k6v6_multigpu_benchmark_report.log),
+and [server log](20260809_v1021rc2_qcn_int8_hqq68_k6v6_multigpu_server.log).
+
+## v1.0.21-rc.2 fixed QCN speed gates — 2026-08-09
+
+The release candidate passed three timing-disabled `./dev speed-test` runs on
+the RTX A4500 using the unchanged fixed QCN INT4/HQQ4/K4V4 configuration: the
+initial version-bumped source, the quick-heatmap fix, and the final source with
+both release blockers fixed. Trace and component timing were disabled. Every
+runtime-calibrated prompt cap reached the full 39,920-token target.
+
+| Measurement | Initial candidate | Heatmap fix | Final exact candidate |
+|---|---:|---:|---:|
+| Internal prefill, 1K / 5K / 10K | 460.0 / 1,470.8 / 1,733.8 | 440.4 / 1,450.5 / 1,724.1 | 437.5 / 1,447.4 / 1,718.4 tok/s |
+| Internal prefill, 20K / 35K / 39,920 | 1,797.8 / 1,716.0 / 1,719.2 | 1,787.1 / 1,707.6 / 1,710.3 | 1,784.5 / 1,701.5 / 1,710.0 tok/s |
+| Internal decode, 50 / 100 / 250 | 36.39 / 36.93 / 35.12 | 36.16 / 36.70 / 34.98 | 36.16 / 36.67 / 34.92 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 64.18 / 46.45 / 38.13 | 63.91 / 46.21 / 37.95 | 63.77 / 46.20 / 37.88 tok/s |
+| HCS coverage / final hit rate | 8,750/24,576 / 89.86% | 8,750/24,576 / 89.86% | 8,750/24,576 / 89.86% |
+| Minimum free VRAM | 758 MiB | 758 MiB | 756 MiB |
+
+The matched A4500 `v1.0.16-rc.1` record measured 1,801.1 tok/s at 20K,
+37.44 tok/s best decode, and 64.92 tok/s best HTTP. The final candidate differs
+by -0.92%, -2.06%, and -1.77% respectively, within the established run
+envelope. Its long calibration floor was 1,242 MiB and timed floor 756 MiB
+against the 600 MiB margin. All three runs had zero HCS copy failures, budget
+skips, safety violations, CUDA errors, or below-margin warnings.
+
+Final evidence: [launcher](20260809_v1021rc2_final_speed_test.log),
+[benchmark stdout](20260809_v1021rc2_final_a4500_qcn_hqq4_k4v4_benchmark_stdout.log),
+[report](20260809_v1021rc2_final_a4500_qcn_hqq4_k4v4_benchmark_report.log), and
+[runtime](20260809_v1021rc2_final_a4500_qcn_hqq4_k4v4_krasis.log). Heatmap-fix
+evidence: [launcher](20260809_v1021rc2_postfix_speed_test.log),
+[stdout](20260809_v1021rc2_postfix_a4500_qcn_hqq4_k4v4_benchmark_stdout.log),
+[report](20260809_v1021rc2_postfix_a4500_qcn_hqq4_k4v4_benchmark_report.log),
+and [runtime](20260809_v1021rc2_postfix_a4500_qcn_hqq4_k4v4_krasis.log).
+Initial evidence: [launcher](20260809_v1021rc2_speed_test.log),
+[stdout](20260809_v1021rc2_a4500_qcn_hqq4_k4v4_benchmark_stdout.log),
+[report](20260809_v1021rc2_a4500_qcn_hqq4_k4v4_benchmark_report.log), and
+[runtime](20260809_v1021rc2_a4500_qcn_hqq4_k4v4_krasis.log).
+
 ## Ornith-397B experimental TileQ-S quality gate — 2026-08-08
 
 Krasis built and executed a source-bound TileQ-S core on Ornith-1.0-397B. This

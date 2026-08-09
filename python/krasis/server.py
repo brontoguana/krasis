@@ -301,6 +301,15 @@ APPROVED_HEATMAP_DEFAULT_MANIFEST_URL = (
     "https://raw.githubusercontent.com/brontoguana/krasis/"
     "main/benchmarks/approved_heatmaps/manifest.json"
 )
+
+
+def _peer_expert_format_error(gpu_expert_bits: int) -> Optional[str]:
+    """Return the explicit runtime incompatibility for peer expert serving."""
+    if int(gpu_expert_bits) != 4:
+        return "peer expert serving currently requires production INT4 experts"
+    return None
+
+
 HEATMAP_DEFAULT_TOP_K = 50
 HEATMAP_DEFAULT_TOP_P = 0.95
 HEATMAP_DEFAULT_PRESENCE_PENALTY = 0.0
@@ -745,6 +754,18 @@ def _metadata_mismatches(expected: Any, actual: Any, path: str = "") -> list[str
             if key == "generated_at_utc":
                 continue
             child_path = f"{label}.{key}" if path else key
+            if child_path == "heatmap_build.total_decode_tokens":
+                measured = actual[key]
+                if (
+                    isinstance(measured, bool)
+                    or not isinstance(measured, int)
+                    or measured <= 0
+                ):
+                    mismatches.append(
+                        f"{child_path}: expected a positive measured integer, "
+                        f"found {measured!r}"
+                    )
+                continue
             mismatches.append(f"{child_path}: unexpected")
         return mismatches
     if expected != actual:
@@ -1560,9 +1581,18 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
             )
 
         # Export and save heatmap before tearing down the collection-only HCS.
+        if total_decode_tokens <= 0:
+            raise RuntimeError(
+                "Quick heatmap collection produced no decode-route tokens"
+            )
         export_t0 = time.perf_counter()
         heatmap_dict = gpu_store.hcs_export_heatmap()
         export_s = time.perf_counter() - export_t0
+        # This is a measured build result, not part of the expected runtime
+        # identity. Peer-plan route counts require the exact denominator.
+        heatmap_metadata["heatmap_build"]["total_decode_tokens"] = int(
+            total_decode_tokens
+        )
         heatmap_metadata["generated_at_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         heatmap_dict["_metadata"] = heatmap_metadata
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -2712,6 +2742,9 @@ def main():
         os.environ.pop("KRASIS_EXPERT_COMPRESSION_PIPELINE", None)
     if args.multi_gpu_mode == "peer" and not args.hcs:
         parser.error("--multi-gpu-mode peer requires HCS")
+    peer_format_error = _peer_expert_format_error(args.gpu_expert_bits)
+    if args.multi_gpu_mode == "peer" and peer_format_error is not None:
+        parser.error(f"--multi-gpu-mode peer: {peer_format_error}")
     if args.dynamic_peer and not args.hcs:
         parser.error("--dynamic-peer requires HCS")
     if args.dynamic_peer and args.multi_gpu_mode == "layer-split":
@@ -4238,6 +4271,15 @@ def main():
             and args.hcs
             and args.multi_gpu_mode in ("auto", "peer")
         )
+        peer_format_error = _peer_expert_format_error(args.gpu_expert_bits)
+        if peer_candidate and peer_format_error is not None:
+            if args.multi_gpu_mode == "peer":
+                raise RuntimeError(peer_format_error)
+            _warn(
+                "Multi-GPU auto selector retained layer-split: "
+                f"{peer_format_error}"
+            )
+            peer_candidate = False
         if args.multi_gpu_mode == "peer" and heuristic_hcs_init:
             raise RuntimeError(
                 "Peer expert mode requires a validated route heatmap; heuristic HCS init has no route-mass basis"

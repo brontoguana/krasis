@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- Prepared and passed the complete `v1.0.21-rc.2` release gate on the final
+  source. Three timing-disabled fixed `./dev speed-test` runs remained within
+  the established A4500 run envelope; the final run measured 1,784.5 tok/s at
+  20K prefill, 36.67 tok/s best internal decode, 63.77 tok/s best HTTP, and a
+  756 MiB floor against the 600 MiB contract. The final
+  `./dev release-test QCN` passed launcher 29/29 plus planner 6/6 and all three
+  INT4/INT8 production configurations. Each completed benchmark, 14 sanity
+  prompts, canonical 2K/10K/25K prompts, and 4/4 llama-witness validation.
+  Peak internal results were 10,987.9/89.47 tok/s for INT4 HQQ4,
+  10,232.1/89.42 for INT4 HQQ68, and 8,941.4/66.61 for two-GPU INT8. The
+  constrained A4500 floor was 1,166 MiB. No HCS copy failure, CUDA error, OOM,
+  or below-margin event occurred; all raw evidence is indexed in
+  `benchmarks/BENCHMARKS.md`.
+- Fixed quick-heatmap metadata used by automatic two-GPU peer planning. The
+  quick builder now persists the exact measured decode-route token count that
+  normalizes peer-plan demand instead of producing a valid ranked heatmap with
+  a missing denominator and failing later during startup. Generated metadata
+  is accepted only when the count is a positive integer, and an empty route
+  capture fails visibly at the builder boundary. Focused heatmap/planner tests
+  pass 21/21, launcher/planner matrices pass 29/29 and 6/6, model configuration
+  tests pass 19/19, and the Rust/Python server contract groups pass. The final
+  release matrix consumed the repaired 1,542-token denominator successfully.
+- Fixed automatic multi-GPU mode eligibility so peer expert calibration and
+  selection are considered only for the production INT4 expert format the
+  peer runtime can execute. An explicit peer request with INT3 or INT8 now
+  fails at argument validation; `auto` retains the measured layer-split path
+  with a visible reason instead of selecting peer and failing after expensive
+  heatmap and service calibration. The shared format contract is covered for
+  INT3, INT4, and INT8. The final live INT8 row visibly retained its measured
+  `[46,2]` layer split and completed every release-test phase.
+
 - Implemented an experimental, opt-in TileQ-S core for routed experts: a
   source-bound packed signed-INT3 residual plus shared rank-32 2D-tiled
   low-rank correction, with native Rust/CUDA decode and full-GPU prefill.
