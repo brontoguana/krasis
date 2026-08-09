@@ -33,6 +33,9 @@ cudarc = { version = "0.12", features = ["driver", "cublas", "f16", "cuda-12060"
 minijinja = "2"
 sha2 = "0.10"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+
 [build-dependencies]
 cc = "1"
 

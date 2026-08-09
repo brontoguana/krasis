@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fixed Windows portability for the opt-in expert-compression sidecar after the
+  exact-SHA prerelease preflight exposed unconditional Unix positional-file and
+  page-size APIs. Sidecar reads now use platform-native exact positional I/O,
+  including short-read and EOF handling, while bounded private mappings align
+  to runtime OS mapping granularity: measured page size on Unix and
+  `GetSystemInfo().dwAllocationGranularity` on Windows. The standalone GPU
+  codec probe uses the same shared primitives. The installed Linux build and
+  focused sidecar contracts pass 3/3; Windows compilation and installer
+  lifecycle remain the authoritative cross-platform gate.
 - Prepared and passed the complete `v1.0.21-rc.2` release gate on the final
   source. Three timing-disabled fixed `./dev speed-test` runs remained within
   the established A4500 run envelope; the final run measured 1,784.5 tok/s at

@@ -5,7 +5,10 @@ use memmap2::{MmapMut, MmapOptions};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::os::unix::fs::FileExt;
+#[cfg(unix)]
+use std::os::unix::fs::FileExt as UnixFileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt as WindowsFileExt;
 use std::path::{Path, PathBuf};
 
 pub const SIDECAR_MAGIC: [u8; 8] = *b"KRASRANS";
@@ -77,7 +80,7 @@ impl ExpertSidecar {
             "file length",
         )?;
         let mut encoded_header = [0_u8; SIDECAR_HEADER_BYTES];
-        file.read_exact_at(&mut encoded_header, 0)
+        read_file_exact_at(&file, &mut encoded_header, 0)
             .map_err(|error| {
                 format!(
                     "failed to read expert sidecar header {}: {error}",
@@ -117,7 +120,7 @@ impl ExpertSidecar {
             return Err("expert sidecar tables are truncated".to_string());
         }
         let mut encoded_tables = vec![0_u8; CodecTables::SERIALIZED_FREQUENCIES_BYTES];
-        file.read_exact_at(&mut encoded_tables, header.tables_offset as u64)
+        read_file_exact_at(&file, &mut encoded_tables, header.tables_offset as u64)
             .map_err(|error| format!("failed to read expert sidecar tables: {error}"))?;
         let tables = CodecTables::from_serialized_frequencies(&encoded_tables)?;
         let index_entries = header
@@ -135,7 +138,7 @@ impl ExpertSidecar {
             return Err("expert sidecar index is truncated".to_string());
         }
         let mut encoded_index = vec![0_u8; index_bytes];
-        file.read_exact_at(&mut encoded_index, header.index_offset as u64)
+        read_file_exact_at(&file, &mut encoded_index, header.index_offset as u64)
             .map_err(|error| format!("failed to read expert sidecar index: {error}"))?;
         let offsets = encoded_index
             .chunks_exact(8)
@@ -149,8 +152,9 @@ impl ExpertSidecar {
                 "expert sidecar index is not a complete strictly increasing range".to_string(),
             );
         }
-        let page_bytes = system_page_bytes()?;
-        let groups = payload_mapping_groups(&offsets, max_mapping_bytes, page_bytes)?;
+        let mapping_granularity = system_mapping_granularity()?;
+        let groups =
+            payload_mapping_groups(&offsets, max_mapping_bytes, mapping_granularity)?;
         let mut payload_mappings = Vec::with_capacity(groups.len());
         let mut blob_locations = Vec::with_capacity(header.expert_count);
         for group in groups {
@@ -265,7 +269,7 @@ pub fn private_payload_mapping(path: &Path, maximum_bytes: usize) -> CodecResult
         "file length",
     )?;
     let mut encoded_header = [0_u8; SIDECAR_HEADER_BYTES];
-    file.read_exact_at(&mut encoded_header, 0)
+    read_file_exact_at(&file, &mut encoded_header, 0)
         .map_err(|error| {
             format!(
                 "failed to read expert sidecar header {}: {error}",
@@ -273,8 +277,8 @@ pub fn private_payload_mapping(path: &Path, maximum_bytes: usize) -> CodecResult
             )
         })?;
     let header = parse_header_for_file(&encoded_header, file_bytes)?;
-    let page_bytes = system_page_bytes()?;
-    let file_start = align_down(header.payload_offset, page_bytes);
+    let mapping_granularity = system_mapping_granularity()?;
+    let file_start = align_down(header.payload_offset, mapping_granularity);
     let available = file_bytes
         .checked_sub(file_start)
         .ok_or_else(|| "expert sidecar payload mapping underflow".to_string())?;
@@ -282,7 +286,7 @@ pub fn private_payload_mapping(path: &Path, maximum_bytes: usize) -> CodecResult
     let mapping_bytes = if requested == available {
         requested
     } else {
-        align_down(requested, page_bytes)
+        align_down(requested, mapping_granularity)
     };
     let payload_prefix = header.payload_offset - file_start;
     if mapping_bytes <= payload_prefix {
@@ -308,14 +312,14 @@ pub fn private_payload_mapping(path: &Path, maximum_bytes: usize) -> CodecResult
 fn payload_mapping_groups(
     offsets: &[u64],
     max_mapping_bytes: usize,
-    page_bytes: usize,
+    mapping_granularity: usize,
 ) -> CodecResult<Vec<PayloadMappingGroup>> {
-    if offsets.len() < 2 || max_mapping_bytes == 0 || page_bytes == 0 {
+    if offsets.len() < 2 || max_mapping_bytes == 0 || mapping_granularity == 0 {
         return Err(format!(
-            "invalid expert sidecar mapping geometry offsets={} max_mapping={} page={}",
+            "invalid expert sidecar mapping geometry offsets={} max_mapping={} granularity={}",
             offsets.len(),
             max_mapping_bytes,
-            page_bytes,
+            mapping_granularity,
         ));
     }
     let mut groups = Vec::new();
@@ -323,7 +327,7 @@ fn payload_mapping_groups(
     let mut ordinal_start = 0usize;
     while ordinal_start < expert_count {
         let first_start = as_usize(offsets[ordinal_start], "expert offset")?;
-        let file_start = align_down(first_start, page_bytes);
+        let file_start = align_down(first_start, mapping_granularity);
         let first_end = as_usize(offsets[ordinal_start + 1], "expert end offset")?;
         if first_end.saturating_sub(file_start) > max_mapping_bytes {
             return Err(format!(
@@ -352,13 +356,61 @@ fn payload_mapping_groups(
     Ok(groups)
 }
 
-fn system_page_bytes() -> CodecResult<usize> {
+#[cfg(unix)]
+pub fn system_mapping_granularity() -> CodecResult<usize> {
     let page_bytes = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     if page_bytes <= 0 {
-        Err("expert sidecar could not determine the host page size".to_string())
+        Err("expert sidecar could not determine the host mapping granularity".to_string())
     } else {
         Ok(page_bytes as usize)
     }
+}
+
+#[cfg(windows)]
+pub fn system_mapping_granularity() -> CodecResult<usize> {
+    use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+
+    let mut info = SYSTEM_INFO::default();
+    unsafe { GetSystemInfo(&mut info) };
+    usize::try_from(info.dwAllocationGranularity)
+        .ok()
+        .filter(|&value| value > 0)
+        .ok_or_else(|| {
+            "expert sidecar could not determine the host mapping granularity".to_string()
+        })
+}
+
+#[cfg(unix)]
+pub fn read_file_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+    UnixFileExt::read_exact_at(file, buffer, offset)
+}
+
+#[cfg(windows)]
+pub fn read_file_exact_at(
+    file: &File,
+    buffer: &mut [u8],
+    offset: u64,
+) -> std::io::Result<()> {
+    let mut filled = 0usize;
+    while filled < buffer.len() {
+        let read = match WindowsFileExt::seek_read(
+            file,
+            &mut buffer[filled..],
+            offset
+                .checked_add(filled as u64)
+                .ok_or_else(|| std::io::Error::other("file offset overflow"))?,
+        ) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if read == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        }
+        filled = filled.checked_add(read).ok_or_else(|| {
+            std::io::Error::other("positional file-read length overflow")
+        })?;
+    }
+    Ok(())
 }
 
 fn align_down(value: usize, alignment: usize) -> usize {

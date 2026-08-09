@@ -15,7 +15,6 @@ mod probe {
     use memmap2::{Mmap, MmapOptions};
     use serde::{Deserialize, Serialize};
     use std::fs::File;
-    use std::os::unix::fs::FileExt;
     use std::path::PathBuf;
     use std::ptr;
     use std::sync::Arc;
@@ -227,16 +226,17 @@ mod probe {
             )
             .map_err(|_| "sidecar file length exceeds usize".to_string())?;
             let mut encoded_header = [0_u8; krasis::expert_sidecar::SIDECAR_HEADER_BYTES];
-            sidecar_file
-                .read_exact_at(&mut encoded_header, 0)
+            krasis::expert_sidecar::read_file_exact_at(
+                &sidecar_file,
+                &mut encoded_header,
+                0,
+            )
                 .map_err(|error| format!("failed to read sidecar header: {error}"))?;
             let sidecar_header =
                 krasis::expert_sidecar::parse_header_for_file(&encoded_header, sidecar_file_bytes)?;
-            let page_bytes = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-            if page_bytes <= 0 {
-                return Err("could not determine host page size".to_string());
-            }
-            let payload_prefix = sidecar_header.payload_offset % page_bytes as usize;
+            let mapping_granularity =
+                krasis::expert_sidecar::system_mapping_granularity()?;
+            let payload_prefix = sidecar_header.payload_offset % mapping_granularity;
             let transfer_bytes = layout.expert_bytes.min(
                 mmap.len()
                     .checked_sub(payload_prefix)

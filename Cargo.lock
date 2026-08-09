@@ -533,6 +533,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokenizers",
+ "windows-sys",
 ]
 
 [[package]]
