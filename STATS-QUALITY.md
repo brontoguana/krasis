@@ -14,6 +14,8 @@ Detailed quality logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](be
 | [DeepSeek-V4-Flash-0731](benchmarks/BENCHMARKS.md#deepseek-v4-hqq8-attention-and-native-cache-acceptance--2026-08-10) | 304.2B checkpoint / 284B main | 13B main | INT4/HQQ8/BF16 cache | accepted BF16/BF16 runtime + llama-witness native source | 4 | 4.8160 | -0.111% vs accepted BF16/BF16 | accepted witness range | 4/4 | 4/4 | 4/4 | PASS |
 | [DeepSeek-V4-Flash-0731 Native](benchmarks/BENCHMARKS.md#deepseek-v4-hqq8-attention-and-native-cache-acceptance--2026-08-10) | 304.2B checkpoint / 284B main | 13B main | INT4/HQQ8/Native cache | HQQ8/BF16 cache + llama-witness native source | 4 | 4.8161 | +0.000775% vs HQQ8/BF16 cache | exact cache reconstruction | 4/4 | 4/4 | 4/4 | PASS |
 | DeepSeek-V4-Flash-0731 launcher default | 304.2B checkpoint / 284B main | 13B main | INT4/HQQ6/Native cache | HQQ8/Native + llama-witness native source | 4 | 4.8385 | +0.466% vs HQQ8/Native | accepted optional lower-bit mode | 4/4 | 4/4 | 4/4 | PASS |
+| [DeepSeek-V4-Flash-0731 mixed](benchmarks/BENCHMARKS.md#deepseek-v4-and-gemma4-mixed-hqq-acceptance--2026-08-11) | 304.2B checkpoint / 284B main | 13B main | INT4/HQQ4+10%/Native cache | HQQ8/Native + llama-witness native source | 4 | 4.8573 | +0.856% vs HQQ8/Native | accepted witness range | 4/4 | 4/4 | 4/4 | PASS |
+| [DeepSeek-V4-Flash-0731 mixed](benchmarks/BENCHMARKS.md#deepseek-v4-and-gemma4-mixed-hqq-acceptance--2026-08-11) | 304.2B checkpoint / 284B main | 13B main | INT4/HQQ6+10%/Native cache | HQQ8/Native + llama-witness native source | 4 | 4.8259 | +0.203% vs HQQ8/Native | accepted witness range | 4/4 | 4/4 | 4/4 | PASS |
 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ4/k4v4 | llama-witness BF16 | 8 | 5.8175 | +3.28% | avg 0.254%, max 0.783% | 8/8 | 8/8 | 8/8 | PASS |
 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ6/k6v6 | llama-witness BF16 | 8 | 5.6895 | +1.00% | avg 0.200%, max 0.695% | 8/8 | 8/8 | 8/8 | PASS |
 | Ornith-1.0-35B | 35B class | 3B class | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 5.9170 | +3.67% | n/a | n/a | n/a | n/a | PASS |
@@ -33,7 +35,9 @@ Detailed quality logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](be
 | Step-3.7-Flash | 201.4B total / 199.4B text | 13.9B | INT4/HQQ4/k4v4 | llama-witness BF16 | 8 | 1.7671 | +3.80% | avg 3.655%, max 7.582% | 7/8 | 8/8 | 8/8 | PASS |
 | Step-3.7-Flash | 201.4B total / 199.4B text | 13.9B | INT4/HQQ6/k6v6 | llama-witness BF16 | 8 | 1.7016 | -0.04% | avg 2.206%, max 3.997% | 8/8 | 8/8 | 8/8 | PASS |
 | Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ4/k4v4 | Krasis BF16 | 14 | 1.1736 | +9.14% chat | avg 1.969%, max 39.239% | 187/197 | 197/197 | 14/14 | PASS |
+| Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ4+10%/k6v6 | Krasis BF16 | 14 | 1.1234 | +4.47% chat | avg 1.205%, max 53.929% | 191/197 | 197/197 | 14/14 | PASS |
 | Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ6/k6v6 | Krasis BF16 | 14 | 1.0792 | +0.36% chat | avg 0.279%, max 10.515% | 193/197 | 197/197 | 14/14 | PASS |
+| Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ6+10%/k6v6 | Krasis BF16 | 14 | 1.0784 | +0.29% chat | avg 0.165%, max 4.657% | 195/197 | 197/197 | 14/14 | PASS |
 | Nemotron-3-Super-120B-A12B | 123.6B total | 12.4B | INT4/HQQ4/k4v4 | llama-witness BF16 | 6 | n/a | n/a | avg 18.267%, max 54.409% | 4/6 | 6/6 | 4/6 | PASS |
 | Nemotron-3-Super-120B-A12B | 123.6B total | 12.4B | INT4/HQQ6/k6v6 | llama-witness BF16 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | BLOCKED |
 | Nemotron-3-Nano-30B-A3B | 31.6B total | 3.2B | INT4/HQQ4/k4v4 | llama-witness BF16 | 6 | n/a | n/a | avg 14.185%, max 44.584% | 4/6 | 6/6 | 4/6 | PASS |
@@ -52,6 +56,12 @@ Column notes:
   only `+0.000775%` versus HQQ8/BF16 cache, and reconstructs the prior
   post-QAT BF16 cache values exactly. Both HQQ8 modes passed the four-prompt
   witness; Native is kept explicit for performance, not quality, reasons.
+  The mixed 10% profiles each promoted 87 of 172 eligible projection tensors
+  within a measured 72.5/75.2 MiB budget. HQQ4+10%/Native measured
+  `4.857317863`, between fixed HQQ6 and fixed HQQ4 and 0.731% better than the
+  fixed-HQQ4 endpoint. HQQ6+10%/Native measured `4.825864933`, between HQQ8
+  and fixed HQQ6 and 0.262% better than fixed HQQ6. Both retained 4/4 witness
+  agreement and the unchanged 600 MiB runtime safety contract.
 
 - `PPL delta vs BF16` uses the per-model Krasis BF16 runtime baseline, measured
   through the Rust prefill `/v1/internal/prefill_logits` test endpoint with
@@ -78,8 +88,9 @@ Column notes:
   pathological for this instruction/vision model. Krasis BF16 generated 14 chat
   continuations, and BF16/HQQ runs scored the same 197 continuation tokens
   through `/v1/internal/prefill_logits`. The BF16 baseline was PPL `1.0753`.
-  HQQ4 and HQQ6 kept the BF16 continuation token in the top 10 for `197/197`
-  scored tokens.
+  HQQ4, HQQ4+10%, HQQ6, and HQQ6+10% kept the BF16 continuation token in the
+  top 10 for `197/197` scored tokens. The mixed rows use the same accepted BF16
+  continuations and 10% planner budget as their launcher presets.
 - Nemotron Nano and Super now have BF16 llama-witness first-token references.
   Their HQQ4/k4v4 rows passed all six prompt verdicts with full prefill top-10
   containment. The first-token drift percentages are reported even though they

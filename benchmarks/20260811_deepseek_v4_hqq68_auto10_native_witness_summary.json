@@ -1,0 +1,1088 @@
+{
+  "model": "DeepSeek-V4-Flash-0731",
+  "config": "tests/deepseek-v4-flash-0731-hqq68-auto10-native.conf",
+  "reference_path": "/home/main/Documents/Claude/krasis-internal/reference-outputs/output/DeepSeek-V4-Flash-0731/llama_witness_deepseek_v4_0731_exact_prefix_first_token.json",
+  "overall": "PASS",
+  "prompt_results": [
+    {
+      "conv_idx": 0,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Give the chemical symbol for sodium, followed by one short sentence.",
+      "trace_input_row": {
+        "case_key": "0:0",
+        "conv_idx": 0,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 16,
+        "positions": [
+          16
+        ],
+        "input_tokens_count": 17,
+        "prompt_prefix": "Give the chemical symbol for sodium, followed by one short sentence."
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 17659,
+          "our_first_token": 17659,
+          "first_token_match": true,
+          "ref_top_ids": [
+            17659,
+            666,
+            671,
+            48,
+            74526,
+            9397,
+            111085,
+            53,
+            73443,
+            27552
+          ],
+          "our_top_ids": [
+            17659,
+            666,
+            671,
+            48,
+            9544,
+            9397,
+            53,
+            5866,
+            4484,
+            73443
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 17659,
+              "logprob": -0.0033419496431719153
+            },
+            {
+              "rank": 2,
+              "token_id": 666,
+              "logprob": -5.706272400082625
+            },
+            {
+              "rank": 3,
+              "token_id": 671,
+              "logprob": -11.920799530209578
+            },
+            {
+              "rank": 4,
+              "token_id": 48,
+              "logprob": -13.453623092831648
+            },
+            {
+              "rank": 5,
+              "token_id": 74526,
+              "logprob": -13.706907547177352
+            },
+            {
+              "rank": 6,
+              "token_id": 9397,
+              "logprob": -13.780449188412703
+            },
+            {
+              "rank": 7,
+              "token_id": 111085,
+              "logprob": -15.49838284319786
+            },
+            {
+              "rank": 8,
+              "token_id": 53,
+              "logprob": -15.569422043026961
+            },
+            {
+              "rank": 9,
+              "token_id": 73443,
+              "logprob": -16.050438202084578
+            },
+            {
+              "rank": 10,
+              "token_id": 27552,
+              "logprob": -16.266241348446883
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 17659,
+              "logprob": -0.029818
+            },
+            {
+              "rank": 2,
+              "token_id": 666,
+              "logprob": -3.527834
+            },
+            {
+              "rank": 3,
+              "token_id": 671,
+              "logprob": -12.323648
+            },
+            {
+              "rank": 4,
+              "token_id": 48,
+              "logprob": -13.628536
+            },
+            {
+              "rank": 5,
+              "token_id": 9544,
+              "logprob": -13.968256
+            },
+            {
+              "rank": 6,
+              "token_id": 9397,
+              "logprob": -14.15428
+            },
+            {
+              "rank": 7,
+              "token_id": 53,
+              "logprob": -14.656145
+            },
+            {
+              "rank": 8,
+              "token_id": 5866,
+              "logprob": -15.196049
+            },
+            {
+              "rank": 9,
+              "token_id": 4484,
+              "logprob": -15.477266
+            },
+            {
+              "rank": 10,
+              "token_id": 73443,
+              "logprob": -15.557058
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 7,
+          "top_overlap_ids": [
+            17659,
+            666,
+            671,
+            48,
+            9397,
+            53,
+            73443
+          ],
+          "ref_top1_top2_logprob_margin": 5.702930450439453,
+          "our_top1_top2_logprob_margin": 3.498016,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.0033419496431719153,
+          "selected_our_logprob": -0.029818,
+          "selected_logprob_delta": 0.026476050356828085,
+          "common_logprob_deltas": [
+            {
+              "token_id": 17659,
+              "ref_logprob": -0.0033419496431719153,
+              "our_logprob": -0.029818,
+              "abs_delta": 0.026476050356828085
+            },
+            {
+              "token_id": 666,
+              "ref_logprob": -5.706272400082625,
+              "our_logprob": -3.527834,
+              "abs_delta": 2.178438400082625
+            },
+            {
+              "token_id": 671,
+              "ref_logprob": -11.920799530209578,
+              "our_logprob": -12.323648,
+              "abs_delta": 0.4028484697904222
+            },
+            {
+              "token_id": 48,
+              "ref_logprob": -13.453623092831648,
+              "our_logprob": -13.628536,
+              "abs_delta": 0.17491290716835195
+            },
+            {
+              "token_id": 9397,
+              "ref_logprob": -13.780449188412703,
+              "our_logprob": -14.15428,
+              "abs_delta": 0.3738308115872968
+            },
+            {
+              "token_id": 53,
+              "ref_logprob": -15.569422043026961,
+              "our_logprob": -14.656145,
+              "abs_delta": 0.9132770430269606
+            },
+            {
+              "token_id": 73443,
+              "ref_logprob": -16.050438202084578,
+              "our_logprob": -15.557058,
+              "abs_delta": 0.49338020208457856
+            }
+          ],
+          "mean_common_logprob_delta": 0.651880554871009,
+          "max_common_logprob_delta": 2.178438400082625
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 17659,
+            "our_token": 17659,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.0033419496431719153,
+            "our_logprob": -0.029818
+          }
+        ],
+        "ref_text": "Na",
+        "our_text": "Na"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 3496.3,
+        "decode_ms": 0.5,
+        "total_ms": 7120.4,
+        "prompt_tokens": 17,
+        "vram_low_water": [
+          {
+            "device": 0,
+            "min_free_mb": 1445
+          }
+        ],
+        "safety_margin_mb": 600
+      },
+      "debug": null
+    },
+    {
+      "conv_idx": 1,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Compute 29 plus 34. Put the number first.",
+      "trace_input_row": {
+        "case_key": "1:0",
+        "conv_idx": 1,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 15,
+        "positions": [
+          15
+        ],
+        "input_tokens_count": 16,
+        "prompt_prefix": "Compute 29 plus 34. Put the number first."
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 1557,
+          "our_first_token": 1557,
+          "first_token_match": true,
+          "ref_top_ids": [
+            1557,
+            16234,
+            27,
+            17685,
+            30079,
+            53624,
+            17928,
+            18528,
+            26599,
+            20
+          ],
+          "our_top_ids": [
+            1557,
+            27,
+            30079,
+            20,
+            19,
+            16234,
+            17928,
+            53624,
+            666,
+            1977
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 1557,
+              "logprob": -0.000400672956750725
+            },
+            {
+              "rank": 2,
+              "token_id": 16234,
+              "logprob": -8.55688489536886
+            },
+            {
+              "rank": 3,
+              "token_id": 27,
+              "logprob": -8.883533607527063
+            },
+            {
+              "rank": 4,
+              "token_id": 17685,
+              "logprob": -10.088533531233118
+            },
+            {
+              "rank": 5,
+              "token_id": 30079,
+              "logprob": -11.485876213117884
+            },
+            {
+              "rank": 6,
+              "token_id": 53624,
+              "logprob": -12.233883033796594
+            },
+            {
+              "rank": 7,
+              "token_id": 17928,
+              "logprob": -13.008190284773157
+            },
+            {
+              "rank": 8,
+              "token_id": 18528,
+              "logprob": -13.19250501255636
+            },
+            {
+              "rank": 9,
+              "token_id": 26599,
+              "logprob": -13.29323972324972
+            },
+            {
+              "rank": 10,
+              "token_id": 20,
+              "logprob": -14.132339607282923
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 1557,
+              "logprob": -0.000392
+            },
+            {
+              "rank": 2,
+              "token_id": 27,
+              "logprob": -8.130809
+            },
+            {
+              "rank": 3,
+              "token_id": 30079,
+              "logprob": -10.2648
+            },
+            {
+              "rank": 4,
+              "token_id": 20,
+              "logprob": -11.523286
+            },
+            {
+              "rank": 5,
+              "token_id": 19,
+              "logprob": -11.809627
+            },
+            {
+              "rank": 6,
+              "token_id": 16234,
+              "logprob": -12.490954
+            },
+            {
+              "rank": 7,
+              "token_id": 17928,
+              "logprob": -12.50493
+            },
+            {
+              "rank": 8,
+              "token_id": 53624,
+              "logprob": -12.522857
+            },
+            {
+              "rank": 9,
+              "token_id": 666,
+              "logprob": -12.733443
+            },
+            {
+              "rank": 10,
+              "token_id": 1977,
+              "logprob": -12.942027
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 7,
+          "top_overlap_ids": [
+            1557,
+            16234,
+            27,
+            30079,
+            53624,
+            17928,
+            20
+          ],
+          "ref_top1_top2_logprob_margin": 8.55648422241211,
+          "our_top1_top2_logprob_margin": 8.130417,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.000400672956750725,
+          "selected_our_logprob": -0.000392,
+          "selected_logprob_delta": 8.67295675072502e-06,
+          "common_logprob_deltas": [
+            {
+              "token_id": 1557,
+              "ref_logprob": -0.000400672956750725,
+              "our_logprob": -0.000392,
+              "abs_delta": 8.67295675072502e-06
+            },
+            {
+              "token_id": 16234,
+              "ref_logprob": -8.55688489536886,
+              "our_logprob": -12.490954,
+              "abs_delta": 3.9340691046311402
+            },
+            {
+              "token_id": 27,
+              "ref_logprob": -8.883533607527063,
+              "our_logprob": -8.130809,
+              "abs_delta": 0.7527246075270639
+            },
+            {
+              "token_id": 30079,
+              "ref_logprob": -11.485876213117884,
+              "our_logprob": -10.2648,
+              "abs_delta": 1.2210762131178843
+            },
+            {
+              "token_id": 53624,
+              "ref_logprob": -12.233883033796594,
+              "our_logprob": -12.522857,
+              "abs_delta": 0.28897396620340565
+            },
+            {
+              "token_id": 17928,
+              "ref_logprob": -13.008190284773157,
+              "our_logprob": -12.50493,
+              "abs_delta": 0.5032602847731571
+            },
+            {
+              "token_id": 20,
+              "ref_logprob": -14.132339607282923,
+              "our_logprob": -11.523286,
+              "abs_delta": 2.609053607282922
+            }
+          ],
+          "mean_common_logprob_delta": 1.3298809223560464,
+          "max_common_logprob_delta": 3.9340691046311402
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 1557,
+            "our_token": 1557,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.000400672956750725,
+            "our_logprob": -0.000392
+          }
+        ],
+        "ref_text": "29",
+        "our_text": "29"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 3326.8,
+        "decode_ms": 0.2,
+        "total_ms": 6951.4,
+        "prompt_tokens": 16,
+        "vram_low_water": [
+          {
+            "device": 0,
+            "min_free_mb": 1443
+          }
+        ],
+        "safety_margin_mb": 600
+      },
+      "debug": null
+    },
+    {
+      "conv_idx": 2,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Name one Rust standard-library smart pointer and state its purpose in one sentence.",
+      "trace_input_row": {
+        "case_key": "2:0",
+        "conv_idx": 2,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 18,
+        "positions": [
+          18
+        ],
+        "input_tokens_count": 19,
+        "prompt_prefix": "Name one Rust standard-library smart pointer and state its purpose in one sentence."
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 666,
+          "our_first_token": 666,
+          "first_token_match": true,
+          "ref_top_ids": [
+            666,
+            6111,
+            66,
+            671,
+            18989,
+            9544,
+            45481,
+            9854,
+            35,
+            372
+          ],
+          "our_top_ids": [
+            666,
+            6111,
+            9544,
+            66,
+            671,
+            372,
+            18989,
+            795,
+            35,
+            9854
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 666,
+              "logprob": -0.011230273704541105
+            },
+            {
+              "rank": 2,
+              "token_id": 6111,
+              "logprob": -4.985095782737744
+            },
+            {
+              "rank": 3,
+              "token_id": 66,
+              "logprob": -5.550510211448682
+            },
+            {
+              "rank": 4,
+              "token_id": 671,
+              "logprob": -8.422645373802197
+            },
+            {
+              "rank": 5,
+              "token_id": 18989,
+              "logprob": -9.284580035667432
+            },
+            {
+              "rank": 6,
+              "token_id": 9544,
+              "logprob": -9.810733600120557
+            },
+            {
+              "rank": 7,
+              "token_id": 45481,
+              "logprob": -10.65449313686372
+            },
+            {
+              "rank": 8,
+              "token_id": 9854,
+              "logprob": -10.930354876976025
+            },
+            {
+              "rank": 9,
+              "token_id": 35,
+              "logprob": -10.973579211692822
+            },
+            {
+              "rank": 10,
+              "token_id": 372,
+              "logprob": -12.247163577537549
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 666,
+              "logprob": -0.070383
+            },
+            {
+              "rank": 2,
+              "token_id": 6111,
+              "logprob": -2.750444
+            },
+            {
+              "rank": 3,
+              "token_id": 9544,
+              "logprob": -6.20347
+            },
+            {
+              "rank": 4,
+              "token_id": 66,
+              "logprob": -6.79133
+            },
+            {
+              "rank": 5,
+              "token_id": 671,
+              "logprob": -7.090906
+            },
+            {
+              "rank": 6,
+              "token_id": 372,
+              "logprob": -10.60607
+            },
+            {
+              "rank": 7,
+              "token_id": 18989,
+              "logprob": -11.11199
+            },
+            {
+              "rank": 8,
+              "token_id": 795,
+              "logprob": -11.203753
+            },
+            {
+              "rank": 9,
+              "token_id": 35,
+              "logprob": -11.59395
+            },
+            {
+              "rank": 10,
+              "token_id": 9854,
+              "logprob": -11.706959
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 9,
+          "top_overlap_ids": [
+            666,
+            6111,
+            66,
+            671,
+            18989,
+            9544,
+            9854,
+            35,
+            372
+          ],
+          "ref_top1_top2_logprob_margin": 4.973865509033203,
+          "our_top1_top2_logprob_margin": 2.680061,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.011230273704541105,
+          "selected_our_logprob": -0.070383,
+          "selected_logprob_delta": 0.059152726295458896,
+          "common_logprob_deltas": [
+            {
+              "token_id": 666,
+              "ref_logprob": -0.011230273704541105,
+              "our_logprob": -0.070383,
+              "abs_delta": 0.059152726295458896
+            },
+            {
+              "token_id": 6111,
+              "ref_logprob": -4.985095782737744,
+              "our_logprob": -2.750444,
+              "abs_delta": 2.2346517827377443
+            },
+            {
+              "token_id": 66,
+              "ref_logprob": -5.550510211448682,
+              "our_logprob": -6.79133,
+              "abs_delta": 1.2408197885513186
+            },
+            {
+              "token_id": 671,
+              "ref_logprob": -8.422645373802197,
+              "our_logprob": -7.090906,
+              "abs_delta": 1.331739373802197
+            },
+            {
+              "token_id": 18989,
+              "ref_logprob": -9.284580035667432,
+              "our_logprob": -11.11199,
+              "abs_delta": 1.8274099643325687
+            },
+            {
+              "token_id": 9544,
+              "ref_logprob": -9.810733600120557,
+              "our_logprob": -6.20347,
+              "abs_delta": 3.6072636001205565
+            },
+            {
+              "token_id": 9854,
+              "ref_logprob": -10.930354876976025,
+              "our_logprob": -11.706959,
+              "abs_delta": 0.776604123023974
+            },
+            {
+              "token_id": 35,
+              "ref_logprob": -10.973579211692822,
+              "our_logprob": -11.59395,
+              "abs_delta": 0.6203707883071772
+            },
+            {
+              "token_id": 372,
+              "ref_logprob": -12.247163577537549,
+              "our_logprob": -10.60607,
+              "abs_delta": 1.6410935775375481
+            }
+          ],
+          "mean_common_logprob_delta": 1.4821228583009491,
+          "max_common_logprob_delta": 3.6072636001205565
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 666,
+            "our_token": 666,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.011230273704541105,
+            "our_logprob": -0.070383
+          }
+        ],
+        "ref_text": "**",
+        "our_text": "**"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 3583.9,
+        "decode_ms": 0.2,
+        "total_ms": 7207.1,
+        "prompt_tokens": 19,
+        "vram_low_water": [
+          {
+            "device": 0,
+            "min_free_mb": 1691
+          }
+        ],
+        "safety_margin_mb": 600
+      },
+      "debug": null
+    },
+    {
+      "conv_idx": 3,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Continue the sequence 2, 6, 12, 20 with the next two values and no explanation.",
+      "trace_input_row": {
+        "case_key": "3:0",
+        "conv_idx": 3,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 26,
+        "positions": [
+          26
+        ],
+        "input_tokens_count": 27,
+        "prompt_prefix": "Continue the sequence 2, 6, 12, 20 with the next two values and no explanation."
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 1059,
+          "our_first_token": 1059,
+          "first_token_match": true,
+          "ref_top_ids": [
+            1059,
+            2012,
+            20,
+            3180,
+            2111,
+            22,
+            1449,
+            2240,
+            2181,
+            1173
+          ],
+          "our_top_ids": [
+            1059,
+            2012,
+            2181,
+            20,
+            22,
+            1872,
+            21,
+            11534,
+            671,
+            23
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 1059,
+              "logprob": -0.0006445871538787173
+            },
+            {
+              "rank": 2,
+              "token_id": 2012,
+              "logprob": -8.222408197993722
+            },
+            {
+              "rank": 3,
+              "token_id": 20,
+              "logprob": -8.903121851558176
+            },
+            {
+              "rank": 4,
+              "token_id": 3180,
+              "logprob": -9.733581446284738
+            },
+            {
+              "rank": 5,
+              "token_id": 2111,
+              "logprob": -9.99370756017634
+            },
+            {
+              "rank": 6,
+              "token_id": 22,
+              "logprob": -10.732309244746652
+            },
+            {
+              "rank": 7,
+              "token_id": 1449,
+              "logprob": -11.140315912837472
+            },
+            {
+              "rank": 8,
+              "token_id": 2240,
+              "logprob": -11.149660013789621
+            },
+            {
+              "rank": 9,
+              "token_id": 2181,
+              "logprob": -11.262840174312082
+            },
+            {
+              "rank": 10,
+              "token_id": 1173,
+              "logprob": -11.293304346675363
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 1059,
+              "logprob": -0.012474
+            },
+            {
+              "rank": 2,
+              "token_id": 2012,
+              "logprob": -4.825441
+            },
+            {
+              "rank": 3,
+              "token_id": 2181,
+              "logprob": -6.267696
+            },
+            {
+              "rank": 4,
+              "token_id": 20,
+              "logprob": -6.472787
+            },
+            {
+              "rank": 5,
+              "token_id": 22,
+              "logprob": -7.979743
+            },
+            {
+              "rank": 6,
+              "token_id": 1872,
+              "logprob": -8.200312
+            },
+            {
+              "rank": 7,
+              "token_id": 21,
+              "logprob": -9.732069
+            },
+            {
+              "rank": 8,
+              "token_id": 11534,
+              "logprob": -9.763134
+            },
+            {
+              "rank": 9,
+              "token_id": 671,
+              "logprob": -10.475525
+            },
+            {
+              "rank": 10,
+              "token_id": 23,
+              "logprob": -10.582035
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 5,
+          "top_overlap_ids": [
+            1059,
+            2012,
+            20,
+            22,
+            2181
+          ],
+          "ref_top1_top2_logprob_margin": 8.221763610839844,
+          "our_top1_top2_logprob_margin": 4.8129669999999996,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.0006445871538787173,
+          "selected_our_logprob": -0.012474,
+          "selected_logprob_delta": 0.011829412846121283,
+          "common_logprob_deltas": [
+            {
+              "token_id": 1059,
+              "ref_logprob": -0.0006445871538787173,
+              "our_logprob": -0.012474,
+              "abs_delta": 0.011829412846121283
+            },
+            {
+              "token_id": 2012,
+              "ref_logprob": -8.222408197993722,
+              "our_logprob": -4.825441,
+              "abs_delta": 3.396967197993723
+            },
+            {
+              "token_id": 20,
+              "ref_logprob": -8.903121851558176,
+              "our_logprob": -6.472787,
+              "abs_delta": 2.4303348515581753
+            },
+            {
+              "token_id": 22,
+              "ref_logprob": -10.732309244746652,
+              "our_logprob": -7.979743,
+              "abs_delta": 2.752566244746652
+            },
+            {
+              "token_id": 2181,
+              "ref_logprob": -11.262840174312082,
+              "our_logprob": -6.267696,
+              "abs_delta": 4.995144174312082
+            }
+          ],
+          "mean_common_logprob_delta": 2.7173683762913505,
+          "max_common_logprob_delta": 4.995144174312082
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 1059,
+            "our_token": 1059,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.0006445871538787173,
+            "our_logprob": -0.012474
+          }
+        ],
+        "ref_text": "30",
+        "our_text": "30"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 3736.4,
+        "decode_ms": 0.2,
+        "total_ms": 7357.2,
+        "prompt_tokens": 27,
+        "vram_low_water": [
+          {
+            "device": 0,
+            "min_free_mb": 1443
+          }
+        ],
+        "safety_margin_mb": 600
+      },
+      "debug": null
+    }
+  ]
+}

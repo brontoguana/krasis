@@ -1,0 +1,21 @@
+Krasis Chat-Continuation Perplexity
+==================================================
+Date:          2026-08-11T07:59:18.361871
+Config:        tests/gemma-4-4-hqq46-auto10-k6v6-a16.conf
+Model:         /home/main/.krasis/models/gemma-4-26b-a4b-it
+Prompt suite:  quality-chat-v1
+Reference:     benchmarks/20260715_gemma_chat_continuation_bf16_reference_krasisdiag.json
+Attention:     hqq46_auto
+KV dtype:      k6v6
+Perplexity:    1.1234
+Bits/token:    0.1678
+Mean loss:     0.116317
+Tokens scored: 197
+Top-1:         191 / 197
+Top-10:        197 / 197
+BF16 top-1:    190 / 197
+BF16 top-10:   197 / 197
+BF16 top-k JS: avg 0.012045, max 0.539289
+Cases:         14
+Elapsed:       8.8s
+Throughput:    22 tok/s

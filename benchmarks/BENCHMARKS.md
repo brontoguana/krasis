@@ -8834,3 +8834,77 @@ Default: pure CPU MoE decode (no HCS), streamed attention with double buffering.
 - Internal decode BF16-cache -> Native at 50/100/250 output tokens: `30.08/29.86/29.29 -> 30.23/30.17/29.48 tok/s`, or `+0.50%/+1.04%/+0.65%`. Native ended with 6,600/11,008 HCS experts and 94.62--95.43% timed hits versus 6,620 experts for the control; both had zero copy failures. Native minimum decode free VRAM was 1,276 MiB versus 1,178 MiB for the control, above the unchanged 600 MiB margin.
 - HTTP BF16-cache -> Native at 50/100/250 outputs: `50.75/38.36/32.45 -> 54.50/37.73/32.20 tok/s`. The standard benchmark result is accepted; no speed inference is drawn from the separate 1 ms VRAM-report perplexity run.
 - Real primary-launcher acceptance: [launcher/stdout](20260810_deepseek_v4_hqq8_native_launcher_accept_stdout.log), [network](20260810_deepseek_v4_hqq8_native_launcher_accept_network.log), [runtime](20260810_deepseek_v4_hqq8_native_launcher_accept_runtime.log). The launcher-generated config preserved layer group 1, HQQ8, `Native`, one physical RTX PRO 6000 and the configured 294,432-token capacity. Startup HCS admitted 6,620/11,008 experts and left 1,271 MiB free. The large network suite passed 18/18, including streaming, blocking, JSON, five-turn recall and canonical 2,043/8,623/23,348/62,403-token prompts. The 62,403-token request measured 1,158.5 prefill and 22.97 decode tok/s with a 656 MiB prefill floor; all requests had zero HCS copy failures. These request timings validate launcher/session behavior and are not substituted for the controlled timing-disabled standard rows above.
+
+## DeepSeek-V4 and Gemma4 mixed-HQQ acceptance — 2026-08-11
+
+- The supported-architecture audit found two gaps only. Qwen/QCN, Step,
+  Nemotron, Ornith and the other generic families already use the
+  descriptor-driven `hqq46_auto`/`hqq68_auto` path and expose both launcher
+  presets. DeepSeek-V4's custom four-projection attach rejected per-tensor
+  descriptors, while Gemma4's launcher displayed the generic presets even
+  though its model guard rejected them.
+- DeepSeek HQQ4+10%/Native used a real 10% planner budget, selecting 87/172
+  candidates and 72.5/75.2 MiB of promotion span. Its authoritative
+  llama-witness gate passed 4/4 argmax, 4/4 top-10 and 4/4 first-token match:
+  [summary](20260811_deepseek_v4_hqq46_auto10_native_witness_summary.json),
+  [server](20260811_deepseek_v4_hqq46_auto10_native_witness_server.log),
+  [runtime](20260811_deepseek_v4_hqq46_auto10_native_witness_runtime.log).
+  Full 281-window WikiText-2 PPL was `4.857317862526` over 287,736 scored
+  tokens, between fixed HQQ6 `4.838535416` and fixed HQQ4 `4.893072164`:
+  [result](../perplexity/results/DeepSeek-V4-Flash-0731_wikitext-2_rust_prefill_hqq46_auto_native_20260811_100215.json),
+  [stdout](20260811_deepseek_v4_hqq46_auto10_native_ppl_stdout.log),
+  [server](20260811_deepseek_v4_hqq46_auto10_native_ppl_server.log).
+- DeepSeek HQQ6+10%/Native selected the same 87/172 candidates and used the
+  same 72.5/75.2 MiB measured span. Its llama-witness gate also passed 4/4
+  argmax, top-10 and first token:
+  [summary](20260811_deepseek_v4_hqq68_auto10_native_witness_summary.json),
+  [server](20260811_deepseek_v4_hqq68_auto10_native_witness_server.log),
+  [runtime](20260811_deepseek_v4_hqq68_auto10_native_witness_runtime.log).
+  Full PPL was `4.825864932955`, between HQQ8/Native `4.816071679` and fixed
+  HQQ6/Native `4.838535416`:
+  [result](../perplexity/results/DeepSeek-V4-Flash-0731_wikitext-2_rust_prefill_hqq68_auto_native_20260811_113359.json),
+  [stdout](20260811_deepseek_v4_hqq68_auto10_native_ppl_stdout.log),
+  [server](20260811_deepseek_v4_hqq68_auto10_native_ppl_server.log).
+- Gemma4 has no accepted llama-witness artifact and raw WikiText-2 is
+  pathological for this instruction/vision model, so both modes used the
+  accepted 197-token Krasis BF16 chat-continuation gate. HQQ4+10%/k6v6 scored
+  PPL `1.123352421`, 191/197 top-1 and 197/197 top-10
+  ([result](../perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_hqq46_auto_k6v6_20260811_075918.json),
+  [stdout](20260811_gemma4_hqq46_auto10_k6v6_quality_stdout.log),
+  [server](20260811_gemma4_hqq46_auto10_k6v6_quality_server.log)).
+  HQQ6+10%/k6v6 scored `1.078425220`, 195/197 top-1 and 197/197 top-10
+  ([result](../perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_hqq68_auto_k6v6_20260811_080300.json),
+  [stdout](20260811_gemma4_hqq68_auto10_k6v6_quality_stdout.log),
+  [server](20260811_gemma4_hqq68_auto10_k6v6_quality_server.log)).
+- Real primary-launcher gates then started Gemma4 HQQ6+10%/k6v6 and DeepSeek
+  HQQ6+10%/Native from their exact saved configs. Both `/health` and
+  `/v1/models` endpoints reported the expected model and context capacity;
+  runtime logs preserved the 10% planner budget and requested attention/cache
+  modes. Gemma reached a 10,624-token configured context and DeepSeek reported
+  294,432 tokens with 6,680/11,008 HCS experts before its normal pressure
+  eviction. Neither logged a below-margin or runtime error:
+  [Gemma launcher runtime](20260811_gemma4_hqq68_auto10_launcher_runtime.log),
+  [DeepSeek launcher runtime](20260811_deepseek_v4_hqq68_auto10_native_launcher_runtime.log).
+- All four profiles are accepted. DeepSeek keeps HQQ6/Native as its launcher
+  default; the two mixed profiles are explicit choices. No run crossed the
+  unchanged 600 MiB safety margin or recorded CUDA, OOM, or HCS-copy failure.
+
+## DeepSeek-V4 HQQ6/Native RTX PRO 6000 standard benchmark — 2026-08-11
+
+- Command: `./dev benchmark tests/deepseek-v4-flash-0731-hqq6-native.conf`.
+  Timing, trace and GPU-telemetry instrumentation were unset. The single RTX
+  PRO 6000 Blackwell 96 GB was operating under its persistent 450 W power cap;
+  the A4500 Lore service remained isolated and healthy.
+- Internal prefill at 1K/5K/10K/20K/35K/39,920 tokens was
+  `124.9/532.8/841.9/1,117.9/1,202.0/1,207.2 tok/s`.
+- Internal decode at 50/100/250 requested outputs was
+  `30.12/30.26/30.00 tok/s`. HTTP round trip for the same three rows was
+  `56.91/40.64/32.13 tok/s`; these client-side figures are not substituted for
+  internal engine decode.
+- The run retained 6,660/11,008 HCS experts (60.5%). Timed hit rate was
+  95.25%/95.25%/94.99%, with zero copy failures. Minimum free VRAM was
+  1,205 MiB against the unchanged 600 MiB margin. No below-margin, CUDA, OOM,
+  or HCS-copy error occurred.
+- Raw evidence: [stdout](20260811_deepseek_v4_hqq6_native_rtxpro6000_450w_benchmark_stdout.log),
+  [report](20260811_deepseek_v4_hqq6_native_rtxpro6000_450w_benchmark_report.log),
+  [runtime](20260811_deepseek_v4_hqq6_native_rtxpro6000_450w_krasis.log).

@@ -224,7 +224,10 @@ class LauncherMatrixTest(unittest.TestCase):
         launcher._apply_model_recommended_defaults()
         self.assertEqual(launcher.cfg.attention_quant, "hqq6")
         self.assertEqual(launcher.cfg.kv_dtype, "native")
-        self.assertEqual(launcher._attention_choices(), ["hqq8", "hqq6", "hqq4", "bf16"])
+        self.assertEqual(
+            launcher._attention_choices(),
+            ["hqq4", "hqq46_auto", "hqq6", "hqq68_auto", "hqq8", "bf16"],
+        )
         self.assertEqual(launcher._kv_choices(), ["native", "bf16"])
         self.assertEqual(launcher._multi_gpu_choices(), ["auto"])
         kv_option = next(
@@ -233,12 +236,8 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertEqual(launcher_mod._format_value(kv_option, "native"), "Native")
         launcher._validate_model_capabilities()
 
-        for supported_attention in ("hqq6", "hqq4"):
+        for supported_attention in ("hqq4", "hqq46_auto", "hqq6", "hqq68_auto", "hqq8"):
             launcher.cfg.attention_quant = supported_attention
-            launcher._validate_model_capabilities()
-
-        launcher.cfg.attention_quant = "hqq68_auto"
-        with self.assertRaisesRegex(ValueError, "does not support attention mode"):
             launcher._validate_model_capabilities()
         launcher.cfg.attention_quant = "hqq8"
         launcher.cfg.kv_dtype = "k6v6"
@@ -268,6 +267,19 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertEqual(launcher.cfg.attention_quant, "bf16")
         self.assertEqual(launcher.cfg.kv_dtype, "bf16")
         self.assertTrue(launcher._ensure_interactive_attention_ready())
+
+    def test_gemma4_launcher_exposes_validated_mixed_hqq_presets(self) -> None:
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = LauncherConfig()
+        launcher.model_info = {"name": "Gemma4", "arch": "gemma4_text"}
+
+        self.assertEqual(
+            launcher._attention_choices(),
+            ["hqq4", "hqq46_auto", "hqq6", "hqq68_auto"],
+        )
+        for supported_attention in ("hqq46_auto", "hqq68_auto"):
+            launcher.cfg.attention_quant = supported_attention
+            launcher._validate_model_capabilities()
 
     def test_deepseek_v4_native_budget_uses_exact_nonlinear_layout(self) -> None:
         cfg = {

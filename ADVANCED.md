@@ -61,7 +61,9 @@ Config files use `KEY=VALUE` format. CLI flags override config file values.
 DeepSeek-V4-Flash-0731 INT4-expert, HQQ8-attention, expanded-BF16-cache config.
 This remains a measured comparison profile. Fresh launcher selections default
 to HQQ6 attention plus `Native` cache; DeepSeek also supports explicit HQQ4,
-HQQ8, BF16-attention, and expanded-BF16-cache choices. The `Native` cache
+HQQ4+10%, HQQ6+10%, HQQ8, BF16-attention, and expanded-BF16-cache choices.
+The mixed presets promote the most beneficial DeepSeek projection tensors
+within the configured measured memory budget. The `Native` cache
 stores the checkpoint's existing packed QAT state without a second
 quantizer; with the same 1,000 MiB budget it increased measured context capacity
 from 149,808 to 294,432 tokens. BF16 attention/cache remains available as an

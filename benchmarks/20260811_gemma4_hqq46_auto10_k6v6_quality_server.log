@@ -1,0 +1,117 @@
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d
+Loaded config from tests/gemma-4-4-hqq46-auto10-k6v6-a16.conf: {'model_path': '/home/main/.krasis/models/gemma-4-26b-a4b-it', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq46_auto', 'hqq_auto_budget_pct': 10, 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'host': '127.0.0.1', 'port': 18225, 'enable_thinking': False, 'vram_safety_margin': 600}
+
+[1m[36m▸ Krasis — gemma-4-26b-a4b-it[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (config; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq46_auto  |  KV: k6v6[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=570 MB, free=96687 MB, total=97258 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=2690 MB, reserved=2742 MB, used=3420 MB, free=93837 MB, total=97258 MB
+  [0;32mHQQ attention artifacts validated (1034 MB cached), 93837 MB free[0m
+
+[1m[36m▸ Building GPU INT4 Marlin expert cache (one-time)[0m
+  [2mCache will be saved to /home/main/.krasis/cache/gemma-4-26b-a4b-it for instant loading next time.[0m
+    Loading GPU Marlin cache: 30 layers...
+    GPU Marlin cache loaded: 12.1 GB in 14s
+  [0;32mExpert cache built in 14s — next launch will be much faster.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=2690 MB, reserved=2742 MB, used=3420 MB, free=93837 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=2690 MB, reserved=2742 MB, used=3420 MB, free=93837 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=3706 MB, reserved=3770 MB, used=4448 MB, free=92809 MB, total=97258 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=3706 MB, reserved=3770 MB, used=4448 MB, free=92809 MB, total=97258 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x6acd1430)[0m
+  [32mReleased redundant GPU execution source tensors (41 MB)[0m
+  [2mVRAM monitor started (startup measurement 1 ms; runtime 50 ms)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 1.3s[0m
+  [2mcuda:0 warmup:  peak 9,132 MB used / 97,258 MB total  (min free: 88,125 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 88,791 MB / 97,258 MB[0m
+  [32mCalibration prefill guard: 1,200 MB (runtime safety remains 600 MB)[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 1.54s (20.8 tok/s)  VRAM: 88777 MB free now, 88777 MB min free during decode[0m
+  [32mShort calibration: baseline=88,791 MB, prefill post-alloc=88,477 MB, prefill min=88,065 MB, decode min=88,777 MB, post-cleanup=88,777 MB[0m
+  [32mAdaptive long calibration: default target=8,419 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.4431 MB/token[0m
+  [32mAdaptive long calibration fail-closed entry check: 4,000 tokens require 1,821 MB, 88,791 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 8,419 tokens (model-estimated initial probe (projected 0.4431 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 8,419 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 1.59s (20.1 tok/s)  VRAM: 88779 MB free now, 88779 MB min free during decode[0m
+  [32mLong calibration: baseline=88,777 MB, prefill post-alloc=85,037 MB, prefill min=84,651 MB, decode min=88,779 MB, post-cleanup=88,779 MB[0m
+  [32mScratch reservation: max=16,424 MB (at 50,000 tokens)[0m
+  [32mVRAM monitor runtime cadence restored: 1 ms -> 50 ms[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 88,779 MB[0m
+  [32mTransient deltas: short prefill=726 MB, long prefill=4,126 MB, short decode=14 MB, long decode=0 MB[0m
+  [32mGPU0 decode HCS budget: 88,165 MB[0m
+  [32mPrefill HCS budgets: short=87,453 MB, long=84,053 MB[0m
+  [32mWorst-case prefill scratch reservation: 16,424 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [2mNo approved heatmap artifact matches this model/router signature and validated runtime; falling back to quick startup heatmap generation[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+  [2mQuick heatmap prompt 1/6: 36 prefill tokens + 256 decode tokens[0m
+  [2mQuick heatmap prompt 1/6 done: 257 route tokens, 13.0s (elapsed 13.0s, eta 64.9s)[0m
+  [2mQuick heatmap prompt 2/6: 44 prefill tokens + 256 decode tokens[0m
+  [2mQuick heatmap prompt 2/6 done: 257 route tokens, 13.0s (elapsed 26.0s, eta 52.0s)[0m
+  [2mQuick heatmap prompt 3/6: 36 prefill tokens + 256 decode tokens[0m
+  [2mQuick heatmap prompt 3/6 done: 257 route tokens, 13.0s (elapsed 39.0s, eta 39.0s)[0m
+  [2mQuick heatmap prompt 4/6: 30 prefill tokens + 256 decode tokens[0m
+  [2mQuick heatmap prompt 4/6 done: 257 route tokens, 13.0s (elapsed 52.0s, eta 26.0s)[0m
+  [2mQuick heatmap prompt 5/6: 43 prefill tokens + 256 decode tokens[0m
+  [2mQuick heatmap prompt 5/6 done: 257 route tokens, 13.0s (elapsed 65.0s, eta 13.0s)[0m
+  [2mQuick heatmap prompt 6/6: 48 prefill tokens + 256 decode tokens[0m
+  [2mQuick heatmap prompt 6/6 done: 257 route tokens, 13.1s (elapsed 78.1s, eta 0.0s)[0m
+  [32mHeatmap: 3,489 experts ranked from 3,489 entries[0m
+  [2mVRAM calibration: baseline 88779 MB | prefill 439.7 KB/tok, decode -1.8 KB/tok | HCS allowance prefill: short 87453 MB, long 84053 MB | decode: short 88165 MB, long 88179 MB | idle floors prefill=1326 MB decode=614 MB | decode-resident HCS budget=88165 MB[0m
+  [2mGPU0 HCS: 3840 experts (3489 ranked + 351 unranked), reclaimable: 88,165 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/3840 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 3840 experts in 0.61s (11570.6 MB, host_mode=source) | total: 3840/3840 (100.0%) coverage[0m
+  [2mLoaded in 0.6s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mgemma-4-26b-a4b-it[0m
+  [32mAddress:[0m  [1m127.0.0.1:18225[0m
+  [32mContext:[0m  10,624 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18225/v1[0m
+    Chat endpoint: http://127.0.0.1:18225/v1/chat/completions
+    Models:        http://127.0.0.1:18225/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mgemma-4-26b-a4b-it-vision[0m
+                   [2mvision-capable; use this same model for text and images[0m
+  [2mPress Q or Ctrl-C to stop[0m
+

@@ -148,7 +148,10 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         local_dir_name="deepseek-ai/DeepSeek-V4-Flash-0731",
         revision="9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
         recommended_config="testconfigs/deepseek-v4-flash-0731-4-4-a16.conf",
-        notes="Quality-gated DeepSeek-V4-Flash-0731 target with INT4 experts and BF16 attention/KV.",
+        notes=(
+            "Quality-gated DeepSeek-V4-Flash-0731 target with INT4 experts; "
+            "fresh launcher selections default to HQQ6 attention and Native cache."
+        ),
     ),
     SupportedHFModel(
         key="nemotron-nano",

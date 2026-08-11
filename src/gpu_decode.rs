@@ -28502,7 +28502,7 @@ impl GpuDecodeStore {
         Ok(())
     }
 
-    /// Attach staged fixed-HQQ execution descriptors to DeepSeek-V4's custom
+    /// Attach staged HQQ execution descriptors to DeepSeek-V4's custom
     /// attention graph. This is deliberately separate from base registration:
     /// the latter establishes architecture geometry, while this method proves
     /// that every required quantized projection has an exact executable view.
@@ -28522,7 +28522,6 @@ impl GpuDecodeStore {
         }
 
         let mut descriptors = HashMap::with_capacity(REQUIRED.len());
-        let mut layer_nbits: Option<u8> = None;
         for tensor_name in REQUIRED {
             let desc = self
                 .hqq_runtime_decode_exec_desc_for_tensor(layer_idx, tensor_name)
@@ -28531,19 +28530,9 @@ impl GpuDecodeStore {
                 .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
             if !matches!(nbits, 4 | 6 | 8) {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "DeepSeek-V4 fixed-HQQ attach accepts only HQQ4/HQQ6/HQQ8; layer {} tensor {} is HQQ{}",
+                    "DeepSeek-V4 HQQ attach accepts only HQQ4/HQQ6/HQQ8 descriptors; layer {} tensor {} is HQQ{}",
                     layer_idx, tensor_name, nbits
                 )));
-            }
-            if let Some(expected) = layer_nbits {
-                if nbits != expected {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "DeepSeek-V4 fixed-HQQ layer {} has mixed tensor precision: expected HQQ{}, tensor {} is HQQ{}",
-                        layer_idx, expected, tensor_name, nbits
-                    )));
-                }
-            } else {
-                layer_nbits = Some(nbits);
             }
             descriptors.insert(tensor_name.to_string(), desc);
         }

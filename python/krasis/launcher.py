@@ -145,8 +145,24 @@ def _unique_gpu_alias_match(spec: str, gpus: List[Dict[str, Any]]) -> Tuple[Opti
 
 
 INTERACTIVE_ATTENTION_QUANT_CHOICES = ("hqq4", "hqq46_auto", "hqq6", "hqq68_auto")
-DEEPSEEK_V4_ATTENTION_QUANT_CHOICES = ("hqq8", "hqq6", "hqq4", "bf16")
+DEEPSEEK_V4_ATTENTION_QUANT_CHOICES = (
+    "hqq4",
+    "hqq46_auto",
+    "hqq6",
+    "hqq68_auto",
+    "hqq8",
+    "bf16",
+)
 DEEPSEEK_V4_KV_CHOICES = ("native", "bf16")
+# Keep this model-owned even while it matches the generic tuple: Gemma4 has an
+# architecture-specific runtime contract and must not inherit future presets
+# until they have their own quality gate.
+GEMMA4_ATTENTION_QUANT_CHOICES = (
+    "hqq4",
+    "hqq46_auto",
+    "hqq6",
+    "hqq68_auto",
+)
 INTERACTIVE_HQQ_AUTO_BUDGET_PCT = 10.0
 INSTALLER_URL = "https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh"
 
@@ -1731,9 +1747,15 @@ class Launcher:
         arch = str((self.model_info or {}).get("arch", "")).strip().lower().replace("-", "_")
         return arch == "deepseek_v4"
 
+    def _is_gemma4(self) -> bool:
+        arch = str((self.model_info or {}).get("arch", "")).strip().lower().replace("-", "_")
+        return arch == "gemma4_text"
+
     def _attention_choices(self) -> List[str]:
         if self._is_deepseek_v4():
             return list(DEEPSEEK_V4_ATTENTION_QUANT_CHOICES)
+        if self._is_gemma4():
+            return list(GEMMA4_ATTENTION_QUANT_CHOICES)
         return list(INTERACTIVE_ATTENTION_QUANT_CHOICES)
 
     def _kv_choices(self) -> List[str]:

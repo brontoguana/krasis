@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- Added the timing-disabled RTX PRO 6000 standard benchmark for the current
+  DeepSeek-V4 launcher default, INT4 experts with HQQ6 attention and Native
+  cache. Internal prefill measured 124.9/532.8/841.9/1,117.9/1,202.0/1,207.2
+  tok/s at 1K/5K/10K/20K/35K/39,920 tokens; internal decode measured
+  30.12/30.26/30.00 tok/s at 50/100/250 outputs; HTTP round trip measured
+  56.91/40.64/32.13 tok/s. HCS retained 6,660/11,008 experts with 94.63--95.25%
+  timed hits, zero copy failures, and a 1,205 MiB floor against the unchanged
+  600 MiB margin. The RTX PRO used its configured 450 W cap; Lore remained
+  healthy on the A4500.
+
+- Enabled measured mixed-precision HQQ on the two supported architecture paths
+  that lacked it. DeepSeek-V4 now accepts and exposes HQQ4+10% and HQQ6+10%
+  through its custom four-projection descriptor attach, retaining exact tensor,
+  geometry, dtype, and per-descriptor 4/6/8-bit validation. Gemma4 now accepts
+  both mixed modes and owns an explicit launcher capability list rather than
+  inheriting the generic menu by coincidence. Both DeepSeek
+  modes passed the authoritative four-prompt llama-witness gate at 4/4 argmax
+  and first-token match. Gemma HQQ4+10% and HQQ6+10% passed the accepted
+  197-token chat-continuation gate at 197/197 BF16 top-10 containment, with
+  PPL 1.1234 and 1.0784 respectively. DeepSeek HQQ4+10%/Native completed all
+  281 WikiText-2 windows at PPL 4.857317863, between fixed HQQ6 and fixed HQQ4;
+  HQQ6+10%/Native completed at 4.825864933, between HQQ8 and fixed HQQ6. Both
+  remained above the 600 MiB safety contract without CUDA, OOM, or HCS-copy
+  errors. Real primary-launcher starts for Gemma HQQ6+10% and DeepSeek
+  HQQ6+10% preserved the requested modes and passed health/model discovery.
+  Existing defaults and fixed modes are unchanged.
+
 - Fixed Windows portability for the opt-in expert-compression sidecar after the
   exact-SHA prerelease preflight exposed unconditional Unix positional-file and
   page-size APIs. Sidecar reads now use platform-native exact positional I/O,

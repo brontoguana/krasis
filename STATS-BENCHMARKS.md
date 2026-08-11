@@ -51,6 +51,7 @@ experts resident and zero HCS copy failures.
 |---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|
 | 1x RTX PRO 6000 Blackwell 96GB, AMD EPYC 7742 | [DeepSeek-V4-Flash-0731](benchmarks/BENCHMARKS.md#deepseek-v4-hqq8-attention-and-native-cache-acceptance--2026-08-10) | 304.2B checkpoint / 284B main | 13B main | INT4/HQQ8/BF16 cache | 151.4 @1K / 534.1 @5K / 847.2 @10K / 1,148.2 @20K / 1,267.2 @35K / 1,301.1 @39,920 tok/s | 30.08/29.86/29.29 (50/100/250 outputs) | 50.75/38.36/32.45 | 154.4 GB process RAM (benchmark report) | 6620/11008 (60.1%) | 1,178 MB |
 | 1x RTX PRO 6000 Blackwell 96GB, AMD EPYC 7742 | [DeepSeek-V4-Flash-0731 Native](benchmarks/BENCHMARKS.md#deepseek-v4-hqq8-attention-and-native-cache-acceptance--2026-08-10) | 304.2B checkpoint / 284B main | 13B main | INT4/HQQ8/Native cache | 138.6 @1K / 500.9 @5K / 853.7 @10K / 1,152.1 @20K / 1,249.3 @35K / 1,296.5 @39,920 tok/s | 30.23/30.17/29.48 (50/100/250 outputs) | 54.50/37.73/32.20 | 154.4 GB process RAM (benchmark report) | 6600/11008 (60.0%) | 1,276 MB |
+| 1x RTX PRO 6000 Blackwell 96GB at 450 W, AMD EPYC 7742 | [DeepSeek-V4-Flash-0731 HQQ6/Native](benchmarks/BENCHMARKS.md#deepseek-v4-hqq6native-rtx-pro-6000-standard-benchmark--2026-08-11) | 304.2B checkpoint / 284B main | 13B main | INT4/HQQ6/Native cache | 124.9 @1K / 532.8 @5K / 841.9 @10K / 1,117.9 @20K / 1,202.0 @35K / 1,207.2 @39,920 tok/s | 30.12/30.26/30.00 (50/100/250 outputs) | 56.91/40.64/32.13 | 153.1 GB process RAM (benchmark report) | 6660/11008 (60.5%) | 1,205 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ4/k4v4 | 10,670.1 tok/s | 117.20 tok/s | 241.78 tok/s | 23.5 GB max RSS (22.4 GiB) | 10240/10240 (100.0%) | 10,186 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ6/k6v6 | 9,693.6 tok/s | 115.50 tok/s | 234.29 tok/s | 23.7 GB max RSS (22.6 GiB) | 10240/10240 (100.0%) | 9,882 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Ornith-1.0-35B | 35B class | 3B class | INT4/HQQ4/k4v4 | 10,575.7 tok/s | 117.63 tok/s | 240.91 tok/s | 22.9 GB max RSS (21.8 GiB) | 10240/10240 (100.0%) | 10,186 MB |
@@ -90,6 +91,9 @@ Notes:
   quality-neutral, but currently regresses 1K/5K prefill by 8.45%/6.22%.
   Expanded BF16 remains an explicit faster-short-prefill mode. Both timing-disabled rows
   had zero HCS copy failures and remained above the 600 MB safety margin.
+  The HQQ6/Native row was measured later under the card's persistent 450 W
+  power cap and is therefore reported as its own current operating point rather
+  than used as an uncontrolled HQQ8-versus-HQQ6 speed A/B.
 
 - Qwen3.6 parameters are counted from the loaded safetensors. Text weights are
   35.5B parameters; active parameters exclude the LM head.

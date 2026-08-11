@@ -782,9 +782,17 @@ class KrasisModel:
                     f"or expanded BF16 storage, got {self.quant_cfg.kv_cache_format!r}. "
                     "Conventional k4v4/k6v6 formats do not represent its shared latent cache."
                 )
-            if self.quant_cfg.attention not in ("hqq4", "hqq6", "hqq8", "bf16"):
+            if self.quant_cfg.attention not in (
+                "hqq4",
+                "hqq46_auto",
+                "hqq6",
+                "hqq68_auto",
+                "hqq8",
+                "bf16",
+            ):
                 raise ValueError(
-                    "DeepSeek-V4 validates fixed HQQ4/HQQ6/HQQ8 or BF16 attention only, got "
+                    "DeepSeek-V4 supports HQQ4/HQQ6/HQQ8, measured 4/6 and 6/8 "
+                    "mixed-auto HQQ, or BF16 attention; got "
                     f"{self.quant_cfg.attention!r}."
                 )
         elif self.quant_cfg.kv_cache_format == "native":
@@ -801,10 +809,17 @@ class KrasisModel:
                     f"gpu_expert_bits={self.quant_cfg.gpu_expert_bits}, "
                     f"cpu_expert_bits={self.quant_cfg.cpu_expert_bits}."
                 )
-            if self.quant_cfg.attention not in ("bf16", "hqq4", "hqq6", "hqq8"):
+            if self.quant_cfg.attention not in (
+                "bf16",
+                "hqq4",
+                "hqq46_auto",
+                "hqq6",
+                "hqq68_auto",
+                "hqq8",
+            ):
                 raise ValueError(
-                    "Gemma4 text support validates only BF16 or fixed HQQ attention "
-                    "(hqq4, hqq6, hqq8). Mixed/auto HQQ modes are not validated for Gemma4 yet. "
+                    "Gemma4 text support validates BF16, fixed HQQ attention, or measured "
+                    "4/6 and 6/8 mixed-auto HQQ attention. "
                     f"Got attention_quant={self.quant_cfg.attention!r}."
                 )
             if self.quant_cfg.kv_cache_format not in ("bf16", "k6v6", "k4v4"):
