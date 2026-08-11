@@ -18,6 +18,7 @@ from krasis import console_input as console_input_mod
 from krasis.config import configure_adaptive_cold_mass_pruning
 from krasis import launcher as launcher_mod
 from krasis import nvidia_smi as nvidia_smi_mod
+from krasis import vram_budget as vram_budget_mod
 from krasis.launcher import Launcher, LauncherConfig
 
 
@@ -148,6 +149,181 @@ def _run_server_start_smoke(config_path: Path, scenario: str, expected_fragments
 
 
 class LauncherMatrixTest(unittest.TestCase):
+    def test_layer_group_one_survives_saved_and_cli_launcher_paths(self) -> None:
+        cfg = LauncherConfig()
+        cfg.apply_saved({"CFG_LAYER_GROUP_SIZE": "1"})
+        self.assertEqual(cfg.layer_group_size, 1)
+
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["krasis", "--layer-group-size", "1"],
+        ):
+            args = launcher_mod.parse_args()
+        cli_cfg = LauncherConfig()
+        launcher_mod._apply_cli_overrides(cli_cfg, args)
+        self.assertEqual(cli_cfg.layer_group_size, 1)
+
+        layer_group_option = next(
+            option for option in launcher_mod.OPTIONS
+            if option.key == "layer_group_size"
+        )
+        self.assertIn(1, layer_group_option.choices)
+        self.assertEqual(
+            launcher_mod._format_value(layer_group_option, 1),
+            "1 layer (double-buffered)",
+        )
+
+        for value in ("0", "-1", "not-an-integer"):
+            with self.subTest(saved_value=value):
+                invalid_cfg = LauncherConfig()
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "CFG_LAYER_GROUP_SIZE",
+                ):
+                    invalid_cfg.apply_saved({"CFG_LAYER_GROUP_SIZE": value})
+
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["krasis", "--layer-group-size", "0"],
+        ):
+            invalid_args = launcher_mod.parse_args()
+        with self.assertRaisesRegex(ValueError, "--layer-group-size"):
+            launcher_mod._apply_cli_overrides(LauncherConfig(), invalid_args)
+
+    def test_launcher_kv_capacity_uses_configured_allocation(self) -> None:
+        rank = {"kv_tokens": 1_048_576, "kv_alloc_tokens": 294_432}
+        self.assertEqual(launcher_mod._allocated_kv_tokens(rank), 294_432)
+        self.assertEqual(
+            launcher_mod._allocated_kv_tokens({"kv_tokens": 149_808}),
+            149_808,
+        )
+
+    def test_native_windows_ram_detection_uses_global_memory_status(self) -> None:
+        import ctypes
+
+        class Kernel32:
+            @staticmethod
+            def GlobalMemoryStatusEx(status_ptr) -> int:
+                status_ptr._obj.ullTotalPhys = 192 * 1024**3
+                return 1
+
+        fake_windll = type("FakeWindll", (), {"kernel32": Kernel32()})()
+        with mock.patch.object(ctypes, "windll", fake_windll, create=True):
+            self.assertEqual(
+                vram_budget_mod._detect_windows_total_ram_gb(),
+                192,
+            )
+
+    def test_deepseek_v4_launcher_capabilities_are_model_specific(self) -> None:
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = LauncherConfig()
+        launcher.model_info = {"name": "DeepSeek-V4", "arch": "deepseek_v4"}
+
+        launcher._apply_model_recommended_defaults()
+        self.assertEqual(launcher.cfg.attention_quant, "hqq6")
+        self.assertEqual(launcher.cfg.kv_dtype, "native")
+        self.assertEqual(launcher._attention_choices(), ["hqq8", "hqq6", "hqq4", "bf16"])
+        self.assertEqual(launcher._kv_choices(), ["native", "bf16"])
+        self.assertEqual(launcher._multi_gpu_choices(), ["auto"])
+        kv_option = next(
+            option for option in launcher_mod.OPTIONS if option.key == "kv_dtype"
+        )
+        self.assertEqual(launcher_mod._format_value(kv_option, "native"), "Native")
+        launcher._validate_model_capabilities()
+
+        for supported_attention in ("hqq6", "hqq4"):
+            launcher.cfg.attention_quant = supported_attention
+            launcher._validate_model_capabilities()
+
+        launcher.cfg.attention_quant = "hqq68_auto"
+        with self.assertRaisesRegex(ValueError, "does not support attention mode"):
+            launcher._validate_model_capabilities()
+        launcher.cfg.attention_quant = "hqq8"
+        launcher.cfg.kv_dtype = "k6v6"
+        with self.assertRaisesRegex(ValueError, "does not support cache mode"):
+            launcher._validate_model_capabilities()
+
+        launcher.cfg.kv_dtype = "native"
+        launcher.cfg.multi_gpu_mode = "peer"
+        with self.assertRaisesRegex(ValueError, "does not support topology mode"):
+            launcher._validate_model_capabilities()
+        launcher.cfg.multi_gpu_mode = "auto"
+        launcher.cfg.selected_gpu_indices = [0, 1]
+        self.assertFalse(launcher._ensure_interactive_attention_ready())
+        with self.assertRaisesRegex(ValueError, "multi-GPU execution is not yet launcher-qualified"):
+            launcher._validate_model_topology()
+        launcher.cfg.multi_gpu_mode = "peer"
+        with self.assertRaisesRegex(ValueError, "peer expert serving"):
+            launcher._validate_model_topology()
+
+        launcher.cfg.selected_gpu_indices = [0]
+        launcher.cfg.multi_gpu_mode = "auto"
+        launcher.cfg.attention_quant = "bf16"
+        launcher.cfg._attention_quant_explicit = True
+        launcher.cfg.kv_dtype = "bf16"
+        launcher.cfg._kv_dtype_explicit = True
+        launcher._apply_model_recommended_defaults()
+        self.assertEqual(launcher.cfg.attention_quant, "bf16")
+        self.assertEqual(launcher.cfg.kv_dtype, "bf16")
+        self.assertTrue(launcher._ensure_interactive_attention_ready())
+
+    def test_deepseek_v4_native_budget_uses_exact_nonlinear_layout(self) -> None:
+        cfg = {
+            "model_type": "deepseek_v4",
+            "num_hidden_layers": 3,
+            "head_dim": 512,
+            "qk_rope_head_dim": 64,
+            "index_head_dim": 128,
+            "sliding_window": 128,
+            # Checkpoint configs can include auxiliary entries after the
+            # runtime transformer layers; the estimator must mirror the
+            # loader and ignore only that validated suffix.
+            "compress_ratios": [0, 4, 128, 0, 0],
+        }
+        tokens = 4096
+        native = vram_budget_mod._deepseek_v4_rank_cache_bytes(
+            cfg, 0, 3, tokens, "native"
+        )
+        bf16 = vram_budget_mod._deepseek_v4_rank_cache_bytes(
+            cfg, 0, 3, tokens, "bf16"
+        )
+        self.assertLess(native, bf16)
+        self.assertEqual(
+            vram_budget_mod._deepseek_v4_tokens_for_rank_budget(
+                cfg, 0, 3, native, tokens, "native"
+            ),
+            tokens,
+        )
+        self.assertLess(
+            vram_budget_mod._deepseek_v4_tokens_for_rank_budget(
+                cfg, 0, 3, native - 1, tokens, "native"
+            ),
+            tokens,
+        )
+
+    def test_deepseek_v4_hqq_fallback_uses_real_phase_one_shapes(self) -> None:
+        cfg = {
+            "model_type": "deepseek_v4",
+            "hidden_size": 4096,
+            "num_attention_heads": 64,
+            "head_dim": 512,
+            "q_lora_rank": 1024,
+            "o_lora_rank": 1024,
+        }
+        self.assertEqual(
+            vram_budget_mod._hqq_attention_tensor_shapes_for_layer(
+                cfg, "full_attention", 0
+            ),
+            [
+                ("wq_a", 1024, 4096),
+                ("wq_b", 32768, 1024),
+                ("wkv", 512, 4096),
+                ("wo_b", 4096, 1024),
+            ],
+        )
+
     def test_dev_benchmark_cleanup_uses_selected_gpu_override(self):
         dev_source = (REPO_ROOT / "dev").read_text(encoding="utf-8")
         benchmark_start = dev_source.index("do_benchmark() {")

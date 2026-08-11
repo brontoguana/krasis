@@ -775,6 +775,24 @@ class KrasisModel:
         self.cfg = ModelConfig.from_model_path(model_path)
         _apply_max_context_limit(self.cfg, max_context_tokens)
         self.quant_cfg = quant_cfg or QuantConfig()
+        if self.cfg.is_deepseek_v4:
+            if self.quant_cfg.kv_cache_format not in ("native", "bf16"):
+                raise ValueError(
+                    "DeepSeek-V4 sequence state supports only architecture-native packed "
+                    f"or expanded BF16 storage, got {self.quant_cfg.kv_cache_format!r}. "
+                    "Conventional k4v4/k6v6 formats do not represent its shared latent cache."
+                )
+            if self.quant_cfg.attention not in ("hqq4", "hqq6", "hqq8", "bf16"):
+                raise ValueError(
+                    "DeepSeek-V4 validates fixed HQQ4/HQQ6/HQQ8 or BF16 attention only, got "
+                    f"{self.quant_cfg.attention!r}."
+                )
+        elif self.quant_cfg.kv_cache_format == "native":
+            raise ValueError(
+                "The Native sequence-state format is architecture-owned and currently "
+                "implemented only for DeepSeek-V4. Select a cache format supported by "
+                f"{self.cfg.model_type}."
+            )
         if self.cfg.gemma4_text:
             if self.quant_cfg.gpu_expert_bits != 4 or self.quant_cfg.cpu_expert_bits != 4:
                 raise ValueError(
@@ -2682,6 +2700,19 @@ class KrasisModel:
         return torch.cat((q_proj, k_proj, v_proj), dim=0).contiguous()
 
     def _hqq_attention_tensor_map(self, layer_type: str, weights: dict) -> dict:
+        if getattr(self.cfg, "is_deepseek_v4", False):
+            result = {}
+
+            def _add(prefix: str, source: dict, names: tuple[str, ...]) -> None:
+                if not isinstance(source, dict):
+                    return
+                for name in names:
+                    tensor = source.get(name)
+                    if isinstance(tensor, torch.Tensor):
+                        result[f"{prefix}{name}"] = tensor
+
+            _add("", weights, ("wq_a", "wq_b", "wkv", "wo_b"))
+            return result
         if layer_type == "linear_attention":
             ordered = ("in_proj_qkvz", "in_proj_ba", "out_proj")
         elif layer_type in ("full_attention", "sliding_attention"):
@@ -3966,6 +3997,8 @@ class KrasisModel:
 
     @staticmethod
     def _hqq_layer_kind(layer: TransformerLayer) -> str:
+        if getattr(layer.cfg, "is_deepseek_v4", False):
+            return "deepseek_v4"
         if layer.layer_type == "linear_attention":
             return "linear_attention"
         attn = layer.attention
@@ -4273,7 +4306,13 @@ class KrasisModel:
 
         for hqq_layer in self.layers:
             attn_obj = hqq_layer.attention
-            if hqq_layer.layer_type == "linear_attention":
+            if getattr(hqq_layer.cfg, "is_deepseek_v4", False):
+                if attn_obj is None or not hasattr(attn_obj, "attention"):
+                    continue
+                v4 = attn_obj.attention
+                for name in ("wq_a", "wq_b", "wkv", "wo_b"):
+                    _release_dict_tensor(v4, name)
+            elif hqq_layer.layer_type == "linear_attention":
                 if attn_obj is None:
                     continue
                 for name in ("in_proj_qkvz", "in_proj_ba", "out_proj"):
@@ -4865,6 +4904,8 @@ class KrasisModel:
         sequence_state_registrations: list | None = None,
     ) -> dict:
         layer_kind = self._hqq_layer_kind(layer)
+        if layer_kind == "deepseek_v4":
+            return {}
         if layer_kind == "gqa":
             gqa_w = layer.gqa_weights if hasattr(layer, "gqa_weights") else None
             q_norm_src = gqa_w.get("q_norm") if gqa_w else None
@@ -5591,6 +5632,13 @@ class KrasisModel:
                     conv_state_ptr=int(layer_meta["conv_state_ptr"]),
                     recur_state_ptr=int(layer_meta["recur_state_ptr"]),
                 )
+            elif layer_kind == "deepseek_v4":
+                # DeepSeek owns a distinct attention graph. Its base,
+                # compressor and indexer registrations below consume stable
+                # HQQ runtime weight views, then attach these exact descriptors
+                # after the complete architecture contract is registered.
+                registered_layers += 1
+                continue
             else:
                 raise RuntimeError(
                     f"Unsupported HQQ layer kind {layer_kind} for registration"
@@ -8928,6 +8976,15 @@ class KrasisModel:
                         layer_idx,
                         cache.dsv4_raw_cache[offset],
                     )
+                    raw_native = cache.dsv4_raw_native[offset]
+                    if raw_native is not None:
+                        for suffix, tensor in raw_native.items():
+                            register(
+                                f"gpu{device_ordinal}.layer{layer_idx}.deepseek_v4.raw_{suffix}",
+                                f"deepseek_v4_native_raw_{suffix}",
+                                layer_idx,
+                                tensor,
+                            )
                     if ratio == 0:
                         continue
                     register(
@@ -8937,6 +8994,16 @@ class KrasisModel:
                         cache.dsv4_compressed_cache[offset],
                         ratio,
                     )
+                    compressed_native = cache.dsv4_compressed_native[offset]
+                    if compressed_native is not None:
+                        for suffix, tensor in compressed_native.items():
+                            register(
+                                f"gpu{device_ordinal}.layer{layer_idx}.deepseek_v4.compressed_{suffix}",
+                                f"deepseek_v4_native_compressed_{suffix}",
+                                layer_idx,
+                                tensor,
+                                ratio,
+                            )
                     register(
                         f"gpu{device_ordinal}.layer{layer_idx}.deepseek_v4.compressor_kv",
                         "deepseek_v4_compressor_kv_state",
@@ -8957,6 +9024,16 @@ class KrasisModel:
                             cache.dsv4_index_cache[offset],
                             ratio,
                         )
+                        index_native = cache.dsv4_index_native[offset]
+                        if index_native is not None:
+                            for suffix, tensor in index_native.items():
+                                register(
+                                    f"gpu{device_ordinal}.layer{layer_idx}.deepseek_v4.index_{suffix}",
+                                    f"deepseek_v4_native_index_{suffix}",
+                                    layer_idx,
+                                    tensor,
+                                    ratio,
+                                )
                         register(
                             f"gpu{device_ordinal}.layer{layer_idx}.deepseek_v4.index_kv",
                             "deepseek_v4_index_kv_state",
@@ -9429,8 +9506,26 @@ class KrasisModel:
                     )
                 v4 = attn.attention
                 hc = attn.hyper_connection
+                v4_hqq_runtime = (
+                    self._hqq_attention_runtime.get(layer_idx, {})
+                    if hqq_active
+                    else {}
+                )
 
                 def _v4_register(weight, name):
+                    if hqq_active:
+                        if name in v4_hqq_runtime:
+                            return store.register_hqq_runtime_weight_view(
+                                layer_idx=layer_idx,
+                                tensor_name=name,
+                            )
+                        if name in {
+                            "wq_a", "wq_b", "wkv", "wo_b",
+                        }:
+                            raise RuntimeError(
+                                f"DeepSeek-V4 HQQ layer {layer_idx} is missing "
+                                f"required runtime tensor {name}"
+                            )
                     return _register_attn_weight(
                         weight, layer_idx, "deepseek_v4", name
                     )
@@ -9442,6 +9537,52 @@ class KrasisModel:
                 cache, v4_offset = self._kv_cache_slot_for_layer(layer_idx)
                 v4_cache = cache.get_deepseek_v4_layer_caches(v4_offset)
                 raw_cache = v4_cache["raw"]
+
+                def _v4_cache_registration(bf16_cache, native_cache, block_size):
+                    if v4_cache["format"] == "native":
+                        if bf16_cache is not None or not isinstance(native_cache, dict):
+                            raise RuntimeError(
+                                f"DeepSeek-V4 layer {layer_idx} Native cache allocation is inconsistent"
+                            )
+                        codes = native_cache["codes"]
+                        scales = native_cache["scales"]
+                        tail = native_cache.get("tail")
+                        return {
+                            "cache_ptr": 0,
+                            "cache_elems": 0,
+                            "cache_rows": int(codes.shape[0]),
+                            "cache_format": "native",
+                            "native_codes_ptr": int(codes.data_ptr()),
+                            "native_codes_elems": int(codes.numel()),
+                            "native_scale_exponents_ptr": int(scales.data_ptr()),
+                            "native_scale_exponents_elems": int(scales.numel()),
+                            "native_tail_ptr": int(tail.data_ptr()) if tail is not None else 0,
+                            "native_tail_elems": int(tail.numel()) if tail is not None else 0,
+                            "native_block_size": int(block_size),
+                        }
+                    if bf16_cache is None or native_cache is not None:
+                        raise RuntimeError(
+                            f"DeepSeek-V4 layer {layer_idx} BF16 cache allocation is inconsistent"
+                        )
+                    return {
+                        "cache_ptr": int(bf16_cache.data_ptr()),
+                        "cache_elems": int(bf16_cache.numel()),
+                        "cache_rows": int(bf16_cache.shape[0]),
+                        "cache_format": "bf16",
+                        "native_codes_ptr": 0,
+                        "native_codes_elems": 0,
+                        "native_scale_exponents_ptr": 0,
+                        "native_scale_exponents_elems": 0,
+                        "native_tail_ptr": 0,
+                        "native_tail_elems": 0,
+                        "native_block_size": int(block_size),
+                    }
+
+                raw_registration = _v4_cache_registration(
+                    raw_cache,
+                    v4_cache["raw_native"],
+                    v4_cache["fp8_block_size"],
+                )
                 v4_max_seq = int(cache.max_context_tokens)
                 (
                     v4_rope_cos_ptr,
@@ -9476,8 +9617,16 @@ class KrasisModel:
                     sliding_window=self.cfg.sliding_window,
                     compress_ratio=int(v4_cache["ratio"]),
                     compress_rope_theta=self.cfg.compress_rope_theta,
-                    raw_cache_ptr=raw_cache.data_ptr(),
-                    raw_cache_elems=raw_cache.numel(),
+                    raw_cache_ptr=raw_registration["cache_ptr"],
+                    raw_cache_elems=raw_registration["cache_elems"],
+                    cache_format=raw_registration["cache_format"],
+                    raw_native_codes_ptr=raw_registration["native_codes_ptr"],
+                    raw_native_codes_elems=raw_registration["native_codes_elems"],
+                    raw_native_scale_exponents_ptr=raw_registration["native_scale_exponents_ptr"],
+                    raw_native_scale_exponents_elems=raw_registration["native_scale_exponents_elems"],
+                    raw_native_tail_ptr=raw_registration["native_tail_ptr"],
+                    raw_native_tail_elems=raw_registration["native_tail_elems"],
+                    native_block_size=raw_registration["native_block_size"],
                     rope_cos_ptr=v4_rope_cos_ptr,
                     rope_sin_ptr=v4_rope_sin_ptr,
                     rope_rows=v4_rope_rows,
@@ -9487,6 +9636,11 @@ class KrasisModel:
                 if v4_cache["ratio"] > 0:
                     compressor = v4["compressor"]
                     compressed = v4_cache["compressed"]
+                    compressed_registration = _v4_cache_registration(
+                        compressed,
+                        v4_cache["compressed_native"],
+                        v4_cache["fp8_block_size"],
+                    )
                     kv_state = v4_cache["compressor_kv_state"]
                     score_state = v4_cache["compressor_score_state"]
                     store.register_deepseek_v4_compressor(
@@ -9496,9 +9650,7 @@ class KrasisModel:
                         wgate_wid=_v4_register(compressor["wgate"], "compressor.wgate"),
                         norm_ptr=compressor["norm"].data_ptr(),
                         norm_elems=compressor["norm"].numel(),
-                        cache_ptr=compressed.data_ptr(),
-                        cache_elems=compressed.numel(),
-                        cache_rows=compressed.shape[0],
+                        **compressed_registration,
                         kv_state_ptr=kv_state.data_ptr(),
                         kv_state_elems=kv_state.numel(),
                         score_state_ptr=score_state.data_ptr(),
@@ -9509,6 +9661,11 @@ class KrasisModel:
                     indexer = v4["indexer"]
                     index_compressor = indexer["compressor"]
                     index_cache = v4_cache["index"]
+                    index_registration = _v4_cache_registration(
+                        index_cache,
+                        v4_cache["index_native"],
+                        v4_cache["fp4_block_size"],
+                    )
                     index_kv_state = v4_cache["index_kv_state"]
                     index_score_state = v4_cache["index_score_state"]
                     store.register_deepseek_v4_indexer(
@@ -9528,9 +9685,7 @@ class KrasisModel:
                         ),
                         norm_ptr=index_compressor["norm"].data_ptr(),
                         norm_elems=index_compressor["norm"].numel(),
-                        cache_ptr=index_cache.data_ptr(),
-                        cache_elems=index_cache.numel(),
-                        cache_rows=index_cache.shape[0],
+                        **index_registration,
                         kv_state_ptr=index_kv_state.data_ptr(),
                         kv_state_elems=index_kv_state.numel(),
                         score_state_ptr=index_score_state.data_ptr(),
@@ -9556,6 +9711,11 @@ class KrasisModel:
                     sinkhorn_iters=self.cfg.hc_sinkhorn_iters,
                     eps=self.cfg.hc_eps,
                 )
+                if hqq_active:
+                    store.attach_hqq_runtime_deepseek_v4_layer(
+                        layer_idx=layer_idx,
+                        tensor_names=sorted(v4_hqq_runtime),
+                    )
             elif hqq_active:
                 # HQQ registration below owns attention projection residency.
                 # Do not route HQQ tensors through the normal BF16/Marlin
@@ -10527,6 +10687,13 @@ class KrasisModel:
         Only the last segment (layer_end == num_layers) gets real final norm + LM head.
         """
         self._require_supported_runtime_features()
+        if self.cfg.is_deepseek_v4:
+            raise RuntimeError(
+                "DeepSeek-V4 serial layer-split decode is not implemented. Its custom "
+                "compressed-attention graph and Native sequence-state planes must not be "
+                "registered as ordinary GQA on an auxiliary store. Use one primary GPU "
+                "or the explicitly selected peer-expert mode."
+            )
         from krasis import GpuDecodeStore
         import torch
 

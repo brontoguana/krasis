@@ -12,6 +12,7 @@
 #   ./dev upload-sidecar-bundle     Upload verified sidecar bundle to configured release
 #   ./dev run <config>              Launch server from a test config
 #   ./dev run <config> --benchmark  Launch with benchmark, then serve
+#   ./dev launcher-run <config>     Launch through the primary launcher path
 #   ./dev test <config>             Run short model test (benchmark + network tests)
 #   ./dev test <config> --thorough  Run thorough model test (stress + benchmark + network + large)
 #   ./dev network <port>            Run network tests against a running server
@@ -91,7 +92,7 @@
 #
 # Configs are short names that map to validated configs:
 #   qcn         -> tests/qcn-k4v4-hqq4-int4-benchmark.conf
-#   dsv4        -> testconfigs/deepseek-v4-flash-0731-4-4-a16.conf
+#   dsv4        -> tests/deepseek-v4-flash-0731-hqq8.conf
 #   gemma       -> tests/gemma-4-4-a16.conf
 #
 set -euo pipefail
@@ -224,7 +225,7 @@ resolve_config() {
     case "$name" in
         qcn|QCN)            echo "$SCRIPT_DIR/tests/qcn-k4v4-hqq4-int4-benchmark.conf" ;;
         dsv4|deepseek-v4|deepseek-v4-flash|dsv4-0731|deepseek-v4-0731|deepseek-v4-flash-0731)
-                            echo "$SCRIPT_DIR/testconfigs/deepseek-v4-flash-0731-4-4-a16.conf" ;;
+                            echo "$SCRIPT_DIR/tests/deepseek-v4-flash-0731-hqq8.conf" ;;
         gemma|Gemma)        echo "$SCRIPT_DIR/tests/gemma-4-4-a16.conf" ;;
         *)
             # Try as a direct path
@@ -935,6 +936,25 @@ do_run() {
     exec_repo_python -m krasis.server --config "$conf" "$@"
 }
 
+do_launcher_run() {
+    [[ $# -lt 1 ]] && err "Usage: ./dev launcher-run <config> [--benchmark] [extra args...]"
+    local conf
+    conf=$(resolve_config "$1")
+    shift
+    local selected_gpus_override
+    selected_gpus_override=$(extract_selected_gpus_arg "$@")
+    local run_dir
+    run_dir=$(create_run_dir "dev-launcher-run")
+    cleanup_gpu "$conf" "$selected_gpus_override"
+    auto_rebuild
+    info "Launching through Krasis launcher from: $conf"
+    info "Run dir: $run_dir"
+    verify_repo_imports
+    export KRASIS_RUN_DIR="$run_dir"
+    export KRASIS_RUN_TYPE="dev-launcher-run"
+    exec_repo_python -m krasis.launcher --config "$conf" "$@"
+}
+
 do_test() {
     [[ $# -lt 1 ]] && err "Usage: ./dev test <config> [--thorough]"
     local conf
@@ -1431,10 +1451,21 @@ do_decode_harness() {
 }
 
 do_perplexity() {
-    [[ $# -lt 1 ]] && err "Usage: ./dev perplexity <config> [--dataset wikitext-2] [--max-tokens N] [--max-windows N]"
+    [[ $# -lt 1 ]] && err "Usage: ./dev perplexity <config> [--dataset wikitext-2] [--max-tokens N] [--max-windows N] [--vram-report]"
     local conf
     conf=$(resolve_config "$1")
     shift
+    local vram_report=false
+    local -a ppl_args=()
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" == "--vram-report" ]]; then
+            vram_report=true
+        else
+            ppl_args+=("$1")
+        fi
+        shift
+    done
+    set -- "${ppl_args[@]}"
     cleanup_gpu "$conf"
     auto_rebuild
     local run_dir
@@ -1466,7 +1497,11 @@ do_perplexity() {
         cd "$SCRIPT_DIR"
         export KRASIS_RUN_DIR="$run_dir"
         export KRASIS_RUN_TYPE="dev-perplexity-server"
-        exec_repo_python -m krasis.server --config "$conf" --test-endpoints
+        local -a server_args=(--config "$conf" --test-endpoints)
+        if $vram_report; then
+            server_args+=(--vram-report)
+        fi
+        exec_repo_python -m krasis.server "${server_args[@]}"
     ) > >(tee "$server_log") 2>&1 &
     local server_pid=$!
 
@@ -2435,6 +2470,7 @@ do_model_config_test() {
     [[ $# -eq 0 ]] || err "model-config-test takes no arguments"
     verify_repo_imports
     KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_model_config.py"
+    KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_deepseek_v4_hqq_contract.py"
 }
 
 do_hqq_gpu_search_probe() {
@@ -3745,6 +3781,7 @@ do_server_test() {
             cargo test --release --lib gpu_prefill::chunk_plan_tests "$@"
         KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_reference_judgement
         KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_session_cache_gate
+        KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_vram_pressure
     )
 }
 
@@ -3780,6 +3817,7 @@ case "$cmd" in
     restore-sidecar-bundle) do_restore_sidecar_bundle "$@" ;;
     upload-sidecar-bundle) do_upload_sidecar_bundle ;;
     run)            do_run "$@" ;;
+    launcher-run)   do_launcher_run "$@" ;;
     test)           do_test "$@" ;;
     benchmark)      do_benchmark "$@" ;;
     approved-heatmap-build) do_approved_heatmap_build "$@" ;;
@@ -3848,6 +3886,7 @@ case "$cmd" in
         echo "  restore-sidecar-bundle [--github] Restore sidecars from bundle cache"
         echo "  upload-sidecar-bundle          Upload bundle to configured GitHub release"
         echo "  run <config> [flags]           Launch server (add --benchmark or --selected-gpus GPU[,GPU...] as needed)"
+        echo "  launcher-run <config> [flags]  Launch through the primary launcher path"
         echo "  benchmark <config>             Run standard benchmark and exit"
         echo "  approved-heatmap-build <config> --out <path>"
         echo "                                 Build approved cumulative HCS route heatmap checkpoints"

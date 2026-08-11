@@ -58,9 +58,17 @@ krasis --config path/to/config.conf
 Config files use `KEY=VALUE` format. CLI flags override config file values.
 
 `dsv4`, `deepseek-v4`, and `deepseek-v4-flash-0731` resolve to the validated
-DeepSeek-V4-Flash-0731 INT4-expert, BF16-attention/KV config. GPU selection,
-layer partitioning, HCS residency, and VRAM budgets remain runtime-measured;
-the named config does not encode a particular GPU or fixed residency budget.
+DeepSeek-V4-Flash-0731 INT4-expert, HQQ8-attention, expanded-BF16-cache config.
+This remains a measured comparison profile. Fresh launcher selections default
+to HQQ6 attention plus `Native` cache; DeepSeek also supports explicit HQQ4,
+HQQ8, BF16-attention, and expanded-BF16-cache choices. The `Native` cache
+stores the checkpoint's existing packed QAT state without a second
+quantizer; with the same 1,000 MiB budget it increased measured context capacity
+from 149,808 to 294,432 tokens. BF16 attention/cache remains available as an
+explicit reference profile. DeepSeek does not expose conventional `k4v4` or
+`k6v6`, because its cache is shared latent/index state rather than separate K/V.
+GPU selection, layer partitioning, HCS residency, and VRAM budgets remain
+runtime-measured; the named config does not encode a fixed residency budget.
 
 ## Tool Use
 

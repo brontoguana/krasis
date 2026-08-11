@@ -1,0 +1,22 @@
+{
+  "schema": "krasis_rust_prefill_ppl_v1",
+  "mode": "dataset",
+  "date": "2026-08-10T17:33:43.625673",
+  "config_path": "tests/deepseek-v4-flash-0731-hqq8-native.conf",
+  "model_path": "/home/main/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-0731",
+  "dataset": "wikitext-2",
+  "attention_quant": "hqq8",
+  "kv_dtype": "native",
+  "window_size": 2048,
+  "stride": 1024,
+  "max_tokens": null,
+  "num_tokens_total": 287737,
+  "num_tokens_scored": 287736,
+  "num_windows": 281,
+  "total_nll": 452309.07725895854,
+  "mean_loss": 1.5719585914135128,
+  "perplexity": 4.816071679021491,
+  "bits_per_char": 2.267856864315075,
+  "elapsed_s": 4647.098712157924,
+  "throughput_tok_s": 61.91734194223456
+}

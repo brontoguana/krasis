@@ -2895,7 +2895,7 @@ def main():
             "Use 'k6v6' for quality, 'k4v4' for compact KV, or 'bf16' for full precision."
         )
 
-    kv_format_str = args.kv_dtype  # "bf16", "k8v4", "k8v6", "k7v4", "k6v6", "k6v4", "k4v4", or "tq4"
+    kv_format_str = args.kv_dtype  # includes architecture-owned "native" and generic formats
     if args.kv_dtype in ("k8v4", "k8v6", "k7v4", "k6v6", "k6v4", "k4v4", "tq4"):
         kv_dtype = torch.float8_e4m3fn  # base dtype for size calc; custom formats allocate their own tensors
     else:

@@ -11,6 +11,9 @@ Detailed quality logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](be
 | Model | Params | Active params | Quant | BF16 reference | Prompts | PPL | PPL delta vs BF16 | BF16 top-k drift | Prefill argmax | Prefill top-10 | First token | Result |
 | --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | [DeepSeek-V4-Flash-0731](benchmarks/BENCHMARKS.md#deepseek-v4-flash-0731-learned-index-gemm-attempt-1-full-ppl--2026-08-03) | 304.2B checkpoint / 284B main | 13B main | INT4/BF16/BF16 KV | llama-witness native source + frozen Krasis scalar anchor | 4 | 4.8214 | +0.114% vs 4.8159 scalar anchor | diagnostic deltas in accepted range | 4/4 | 4/4 | 4/4 | PASS |
+| [DeepSeek-V4-Flash-0731](benchmarks/BENCHMARKS.md#deepseek-v4-hqq8-attention-and-native-cache-acceptance--2026-08-10) | 304.2B checkpoint / 284B main | 13B main | INT4/HQQ8/BF16 cache | accepted BF16/BF16 runtime + llama-witness native source | 4 | 4.8160 | -0.111% vs accepted BF16/BF16 | accepted witness range | 4/4 | 4/4 | 4/4 | PASS |
+| [DeepSeek-V4-Flash-0731 Native](benchmarks/BENCHMARKS.md#deepseek-v4-hqq8-attention-and-native-cache-acceptance--2026-08-10) | 304.2B checkpoint / 284B main | 13B main | INT4/HQQ8/Native cache | HQQ8/BF16 cache + llama-witness native source | 4 | 4.8161 | +0.000775% vs HQQ8/BF16 cache | exact cache reconstruction | 4/4 | 4/4 | 4/4 | PASS |
+| DeepSeek-V4-Flash-0731 launcher default | 304.2B checkpoint / 284B main | 13B main | INT4/HQQ6/Native cache | HQQ8/Native + llama-witness native source | 4 | 4.8385 | +0.466% vs HQQ8/Native | accepted optional lower-bit mode | 4/4 | 4/4 | 4/4 | PASS |
 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ4/k4v4 | llama-witness BF16 | 8 | 5.8175 | +3.28% | avg 0.254%, max 0.783% | 8/8 | 8/8 | 8/8 | PASS |
 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ6/k6v6 | llama-witness BF16 | 8 | 5.6895 | +1.00% | avg 0.200%, max 0.695% | 8/8 | 8/8 | 8/8 | PASS |
 | Ornith-1.0-35B | 35B class | 3B class | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 5.9170 | +3.67% | n/a | n/a | n/a | n/a | PASS |
@@ -44,6 +47,11 @@ Column notes:
   `4.82137538882331` (`+0.11369%`), while the independent llama-witness gate
   passed all four prompts for prefill argmax, top-10 containment, and first
   token. The full prefill campaign stayed inside its permanent quality ledger.
+  Phase-one HQQ8/BF16 cache measured `4.816034369291275`, or `-0.1108%`
+  versus that accepted BF16/BF16 run. Native measured `4.816071679021491`,
+  only `+0.000775%` versus HQQ8/BF16 cache, and reconstructs the prior
+  post-QAT BF16 cache values exactly. Both HQQ8 modes passed the four-prompt
+  witness; Native is kept explicit for performance, not quality, reasons.
 
 - `PPL delta vs BF16` uses the per-model Krasis BF16 runtime baseline, measured
   through the Rust prefill `/v1/internal/prefill_logits` test endpoint with

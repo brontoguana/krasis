@@ -16,7 +16,7 @@ ATTENTION_QUANT_CHOICES = (
     "hqq8",
 )
 DEPRECATED_ATTENTION_QUANT_CHOICES = ("awq",)
-KV_CACHE_FORMAT_CHOICES = ("bf16", "bfloat16", "k8v4", "k8v6", "k7v4", "k6v6", "k6v4", "k4v4", "tq4")
+KV_CACHE_FORMAT_CHOICES = ("bf16", "bfloat16", "native", "k8v4", "k8v6", "k7v4", "k6v6", "k6v4", "k4v4", "tq4")
 DEPRECATED_KV_CACHE_FORMAT_CHOICES = ("fp8", "fp8_e4m3", "polar4")
 GPU_EXPERT_INT4_CALIB_CHOICES = ("amax", "search_rmse")
 HQQ_CACHE_PROFILE_BASELINE = "baseline"
@@ -358,7 +358,7 @@ class QuantConfig:
     expert_group_size: int = 128   # routed expert quantization group size; 32 matches Q8_0-style block scale granularity
     gpu_expert_int4_calib: str = "amax"  # "amax" or "search_rmse" for routed-expert GPU INT4 cache build
     cpu_expert_bits: int = 4       # 4 or 8 for CPU expert quantization
-    kv_cache_format: str = "k6v6"  # Quality default; public modes are "k6v6", "k4v4", and "bf16"
+    kv_cache_format: str = "k6v6"  # Generic modes: k6v6/k4v4/bf16; Native is architecture-owned
     ring_window_kv: bool = False    # Experimental: cap sliding-attention KV layers to their window
     hqq_cache_profile: str = HQQ_CACHE_PROFILE_BASELINE  # "baseline" or an explicit calibrated HQQ profile
     hqq_group_size: int = HQQ_ATTENTION_DEFAULT_GROUP_SIZE  # HQQ attention quantization group size
@@ -379,6 +379,7 @@ class QuantConfig:
             "k6v4": "k6v4",
             "k4v4": "k4v4",
             "tq4": "tq4",
+            "native": "native",
         }
         if self.kv_cache_format in DEPRECATED_KV_CACHE_FORMAT_CHOICES:
             raise ValueError(
@@ -388,7 +389,8 @@ class QuantConfig:
         if self.kv_cache_format not in kv_aliases:
             raise ValueError(
                 f"Unsupported kv_cache_format '{self.kv_cache_format}'. "
-                "Use public modes 'k6v6', 'k4v4', or 'bf16'; internal modes include "
+                "Use generic modes 'k6v6', 'k4v4', or 'bf16', or an architecture-owned "
+                "'native' mode where supported; internal modes include "
                 "'k8v4', 'k8v6', 'k7v4', 'k6v4', and 'tq4'."
             )
         self.kv_cache_format = kv_aliases[self.kv_cache_format]

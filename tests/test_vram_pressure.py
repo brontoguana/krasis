@@ -39,6 +39,48 @@ class VramPressureSourceTests(unittest.TestCase):
         self.assertNotIn("final_free_mb >= target_floor_mb || final_free_mb >= safety_mb", section)
         self.assertIn("target_floor=", section)
 
+    def test_hcs_pressure_cap_survives_reload_until_measured_headroom_clears_it(self) -> None:
+        source = (ROOT / "src/gpu_decode.rs").read_text()
+        sync_reload = source[
+            source.index("pub fn hcs_reload_after_prefill("):
+            source.index("/// Async version of hcs_reload_after_prefill.")
+        ]
+        async_reload = source[
+            source.index("pub fn hcs_reload_after_prefill_async("):
+            source.index("pub fn hcs_check_soft_reload_complete(")
+        ]
+
+        for reload_path in (sync_reload, async_reload):
+            self.assertIn("pressure_capped_target_chunks", reload_path)
+            self.assertNotIn("clear_pressure_cap", reload_path)
+
+        drain = source[
+            source.index("pub fn hcs_drain_vram_pressure"):
+            source.index("/// Reload soft-tier HCS experts after prefill completes.")
+        ]
+        self.assertIn("if observed_free_mb >= reload_room_mb", drain)
+        self.assertIn("hcs.clear_pressure_cap();", drain)
+        self.assertIn("hcs.apply_pressure_cap(hcs.soft_chunks_loaded);", drain)
+
+    def test_prefill_logits_cleanup_feeds_measured_pressure_back_into_hcs(self) -> None:
+        source = (ROOT / "src/server.rs").read_text()
+        finalizer = source[
+            source.index("fn finish_prefill_logits_runtime("):
+            source.index("fn handle_prefill_logits(")
+        ]
+
+        self.assertLess(
+            finalizer.index('report_event("prefill_logits_cleanup_end")'),
+            finalizer.index("drain_vram_pressure_for_state("),
+        )
+        self.assertIn('"prefill_logits_cleanup_end", true', finalizer)
+
+        handler = source[
+            source.index("fn handle_prefill_logits("):
+            source.index("/// Handle /v1/internal/reference_test endpoint.")
+        ]
+        self.assertGreaterEqual(handler.count("finish_prefill_logits_runtime("), 5)
+
     def test_reference_runner_rejects_measured_low_below_margin(self) -> None:
         violation = timing_vram_safety_violation(
             {
@@ -102,7 +144,7 @@ class VramPressureSourceTests(unittest.TestCase):
             rust,
         )
         self.assertIn("let split_flag_idx = 2 + graph.max_experts_per_tok * 2;", rust)
-        self.assertIn("batch_upload_ptrs_bytes + max_ept * 4 * 3", rust)
+        self.assertIn("batch_upload_ptrs_bytes + max_ept * 4 * 4", rust)
         self.assertIn("d_wts + (graph.max_experts_per_tok * 4) as u64", rust)
         self.assertIn(
             "d_upload_base + (ptr_stride * 4 + max_ept * 4 * 2) as u64",

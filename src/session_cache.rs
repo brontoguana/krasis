@@ -17,6 +17,7 @@ pub const PREFILL_STAGE_K_KIND: &str = "gqa_prefill_stage_k";
 pub const PREFILL_STAGE_V_KIND: &str = "gqa_prefill_stage_v";
 pub const RUNTIME_KV_FORMAT_BF16: u32 = 0;
 pub const RUNTIME_KV_FORMAT_K4V4: u32 = 9;
+pub const RUNTIME_KV_FORMAT_NATIVE: u32 = 10;
 
 pub fn synthetic_boundary_capture_is_lossless(
     _runtime_kv_format: u32,
@@ -1910,6 +1911,11 @@ mod tests {
             false,
         ));
         assert!(!synthetic_boundary_capture_is_lossless(
+            RUNTIME_KV_FORMAT_NATIVE,
+            false,
+            true,
+        ));
+        assert!(!synthetic_boundary_capture_is_lossless(
             RUNTIME_KV_FORMAT_BF16,
             true,
             false,
@@ -2108,6 +2114,15 @@ mod tests {
                 bytes: vec![seed as u8; payload_bytes],
             }],
         }
+    }
+
+    #[test]
+    fn native_shared_latent_signature_is_explicit_and_valid() {
+        let mut value = signature();
+        value.kv_format = "native".to_string();
+        value.kv_key_bits = 8;
+        value.kv_value_bits = 8;
+        value.validate().unwrap();
     }
 
     fn snapshot_with_tokens(tokens: &[u32], payload_bytes: usize) -> SessionSnapshot {

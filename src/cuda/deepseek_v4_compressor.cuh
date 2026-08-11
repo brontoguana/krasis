@@ -28,6 +28,37 @@ __device__ __forceinline__ float dsv4_e2m1_round(float value) {
     return copysignf(levels[best], value);
 }
 
+__device__ __forceinline__ unsigned char dsv4_e2m1_code(float value) {
+    const float levels[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    float magnitude = fminf(fabsf(value), 6.0f);
+    int best = 0;
+    float best_distance = fabsf(magnitude - levels[0]);
+#pragma unroll
+    for (int code = 1; code < 8; ++code) {
+        float distance = fabsf(magnitude - levels[code]);
+        if (distance < best_distance ||
+            (distance == best_distance && (code & 1) == 0 && (best & 1) != 0)) {
+            best = code;
+            best_distance = distance;
+        }
+    }
+    return (unsigned char)(best | (signbit(value) ? 8 : 0));
+}
+
+__device__ __forceinline__ float dsv4_e2m1_from_code(unsigned char code) {
+    const float levels[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    float value = levels[code & 7];
+    return (code & 8) != 0 ? -value : value;
+}
+
+__device__ __forceinline__ signed char dsv4_pow2_scale_exponent(float scale) {
+    return (signed char)ilogbf(scale);
+}
+
+__device__ __forceinline__ float dsv4_pow2_scale_from_exponent(signed char exponent) {
+    return ldexpf(1.0f, (int)exponent);
+}
+
 // Pool complete compression windows. FP32 WKV/WGate projections and FP32 APE
 // enter the exact per-dimension softmax equation. With overlap enabled, the
 // first half comes from the preceding window and the second half from the
@@ -298,6 +329,77 @@ extern "C" __global__ void deepseek_v4_index_scores_decode_kernel(
     }
 }
 
+// Native-cache equivalent of the learned-index scorer. The persistent cache
+// stores the model's own E2M1 QAT codes and power-of-two scale exponents; this
+// reconstructs the same BF16-expanded values consumed by the reference path
+// without retaining a second expanded cache.
+extern "C" __global__ void deepseek_v4_index_scores_native_decode_kernel(
+    float* __restrict__ output,
+    const unsigned char* __restrict__ key_codes,
+    const signed char* __restrict__ key_scale_exponents,
+    const __nv_bfloat16* __restrict__ query,
+    const __nv_bfloat16* __restrict__ head_weights,
+    const int* __restrict__ compressed_count,
+    int score_capacity,
+    int num_heads,
+    int head_dim,
+    int block_size)
+{
+    if (compressed_count == nullptr || key_codes == nullptr ||
+        key_scale_exponents == nullptr || score_capacity <= 0 || num_heads <= 0 ||
+        head_dim <= 0 || block_size <= 0 || (blockDim.x & 31) != 0) return;
+    int context = min(max(*compressed_count, 0), score_capacity);
+    int num_warps = blockDim.x >> 5;
+    int warp = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    int code_stride = (head_dim + 1) >> 1;
+    int scale_stride = (head_dim + block_size - 1) / block_size;
+    extern __shared__ float shared[];
+    float* shared_key = shared;
+    float* contributions = shared_key + head_dim;
+
+    for (int token = (int)blockIdx.x; token < context; token += (int)gridDim.x) {
+        for (int dim = (int)threadIdx.x; dim < head_dim; dim += (int)blockDim.x) {
+            unsigned char packed = key_codes[(int64_t)token * code_stride + (dim >> 1)];
+            unsigned char code = (dim & 1) == 0 ? packed & 0x0f : packed >> 4;
+            float scale = dsv4_pow2_scale_from_exponent(
+                key_scale_exponents[(int64_t)token * scale_stride + dim / block_size]);
+            shared_key[dim] = dsv4_e2m1_from_code(code) * scale;
+        }
+        __syncthreads();
+        for (int head = warp; head < num_heads; head += num_warps) {
+            const __nv_bfloat16* head_query = query + (int64_t)head * head_dim;
+            float dot = 0.0f;
+            for (int dim = lane; dim < head_dim; dim += 32) {
+                dot += __bfloat162float(head_query[dim]) * shared_key[dim];
+            }
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                dot += __shfl_down_sync(0xffffffff, dot, offset);
+            }
+            if (lane == 0) {
+                contributions[head] =
+                    __bfloat162float(head_weights[head]) * fmaxf(dot, 0.0f);
+            }
+        }
+        __syncthreads();
+        if (warp == 0) {
+            float score = 0.0f;
+            for (int head = lane; head < num_heads; head += 32) {
+                score += contributions[head];
+            }
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                score += __shfl_down_sync(0xffffffff, score, offset);
+            }
+            if (lane == 0) output[token] = score;
+        }
+        __syncthreads();
+    }
+    for (int token = context + (int)blockIdx.x; token < score_capacity;
+         token += (int)gridDim.x) {
+        output[token] = -INFINITY;
+    }
+}
+
 // Continue compressor prefill from an arbitrary absolute prompt position.
 // One block owns one output dimension and walks the chunk in order, so state
 // updates and ratio-boundary pooling are ordered without host or grid-wide
@@ -545,6 +647,146 @@ extern "C" __global__ void deepseek_v4_compressor_finalize_decode_kernel(
     }
 }
 
+// Graph-safe native-cache finalizer. It preserves the reference operation and
+// rounding order (FP32 pool -> BF16 cast -> RMSNorm -> BF16 -> RoPE -> BF16 ->
+// optional Hadamard -> BF16 -> QAT) but publishes the final QAT codes and exact
+// power-of-two scale exponents instead of an expanded BF16 cache row.
+extern "C" __global__ void deepseek_v4_compressor_finalize_native_decode_kernel(
+    unsigned char* __restrict__ codes,
+    signed char* __restrict__ scale_exponents,
+    __nv_bfloat16* __restrict__ tails,
+    const float* __restrict__ pooled,
+    const __nv_bfloat16* __restrict__ norm_weight,
+    const int* __restrict__ position_ptr,
+    const float* __restrict__ cos_table,
+    const float* __restrict__ sin_table,
+    int cache_rows,
+    int head_dim,
+    int rope_dim,
+    int rope_rows,
+    int ratio,
+    int code_bits,
+    int qat_block_size,
+    float eps)
+{
+    if (blockIdx.x != 0 || position_ptr == nullptr || codes == nullptr ||
+        scale_exponents == nullptr || pooled == nullptr || norm_weight == nullptr ||
+        cos_table == nullptr || sin_table == nullptr || cache_rows <= 0 ||
+        head_dim <= 0 || head_dim > (int)blockDim.x || rope_dim <= 0 ||
+        rope_dim > head_dim || (rope_dim & 1) != 0 || rope_rows <= 0 ||
+        ratio <= 0 || qat_block_size <= 0 || !((code_bits == 8 && tails != nullptr) ||
+        (code_bits == 4 && tails == nullptr))) return;
+    int position = *position_ptr;
+    if (position < 0 || (position + 1) % ratio != 0) return;
+    int cache_row = (position + 1) / ratio - 1;
+    if (cache_row < 0 || cache_row >= cache_rows) return;
+    int compressed_position = cache_row * ratio;
+    if (compressed_position < 0 || compressed_position >= rope_rows) return;
+
+    extern __shared__ float shared[];
+    float* reduction = shared;
+    float* values = shared + blockDim.x;
+    int lane = (int)threadIdx.x;
+    float cast_value = lane < head_dim
+        ? __bfloat162float(__float2bfloat16(pooled[lane]))
+        : 0.0f;
+    values[lane] = cast_value;
+    reduction[lane] = cast_value * cast_value;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) reduction[lane] += reduction[lane + stride];
+        __syncthreads();
+    }
+    float inv = rsqrtf(reduction[0] / (float)head_dim + eps);
+    if (lane < head_dim) {
+        values[lane] = __bfloat162float(__float2bfloat16(
+            values[lane] * inv * __bfloat162float(norm_weight[lane])));
+    }
+    __syncthreads();
+
+    int half_rope = rope_dim / 2;
+    int tail_start = head_dim - rope_dim;
+    if (lane < half_rope) {
+        int real_index = tail_start + 2 * lane;
+        float real = values[real_index];
+        float imag = values[real_index + 1];
+        float cosine = cos_table[(int64_t)compressed_position * half_rope + lane];
+        float sine = sin_table[(int64_t)compressed_position * half_rope + lane];
+        values[real_index] = __bfloat162float(__float2bfloat16(real * cosine - imag * sine));
+        values[real_index + 1] = __bfloat162float(__float2bfloat16(imag * cosine + real * sine));
+    }
+    __syncthreads();
+
+    if (code_bits == 4) {
+        if ((head_dim & (head_dim - 1)) != 0) return;
+        for (int stride = 1; stride < head_dim; stride <<= 1) {
+            if (lane < head_dim / 2) {
+                int base = (lane / stride) * (stride << 1);
+                int offset = lane - (lane / stride) * stride;
+                float left = values[base + offset];
+                float right = values[base + offset + stride];
+                values[base + offset] = left + right;
+                values[base + offset + stride] = left - right;
+            }
+            __syncthreads();
+        }
+        if (lane < head_dim) {
+            values[lane] = __bfloat162float(__float2bfloat16(
+                values[lane] * rsqrtf((float)head_dim)));
+        }
+        __syncthreads();
+    }
+
+    int quant_cols = code_bits == 4 ? head_dim : head_dim - rope_dim;
+    int blocks_per_row = (quant_cols + qat_block_size - 1) / qat_block_size;
+    for (int block = 0; block < blocks_per_row; ++block) {
+        int block_start = block * qat_block_size;
+        float amax = 0.0f;
+        int column = block_start + lane;
+        if (lane < qat_block_size && column < quant_cols) amax = fabsf(values[column]);
+        reduction[lane] = amax;
+        __syncthreads();
+        for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (lane < stride) reduction[lane] = fmaxf(reduction[lane], reduction[lane + stride]);
+            __syncthreads();
+        }
+        float scale = code_bits == 4
+            ? dsv4_pow2_scale(fmaxf(reduction[0], 6.0f * 0x1p-126f), 6.0f)
+            : dsv4_pow2_scale(fmaxf(reduction[0], 1.0e-4f), 448.0f);
+        if (lane == 0) {
+            scale_exponents[(int64_t)cache_row * blocks_per_row + block] =
+                dsv4_pow2_scale_exponent(scale);
+        }
+        if (code_bits == 8) {
+            if (lane < qat_block_size && column < quant_cols) {
+                float scaled = fminf(fmaxf(values[column] / scale, -448.0f), 448.0f);
+                __nv_fp8_e4m3 quantized(scaled);
+                codes[(int64_t)cache_row * quant_cols + column] = quantized.__x;
+            }
+        } else {
+            int pair_column = block_start + 2 * lane;
+            if (2 * lane < qat_block_size && pair_column < quant_cols) {
+                float scaled0 = fminf(fmaxf(values[pair_column] / scale, -6.0f), 6.0f);
+                unsigned char code0 = dsv4_e2m1_code(scaled0);
+                unsigned char code1 = 0;
+                if (pair_column + 1 < quant_cols) {
+                    float scaled1 = fminf(fmaxf(values[pair_column + 1] / scale, -6.0f), 6.0f);
+                    code1 = dsv4_e2m1_code(scaled1);
+                }
+                codes[(int64_t)cache_row * ((quant_cols + 1) / 2) + pair_column / 2] =
+                    (unsigned char)(code0 | (code1 << 4));
+            }
+        }
+        __syncthreads();
+    }
+    if (code_bits == 8) {
+        for (int offset = lane; offset < rope_dim; offset += (int)blockDim.x) {
+            tails[(int64_t)cache_row * rope_dim + offset] =
+                __float2bfloat16(values[quant_cols + offset]);
+        }
+    }
+}
+
 // In-place block FP8 E4M3 quantize/dequantize with power-of-two scales. Only
 // quant_cols are transformed so the main compressor can preserve RoPE dims.
 extern "C" __global__ void deepseek_v4_fp8_qat_inplace_kernel(
@@ -654,6 +896,185 @@ extern "C" __global__ void deepseek_v4_fp4_qat_inplace_kernel(
             values[index] = __float2bfloat16(dsv4_e2m1_round(scaled) * scale);
         }
     }
+}
+
+// Pack already-normalized rows into DeepSeek-V4's source-native persistent
+// representation. The BF16 input is rewritten with the exact dequantized value
+// so callers can compare/use it without changing the established QAT contract.
+extern "C" __global__ void deepseek_v4_pack_fp8_native_kernel(
+    __nv_bfloat16* __restrict__ values,
+    unsigned char* __restrict__ codes,
+    signed char* __restrict__ scale_exponents,
+    __nv_bfloat16* __restrict__ tails,
+    int rows,
+    int row_width,
+    int quant_cols,
+    int block_size,
+    int destination_row)
+{
+    int block = (int)blockIdx.x;
+    int row = (int)blockIdx.y;
+    int blocks_per_row = (quant_cols + block_size - 1) / block_size;
+    if (row >= rows || row_width <= 0 || quant_cols <= 0 || quant_cols > row_width ||
+        block_size <= 0 || codes == nullptr || scale_exponents == nullptr ||
+        tails == nullptr || values == nullptr) return;
+    int destination = destination_row + row;
+    int lane = (int)threadIdx.x;
+    if (block == blocks_per_row) {
+        int tail_width = row_width - quant_cols;
+        for (int offset = lane; offset < tail_width; offset += (int)blockDim.x) {
+            tails[(int64_t)destination * tail_width + offset] =
+                values[(int64_t)row * row_width + quant_cols + offset];
+        }
+        return;
+    }
+    if (block > blocks_per_row) return;
+    int block_start = block * block_size;
+    extern __shared__ float reduction[];
+    float amax = 0.0f;
+    for (int offset = lane; offset < block_size; offset += (int)blockDim.x) {
+        int column = block_start + offset;
+        if (column < quant_cols) {
+            amax = fmaxf(amax, fabsf(__bfloat162float(
+                values[(int64_t)row * row_width + column])));
+        }
+    }
+    reduction[lane] = amax;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) reduction[lane] = fmaxf(reduction[lane], reduction[lane + stride]);
+        __syncthreads();
+    }
+    float scale = dsv4_pow2_scale(fmaxf(reduction[0], 1.0e-4f), 448.0f);
+    if (lane == 0) {
+        scale_exponents[(int64_t)destination * blocks_per_row + block] =
+            dsv4_pow2_scale_exponent(scale);
+    }
+    for (int offset = lane; offset < block_size; offset += (int)blockDim.x) {
+        int column = block_start + offset;
+        if (column < quant_cols) {
+            int64_t source = (int64_t)row * row_width + column;
+            float scaled = fminf(fmaxf(__bfloat162float(values[source]) / scale, -448.0f), 448.0f);
+            __nv_fp8_e4m3 quantized(scaled);
+            codes[(int64_t)destination * quant_cols + column] = quantized.__x;
+            values[source] = __float2bfloat16((float)quantized * scale);
+        }
+    }
+}
+
+extern "C" __global__ void deepseek_v4_unpack_fp8_native_kernel(
+    __nv_bfloat16* __restrict__ output,
+    const unsigned char* __restrict__ codes,
+    const signed char* __restrict__ scale_exponents,
+    const __nv_bfloat16* __restrict__ tails,
+    int rows,
+    int row_width,
+    int quant_cols,
+    int block_size,
+    int source_row)
+{
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = (int64_t)rows * row_width;
+    if (linear >= total || output == nullptr || codes == nullptr ||
+        scale_exponents == nullptr || tails == nullptr || block_size <= 0 ||
+        quant_cols <= 0 || quant_cols > row_width) return;
+    int row = (int)(linear / row_width);
+    int column = (int)(linear - (int64_t)row * row_width);
+    int source = source_row + row;
+    if (column < quant_cols) {
+        int blocks_per_row = (quant_cols + block_size - 1) / block_size;
+        float scale = dsv4_pow2_scale_from_exponent(
+            scale_exponents[(int64_t)source * blocks_per_row + column / block_size]);
+        __nv_fp8_e4m3 quantized;
+        quantized.__x = codes[(int64_t)source * quant_cols + column];
+        output[linear] = __float2bfloat16((float)quantized * scale);
+    } else {
+        int tail_width = row_width - quant_cols;
+        output[linear] = tails[(int64_t)source * tail_width + column - quant_cols];
+    }
+}
+
+extern "C" __global__ void deepseek_v4_pack_fp4_native_kernel(
+    __nv_bfloat16* __restrict__ values,
+    unsigned char* __restrict__ packed_codes,
+    signed char* __restrict__ scale_exponents,
+    int rows,
+    int width,
+    int block_size,
+    int destination_row)
+{
+    int linear_block = (int)blockIdx.x;
+    int blocks_per_row = (width + block_size - 1) / block_size;
+    int row = linear_block / blocks_per_row;
+    int block = linear_block - row * blocks_per_row;
+    int block_start = block * block_size;
+    if (row >= rows || values == nullptr || packed_codes == nullptr ||
+        scale_exponents == nullptr || width <= 0 || block_size <= 0) return;
+    int lane = (int)threadIdx.x;
+    extern __shared__ float reduction[];
+    float amax = 0.0f;
+    for (int offset = 2 * lane; offset < block_size; offset += 2 * (int)blockDim.x) {
+        int column0 = block_start + offset;
+        int column1 = column0 + 1;
+        if (column0 < width) amax = fmaxf(amax, fabsf(__bfloat162float(values[(int64_t)row * width + column0])));
+        if (column1 < width) amax = fmaxf(amax, fabsf(__bfloat162float(values[(int64_t)row * width + column1])));
+    }
+    reduction[lane] = amax;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) reduction[lane] = fmaxf(reduction[lane], reduction[lane + stride]);
+        __syncthreads();
+    }
+    float scale = dsv4_pow2_scale(fmaxf(reduction[0], 6.0f * 0x1p-126f), 6.0f);
+    int destination = destination_row + row;
+    if (lane == 0) {
+        scale_exponents[(int64_t)destination * blocks_per_row + block] =
+            dsv4_pow2_scale_exponent(scale);
+    }
+    int code_stride = (width + 1) / 2;
+    for (int offset = 2 * lane; offset < block_size; offset += 2 * (int)blockDim.x) {
+        int column0 = block_start + offset;
+        int column1 = column0 + 1;
+        if (column0 >= width) continue;
+        int64_t source0 = (int64_t)row * width + column0;
+        float scaled0 = fminf(fmaxf(__bfloat162float(values[source0]) / scale, -6.0f), 6.0f);
+        unsigned char code0 = dsv4_e2m1_code(scaled0);
+        unsigned char code1 = 0;
+        values[source0] = __float2bfloat16(dsv4_e2m1_from_code(code0) * scale);
+        if (column1 < width) {
+            int64_t source1 = (int64_t)row * width + column1;
+            float scaled1 = fminf(fmaxf(__bfloat162float(values[source1]) / scale, -6.0f), 6.0f);
+            code1 = dsv4_e2m1_code(scaled1);
+            values[source1] = __float2bfloat16(dsv4_e2m1_from_code(code1) * scale);
+        }
+        packed_codes[(int64_t)destination * code_stride + column0 / 2] =
+            (unsigned char)(code0 | (code1 << 4));
+    }
+}
+
+extern "C" __global__ void deepseek_v4_unpack_fp4_native_kernel(
+    __nv_bfloat16* __restrict__ output,
+    const unsigned char* __restrict__ packed_codes,
+    const signed char* __restrict__ scale_exponents,
+    int rows,
+    int width,
+    int block_size,
+    int source_row)
+{
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = (int64_t)rows * width;
+    if (linear >= total || output == nullptr || packed_codes == nullptr ||
+        scale_exponents == nullptr || width <= 0 || block_size <= 0) return;
+    int row = (int)(linear / width);
+    int column = (int)(linear - (int64_t)row * width);
+    int source = source_row + row;
+    int code_stride = (width + 1) / 2;
+    int blocks_per_row = (width + block_size - 1) / block_size;
+    unsigned char pair = packed_codes[(int64_t)source * code_stride + column / 2];
+    unsigned char code = (column & 1) == 0 ? pair & 0x0f : pair >> 4;
+    float scale = dsv4_pow2_scale_from_exponent(
+        scale_exponents[(int64_t)source * blocks_per_row + column / block_size]);
+    output[linear] = __float2bfloat16(dsv4_e2m1_from_code(code) * scale);
 }
 
 // The shipped indexer rounds weights_proj(x) *
@@ -831,4 +1252,170 @@ extern "C" __global__ void deepseek_v4_store_raw_kv_decode_kernel(
     int pos = *position;
     if (pos < 0) return;
     ring[(int64_t)(pos % window) * head_dim + dim] = input[dim];
+}
+
+// Source-native raw-ring append for prefill. Quantized dimensions are rounded
+// once, published both to chronological BF16 request scratch and to their exact
+// E4M3 code/exponent planes. RoPE dimensions remain BF16. A chunk can wrap the
+// ring repeatedly, so only its newest token for a physical slot is published.
+extern "C" __global__ void deepseek_v4_store_raw_native_prefill_kernel(
+    __nv_bfloat16* __restrict__ history,
+    unsigned char* __restrict__ ring_codes,
+    signed char* __restrict__ ring_scale_exponents,
+    __nv_bfloat16* __restrict__ ring_tails,
+    __nv_bfloat16* __restrict__ input,
+    int start_pos,
+    int tokens,
+    int head_dim,
+    int quant_cols,
+    int block_size,
+    int window)
+{
+    int block = (int)blockIdx.x;
+    int token = (int)blockIdx.y;
+    int blocks_per_row = (quant_cols + block_size - 1) / block_size;
+    if (token >= tokens || history == nullptr || ring_codes == nullptr ||
+        ring_scale_exponents == nullptr || ring_tails == nullptr || input == nullptr ||
+        head_dim <= 0 || quant_cols <= 0 || quant_cols > head_dim ||
+        block_size <= 0 || window <= 0) return;
+    int lane = (int)threadIdx.x;
+    int position = start_pos + token;
+    int ring_row = position % window;
+    bool publish_ring = (int64_t)token + window >= tokens;
+    if (block == blocks_per_row) {
+        int tail_width = head_dim - quant_cols;
+        for (int offset = lane; offset < tail_width; offset += (int)blockDim.x) {
+            __nv_bfloat16 value = input[(int64_t)token * head_dim + quant_cols + offset];
+            history[(int64_t)position * head_dim + quant_cols + offset] = value;
+            if (publish_ring) ring_tails[(int64_t)ring_row * tail_width + offset] = value;
+        }
+        return;
+    }
+    if (block > blocks_per_row) return;
+    int block_start = block * block_size;
+    extern __shared__ float reduction[];
+    float amax = 0.0f;
+    for (int offset = lane; offset < block_size; offset += (int)blockDim.x) {
+        int column = block_start + offset;
+        if (column < quant_cols) {
+            amax = fmaxf(amax, fabsf(__bfloat162float(input[(int64_t)token * head_dim + column])));
+        }
+    }
+    reduction[lane] = amax;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) reduction[lane] = fmaxf(reduction[lane], reduction[lane + stride]);
+        __syncthreads();
+    }
+    float scale = dsv4_pow2_scale(fmaxf(reduction[0], 1.0e-4f), 448.0f);
+    if (lane == 0 && publish_ring) {
+        ring_scale_exponents[(int64_t)ring_row * blocks_per_row + block] =
+            dsv4_pow2_scale_exponent(scale);
+    }
+    for (int offset = lane; offset < block_size; offset += (int)blockDim.x) {
+        int column = block_start + offset;
+        if (column < quant_cols) {
+            int64_t input_index = (int64_t)token * head_dim + column;
+            float scaled = fminf(fmaxf(__bfloat162float(input[input_index]) / scale, -448.0f), 448.0f);
+            __nv_fp8_e4m3 quantized(scaled);
+            __nv_bfloat16 value = __float2bfloat16((float)quantized * scale);
+            input[input_index] = value;
+            history[(int64_t)position * head_dim + column] = value;
+            if (publish_ring) ring_codes[(int64_t)ring_row * quant_cols + column] = quantized.__x;
+        }
+    }
+}
+
+extern "C" __global__ void deepseek_v4_store_raw_native_decode_kernel(
+    unsigned char* __restrict__ ring_codes,
+    signed char* __restrict__ ring_scale_exponents,
+    __nv_bfloat16* __restrict__ ring_tails,
+    __nv_bfloat16* __restrict__ input,
+    const int* __restrict__ position,
+    int head_dim,
+    int quant_cols,
+    int block_size,
+    int window)
+{
+    int block = (int)blockIdx.x;
+    int blocks_per_row = (quant_cols + block_size - 1) / block_size;
+    if (position == nullptr || ring_codes == nullptr || ring_scale_exponents == nullptr ||
+        ring_tails == nullptr || input == nullptr || head_dim <= 0 || quant_cols <= 0 ||
+        quant_cols > head_dim || block_size <= 0 || window <= 0) return;
+    int pos = *position;
+    if (pos < 0) return;
+    int ring_row = pos % window;
+    int lane = (int)threadIdx.x;
+    if (block == blocks_per_row) {
+        int tail_width = head_dim - quant_cols;
+        for (int offset = lane; offset < tail_width; offset += (int)blockDim.x) {
+            ring_tails[(int64_t)ring_row * tail_width + offset] = input[quant_cols + offset];
+        }
+        return;
+    }
+    if (block > blocks_per_row) return;
+    int block_start = block * block_size;
+    extern __shared__ float reduction[];
+    float amax = 0.0f;
+    for (int offset = lane; offset < block_size; offset += (int)blockDim.x) {
+        int column = block_start + offset;
+        if (column < quant_cols) amax = fmaxf(amax, fabsf(__bfloat162float(input[column])));
+    }
+    reduction[lane] = amax;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) reduction[lane] = fmaxf(reduction[lane], reduction[lane + stride]);
+        __syncthreads();
+    }
+    float scale = dsv4_pow2_scale(fmaxf(reduction[0], 1.0e-4f), 448.0f);
+    if (lane == 0) {
+        ring_scale_exponents[(int64_t)ring_row * blocks_per_row + block] =
+            dsv4_pow2_scale_exponent(scale);
+    }
+    for (int offset = lane; offset < block_size; offset += (int)blockDim.x) {
+        int column = block_start + offset;
+        if (column < quant_cols) {
+            float scaled = fminf(fmaxf(__bfloat162float(input[column]) / scale, -448.0f), 448.0f);
+            __nv_fp8_e4m3 quantized(scaled);
+            ring_codes[(int64_t)ring_row * quant_cols + column] = quantized.__x;
+            input[column] = __float2bfloat16((float)quantized * scale);
+        }
+    }
+}
+
+extern "C" __global__ void deepseek_v4_restore_raw_history_native_kernel(
+    __nv_bfloat16* __restrict__ history,
+    const unsigned char* __restrict__ ring_codes,
+    const signed char* __restrict__ ring_scale_exponents,
+    const __nv_bfloat16* __restrict__ ring_tails,
+    int end_pos,
+    int head_dim,
+    int quant_cols,
+    int block_size,
+    int window)
+{
+    int retained = min(end_pos, window);
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = (int64_t)retained * head_dim;
+    if (linear >= total || history == nullptr || ring_codes == nullptr ||
+        ring_scale_exponents == nullptr || ring_tails == nullptr || end_pos <= 0 ||
+        head_dim <= 0 || quant_cols <= 0 || quant_cols > head_dim ||
+        block_size <= 0 || window <= 0) return;
+    int row = (int)(linear / head_dim);
+    int column = (int)(linear - (int64_t)row * head_dim);
+    int position_value = end_pos - retained + row;
+    int ring_row = position_value % window;
+    if (column < quant_cols) {
+        int blocks_per_row = (quant_cols + block_size - 1) / block_size;
+        float scale = dsv4_pow2_scale_from_exponent(
+            ring_scale_exponents[(int64_t)ring_row * blocks_per_row + column / block_size]);
+        __nv_fp8_e4m3 quantized;
+        quantized.__x = ring_codes[(int64_t)ring_row * quant_cols + column];
+        history[(int64_t)position_value * head_dim + column] =
+            __float2bfloat16((float)quantized * scale);
+    } else {
+        int tail_width = head_dim - quant_cols;
+        history[(int64_t)position_value * head_dim + column] =
+            ring_tails[(int64_t)ring_row * tail_width + column - quant_cols];
+    }
 }

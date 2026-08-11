@@ -4927,6 +4927,53 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
 
 /// Handle /v1/internal/prefill_logits endpoint.
 /// Runs a full prefill pass and extracts top-k logprobs at sampled positions.
+fn finish_prefill_logits_runtime(
+    state: &mut ServerState,
+    token_count: usize,
+    invalidate_graph: bool,
+    reason: &str,
+) {
+    crate::vram_monitor::report_event("prefill_logits_restore_start");
+    let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+    if let Err(error) = store.prepare_runtime_for_decode_rust() {
+        log::error!(
+            "prefill_logits: failed to restore decode runtime after {}: {}",
+            reason,
+            error,
+        );
+        abort_if_cuda_context_poisoned("prefill_logits decode-runtime restore", &error);
+    }
+    let _ = store.hcs_reload_after_prefill(token_count);
+    if invalidate_graph {
+        store.invalidate_cuda_graph();
+        log::info!(
+            "prefill_logits: invalidated CUDA graphs after {} restore",
+            reason,
+        );
+    }
+    crate::vram_monitor::report_event("prefill_logits_restore_end");
+
+    // Match the normal reference/inference cleanup path so diagnostic prefill
+    // requests do not leak sequence state into the next prompt.
+    crate::vram_monitor::report_event("prefill_logits_cleanup_start");
+    Python::with_gil(|py| {
+        let _ = state.py_model.call_method0(py, "server_cleanup");
+    });
+    crate::vram_monitor::report_event("prefill_logits_cleanup_end");
+
+    // The monitor may observe a transient peak between named phase snapshots.
+    // Convert that measured deficit into the same runtime-sized HCS pressure
+    // cap used by ordinary inference before another diagnostic request starts.
+    let pressure_evicted = drain_vram_pressure_for_state(state, "prefill_logits_cleanup_end", true);
+    if pressure_evicted > 0 {
+        log::warn!(
+            "prefill_logits: VRAM pressure feedback after {} evicted {} soft experts",
+            reason,
+            pressure_evicted,
+        );
+    }
+}
+
 fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
     invalidate_active_sequence(state, "prefill_logits_request");
     // Parse request
@@ -5096,6 +5143,13 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
     let engine = match engine_guard.as_mut() {
         Some(e) => e,
         None => {
+            drop(engine_guard);
+            finish_prefill_logits_runtime(
+                state,
+                token_ids.len(),
+                true,
+                "missing Rust prefill engine",
+            );
             let _ = send_json(
                 stream,
                 500,
@@ -5118,6 +5172,13 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
         match prepare_store_for_rust_prefill(store, engine, token_ids.len()) {
             Ok(has_hqq) => has_hqq,
             Err(e) => {
+                drop(engine_guard);
+                finish_prefill_logits_runtime(
+                    state,
+                    token_ids.len(),
+                    true,
+                    "failed prefill preparation",
+                );
                 let _ = send_json(
                     stream,
                     500,
@@ -5133,12 +5194,8 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
     // run_prefill_logits needs scratch sized for all tokens (no chunking)
     crate::vram_monitor::report_event("prefill_logits_scratch_alloc_start");
     if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
-        let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-        let _ = store.prepare_runtime_for_decode_rust();
-        store.invalidate_cuda_graph();
-        log::info!(
-            "prefill_logits: invalidated CUDA graphs after failed scratch allocation restore"
-        );
+        drop(engine_guard);
+        finish_prefill_logits_runtime(state, token_ids.len(), true, "failed scratch allocation");
         let _ = send_json(
             stream,
             500,
@@ -5159,16 +5216,13 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
         Err(e) => {
             // Release scratch even on error
             let _ = engine.release_scratch();
-            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-            let _ = store.prepare_runtime_for_decode_rust();
-            let _ = store.hcs_reload_after_prefill(token_ids.len());
-            store.invalidate_cuda_graph();
-            log::info!(
-                "prefill_logits: invalidated CUDA graphs after failed diagnostic prefill restore"
+            drop(engine_guard);
+            finish_prefill_logits_runtime(
+                state,
+                token_ids.len(),
+                true,
+                "failed diagnostic prefill",
             );
-            Python::with_gil(|py| {
-                let _ = state.py_model.call_method0(py, "server_cleanup");
-            });
             let _ = send_json(
                 stream,
                 500,
@@ -5187,22 +5241,8 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
     }
     crate::vram_monitor::report_event("prefill_logits_scratch_release_end");
 
-    // Restore evicted soft HCS so the next decode/reference request starts
-    // from the normal steady-state cache residency.
-    crate::vram_monitor::report_event("prefill_logits_restore_start");
-    let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-    let _ = store.prepare_runtime_for_decode_rust();
-    let _ = store.hcs_reload_after_prefill(token_ids.len());
-    log::info!("prefill_logits: restored decode runtime after diagnostic prefill");
-    crate::vram_monitor::report_event("prefill_logits_restore_end");
-
-    // Match the normal reference/inference cleanup path so diagnostic prefill
-    // requests do not leak sequence state into the next prompt.
-    crate::vram_monitor::report_event("prefill_logits_cleanup_start");
-    Python::with_gil(|py| {
-        let _ = state.py_model.call_method0(py, "server_cleanup");
-    });
-    crate::vram_monitor::report_event("prefill_logits_cleanup_end");
+    drop(engine_guard);
+    finish_prefill_logits_runtime(state, token_ids.len(), false, "successful prefill");
 
     // Format response: {positions: [{position, target_token_id, target_logprob, top_k: [...]}]}
     let mut pos_json = Vec::new();

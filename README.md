@@ -102,7 +102,7 @@ measurement; `HTTP round trip` includes local client/server HTTP overhead.
 
 | Hardware | Model | Params | Attention + KV | Prefill | Decode | HTTP round trip |
 |---|---|---:|---|---:|---:|---:|
-| RTX PRO 6000 96 GB | DeepSeek-V4-Flash-0731 | 304.2B checkpoint / 284B main | INT4/BF16/BF16 KV | 1,328.2 tok/s at 23K; 1,204.3 at 62K | 29.38 tok/s at 1K; 19.41 at 62K | 54.05 tok/s at 1K/50-token generation; 19.41 at 62K |
+| RTX PRO 6000 96 GB | DeepSeek-V4-Flash-0731 | 304.2B checkpoint / 284B main | INT4/HQQ8/BF16 cache | 1,301.1 tok/s at 39,920 | 30.08/29.86/29.29 tok/s for 50/100/250 outputs | 50.75/38.36/32.45 tok/s |
 | RTX PRO 6000 96 GB | Step-3.7-Flash | 201.4B | INT4/HQQ4/k4v4 | 5,261.0 tok/s | 55.40 tok/s | 112.82 tok/s |
 | RTX PRO 6000 96 GB | Ornith-1.0-397B | 397B | INT4/HQQ4/k4v4 | 2,354.5 tok/s | 23.58 tok/s | 41.73 tok/s |
 | RTX PRO 6000 96 GB | Qwen3-Coder-Next | 80B | INT4/HQQ4/k4v4 | 11,211.1 tok/s | 91.34 tok/s | 161.82 tok/s |
@@ -388,11 +388,18 @@ cd krasis
 ```
 
 DeepSeek-V4-Flash-0731 is available as `./dev run dsv4` (also
-`deepseek-v4`). Its validated BF16-attention/KV configuration favors faithful
-INT4 execution. The learned-index GEMM is optimized for long prompts: the
-accepted 1K prefill result is 152.2 tok/s, while 8.6K/23K/62K reach
-906.3/1,328.2/1,204.3 tok/s. The 1K result is lower than the preceding scalar-
-index runtime because GEMM launch overhead does not amortize at that length.
+`deepseek-v4`). Fresh launcher selections use INT4 experts, HQQ6 attention, and
+the architecture-owned `Native` cache. HQQ6 measured `4.838535` WikiText-2
+perplexity, `+0.466%` versus HQQ8/Native, and passed the four-prompt witness.
+The measured HQQ8/expanded-BF16 comparison profile matched the accepted BF16
+quality gate and measured
+30.08/29.86/29.29 tok/s internal decode for 50/100/250-token outputs. An
+explicit `Native` cache stores the checkpoint's existing E4M3/E2M1 QAT state
+without a second quantizer and increases the measured 1,000 MiB context capacity
+from 149,808 to 294,432 tokens. Native currently regresses 1K/5K prefill by
+8.45%/6.22% against expanded BF16 while remaining effectively flat at 10K and
+above; the launcher nevertheless defaults to Native to prioritize context
+capacity, with expanded BF16 retained as an explicit faster-short-prefill mode.
 
 The `./dev` entry point handles environment setup and is preferred for local
 development commands. Its general config shortcuts are `qcn`, `dsv4`, and

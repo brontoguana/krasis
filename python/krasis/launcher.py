@@ -145,6 +145,8 @@ def _unique_gpu_alias_match(spec: str, gpus: List[Dict[str, Any]]) -> Tuple[Opti
 
 
 INTERACTIVE_ATTENTION_QUANT_CHOICES = ("hqq4", "hqq46_auto", "hqq6", "hqq68_auto")
+DEEPSEEK_V4_ATTENTION_QUANT_CHOICES = ("hqq8", "hqq6", "hqq4", "bf16")
+DEEPSEEK_V4_KV_CHOICES = ("native", "bf16")
 INTERACTIVE_HQQ_AUTO_BUDGET_PCT = 10.0
 INSTALLER_URL = "https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh"
 
@@ -432,16 +434,11 @@ def detect_hardware() -> Dict[str, Any]:
     except FileNotFoundError:
         pass
 
-    # RAM
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemTotal"):
-                    kb = int(line.split()[1])
-                    hw["total_ram_gb"] = kb // (1024 * 1024)
-                    break
-    except (FileNotFoundError, ValueError):
-        pass
+    # RAM uses the shared cross-platform detector so native Windows and the
+    # pre-launch budget cannot disagree.
+    from krasis.vram_budget import detect_total_ram_gb
+
+    hw["total_ram_gb"] = detect_total_ram_gb()
 
     return hw
 
@@ -655,10 +652,11 @@ class LauncherConfig:
         self.selected_gpu_indices: List[int] = []  # empty = all GPUs
         self.selected_gpu_specs: List[str] = []  # raw CFG_SELECTED_GPUS entries; indices, UUIDs, PCI IDs, or aliases
         self.pp_partition: str = ""
-        self.layer_group_size: int = 2  # layers per group (must be even, min 2 for double buffering)
+        self.layer_group_size: int = 2  # expert layers per DMA group; 1 is valid
         self.kv_cache_mb: int = 1000
         self.max_context_tokens: int = 0  # 0 = model-declared limit
         self.kv_dtype: str = "k6v6"
+        self._kv_dtype_explicit: bool = False
         self.gpu_expert_bits: int = 4
         self.expert_group_size: int = 128
         self.gpu_expert_int4_calib: str = "amax"
@@ -721,10 +719,15 @@ class LauncherConfig:
             val = saved["CFG_LAYER_GROUP_SIZE"]
             try:
                 v = int(val)
-                if v >= 2:
-                    self.layer_group_size = v
-            except ValueError:
-                pass
+            except ValueError as exc:
+                raise ValueError(
+                    "CFG_LAYER_GROUP_SIZE must be an integer"
+                ) from exc
+            if v < 1:
+                raise ValueError(
+                    "CFG_LAYER_GROUP_SIZE must be at least 1"
+                )
+            self.layer_group_size = v
         # Legacy compat
         elif "CFG_EXPERT_DIVISOR" in saved:
             val = saved["CFG_EXPERT_DIVISOR"]
@@ -756,9 +759,11 @@ class LauncherConfig:
             if saved["CFG_KV_DTYPE"] in DEPRECATED_KV_CACHE_FORMAT_CHOICES:
                 raise ValueError(
                     f"Saved CFG_KV_DTYPE={saved['CFG_KV_DTYPE']} is deprecated and disabled. "
-                    "Use k6v6, k4v4, or bf16."
+                    "Use a cache mode supported by the selected model; the launcher "
+                    "shows Native for architectures with an exact packed state format."
                 )
             self.kv_dtype = saved["CFG_KV_DTYPE"]
+            self._kv_dtype_explicit = True
         if "CFG_GPU_EXPERT_BITS" in saved:
             try:
                 self.gpu_expert_bits = int(saved["CFG_GPU_EXPERT_BITS"])
@@ -1077,7 +1082,7 @@ class ConfigOption:
 # Config options shown in TUI
 OPTIONS = [
     ConfigOption("Layer group size", "layer_group_size",
-                 choices=[2, 4, 6, 8, 10, 12], affects_budget=True),
+                 choices=[1, 2, 4, 6, 8, 10, 12], affects_budget=True),
     ConfigOption("KV cache (MB)", "kv_cache_mb",
                  opt_type="number", min_val=200, max_val=65500, step=100, affects_budget=True),
     ConfigOption("Max context tokens", "max_context_tokens",
@@ -1142,14 +1147,22 @@ def _format_on_off(enabled: bool) -> str:
     return f"{GREEN}On{NC}" if enabled else f"{DIM}Off{NC}"
 
 
+def _format_kv_dtype_value(kv_dtype: str) -> str:
+    """Return the user-facing name without changing the serialized value."""
+    return "Native" if kv_dtype == "native" else kv_dtype
+
+
 def _format_value(opt: ConfigOption, val: Any) -> str:
     """Format a config value for display."""
     if isinstance(val, bool):
         return _format_on_off(val)
     if opt.key == "layer_group_size":
-        return f"{val} layers (double-buffered)"
+        layer_word = "layer" if int(val) == 1 else "layers"
+        return f"{val} {layer_word} (double-buffered)"
     if opt.key == "kv_cache_mb":
         return f"{val:,} MB"
+    if opt.key == "kv_dtype":
+        return _format_kv_dtype_value(str(val))
     if opt.key == "max_context_tokens":
         return "model limit" if int(val) == 0 else _format_tokens(int(val))
     if opt.key == "vram_safety_margin":
@@ -1232,6 +1245,8 @@ def _quality_annotation(native_dtype: str, config_key: str, current_val: Any) ->
             return f"{DIM}{native_label} \u2192 HQQ6+auto \u2014 HQQ6 with targeted HQQ8 promotion{NC}"
         elif current == "hqq6":
             return f"{DIM}{native_label} \u2192 HQQ6 \u2014 default HQQ attention{NC}"
+        elif current == "hqq8":
+            return f"{DIM}{native_label} \u2192 HQQ8 \u2014 validated DeepSeek attention{NC}"
         return f"{DIM}{native_label} \u2192 {current}{NC}"
 
     elif config_key == "gpu_expert_bits":
@@ -1265,6 +1280,8 @@ def _quality_annotation(native_dtype: str, config_key: str, current_val: Any) ->
             return f"{DIM}{native_label} \u2192 tq4 \u2014 4-bit TurboQuant KV{NC}"
         elif current == "bf16":
             return f"{DIM}{native_label} \u2192 bf16 \u2014 Full Precision KV{NC}"
+        elif current == "native":
+            return f"{DIM}Native \u2014 exact checkpoint QAT state, packed without extra loss{NC}"
         return f"{DIM}{native_label} \u2192 {current}{NC}"
 
     return ""
@@ -1277,6 +1294,11 @@ def _format_tokens(n: int) -> str:
     elif n >= 1000:
         return f"{n / 1000:.0f}K"
     return str(n)
+
+
+def _allocated_kv_tokens(rank: Dict[str, Any]) -> int:
+    """Return configured KV capacity rather than spare-VRAM potential."""
+    return int(rank.get("kv_alloc_tokens", rank.get("kv_tokens", 0)))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1661,9 +1683,16 @@ class Launcher:
     def _set_interactive_attention_quant(self, value: str) -> bool:
         """Apply an interactive attention preset.
 
-        The TUI exposes four simple attention presets:
-        HQQ4, HQQ4+10%, HQQ6, and HQQ6+10%.
+        Choices are supplied by the selected model's capability contract.
         """
+        if value in ("hqq8", "bf16"):
+            self.cfg.attention_quant = value
+            self.cfg.hqq_cache_profile = HQQ_CACHE_PROFILE_BASELINE
+            self.cfg.hqq_group_size = HQQ_ATTENTION_DEFAULT_GROUP_SIZE
+            self.cfg.hqq_auto_budget_pct = 0.0
+            self.cfg.hqq46_auto_budget_mib = 0
+            self.cfg.hqq_sidecar_manifest = ""
+            return True
         if value == "hqq6":
             self.cfg.attention_quant = "hqq6"
             self.cfg.hqq_cache_profile = HQQ_CACHE_PROFILE_BASELINE
@@ -1698,16 +1727,90 @@ class Launcher:
             return True
         return False
 
+    def _is_deepseek_v4(self) -> bool:
+        arch = str((self.model_info or {}).get("arch", "")).strip().lower().replace("-", "_")
+        return arch == "deepseek_v4"
+
+    def _attention_choices(self) -> List[str]:
+        if self._is_deepseek_v4():
+            return list(DEEPSEEK_V4_ATTENTION_QUANT_CHOICES)
+        return list(INTERACTIVE_ATTENTION_QUANT_CHOICES)
+
+    def _kv_choices(self) -> List[str]:
+        if self._is_deepseek_v4():
+            return list(DEEPSEEK_V4_KV_CHOICES)
+        return ["k4v4", "k6v6", "bf16"]
+
+    def _multi_gpu_choices(self) -> List[str]:
+        if self._is_deepseek_v4():
+            # `auto` remains meaningful for one selected GPU. No DeepSeek
+            # multi-GPU topology is launcher-qualified yet: serial layer split
+            # lacks the custom auxiliary attention graph, while peer expert
+            # serving still needs its own live DeepSeek acceptance run.
+            return ["auto"]
+        return ["auto", "layer-split", "peer"]
+
+    def _apply_model_recommended_defaults(self) -> None:
+        if self._is_deepseek_v4():
+            if not self.cfg._attention_quant_explicit:
+                self._set_interactive_attention_quant("hqq6")
+            if not self.cfg._kv_dtype_explicit:
+                # Native stores DeepSeek-V4's checkpoint-owned packed state
+                # directly. It preserves measured quality while nearly doubling
+                # same-budget context capacity versus expanded BF16.
+                self.cfg.kv_dtype = "native"
+        else:
+            if not self.cfg._attention_quant_explicit:
+                self._set_interactive_attention_quant("hqq6")
+            if not self.cfg._kv_dtype_explicit:
+                self.cfg.kv_dtype = "k6v6"
+
+    def _validate_model_capabilities(self) -> None:
+        attention_choices = self._attention_choices()
+        kv_choices = self._kv_choices()
+        topology_choices = self._multi_gpu_choices()
+        if self.cfg.attention_quant not in attention_choices:
+            raise ValueError(
+                f"{(self.model_info or {}).get('name', 'Selected model')} does not support "
+                f"attention mode {self.cfg.attention_quant!r}; supported modes: "
+                f"{', '.join(attention_choices)}"
+            )
+        if self.cfg.kv_dtype not in kv_choices:
+            raise ValueError(
+                f"{(self.model_info or {}).get('name', 'Selected model')} does not support "
+                f"cache mode {self.cfg.kv_dtype!r}; supported modes: {', '.join(kv_choices)}"
+            )
+        if self.cfg.multi_gpu_mode not in topology_choices:
+            raise ValueError(
+                f"{(self.model_info or {}).get('name', 'Selected model')} does not support "
+                f"topology mode {self.cfg.multi_gpu_mode!r}; supported modes: "
+                f"{', '.join(topology_choices)}"
+            )
+
+    def _validate_model_topology(self) -> None:
+        selected_count = len(self.cfg.selected_gpu_indices)
+        if not self._is_deepseek_v4() or selected_count <= 1:
+            return
+        raise ValueError(
+            "DeepSeek-V4 multi-GPU execution is not yet launcher-qualified. Serial "
+            "layer-split lacks its custom auxiliary attention graph, and peer expert "
+            "serving still requires a dedicated live DeepSeek acceptance run. Select "
+            "one GPU."
+        )
+
     def _ensure_interactive_attention_ready(self) -> bool:
-        if self.cfg.attention_quant not in INTERACTIVE_ATTENTION_QUANT_CHOICES:
-            return self._set_interactive_attention_quant("hqq6")
-        return True
+        try:
+            self._validate_model_capabilities()
+            self._validate_model_topology()
+            return True
+        except ValueError:
+            return False
 
     def _show_attention_unavailable(self) -> None:
         _clear_screen()
         sys.stdout.write(
-            f"\n  {RED}Attention preset is unavailable for this model.{NC}\n\n"
-            "  Use another HQQ attention preset or rebuild the required HQQ cache.\n\n"
+            f"\n  {RED}The selected runtime mode or GPU topology is unavailable for this model.{NC}\n\n"
+            "  Choose one of the model-specific modes and supported GPU layouts shown by the launcher.\n\n"
             f"  {DIM}[Any key] Back{NC}\n"
         )
         sys.stdout.flush()
@@ -1835,7 +1938,16 @@ class Launcher:
                 kv_dim = mi.get("kv_dim", 0)
                 num_kv_layers = mi.get("num_kv_layers", 0)
                 max_ctx = mi.get("max_context", 0)
-                if kv_dim > 0 and num_kv_layers > 0:
+                if self._is_deepseek_v4() and self.budget:
+                    rank = self.budget["ranks"][self.budget["worst_rank"]]
+                    alloc_tokens = _allocated_kv_tokens(rank)
+                    runtime_max = self.cfg.max_context_tokens or max_ctx
+                    suffix = (
+                        f"  {DIM}(~{_format_tokens(alloc_tokens)} tokens, "
+                        f"runtime max {_format_tokens(runtime_max)}, "
+                        f"model max {_format_tokens(max_ctx)}){NC}"
+                    )
+                elif kv_dim > 0 and num_kv_layers > 0:
                     kv_bytes_per_token = kv_dim * num_kv_layers
                     alloc_tokens = (self.cfg.kv_cache_mb * 1024 * 1024) // kv_bytes_per_token if kv_bytes_per_token > 0 else 0
                     runtime_max = self.cfg.max_context_tokens or max_ctx
@@ -1885,10 +1997,11 @@ class Launcher:
                 else "k6v4" if self.cfg.kv_dtype == "k6v4"
                 else "k4v4" if self.cfg.kv_dtype == "k4v4"
                 else "tq4" if self.cfg.kv_dtype == "tq4"
+                else "Native" if self.cfg.kv_dtype == "native"
                 else "fp8" if self.cfg.kv_dtype == "fp8_e4m3"
                 else "bf16"
             )
-            kv_alloc_tokens = rank.get("kv_alloc_tokens", rank["kv_tokens"])
+            kv_alloc_tokens = _allocated_kv_tokens(rank)
 
             total_used = experts_mb + attention_mb + overhead_mb + kv_alloc
 
@@ -2390,7 +2503,7 @@ class Launcher:
 
         if opt.opt_type == "cycle" and opt.choices:
             if opt.key == "attention_quant":
-                choices = list(INTERACTIVE_ATTENTION_QUANT_CHOICES)
+                choices = self._attention_choices()
                 try:
                     idx = choices.index(val)
                 except ValueError:
@@ -2398,8 +2511,15 @@ class Launcher:
                 idx = (idx + direction) % len(choices)
                 if not self._set_interactive_attention_quant(choices[idx]):
                     self._show_attention_unavailable()
+                else:
+                    self.cfg._attention_quant_explicit = True
                 return
-            choices = opt.choices
+            if opt.key == "kv_dtype":
+                choices = self._kv_choices()
+            elif opt.key == "multi_gpu_mode":
+                choices = self._multi_gpu_choices()
+            else:
+                choices = opt.choices
             try:
                 idx = choices.index(val)
             except ValueError:
@@ -2407,6 +2527,8 @@ class Launcher:
             idx = (idx + direction) % len(choices)
             new_val = choices[idx]
             setattr(self.cfg, opt.key, new_val)
+            if opt.key == "kv_dtype":
+                self.cfg._kv_dtype_explicit = True
             if opt.key == "gpu_expert_bits":
                 # The launcher exposes one expert quantization choice, so keep
                 # the underlying runtime config keys aligned.
@@ -2452,9 +2574,8 @@ class Launcher:
             self.cfg.model_path = selected["path"]
             self.model_info = selected
 
-        # Default new interactive installs to the current balanced HQQ path.
-        if not self.cfg._attention_quant_explicit:
-            self._set_interactive_attention_quant("hqq6")
+        # Defaults come from the selected model's validated capability record.
+        self._apply_model_recommended_defaults()
 
         # Step 2: GPU selection (always shown, pre-selects saved GPUs)
         if self.hw["gpus"]:
@@ -2665,7 +2786,11 @@ class Launcher:
         print(f"  Models dir:      {self.models_dir}")
         print(f"  Model:           {model_name}")
         print(f"  PP partition:    {self.cfg.pp_partition}")
-        print(f"  Layer group:     {self.cfg.layer_group_size} layers (double-buffered)")
+        layer_word = "layer" if self.cfg.layer_group_size == 1 else "layers"
+        print(
+            f"  Layer group:     {self.cfg.layer_group_size} {layer_word} "
+            "(double-buffered)"
+        )
         print(f"  KV cache:        {self.cfg.kv_cache_mb:,} MB")
         context_display = (
             "model limit"
@@ -2673,7 +2798,7 @@ class Launcher:
             else f"{self.cfg.max_context_tokens:,} tokens"
         )
         print(f"  Max context:     {context_display}")
-        print(f"  KV dtype:        {self.cfg.kv_dtype}")
+        print(f"  KV dtype:        {_format_kv_dtype_value(self.cfg.kv_dtype)}")
         print(f"  Quantization:    INT{self.cfg.gpu_expert_bits} g{self.cfg.expert_group_size}")
         if self.cfg.gpu_expert_bits == 4:
             print(f"  Expert INT4:     {self.cfg.gpu_expert_int4_calib}")
@@ -2731,6 +2856,7 @@ class Launcher:
                 else "k6v4" if self.cfg.kv_dtype == "k6v4"
                 else "k4v4" if self.cfg.kv_dtype == "k4v4"
                 else "tq4" if self.cfg.kv_dtype == "tq4"
+                else "Native" if self.cfg.kv_dtype == "native"
                 else "fp8" if self.cfg.kv_dtype == "fp8_e4m3"
                 else "bf16"
             )
@@ -2748,7 +2874,11 @@ class Launcher:
             hcs_pct = (free_for_hcs / total_expert_cache * 100) if total_expert_cache > 0 else 0
             print(f"  HCS:   {free_for_hcs:>8,} MB  (~{hcs_pct:.0f}% coverage)")
             if rank["free_mb"] > 0:
-                print(f"  KV capacity: ~{_format_tokens(rank['kv_tokens'])} tokens ({kv_label})")
+                print(
+                    "  KV capacity: "
+                    f"~{_format_tokens(_allocated_kv_tokens(rank))} "
+                    f"tokens ({kv_label})"
+                )
             else:
                 print(f"  {RED}WARNING: OVER BUDGET by {-rank['free_mb']:,.0f} MB{NC}")
             ram_gb = budget.get('ram_total_mb', 0) / 1024
@@ -2894,7 +3024,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--selected-gpus", default=None,
                         help="Comma-separated GPU selectors to use (indices, UUIDs, PCI IDs, or aliases like '6000')")
     parser.add_argument("--layer-group-size", type=int, default=None,
-                        help="Layers per streaming group (even number, min 2 for double buffering)")
+                        help="Expert layers per DMA group (minimum 1; attention streaming may require an even value of at least 2)")
     parser.add_argument("--kv-cache-mb", type=int, default=None,
                         help="KV cache size in MB (default: 1000)")
     parser.add_argument("--max-context-tokens", type=int, default=None,
@@ -2902,7 +3032,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vram-safety-margin", type=int, default=None,
                         help="VRAM safety margin in MB (default: 600)")
     parser.add_argument("--kv-dtype", default=None,
-                        help="KV cache format: k6v6 Quality default, k4v4 Ultra Compact, bf16 Full Precision, or explicit internal formats")
+                        help="Model-specific cache format: common modes include k6v6, k4v4, and bf16; DeepSeek-V4 also provides Native exact packed state")
     parser.add_argument("--gpu-expert-bits", type=int, default=None,
                         help="Model quantization: 4 or 8")
     parser.add_argument("--expert-group-size", type=int, default=None, choices=[32, 64, 128],
@@ -3005,7 +3135,9 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
     if args.pp_partition is not None:
         cfg.pp_partition = args.pp_partition
     if args.layer_group_size is not None:
-        cfg.layer_group_size = max(2, args.layer_group_size)
+        if args.layer_group_size < 1:
+            raise ValueError("--layer-group-size must be at least 1")
+        cfg.layer_group_size = args.layer_group_size
     if args.kv_cache_mb is not None:
         cfg.kv_cache_mb = max(200, args.kv_cache_mb)
     if args.max_context_tokens is not None:
@@ -3021,9 +3153,10 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         if args.kv_dtype in DEPRECATED_KV_CACHE_FORMAT_CHOICES:
             raise ValueError(
                 f"Unsupported --kv-dtype {args.kv_dtype}: this KV cache format is deprecated and disabled. "
-                "Use k6v6, k4v4, or bf16."
+                "Use a cache mode supported by the selected model; DeepSeek-V4 uses Native or bf16."
             )
         cfg.kv_dtype = args.kv_dtype
+        cfg._kv_dtype_explicit = True
     if args.gpu_expert_bits is not None:
         cfg.gpu_expert_bits = args.gpu_expert_bits
         cfg.cpu_expert_bits = args.gpu_expert_bits
@@ -3434,9 +3567,18 @@ def main():
                 sys.exit(1)
 
         launcher._read_model_info()
-        if not launcher.cfg._attention_quant_explicit:
-            launcher._set_interactive_attention_quant("hqq6")
+        launcher._apply_model_recommended_defaults()
+        try:
+            launcher._validate_model_capabilities()
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
         launcher._resolve_selected_gpus()
+        try:
+            launcher._validate_model_topology()
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
 
         # Set/recompute PP if not specified, GPU count mismatch, or layer sum mismatch
         ngpus = len(launcher.selected_gpus) if launcher.selected_gpus else 1

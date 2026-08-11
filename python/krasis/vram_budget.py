@@ -30,6 +30,7 @@ Usage (Python):
 import argparse
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -411,6 +412,17 @@ def _hqq_attention_tensor_shapes_for_layer(
     layer_idx: Optional[int] = None,
 ) -> list[tuple[str, int, int]]:
     hidden = int(cfg["hidden_size"])
+    if str(cfg.get("model_type", "")).lower().replace("-", "_") == "deepseek_v4":
+        heads = int(cfg["num_attention_heads"])
+        head_dim = int(cfg["head_dim"])
+        q_rank = int(cfg["q_lora_rank"])
+        o_rank = int(cfg["o_lora_rank"])
+        return [
+            ("wq_a", q_rank, hidden),
+            ("wq_b", heads * head_dim, q_rank),
+            ("wkv", head_dim, hidden),
+            ("wo_b", hidden, o_rank),
+        ]
     if layer_type == "linear_attention":
         nk = int(cfg.get("linear_num_key_heads", 16))
         nv = int(cfg.get("linear_num_value_heads", 32))
@@ -698,8 +710,39 @@ def _cpu_expert_bytes_per_expert(cfg: Dict[str, Any], bits: int = 4, group_size:
         return total_params + (total_params // group_size) * 2
 
 
+def _detect_windows_total_ram_gb() -> int:
+    """Read native-Windows physical RAM through the OS-owned API."""
+    try:
+        import ctypes
+
+        class MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.ullTotalPhys // (1024**3))
+    except (AttributeError, OSError, ValueError):
+        pass
+    return 0
+
+
 def _detect_total_ram_gb() -> int:
-    """Auto-detect total system RAM in GB."""
+    """Auto-detect physical system RAM in GiB on Unix, WSL, and Windows."""
+    if os.name == "nt":
+        total = _detect_windows_total_ram_gb()
+        if total > 0:
+            return total
     try:
         with open("/proc/meminfo") as f:
             for line in f:
@@ -709,6 +752,145 @@ def _detect_total_ram_gb() -> int:
     except (FileNotFoundError, ValueError):
         pass
     return 0
+
+
+detect_total_ram_gb = _detect_total_ram_gb
+
+
+def _deepseek_v4_cache_row_bytes(cfg: Dict[str, Any], kv_dtype: str) -> tuple[int, int]:
+    head_dim = int(cfg["head_dim"])
+    rope_dim = int(cfg["qk_rope_head_dim"])
+    index_dim = int(cfg["index_head_dim"])
+    if head_dim <= rope_dim or rope_dim <= 0 or index_dim <= 0:
+        raise ValueError("DeepSeek-V4 cache geometry is invalid")
+    if kv_dtype == "bf16":
+        return head_dim * 2, index_dim * 2
+    if kv_dtype != "native":
+        raise ValueError(
+            f"DeepSeek-V4 cache mode must be native or bf16, got {kv_dtype!r}"
+        )
+    quant_cols = head_dim - rope_dim
+    main_row = quant_cols + math.ceil(quant_cols / 64) + rope_dim * 2
+    index_row = math.ceil(index_dim / 2) + math.ceil(index_dim / 32)
+    return main_row, index_row
+
+
+def _deepseek_v4_rank_cache_bytes(
+    cfg: Dict[str, Any],
+    start_layer: int,
+    end_layer: int,
+    tokens: int,
+    kv_dtype: str,
+) -> int:
+    if tokens <= 0:
+        return 0
+    ratios = [int(value) for value in cfg.get("compress_ratios", [])]
+    runtime_layers = int(cfg["num_hidden_layers"])
+    if len(ratios) < runtime_layers:
+        raise ValueError(
+            "DeepSeek-V4 compress_ratios must contain at least one entry per runtime layer"
+        )
+    ratios = ratios[:runtime_layers]
+    head_dim = int(cfg["head_dim"])
+    index_dim = int(cfg["index_head_dim"])
+    window = int(cfg["sliding_window"])
+    main_row_bytes, index_row_bytes = _deepseek_v4_cache_row_bytes(cfg, kv_dtype)
+    total = 0
+    for ratio in ratios[start_layer:end_layer]:
+        total += window * main_row_bytes
+        if ratio <= 0:
+            continue
+        compressed_rows = max(1, math.ceil(tokens / ratio))
+        total += compressed_rows * main_row_bytes
+        overlap_width = 2 if ratio == 4 else 1
+        state_rows = overlap_width * ratio
+        state_cols = overlap_width * head_dim
+        total += state_rows * state_cols * 4 * 2
+        if ratio == 4:
+            total += compressed_rows * index_row_bytes
+            index_state_cols = overlap_width * index_dim
+            total += state_rows * index_state_cols * 4 * 2
+    return total
+
+
+def _deepseek_v4_tokens_for_rank_budget(
+    cfg: Dict[str, Any],
+    start_layer: int,
+    end_layer: int,
+    budget_bytes: int,
+    token_limit: int,
+    kv_dtype: str,
+) -> int:
+    if budget_bytes <= 0 or token_limit <= 0:
+        return 0
+    if _deepseek_v4_rank_cache_bytes(
+        cfg, start_layer, end_layer, 1, kv_dtype
+    ) > budget_bytes:
+        return 0
+    if _deepseek_v4_rank_cache_bytes(
+        cfg, start_layer, end_layer, token_limit, kv_dtype
+    ) <= budget_bytes:
+        return token_limit
+    low, high = 1, token_limit
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _deepseek_v4_rank_cache_bytes(
+            cfg, start_layer, end_layer, middle, kv_dtype
+        ) <= budget_bytes:
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
+def _deepseek_v4_attention_weight_bytes(
+    cfg: Dict[str, Any],
+) -> tuple[list[int], list[int]]:
+    """Return per-layer BF16 total and BF16 residual beside phase-one HQQ."""
+    hidden = int(cfg["hidden_size"])
+    heads = int(cfg["num_attention_heads"])
+    head_dim = int(cfg["head_dim"])
+    q_rank = int(cfg["q_lora_rank"])
+    o_rank = int(cfg["o_lora_rank"])
+    o_groups = int(cfg["o_groups"])
+    index_dim = int(cfg["index_head_dim"])
+    index_heads = int(cfg["index_n_heads"])
+    ratios = [int(value) for value in cfg.get("compress_ratios", [])]
+    runtime_layers = int(cfg["num_hidden_layers"])
+    if len(ratios) < runtime_layers or heads % o_groups != 0:
+        raise ValueError("DeepSeek-V4 attention-weight geometry is invalid")
+    ratios = ratios[:runtime_layers]
+
+    quantized_params = (
+        hidden * q_rank
+        + q_rank * heads * head_dim
+        + hidden * head_dim
+        + hidden * o_rank
+    )
+    residual_base_bytes = (
+        o_rank * (heads // o_groups) * head_dim * 2
+        + (q_rank + head_dim + heads) * 2
+    )
+    totals: list[int] = []
+    residuals: list[int] = []
+    for ratio in ratios:
+        residual = residual_base_bytes
+        if ratio > 0:
+            copies = 2 if ratio == 4 else 1
+            projected = copies * head_dim
+            residual += (2 * hidden * projected + ratio * projected * 2 + head_dim) * 2
+            if ratio == 4:
+                index_projected = 2 * index_dim
+                residual += (
+                    2 * hidden * index_projected
+                    + ratio * index_projected * 2
+                    + index_dim
+                    + q_rank * index_heads * index_dim
+                    + hidden * index_heads
+                ) * 2
+        residuals.append(residual)
+        totals.append(residual + quantized_params * 2)
+    return totals, residuals
 
 
 def compute_launcher_budget(
@@ -767,6 +949,7 @@ def compute_launcher_budget(
 
     num_ranks = len(pp_partition)
     total_layers = cfg["num_hidden_layers"]
+    is_deepseek_v4 = str(cfg.get("model_type", "")).lower().replace("-", "_") == "deepseek_v4"
     is_mla = _is_mla(cfg)
     hybrid = _is_hybrid(cfg)
     n_experts = cfg.get("n_routed_experts", cfg.get("num_experts", 0))
@@ -829,6 +1012,13 @@ def compute_launcher_budget(
             hqq_group_size,
             hqq_auto_budget_pct,
         )
+    deepseek_v4_attention_total = None
+    deepseek_v4_attention_residual = None
+    if is_deepseek_v4:
+        (
+            deepseek_v4_attention_total,
+            deepseek_v4_attention_residual,
+        ) = _deepseek_v4_attention_weight_bytes(cfg)
 
     # Expert buffer bytes per expert (GPU Marlin format)
     expert_buf_bytes = _expert_bytes_per_expert(
@@ -848,8 +1038,11 @@ def compute_launcher_budget(
     dense_mlp_params_per_layer = 3 * hidden * dense_inter
 
     # KV bytes per token per layer
-    kv_b = _kv_dtype_bytes(kv_dtype, cfg)
-    if is_mla:
+    kv_b = 0 if is_deepseek_v4 else _kv_dtype_bytes(kv_dtype, cfg)
+    if is_deepseek_v4:
+        _deepseek_v4_cache_row_bytes(cfg, kv_dtype)
+        kv_ptl = 0
+    elif is_mla:
         kv_ptl = (cfg["kv_lora_rank"] + cfg["qk_rope_head_dim"]) * kv_b
     else:
         n_kv_heads = cfg.get("num_key_value_heads", cfg["num_attention_heads"])
@@ -896,12 +1089,16 @@ def compute_launcher_budget(
         total_full_attn = total_model_layers
     kv_total_per_token = kv_ptl * total_full_attn
     max_kv_tokens = (
-        min(
-            int(kv_cache_mb * 1024 * 1024 // kv_total_per_token),
-            effective_context_limit,
+        effective_context_limit
+        if is_deepseek_v4
+        else (
+            min(
+                int(kv_cache_mb * 1024 * 1024 // kv_total_per_token),
+                effective_context_limit,
+            )
+            if kv_total_per_token > 0
+            else effective_context_limit
         )
-        if kv_total_per_token > 0
-        else effective_context_limit
     )
     prefill_chunk = min(prefill_chunk_size, max_kv_tokens)
     prefill_workspace_bytes = 0
@@ -948,7 +1145,16 @@ def compute_launcher_budget(
             streaming = False
 
         # Attention weights: ALL layers permanently on GPU (not capped by group_size)
-        if hqq_layer_bytes is not None:
+        if is_deepseek_v4 and hqq_layer_bytes is not None:
+            rank_attn_bytes = sum(
+                hqq_layer_bytes.get(i, 0) + deepseek_v4_attention_residual[i]
+                for i in range(rank_start, rank_end)
+            )
+        elif is_deepseek_v4:
+            rank_attn_bytes = sum(
+                deepseek_v4_attention_total[i] for i in range(rank_start, rank_end)
+            )
+        elif hqq_layer_bytes is not None:
             rank_attn_bytes = sum(hqq_layer_bytes.get(i, 0) for i in range(rank_start, rank_end))
         else:
             rank_attn_bytes = _component_weight_bytes(attn_params_per_layer, attention_quant) * rank_full_attn
@@ -996,22 +1202,54 @@ def compute_launcher_budget(
             cuda_overhead * 1024 * 1024
         )
         free_bytes = gpu_vram_mb * 1024 * 1024 - total_bytes
-        # KV cache only for full attention layers in THIS rank's partition
+        # KV cache only for layers in this rank's partition. DeepSeek-V4 has a
+        # fixed raw ring plus ratio-dependent compressed/index state, so its
+        # exact nonlinear model is inverted rather than approximated per token.
         kv_per_rank = kv_ptl * rank_full_attn
-        kv_tokens = (
-            min(
-                max(0, int(free_bytes // kv_per_rank)),
+        if is_deepseek_v4:
+            kv_tokens = _deepseek_v4_tokens_for_rank_budget(
+                cfg,
+                rank_start,
+                rank_end,
+                max(0, int(free_bytes)),
                 effective_kv_capacity_tokens,
+                kv_dtype,
             )
-            if kv_per_rank > 0 and free_bytes > 0
-            else 0
-        )
-        # Tokens for the user-configured KV cache allocation
-        kv_alloc_bytes = min(
-            kv_cache_mb * 1024 * 1024,
-            effective_kv_capacity_tokens * kv_per_rank,
-        )
-        kv_alloc_tokens = max(0, int(kv_alloc_bytes // kv_per_rank)) if kv_per_rank > 0 else 0
+            allocation_budget = min(
+                kv_cache_mb * 1024 * 1024,
+                max(0, int(free_bytes)),
+            )
+            kv_alloc_tokens = _deepseek_v4_tokens_for_rank_budget(
+                cfg,
+                rank_start,
+                rank_end,
+                allocation_budget,
+                effective_kv_capacity_tokens,
+                kv_dtype,
+            )
+            kv_alloc_bytes = (
+                _deepseek_v4_rank_cache_bytes(
+                    cfg, rank_start, rank_end, kv_alloc_tokens, kv_dtype
+                )
+                if kv_alloc_tokens > 0
+                else 0
+            )
+        else:
+            kv_tokens = (
+                min(
+                    max(0, int(free_bytes // kv_per_rank)),
+                    effective_kv_capacity_tokens,
+                )
+                if kv_per_rank > 0 and free_bytes > 0
+                else 0
+            )
+            kv_alloc_bytes = min(
+                kv_cache_mb * 1024 * 1024,
+                effective_kv_capacity_tokens * kv_per_rank,
+            )
+            kv_alloc_tokens = (
+                max(0, int(kv_alloc_bytes // kv_per_rank)) if kv_per_rank > 0 else 0
+            )
         total_with_kv = total_bytes + min(kv_alloc_bytes, max(0, free_bytes))
         free_after_kv = gpu_vram_mb * 1024 * 1024 - total_with_kv
 
@@ -1063,7 +1301,7 @@ def compute_launcher_budget(
 
     peak_vram_mb = max(r["total_with_kv_mb"] for r in ranks) if ranks else 0
 
-    arch = "MLA" if is_mla else "GQA"
+    arch = "DeepSeek-V4 compressed attention" if is_deepseek_v4 else "MLA" if is_mla else "GQA"
     if hybrid:
         arch += "+DeltaNet"
 

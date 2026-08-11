@@ -13,7 +13,7 @@ from pathlib import Path
 
 import torch
 
-from krasis.config import ModelConfig
+from krasis.config import ModelConfig, QuantConfig
 from krasis.kv_cache import MLA_CKV_KERNEL_MIN_DIM, PagedKVCache
 from krasis.layer import (
     NativeDeepseekV4Weights,
@@ -127,6 +127,17 @@ def _deepseek_v4_config() -> dict:
 
 
 class ModelConfigContractTests(unittest.TestCase):
+    def test_native_sequence_state_rejects_non_deepseek_architectures(self) -> None:
+        model_path = _write_config(self, _glm_dsa_config())
+        with self.assertRaisesRegex(
+            ValueError,
+            r"Native sequence-state format.*only for DeepSeek-V4",
+        ):
+            KrasisModel(
+                model_path,
+                quant_cfg=QuantConfig(kv_cache_format="native"),
+            )
+
     def test_tileq_configuration_requires_exact_artifact_pairing(self) -> None:
         self.assertEqual(
             _tileq_configuration_error(3, None),

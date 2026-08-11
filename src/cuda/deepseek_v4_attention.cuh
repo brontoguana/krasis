@@ -13,6 +13,27 @@ __device__ __forceinline__ __nv_bfloat16 dsv4_attn_f32_to_bf16(float value) {
     return __float2bfloat16(value);
 }
 
+__device__ __forceinline__ float dsv4_attn_native_main_value(
+    const unsigned char* codes,
+    const signed char* scale_exponents,
+    const __nv_bfloat16* tails,
+    int row,
+    int column,
+    int head_dim,
+    int quant_cols,
+    int block_size)
+{
+    if (column >= quant_cols) {
+        return __bfloat162float(tails[(int64_t)row * (head_dim - quant_cols) + column - quant_cols]);
+    }
+    int blocks_per_row = (quant_cols + block_size - 1) / block_size;
+    float scale = ldexpf(1.0f, (int)scale_exponents[
+        (int64_t)row * blocks_per_row + column / block_size]);
+    __nv_fp8_e4m3 quantized;
+    quantized.__x = codes[(int64_t)row * quant_cols + column];
+    return (float)quantized * scale;
+}
+
 // One block normalizes one BF16 row. DeepSeek-V4 applies this both to the
 // per-head Q rows (without a learned weight) and the single KV row (with one).
 // Keeping all rows in one launch avoids a per-head launch chain at decode M=1.
@@ -266,6 +287,67 @@ extern "C" __global__ void deepseek_v4_gather_selected_kv_scores_kernel(
     bool valid = index >= 0 &&
         (index < raw_rows ||
          (compressed != nullptr && index - raw_rows >= 0 &&
+          index - raw_rows < compressed_rows));
+    scores[score_linear] = valid ? 0.0f : -INFINITY;
+}
+
+extern "C" __global__ void deepseek_v4_gather_selected_native_kv_scores_kernel(
+    __nv_bfloat16* __restrict__ selected_kv,
+    float* __restrict__ scores,
+    const unsigned char* __restrict__ raw_codes,
+    const signed char* __restrict__ raw_scale_exponents,
+    const __nv_bfloat16* __restrict__ raw_tails,
+    const unsigned char* __restrict__ compressed_codes,
+    const signed char* __restrict__ compressed_scale_exponents,
+    const __nv_bfloat16* __restrict__ compressed_tails,
+    const int* __restrict__ indices,
+    int heads,
+    int head_dim,
+    int quant_cols,
+    int block_size,
+    int topk,
+    int raw_rows,
+    int compressed_rows)
+{
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t kv_elements = (int64_t)topk * head_dim;
+    int64_t score_elements = (int64_t)heads * topk;
+    int64_t total = kv_elements + score_elements;
+    if (linear >= total || selected_kv == nullptr || scores == nullptr ||
+        raw_codes == nullptr || raw_scale_exponents == nullptr || raw_tails == nullptr ||
+        indices == nullptr || heads <= 0 || head_dim <= 0 || quant_cols <= 0 ||
+        quant_cols >= head_dim || block_size <= 0 || topk <= 0 || raw_rows < 0 ||
+        compressed_rows < 0) return;
+
+    if (linear < kv_elements) {
+        int selected = (int)(linear / head_dim);
+        int dim = (int)(linear - (int64_t)selected * head_dim);
+        int index = indices[selected];
+        float value = 0.0f;
+        if (index >= 0 && index < raw_rows) {
+            value = dsv4_attn_native_main_value(
+                raw_codes, raw_scale_exponents, raw_tails,
+                index, dim, head_dim, quant_cols, block_size);
+        } else {
+            int compressed_row = index - raw_rows;
+            if (compressed_row >= 0 && compressed_row < compressed_rows &&
+                compressed_codes != nullptr && compressed_scale_exponents != nullptr &&
+                compressed_tails != nullptr) {
+                value = dsv4_attn_native_main_value(
+                    compressed_codes, compressed_scale_exponents, compressed_tails,
+                    compressed_row, dim, head_dim, quant_cols, block_size);
+            }
+        }
+        selected_kv[linear] = dsv4_attn_f32_to_bf16(value);
+        return;
+    }
+
+    int64_t score_linear = linear - kv_elements;
+    int selected = (int)(score_linear % topk);
+    int index = indices[selected];
+    bool valid = index >= 0 &&
+        (index < raw_rows ||
+         (compressed_codes != nullptr && index - raw_rows >= 0 &&
           index - raw_rows < compressed_rows));
     scores[score_linear] = valid ? 0.0f : -INFINITY;
 }
@@ -714,6 +796,65 @@ extern "C" __global__ void deepseek_v4_sparse_output_cached_exp_kernel(
             if (kv != nullptr) {
                 accumulator += exponential * dsv4_attn_bf16_to_f32(kv[dim]);
             }
+        }
+        output_row[dim] = dsv4_attn_f32_to_bf16(accumulator / denominator);
+    }
+}
+
+// Native decode already reconstructed selected rows once for the score GEMM.
+// Reuse that bounded BF16 scratch for value accumulation instead of decoding
+// the persistent codes a second time.
+extern "C" __global__ void deepseek_v4_sparse_output_selected_cached_exp_kernel(
+    __nv_bfloat16* __restrict__ output,
+    const float* __restrict__ scores,
+    const __nv_bfloat16* __restrict__ selected_kv,
+    const float* __restrict__ attention_sink,
+    int tokens,
+    int heads,
+    int head_dim,
+    int topk)
+{
+    int head = (int)blockIdx.x;
+    int token = (int)blockIdx.y;
+    if (head >= heads || token >= tokens || output == nullptr || scores == nullptr ||
+        selected_kv == nullptr || attention_sink == nullptr) return;
+    const float* score_row = scores + ((int64_t)token * heads + head) * topk;
+    float local_max = threadIdx.x == 0 ? attention_sink[head] : -INFINITY;
+    for (int selected = (int)threadIdx.x; selected < topk; selected += (int)blockDim.x) {
+        local_max = fmaxf(local_max, score_row[selected]);
+    }
+    extern __shared__ float shared[];
+    float* reduction = shared;
+    float* exponentials = reduction + blockDim.x;
+    reduction[threadIdx.x] = local_max;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if ((int)threadIdx.x < stride) reduction[threadIdx.x] =
+            fmaxf(reduction[threadIdx.x], reduction[threadIdx.x + stride]);
+        __syncthreads();
+    }
+    float row_max = reduction[0];
+    float local_sum = threadIdx.x == 0 ? expf(attention_sink[head] - row_max) : 0.0f;
+    for (int selected = (int)threadIdx.x; selected < topk; selected += (int)blockDim.x) {
+        float value = score_row[selected];
+        float exponential = isfinite(value) ? expf(value - row_max) : 0.0f;
+        exponentials[selected] = exponential;
+        local_sum += exponential;
+    }
+    reduction[threadIdx.x] = local_sum;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if ((int)threadIdx.x < stride) reduction[threadIdx.x] += reduction[threadIdx.x + stride];
+        __syncthreads();
+    }
+    float denominator = reduction[0];
+    __nv_bfloat16* output_row = output + ((int64_t)token * heads + head) * head_dim;
+    const __nv_bfloat16* selected_rows = selected_kv + (int64_t)token * topk * head_dim;
+    for (int dim = (int)threadIdx.x; dim < head_dim; dim += (int)blockDim.x) {
+        float accumulator = 0.0f;
+        for (int selected = 0; selected < topk; ++selected) {
+            accumulator += exponentials[selected] * __bfloat162float(
+                selected_rows[(int64_t)selected * head_dim + dim]);
         }
         output_row[dim] = dsv4_attn_f32_to_bf16(accumulator / denominator);
     }

@@ -3098,11 +3098,14 @@ const KERNEL_NAMES: &[&str] = &[
     "deepseek_v4_sparse_scores_kernel",
     "deepseek_v4_sparse_scores_query_cached_kernel",
     "deepseek_v4_gather_selected_kv_scores_kernel",
+    "deepseek_v4_gather_selected_native_kv_scores_kernel",
     "deepseek_v4_sparse_output_kernel",
     "deepseek_v4_sparse_output_bf16x2_kernel",
     "deepseek_v4_sparse_output_cached_exp_kernel",
+    "deepseek_v4_sparse_output_selected_cached_exp_kernel",
     "deepseek_v4_compressor_decode_kernel",
     "deepseek_v4_compressor_finalize_decode_kernel",
+    "deepseek_v4_compressor_finalize_native_decode_kernel",
     "deepseek_v4_compressor_rmsnorm_kernel",
     "deepseek_v4_fp8_qat_inplace_kernel",
     "deepseek_v4_hadamard_inplace_kernel",
@@ -3113,7 +3116,9 @@ const KERNEL_NAMES: &[&str] = &[
     "deepseek_v4_compressed_causal_counts_kernel",
     "deepseek_v4_static_compressed_indices_kernel",
     "deepseek_v4_store_raw_kv_decode_kernel",
+    "deepseek_v4_store_raw_native_decode_kernel",
     "deepseek_v4_index_scores_decode_kernel",
+    "deepseek_v4_index_scores_native_decode_kernel",
     "weighted_add_bf16",
     "weighted_add_bf16_sigmoid_f32",
     "zero_bf16",
@@ -7391,6 +7396,102 @@ struct DsaIndexerRegistration {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct DeepseekV4NativeCacheRegistration {
+    pub(crate) codes_ptr: u64,
+    pub(crate) scale_exponents_ptr: u64,
+    pub(crate) tail_ptr: u64,
+    pub(crate) rows: usize,
+    pub(crate) width: usize,
+    pub(crate) quant_cols: usize,
+    pub(crate) block_size: usize,
+    pub(crate) code_bits: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deepseek_v4_native_cache_registration(
+    cache_format: &str,
+    bf16_ptr: usize,
+    bf16_elems: usize,
+    codes_ptr: usize,
+    codes_elems: usize,
+    scale_exponents_ptr: usize,
+    scale_exponents_elems: usize,
+    tail_ptr: usize,
+    tail_elems: usize,
+    rows: usize,
+    width: usize,
+    quant_cols: usize,
+    block_size: usize,
+    code_bits: usize,
+) -> Result<Option<DeepseekV4NativeCacheRegistration>, String> {
+    if rows == 0 || width == 0 || quant_cols == 0 || quant_cols > width || block_size == 0 {
+        return Err("invalid cache geometry".to_string());
+    }
+    let bf16_elems_expected = rows
+        .checked_mul(width)
+        .ok_or_else(|| "BF16 cache geometry overflows usize".to_string())?;
+    match cache_format {
+        "bf16" => {
+            if bf16_ptr == 0
+                || bf16_elems != bf16_elems_expected
+                || codes_ptr != 0
+                || codes_elems != 0
+                || scale_exponents_ptr != 0
+                || scale_exponents_elems != 0
+                || tail_ptr != 0
+                || tail_elems != 0
+            {
+                return Err("BF16 and Native cache planes are inconsistent".to_string());
+            }
+            Ok(None)
+        }
+        "native" => {
+            if bf16_ptr != 0 || bf16_elems != 0 || !matches!(code_bits, 4 | 8) {
+                return Err("Native cache has a BF16 backing or unsupported code width".to_string());
+            }
+            let code_stride = if code_bits == 8 {
+                quant_cols
+            } else {
+                width.div_ceil(2)
+            };
+            let codes_expected = rows
+                .checked_mul(code_stride)
+                .ok_or_else(|| "Native code-plane geometry overflows usize".to_string())?;
+            let scales_expected = rows
+                .checked_mul(quant_cols.div_ceil(block_size))
+                .ok_or_else(|| "Native scale-plane geometry overflows usize".to_string())?;
+            let expected_tail = if code_bits == 8 {
+                rows.checked_mul(width - quant_cols)
+                    .ok_or_else(|| "Native tail-plane geometry overflows usize".to_string())?
+            } else {
+                0
+            };
+            if codes_ptr == 0
+                || codes_elems != codes_expected
+                || scale_exponents_ptr == 0
+                || scale_exponents_elems != scales_expected
+                || (expected_tail > 0 && tail_ptr == 0)
+                || tail_elems != expected_tail
+                || (expected_tail == 0 && tail_ptr != 0)
+            {
+                return Err("Native code/scale/tail plane geometry mismatch".to_string());
+            }
+            Ok(Some(DeepseekV4NativeCacheRegistration {
+                codes_ptr: codes_ptr as u64,
+                scale_exponents_ptr: scale_exponents_ptr as u64,
+                tail_ptr: tail_ptr as u64,
+                rows,
+                width,
+                quant_cols,
+                block_size,
+                code_bits,
+            }))
+        }
+        other => Err(format!("unsupported cache format {other:?}")),
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct DeepseekV4CompressorRegistration {
     pub(crate) ape_wid: usize,
     pub(crate) wkv_wid: usize,
@@ -7398,6 +7499,7 @@ pub(crate) struct DeepseekV4CompressorRegistration {
     pub(crate) norm_ptr: u64,
     pub(crate) cache_ptr: u64,
     pub(crate) cache_rows: usize,
+    pub(crate) native_cache: Option<DeepseekV4NativeCacheRegistration>,
     pub(crate) kv_state_ptr: u64,
     pub(crate) kv_state_elems: usize,
     pub(crate) score_state_ptr: u64,
@@ -7455,6 +7557,7 @@ pub(crate) struct DeepseekV4LayerRegistration {
     pub(crate) compress_rope_theta: f32,
     pub(crate) raw_cache_ptr: u64,
     pub(crate) raw_cache_elems: usize,
+    pub(crate) raw_native_cache: Option<DeepseekV4NativeCacheRegistration>,
     pub(crate) rope_cos_ptr: u64,
     pub(crate) rope_sin_ptr: u64,
     pub(crate) rope_rows: usize,
@@ -7462,6 +7565,10 @@ pub(crate) struct DeepseekV4LayerRegistration {
     pub(crate) compressor: Option<DeepseekV4CompressorRegistration>,
     pub(crate) indexer: Option<DeepseekV4IndexerRegistration>,
     pub(crate) hyper_connection: Option<DeepseekV4HyperConnectionRegistration>,
+    /// Exact decode-stage HQQ descriptors for the main attention projection
+    /// bank. Auxiliary compressor/indexer projections remain BF16 until their
+    /// FP32-output execution contract is implemented and measured separately.
+    hqq_tensors: HashMap<String, HqqTensorExecDescriptor>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -13172,10 +13279,13 @@ struct CachedKernels {
     deepseek_v4_tail_rope_bf16: cudarc::driver::CudaFunction,
     deepseek_v4_sparse_scores: cudarc::driver::CudaFunction,
     deepseek_v4_gather_selected_kv_scores: cudarc::driver::CudaFunction,
+    deepseek_v4_gather_selected_native_kv_scores: cudarc::driver::CudaFunction,
     deepseek_v4_sparse_output: cudarc::driver::CudaFunction,
     deepseek_v4_sparse_output_cached_exp: cudarc::driver::CudaFunction,
+    deepseek_v4_sparse_output_selected_cached_exp: cudarc::driver::CudaFunction,
     deepseek_v4_compressor_decode: cudarc::driver::CudaFunction,
     deepseek_v4_compressor_finalize_decode: cudarc::driver::CudaFunction,
+    deepseek_v4_compressor_finalize_native_decode: cudarc::driver::CudaFunction,
     deepseek_v4_compressor_rmsnorm: cudarc::driver::CudaFunction,
     deepseek_v4_fp8_qat_inplace: cudarc::driver::CudaFunction,
     deepseek_v4_hadamard_inplace: cudarc::driver::CudaFunction,
@@ -13186,7 +13296,9 @@ struct CachedKernels {
     deepseek_v4_compressed_causal_counts: cudarc::driver::CudaFunction,
     deepseek_v4_static_compressed_indices: cudarc::driver::CudaFunction,
     deepseek_v4_store_raw_kv_decode: cudarc::driver::CudaFunction,
+    deepseek_v4_store_raw_native_decode: cudarc::driver::CudaFunction,
     deepseek_v4_index_scores_decode: cudarc::driver::CudaFunction,
+    deepseek_v4_index_scores_native_decode: cudarc::driver::CudaFunction,
     zero_bf16: cudarc::driver::CudaFunction,
     add_bf16: cudarc::driver::CudaFunction,
     peer_publish_request: cudarc::driver::CudaFunction,
@@ -18790,6 +18902,10 @@ impl GpuDecodeStore {
             7 => ("k6v6", 6, 6),
             8 => ("k8v6", 8, 6),
             9 => ("k4v4", 4, 4),
+            // DeepSeek Native uses one shared E4M3 latent for both score and
+            // value roles. Its E2M1 learned-index and BF16 tail planes remain
+            // explicit in the hashed state-layout inventory.
+            10 => ("native", 8, 8),
             other => return Err(format!("unsupported runtime KV format {other}")),
         };
         let attention_layout: Vec<_> = graph
@@ -18797,9 +18913,26 @@ impl GpuDecodeStore {
             .iter()
             .enumerate()
             .map(|(layer_idx, layer)| {
+                let hqq = layer.hqq_exec.as_ref().map(hqq_execution_json_value).or_else(|| {
+                    layer.deepseek_v4.as_ref().and_then(|v4| {
+                        if v4.hqq_tensors.is_empty() {
+                            return None;
+                        }
+                        let mut names: Vec<_> = v4.hqq_tensors.keys().cloned().collect();
+                        names.sort();
+                        let tensors: Vec<_> = names
+                            .iter()
+                            .map(|name| hqq_tensor_exec_json(&v4.hqq_tensors[name], name))
+                            .collect();
+                        Some(serde_json::json!({
+                            "kind": "deepseek_v4",
+                            "tensors": tensors,
+                        }))
+                    })
+                });
                 serde_json::json!({
                     "layer_idx": layer_idx,
-                    "hqq": layer.hqq_exec.as_ref().map(hqq_execution_json_value),
+                    "hqq": hqq,
                 })
             })
             .collect();
@@ -19306,6 +19439,11 @@ impl GpuDecodeStore {
                     tensor.packed_ptr = new_desc.packed_ptr;
                     tensor.scales_ptr = new_desc.scales_ptr;
                     tensor.zeros_ptr = new_desc.zeros_ptr;
+                }
+            }
+            if let Some(v4) = layer.deepseek_v4.as_mut() {
+                if let Some(desc) = v4.hqq_tensors.get_mut(&tensor_name) {
+                    changed |= Self::update_hqq_exec_tensor_pointers(desc, &new_desc);
                 }
             }
             let Some(exec) = layer.hqq_exec.as_mut() else {
@@ -20759,6 +20897,37 @@ impl GpuDecodeStore {
         }
     }
 
+    fn deepseek_v4_projection_gemv_bf16(
+        &self,
+        v4: &DeepseekV4LayerRegistration,
+        tensor_name: &str,
+        weight: &GpuWeight,
+        input_ptr: u64,
+        output_ptr: u64,
+    ) -> Result<(), String> {
+        if let Some(desc) = v4.hqq_tensors.get(tensor_name) {
+            if (desc.rows, desc.cols) != (weight.rows, weight.cols) {
+                return Err(format!(
+                    "DeepSeek-V4 HQQ tensor {} shape mismatch: descriptor=({}, {}) weight=({}, {})",
+                    tensor_name, desc.rows, desc.cols, weight.rows, weight.cols
+                ));
+            }
+            return self.launch_hqq_decode_gemv_bf16(
+                tensor_name,
+                desc,
+                input_ptr,
+                output_ptr,
+            );
+        }
+        if weight.dtype != 0 {
+            return Err(format!(
+                "DeepSeek-V4 tensor {} has non-BF16 dtype {} without an HQQ descriptor",
+                tensor_name, weight.dtype
+            ));
+        }
+        self.gemv_bf16_internal(weight, input_ptr, output_ptr)
+    }
+
     /// Measure the real HQQ4 linear-attention projection shapes before CUDA
     /// graph capture and select the best block geometry for this store/GPU.
     /// Candidate sizes come from the runtime CUDA warp and block limits; no
@@ -21773,6 +21942,19 @@ impl GpuDecodeStore {
             .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
         let mut required: Vec<(String, u64)> = Vec::new();
+        let require_native_cache =
+            |required: &mut Vec<(String, u64)>,
+             prefix: String,
+             cache: &DeepseekV4NativeCacheRegistration| {
+                required.push((format!("{}.codes", prefix), cache.codes_ptr));
+                required.push((
+                    format!("{}.scale_exponents", prefix),
+                    cache.scale_exponents_ptr,
+                ));
+                if cache.tail_ptr != 0 {
+                    required.push((format!("{}.tail", prefix), cache.tail_ptr));
+                }
+            };
         for (layer_idx, layer) in graph.layers.iter().enumerate() {
             if layer_idx < graph.decode_layer_start || layer_idx >= graph.decode_layer_end {
                 continue;
@@ -21853,42 +22035,62 @@ impl GpuDecodeStore {
                 GpuAttnConfig::GQA { .. } => {}
             }
             if let Some(v4) = layer.deepseek_v4.as_ref() {
-                required.push((
-                    format!("layer{}.deepseek_v4.raw", layer_idx),
-                    v4.raw_cache_ptr,
-                ));
+                if let Some(native) = v4.raw_native_cache.as_ref() {
+                    require_native_cache(
+                        &mut required,
+                        format!("layer{}.deepseek_v4.raw", layer_idx),
+                        native,
+                    );
+                } else {
+                    required.push((
+                        format!("layer{}.deepseek_v4.raw", layer_idx),
+                        v4.raw_cache_ptr,
+                    ));
+                }
                 if let Some(compressor) = v4.compressor.as_ref() {
-                    required.extend([
-                        (
+                    if let Some(native) = compressor.native_cache.as_ref() {
+                        require_native_cache(
+                            &mut required,
+                            format!("layer{}.deepseek_v4.compressed", layer_idx),
+                            native,
+                        );
+                    } else {
+                        required.push((
                             format!("layer{}.deepseek_v4.compressed", layer_idx),
                             compressor.cache_ptr,
-                        ),
-                        (
-                            format!("layer{}.deepseek_v4.compressor_kv", layer_idx),
-                            compressor.kv_state_ptr,
-                        ),
-                        (
-                            format!("layer{}.deepseek_v4.compressor_score", layer_idx),
-                            compressor.score_state_ptr,
-                        ),
-                    ]);
+                        ));
+                    }
+                    required.push((
+                        format!("layer{}.deepseek_v4.compressor_kv", layer_idx),
+                        compressor.kv_state_ptr,
+                    ));
+                    required.push((
+                        format!("layer{}.deepseek_v4.compressor_score", layer_idx),
+                        compressor.score_state_ptr,
+                    ));
                 }
                 if let Some(indexer) = v4.indexer.as_ref() {
                     let compressor = &indexer.compressor;
-                    required.extend([
-                        (
+                    if let Some(native) = compressor.native_cache.as_ref() {
+                        require_native_cache(
+                            &mut required,
+                            format!("layer{}.deepseek_v4.index", layer_idx),
+                            native,
+                        );
+                    } else {
+                        required.push((
                             format!("layer{}.deepseek_v4.index", layer_idx),
                             compressor.cache_ptr,
-                        ),
-                        (
-                            format!("layer{}.deepseek_v4.index_kv", layer_idx),
-                            compressor.kv_state_ptr,
-                        ),
-                        (
-                            format!("layer{}.deepseek_v4.index_score", layer_idx),
-                            compressor.score_state_ptr,
-                        ),
-                    ]);
+                        ));
+                    }
+                    required.push((
+                        format!("layer{}.deepseek_v4.index_kv", layer_idx),
+                        compressor.kv_state_ptr,
+                    ));
+                    required.push((
+                        format!("layer{}.deepseek_v4.index_score", layer_idx),
+                        compressor.score_state_ptr,
+                    ));
                 }
             }
         }
@@ -23153,13 +23355,22 @@ impl GpuDecodeStore {
                 deepseek_v4_gather_selected_kv_scores: get(
                     "deepseek_v4_gather_selected_kv_scores_kernel",
                 )?,
+                deepseek_v4_gather_selected_native_kv_scores: get(
+                    "deepseek_v4_gather_selected_native_kv_scores_kernel",
+                )?,
                 deepseek_v4_sparse_output: get("deepseek_v4_sparse_output_kernel")?,
                 deepseek_v4_sparse_output_cached_exp: get(
                     "deepseek_v4_sparse_output_cached_exp_kernel",
                 )?,
+                deepseek_v4_sparse_output_selected_cached_exp: get(
+                    "deepseek_v4_sparse_output_selected_cached_exp_kernel",
+                )?,
                 deepseek_v4_compressor_decode: get("deepseek_v4_compressor_decode_kernel")?,
                 deepseek_v4_compressor_finalize_decode: get(
                     "deepseek_v4_compressor_finalize_decode_kernel",
+                )?,
+                deepseek_v4_compressor_finalize_native_decode: get(
+                    "deepseek_v4_compressor_finalize_native_decode_kernel",
                 )?,
                 deepseek_v4_compressor_rmsnorm: get("deepseek_v4_compressor_rmsnorm_kernel")?,
                 deepseek_v4_fp8_qat_inplace: get("deepseek_v4_fp8_qat_inplace_kernel")?,
@@ -23177,7 +23388,13 @@ impl GpuDecodeStore {
                     "deepseek_v4_static_compressed_indices_kernel",
                 )?,
                 deepseek_v4_store_raw_kv_decode: get("deepseek_v4_store_raw_kv_decode_kernel")?,
+                deepseek_v4_store_raw_native_decode: get(
+                    "deepseek_v4_store_raw_native_decode_kernel",
+                )?,
                 deepseek_v4_index_scores_decode: get("deepseek_v4_index_scores_decode_kernel")?,
+                deepseek_v4_index_scores_native_decode: get(
+                    "deepseek_v4_index_scores_native_decode_kernel",
+                )?,
                 zero_bf16: get("zero_bf16")?,
                 add_bf16: get("add_bf16")?,
                 peer_publish_request: get("peer_publish_request")?,
@@ -23443,6 +23660,48 @@ impl GpuDecodeStore {
         graph
             .weights
             .push(GpuWeight::new(ptr as u64, rows, cols, dtype));
+        Ok(id)
+    }
+
+    /// Register only the stable geometry of a staged HQQ runtime tensor.
+    /// DeepSeek-V4 owns a custom attention graph, so its native registration
+    /// needs weight IDs for shape planning while execution must use the exact
+    /// HQQ descriptors attached after the complete layer is registered.
+    fn register_hqq_runtime_weight_view(
+        &mut self,
+        layer_idx: usize,
+        tensor_name: &str,
+    ) -> PyResult<usize> {
+        let slot = self
+            .hqq_runtime_slots
+            .iter()
+            .find(|slot| slot.layer_idx == layer_idx && slot.tensor_name == tensor_name)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "HQQ runtime weight view is absent for DeepSeek-V4 layer {} tensor {}",
+                    layer_idx, tensor_name
+                ))
+            })?;
+        if !slot.is_registered()
+            || slot.packed_slot_ptr == 0
+            || slot.scales_slot_ptr == 0
+            || slot.zeros_slot_ptr == 0
+        {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "HQQ runtime weight view is not registered for DeepSeek-V4 layer {} tensor {}",
+                layer_idx, tensor_name
+            )));
+        }
+        let (ptr, rows, cols) = (slot.packed_slot_ptr, slot.rows, slot.cols);
+        let graph = self
+            .graph
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        let id = graph.weights.len();
+        // dtype=6 is a non-executable geometry marker. Any accidental route
+        // through the generic weight path fails instead of interpreting packed
+        // bytes as BF16.
+        graph.weights.push(GpuWeight::new(ptr, rows, cols, 6));
         Ok(id)
     }
 
@@ -28031,7 +28290,10 @@ impl GpuDecodeStore {
         wo_b_wid, attn_sink_ptr, attn_sink_elems, q_norm_ptr, q_norm_elems,
         kv_norm_ptr, kv_norm_elems, num_heads, head_dim, rope_dim, o_groups,
         sliding_window, compress_ratio, compress_rope_theta, raw_cache_ptr,
-        raw_cache_elems, rope_cos_ptr, rope_sin_ptr, rope_rows,
+        raw_cache_elems, cache_format, raw_native_codes_ptr,
+        raw_native_codes_elems, raw_native_scale_exponents_ptr,
+        raw_native_scale_exponents_elems, raw_native_tail_ptr,
+        raw_native_tail_elems, native_block_size, rope_cos_ptr, rope_sin_ptr, rope_rows,
         logical_max_seq
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -28062,6 +28324,14 @@ impl GpuDecodeStore {
         compress_rope_theta: f32,
         raw_cache_ptr: usize,
         raw_cache_elems: usize,
+        cache_format: &str,
+        raw_native_codes_ptr: usize,
+        raw_native_codes_elems: usize,
+        raw_native_scale_exponents_ptr: usize,
+        raw_native_scale_exponents_elems: usize,
+        raw_native_tail_ptr: usize,
+        raw_native_tail_elems: usize,
+        native_block_size: usize,
         rope_cos_ptr: usize,
         rope_sin_ptr: usize,
         rope_rows: usize,
@@ -28113,7 +28383,9 @@ impl GpuDecodeStore {
         let wo_a = get(wo_a_wid, "wo_a")?;
         let wo_b = get(wo_b_wid, "wo_b")?;
         let common_weights = [wq_a, wq_b, wkv, wo_a, wo_b];
-        if common_weights.iter().any(|weight| weight.dtype != 0)
+        if common_weights
+            .iter()
+            .any(|weight| !matches!(weight.dtype, 0 | 6))
             || q_lora_rank == 0
             || hidden_size == 0
             || (wq_b.rows, wq_b.cols) != (num_heads * head_dim, q_lora_rank)
@@ -28127,6 +28399,44 @@ impl GpuDecodeStore {
                 layer_idx
             )));
         }
+        let quant_cols = head_dim - rope_dim;
+        let raw_native_cache = deepseek_v4_native_cache_registration(
+            cache_format,
+            raw_cache_ptr,
+            raw_cache_elems,
+            raw_native_codes_ptr,
+            raw_native_codes_elems,
+            raw_native_scale_exponents_ptr,
+            raw_native_scale_exponents_elems,
+            raw_native_tail_ptr,
+            raw_native_tail_elems,
+            sliding_window,
+            head_dim,
+            quant_cols,
+            native_block_size,
+            8,
+        )
+        .map_err(|error| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "DeepSeek-V4 layer {} raw-cache contract mismatch: {}",
+                layer_idx, error
+            ))
+        })?;
+        let runtime_kv_format = if raw_native_cache.is_some() {
+            crate::session_cache::RUNTIME_KV_FORMAT_NATIVE
+        } else {
+            crate::session_cache::RUNTIME_KV_FORMAT_BF16
+        };
+        if graph.layers.iter().any(|item| item.deepseek_v4.is_some()) {
+            if graph.kv_format != runtime_kv_format {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "DeepSeek-V4 layer {} cache format differs from earlier layers",
+                    layer_idx
+                )));
+            }
+        } else {
+            graph.kv_format = runtime_kv_format;
+        }
         if input_norm_ptr == 0
             || input_norm_size != hidden_size
             || post_attn_norm_ptr == 0
@@ -28137,8 +28447,6 @@ impl GpuDecodeStore {
             || q_norm_elems != q_lora_rank
             || kv_norm_ptr == 0
             || kv_norm_elems != head_dim
-            || raw_cache_ptr == 0
-            || raw_cache_elems != sliding_window * head_dim
             || rope_cos_ptr == 0
             || rope_sin_ptr == 0
         {
@@ -28181,6 +28489,7 @@ impl GpuDecodeStore {
             compress_rope_theta,
             raw_cache_ptr: raw_cache_ptr as u64,
             raw_cache_elems,
+            raw_native_cache,
             rope_cos_ptr: rope_cos_ptr as u64,
             rope_sin_ptr: rope_sin_ptr as u64,
             rope_rows,
@@ -28188,13 +28497,115 @@ impl GpuDecodeStore {
             compressor: None,
             indexer: None,
             hyper_connection: None,
+            hqq_tensors: HashMap::new(),
         });
+        Ok(())
+    }
+
+    /// Attach staged fixed-HQQ execution descriptors to DeepSeek-V4's custom
+    /// attention graph. This is deliberately separate from base registration:
+    /// the latter establishes architecture geometry, while this method proves
+    /// that every required quantized projection has an exact executable view.
+    fn attach_hqq_runtime_deepseek_v4_layer(
+        &mut self,
+        layer_idx: usize,
+        tensor_names: Vec<String>,
+    ) -> PyResult<()> {
+        const REQUIRED: [&str; 4] = ["wq_a", "wq_b", "wkv", "wo_b"];
+        let supplied: HashSet<&str> = tensor_names.iter().map(String::as_str).collect();
+        let required: HashSet<&str> = REQUIRED.into_iter().collect();
+        if supplied != required || tensor_names.len() != REQUIRED.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "DeepSeek-V4 HQQ layer {} requires exactly {:?}, got {:?}",
+                layer_idx, REQUIRED, tensor_names
+            )));
+        }
+
+        let mut descriptors = HashMap::with_capacity(REQUIRED.len());
+        let mut layer_nbits: Option<u8> = None;
+        for tensor_name in REQUIRED {
+            let desc = self
+                .hqq_runtime_decode_exec_desc_for_tensor(layer_idx, tensor_name)
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            let nbits = hqq_nbits_from_desc(&desc)
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            if !matches!(nbits, 4 | 6 | 8) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "DeepSeek-V4 fixed-HQQ attach accepts only HQQ4/HQQ6/HQQ8; layer {} tensor {} is HQQ{}",
+                    layer_idx, tensor_name, nbits
+                )));
+            }
+            if let Some(expected) = layer_nbits {
+                if nbits != expected {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "DeepSeek-V4 fixed-HQQ layer {} has mixed tensor precision: expected HQQ{}, tensor {} is HQQ{}",
+                        layer_idx, expected, tensor_name, nbits
+                    )));
+                }
+            } else {
+                layer_nbits = Some(nbits);
+            }
+            descriptors.insert(tensor_name.to_string(), desc);
+        }
+
+        let graph = self
+            .graph
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        let layer = graph.layers.get_mut(layer_idx).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "DeepSeek-V4 HQQ layer {} base registration is absent",
+                layer_idx
+            ))
+        })?;
+        let v4 = layer.deepseek_v4.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "DeepSeek-V4 HQQ layer {} base registration is absent",
+                layer_idx
+            ))
+        })?;
+        if !v4.hqq_tensors.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "DeepSeek-V4 HQQ layer {} is already attached",
+                layer_idx
+            )));
+        }
+        for (tensor_name, wid) in [
+            ("wq_a", v4.wq_a_wid),
+            ("wq_b", v4.wq_b_wid),
+            ("wkv", v4.wkv_wid),
+            ("wo_b", v4.wo_b_wid),
+        ] {
+            let weight = graph.weights.get(wid).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "DeepSeek-V4 HQQ layer {} tensor {} has invalid weight id {}",
+                    layer_idx, tensor_name, wid
+                ))
+            })?;
+            let desc = descriptors.get(tensor_name).expect("required descriptor");
+            if weight.dtype != 6 || (weight.rows, weight.cols) != (desc.rows, desc.cols) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "DeepSeek-V4 HQQ layer {} tensor {} geometry mismatch: weight=({}, {}, dtype={}) descriptor=({}, {})",
+                    layer_idx,
+                    tensor_name,
+                    weight.rows,
+                    weight.cols,
+                    weight.dtype,
+                    desc.rows,
+                    desc.cols,
+                )));
+            }
+        }
+        v4.hqq_tensors = descriptors;
         Ok(())
     }
 
     #[pyo3(signature = (
         layer_idx, ape_wid, wkv_wid, wgate_wid, norm_ptr, norm_elems,
-        cache_ptr, cache_elems, cache_rows, kv_state_ptr, kv_state_elems,
+        cache_ptr, cache_elems, cache_rows, cache_format, native_codes_ptr,
+        native_codes_elems, native_scale_exponents_ptr,
+        native_scale_exponents_elems, native_tail_ptr, native_tail_elems,
+        native_block_size, kv_state_ptr, kv_state_elems,
         score_state_ptr, score_state_elems
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -28209,6 +28620,14 @@ impl GpuDecodeStore {
         cache_ptr: usize,
         cache_elems: usize,
         cache_rows: usize,
+        cache_format: &str,
+        native_codes_ptr: usize,
+        native_codes_elems: usize,
+        native_scale_exponents_ptr: usize,
+        native_scale_exponents_elems: usize,
+        native_tail_ptr: usize,
+        native_tail_elems: usize,
+        native_block_size: usize,
         kv_state_ptr: usize,
         kv_state_elems: usize,
         score_state_ptr: usize,
@@ -28265,11 +28684,31 @@ impl GpuDecodeStore {
                 )));
             }
         }
+        let native_cache = deepseek_v4_native_cache_registration(
+            cache_format,
+            cache_ptr,
+            cache_elems,
+            native_codes_ptr,
+            native_codes_elems,
+            native_scale_exponents_ptr,
+            native_scale_exponents_elems,
+            native_tail_ptr,
+            native_tail_elems,
+            cache_rows,
+            base.head_dim,
+            base.head_dim - base.rope_dim,
+            native_block_size,
+            8,
+        )
+        .map_err(|error| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "DeepSeek-V4 layer {} compressor cache mismatch: {}",
+                layer_idx, error
+            ))
+        })?;
         if norm_ptr == 0
             || norm_elems != base.head_dim
-            || cache_ptr == 0
             || cache_rows != expected_cache_rows
-            || cache_elems != cache_rows * base.head_dim
             || kv_state_ptr == 0
             || score_state_ptr == 0
             || kv_state_elems != state_elems
@@ -28291,6 +28730,7 @@ impl GpuDecodeStore {
             norm_ptr: norm_ptr as u64,
             cache_ptr: cache_ptr as u64,
             cache_rows,
+            native_cache,
             kv_state_ptr: kv_state_ptr as u64,
             kv_state_elems,
             score_state_ptr: score_state_ptr as u64,
@@ -28302,7 +28742,10 @@ impl GpuDecodeStore {
     #[pyo3(signature = (
         layer_idx, wq_b_wid, weights_proj_wid, ape_wid, compressor_wkv_wid,
         compressor_wgate_wid, norm_ptr, norm_elems, cache_ptr, cache_elems,
-        cache_rows, kv_state_ptr, kv_state_elems, score_state_ptr,
+        cache_rows, cache_format, native_codes_ptr, native_codes_elems,
+        native_scale_exponents_ptr, native_scale_exponents_elems,
+        native_tail_ptr, native_tail_elems, native_block_size,
+        kv_state_ptr, kv_state_elems, score_state_ptr,
         score_state_elems, index_topk, index_n_heads, index_head_dim
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -28319,6 +28762,14 @@ impl GpuDecodeStore {
         cache_ptr: usize,
         cache_elems: usize,
         cache_rows: usize,
+        cache_format: &str,
+        native_codes_ptr: usize,
+        native_codes_elems: usize,
+        native_scale_exponents_ptr: usize,
+        native_scale_exponents_elems: usize,
+        native_tail_ptr: usize,
+        native_tail_elems: usize,
+        native_block_size: usize,
         kv_state_ptr: usize,
         kv_state_elems: usize,
         score_state_ptr: usize,
@@ -28380,11 +28831,31 @@ impl GpuDecodeStore {
                 )));
             }
         }
+        let native_cache = deepseek_v4_native_cache_registration(
+            cache_format,
+            cache_ptr,
+            cache_elems,
+            native_codes_ptr,
+            native_codes_elems,
+            native_scale_exponents_ptr,
+            native_scale_exponents_elems,
+            native_tail_ptr,
+            native_tail_elems,
+            cache_rows,
+            index_head_dim,
+            index_head_dim,
+            native_block_size,
+            4,
+        )
+        .map_err(|error| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "DeepSeek-V4 layer {} indexer cache mismatch: {}",
+                layer_idx, error
+            ))
+        })?;
         if norm_ptr == 0
             || norm_elems != index_head_dim
-            || cache_ptr == 0
             || cache_rows != expected_cache_rows
-            || cache_elems != cache_rows * index_head_dim
             || kv_state_ptr == 0
             || score_state_ptr == 0
             || kv_state_elems != index_state_elems
@@ -28402,6 +28873,7 @@ impl GpuDecodeStore {
             norm_ptr: norm_ptr as u64,
             cache_ptr: cache_ptr as u64,
             cache_rows,
+            native_cache,
             kv_state_ptr: kv_state_ptr as u64,
             kv_state_elems,
             score_state_ptr: score_state_ptr as u64,
@@ -30694,13 +31166,28 @@ impl GpuDecodeStore {
         let layer = graph.layers.get(layer_idx).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Layer {} not registered", layer_idx))
         })?;
-        let exec = layer.hqq_exec.as_ref().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Layer {} has no HQQ execution descriptor",
-                layer_idx
-            ))
-        })?;
-        Ok(hqq_execution_json_value(exec).to_string())
+        if let Some(exec) = layer.hqq_exec.as_ref() {
+            return Ok(hqq_execution_json_value(exec).to_string());
+        }
+        if let Some(v4) = layer.deepseek_v4.as_ref() {
+            if !v4.hqq_tensors.is_empty() {
+                let mut names: Vec<_> = v4.hqq_tensors.keys().cloned().collect();
+                names.sort();
+                let tensors: Vec<_> = names
+                    .iter()
+                    .map(|name| hqq_tensor_exec_json(&v4.hqq_tensors[name], name))
+                    .collect();
+                return Ok(serde_json::json!({
+                    "kind": "deepseek_v4",
+                    "tensors": tensors,
+                })
+                .to_string());
+            }
+        }
+        Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Layer {} has no HQQ execution descriptor",
+            layer_idx
+        )))
     }
 
     fn hqq_decode_timing_json(&self) -> PyResult<String> {
@@ -34898,12 +35385,14 @@ impl GpuDecodeStore {
             .weights
             .get(compressor.ape_wid)
             .ok_or_else(|| format!("{} compressor APE is absent", label))?;
+        let native = compressor.native_cache.as_ref();
         if hidden_ptr == 0
             || position_ptr == 0
             || ratio == 0
             || compressor.norm_ptr == 0
-            || compressor.cache_ptr == 0
             || compressor.cache_rows == 0
+            || (native.is_none() && compressor.cache_ptr == 0)
+            || (native.is_some() && compressor.cache_ptr != 0)
             || compressor.kv_state_ptr == 0
             || compressor.score_state_ptr == 0
             || compressor.kv_state_elems != state_elems
@@ -34970,6 +35459,80 @@ impl GpuDecodeStore {
         } else {
             DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE
         };
+        if let Some(cache) = native {
+            let expected_bits = if indexer_mode { 4 } else { 8 };
+            let expected_quant_cols = if indexer_mode {
+                head_dim
+            } else {
+                head_dim - rope_dim
+            };
+            if cache.rows != compressor.cache_rows
+                || cache.width != head_dim
+                || cache.quant_cols != expected_quant_cols
+                || cache.block_size != qat_block
+                || cache.code_bits != expected_bits
+            {
+                return Err(format!("{} Native cache contract mismatch", label));
+            }
+            let mut a0 = cache.codes_ptr;
+            let mut a1 = cache.scale_exponents_ptr;
+            let mut a2 = cache.tail_ptr;
+            let mut a3 = *workspace.d_compressor_pooled.device_ptr();
+            let mut a4 = compressor.norm_ptr;
+            let mut a5 = position_ptr;
+            let mut a6 = rope_cos_ptr;
+            let mut a7 = rope_sin_ptr;
+            let mut a8 = i32::try_from(cache.rows)
+                .map_err(|_| format!("{} cache rows exceed i32", label))?;
+            let mut a9 = i32::try_from(head_dim)
+                .map_err(|_| format!("{} finalizer width exceeds i32", label))?;
+            let mut a10 = i32::try_from(rope_dim)
+                .map_err(|_| format!("{} finalizer RoPE width exceeds i32", label))?;
+            let mut a11 = i32::try_from(rope_rows)
+                .map_err(|_| format!("{} finalizer RoPE rows exceed i32", label))?;
+            let mut a12 = i32::try_from(ratio)
+                .map_err(|_| format!("{} finalizer ratio exceeds i32", label))?;
+            let mut a13 = i32::try_from(cache.code_bits)
+                .map_err(|_| format!("{} Native code bits exceed i32", label))?;
+            let mut a14 = i32::try_from(cache.block_size)
+                .map_err(|_| format!("{} Native block size exceeds i32", label))?;
+            let mut a15 = graph.eps;
+            let mut params: Vec<*mut std::ffi::c_void> = vec![
+                &mut a0 as *mut _ as *mut std::ffi::c_void,
+                &mut a1 as *mut _ as *mut std::ffi::c_void,
+                &mut a2 as *mut _ as *mut std::ffi::c_void,
+                &mut a3 as *mut _ as *mut std::ffi::c_void,
+                &mut a4 as *mut _ as *mut std::ffi::c_void,
+                &mut a5 as *mut _ as *mut std::ffi::c_void,
+                &mut a6 as *mut _ as *mut std::ffi::c_void,
+                &mut a7 as *mut _ as *mut std::ffi::c_void,
+                &mut a8 as *mut _ as *mut std::ffi::c_void,
+                &mut a9 as *mut _ as *mut std::ffi::c_void,
+                &mut a10 as *mut _ as *mut std::ffi::c_void,
+                &mut a11 as *mut _ as *mut std::ffi::c_void,
+                &mut a12 as *mut _ as *mut std::ffi::c_void,
+                &mut a13 as *mut _ as *mut std::ffi::c_void,
+                &mut a14 as *mut _ as *mut std::ffi::c_void,
+                &mut a15 as *mut _ as *mut std::ffi::c_void,
+            ];
+            unsafe {
+                kernels
+                    .deepseek_v4_compressor_finalize_native_decode
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (finalizer_threads, 1, 1),
+                            shared_mem_bytes: finalizer_threads * 2 * 4,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|error| {
+                        format!("{} Native compressor finalizer: {:?}", label, error)
+                    })?;
+            }
+            return Ok(());
+        }
         let mut a0 = compressor.cache_ptr;
         let mut a1 = *workspace.d_compressor_pooled.device_ptr();
         let mut a2 = compressor.norm_ptr;
@@ -35188,30 +35751,54 @@ impl GpuDecodeStore {
         }
         let score_threads = 256u32;
         let score_grid = graph.num_sms.max(1).min(indexer.compressor.cache_rows);
+        let score_config = LaunchConfig {
+            grid_dim: (score_grid as u32, 1, 1),
+            block_dim: (score_threads, 1, 1),
+            shared_mem_bytes: ((indexer.index_head_dim + indexer.index_n_heads)
+                * std::mem::size_of::<f32>()) as u32,
+        };
         unsafe {
-            kernels
-                .deepseek_v4_index_scores_decode
-                .clone()
-                .launch(
-                    LaunchConfig {
-                        grid_dim: (score_grid as u32, 1, 1),
-                        block_dim: (score_threads, 1, 1),
-                        shared_mem_bytes: ((indexer.index_head_dim + indexer.index_n_heads)
-                            * std::mem::size_of::<f32>())
-                            as u32,
-                    },
-                    (
-                        *workspace.d_index_scores.device_ptr(),
-                        indexer.compressor.cache_ptr,
-                        *workspace.d_index_query.device_ptr(),
-                        *workspace.d_index_weights.device_ptr(),
-                        *workspace.d_compressed_count.device_ptr(),
-                        indexer.compressor.cache_rows as i32,
-                        indexer.index_n_heads as i32,
-                        indexer.index_head_dim as i32,
-                    ),
-                )
-                .map_err(|error| format!("{} score reduction: {:?}", label, error))?;
+            if let Some(native) = indexer.compressor.native_cache.as_ref() {
+                kernels
+                    .deepseek_v4_index_scores_native_decode
+                    .clone()
+                    .launch(
+                        score_config,
+                        (
+                            *workspace.d_index_scores.device_ptr(),
+                            native.codes_ptr,
+                            native.scale_exponents_ptr,
+                            *workspace.d_index_query.device_ptr(),
+                            *workspace.d_index_weights.device_ptr(),
+                            *workspace.d_compressed_count.device_ptr(),
+                            indexer.compressor.cache_rows as i32,
+                            indexer.index_n_heads as i32,
+                            indexer.index_head_dim as i32,
+                            native.block_size as i32,
+                        ),
+                    )
+                    .map_err(|error| {
+                        format!("{} Native score reduction: {:?}", label, error)
+                    })?;
+            } else {
+                kernels
+                    .deepseek_v4_index_scores_decode
+                    .clone()
+                    .launch(
+                        score_config,
+                        (
+                            *workspace.d_index_scores.device_ptr(),
+                            indexer.compressor.cache_ptr,
+                            *workspace.d_index_query.device_ptr(),
+                            *workspace.d_index_weights.device_ptr(),
+                            *workspace.d_compressed_count.device_ptr(),
+                            indexer.compressor.cache_rows as i32,
+                            indexer.index_n_heads as i32,
+                            indexer.index_head_dim as i32,
+                        ),
+                    )
+                    .map_err(|error| format!("{} score reduction: {:?}", label, error))?;
+            }
         }
         self.execute_graphable_topk_for_pointers(
             graph,
@@ -35329,7 +35916,13 @@ impl GpuDecodeStore {
             return Err(format!("{} attention contract mismatch", label));
         }
         let hidden_ptr = *graph.d_hidden.device_ptr();
-        self.gemv_bf16_internal(wq_a, hidden_ptr, *workspace.d_q_rank.device_ptr())?;
+        self.deepseek_v4_projection_gemv_bf16(
+            &v4,
+            "wq_a",
+            wq_a,
+            hidden_ptr,
+            *workspace.d_q_rank.device_ptr(),
+        )?;
         self.launch_deepseek_v4_rmsnorm_for_graph(
             graph,
             *workspace.d_q_rank.device_ptr(),
@@ -35370,7 +35963,9 @@ impl GpuDecodeStore {
         }
         mark_prefix(8, "deepseek-v4-indexer-end")?;
 
-        self.gemv_bf16_internal(
+        self.deepseek_v4_projection_gemv_bf16(
+            &v4,
+            "wq_b",
             wq_b,
             *workspace.d_q_rank.device_ptr(),
             *workspace.d_query.device_ptr(),
@@ -35400,7 +35995,13 @@ impl GpuDecodeStore {
         )?;
         mark_prefix(9, "deepseek-v4-q-b-norm-rope-end")?;
 
-        self.gemv_bf16_internal(wkv, hidden_ptr, *workspace.d_kv.device_ptr())?;
+        self.deepseek_v4_projection_gemv_bf16(
+            &v4,
+            "wkv",
+            wkv,
+            hidden_ptr,
+            *workspace.d_kv.device_ptr(),
+        )?;
         self.launch_deepseek_v4_rmsnorm_rows_for_graph(
             graph,
             *workspace.d_kv.device_ptr(),
@@ -35426,42 +36027,68 @@ impl GpuDecodeStore {
         )?;
         let quant_cols = head_dim - rope_dim;
         unsafe {
-            kernels
-                .deepseek_v4_fp8_qat_inplace
-                .clone()
-                .launch(
-                    LaunchConfig {
-                        grid_dim: (
-                            quant_cols.div_ceil(DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE) as u32,
-                            1,
-                            1,
+            if let Some(native) = v4.raw_native_cache.as_ref() {
+                let blocks = quant_cols.div_ceil(native.block_size);
+                kernels
+                    .deepseek_v4_store_raw_native_decode
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: ((blocks + 1) as u32, 1, 1),
+                            block_dim: (native.block_size as u32, 1, 1),
+                            shared_mem_bytes: (native.block_size * 4) as u32,
+                        },
+                        (
+                            native.codes_ptr,
+                            native.scale_exponents_ptr,
+                            native.tail_ptr,
+                            *workspace.d_kv.device_ptr(),
+                            position_ptr,
+                            head_dim as i32,
+                            quant_cols as i32,
+                            native.block_size as i32,
+                            window as i32,
                         ),
-                        block_dim: (DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE as u32, 1, 1),
-                        shared_mem_bytes: (DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE * 4) as u32,
-                    },
-                    (
-                        *workspace.d_kv.device_ptr(),
-                        1i32,
-                        head_dim as i32,
-                        quant_cols as i32,
-                        DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE as i32,
-                    ),
-                )
-                .map_err(|error| format!("{} KV FP8 QAT: {:?}", label, error))?;
-            kernels
-                .deepseek_v4_store_raw_kv_decode
-                .clone()
-                .launch(
-                    LaunchConfig::for_num_elems(head_dim as u32),
-                    (
-                        v4.raw_cache_ptr,
-                        *workspace.d_kv.device_ptr(),
-                        position_ptr,
-                        head_dim as i32,
-                        window as i32,
-                    ),
-                )
-                .map_err(|error| format!("{} raw-ring write: {:?}", label, error))?;
+                    )
+                    .map_err(|error| format!("{} Native raw-ring write: {:?}", label, error))?;
+            } else {
+                kernels
+                    .deepseek_v4_fp8_qat_inplace
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (
+                                quant_cols.div_ceil(DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE) as u32,
+                                1,
+                                1,
+                            ),
+                            block_dim: (DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE as u32, 1, 1),
+                            shared_mem_bytes: (DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE * 4) as u32,
+                        },
+                        (
+                            *workspace.d_kv.device_ptr(),
+                            1i32,
+                            head_dim as i32,
+                            quant_cols as i32,
+                            DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE as i32,
+                        ),
+                    )
+                    .map_err(|error| format!("{} KV FP8 QAT: {:?}", label, error))?;
+                kernels
+                    .deepseek_v4_store_raw_kv_decode
+                    .clone()
+                    .launch(
+                        LaunchConfig::for_num_elems(head_dim as u32),
+                        (
+                            v4.raw_cache_ptr,
+                            *workspace.d_kv.device_ptr(),
+                            position_ptr,
+                            head_dim as i32,
+                            window as i32,
+                        ),
+                    )
+                    .map_err(|error| format!("{} raw-ring write: {:?}", label, error))?;
+            }
         }
 
         let suffix = if let Some(indexer) = v4.indexer.as_ref() {
@@ -35558,6 +36185,10 @@ impl GpuDecodeStore {
             .as_ref()
             .map(|compressor| compressor.cache_ptr)
             .unwrap_or(0);
+        let compressed_native = v4
+            .compressor
+            .as_ref()
+            .and_then(|compressor| compressor.native_cache.as_ref());
         let compressed_rows = v4
             .compressor
             .as_ref()
@@ -35582,25 +36213,77 @@ impl GpuDecodeStore {
         let alpha = 1.0f32 / (head_dim as f32).sqrt();
         let beta = 1.0f32;
         unsafe {
-            kernels
-                .deepseek_v4_gather_selected_kv_scores
-                .clone()
-                .launch(
-                    LaunchConfig::for_num_elems(gather_elements),
-                    (
-                        *workspace.d_selected_kv.device_ptr(),
-                        *workspace.d_attention_scores.device_ptr(),
-                        v4.raw_cache_ptr,
-                        compressed_ptr,
-                        *workspace.d_indices.device_ptr(),
-                        heads_i32,
-                        head_dim_i32,
-                        selected_i32,
-                        window as i32,
-                        compressed_rows as i32,
-                    ),
-                )
-                .map_err(|error| format!("{} selected KV gather: {:?}", label, error))?;
+            if let Some(raw_native) = v4.raw_native_cache.as_ref() {
+                let compressed_codes = compressed_native.map(|cache| cache.codes_ptr).unwrap_or(0);
+                let compressed_scales = compressed_native
+                    .map(|cache| cache.scale_exponents_ptr)
+                    .unwrap_or(0);
+                let compressed_tails = compressed_native.map(|cache| cache.tail_ptr).unwrap_or(0);
+                let mut a0 = *workspace.d_selected_kv.device_ptr();
+                let mut a1 = *workspace.d_attention_scores.device_ptr();
+                let mut a2 = raw_native.codes_ptr;
+                let mut a3 = raw_native.scale_exponents_ptr;
+                let mut a4 = raw_native.tail_ptr;
+                let mut a5 = compressed_codes;
+                let mut a6 = compressed_scales;
+                let mut a7 = compressed_tails;
+                let mut a8 = *workspace.d_indices.device_ptr();
+                let mut a9 = heads_i32;
+                let mut a10 = head_dim_i32;
+                let mut a11 = raw_native.quant_cols as i32;
+                let mut a12 = raw_native.block_size as i32;
+                let mut a13 = selected_i32;
+                let mut a14 = window as i32;
+                let mut a15 = compressed_rows as i32;
+                let mut params: Vec<*mut std::ffi::c_void> = vec![
+                    &mut a0 as *mut _ as *mut std::ffi::c_void,
+                    &mut a1 as *mut _ as *mut std::ffi::c_void,
+                    &mut a2 as *mut _ as *mut std::ffi::c_void,
+                    &mut a3 as *mut _ as *mut std::ffi::c_void,
+                    &mut a4 as *mut _ as *mut std::ffi::c_void,
+                    &mut a5 as *mut _ as *mut std::ffi::c_void,
+                    &mut a6 as *mut _ as *mut std::ffi::c_void,
+                    &mut a7 as *mut _ as *mut std::ffi::c_void,
+                    &mut a8 as *mut _ as *mut std::ffi::c_void,
+                    &mut a9 as *mut _ as *mut std::ffi::c_void,
+                    &mut a10 as *mut _ as *mut std::ffi::c_void,
+                    &mut a11 as *mut _ as *mut std::ffi::c_void,
+                    &mut a12 as *mut _ as *mut std::ffi::c_void,
+                    &mut a13 as *mut _ as *mut std::ffi::c_void,
+                    &mut a14 as *mut _ as *mut std::ffi::c_void,
+                    &mut a15 as *mut _ as *mut std::ffi::c_void,
+                ];
+                kernels
+                    .deepseek_v4_gather_selected_native_kv_scores
+                    .clone()
+                    .launch(
+                        LaunchConfig::for_num_elems(gather_elements),
+                        &mut params,
+                    )
+                    .map_err(|error| {
+                        format!("{} selected Native KV gather: {:?}", label, error)
+                    })?;
+            } else {
+                kernels
+                    .deepseek_v4_gather_selected_kv_scores
+                    .clone()
+                    .launch(
+                        LaunchConfig::for_num_elems(gather_elements),
+                        (
+                            *workspace.d_selected_kv.device_ptr(),
+                            *workspace.d_attention_scores.device_ptr(),
+                            v4.raw_cache_ptr,
+                            compressed_ptr,
+                            *workspace.d_indices.device_ptr(),
+                            heads_i32,
+                            head_dim_i32,
+                            selected_i32,
+                            window as i32,
+                            compressed_rows as i32,
+                        ),
+                    )
+                    .map_err(|error| format!("{} selected KV gather: {:?}", label, error))?;
+            }
             cublas_result::gemm_ex(
                 *self.blas.handle(),
                 cublas_sys::cublasOperation_t::CUBLAS_OP_T,
@@ -35634,31 +36317,52 @@ impl GpuDecodeStore {
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or_else(|| format!("{} sparse-output shared bytes exceed u32", label))?;
         unsafe {
-            kernels
-                .deepseek_v4_sparse_output_cached_exp
-                .clone()
-                .launch(
-                    LaunchConfig {
-                        grid_dim: (heads as u32, 1, 1),
-                        block_dim: (output_threads, 1, 1),
-                        shared_mem_bytes: output_shared_bytes,
-                    },
-                    (
-                        *workspace.d_attention.device_ptr(),
-                        *workspace.d_attention_scores.device_ptr(),
-                        *workspace.d_indices.device_ptr(),
-                        v4.raw_cache_ptr,
-                        compressed_ptr,
-                        v4.attn_sink_ptr,
-                        1i32,
-                        heads as i32,
-                        head_dim as i32,
-                        selected as i32,
-                        window as i32,
-                        compressed_rows as i32,
-                    ),
-                )
-                .map_err(|error| format!("{} sparse output: {:?}", label, error))?;
+            let output_config = LaunchConfig {
+                grid_dim: (heads as u32, 1, 1),
+                block_dim: (output_threads, 1, 1),
+                shared_mem_bytes: output_shared_bytes,
+            };
+            if v4.raw_native_cache.is_some() {
+                kernels
+                    .deepseek_v4_sparse_output_selected_cached_exp
+                    .clone()
+                    .launch(
+                        output_config,
+                        (
+                            *workspace.d_attention.device_ptr(),
+                            *workspace.d_attention_scores.device_ptr(),
+                            *workspace.d_selected_kv.device_ptr(),
+                            v4.attn_sink_ptr,
+                            1i32,
+                            heads as i32,
+                            head_dim as i32,
+                            selected as i32,
+                        ),
+                    )
+                    .map_err(|error| format!("{} Native sparse output: {:?}", label, error))?;
+            } else {
+                kernels
+                    .deepseek_v4_sparse_output_cached_exp
+                    .clone()
+                    .launch(
+                        output_config,
+                        (
+                            *workspace.d_attention.device_ptr(),
+                            *workspace.d_attention_scores.device_ptr(),
+                            *workspace.d_indices.device_ptr(),
+                            v4.raw_cache_ptr,
+                            compressed_ptr,
+                            v4.attn_sink_ptr,
+                            1i32,
+                            heads as i32,
+                            head_dim as i32,
+                            selected as i32,
+                            window as i32,
+                            compressed_rows as i32,
+                        ),
+                    )
+                    .map_err(|error| format!("{} sparse output: {:?}", label, error))?;
+            }
         }
         mark_path(2, "deepseek-v4-sparse-output-end")?;
         self.launch_deepseek_v4_tail_rope_for_graph(
@@ -35697,35 +36401,19 @@ impl GpuDecodeStore {
                 groups,
             )?;
         } else {
-            for group in 0..groups {
-                let input_offset = group
-                    .checked_mul(group_width)
-                    .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
-                    .ok_or_else(|| format!("{} group input offset overflow", label))?;
-                let weight_offset = group
-                    .checked_mul(rank_per_group)
-                    .and_then(|value| value.checked_mul(group_width))
-                    .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
-                    .ok_or_else(|| format!("{} group weight offset overflow", label))?;
-                let output_offset = group
-                    .checked_mul(rank_per_group)
-                    .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
-                    .ok_or_else(|| format!("{} group output offset overflow", label))?;
-                let group_weight = GpuWeight::new(
-                    wo_a.ptr + weight_offset as u64,
-                    rank_per_group,
-                    group_width,
-                    wo_a.dtype,
-                );
-                self.gemv_bf16_internal(
-                    &group_weight,
-                    *workspace.d_attention.device_ptr() + input_offset as u64,
-                    *workspace.d_o_rank.device_ptr() + output_offset as u64,
-                )?;
-            }
+            return Err(format!(
+                "{} WO-A has non-BF16 dtype {} without an HQQ descriptor",
+                label, wo_a.dtype
+            ));
         }
         mark_path(4, "deepseek-v4-grouped-wo-a-end")?;
-        self.gemv_bf16_internal(wo_b, *workspace.d_o_rank.device_ptr(), hidden_ptr)?;
+        self.deepseek_v4_projection_gemv_bf16(
+            &v4,
+            "wo_b",
+            wo_b,
+            *workspace.d_o_rank.device_ptr(),
+            hidden_ptr,
+        )?;
         mark_path(5, "deepseek-v4-output-projection-end")?;
         Ok(())
     }
@@ -38187,6 +38875,8 @@ impl GpuDecodeStore {
         let mut deepseek_v4_index_topk = 0usize;
         let mut deepseek_v4_index_head_dim = 0usize;
         let mut deepseek_v4_static_compress_ratio = 0usize;
+        let mut deepseek_v4_native_cache = false;
+        let mut deepseek_v4_min_compress_ratio = 0usize;
 
         // Detect dimensions from first GQA layer
         for l in &graph.layers {
@@ -38262,6 +38952,15 @@ impl GpuDecodeStore {
                 }
                 deepseek_v4_hc_mult = hc.mult;
                 deepseek_v4_sliding_window = v4.sliding_window;
+                deepseek_v4_native_cache |= v4.raw_native_cache.is_some();
+                if v4.compress_ratio > 0 {
+                    deepseek_v4_min_compress_ratio =
+                        if deepseek_v4_min_compress_ratio == 0 {
+                            v4.compress_ratio
+                        } else {
+                            deepseek_v4_min_compress_ratio.min(v4.compress_ratio)
+                        };
+                }
                 if let Some(indexer) = &v4.indexer {
                     deepseek_v4_index_topk = deepseek_v4_index_topk.max(indexer.index_topk);
                     deepseek_v4_index_head_dim =
@@ -38481,6 +39180,8 @@ impl GpuDecodeStore {
             deepseek_v4_index_topk,
             deepseek_v4_index_head_dim,
             deepseek_v4_static_compress_ratio,
+            deepseek_v4_native_cache,
+            deepseek_v4_min_compress_ratio,
         };
         let (fused_moe_w1_ctmp_floats, fused_moe_w2_ctmp_floats) =
             fused_moe_ctmp_floats_for_config(&config);
@@ -38705,6 +39406,38 @@ impl GpuDecodeStore {
                         )
                     })
                 };
+                let make_projection = |wid: usize,
+                                       name: &str|
+                 -> Result<crate::gpu_prefill::DeepseekV4ProjectionPrefillDescriptor, String> {
+                    if v4.hqq_tensors.contains_key(name) {
+                        let desc = self.hqq_runtime_prefill_exec_desc_for_tensor(i, name)?;
+                        return Ok(
+                            crate::gpu_prefill::DeepseekV4ProjectionPrefillDescriptor::Hqq {
+                                tensor_name: name.to_string(),
+                                desc: crate::gpu_prefill::HqqTensorExecDescriptor {
+                                    packed_ptr: desc.packed_ptr,
+                                    scales_ptr: desc.scales_ptr,
+                                    zeros_ptr: desc.zeros_ptr,
+                                    rows: desc.rows,
+                                    cols: desc.cols,
+                                    group_size: desc.group_size,
+                                    axis: desc.axis,
+                                    layout: desc.layout,
+                                    packed_dtype: desc.packed_dtype,
+                                    scales_dtype: desc.scales_dtype,
+                                    zeros_dtype: desc.zeros_dtype,
+                                    original_dtype: desc.original_dtype,
+                                    tensor_bytes: desc.tensor_bytes,
+                                },
+                            },
+                        );
+                    }
+                    Ok(
+                        crate::gpu_prefill::DeepseekV4ProjectionPrefillDescriptor::Bf16(
+                            require_bf16(wid, name)?,
+                        ),
+                    )
+                };
                 let require_f32 = |wid: usize, name: &str| -> Result<F32Weight, String> {
                     extract_f32(wid).ok_or_else(|| {
                         format!(
@@ -38717,6 +39450,18 @@ impl GpuDecodeStore {
                     |registration: &DeepseekV4CompressorRegistration,
                      prefix: &str|
                      -> Result<DeepseekV4CompressorPrefillDescriptor, String> {
+                        let native_cache = registration.native_cache.as_ref().map(|cache| {
+                            crate::gpu_prefill::DeepseekV4NativeCachePrefillDescriptor {
+                                codes_ptr: cache.codes_ptr,
+                                scale_exponents_ptr: cache.scale_exponents_ptr,
+                                tail_ptr: cache.tail_ptr,
+                                rows: cache.rows,
+                                width: cache.width,
+                                quant_cols: cache.quant_cols,
+                                block_size: cache.block_size,
+                                code_bits: cache.code_bits,
+                            }
+                        });
                         Ok(DeepseekV4CompressorPrefillDescriptor {
                             ape: require_f32(registration.ape_wid, &format!("{}.ape", prefix))?,
                             wkv: require_bf16(registration.wkv_wid, &format!("{}.wkv", prefix))?,
@@ -38727,6 +39472,7 @@ impl GpuDecodeStore {
                             norm_ptr: registration.norm_ptr,
                             cache_ptr: registration.cache_ptr,
                             cache_rows: registration.cache_rows,
+                            native_cache,
                             kv_state_ptr: registration.kv_state_ptr,
                             kv_state_elems: registration.kv_state_elems,
                             score_state_ptr: registration.score_state_ptr,
@@ -38760,11 +39506,11 @@ impl GpuDecodeStore {
                     None
                 };
                 lw.deepseek_v4 = Some(DeepseekV4PrefillDescriptor {
-                    wq_a: require_bf16(v4.wq_a_wid, "wq_a")?,
-                    wq_b: require_bf16(v4.wq_b_wid, "wq_b")?,
-                    wkv: require_bf16(v4.wkv_wid, "wkv")?,
+                    wq_a: make_projection(v4.wq_a_wid, "wq_a")?,
+                    wq_b: make_projection(v4.wq_b_wid, "wq_b")?,
+                    wkv: make_projection(v4.wkv_wid, "wkv")?,
                     wo_a: require_bf16(v4.wo_a_wid, "wo_a")?,
-                    wo_b: require_bf16(v4.wo_b_wid, "wo_b")?,
+                    wo_b: make_projection(v4.wo_b_wid, "wo_b")?,
                     attn_sink_ptr: v4.attn_sink_ptr,
                     q_norm_ptr: v4.q_norm_ptr,
                     kv_norm_ptr: v4.kv_norm_ptr,
@@ -38775,6 +39521,18 @@ impl GpuDecodeStore {
                     sliding_window: v4.sliding_window,
                     compress_ratio: v4.compress_ratio,
                     raw_cache_ptr: v4.raw_cache_ptr,
+                    raw_native_cache: v4.raw_native_cache.as_ref().map(|cache| {
+                        crate::gpu_prefill::DeepseekV4NativeCachePrefillDescriptor {
+                            codes_ptr: cache.codes_ptr,
+                            scale_exponents_ptr: cache.scale_exponents_ptr,
+                            tail_ptr: cache.tail_ptr,
+                            rows: cache.rows,
+                            width: cache.width,
+                            quant_cols: cache.quant_cols,
+                            block_size: cache.block_size,
+                            code_bits: cache.code_bits,
+                        }
+                    }),
                     rope_cos_ptr: v4.rope_cos_ptr,
                     rope_sin_ptr: v4.rope_sin_ptr,
                     rope_rows: v4.rope_rows,
@@ -65584,9 +66342,6 @@ impl GpuDecodeStore {
         }
 
         let spc = hcs.soft_slots_per_chunk;
-        if crate::vram_monitor::pressure_pending(device_id).is_none() {
-            hcs.clear_pressure_cap();
-        }
         let decode_budget_mb = cal
             .map(|cal| cal.decode_hcs_budget_mb(actual_tokens) as usize)
             .unwrap_or(hcs.hard_budget_mb + hcs.soft_max_mb);
@@ -66003,9 +66758,6 @@ impl GpuDecodeStore {
         }
 
         let spc = hcs.soft_slots_per_chunk;
-        if crate::vram_monitor::pressure_pending(device_id).is_none() {
-            hcs.clear_pressure_cap();
-        }
         let decode_budget_mb = cal
             .map(|cal| cal.decode_hcs_budget_mb(actual_tokens) as usize)
             .unwrap_or(hcs.hard_budget_mb + hcs.soft_max_mb);

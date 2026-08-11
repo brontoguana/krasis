@@ -1,0 +1,17 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Date:          2026-08-10T10:13:21.213181
+Config:        tests/deepseek-v4-flash-0731-hqq8.conf
+Model:         /home/main/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-0731
+Dataset:       wikitext-2
+Attention:     hqq8
+KV dtype:      bf16
+Window size:   2048
+Stride:        1024
+Perplexity:    4.8160
+BPC:           2.2678
+Mean loss:     1.571951
+Tokens scored: 287736 / 287737
+Windows:       281
+Elapsed:       4846.8s
+Throughput:    59 tok/s

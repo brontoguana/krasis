@@ -31,6 +31,8 @@ TRTLLM_BLOCK_CONSTRAINT = 128
 # smaller learned latent rank are zero-padded to this kernel contract; larger
 # learned ranks retain their actual dimension.
 MLA_CKV_KERNEL_MIN_DIM = 512
+DSV4_FP8_QAT_BLOCK_SIZE = 64
+DSV4_FP4_QAT_BLOCK_SIZE = 32
 
 
 class PagedKVCache:
@@ -79,6 +81,7 @@ class PagedKVCache:
             "k6v4": "k6v4",
             "k4v4": "k4v4",
             "tq4": "tq4",
+            "native": "native",
         }
         self.kv_format_str = kv_aliases.get(kv_format, kv_format)
         self.enable_ring_window = bool(enable_ring_window)
@@ -101,17 +104,19 @@ class PagedKVCache:
             self.kv_format = 8
         elif self.kv_format_str == "k4v4":
             self.kv_format = 9
+        elif self.kv_format_str == "native":
+            self.kv_format = 10
 
         # Compute cache dimensions based on attention type. DeepSeek-V4 has a
         # distinct K-only sparse-attention state; it is neither MLA nor GQA.
         if cfg.is_deepseek_v4:
             if combined:
                 raise ValueError("DeepSeek-V4 does not use a combined MLA KV cache")
-            if self.kv_format_str != "bf16" or kv_dtype != torch.bfloat16:
+            if self.kv_format_str not in ("bf16", "native") or kv_dtype != torch.bfloat16:
                 raise ValueError(
-                    "DeepSeek-V4 correctness bring-up requires source-faithful BF16 KV state; "
+                    "DeepSeek-V4 supports its source-native packed state or expanded BF16 state; "
                     f"got kv_format={self.kv_format_str!r}, dtype={kv_dtype}. "
-                    "No quantized-cache fallback is available."
+                    "Conventional k4v4/k6v6 cache formats do not represent this architecture."
                 )
             if cfg.attention_head_dim <= 0 or cfg.index_head_dim <= 0:
                 raise ValueError(
@@ -138,6 +143,17 @@ class PagedKVCache:
             self.gqa_head_dim = None
             self.kv_cache_dim = cfg.attention_head_dim
             self.variable_gqa_dims = False
+            self.dsv4_quant_cols = cfg.attention_head_dim - cfg.qk_rope_head_dim
+            if self.dsv4_quant_cols <= 0:
+                raise ValueError(
+                    "DeepSeek-V4 requires attention_head_dim greater than qk_rope_head_dim"
+                )
+            self.dsv4_fp8_blocks = math.ceil(
+                self.dsv4_quant_cols / DSV4_FP8_QAT_BLOCK_SIZE
+            )
+            self.dsv4_fp4_blocks = math.ceil(
+                cfg.index_head_dim / DSV4_FP4_QAT_BLOCK_SIZE
+            )
         elif cfg.is_mla:
             if combined:
                 raise ValueError(
@@ -270,6 +286,9 @@ class PagedKVCache:
         self.dsv4_raw_cache = None
         self.dsv4_compressed_cache = None
         self.dsv4_index_cache = None
+        self.dsv4_raw_native = None
+        self.dsv4_compressed_native = None
+        self.dsv4_index_native = None
         self.dsv4_compressor_kv_state = None
         self.dsv4_compressor_score_state = None
         self.dsv4_index_kv_state = None
@@ -280,6 +299,9 @@ class PagedKVCache:
             self.dsv4_raw_cache = []
             self.dsv4_compressed_cache = []
             self.dsv4_index_cache = []
+            self.dsv4_raw_native = []
+            self.dsv4_compressed_native = []
+            self.dsv4_index_native = []
             self.dsv4_compressor_kv_state = []
             self.dsv4_compressor_score_state = []
             self.dsv4_index_kv_state = []
@@ -287,18 +309,40 @@ class PagedKVCache:
             context_tokens = max_pages * page_size
             alloc_bytes = 0
             for ratio in self.dsv4_compress_ratios:
-                raw = torch.zeros(
-                    cfg.sliding_window,
-                    cfg.attention_head_dim,
-                    dtype=torch.bfloat16,
-                    device=device,
-                )
+                if self.kv_format_str == "native":
+                    raw = None
+                    raw_native = {
+                        "codes": torch.zeros(
+                            cfg.sliding_window, self.dsv4_quant_cols,
+                            dtype=torch.uint8, device=device,
+                        ),
+                        "scales": torch.zeros(
+                            cfg.sliding_window, self.dsv4_fp8_blocks,
+                            dtype=torch.int8, device=device,
+                        ),
+                        "tail": torch.zeros(
+                            cfg.sliding_window, cfg.qk_rope_head_dim,
+                            dtype=torch.bfloat16, device=device,
+                        ),
+                    }
+                    alloc_bytes += sum(tensor.nbytes for tensor in raw_native.values())
+                else:
+                    raw = torch.zeros(
+                        cfg.sliding_window,
+                        cfg.attention_head_dim,
+                        dtype=torch.bfloat16,
+                        device=device,
+                    )
+                    raw_native = None
+                    alloc_bytes += raw.nbytes
                 self.dsv4_raw_cache.append(raw)
-                alloc_bytes += raw.nbytes
+                self.dsv4_raw_native.append(raw_native)
 
                 if ratio == 0:
                     self.dsv4_compressed_cache.append(None)
                     self.dsv4_index_cache.append(None)
+                    self.dsv4_compressed_native.append(None)
+                    self.dsv4_index_native.append(None)
                     self.dsv4_compressor_kv_state.append(None)
                     self.dsv4_compressor_score_state.append(None)
                     self.dsv4_index_kv_state.append(None)
@@ -306,12 +350,34 @@ class PagedKVCache:
                     continue
 
                 compressed_rows = max(1, math.ceil(context_tokens / ratio))
-                compressed = torch.zeros(
-                    compressed_rows,
-                    cfg.attention_head_dim,
-                    dtype=torch.bfloat16,
-                    device=device,
-                )
+                if self.kv_format_str == "native":
+                    compressed = None
+                    compressed_native = {
+                        "codes": torch.zeros(
+                            compressed_rows, self.dsv4_quant_cols,
+                            dtype=torch.uint8, device=device,
+                        ),
+                        "scales": torch.zeros(
+                            compressed_rows, self.dsv4_fp8_blocks,
+                            dtype=torch.int8, device=device,
+                        ),
+                        "tail": torch.zeros(
+                            compressed_rows, cfg.qk_rope_head_dim,
+                            dtype=torch.bfloat16, device=device,
+                        ),
+                    }
+                    compressed_bytes = sum(
+                        tensor.nbytes for tensor in compressed_native.values()
+                    )
+                else:
+                    compressed = torch.zeros(
+                        compressed_rows,
+                        cfg.attention_head_dim,
+                        dtype=torch.bfloat16,
+                        device=device,
+                    )
+                    compressed_native = None
+                    compressed_bytes = compressed.nbytes
                 overlap_width = 2 if ratio == 4 else 1
                 state_rows = overlap_width * ratio
                 state_cols = overlap_width * cfg.attention_head_dim
@@ -325,17 +391,36 @@ class PagedKVCache:
                     device=device,
                 )
                 self.dsv4_compressed_cache.append(compressed)
+                self.dsv4_compressed_native.append(compressed_native)
                 self.dsv4_compressor_kv_state.append(compressor_kv)
                 self.dsv4_compressor_score_state.append(compressor_score)
-                alloc_bytes += compressed.nbytes + compressor_kv.nbytes + compressor_score.nbytes
+                alloc_bytes += compressed_bytes + compressor_kv.nbytes + compressor_score.nbytes
 
                 if ratio == 4:
-                    index_cache = torch.zeros(
-                        compressed_rows,
-                        cfg.index_head_dim,
-                        dtype=torch.bfloat16,
-                        device=device,
-                    )
+                    if self.kv_format_str == "native":
+                        index_cache = None
+                        index_native = {
+                            "codes": torch.zeros(
+                                compressed_rows, math.ceil(cfg.index_head_dim / 2),
+                                dtype=torch.uint8, device=device,
+                            ),
+                            "scales": torch.zeros(
+                                compressed_rows, self.dsv4_fp4_blocks,
+                                dtype=torch.int8, device=device,
+                            ),
+                        }
+                        index_bytes = sum(
+                            tensor.nbytes for tensor in index_native.values()
+                        )
+                    else:
+                        index_cache = torch.zeros(
+                            compressed_rows,
+                            cfg.index_head_dim,
+                            dtype=torch.bfloat16,
+                            device=device,
+                        )
+                        index_native = None
+                        index_bytes = index_cache.nbytes
                     index_state_cols = overlap_width * cfg.index_head_dim
                     index_kv = torch.zeros(
                         state_rows, index_state_cols, dtype=torch.float32, device=device
@@ -347,11 +432,13 @@ class PagedKVCache:
                         device=device,
                     )
                     self.dsv4_index_cache.append(index_cache)
+                    self.dsv4_index_native.append(index_native)
                     self.dsv4_index_kv_state.append(index_kv)
                     self.dsv4_index_score_state.append(index_score)
-                    alloc_bytes += index_cache.nbytes + index_kv.nbytes + index_score.nbytes
+                    alloc_bytes += index_bytes + index_kv.nbytes + index_score.nbytes
                 else:
                     self.dsv4_index_cache.append(None)
+                    self.dsv4_index_native.append(None)
                     self.dsv4_index_kv_state.append(None)
                     self.dsv4_index_score_state.append(None)
 
@@ -362,7 +449,11 @@ class PagedKVCache:
                     f"allocated={alloc_bytes}, expected={expected_bytes}"
                 )
             alloc_mb = alloc_bytes / (1024**2)
-            layout_str = "deepseek-v4-bf16-raw-csa-hca-index"
+            layout_str = (
+                "deepseek-v4-native-qat-raw-csa-hca-index"
+                if self.kv_format_str == "native"
+                else "deepseek-v4-bf16-raw-csa-hca-index"
+            )
         elif cfg.is_gqa:
             if self.kv_format == 2:
                 # Polar4: radius (BF16) + angles (4-bit uint8)
@@ -590,27 +681,51 @@ class PagedKVCache:
         self._free_pages.reverse()  # pop from end
 
     def _dsv4_bytes_for_pages(self, max_pages: int) -> int:
-        """Exact BF16 V4 cache/state bytes for a logical page capacity."""
+        """Exact V4 cache/state bytes for a logical page capacity."""
         if max_pages <= 0:
             raise ValueError(f"DeepSeek-V4 max_pages must be positive, got {max_pages}")
         context_tokens = max_pages * self.page_size
         head_dim = self.cfg.attention_head_dim
         index_dim = self.cfg.index_head_dim
         total = 0
+        quant_cols = getattr(
+            self,
+            "dsv4_quant_cols",
+            head_dim - self.cfg.qk_rope_head_dim,
+        )
+        fp8_blocks = getattr(
+            self,
+            "dsv4_fp8_blocks",
+            math.ceil(quant_cols / DSV4_FP8_QAT_BLOCK_SIZE),
+        )
+        fp4_blocks = getattr(
+            self,
+            "dsv4_fp4_blocks",
+            math.ceil(index_dim / DSV4_FP4_QAT_BLOCK_SIZE),
+        )
+        kv_format_str = getattr(self, "kv_format_str", "bf16")
+        native_main_row = (
+            quant_cols
+            + fp8_blocks
+            + self.cfg.qk_rope_head_dim * 2
+        )
+        native_index_row = math.ceil(index_dim / 2) + fp4_blocks
+        main_row_bytes = native_main_row if kv_format_str == "native" else head_dim * 2
+        index_row_bytes = native_index_row if kv_format_str == "native" else index_dim * 2
         for ratio in self.dsv4_compress_ratios:
-            total += self.cfg.sliding_window * head_dim * 2
+            total += self.cfg.sliding_window * main_row_bytes
             if ratio == 0:
                 continue
 
             compressed_rows = max(1, math.ceil(context_tokens / ratio))
-            total += compressed_rows * head_dim * 2
+            total += compressed_rows * main_row_bytes
             overlap_width = 2 if ratio == 4 else 1
             state_rows = overlap_width * ratio
             state_cols = overlap_width * head_dim
             total += state_rows * state_cols * 4 * 2  # KV and score FP32 states
 
             if ratio == 4:
-                total += compressed_rows * index_dim * 2
+                total += compressed_rows * index_row_bytes
                 index_state_cols = overlap_width * index_dim
                 total += state_rows * index_state_cols * 4 * 2
         return total
@@ -836,13 +951,19 @@ class PagedKVCache:
             )
         return {
             "raw": self.dsv4_raw_cache[layer_offset],
+            "raw_native": self.dsv4_raw_native[layer_offset],
             "compressed": self.dsv4_compressed_cache[layer_offset],
+            "compressed_native": self.dsv4_compressed_native[layer_offset],
             "index": self.dsv4_index_cache[layer_offset],
+            "index_native": self.dsv4_index_native[layer_offset],
             "compressor_kv_state": self.dsv4_compressor_kv_state[layer_offset],
             "compressor_score_state": self.dsv4_compressor_score_state[layer_offset],
             "index_kv_state": self.dsv4_index_kv_state[layer_offset],
             "index_score_state": self.dsv4_index_score_state[layer_offset],
             "ratio": self.dsv4_compress_ratios[layer_offset],
+            "format": self.kv_format_str,
+            "fp8_block_size": DSV4_FP8_QAT_BLOCK_SIZE,
+            "fp4_block_size": DSV4_FP4_QAT_BLOCK_SIZE,
         }
 
     # ── GQA cache access ──
