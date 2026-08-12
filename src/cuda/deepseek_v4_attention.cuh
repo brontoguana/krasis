@@ -1,6 +1,7 @@
 #pragma once
 
 #include <math.h>
+#include <stdint.h>
 
 // Source-faithful DeepSeek-V4 sparse attention primitives shared by prefill
 // and decode. Geometry and cache boundaries are runtime inputs.
@@ -406,6 +407,75 @@ extern "C" __global__ void deepseek_v4_prefill_gather_scores_bf16_kernel(
     scores[score_linear] = valid ? 0.0f : -INFINITY;
 }
 
+// Copy selected BF16 value rows in 16-byte chunks while retaining the scalar
+// score-initialization contract. Runtime head width determines both the chunk
+// count and the scalar tail; unaligned rows are copied element-by-element, so
+// no model-specific alignment assumption or fallback path is required.
+extern "C" __global__ void deepseek_v4_prefill_gather_scores_bf16x8_kernel(
+    __nv_bfloat16* __restrict__ selected_kv,
+    float* __restrict__ scores,
+    const __nv_bfloat16* __restrict__ raw,
+    const __nv_bfloat16* __restrict__ compressed,
+    const int* __restrict__ indices,
+    int tokens,
+    int heads,
+    int head_dim,
+    int topk,
+    int raw_rows,
+    int compressed_rows)
+{
+    constexpr int values_per_thread = 8;
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t selected_rows = (int64_t)tokens * topk;
+    int64_t chunks_per_row = (head_dim + values_per_thread - 1) / values_per_thread;
+    int64_t value_chunks = selected_rows * chunks_per_row;
+    int64_t score_per_token = (int64_t)heads * topk;
+    int64_t score_elements = (int64_t)tokens * score_per_token;
+    int64_t total = value_chunks + score_elements;
+    if (linear >= total || selected_kv == nullptr || scores == nullptr ||
+        raw == nullptr || indices == nullptr || tokens <= 0 || heads <= 0 ||
+        head_dim <= 0 || topk <= 0 || raw_rows < 0 || compressed_rows < 0) {
+        return;
+    }
+
+    if (linear < value_chunks) {
+        int64_t selected_row = linear / chunks_per_row;
+        int chunk = (int)(linear - selected_row * chunks_per_row);
+        int token = (int)(selected_row / topk);
+        int selected = (int)(selected_row - (int64_t)token * topk);
+        int dim = chunk * values_per_thread;
+        int count = min(values_per_thread, head_dim - dim);
+        int index = indices[(int64_t)token * topk + selected];
+        const __nv_bfloat16* kv = dsv4_attn_kv_row(
+            index, raw, raw_rows, compressed, compressed_rows, head_dim);
+        __nv_bfloat16* destination = selected_kv + selected_row * head_dim + dim;
+        if (count == values_per_thread &&
+            (((uintptr_t)destination | (uintptr_t)(kv == nullptr ? destination : kv + dim)) &
+             (alignof(uint4) - 1)) == 0) {
+            *reinterpret_cast<uint4*>(destination) = kv == nullptr
+                ? make_uint4(0, 0, 0, 0)
+                : *reinterpret_cast<const uint4*>(kv + dim);
+        } else {
+            for (int offset = 0; offset < count; ++offset) {
+                destination[offset] = kv == nullptr
+                    ? dsv4_attn_f32_to_bf16(0.0f)
+                    : kv[dim + offset];
+            }
+        }
+        return;
+    }
+
+    int64_t score_linear = linear - value_chunks;
+    int token = (int)(score_linear / score_per_token);
+    int selected = (int)(score_linear % topk);
+    int index = indices[(int64_t)token * topk + selected];
+    bool valid = index >= 0 &&
+        (index < raw_rows ||
+         (compressed != nullptr && index - raw_rows >= 0 &&
+          index - raw_rows < compressed_rows));
+    scores[score_linear] = valid ? 0.0f : -INFINITY;
+}
+
 extern "C" __global__ void deepseek_v4_prefill_gather_scores_fp32_kernel(
     float* __restrict__ selected_kv,
     float* __restrict__ query_fp32,
@@ -564,6 +634,61 @@ extern "C" __global__ void deepseek_v4_prefill_softmax_weights_bf16_kernel(
         weights + ((int64_t)token * heads + head) * topk;
     for (int selected = (int)threadIdx.x; selected < topk;
          selected += (int)blockDim.x) {
+        float value = score_row[selected];
+        float weight = isfinite(value) ? expf(value - row_max) / denominator : 0.0f;
+        weight_row[selected] = dsv4_attn_f32_to_bf16(weight);
+    }
+}
+
+// One warp computes one (token, head) row. The block-wide reference above
+// launches 512 or 1024 threads for the production selected widths even though
+// each thread touches at most two scores. Packing several rows into one block
+// removes most launch/reduction overhead while preserving FP32 max/sum and the
+// final BF16 weight contract. The reduction tree differs from the reference
+// and is therefore selected only by the explicitly validated runtime mode.
+extern "C" __global__ void deepseek_v4_prefill_softmax_weights_warp_bf16_kernel(
+    __nv_bfloat16* __restrict__ weights,
+    const float* __restrict__ scores,
+    const float* __restrict__ attention_sink,
+    int tokens,
+    int heads,
+    int topk)
+{
+    if (weights == nullptr || scores == nullptr || attention_sink == nullptr ||
+        tokens <= 0 || heads <= 0 || topk <= 0) {
+        return;
+    }
+    int lane = (int)threadIdx.x & (warpSize - 1);
+    int warp_in_block = (int)threadIdx.x / warpSize;
+    int warps_per_block = (int)blockDim.x / warpSize;
+    int64_t row = (int64_t)blockIdx.x * warps_per_block + warp_in_block;
+    int64_t rows = (int64_t)tokens * heads;
+    if (row >= rows) return;
+
+    int head = (int)(row % heads);
+    const float* score_row = scores + row * topk;
+    float local_max = lane == 0 ? attention_sink[head] : -INFINITY;
+    for (int selected = lane; selected < topk; selected += warpSize) {
+        local_max = fmaxf(local_max, score_row[selected]);
+    }
+    unsigned mask = 0xffffffffu;
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_max = fmaxf(local_max, __shfl_down_sync(mask, local_max, offset));
+    }
+    float row_max = __shfl_sync(mask, local_max, 0);
+
+    float local_sum = lane == 0 ? expf(attention_sink[head] - row_max) : 0.0f;
+    for (int selected = lane; selected < topk; selected += warpSize) {
+        float value = score_row[selected];
+        if (isfinite(value)) local_sum += expf(value - row_max);
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_sum += __shfl_down_sync(mask, local_sum, offset);
+    }
+    float denominator = __shfl_sync(mask, local_sum, 0);
+
+    __nv_bfloat16* weight_row = weights + row * topk;
+    for (int selected = lane; selected < topk; selected += warpSize) {
         float value = score_row[selected];
         float weight = isfinite(value) ? expf(value - row_max) / denominator : 0.0f;
         weight_row[selected] = dsv4_attn_f32_to_bf16(weight);

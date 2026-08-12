@@ -398,15 +398,11 @@ fn compile_prefill_kernels() {
     println!("cargo:rerun-if-changed={deepseek_v4_attention_header}");
     println!("cargo:rerun-if-changed={deepseek_v4_compressor_header}");
     if !std::path::Path::new(cu_src).exists() {
-        println!("cargo:warning=prefill_kernels.cu not found — GPU prefill kernels disabled");
-        return;
+        panic!("required GPU prefill source is missing: {cu_src}");
     }
 
-    let nvcc = find_nvcc();
-    let Some(nvcc) = nvcc else {
-        println!("cargo:warning=nvcc not found — GPU prefill kernels disabled");
-        return;
-    };
+    let nvcc = find_nvcc()
+        .unwrap_or_else(|| panic!("nvcc is required to build Krasis GPU prefill kernels"));
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let ptx_path = format!("{out_dir}/prefill_kernels.ptx");
@@ -446,10 +442,10 @@ fn compile_prefill_kernels() {
             println!("cargo:warning=Compiled GPU prefill kernels to PTX ({ptx_path})");
         }
         Ok(s) => {
-            println!("cargo:warning=nvcc failed with status {s} — GPU prefill kernels disabled");
+            panic!("nvcc failed to compile required GPU prefill kernels with status {s}");
         }
         Err(e) => {
-            println!("cargo:warning=nvcc execution error: {e} — GPU prefill kernels disabled");
+            panic!("failed to execute nvcc for required GPU prefill kernels: {e}");
         }
     }
 }

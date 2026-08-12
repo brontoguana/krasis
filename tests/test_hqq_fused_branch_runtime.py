@@ -153,6 +153,7 @@ def stage_hqq(store: GpuDecodeStore, layer_idx: int, tensor_name: str, weight: t
         layer_idx=layer_idx,
         tensor_name=tensor_name,
         backend="hqq4",
+        deepseek_v4=False,
         nbits=4,
         format_version=HQQ_ATTENTION_CACHE_VERSION,
         packed_ptr=int(packed.data_ptr()),

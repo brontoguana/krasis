@@ -12,7 +12,9 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#include <cub/block/block_radix_sort.cuh>
 #include <math.h>
+#include <stdint.h>
 #include "deepseek_v4_hc.cuh"
 #define KRASIS_DEEPSEEK_V4_PREFILL_ONLY_KERNELS 1
 #include "deepseek_v4_attention.cuh"
@@ -1519,36 +1521,47 @@ extern "C" __global__ void dsa_prefill_fused_scores_kernel(
 
 // Accumulate one learned-index head after a BF16-input/FP32-accumulate GEMM.
 // The temporary matrix and final score matrix are both row-major
-// [row_count, context_end]. Heads are launched sequentially so this epilogue
-// preserves the model's head summation order while applying ReLU and the
-// BF16-rounded per-row head weight. Future positions are deliberately left
-// untouched because the existing top-k kernel applies the causal boundary.
+// [row_count, score_context_end] and [row_count, output_context_end]
+// respectively. The separate strides let a causal band omit future columns
+// while retaining the full score-row layout consumed by the exact top-k.
+// Heads are launched sequentially so this epilogue preserves the model's head
+// summation order while applying ReLU and the BF16-rounded per-row head weight.
+// Future positions are deliberately left untouched because the existing top-k
+// kernel applies the causal boundary.
 extern "C" __global__ void dsa_prefill_accumulate_gemm_scores_kernel(
     float* __restrict__ output,
-    const float* __restrict__ head_scores,
+    const void* __restrict__ head_scores,
     const __nv_bfloat16* __restrict__ head_weights,
     const int* __restrict__ positions,
     int row_count,
-    int context_end,
+    int output_context_end,
+    int score_context_end,
     int num_heads,
     int head,
-    int initialize)
+    int initialize,
+    int head_scores_bf16)
 {
     int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t total = (int64_t)row_count * context_end;
+    int64_t total = (int64_t)row_count * score_context_end;
     if (linear >= total || positions == nullptr || num_heads <= 0 ||
         head < 0 || head >= num_heads) {
         return;
     }
-    int row = (int)(linear / context_end);
-    int token = (int)(linear - (int64_t)row * context_end);
-    int causal_context = min(max(positions[row] + 1, 0), context_end);
+    int row = (int)(linear / score_context_end);
+    int token = (int)(linear - (int64_t)row * score_context_end);
+    int causal_context = min(max(positions[row] + 1, 0), score_context_end);
     if (token >= causal_context) return;
 
+    float head_score = head_scores_bf16
+        ? bf16_to_float(reinterpret_cast<const __nv_bfloat16*>(head_scores)[linear])
+        : reinterpret_cast<const float*>(head_scores)[linear];
     float contribution = bf16_to_float(
         head_weights[(int64_t)row * num_heads + head]) *
-        fmaxf(head_scores[linear], 0.0f);
-    output[linear] = initialize ? contribution : output[linear] + contribution;
+        fmaxf(head_score, 0.0f);
+    int64_t output_index = (int64_t)row * output_context_end + token;
+    output[output_index] = initialize
+        ? contribution
+        : output[output_index] + contribution;
 }
 
 __device__ inline bool dsa_prefill_topk_precedes(
@@ -1709,6 +1722,198 @@ extern "C" __global__ void dsa_prefill_topk_merge_rows_kernel(
         output_scores[output_base + item] = shared_scores[item];
         output_indices[output_base + item] = shared_indices[item];
         if (output_runs == 1) row_selected[item] = shared_indices[item];
+    }
+}
+
+// Radix candidate for the exact DSA base-run order. The 1,024-entry block
+// capacity is a kernel execution bound; runtime plan geometry remains
+// authoritative and the Rust dispatcher rejects larger explicit requests.
+// Scores are encoded into a numeric total-order key with the existing lower-
+// token-index tie break. Signed zero is normalized because the reference
+// comparator treats -0 and +0 as equal.
+static constexpr int DSA_PREFILL_RADIX_THREADS = 256;
+static constexpr int DSA_PREFILL_RADIX_ITEMS_PER_THREAD = 4;
+static constexpr int DSA_PREFILL_RADIX_CAPACITY =
+    DSA_PREFILL_RADIX_THREADS * DSA_PREFILL_RADIX_ITEMS_PER_THREAD;
+
+__device__ __forceinline__ uint32_t dsa_prefill_ordered_score_bits(float score)
+{
+    if (score == 0.0f) score = 0.0f;
+    uint32_t bits = __float_as_uint(score);
+    return (bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u);
+}
+
+__device__ __forceinline__ float dsa_prefill_score_from_ordered_bits(uint32_t ordered)
+{
+    uint32_t bits = (ordered & 0x80000000u)
+        ? (ordered ^ 0x80000000u)
+        : ~ordered;
+    return __uint_as_float(bits);
+}
+
+__device__ __forceinline__ uint64_t dsa_prefill_topk_key(float score, int index)
+{
+    uint32_t ordered_score = dsa_prefill_ordered_score_bits(score);
+    uint32_t ordered_index = 0xffffffffu - static_cast<uint32_t>(index);
+    return (static_cast<uint64_t>(ordered_score) << 32) | ordered_index;
+}
+
+extern "C" __global__ void dsa_prefill_topk_radix_sort_rows_kernel(
+    const float* __restrict__ input_scores,
+    float* __restrict__ candidate_scores,
+    int* __restrict__ candidate_indices,
+    int* __restrict__ selected_indices,
+    const int* __restrict__ positions,
+    int row_count,
+    int context_end,
+    int selected_stride,
+    int candidate_stride,
+    int initial_runs,
+    int sort_width)
+{
+    int row = blockIdx.y;
+    int run = blockIdx.x;
+    if (row < 0 || row >= row_count || run < 0 || run >= initial_runs ||
+        positions == nullptr || selected_indices == nullptr ||
+        input_scores == nullptr || context_end <= 0 || selected_stride <= 0 ||
+        selected_stride > DSA_PREFILL_RADIX_CAPACITY || sort_width <= 0 ||
+        sort_width > DSA_PREFILL_RADIX_CAPACITY ||
+        blockDim.x != DSA_PREFILL_RADIX_THREADS) {
+        return;
+    }
+
+    using BlockSort = cub::BlockRadixSort<
+        uint64_t,
+        DSA_PREFILL_RADIX_THREADS,
+        DSA_PREFILL_RADIX_ITEMS_PER_THREAD>;
+    __shared__ typename BlockSort::TempStorage sort_storage;
+    uint64_t keys[DSA_PREFILL_RADIX_ITEMS_PER_THREAD];
+    int context = min(max(positions[row] + 1, 0), context_end);
+    int input_base = run * sort_width;
+    const float* row_scores = input_scores + (int64_t)row * context_end;
+
+#pragma unroll
+    for (int item = 0; item < DSA_PREFILL_RADIX_ITEMS_PER_THREAD; ++item) {
+        int within_run = threadIdx.x * DSA_PREFILL_RADIX_ITEMS_PER_THREAD + item;
+        int token = input_base + within_run;
+        float score = within_run < sort_width && token < context
+            ? row_scores[token]
+            : -INFINITY;
+        int index = within_run < sort_width && token < context ? token : INT_MAX;
+        keys[item] = dsa_prefill_topk_key(score, index);
+    }
+    BlockSort(sort_storage).SortDescending(keys);
+
+    int* row_selected = selected_indices + (int64_t)row * selected_stride;
+#pragma unroll
+    for (int item = 0; item < DSA_PREFILL_RADIX_ITEMS_PER_THREAD; ++item) {
+        int output_item = threadIdx.x * DSA_PREFILL_RADIX_ITEMS_PER_THREAD + item;
+        if (output_item >= selected_stride) continue;
+        uint64_t key = keys[item];
+        float score = dsa_prefill_score_from_ordered_bits(static_cast<uint32_t>(key >> 32));
+        int index = static_cast<int>(0xffffffffu - static_cast<uint32_t>(key));
+        if (initial_runs == 1) {
+            row_selected[output_item] = index;
+        } else if (candidate_scores != nullptr && candidate_indices != nullptr &&
+                   candidate_stride >= initial_runs * selected_stride) {
+            int64_t destination = (int64_t)row * candidate_stride +
+                (int64_t)run * selected_stride + output_item;
+            candidate_scores[destination] = score;
+            candidate_indices[destination] = index;
+        }
+    }
+}
+
+// Merge two already sorted retained runs directly. Each output rank performs
+// a deterministic merge-path partition under the exact score/index comparator
+// instead of re-sorting both runs with another bitonic network.
+extern "C" __global__ void dsa_prefill_topk_linear_merge_rows_kernel(
+    const float* __restrict__ input_scores,
+    const int* __restrict__ input_indices,
+    float* __restrict__ output_scores,
+    int* __restrict__ output_indices,
+    int* __restrict__ selected_indices,
+    int row_count,
+    int selected_stride,
+    int candidate_stride,
+    int input_runs,
+    int sort_width)
+{
+    int row = blockIdx.y;
+    int output_run = blockIdx.x;
+    int output_runs = (input_runs + 1) / 2;
+    if (row < 0 || row >= row_count || output_run < 0 ||
+        output_run >= output_runs || input_runs <= 1 ||
+        selected_stride <= 0 || candidate_stride < input_runs * selected_stride ||
+        sort_width < 2 * selected_stride || input_scores == nullptr ||
+        input_indices == nullptr || output_scores == nullptr ||
+        output_indices == nullptr || selected_indices == nullptr) {
+        return;
+    }
+
+    int first_run = output_run * 2;
+    int second_run = first_run + 1;
+    int first_count = selected_stride;
+    int second_count = second_run < input_runs ? selected_stride : 0;
+    int64_t row_base = (int64_t)row * candidate_stride;
+    const float* first_scores = input_scores + row_base +
+        (int64_t)first_run * selected_stride;
+    const int* first_indices = input_indices + row_base +
+        (int64_t)first_run * selected_stride;
+    const float* second_scores = input_scores + row_base +
+        (int64_t)second_run * selected_stride;
+    const int* second_indices = input_indices + row_base +
+        (int64_t)second_run * selected_stride;
+    int64_t output_base = row_base + (int64_t)output_run * selected_stride;
+    int* row_selected = selected_indices + (int64_t)row * selected_stride;
+
+    for (int rank = threadIdx.x; rank < selected_stride; rank += blockDim.x) {
+        int low = max(0, rank - second_count);
+        int high = min(rank, first_count);
+        int first_take = low;
+        while (low <= high) {
+            int candidate_first = (low + high) / 2;
+            int candidate_second = rank - candidate_first;
+            bool first_too_large = candidate_first > 0 &&
+                candidate_second < second_count &&
+                dsa_prefill_topk_precedes(
+                    second_scores[candidate_second],
+                    second_indices[candidate_second],
+                    first_scores[candidate_first - 1],
+                    first_indices[candidate_first - 1]);
+            bool first_too_small = candidate_second > 0 &&
+                candidate_first < first_count &&
+                dsa_prefill_topk_precedes(
+                    first_scores[candidate_first],
+                    first_indices[candidate_first],
+                    second_scores[candidate_second - 1],
+                    second_indices[candidate_second - 1]);
+            if (first_too_large) {
+                high = candidate_first - 1;
+            } else if (first_too_small) {
+                low = candidate_first + 1;
+            } else {
+                first_take = candidate_first;
+                break;
+            }
+        }
+        int second_take = rank - first_take;
+        bool choose_first = first_take < first_count &&
+            (second_take >= second_count ||
+             dsa_prefill_topk_precedes(
+                 first_scores[first_take],
+                 first_indices[first_take],
+                 second_scores[second_take],
+                 second_indices[second_take]));
+        float score = choose_first
+            ? first_scores[first_take]
+            : second_scores[second_take];
+        int index = choose_first
+            ? first_indices[first_take]
+            : second_indices[second_take];
+        output_scores[output_base + rank] = score;
+        output_indices[output_base + rank] = index;
+        if (output_runs == 1) row_selected[rank] = index;
     }
 }
 

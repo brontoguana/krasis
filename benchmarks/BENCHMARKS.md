@@ -1,5 +1,192 @@
 # Krasis Benchmark Results
 
+## DeepSeek shared-HQQ/Native promoted defaults — 2026-08-12
+
+This timing-disabled standard benchmark used fixed HQQ6 with Native KV on the
+450 W RTX PRO 6000 after Candidate 19 was promoted to DeepSeek-HQQ architecture
+defaults. Every diagnostic execution-policy environment override was removed;
+the runtime log confirms that the production defaults resolved to the accepted
+TF32 HC projection, fused sparse pipeline, BF16x8 gather, warp softmax, GEMM
+index score, radix-linear top-k, predicted-W1 staging, split expert DMA,
+materialized HQQ prefill weights, and stage-specific pinned copies.
+
+The production-default run crossed the requested `2,500 tok/s` threshold at
+both 35K and the runtime-calibrated 39,920-token maximum, closely reproducing
+the accepted Candidate-19 experiment.
+
+| Measurement | Result |
+|---|---:|
+| Internal prefill, 1K / 5K / 10K | 152.6 / 771.8 / 1,159.0 tok/s |
+| Internal prefill, 20K / 35K / 39,920 | 2,274.5 / 2,613.2 / 2,509.0 tok/s |
+| Internal decode, 50 / 100 / 250 | 29.76 / 30.72 / 29.79 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 55.05 / 39.27 / 32.67 tok/s |
+| HCS coverage | 6,660/11,008 (60.5%) |
+| Minimum free VRAM | 1,197 MiB |
+
+Runtime calibration recorded a 1,219 MiB long-prompt low-water mark. Active
+timed prefill was observed at 652 MiB free, close to and above the unchanged
+600 MiB runtime safety contract. The completed standard run reported zero HCS
+copy failures, budget skips, CUDA/OOM errors, or below-margin events. Evidence:
+[stdout](20260812_deepseek_v4_hqq6_native_prefill_promoted_defaults_benchmark_stdout.log),
+[report](20260812_deepseek_v4_hqq6_native_prefill_promoted_defaults_benchmark_report.log),
+and [runtime](20260812_deepseek_v4_hqq6_native_prefill_promoted_defaults_krasis.log).
+
+## DeepSeek shared-HQQ/Native prefill candidate 19 — 2026-08-12
+
+This timing-disabled benchmark retained all nine attention-bit-width-independent
+or shared-HQQ execution candidates and strict pinned HQQ host staging, while
+restricting asynchronous HQQ copies to the decode restore. It used fixed HQQ6
+with Native KV on the 450 W RTX PRO 6000. All timing, trace, telemetry,
+prescan, runtime-stage and sparse-substage diagnostics were disabled.
+
+The runtime-calibrated 39,920-token row reached `2,518.8 tok/s`, reproducing
+the requested threshold for a third clean run. Restricting async copies to
+decode also removed Candidate 4's 5K regression: 5K reached `771.7 tok/s`.
+This is the selected speed candidate, subject to witness, full perplexity,
+cross-HQQ and promoted-default validation before release acceptance.
+
+| Measurement | Result |
+|---|---:|
+| Internal prefill, 1K / 5K / 10K | 114.0 / 771.7 / 1,150.5 tok/s |
+| Internal prefill, 20K / 35K / 39,920 | 2,278.3 / 2,625.9 / 2,518.8 tok/s |
+| Internal decode, 50 / 100 / 250 | 29.99 / 30.25 / 29.64 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 54.85 / 38.51 / 32.63 tok/s |
+| HCS coverage | 6,660/11,008 (60.5%) |
+| Minimum free VRAM | 1,197 MiB |
+
+Runtime calibration recorded a 1,225 MiB long-prompt low-water mark. Active
+timed prefill was observed at 652 MiB free, close to and above the unchanged
+600 MiB runtime safety contract. The standard run reported zero HCS copy
+failures, budget skips, CUDA/OOM errors, or below-margin events. Evidence:
+[stdout](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate19_benchmark_stdout.log),
+[report](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate19_benchmark_report.log),
+and [runtime](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate19_krasis.log).
+
+## DeepSeek shared-HQQ/Native prefill candidate 4 — 2026-08-12
+
+The fourth timing-disabled combined-candidate benchmark retained the nine
+descriptor-driven execution candidates and added strict pinned plus
+asynchronous HQQ runtime-stage copies. It used fixed HQQ6 with Native KV on
+the 450 W RTX PRO 6000; all timing, trace, telemetry, prescan and sparse-stage
+diagnostics were disabled.
+
+The requested 2,500 tok/s threshold was crossed both at 35K and at the
+runtime-calibrated 39,920-token maximum. Its unchanged clean reproduction
+reached `149.7/505.0/1497.7/2140.7/2620.5/2515.9 tok/s`, confirming the long
+target but leaving a smaller 5K regression. Candidate 4 remains an
+intermediate; Candidate 19 isolates async copies to decode and provides the
+better short/long tradeoff.
+
+| Measurement | Result |
+|---|---:|
+| Internal prefill, 1K / 5K / 10K | 140.3 / 404.8 / 1,493.6 tok/s |
+| Internal prefill, 20K / 35K / 39,920 | 2,180.2 / 2,626.9 / 2,522.3 tok/s |
+| Internal decode, 50 / 100 / 250 | 30.11 / 30.79 / 30.09 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 49.89 / 39.31 / 32.49 tok/s |
+| HCS coverage | 6,660/11,008 (60.5%) |
+| Minimum free VRAM | 1,197 MiB |
+
+Runtime calibration recorded a 1,203 MiB long-prompt low-water mark. The
+standard run reported zero HCS copy failures, budget skips, CUDA/OOM errors,
+or below-margin events against the unchanged 600 MiB safety contract.
+Evidence:
+[stdout](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate4_benchmark_stdout.log),
+[report](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate4_benchmark_report.log),
+and [runtime](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate4_krasis.log).
+Unchanged reproduction:
+[stdout](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate4_repro_benchmark_stdout.log),
+[report](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate4_repro_benchmark_report.log),
+and [runtime](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate4_repro_krasis.log).
+
+## DeepSeek shared-HQQ/Native prefill candidate 3 — 2026-08-12
+
+The third timing-disabled combined-candidate benchmark added the exact
+`radix_linear` learned-index selector to the previously retained shared-HQQ
+execution candidates. It used fixed HQQ6 with Native KV on the 450 W RTX PRO
+6000; component timing, trace, telemetry, prescan diagnostics, and sparse
+substage instrumentation were disabled.
+
+The requested 2,500 tok/s threshold was crossed at 35K, but not at the
+runtime-calibrated 39,920-token maximum. This is therefore an intermediate
+result rather than an accepted completion result. Internal decode remained in
+the established 30 tok/s envelope.
+
+| Measurement | Result |
+|---|---:|
+| Internal prefill, 1K / 5K / 10K | 154.0 / 702.5 / 953.0 tok/s |
+| Internal prefill, 20K / 35K / 39,920 | 2,023.5 / 2,526.6 / 2,438.7 tok/s |
+| Internal decode, 50 / 100 / 250 | 29.89 / 30.68 / 29.65 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 55.51 / 39.82 / 32.79 tok/s |
+| HCS coverage | 6,660/11,008 (60.5%) |
+| Minimum free VRAM | 1,207 MiB |
+
+Runtime calibration recorded a 1,223 MiB long-prompt low-water mark. The
+standard run reported zero HCS copy failures, budget skips, CUDA/OOM errors, or
+below-margin events against the unchanged 600 MiB safety contract. Evidence:
+[stdout](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate3_benchmark_stdout.log),
+[report](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate3_benchmark_report.log),
+and [runtime](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate3_krasis.log).
+
+## DeepSeek shared-HQQ/Native prefill candidate 2 — 2026-08-12
+
+The second timing-disabled combined-candidate benchmark used fixed HQQ6 with
+Native KV on the 450 W RTX PRO 6000. It retained the shared-HQQ projection,
+causal index scoring, HQQ materialization, split expert DMA, prescan-predicted
+W1 staging, warp-row sparse softmax, and vectorized selected-row gather
+candidates. Component timing, trace, telemetry, prescan diagnostics, and sparse
+substage instrumentation were all disabled.
+
+Long-prompt performance nearly doubled relative to the accepted 1,207.2 tok/s
+baseline, but the clean run did not reach the requested 2,500 tok/s gate:
+peak prefill was 2,424.1 tok/s at 35K and the 39,920-token row reached
+2,343.6 tok/s. This is therefore retained as a rejected intermediate, not an
+accepted release result. Internal decode remained in the established 30 tok/s
+envelope.
+
+| Measurement | Result |
+|---|---:|
+| Internal prefill, 1K / 5K / 10K | 136.2 / 688.4 / 1,083.7 tok/s |
+| Internal prefill, 20K / 35K / 39,920 | 2,099.4 / 2,424.1 / 2,343.6 tok/s |
+| Internal decode, 50 / 100 / 250 | 30.02 / 30.36 / 29.82 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 55.17 / 38.54 / 32.54 tok/s |
+| HCS coverage | 6,660/11,008 (60.5%) |
+| Minimum free VRAM | 1,207 MiB |
+
+Runtime calibration recorded a 1,215 MiB long-prompt low-water mark. The
+standard run reported zero HCS copy failures, budget skips, CUDA/OOM errors, or
+below-margin events against the unchanged 600 MiB safety contract. Evidence:
+[stdout](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate2_benchmark_stdout.log),
+[report](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate2_benchmark_report.log),
+and [runtime](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate2_krasis.log).
+
+## DeepSeek shared-HQQ/Native prefill candidate — 2026-08-12
+
+The first timing-disabled combined-candidate benchmark used fixed HQQ6 with
+Native KV on the 450 W RTX PRO 6000. The retained candidates are all
+attention-bit-width-independent or use Krasis's shared HQQ4/HQQ6/HQQ8
+descriptor path; this row is an optimization gate, not an accepted release
+result. Against the accepted 39,920-token baseline of 1,207.2 tok/s, long
+prefill reached 1,840.5 tok/s (`+52.5%`) but remained below the requested
+2,500 tok/s target. Internal decode was unchanged within the established run
+envelope. The unusual 5K result is retained exactly and must be explained
+before promotion.
+
+| Measurement | Result |
+|---|---:|
+| Internal prefill, 1K / 5K / 10K | 147.6 / 436.2 / 1,043.9 tok/s |
+| Internal prefill, 20K / 35K / 39,920 | 1,478.2 / 1,865.2 / 1,840.5 tok/s |
+| Internal decode, 50 / 100 / 250 | 30.59 / 30.75 / 29.95 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 54.34 / 40.02 / 32.65 tok/s |
+| HCS coverage | 6,660/11,008 (60.5%) |
+| Minimum free VRAM | 1,207 MiB |
+
+The runtime-calibrated long-probe floor was 1,203 MiB and the timed decode
+floor was 1,207 MiB against the unchanged 600 MiB safety margin. There were no
+HCS copy failures, budget skips, CUDA/OOM errors, or below-margin events.
+Evidence: [stdout](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate_benchmark_stdout.log),
+[report](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate_benchmark_report.log),
+and [runtime](20260812_deepseek_v4_hqq6_native_prefill_opt_candidate_krasis.log).
+
 ## v1.0.21-rc.2 QCN release matrix — 2026-08-09
 
 The authoritative timing-disabled `./dev release-test QCN` ran from the exact

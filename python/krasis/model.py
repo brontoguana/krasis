@@ -5447,6 +5447,7 @@ class KrasisModel:
                     layer_idx=layer_idx,
                     tensor_name=tensor_name,
                     backend=manifest["backend"],
+                    deepseek_v4=bool(self.cfg.is_deepseek_v4),
                     nbits=int(desc["nbits"]),
                     format_version=int(manifest["format_version"]),
                     packed_ptr=int(desc["packed"].data_ptr()),

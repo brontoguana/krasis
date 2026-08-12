@@ -211,11 +211,55 @@ const DEEPSEEK_V4_INDEXER_TIMING_LABELS: [&str; DEEPSEEK_V4_INDEXER_TIMING_STAGE
     "select_merge",
 ];
 
+const DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_INV_RMS: usize = 0;
+const DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_PROJECT: usize = 1;
+const DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_PREPARE: usize = 2;
+const DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_REDUCE: usize = 3;
+const DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_NORM: usize = 4;
+const DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGES: usize = 5;
+const DEEPSEEK_V4_HC_INTERNAL_TIMING_LABELS: [&str; DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGES] =
+    ["inv_rms", "project", "prepare", "reduce", "norm"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeepseekV4PrefillSparseScoreMode {
     ScalarQueryCached,
     Bf16Fp32,
     Fp32PedanticPostscale,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeepseekV4PrefillHcProjectMode {
+    Scalar,
+    Tf32Gemm,
+}
+
+impl DeepseekV4PrefillHcProjectMode {
+    pub(crate) fn from_env(optimized_default: bool) -> Result<Self, String> {
+        match std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_HC_PROJECT_MODE") {
+            Err(std::env::VarError::NotPresent) => Ok(if optimized_default {
+                Self::Tf32Gemm
+            } else {
+                Self::Scalar
+            }),
+            Err(error) => Err(format!(
+                "read KRASIS_DEEPSEEK_V4_PREFILL_HC_PROJECT_MODE: {error}"
+            )),
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "scalar" => Ok(Self::Scalar),
+                "tf32_gemm" => Ok(Self::Tf32Gemm),
+                other => Err(format!(
+                    "invalid KRASIS_DEEPSEEK_V4_PREFILL_HC_PROJECT_MODE={other:?}; expected scalar or tf32_gemm"
+                )),
+            },
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Scalar => "scalar",
+            Self::Tf32Gemm => "tf32_gemm",
+        }
+    }
 }
 
 impl DeepseekV4PrefillSparseScoreMode {
@@ -256,23 +300,142 @@ pub(crate) enum DeepseekV4PrefillSparseOutputMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeepseekV4PrefillSparsePipelineMode {
+    Separate,
+    TiledFusedGather,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeepseekV4PrefillSoftmaxMode {
+    BlockRows,
+    WarpRows,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeepseekV4PrefillGatherMode {
+    Scalar,
+    Bf16x8,
+}
+
+impl DeepseekV4PrefillGatherMode {
+    pub(crate) fn from_env(optimized_default: bool) -> Result<Self, String> {
+        match std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_GATHER_MODE") {
+            Err(std::env::VarError::NotPresent) => Ok(if optimized_default {
+                Self::Bf16x8
+            } else {
+                Self::Scalar
+            }),
+            Err(error) => Err(format!(
+                "read KRASIS_DEEPSEEK_V4_PREFILL_GATHER_MODE: {error}"
+            )),
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "scalar" => Ok(Self::Scalar),
+                "bf16x8" => Ok(Self::Bf16x8),
+                other => Err(format!(
+                    "invalid KRASIS_DEEPSEEK_V4_PREFILL_GATHER_MODE={other:?}; expected scalar or bf16x8"
+                )),
+            },
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Scalar => "scalar",
+            Self::Bf16x8 => "bf16x8",
+        }
+    }
+}
+
+impl DeepseekV4PrefillSoftmaxMode {
+    pub(crate) fn from_env(optimized_default: bool) -> Result<Self, String> {
+        match std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_SOFTMAX_MODE") {
+            Err(std::env::VarError::NotPresent) => Ok(if optimized_default {
+                Self::WarpRows
+            } else {
+                Self::BlockRows
+            }),
+            Err(error) => Err(format!(
+                "read KRASIS_DEEPSEEK_V4_PREFILL_SOFTMAX_MODE: {error}"
+            )),
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "block_rows" => Ok(Self::BlockRows),
+                "warp_rows" => Ok(Self::WarpRows),
+                other => Err(format!(
+                    "invalid KRASIS_DEEPSEEK_V4_PREFILL_SOFTMAX_MODE={other:?}; expected block_rows or warp_rows"
+                )),
+            },
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::BlockRows => "block_rows",
+            Self::WarpRows => "warp_rows",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeepseekV4PrefillIndexScoreMode {
     Scalar,
     Bf16Fp32Gemm,
+    Bf16Bf16Gemm,
+    Bf16Bf16CausalGemm,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeepseekV4PrefillTopkMode {
+    Bitonic,
+    RadixLinear,
+}
+
+impl DeepseekV4PrefillTopkMode {
+    pub(crate) fn from_env(optimized_default: bool) -> Result<Self, String> {
+        match std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE") {
+            Err(std::env::VarError::NotPresent) => Ok(if optimized_default {
+                Self::RadixLinear
+            } else {
+                Self::Bitonic
+            }),
+            Err(error) => Err(format!(
+                "read KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE: {error}"
+            )),
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "bitonic" => Ok(Self::Bitonic),
+                "radix_linear" => Ok(Self::RadixLinear),
+                other => Err(format!(
+                    "invalid KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE={other:?}; expected bitonic or radix_linear"
+                )),
+            },
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Bitonic => "bitonic",
+            Self::RadixLinear => "radix_linear",
+        }
+    }
 }
 
 impl DeepseekV4PrefillIndexScoreMode {
-    pub(crate) fn from_env() -> Result<Self, String> {
+    pub(crate) fn from_env(optimized_default: bool) -> Result<Self, String> {
         match std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE") {
-            Err(std::env::VarError::NotPresent) => Ok(Self::Bf16Fp32Gemm),
+            Err(std::env::VarError::NotPresent) => Ok(if optimized_default {
+                Self::Bf16Bf16CausalGemm
+            } else {
+                Self::Bf16Fp32Gemm
+            }),
             Err(error) => Err(format!(
                 "read KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE: {error}"
             )),
             Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
                 "scalar" => Ok(Self::Scalar),
                 "bf16_fp32_gemm" => Ok(Self::Bf16Fp32Gemm),
+                "bf16_bf16_gemm" => Ok(Self::Bf16Bf16Gemm),
+                "bf16_bf16_causal_gemm" => Ok(Self::Bf16Bf16CausalGemm),
                 other => Err(format!(
-                    "invalid KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE={other:?}; expected scalar or bf16_fp32_gemm"
+                    "invalid KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE={other:?}; expected scalar, bf16_fp32_gemm, bf16_bf16_gemm, or bf16_bf16_causal_gemm"
                 )),
             },
         }
@@ -282,14 +445,24 @@ impl DeepseekV4PrefillIndexScoreMode {
         match self {
             Self::Scalar => "scalar",
             Self::Bf16Fp32Gemm => "bf16_fp32_gemm",
+            Self::Bf16Bf16Gemm => "bf16_bf16_gemm",
+            Self::Bf16Bf16CausalGemm => "bf16_bf16_causal_gemm",
         }
     }
 
     fn score_buffer_count(self) -> usize {
         match self {
             Self::Scalar => 1,
-            Self::Bf16Fp32Gemm => 2,
+            Self::Bf16Fp32Gemm | Self::Bf16Bf16Gemm | Self::Bf16Bf16CausalGemm => 2,
         }
+    }
+
+    fn temporary_is_bf16(self) -> bool {
+        matches!(self, Self::Bf16Bf16Gemm | Self::Bf16Bf16CausalGemm)
+    }
+
+    fn uses_causal_gemm_bands(self) -> bool {
+        self == Self::Bf16Bf16CausalGemm
     }
 }
 
@@ -314,6 +487,35 @@ impl DeepseekV4PrefillSparseOutputMode {
         match self {
             Self::ScalarBf16x2 => "scalar_bf16x2",
             Self::Bf16Fp32Gemm => "bf16_fp32_gemm",
+        }
+    }
+}
+
+impl DeepseekV4PrefillSparsePipelineMode {
+    pub(crate) fn from_env(optimized_default: bool) -> Result<Self, String> {
+        match std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_SPARSE_PIPELINE_MODE") {
+            Err(std::env::VarError::NotPresent) => Ok(if optimized_default {
+                Self::TiledFusedGather
+            } else {
+                Self::Separate
+            }),
+            Err(error) => Err(format!(
+                "read KRASIS_DEEPSEEK_V4_PREFILL_SPARSE_PIPELINE_MODE: {error}"
+            )),
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "separate" => Ok(Self::Separate),
+                "tiled_fused_gather" => Ok(Self::TiledFusedGather),
+                other => Err(format!(
+                    "invalid KRASIS_DEEPSEEK_V4_PREFILL_SPARSE_PIPELINE_MODE={other:?}; expected separate or tiled_fused_gather"
+                )),
+            },
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Separate => "separate",
+            Self::TiledFusedGather => "tiled_fused_gather",
         }
     }
 }
@@ -943,6 +1145,24 @@ fn prefill_prescan_accuracy_enabled() -> bool {
     std::env::var("KRASIS_PREFILL_PRESCAN_ACCURACY")
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+pub(crate) fn deepseek_v4_prefill_predicted_w1_enabled_from_env(
+    optimized_default: bool,
+) -> Result<bool, String> {
+    match std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1") {
+        Err(std::env::VarError::NotPresent) => Ok(optimized_default),
+        Err(error) => Err(format!(
+            "read KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1: {error}"
+        )),
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            other => Err(format!(
+                "invalid KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1={other:?}; expected 0/1, false/true, no/yes, or off/on"
+            )),
+        },
+    }
 }
 
 fn prefill_prescan_accuracy_detail_enabled() -> bool {
@@ -5624,6 +5844,8 @@ pub struct PrefillKernels {
     dsa_prefill_accumulate_gemm_scores: RawCuFunc,
     dsa_prefill_topk_sort_rows: RawCuFunc,
     dsa_prefill_topk_merge_rows: RawCuFunc,
+    dsa_prefill_topk_radix_sort_rows: RawCuFunc,
+    dsa_prefill_topk_linear_merge_rows: RawCuFunc,
     mla_pack_qkv_rope_bf16: RawCuFunc,
     mla_cache_append_k4: RawCuFunc,
     mla_prefill_absorb_wkc: RawCuFunc,
@@ -5641,6 +5863,7 @@ pub struct PrefillKernels {
     deepseek_v4_sqrtsoftplus_topk: RawCuFunc,
     deepseek_v4_hc_inv_rms: RawCuFunc,
     deepseek_v4_hc_project: RawCuFunc,
+    deepseek_v4_hc_normalize_f32: RawCuFunc,
     deepseek_v4_hc_prepare: RawCuFunc,
     deepseek_v4_hc_reduce: RawCuFunc,
     deepseek_v4_hc_post: RawCuFunc,
@@ -5649,10 +5872,12 @@ pub struct PrefillKernels {
     deepseek_v4_sparse_scores: RawCuFunc,
     deepseek_v4_sparse_scores_query_cached: RawCuFunc,
     deepseek_v4_prefill_gather_scores_bf16: RawCuFunc,
+    deepseek_v4_prefill_gather_scores_bf16x8: RawCuFunc,
     deepseek_v4_prefill_gather_scores_fp32: RawCuFunc,
     deepseek_v4_prefill_scale_finite_scores: RawCuFunc,
     deepseek_v4_prefill_gather_sparse_values_bf16: RawCuFunc,
     deepseek_v4_prefill_softmax_weights_bf16: RawCuFunc,
+    deepseek_v4_prefill_softmax_weights_warp_bf16: RawCuFunc,
     deepseek_v4_sparse_output: RawCuFunc,
     deepseek_v4_sparse_output_cached_exp: RawCuFunc,
     deepseek_v4_compressor_pool_prefill: RawCuFunc,
@@ -6242,6 +6467,9 @@ pub struct PrefillModelConfig {
     pub deepseek_v4_static_compress_ratio: usize,
     pub deepseek_v4_native_cache: bool,
     pub deepseek_v4_min_compress_ratio: usize,
+    /// Store-scoped DeepSeek HQQ policy resolved during model setup. Keeping
+    /// this in the model config prevents request-time environment reads.
+    pub hqq_prefill_materialize_bf16: bool,
 }
 
 pub struct MarlinWeight {
@@ -6537,6 +6765,8 @@ struct DsaPrefillSelectionKernels {
     accumulate_gemm_scores: RawCuFunc,
     topk_sort_rows: RawCuFunc,
     topk_merge_rows: RawCuFunc,
+    topk_radix_sort_rows: RawCuFunc,
+    topk_linear_merge_rows: RawCuFunc,
 }
 
 const DSA_PREFILL_SELECTION_TIMING_QUERY: usize = 0;
@@ -6544,6 +6774,7 @@ const DSA_PREFILL_SELECTION_TIMING_SCORES: usize = 1;
 const DSA_PREFILL_SELECTION_TIMING_BASE_SORT: usize = 2;
 const DSA_PREFILL_SELECTION_TIMING_MERGE: usize = 3;
 const DSA_PREFILL_SELECTION_TIMING_STAGES: usize = 4;
+const DSA_PREFILL_RADIX_CAPACITY: usize = 256 * 4;
 
 #[derive(Clone, Copy)]
 struct DsaPrefillSelectionTimingEvents {
@@ -6929,6 +7160,10 @@ fn launch_dsa_prefill_gemm_scores(
     index_n_heads: usize,
     index_head_dim: usize,
     score_scale: f32,
+    temporary_is_bf16: bool,
+    causal_position_start: usize,
+    causal_compress_ratio: usize,
+    causal_band_rows: usize,
     buffers: DsaPrefillSelectionBuffers,
 ) -> Result<(), String> {
     use cudarc::cublas::result as cublas_result;
@@ -6940,19 +7175,24 @@ fn launch_dsa_prefill_gemm_scores(
             cublas_handle.is_null(), cublas_workspace_ptr, cublas_workspace_bytes
         ));
     }
-    let score_elements = rows
+    let output_score_elements = rows
         .checked_mul(context_end)
         .ok_or_else(|| "DSA prefill GEMM score element count overflow".to_string())?;
-    if buffers.score_temp_ptr == 0 || score_elements > buffers.score_temp_capacity {
+    if buffers.score_temp_ptr == 0 || output_score_elements > buffers.score_temp_capacity {
         return Err(format!(
             "DSA prefill GEMM temporary score capacity {} < required {} or pointer is null",
-            buffers.score_temp_capacity, score_elements
+            buffers.score_temp_capacity, output_score_elements
         ));
     }
-    let rows_i32 =
-        i32::try_from(rows).map_err(|_| format!("DSA prefill GEMM rows {rows} exceed i32"))?;
-    let context_i32 = i32::try_from(context_end)
-        .map_err(|_| format!("DSA prefill GEMM context {context_end} exceeds i32"))?;
+    let causal_bands_enabled = causal_compress_ratio > 0 || causal_band_rows > 0;
+    if causal_bands_enabled && (causal_compress_ratio == 0 || causal_band_rows == 0) {
+        return Err(format!(
+            "DSA prefill causal GEMM requires positive compression ratio and band rows, got ratio={} band_rows={}",
+            causal_compress_ratio, causal_band_rows
+        ));
+    }
+    let output_context_i32 = i32::try_from(context_end)
+        .map_err(|_| format!("DSA prefill GEMM output context {context_end} exceeds i32"))?;
     let heads_i32 = i32::try_from(index_n_heads)
         .map_err(|_| format!("DSA prefill GEMM heads {index_n_heads} exceed i32"))?;
     let head_dim_i32 = i32::try_from(index_head_dim)
@@ -7032,82 +7272,194 @@ fn launch_dsa_prefill_gemm_scores(
         let alpha = score_scale;
         let beta = 0.0f32;
         let epilogue_block = 256u32;
-        let epilogue_grid = u32::try_from(score_elements.div_ceil(epilogue_block as usize))
-            .map_err(|_| "DSA prefill GEMM epilogue grid exceeds u32".to_string())?;
-        for head in 0..index_n_heads {
-            let query_head_ptr = rope_queries_ptr
+        let query_row_bytes = query_row_stride
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "DSA prefill GEMM query row-byte size overflow".to_string())?;
+        let head_weight_row_bytes = index_n_heads
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "DSA prefill GEMM weight row-byte size overflow".to_string())?;
+        let output_row_bytes = context_end
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "DSA prefill GEMM output row-byte size overflow".to_string())?;
+        let band_row_limit = if causal_bands_enabled {
+            causal_band_rows.min(rows)
+        } else {
+            rows
+        };
+        let mut band_row_start = 0usize;
+        while band_row_start < rows {
+            let band_rows = (rows - band_row_start).min(band_row_limit);
+            let score_context_end = if causal_bands_enabled {
+                causal_position_start
+                    .checked_add(band_row_start)
+                    .and_then(|value| value.checked_add(band_rows))
+                    .ok_or_else(|| "DSA prefill causal GEMM position overflow".to_string())?
+                    / causal_compress_ratio
+            } else {
+                context_end
+            }
+            .min(context_end);
+            if score_context_end == 0 {
+                return Err(format!(
+                    "DSA prefill causal GEMM band [{}, {}) has no causal compressed rows (position_start={} ratio={})",
+                    band_row_start,
+                    band_row_start + band_rows,
+                    causal_position_start,
+                    causal_compress_ratio
+                ));
+            }
+            let band_score_elements = band_rows
+                .checked_mul(score_context_end)
+                .ok_or_else(|| "DSA prefill GEMM band score size overflow".to_string())?;
+            if band_score_elements > buffers.score_temp_capacity {
+                return Err(format!(
+                    "DSA prefill GEMM temporary score capacity {} < causal band requirement {}",
+                    buffers.score_temp_capacity, band_score_elements
+                ));
+            }
+            let band_rows_i32 = i32::try_from(band_rows)
+                .map_err(|_| format!("DSA prefill GEMM band rows {band_rows} exceed i32"))?;
+            let score_context_i32 = i32::try_from(score_context_end).map_err(|_| {
+                format!("DSA prefill GEMM score context {score_context_end} exceeds i32")
+            })?;
+            let epilogue_grid =
+                u32::try_from(band_score_elements.div_ceil(epilogue_block as usize))
+                    .map_err(|_| "DSA prefill GEMM epilogue grid exceeds u32".to_string())?;
+            let query_band_ptr = rope_queries_ptr
+                .checked_add(
+                    u64::try_from(band_row_start.checked_mul(query_row_bytes).ok_or_else(
+                        || "DSA prefill GEMM query band offset overflow".to_string(),
+                    )?)
+                    .map_err(|_| "DSA prefill GEMM query band offset exceeds u64".to_string())?,
+                )
+                .ok_or_else(|| "DSA prefill GEMM query band pointer overflow".to_string())?;
+            let head_weights_band_ptr = head_weights_ptr
                 .checked_add(
                     u64::try_from(
-                        head.checked_mul(index_head_dim)
-                            .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+                        band_row_start
+                            .checked_mul(head_weight_row_bytes)
                             .ok_or_else(|| {
-                                "DSA prefill GEMM query-head offset overflow".to_string()
+                                "DSA prefill GEMM weight band offset overflow".to_string()
                             })?,
                     )
-                    .map_err(|_| "DSA prefill GEMM query-head offset exceeds u64".to_string())?,
+                    .map_err(|_| "DSA prefill GEMM weight band offset exceeds u64".to_string())?,
                 )
-                .ok_or_else(|| "DSA prefill GEMM query-head pointer overflow".to_string())?;
-            unsafe {
-                cublas_result::gemm_ex(
-                    cublas_handle,
-                    cublas_sys::cublasOperation_t::CUBLAS_OP_T,
-                    cublas_sys::cublasOperation_t::CUBLAS_OP_N,
-                    context_i32,
-                    rows_i32,
-                    head_dim_i32,
-                    &alpha as *const f32 as *const std::ffi::c_void,
-                    key_cache_ptr as *const std::ffi::c_void,
-                    cublas_sys::cudaDataType::CUDA_R_16BF,
-                    head_dim_i32,
-                    query_head_ptr as *const std::ffi::c_void,
-                    cublas_sys::cudaDataType::CUDA_R_16BF,
-                    query_row_stride_i32,
-                    &beta as *const f32 as *const std::ffi::c_void,
-                    buffers.score_temp_ptr as *mut std::ffi::c_void,
-                    cublas_sys::cudaDataType::CUDA_R_32F,
-                    context_i32,
-                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                    cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
-                )
-                .map_err(|error| {
-                    format!(
-                        "DSA prefill BF16/FP32 GEMM failed at head {head}/{index_n_heads}: {error:?}"
+                .ok_or_else(|| "DSA prefill GEMM weight band pointer overflow".to_string())?;
+            let positions_band_ptr = positions_ptr
+                .checked_add(
+                    u64::try_from(
+                        band_row_start
+                            .checked_mul(std::mem::size_of::<i32>())
+                            .ok_or_else(|| {
+                                "DSA prefill GEMM position band offset overflow".to_string()
+                            })?,
                     )
-                })?;
+                    .map_err(|_| "DSA prefill GEMM position band offset exceeds u64".to_string())?,
+                )
+                .ok_or_else(|| "DSA prefill GEMM position band pointer overflow".to_string())?;
+            let output_band_ptr = buffers
+                .scores_ptr
+                .checked_add(
+                    u64::try_from(band_row_start.checked_mul(output_row_bytes).ok_or_else(
+                        || "DSA prefill GEMM output band offset overflow".to_string(),
+                    )?)
+                    .map_err(|_| "DSA prefill GEMM output band offset exceeds u64".to_string())?,
+                )
+                .ok_or_else(|| "DSA prefill GEMM output band pointer overflow".to_string())?;
+            for head in 0..index_n_heads {
+                let query_head_ptr = query_band_ptr
+                    .checked_add(
+                        u64::try_from(
+                            head.checked_mul(index_head_dim)
+                                .and_then(|elements| {
+                                    elements.checked_mul(std::mem::size_of::<u16>())
+                                })
+                                .ok_or_else(|| {
+                                    "DSA prefill GEMM query-head offset overflow".to_string()
+                                })?,
+                        )
+                        .map_err(|_| {
+                            "DSA prefill GEMM query-head offset exceeds u64".to_string()
+                        })?,
+                    )
+                    .ok_or_else(|| "DSA prefill GEMM query-head pointer overflow".to_string())?;
+                unsafe {
+                    cublas_result::gemm_ex(
+                        cublas_handle,
+                        cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                        cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                        score_context_i32,
+                        band_rows_i32,
+                        head_dim_i32,
+                        &alpha as *const f32 as *const std::ffi::c_void,
+                        key_cache_ptr as *const std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                        head_dim_i32,
+                        query_head_ptr as *const std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                        query_row_stride_i32,
+                        &beta as *const f32 as *const std::ffi::c_void,
+                        buffers.score_temp_ptr as *mut std::ffi::c_void,
+                        if temporary_is_bf16 {
+                            cublas_sys::cudaDataType::CUDA_R_16BF
+                        } else {
+                            cublas_sys::cudaDataType::CUDA_R_32F
+                        },
+                        score_context_i32,
+                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                        cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "DSA prefill BF16/FP32 GEMM failed at band [{}, {}) context={} head {}/{}: {:?}",
+                            band_row_start,
+                            band_row_start + band_rows,
+                            score_context_end,
+                            head,
+                            index_n_heads,
+                            error
+                        )
+                    })?;
+                }
+                let mut e0 = output_band_ptr;
+                let mut e1 = buffers.score_temp_ptr;
+                let mut e2 = head_weights_band_ptr;
+                let mut e3 = positions_band_ptr;
+                let mut e4 = band_rows_i32;
+                let mut e5 = output_context_i32;
+                let mut e6 = score_context_i32;
+                let mut e7 = heads_i32;
+                let mut e8 = i32::try_from(head)
+                    .map_err(|_| format!("DSA prefill GEMM head {head} exceeds i32"))?;
+                let mut e9 = if head == 0 { 1i32 } else { 0i32 };
+                let mut e10 = i32::from(temporary_is_bf16);
+                unsafe {
+                    launch(
+                        kernels.accumulate_gemm_scores,
+                        (epilogue_grid, 1, 1),
+                        (epilogue_block, 1, 1),
+                        0,
+                        stream,
+                        &mut [
+                            &mut e0 as *mut _ as *mut _,
+                            &mut e1 as *mut _ as *mut _,
+                            &mut e2 as *mut _ as *mut _,
+                            &mut e3 as *mut _ as *mut _,
+                            &mut e4 as *mut _ as *mut _,
+                            &mut e5 as *mut _ as *mut _,
+                            &mut e6 as *mut _ as *mut _,
+                            &mut e7 as *mut _ as *mut _,
+                            &mut e8 as *mut _ as *mut _,
+                            &mut e9 as *mut _ as *mut _,
+                            &mut e10 as *mut _ as *mut _,
+                        ],
+                    )?;
+                }
+                if band_row_start == 0 && head == 0 {
+                    sample_vram("after_first_head")?;
+                }
             }
-            let mut e0 = buffers.scores_ptr;
-            let mut e1 = buffers.score_temp_ptr;
-            let mut e2 = head_weights_ptr;
-            let mut e3 = positions_ptr;
-            let mut e4 = rows_i32;
-            let mut e5 = context_i32;
-            let mut e6 = heads_i32;
-            let mut e7 = i32::try_from(head)
-                .map_err(|_| format!("DSA prefill GEMM head {head} exceeds i32"))?;
-            let mut e8 = if head == 0 { 1i32 } else { 0i32 };
-            unsafe {
-                launch(
-                    kernels.accumulate_gemm_scores,
-                    (epilogue_grid, 1, 1),
-                    (epilogue_block, 1, 1),
-                    0,
-                    stream,
-                    &mut [
-                        &mut e0 as *mut _ as *mut _,
-                        &mut e1 as *mut _ as *mut _,
-                        &mut e2 as *mut _ as *mut _,
-                        &mut e3 as *mut _ as *mut _,
-                        &mut e4 as *mut _ as *mut _,
-                        &mut e5 as *mut _ as *mut _,
-                        &mut e6 as *mut _ as *mut _,
-                        &mut e7 as *mut _ as *mut _,
-                        &mut e8 as *mut _ as *mut _,
-                    ],
-                )?;
-            }
-            if head == 0 {
-                sample_vram("after_first_head")?;
-            }
+            band_row_start += band_rows;
         }
         sample_vram("after_all_heads")?;
         Ok(())
@@ -7142,7 +7494,10 @@ fn launch_dsa_prefill_selection_rows(
     qk_rope_head_dim: usize,
     configured_topk: usize,
     score_scale: f32,
+    causal_position_start: usize,
+    causal_compress_ratio: usize,
     index_score_mode: DeepseekV4PrefillIndexScoreMode,
+    topk_mode: DeepseekV4PrefillTopkMode,
     cublas_handle: cudarc::cublas::sys::cublasHandle_t,
     cublas_workspace_ptr: u64,
     cublas_workspace_bytes: usize,
@@ -7348,7 +7703,22 @@ fn launch_dsa_prefill_selection_rows(
                 )?;
             }
         }
-        DeepseekV4PrefillIndexScoreMode::Bf16Fp32Gemm => {
+        DeepseekV4PrefillIndexScoreMode::Bf16Fp32Gemm
+        | DeepseekV4PrefillIndexScoreMode::Bf16Bf16Gemm
+        | DeepseekV4PrefillIndexScoreMode::Bf16Bf16CausalGemm => {
+            let causal_band_rows = if index_score_mode.uses_causal_gemm_bands() {
+                if causal_compress_ratio == 0 {
+                    return Err(
+                        "DSA prefill causal GEMM mode requires a positive compression ratio"
+                            .to_string(),
+                    );
+                }
+                configured_topk
+                    .checked_mul(causal_compress_ratio)
+                    .ok_or_else(|| "DSA prefill causal GEMM band rows overflow".to_string())?
+            } else {
+                0
+            };
             launch_dsa_prefill_gemm_scores(
                 kernels,
                 stream,
@@ -7364,6 +7734,14 @@ fn launch_dsa_prefill_selection_rows(
                 index_n_heads,
                 index_head_dim,
                 score_scale,
+                index_score_mode.temporary_is_bf16(),
+                causal_position_start,
+                if causal_band_rows == 0 {
+                    0
+                } else {
+                    causal_compress_ratio
+                },
+                causal_band_rows,
                 buffers,
             )?;
         }
@@ -7389,18 +7767,44 @@ fn launch_dsa_prefill_selection_rows(
         .map_err(|_| format!("DSA initial run count {} exceeds i32", plan.initial_runs))?;
     let sort_width_i32 = i32::try_from(plan.sort_width)
         .map_err(|_| format!("DSA sort width {} exceeds i32", plan.sort_width))?;
-    let block_threads = u32::try_from(plan.sort_width.min(256).max(1))
-        .map_err(|_| "DSA top-k block width exceeds u32".to_string())?;
-    let topk_shared_bytes_u32 = dsa_prefill_configure_dynamic_shared(
-        kernels.topk_sort_rows,
-        plan.shared_bytes,
-        "DSA prefill top-k sort",
-    )?;
-    dsa_prefill_configure_dynamic_shared(
-        kernels.topk_merge_rows,
-        plan.shared_bytes,
-        "DSA prefill top-k merge",
-    )?;
+    let (sort_kernel, merge_kernel, block_threads, topk_shared_bytes_u32) = match topk_mode {
+        DeepseekV4PrefillTopkMode::Bitonic => {
+            let block_threads = u32::try_from(plan.sort_width.min(256).max(1))
+                .map_err(|_| "DSA top-k block width exceeds u32".to_string())?;
+            let shared_bytes = dsa_prefill_configure_dynamic_shared(
+                kernels.topk_sort_rows,
+                plan.shared_bytes,
+                "DSA prefill top-k sort",
+            )?;
+            dsa_prefill_configure_dynamic_shared(
+                kernels.topk_merge_rows,
+                plan.shared_bytes,
+                "DSA prefill top-k merge",
+            )?;
+            (
+                kernels.topk_sort_rows,
+                kernels.topk_merge_rows,
+                block_threads,
+                shared_bytes,
+            )
+        }
+        DeepseekV4PrefillTopkMode::RadixLinear => {
+            if plan.sort_width > DSA_PREFILL_RADIX_CAPACITY
+                || plan.selected > DSA_PREFILL_RADIX_CAPACITY
+            {
+                return Err(format!(
+                    "DSA radix-linear top-k plan width/selected {}/{} exceeds kernel capacity {}",
+                    plan.sort_width, plan.selected, DSA_PREFILL_RADIX_CAPACITY
+                ));
+            }
+            (
+                kernels.topk_radix_sort_rows,
+                kernels.topk_linear_merge_rows,
+                256,
+                0,
+            )
+        }
+    };
     let mut t0 = buffers.scores_ptr;
     let mut t1 = buffers.candidate_scores_a_ptr;
     let mut t2 = buffers.candidate_indices_a_ptr;
@@ -7419,7 +7823,7 @@ fn launch_dsa_prefill_selection_rows(
     )?;
     unsafe {
         launch(
-            kernels.topk_sort_rows,
+            sort_kernel,
             (
                 u32::try_from(plan.initial_runs).map_err(|_| "DSA initial run grid exceeds u32")?,
                 u32::try_from(rows).map_err(|_| "DSA rows exceed u32")?,
@@ -7489,7 +7893,7 @@ fn launch_dsa_prefill_selection_rows(
         let mut m9 = sort_width_i32;
         unsafe {
             launch(
-                kernels.topk_merge_rows,
+                merge_kernel,
                 (
                     u32::try_from(output_runs).map_err(|_| "DSA output run grid exceeds u32")?,
                     u32::try_from(rows).map_err(|_| "DSA rows exceed u32")?,
@@ -7542,7 +7946,9 @@ fn launch_dsa_prefill_selection_chunk(
     rope_sin_ptr: u64,
     qk_rope_head_dim: usize,
     score_scale: f32,
+    causal_compress_ratio: usize,
     index_score_mode: DeepseekV4PrefillIndexScoreMode,
+    topk_mode: DeepseekV4PrefillTopkMode,
     cublas_handle: cudarc::cublas::sys::cublasHandle_t,
     cublas_workspace_ptr: u64,
     cublas_workspace_bytes: usize,
@@ -7590,7 +7996,7 @@ fn launch_dsa_prefill_selection_chunk(
         .checked_mul(std::mem::size_of::<f32>())
         .ok_or_else(|| "DSA prefill candidate-component byte size overflow".to_string())?;
     let workspace_base = *workspace.d_selection_workspace.device_ptr();
-    let score_temp_ptr = if index_score_mode == DeepseekV4PrefillIndexScoreMode::Bf16Fp32Gemm {
+    let score_temp_ptr = if index_score_mode != DeepseekV4PrefillIndexScoreMode::Scalar {
         workspace_base
             .checked_add(
                 u64::try_from(score_bytes)
@@ -7725,7 +8131,12 @@ fn launch_dsa_prefill_selection_chunk(
             qk_rope_head_dim,
             workspace.configured_topk,
             score_scale,
+            chunk_start
+                .checked_add(row_start)
+                .ok_or_else(|| "DSA prefill causal position start overflow".to_string())?,
+            causal_compress_ratio,
             index_score_mode,
+            topk_mode,
             cublas_handle,
             cublas_workspace_ptr,
             cublas_workspace_bytes,
@@ -8170,19 +8581,26 @@ pub struct TileQCalibrationCapture {
 }
 
 impl TileQCalibrationCapture {
-    fn from_env(config: &PrefillModelConfig, layers: &[PrefillLayerWeights]) -> Result<Option<Self>, String> {
+    fn from_env(
+        config: &PrefillModelConfig,
+        layers: &[PrefillLayerWeights],
+    ) -> Result<Option<Self>, String> {
         let Some(raw_dir) = std::env::var_os("KRASIS_TILEQ_CAPTURE_DIR") else {
             return Ok(None);
         };
         if !cfg!(target_endian = "little") {
-            return Err("TileQ calibration capture currently requires a little-endian host".to_string());
+            return Err(
+                "TileQ calibration capture currently requires a little-endian host".to_string(),
+            );
         }
         let dir = PathBuf::from(raw_dir);
         if dir.as_os_str().is_empty() {
             return Err("KRASIS_TILEQ_CAPTURE_DIR must not be empty".to_string());
         }
         let max_tokens_per_layer = std::env::var("KRASIS_TILEQ_CAPTURE_TOKENS")
-            .map_err(|_| "KRASIS_TILEQ_CAPTURE_TOKENS is required with KRASIS_TILEQ_CAPTURE_DIR".to_string())?
+            .map_err(|_| {
+                "KRASIS_TILEQ_CAPTURE_TOKENS is required with KRASIS_TILEQ_CAPTURE_DIR".to_string()
+            })?
             .parse::<usize>()
             .map_err(|_| "KRASIS_TILEQ_CAPTURE_TOKENS must be a positive integer".to_string())?;
         if max_tokens_per_layer == 0 {
@@ -8203,16 +8621,23 @@ impl TileQCalibrationCapture {
                     .to_string(),
             );
         }
-        let calibration_sha256 = std::env::var("KRASIS_TILEQ_CALIBRATION_SHA256")
-            .map_err(|_| "KRASIS_TILEQ_CALIBRATION_SHA256 is required with KRASIS_TILEQ_CAPTURE_DIR".to_string())?;
+        let calibration_sha256 =
+            std::env::var("KRASIS_TILEQ_CALIBRATION_SHA256").map_err(|_| {
+                "KRASIS_TILEQ_CALIBRATION_SHA256 is required with KRASIS_TILEQ_CAPTURE_DIR"
+                    .to_string()
+            })?;
         if calibration_sha256.len() != 64
             || !calibration_sha256.bytes().all(|b| b.is_ascii_hexdigit())
         {
-            return Err("KRASIS_TILEQ_CALIBRATION_SHA256 must be 64 hexadecimal characters".to_string());
+            return Err(
+                "KRASIS_TILEQ_CALIBRATION_SHA256 must be 64 hexadecimal characters".to_string(),
+            );
         }
         let arm_file = PathBuf::from(
-            std::env::var_os("KRASIS_TILEQ_CAPTURE_ARM_FILE")
-                .ok_or_else(|| "KRASIS_TILEQ_CAPTURE_ARM_FILE is required with KRASIS_TILEQ_CAPTURE_DIR".to_string())?,
+            std::env::var_os("KRASIS_TILEQ_CAPTURE_ARM_FILE").ok_or_else(|| {
+                "KRASIS_TILEQ_CAPTURE_ARM_FILE is required with KRASIS_TILEQ_CAPTURE_DIR"
+                    .to_string()
+            })?,
         );
         if arm_file.as_os_str().is_empty() || arm_file.exists() {
             return Err(
@@ -8220,10 +8645,19 @@ impl TileQCalibrationCapture {
                     .to_string(),
             );
         }
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("failed to create TileQ capture directory {}: {e}", dir.display()))?;
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            format!(
+                "failed to create TileQ capture directory {}: {e}",
+                dir.display()
+            )
+        })?;
         if std::fs::read_dir(&dir)
-            .map_err(|e| format!("failed to inspect TileQ capture directory {}: {e}", dir.display()))?
+            .map_err(|e| {
+                format!(
+                    "failed to inspect TileQ capture directory {}: {e}",
+                    dir.display()
+                )
+            })?
             .next()
             .is_some()
         {
@@ -8358,7 +8792,12 @@ impl TileQCalibrationCapture {
                 .and_then(|_| file.write_all(&(topk as u32).to_le_bytes()))
                 .and_then(|_| file.write_all(&(expert_count as u32).to_le_bytes()))
                 .and_then(|_| file.write_all(&0u32.to_le_bytes()))
-                .map_err(|e| format!("failed to write TileQ capture header {}: {e}", path.display()))?;
+                .map_err(|e| {
+                    format!(
+                        "failed to write TileQ capture header {}: {e}",
+                        path.display()
+                    )
+                })?;
             file
         } else {
             OpenOptions::new()
@@ -8376,8 +8815,12 @@ impl TileQCalibrationCapture {
             .map_err(|e| format!("failed to flush TileQ capture {}: {e}", path.display()))?;
         self.tokens_per_layer[model_layer] = existing.saturating_add(rows);
         if self.tokens_per_layer[model_layer] == self.max_tokens_per_layer {
-            file.sync_all()
-                .map_err(|e| format!("failed to sync completed TileQ capture {}: {e}", path.display()))?;
+            file.sync_all().map_err(|e| {
+                format!(
+                    "failed to sync completed TileQ capture {}: {e}",
+                    path.display()
+                )
+            })?;
             eprintln!(
                 "[TILEQ-CAPTURE] layer={} complete tokens={} file={}",
                 model_layer,
@@ -8389,7 +8832,11 @@ impl TileQCalibrationCapture {
     }
 }
 
-fn write_native_le_slice<T: Copy>(file: &mut File, values: &[T], path: &std::path::Path) -> Result<(), String> {
+fn write_native_le_slice<T: Copy>(
+    file: &mut File,
+    values: &[T],
+    path: &std::path::Path,
+) -> Result<(), String> {
     let byte_len = values
         .len()
         .checked_mul(std::mem::size_of::<T>())
@@ -8483,7 +8930,14 @@ pub struct PrefillEngine {
     pub shared_cublas_handle: cudarc::cublas::sys::cublasHandle_t,
     pub(crate) deepseek_v4_prefill_sparse_score_mode: DeepseekV4PrefillSparseScoreMode,
     pub(crate) deepseek_v4_prefill_sparse_output_mode: DeepseekV4PrefillSparseOutputMode,
+    pub(crate) deepseek_v4_prefill_sparse_pipeline_mode: DeepseekV4PrefillSparsePipelineMode,
+    pub(crate) deepseek_v4_prefill_gather_mode: DeepseekV4PrefillGatherMode,
+    pub(crate) deepseek_v4_prefill_softmax_mode: DeepseekV4PrefillSoftmaxMode,
+    pub(crate) deepseek_v4_prefill_predicted_w1_enabled: bool,
+    pub(crate) deepseek_v4_prefill_split_expert_dma_enabled: bool,
     pub(crate) deepseek_v4_prefill_index_score_mode: DeepseekV4PrefillIndexScoreMode,
+    pub(crate) deepseek_v4_prefill_topk_mode: DeepseekV4PrefillTopkMode,
+    pub(crate) deepseek_v4_prefill_hc_project_mode: DeepseekV4PrefillHcProjectMode,
     pub h_logits: Vec<f32>,
     pub reference_debug_trace_enabled: bool,
     pub first_token_margin_projection_request_enabled: bool,
@@ -8523,6 +8977,7 @@ pub struct PrefillEngine {
     pub hcs_num_experts_per_layer: usize,
     // CUDA events for double-buffer expert DMA synchronization
     pub dma_event: cuda_sys::CUevent,
+    pub dma_w1_event: cuda_sys::CUevent,
     pub cold_staging_reuse_event: cuda_sys::CUevent,
     pub compute_event: cuda_sys::CUevent,
     pub scatter_event: cuda_sys::CUevent,
@@ -8629,6 +9084,13 @@ pub struct PrefillEngine {
     pub ptr_prefetch_pinned_count: usize,
     pub ptr_prefetch_cold_count: usize,
     pub ptr_prefetch_total_count: usize,
+    // DeepSeek prefill can speculatively stage only the prescan-predicted cold
+    // W1 rows while attention runs. Exact post-route MoE remains authoritative:
+    // this map is consulted only to reuse a matching slot, and every miss is
+    // copied through the ordinary path before the W1-ready event is recorded.
+    pub deepseek_predicted_w1_layer: Option<usize>,
+    pub deepseek_predicted_w1_slots: Vec<usize>,
+    pub deepseek_predicted_w1_count: usize,
     // ScalarType for Marlin GEMM dispatch (matches weight quantization format)
     pub q_type: ScalarType,
     // BF16 copies of QK norm weights (converted from FP32 at engine creation)
@@ -8696,6 +9158,8 @@ pub struct PrefillEngine {
     pub t_deepseek_v4_indexer_event: [Cell<f64>; DEEPSEEK_V4_INDEXER_TIMING_STAGES],
     pub t_deepseek_v4_indexer_sync: [Cell<f64>; DEEPSEEK_V4_INDEXER_TIMING_STAGES],
     pub deepseek_v4_indexer_calls: [Cell<u64>; DEEPSEEK_V4_INDEXER_TIMING_STAGES],
+    pub t_deepseek_v4_hc_internal_wall: [Cell<f64>; DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGES],
+    pub deepseek_v4_hc_internal_calls: [Cell<u64>; DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGES],
     pub gqa_fa2_calls: Cell<u64>,  // number of FA2 calls (for averaging)
     pub gqa_fp8_calls: Cell<u64>,  // how many used FP8 path
     pub gqa_bf16_calls: Cell<u64>, // how many used BF16 dequant path
@@ -8837,6 +9301,9 @@ impl Drop for PrefillEngine {
             }
             if !self.dma_event.is_null() {
                 let _ = cuda_sys::lib().cuEventDestroy_v2(self.dma_event);
+            }
+            if !self.dma_w1_event.is_null() {
+                let _ = cuda_sys::lib().cuEventDestroy_v2(self.dma_w1_event);
             }
             if !self.cold_staging_reuse_event.is_null() {
                 let _ = cuda_sys::lib().cuEventDestroy_v2(self.cold_staging_reuse_event);
@@ -16883,6 +17350,30 @@ impl PrefillEngine {
         Ok(())
     }
 
+    fn deepseek_v4_hc_internal_timing_start(&self) -> Option<Instant> {
+        self.gqa_timing_enabled.get().then(Instant::now)
+    }
+
+    fn deepseek_v4_hc_internal_timing_finish(
+        &self,
+        stage_idx: usize,
+        started: Option<Instant>,
+    ) -> Result<(), String> {
+        let Some(t0) = started else {
+            return Ok(());
+        };
+        self.stream_sync()?;
+        if stage_idx < DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGES {
+            self.t_deepseek_v4_hc_internal_wall[stage_idx].set(
+                self.t_deepseek_v4_hc_internal_wall[stage_idx].get()
+                    + t0.elapsed().as_secs_f64() * 1000.0,
+            );
+            self.deepseek_v4_hc_internal_calls[stage_idx]
+                .set(self.deepseek_v4_hc_internal_calls[stage_idx].get() + 1);
+        }
+        Ok(())
+    }
+
     fn record_gqa_queue_event(
         &self,
         event_cell: &Cell<f64>,
@@ -17209,6 +17700,12 @@ impl PrefillEngine {
         self.ptr_prefetch_pinned_count = 0;
         self.ptr_prefetch_cold_count = 0;
         self.ptr_prefetch_total_count = 0;
+    }
+
+    fn clear_deepseek_predicted_w1_state(&mut self) {
+        self.deepseek_predicted_w1_layer = None;
+        self.deepseek_predicted_w1_count = 0;
+        self.deepseek_predicted_w1_slots.fill(usize::MAX);
     }
 
     fn free_raw_ptr_table(ptrs: &mut [u64; 4]) {
@@ -17555,6 +18052,176 @@ impl PrefillEngine {
             );
         }
 
+        Ok(())
+    }
+
+    fn prefetch_deepseek_predicted_w1_for_layer(
+        &mut self,
+        layer_idx: usize,
+        m: usize,
+        chunk_start: usize,
+    ) -> Result<(), String> {
+        if !self.deepseek_v4_prefill_predicted_w1_enabled
+            || !self.deepseek_v4_prefill_split_expert_dma_enabled
+            || self.synthetic_repack.is_some()
+            || prefill_disable_ptr_table()
+            || self.d_expert_w1_ptrs.is_none()
+        {
+            return Ok(());
+        }
+        if self.deepseek_predicted_w1_layer.is_some() {
+            return Err(format!(
+                "DeepSeek predicted-W1 state was not consumed before layer {}",
+                layer_idx
+            ));
+        }
+        if self.layer_weights[layer_idx].layer_type != 4
+            || self.layer_weights[layer_idx].moe_gate_ptr == 0
+        {
+            return Ok(());
+        }
+        let Some(hcs_layer_idx) = self.layer_weights[layer_idx].moe_layer_idx else {
+            return Ok(());
+        };
+        let prescan_layer_idx = self
+            .moe_ordinal_for_model_layer(layer_idx)
+            .unwrap_or(hcs_layer_idx);
+        let chunk_end = chunk_start
+            .checked_add(m)
+            .ok_or_else(|| "DeepSeek predicted-W1 chunk end overflow".to_string())?;
+        if self.prescan_token_count < chunk_end {
+            return Ok(());
+        }
+        let Some(predicted_active) = self
+            .prescan_active_experts
+            .get(prescan_layer_idx)
+            .and_then(|chunks| chunks.get(self.active_prefill_chunk_idx))
+            .cloned()
+        else {
+            return Ok(());
+        };
+        if predicted_active.is_empty() {
+            return Ok(());
+        }
+
+        let n_experts = self.layer_weights[layer_idx].moe_num_experts;
+        if self.deepseek_predicted_w1_slots.len() < n_experts {
+            self.deepseek_predicted_w1_slots
+                .resize(n_experts, usize::MAX);
+        }
+        self.deepseek_predicted_w1_slots.fill(usize::MAX);
+
+        let mut predicted_cold = Vec::with_capacity(predicted_active.len());
+        for eid in predicted_active {
+            if eid >= n_experts || self.expert_lookup(hcs_layer_idx, eid).is_some() {
+                continue;
+            }
+            let pinned = self.pinning_active
+                && prescan_layer_idx < self.pinned_expert_offsets.len()
+                && eid < self.pinned_expert_offsets[prescan_layer_idx].len()
+                && self.pinned_expert_offsets[prescan_layer_idx][eid].is_some();
+            if !pinned && !predicted_cold.contains(&eid) {
+                predicted_cold.push(eid);
+            }
+        }
+        if predicted_cold.is_empty() {
+            return Ok(());
+        }
+
+        if (self.d_cold_staging.is_none() || self.max_cold_experts < predicted_cold.len())
+            && self
+                .ensure_cold_staging_capacity(predicted_cold.len(), m)
+                .is_err()
+        {
+            // The optimization is capacity-gated. Exact routing still owns the
+            // request and will size/fail through the normal measured path.
+            return Ok(());
+        }
+        let cold_staging_base = self.d_cold_staging.as_ref().map_or(0, |s| *s.device_ptr());
+        if cold_staging_base == 0 || self.max_cold_experts < predicted_cold.len() {
+            return Ok(());
+        }
+
+        let copies = {
+            let Some(moe_data) = self.moe_layers.get(hcs_layer_idx).and_then(|o| o.as_ref()) else {
+                return Ok(());
+            };
+            let mut copies = Vec::with_capacity(predicted_cold.len());
+            for &eid in &predicted_cold {
+                let Some(expert) = moe_data.experts.get(eid) else {
+                    continue;
+                };
+                if expert.w13_packed_bytes != self.w1_packed_per_expert
+                    || expert.w13_scales_bytes != self.w1_scales_per_expert
+                {
+                    return Err(format!(
+                        "DeepSeek predicted-W1 expert {} layer {} byte geometry differs from runtime layout: packed={}/{} scales={}/{}",
+                        eid,
+                        layer_idx,
+                        expert.w13_packed_bytes,
+                        self.w1_packed_per_expert,
+                        expert.w13_scales_bytes,
+                        self.w1_scales_per_expert,
+                    ));
+                }
+                copies.push((
+                    eid,
+                    expert.w13_packed_ptr as usize,
+                    expert.w13_packed_bytes,
+                    expert.w13_scales_ptr as usize,
+                    expert.w13_scales_bytes,
+                ));
+            }
+            copies
+        };
+        if copies.is_empty() {
+            return Ok(());
+        }
+
+        self.order_copy_stream_after_compute_for_cold_staging()?;
+        for (slot, &(eid, w1_src, w1_bytes, w1s_src, w1s_bytes)) in copies.iter().enumerate() {
+            let slot_base = cold_staging_base + (slot * self.cold_expert_bytes) as u64;
+            unsafe {
+                let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    slot_base,
+                    w1_src as *const std::ffi::c_void,
+                    w1_bytes,
+                    self.copy_stream,
+                );
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "DeepSeek predicted-W1 packed copy failed at layer {} expert {}: {:?}",
+                        layer_idx, eid, err
+                    ));
+                }
+                let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    slot_base + self.w1_packed_per_expert as u64,
+                    w1s_src as *const std::ffi::c_void,
+                    w1s_bytes,
+                    self.copy_stream,
+                );
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "DeepSeek predicted-W1 scale copy failed at layer {} expert {}: {:?}",
+                        layer_idx, eid, err
+                    ));
+                }
+            }
+            self.deepseek_predicted_w1_slots[eid] = slot;
+        }
+        self.deepseek_predicted_w1_layer = Some(layer_idx);
+        self.deepseek_predicted_w1_count = copies.len();
+
+        if std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1_DIAG").is_ok() {
+            eprintln!(
+                "[DSV4-PREDICTED-W1] prefetched layer={} chunk={} tokens={} predicted_cold={} capacity={}",
+                layer_idx,
+                self.active_prefill_chunk_idx,
+                m,
+                copies.len(),
+                self.max_cold_experts,
+            );
+        }
         Ok(())
     }
 
@@ -21587,14 +22254,13 @@ impl PrefillEngine {
             // norm_correction. Keep construction centralized and covered by
             // a non-zero-start regression: swapping the final two arguments
             // silently writes an incremental export at row zero.
-            let (mut p6, mut p7, mut p8, mut p9, mut p10) =
-                stage_exact_export_launch_scalars(
-                    export_tokens,
-                    kv_stride,
-                    layer_decode_max_seq,
-                    source_start,
-                    self.polar4_norm_correction_mode,
-                );
+            let (mut p6, mut p7, mut p8, mut p9, mut p10) = stage_exact_export_launch_scalars(
+                export_tokens,
+                kv_stride,
+                layer_decode_max_seq,
+                source_start,
+                self.polar4_norm_correction_mode,
+            );
             let kernel = match (self.prefill_kv_temp_format, self.decode_kv_format) {
                 (0, 7) => self.kernels.kv_cache_append_k6v6,
                 (0, 9) => self.kernels.kv_cache_append_k4v4,
@@ -21782,6 +22448,7 @@ impl PrefillEngine {
         self.scratch = allocate_scratch(&self.device, &self.config, 0)
             .map_err(|e| format!("alloc empty scratch: {e}"))?;
         self.release_reusable_ptr_tables();
+        self.clear_deepseek_predicted_w1_state();
         self.d_cold_staging = None;
         self.d_shared_bf16_scratch1 = None;
         self.d_shared_bf16_scratch2 = None;
@@ -22595,6 +23262,7 @@ impl PrefillEngine {
         self.d_fla_final_state = None;
         self.d_fla_v_new = None;
         self.d_fla_o = None;
+        self.clear_deepseek_predicted_w1_state();
         if !self.retain_prefill_kv_for_active {
             self.release_prefill_kv_temp();
         }
@@ -22649,15 +23317,7 @@ impl PrefillEngine {
         temperature: f32,
         suppress_tokens: &[u32],
     ) -> Result<PrefillResult, String> {
-        self.run_prefill_from_state(
-            token_ids,
-            0,
-            true,
-            None,
-            None,
-            temperature,
-            suppress_tokens,
-        )
+        self.run_prefill_from_state(token_ids, 0, true, None, None, temperature, suppress_tokens)
             .map(|(result, _)| result)
     }
 
@@ -22987,7 +23647,9 @@ impl PrefillEngine {
             && std::env::var("KRASIS_NO_PINNING").is_err();
         let prescan_enabled = use_fused
             && self.config.n_routed_experts > 0
-            && (pinning_enabled || self.prefill_prescan_accuracy_enabled);
+            && (pinning_enabled
+                || self.prefill_prescan_accuracy_enabled
+                || self.deepseek_v4_prefill_predicted_w1_enabled);
         if debug_prefill {
             let hcs_cached_experts = self.hcs_cached_expert_count();
             eprintln!(
@@ -23108,6 +23770,9 @@ impl PrefillEngine {
                 }
                 Err(e) => {
                     self.prescan_token_count = 0;
+                    if self.deepseek_v4_prefill_predicted_w1_enabled {
+                        return Err(format!("DeepSeek predicted-W1 pre-scan failed: {e}"));
+                    }
                     if stderr_debug_enabled() {
                         eprintln!("[PREFILL] Gate pre-scan failed (non-fatal): {}", e);
                     }
@@ -23291,6 +23956,12 @@ impl PrefillEngine {
                 cell.set(0.0);
             }
             for cell in &self.deepseek_v4_indexer_calls {
+                cell.set(0);
+            }
+            for cell in &self.t_deepseek_v4_hc_internal_wall {
+                cell.set(0.0);
+            }
+            for cell in &self.deepseek_v4_hc_internal_calls {
                 cell.set(0);
             }
             for cell in &self.mamba2_stage_calls {
@@ -25904,9 +26575,8 @@ impl PrefillEngine {
                 // keeping the temporary cache active for the remaining chunks.
                 self.export_stage_exact_prefill_kv_boundary(chunk_end, sequence_start)?;
                 self.stream_sync()?;
-                boundary_capture = Some(
-                    self.capture_sequence_boundary_state(chunk_end, incremental_base)?,
-                );
+                boundary_capture =
+                    Some(self.capture_sequence_boundary_state(chunk_end, incremental_base)?);
                 let capture = boundary_capture
                     .as_ref()
                     .ok_or("prefill boundary capture disappeared")?;
@@ -26833,6 +27503,25 @@ impl PrefillEngine {
                         );
                     }
                 }
+                if self
+                    .deepseek_v4_hc_internal_calls
+                    .iter()
+                    .any(|calls| calls.get() > 0)
+                {
+                    eprintln!("[PREFILL-TIMING]         HC prepare internals:");
+                    for (idx, label) in DEEPSEEK_V4_HC_INTERNAL_TIMING_LABELS.iter().enumerate() {
+                        let calls = self.deepseek_v4_hc_internal_calls[idx].get();
+                        if calls == 0 {
+                            continue;
+                        }
+                        eprintln!(
+                            "[PREFILL-TIMING]           {:<16} wall+sync={:>8.1}ms over {} calls",
+                            label,
+                            self.t_deepseek_v4_hc_internal_wall[idx].get(),
+                            calls
+                        );
+                    }
+                }
             }
             let mamba2_has_data = self.mamba2_stage_calls.iter().any(|calls| calls.get() > 0);
             if mamba2_has_data {
@@ -27409,6 +28098,8 @@ impl PrefillEngine {
                 accumulate_gemm_scores: self.kernels.dsa_prefill_accumulate_gemm_scores,
                 topk_sort_rows: self.kernels.dsa_prefill_topk_sort_rows,
                 topk_merge_rows: self.kernels.dsa_prefill_topk_merge_rows,
+                topk_radix_sort_rows: self.kernels.dsa_prefill_topk_radix_sort_rows,
+                topk_linear_merge_rows: self.kernels.dsa_prefill_topk_linear_merge_rows,
             },
             self.stream,
             layer_idx,
@@ -27425,7 +28116,9 @@ impl PrefillEngine {
             1.0f32
                 / ((registration.index_head_dim as f32).sqrt()
                     * (registration.index_n_heads as f32).sqrt()),
+            0,
             DeepseekV4PrefillIndexScoreMode::Scalar,
+            DeepseekV4PrefillTopkMode::Bitonic,
             std::ptr::null_mut(),
             0,
             0,
@@ -28143,6 +28836,7 @@ impl PrefillEngine {
         let mut i2 = h as i32;
         let mut i3 = hc_mult as i32;
         let mut i4 = self.config.rms_norm_eps;
+        let inv_rms_timing = self.deepseek_v4_hc_internal_timing_start();
         unsafe {
             launch(
                 self.kernels.deepseek_v4_hc_inv_rms,
@@ -28159,32 +28853,207 @@ impl PrefillEngine {
                 ],
             )?;
         }
+        self.deepseek_v4_hc_internal_timing_finish(
+            DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_INV_RMS,
+            inv_rms_timing,
+        )?;
 
-        let mut j0 = mixes_ptr;
-        let mut j1 = state;
-        let mut j2 = function.ptr;
-        let mut j3 = inv_ptr;
-        let mut j4 = h as i32;
-        let mut j5 = hc_mult as i32;
-        let mut j6 = mix_width as i32;
-        unsafe {
-            launch(
-                self.kernels.deepseek_v4_hc_project,
-                (mix_width as u32, m as u32, 1),
-                (reduction_threads, 1, 1),
-                reduction_threads * 4,
-                self.stream,
-                &mut [
-                    &mut j0 as *mut _ as *mut std::ffi::c_void,
-                    &mut j1 as *mut _ as *mut std::ffi::c_void,
-                    &mut j2 as *mut _ as *mut std::ffi::c_void,
-                    &mut j3 as *mut _ as *mut std::ffi::c_void,
-                    &mut j4 as *mut _ as *mut std::ffi::c_void,
-                    &mut j5 as *mut _ as *mut std::ffi::c_void,
-                    &mut j6 as *mut _ as *mut std::ffi::c_void,
-                ],
-            )?;
+        let project_timing = self.deepseek_v4_hc_internal_timing_start();
+        match self.deepseek_v4_prefill_hc_project_mode {
+            DeepseekV4PrefillHcProjectMode::Scalar => {
+                let mut j0 = mixes_ptr;
+                let mut j1 = state;
+                let mut j2 = function.ptr;
+                let mut j3 = inv_ptr;
+                let mut j4 = h as i32;
+                let mut j5 = hc_mult as i32;
+                let mut j6 = mix_width as i32;
+                unsafe {
+                    launch(
+                        self.kernels.deepseek_v4_hc_project,
+                        (mix_width as u32, m as u32, 1),
+                        (reduction_threads, 1, 1),
+                        reduction_threads * 4,
+                        self.stream,
+                        &mut [
+                            &mut j0 as *mut _ as *mut std::ffi::c_void,
+                            &mut j1 as *mut _ as *mut std::ffi::c_void,
+                            &mut j2 as *mut _ as *mut std::ffi::c_void,
+                            &mut j3 as *mut _ as *mut std::ffi::c_void,
+                            &mut j4 as *mut _ as *mut std::ffi::c_void,
+                            &mut j5 as *mut _ as *mut std::ffi::c_void,
+                            &mut j6 as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )?;
+                }
+            }
+            DeepseekV4PrefillHcProjectMode::Tf32Gemm => {
+                let normalized_ptr = *self.scratch.d_moe_accum.device_ptr();
+                let tile_capacity = self.scratch.d_moe_accum.len() / flat;
+                if normalized_ptr == 0 || tile_capacity == 0 {
+                    return Err(format!(
+                        "DeepSeek-V4 HC TF32 projection scratch is too small: elements={} flat={}",
+                        self.scratch.d_moe_accum.len(),
+                        flat
+                    ));
+                }
+                let cublas_workspace = *self.scratch.d_fp32_scratch.device_ptr();
+                let cublas_workspace_bytes = self
+                    .scratch
+                    .d_fp32_scratch
+                    .len()
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or("DeepSeek-V4 HC TF32 cuBLAS workspace size overflow")?;
+                if cublas_workspace == 0 || cublas_workspace_bytes == 0 {
+                    return Err("DeepSeek-V4 HC TF32 cuBLAS workspace is absent".to_string());
+                }
+                let lib = unsafe { cublas_sys::lib() };
+                let set_workspace = unsafe {
+                    lib.cublasSetWorkspace_v2(
+                        self.cublas_handle,
+                        cublas_workspace as *mut std::ffi::c_void,
+                        cublas_workspace_bytes,
+                    )
+                };
+                if set_workspace != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                    return Err(format!(
+                        "DeepSeek-V4 HC TF32 cublasSetWorkspace failed: {set_workspace:?} bytes={cublas_workspace_bytes}"
+                    ));
+                }
+                let project_result = (|| -> Result<(), String> {
+                    unsafe {
+                        cublas_result::set_stream(
+                            self.cublas_handle,
+                            self.stream as cublas_sys::cudaStream_t,
+                        )
+                        .map_err(|error| {
+                            format!("DeepSeek-V4 HC TF32 set_stream failed: {error:?}")
+                        })?;
+                    }
+                    let alpha = 1.0f32;
+                    let beta = 0.0f32;
+                    let mut token_start = 0usize;
+                    while token_start < m {
+                        let tile_rows = (m - token_start).min(tile_capacity);
+                        let tile_elements = tile_rows
+                            .checked_mul(flat)
+                            .ok_or("DeepSeek-V4 HC TF32 tile element count overflow")?;
+                        let state_tile = state
+                            .checked_add(
+                                u64::try_from(
+                                    token_start
+                                        .checked_mul(flat)
+                                        .and_then(|value| {
+                                            value.checked_mul(std::mem::size_of::<u16>())
+                                        })
+                                        .ok_or("DeepSeek-V4 HC TF32 state offset overflow")?,
+                                )
+                                .map_err(|_| "DeepSeek-V4 HC TF32 state offset exceeds u64")?,
+                            )
+                            .ok_or("DeepSeek-V4 HC TF32 state pointer overflow")?;
+                        let inv_tile = inv_ptr
+                            .checked_add(
+                                u64::try_from(
+                                    token_start
+                                        .checked_mul(std::mem::size_of::<f32>())
+                                        .ok_or("DeepSeek-V4 HC TF32 inverse-RMS offset overflow")?,
+                                )
+                                .map_err(|_| {
+                                    "DeepSeek-V4 HC TF32 inverse-RMS offset exceeds u64"
+                                })?,
+                            )
+                            .ok_or("DeepSeek-V4 HC TF32 inverse-RMS pointer overflow")?;
+                        let mixes_tile = mixes_ptr
+                            .checked_add(
+                                u64::try_from(
+                                    token_start
+                                        .checked_mul(mix_width)
+                                        .and_then(|value| {
+                                            value.checked_mul(std::mem::size_of::<f32>())
+                                        })
+                                        .ok_or("DeepSeek-V4 HC TF32 output offset overflow")?,
+                                )
+                                .map_err(|_| "DeepSeek-V4 HC TF32 output offset exceeds u64")?,
+                            )
+                            .ok_or("DeepSeek-V4 HC TF32 output pointer overflow")?;
+                        let threads = 256u32;
+                        let blocks = u32::try_from(tile_elements.div_ceil(threads as usize))
+                            .map_err(|_| "DeepSeek-V4 HC TF32 normalize grid exceeds u32")?;
+                        let mut n0 = normalized_ptr;
+                        let mut n1 = state_tile;
+                        let mut n2 = inv_tile;
+                        let mut n3 = i64::try_from(tile_elements)
+                            .map_err(|_| "DeepSeek-V4 HC TF32 tile elements exceed i64")?;
+                        let mut n4 = i32::try_from(flat)
+                            .map_err(|_| "DeepSeek-V4 HC TF32 flat width exceeds i32")?;
+                        unsafe {
+                            launch(
+                                self.kernels.deepseek_v4_hc_normalize_f32,
+                                (blocks, 1, 1),
+                                (threads, 1, 1),
+                                0,
+                                self.stream,
+                                &mut [
+                                    &mut n0 as *mut _ as *mut std::ffi::c_void,
+                                    &mut n1 as *mut _ as *mut std::ffi::c_void,
+                                    &mut n2 as *mut _ as *mut std::ffi::c_void,
+                                    &mut n3 as *mut _ as *mut std::ffi::c_void,
+                                    &mut n4 as *mut _ as *mut std::ffi::c_void,
+                                ],
+                            )?;
+                            cublas_result::gemm_ex(
+                                self.cublas_handle,
+                                cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                                i32::try_from(mix_width).map_err(|_| {
+                                    "DeepSeek-V4 HC TF32 mix width exceeds i32"
+                                })?,
+                                i32::try_from(tile_rows).map_err(|_| {
+                                    "DeepSeek-V4 HC TF32 tile rows exceed i32"
+                                })?,
+                                n4,
+                                &alpha as *const f32 as *const std::ffi::c_void,
+                                function.ptr as *const std::ffi::c_void,
+                                cublas_sys::cudaDataType::CUDA_R_32F,
+                                n4,
+                                normalized_ptr as *const std::ffi::c_void,
+                                cublas_sys::cudaDataType::CUDA_R_32F,
+                                n4,
+                                &beta as *const f32 as *const std::ffi::c_void,
+                                mixes_tile as *mut std::ffi::c_void,
+                                cublas_sys::cudaDataType::CUDA_R_32F,
+                                i32::try_from(mix_width).map_err(|_| {
+                                    "DeepSeek-V4 HC TF32 mix width exceeds i32"
+                                })?,
+                                cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+                                cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "DeepSeek-V4 HC TF32 GEMM failed at rows {token_start}..{}: {error:?}",
+                                    token_start + tile_rows
+                                )
+                            })?;
+                        }
+                        token_start += tile_rows;
+                    }
+                    Ok(())
+                })();
+                let restore_workspace = unsafe {
+                    lib.cublasSetWorkspace_v2(self.cublas_handle, std::ptr::null_mut(), 0)
+                };
+                if restore_workspace != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                    return Err(format!(
+                        "DeepSeek-V4 HC TF32 failed to restore cuBLAS workspace: {restore_workspace:?}; operation={project_result:?}"
+                    ));
+                }
+                project_result?;
+            }
         }
+        self.deepseek_v4_hc_internal_timing_finish(
+            DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_PROJECT,
+            project_timing,
+        )?;
 
         let mut k0 = pre_ptr;
         let mut k1 = post_ptr;
@@ -28197,6 +29066,7 @@ impl PrefillEngine {
         let mut k8 = hc_eps;
         let prepare_threads =
             std::cmp::max(32, std::cmp::min(1024, hc_mult).next_power_of_two()) as u32;
+        let prepare_timing = self.deepseek_v4_hc_internal_timing_start();
         unsafe {
             launch(
                 self.kernels.deepseek_v4_hc_prepare,
@@ -28217,6 +29087,10 @@ impl PrefillEngine {
                 ],
             )?;
         }
+        self.deepseek_v4_hc_internal_timing_finish(
+            DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_PREPARE,
+            prepare_timing,
+        )?;
 
         let hidden_threads = std::cmp::max(32, ((std::cmp::min(1024, h) + 31) / 32) * 32) as u32;
         let mut r0 = hidden_out;
@@ -28224,6 +29098,7 @@ impl PrefillEngine {
         let mut r2 = pre_ptr;
         let mut r3 = h as i32;
         let mut r4 = hc_mult as i32;
+        let reduce_timing = self.deepseek_v4_hc_internal_timing_start();
         unsafe {
             launch(
                 self.kernels.deepseek_v4_hc_reduce,
@@ -28240,6 +29115,10 @@ impl PrefillEngine {
                 ],
             )?;
         }
+        self.deepseek_v4_hc_internal_timing_finish(
+            DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_REDUCE,
+            reduce_timing,
+        )?;
         Ok((post_ptr, comb_ptr))
     }
 
@@ -31441,7 +32320,10 @@ impl PrefillEngine {
                 .d_deepseek_v4_native_history
                 .as_ref()
                 .ok_or_else(|| {
-                    format!("DeepSeek-V4 layer {} Native index history is absent", layer_idx)
+                    format!(
+                        "DeepSeek-V4 layer {} Native index history is absent",
+                        layer_idx
+                    )
                 })?
                 .device_ptr()
         } else {
@@ -31778,6 +32660,8 @@ impl PrefillEngine {
                 accumulate_gemm_scores: self.kernels.dsa_prefill_accumulate_gemm_scores,
                 topk_sort_rows: self.kernels.dsa_prefill_topk_sort_rows,
                 topk_merge_rows: self.kernels.dsa_prefill_topk_merge_rows,
+                topk_radix_sort_rows: self.kernels.dsa_prefill_topk_radix_sort_rows,
+                topk_linear_merge_rows: self.kernels.dsa_prefill_topk_linear_merge_rows,
             },
             self.stream,
             layer_idx,
@@ -31792,7 +32676,9 @@ impl PrefillEngine {
             desc.rope_sin_ptr,
             0,
             1.0,
+            desc.compress_ratio,
             self.deepseek_v4_prefill_index_score_mode,
+            self.deepseek_v4_prefill_topk_mode,
             self.cublas_handle,
             *self.scratch.d_moe_accum.device_ptr(),
             self.scratch
@@ -31888,10 +32774,14 @@ impl PrefillEngine {
         source_row: usize,
         label: &str,
     ) -> Result<(), String> {
-        if output == 0 || rows == 0 || source_row.checked_add(rows).is_none()
+        if output == 0
+            || rows == 0
+            || source_row.checked_add(rows).is_none()
             || source_row + rows > cache.rows
         {
-            return Err(format!("DeepSeek-V4 {label} Native unpack contract mismatch"));
+            return Err(format!(
+                "DeepSeek-V4 {label} Native unpack contract mismatch"
+            ));
         }
         let elements = rows
             .checked_mul(cache.width)
@@ -31914,7 +32804,11 @@ impl PrefillEngine {
         let kernel = match cache.code_bits {
             8 => self.kernels.deepseek_v4_unpack_fp8_native,
             4 => self.kernels.deepseek_v4_unpack_fp4_native,
-            bits => return Err(format!("DeepSeek-V4 {label} unsupported Native code width {bits}")),
+            bits => {
+                return Err(format!(
+                    "DeepSeek-V4 {label} unsupported Native code width {bits}"
+                ))
+            }
         };
         let mut params: Vec<*mut std::ffi::c_void> = if cache.code_bits == 8 {
             vec![
@@ -31942,8 +32836,12 @@ impl PrefillEngine {
         unsafe {
             launch(
                 kernel,
-                (u32::try_from(elements.div_ceil(threads))
-                    .map_err(|_| format!("DeepSeek-V4 {label} Native grid exceeds u32"))?, 1, 1),
+                (
+                    u32::try_from(elements.div_ceil(threads))
+                        .map_err(|_| format!("DeepSeek-V4 {label} Native grid exceeds u32"))?,
+                    1,
+                    1,
+                ),
                 (threads as u32, 1, 1),
                 0,
                 self.stream,
@@ -31961,7 +32859,9 @@ impl PrefillEngine {
         destination_row: usize,
         label: &str,
     ) -> Result<(), String> {
-        if values == 0 || rows == 0 || destination_row.checked_add(rows).is_none()
+        if values == 0
+            || rows == 0
+            || destination_row.checked_add(rows).is_none()
             || destination_row + rows > cache.rows
         {
             return Err(format!("DeepSeek-V4 {label} Native pack contract mismatch"));
@@ -31984,17 +32884,30 @@ impl PrefillEngine {
         let kernel = match cache.code_bits {
             8 => self.kernels.deepseek_v4_pack_fp8_native,
             4 => self.kernels.deepseek_v4_pack_fp4_native,
-            bits => return Err(format!("DeepSeek-V4 {label} unsupported Native code width {bits}")),
+            bits => {
+                return Err(format!(
+                    "DeepSeek-V4 {label} unsupported Native code width {bits}"
+                ))
+            }
         };
         let grid = if cache.code_bits == 8 {
-            (u32::try_from(blocks + 1)
-                .map_err(|_| format!("DeepSeek-V4 {label} Native block grid exceeds u32"))?,
-             u32::try_from(rows)
-                .map_err(|_| format!("DeepSeek-V4 {label} Native row grid exceeds u32"))?, 1)
+            (
+                u32::try_from(blocks + 1)
+                    .map_err(|_| format!("DeepSeek-V4 {label} Native block grid exceeds u32"))?,
+                u32::try_from(rows)
+                    .map_err(|_| format!("DeepSeek-V4 {label} Native row grid exceeds u32"))?,
+                1,
+            )
         } else {
-            (u32::try_from(rows.checked_mul(blocks)
-                .ok_or_else(|| format!("DeepSeek-V4 {label} Native grid overflow"))?)
-                .map_err(|_| format!("DeepSeek-V4 {label} Native grid exceeds u32"))?, 1, 1)
+            (
+                u32::try_from(
+                    rows.checked_mul(blocks)
+                        .ok_or_else(|| format!("DeepSeek-V4 {label} Native grid overflow"))?,
+                )
+                .map_err(|_| format!("DeepSeek-V4 {label} Native grid exceeds u32"))?,
+                1,
+                1,
+            )
         };
         let threads = cache.block_size;
         let mut params: Vec<*mut std::ffi::c_void> = if cache.code_bits == 8 {
@@ -32024,8 +32937,12 @@ impl PrefillEngine {
             launch(
                 kernel,
                 grid,
-                (u32::try_from(threads)
-                    .map_err(|_| format!("DeepSeek-V4 {label} Native threads exceed u32"))?, 1, 1),
+                (
+                    u32::try_from(threads)
+                        .map_err(|_| format!("DeepSeek-V4 {label} Native threads exceed u32"))?,
+                    1,
+                    1,
+                ),
                 u32::try_from(threads * std::mem::size_of::<f32>())
                     .map_err(|_| format!("DeepSeek-V4 {label} Native shared bytes exceed u32"))?,
                 self.stream,
@@ -32133,9 +33050,16 @@ impl PrefillEngine {
             if native.rows != compressor.cache_rows
                 || native.width != head_dim
                 || native.code_bits != if rotate_for_indexer { 4 } else { 8 }
-                || native.quant_cols != if rotate_for_indexer { head_dim } else { head_dim - rope_dim }
+                || native.quant_cols
+                    != if rotate_for_indexer {
+                        head_dim
+                    } else {
+                        head_dim - rope_dim
+                    }
             {
-                return Err(format!("DeepSeek-V4 {label} Native compressor geometry mismatch"));
+                return Err(format!(
+                    "DeepSeek-V4 {label} Native compressor geometry mismatch"
+                ));
             }
             let history = self
                 .scratch
@@ -32154,13 +33078,7 @@ impl PrefillEngine {
             }
             let history_ptr = *history.device_ptr();
             if self.active_prefill_chunk_idx == 0 && first_group > 0 {
-                self.unpack_deepseek_v4_native_cache(
-                    native,
-                    history_ptr,
-                    first_group,
-                    0,
-                    label,
-                )?;
+                self.unpack_deepseek_v4_native_cache(native, history_ptr, first_group, 0, label)?;
             }
             Some(history_ptr)
         } else {
@@ -32461,9 +33379,12 @@ impl PrefillEngine {
                 unsafe {
                     launch(
                         self.kernels.deepseek_v4_fp4_qat_inplace,
-                        (u32::try_from(quant_grid_blocks).map_err(|_| {
-                            format!("DeepSeek-V4 {label} FP4 grid exceeds u32")
-                        })?, 1, 1),
+                        (
+                            u32::try_from(quant_grid_blocks)
+                                .map_err(|_| format!("DeepSeek-V4 {label} FP4 grid exceeds u32"))?,
+                            1,
+                            1,
+                        ),
                         (DEEPSEEK_V4_FP4_QAT_BLOCK_SIZE as u32, 1, 1),
                         (DEEPSEEK_V4_FP4_QAT_BLOCK_SIZE * std::mem::size_of::<f32>()) as u32,
                         self.stream,
@@ -32499,11 +33420,13 @@ impl PrefillEngine {
                 unsafe {
                     launch(
                         self.kernels.deepseek_v4_fp8_qat_inplace,
-                        (u32::try_from(quant_blocks).map_err(|_| {
-                            format!("DeepSeek-V4 {label} FP8 grid exceeds u32")
-                        })?, u32::try_from(emitted_rows).map_err(|_| {
-                            format!("DeepSeek-V4 {label} FP8 rows exceed u32")
-                        })?, 1),
+                        (
+                            u32::try_from(quant_blocks)
+                                .map_err(|_| format!("DeepSeek-V4 {label} FP8 grid exceeds u32"))?,
+                            u32::try_from(emitted_rows)
+                                .map_err(|_| format!("DeepSeek-V4 {label} FP8 rows exceed u32"))?,
+                            1,
+                        ),
                         (DEEPSEEK_V4_FP8_QAT_BLOCK_SIZE as u32, 1, 1),
                         (DEEPSEEK_V4_FP8_QAT_BLOCK_SIZE * std::mem::size_of::<f32>()) as u32,
                         self.stream,
@@ -32540,11 +33463,20 @@ impl PrefillEngine {
         selected: usize,
         raw_rows: usize,
         compressed_rows: usize,
+        fused_output: Option<(u64, u64)>,
     ) -> Result<(), String> {
         let mode = self.deepseek_v4_prefill_sparse_score_mode;
         if !mode.uses_gathered_gemm() {
             return Err(format!(
                 "DeepSeek-V4 layer {layer_idx} gathered sparse-score helper called in {} mode",
+                mode.label()
+            ));
+        }
+        if self.deepseek_v4_prefill_gather_mode == DeepseekV4PrefillGatherMode::Bf16x8
+            && mode != DeepseekV4PrefillSparseScoreMode::Bf16Fp32
+        {
+            return Err(format!(
+                "DeepSeek-V4 layer {layer_idx} bf16x8 gather requires bf16_fp32 sparse-score mode, got {}",
                 mode.label()
             ));
         }
@@ -32560,6 +33492,20 @@ impl PrefillEngine {
             return Err(format!(
                 "DeepSeek-V4 layer {layer_idx} invalid gathered sparse-score inputs: scores=0x{scores:x} query=0x{query:x} raw=0x{raw_history:x} indices=0x{indices:x} tokens={tokens} heads={heads} head_dim={head_dim} selected={selected}"
             ));
+        }
+        if let Some((output, attention_sink)) = fused_output {
+            if mode != DeepseekV4PrefillSparseScoreMode::Bf16Fp32
+                || self.deepseek_v4_prefill_sparse_output_mode
+                    != DeepseekV4PrefillSparseOutputMode::Bf16Fp32Gemm
+                || output == 0
+                || attention_sink == 0
+            {
+                return Err(format!(
+                    "DeepSeek-V4 layer {layer_idx} fused sparse pipeline requires bf16_fp32 score/output modes and non-null output/sink: score_mode={} output_mode={} output=0x{output:x} sink=0x{attention_sink:x}",
+                    mode.label(),
+                    self.deepseek_v4_prefill_sparse_output_mode.label(),
+                ));
+            }
         }
 
         let selected_elems_per_token = selected.checked_mul(head_dim).ok_or_else(|| {
@@ -32592,7 +33538,12 @@ impl PrefillEngine {
             .ok_or_else(|| {
                 format!("DeepSeek-V4 layer {layer_idx} gathered operand capacity overflow")
             })?;
-        let tile_capacity = operand_buffer_bytes / operand_bytes_per_token;
+        let mut tile_capacity = operand_buffer_bytes / operand_bytes_per_token;
+        let fused_weights = *self.scratch.d_moe_expert_out.device_ptr();
+        if fused_output.is_some() {
+            tile_capacity =
+                tile_capacity.min(self.scratch.d_moe_expert_out.len() / score_elems_per_token);
+        }
         if tile_capacity == 0 {
             return Err(format!(
                 "DeepSeek-V4 layer {layer_idx} gathered operand scratch is too small: bytes={} required_per_token={} mode={}",
@@ -32650,6 +33601,21 @@ impl PrefillEngine {
             }
         }
 
+        // Diagnostic-only substage timing. Each boundary synchronizes the
+        // prefill stream so the reported wall time is attributable to the
+        // gather, score GEMM, or fused softmax/output work rather than CUDA
+        // queueing debt. This is intentionally opt-in and must never be used
+        // for speed claims.
+        let sparse_substage_timing =
+            std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_SPARSE_SUBSTAGE_TIMING")
+                .map(|value| value == "1")
+                .unwrap_or(false);
+        let mut sparse_gather_ms = 0.0f64;
+        let mut sparse_score_ms = 0.0f64;
+        let mut sparse_softmax_ms = 0.0f64;
+        let mut sparse_output_ms = 0.0f64;
+        let mut sparse_tiles = 0usize;
+
         let run_result = (|| -> Result<(), String> {
             unsafe {
                 cublas_result::set_stream(
@@ -32686,13 +33652,49 @@ impl PrefillEngine {
                             format!("DeepSeek-V4 layer {layer_idx} index tile offset overflow")
                         })? as u64;
 
+                if sparse_substage_timing {
+                    self.stream_sync()?;
+                }
+                let gather_started = sparse_substage_timing.then(Instant::now);
                 let (a_ptr, b_ptr, operand_type, alpha, gather_elements) = match mode {
                     DeepseekV4PrefillSparseScoreMode::Bf16Fp32 => {
-                        let gather_elements = tile_tokens
-                            .checked_mul(selected_elems_per_token + score_elems_per_token)
-                            .ok_or_else(|| {
-                                format!("DeepSeek-V4 layer {layer_idx} BF16 gather work overflow")
-                            })?;
+                        let (gather_kernel, gather_work) =
+                            match self.deepseek_v4_prefill_gather_mode {
+                                DeepseekV4PrefillGatherMode::Scalar => (
+                                    self.kernels.deepseek_v4_prefill_gather_scores_bf16,
+                                    tile_tokens
+                                        .checked_mul(
+                                            selected_elems_per_token + score_elems_per_token,
+                                        )
+                                        .ok_or_else(|| {
+                                            format!(
+                                                "DeepSeek-V4 layer {layer_idx} scalar BF16 gather work overflow"
+                                            )
+                                        })?,
+                                ),
+                                DeepseekV4PrefillGatherMode::Bf16x8 => {
+                                    const VALUES_PER_THREAD: usize = 8;
+                                    let value_chunks_per_token = selected
+                                        .checked_mul(head_dim.div_ceil(VALUES_PER_THREAD))
+                                        .ok_or_else(|| {
+                                            format!(
+                                                "DeepSeek-V4 layer {layer_idx} BF16x8 gather chunk count overflow"
+                                            )
+                                        })?;
+                                    (
+                                        self.kernels.deepseek_v4_prefill_gather_scores_bf16x8,
+                                        tile_tokens
+                                            .checked_mul(
+                                                value_chunks_per_token + score_elems_per_token,
+                                            )
+                                            .ok_or_else(|| {
+                                                format!(
+                                                    "DeepSeek-V4 layer {layer_idx} BF16x8 gather work overflow"
+                                                )
+                                            })?,
+                                    )
+                                }
+                            };
                         let mut g0 = operand_buffer;
                         let mut g1 = tile_scores;
                         let mut g2 = raw_history;
@@ -32718,9 +33720,9 @@ impl PrefillEngine {
                         })?;
                         unsafe {
                             launch(
-                                self.kernels.deepseek_v4_prefill_gather_scores_bf16,
+                                gather_kernel,
                                 (
-                                    u32::try_from(gather_elements.div_ceil(256)).map_err(|_| {
+                                    u32::try_from(gather_work.div_ceil(256)).map_err(|_| {
                                         format!(
                                             "DeepSeek-V4 layer {layer_idx} BF16 gather grid exceeds u32"
                                         )
@@ -32751,7 +33753,7 @@ impl PrefillEngine {
                             tile_query,
                             cublas_sys::cudaDataType::CUDA_R_16BF,
                             scale,
-                            gather_elements,
+                            gather_work,
                         )
                     }
                     DeepseekV4PrefillSparseScoreMode::Fp32PedanticPostscale => {
@@ -32854,6 +33856,10 @@ impl PrefillEngine {
                     DeepseekV4PrefillSparseScoreMode::ScalarQueryCached => unreachable!(),
                 };
                 let _ = gather_elements;
+                if let Some(started) = gather_started {
+                    self.stream_sync()?;
+                    sparse_gather_ms += started.elapsed().as_secs_f64() * 1000.0;
+                }
 
                 let beta = 1.0f32;
                 let selected_i32 = i32::try_from(selected)
@@ -32879,6 +33885,7 @@ impl PrefillEngine {
                     } else {
                         cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F
                     };
+                let score_started = sparse_substage_timing.then(Instant::now);
                 unsafe {
                     cublas_result::gemm_strided_batched_ex(
                         self.cublas_handle,
@@ -32950,6 +33957,165 @@ impl PrefillEngine {
                         )?;
                     }
                 }
+                if let Some(started) = score_started {
+                    self.stream_sync()?;
+                    sparse_score_ms += started.elapsed().as_secs_f64() * 1000.0;
+                }
+                if let Some((output, attention_sink)) = fused_output {
+                    let (softmax_kernel, softmax_grid, softmax_block, softmax_shared) = match self
+                        .deepseek_v4_prefill_softmax_mode
+                    {
+                        DeepseekV4PrefillSoftmaxMode::BlockRows => {
+                            let threads = selected
+                                    .checked_next_power_of_two()
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "DeepSeek-V4 layer {layer_idx} fused softmax width overflows power-of-two launch geometry: {selected}"
+                                        )
+                                    })?
+                                    .clamp(32, 1024);
+                            let shared = threads
+                                    .checked_mul(std::mem::size_of::<f32>())
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "DeepSeek-V4 layer {layer_idx} fused softmax shared bytes overflow"
+                                        )
+                                    })?;
+                            (
+                                    self.kernels.deepseek_v4_prefill_softmax_weights_bf16,
+                                    (
+                                        u32::try_from(heads).map_err(|_| {
+                                            format!("DeepSeek-V4 layer {layer_idx} fused softmax head grid exceeds u32")
+                                        })?,
+                                        u32::try_from(tile_tokens).map_err(|_| {
+                                            format!("DeepSeek-V4 layer {layer_idx} fused softmax token grid exceeds u32")
+                                        })?,
+                                        1,
+                                    ),
+                                    (
+                                        u32::try_from(threads).map_err(|_| {
+                                            format!("DeepSeek-V4 layer {layer_idx} fused softmax block exceeds u32")
+                                        })?,
+                                        1,
+                                        1,
+                                    ),
+                                    u32::try_from(shared).map_err(|_| {
+                                        format!("DeepSeek-V4 layer {layer_idx} fused softmax shared bytes exceed u32")
+                                    })?,
+                                )
+                        }
+                        DeepseekV4PrefillSoftmaxMode::WarpRows => {
+                            const CUDA_WARP_THREADS: usize = 32;
+                            const SOFTMAX_WARPS_PER_BLOCK: usize = 8;
+                            let threads = CUDA_WARP_THREADS * SOFTMAX_WARPS_PER_BLOCK;
+                            let rows = tile_tokens.checked_mul(heads).ok_or_else(|| {
+                                format!(
+                                    "DeepSeek-V4 layer {layer_idx} warp softmax row count overflow"
+                                )
+                            })?;
+                            (
+                                    self.kernels
+                                        .deepseek_v4_prefill_softmax_weights_warp_bf16,
+                                    (
+                                        u32::try_from(rows.div_ceil(SOFTMAX_WARPS_PER_BLOCK))
+                                            .map_err(|_| {
+                                                format!(
+                                                    "DeepSeek-V4 layer {layer_idx} warp softmax grid exceeds u32"
+                                                )
+                                            })?,
+                                        1,
+                                        1,
+                                    ),
+                                    (threads as u32, 1, 1),
+                                    0,
+                                )
+                        }
+                    };
+                    let mut s0 = fused_weights;
+                    let mut s1 = tile_scores;
+                    let mut s2 = attention_sink;
+                    let mut s3 = tile_i32;
+                    let mut s4 = heads_i32;
+                    let mut s5 = selected_i32;
+                    let softmax_started = sparse_substage_timing.then(Instant::now);
+                    unsafe {
+                        launch(
+                            softmax_kernel,
+                            softmax_grid,
+                            softmax_block,
+                            softmax_shared,
+                            self.stream,
+                            &mut [
+                                &mut s0 as *mut _ as *mut std::ffi::c_void,
+                                &mut s1 as *mut _ as *mut std::ffi::c_void,
+                                &mut s2 as *mut _ as *mut std::ffi::c_void,
+                                &mut s3 as *mut _ as *mut std::ffi::c_void,
+                                &mut s4 as *mut _ as *mut std::ffi::c_void,
+                                &mut s5 as *mut _ as *mut std::ffi::c_void,
+                            ],
+                        )?;
+                    }
+                    if let Some(started) = softmax_started {
+                        self.stream_sync()?;
+                        sparse_softmax_ms += started.elapsed().as_secs_f64() * 1000.0;
+                    }
+
+                    let output_elems_per_token = query_elems_per_token;
+                    let tile_output = output
+                        .checked_add(
+                            token_start
+                                .checked_mul(output_elems_per_token)
+                                .and_then(|value| {
+                                    value.checked_mul(std::mem::size_of::<u16>())
+                                })
+                                .ok_or_else(|| {
+                                    format!("DeepSeek-V4 layer {layer_idx} fused output offset overflow")
+                                })? as u64,
+                        )
+                        .ok_or_else(|| {
+                            format!("DeepSeek-V4 layer {layer_idx} fused output pointer overflow")
+                        })?;
+                    let alpha_output = 1.0f32;
+                    let beta_output = 0.0f32;
+                    let output_started = sparse_substage_timing.then(Instant::now);
+                    unsafe {
+                        cublas_result::gemm_strided_batched_ex(
+                            self.cublas_handle,
+                            cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                            cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                            head_dim_i32,
+                            heads_i32,
+                            selected_i32,
+                            &alpha_output as *const f32 as *const std::ffi::c_void,
+                            operand_buffer as *const std::ffi::c_void,
+                            cublas_sys::cudaDataType::CUDA_R_16BF,
+                            head_dim_i32,
+                            selected_stride,
+                            fused_weights as *const std::ffi::c_void,
+                            cublas_sys::cudaDataType::CUDA_R_16BF,
+                            selected_i32,
+                            score_stride,
+                            &beta_output as *const f32 as *const std::ffi::c_void,
+                            tile_output as *mut std::ffi::c_void,
+                            cublas_sys::cudaDataType::CUDA_R_16BF,
+                            head_dim_i32,
+                            query_stride,
+                            tile_i32,
+                            cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                            cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "DeepSeek-V4 layer {layer_idx} fused sparse-output GEMM tile_start={token_start} tile_tokens={tile_tokens}: {error:?}"
+                            )
+                        })?;
+                    }
+                    if let Some(started) = output_started {
+                        self.stream_sync()?;
+                        sparse_output_ms += started.elapsed().as_secs_f64() * 1000.0;
+                    }
+                }
+                sparse_tiles += 1;
                 token_start += tile_tokens;
             }
             Ok(())
@@ -32970,6 +34136,21 @@ impl PrefillEngine {
             return Err(format!(
                 "DeepSeek-V4 layer {layer_idx} failed to restore cuBLAS workspace: {restore_workspace:?}; operation={run_result:?}"
             ));
+        }
+        if sparse_substage_timing {
+            eprintln!(
+                "[DSV4-SPARSE-SUBSTAGE] layer={} tokens={} selected={} tiles={} tile_capacity={} gather_ms={:.3} score_ms={:.3} softmax_ms={:.3} output_ms={:.3} operation_ok={}",
+                layer_idx,
+                tokens,
+                selected,
+                sparse_tiles,
+                tile_capacity,
+                sparse_gather_ms,
+                sparse_score_ms,
+                sparse_softmax_ms,
+                sparse_output_ms,
+                run_result.is_ok(),
+            );
         }
         run_result
     }
@@ -33206,8 +34387,10 @@ impl PrefillEngine {
                 })?;
                 let mut s4 = heads_i32;
                 let mut s5 = selected_i32;
-                unsafe {
-                    launch(
+                let (softmax_kernel, softmax_grid, softmax_block, softmax_shared_bytes) = match self
+                    .deepseek_v4_prefill_softmax_mode
+                {
+                    DeepseekV4PrefillSoftmaxMode::BlockRows => (
                         self.kernels.deepseek_v4_prefill_softmax_weights_bf16,
                         (
                             u32::try_from(heads).map_err(|_| {
@@ -33232,6 +34415,41 @@ impl PrefillEngine {
                         u32::try_from(softmax_shared).map_err(|_| {
                             format!("DeepSeek-V4 layer {layer_idx} softmax shared bytes exceed u32")
                         })?,
+                    ),
+                    DeepseekV4PrefillSoftmaxMode::WarpRows => {
+                        const CUDA_WARP_THREADS: usize = 32;
+                        const SOFTMAX_WARPS_PER_BLOCK: usize = 8;
+                        let rows = tile_tokens.checked_mul(heads).ok_or_else(|| {
+                            format!("DeepSeek-V4 layer {layer_idx} warp softmax row count overflow")
+                        })?;
+                        (
+                                self.kernels
+                                    .deepseek_v4_prefill_softmax_weights_warp_bf16,
+                                (
+                                    u32::try_from(rows.div_ceil(SOFTMAX_WARPS_PER_BLOCK))
+                                        .map_err(|_| {
+                                            format!(
+                                                "DeepSeek-V4 layer {layer_idx} warp softmax grid exceeds u32"
+                                            )
+                                        })?,
+                                    1,
+                                    1,
+                                ),
+                                (
+                                    (CUDA_WARP_THREADS * SOFTMAX_WARPS_PER_BLOCK) as u32,
+                                    1,
+                                    1,
+                                ),
+                                0,
+                            )
+                    }
+                };
+                unsafe {
+                    launch(
+                        softmax_kernel,
+                        softmax_grid,
+                        softmax_block,
+                        softmax_shared_bytes,
                         self.stream,
                         &mut [
                             &mut s0 as *mut _ as *mut std::ffi::c_void,
@@ -33303,15 +34521,27 @@ impl PrefillEngine {
             DeepseekV4ProjectionPrefillDescriptor::Bf16(weight) => {
                 self.cublas_bf16_gemm(input_ptr, weight, output_ptr, m)
             }
-            DeepseekV4ProjectionPrefillDescriptor::Hqq { tensor_name, desc } => self
-                .hqq_quantized_prefill_gemm_bf16(
-                    layer_idx,
-                    tensor_name,
-                    desc,
-                    input_ptr,
-                    output_ptr,
-                    m,
-                ),
+            DeepseekV4ProjectionPrefillDescriptor::Hqq { tensor_name, desc } => {
+                if self.config.hqq_prefill_materialize_bf16 {
+                    self.hqq_materialized_prefill_gemm_bf16(
+                        layer_idx,
+                        tensor_name,
+                        desc,
+                        input_ptr,
+                        output_ptr,
+                        m,
+                    )
+                } else {
+                    self.hqq_quantized_prefill_gemm_bf16(
+                        layer_idx,
+                        tensor_name,
+                        desc,
+                        input_ptr,
+                        output_ptr,
+                        m,
+                    )
+                }
+            }
         }
     }
 
@@ -33473,9 +34703,8 @@ impl PrefillEngine {
             let mut rr3 = i32::try_from(head_dim).map_err(|_| {
                 format!("DeepSeek-V4 layer {} head dimension exceeds i32", layer_idx)
             })?;
-            let mut rr4 = i32::try_from(window).map_err(|_| {
-                format!("DeepSeek-V4 layer {} raw window exceeds i32", layer_idx)
-            })?;
+            let mut rr4 = i32::try_from(window)
+                .map_err(|_| format!("DeepSeek-V4 layer {} raw window exceeds i32", layer_idx))?;
             unsafe {
                 if let Some(native) = desc.raw_native_cache.as_ref() {
                     let mut rn1 = native.codes_ptr;
@@ -33487,7 +34716,10 @@ impl PrefillEngine {
                         format!("DeepSeek-V4 layer {} Native columns exceed i32", layer_idx)
                     })?;
                     let mut rn7 = i32::try_from(native.block_size).map_err(|_| {
-                        format!("DeepSeek-V4 layer {} Native block size exceeds i32", layer_idx)
+                        format!(
+                            "DeepSeek-V4 layer {} Native block size exceeds i32",
+                            layer_idx
+                        )
                     })?;
                     let mut rn8 = rr4;
                     launch(
@@ -33520,39 +34752,33 @@ impl PrefillEngine {
                 } else {
                     launch(
                         self.kernels.deepseek_v4_restore_raw_history,
-                    (
-                        u32::try_from(restore_blocks).map_err(|_| {
-                            format!(
-                                "DeepSeek-V4 layer {} restored raw-history grid exceeds u32",
-                                layer_idx
-                            )
-                        })?,
-                        1,
-                        1,
-                    ),
-                    (restore_threads, 1, 1),
-                    0,
-                    self.stream,
-                    &mut [
-                        &mut rr0 as *mut _ as *mut std::ffi::c_void,
-                        &mut rr1 as *mut _ as *mut std::ffi::c_void,
-                        &mut rr2 as *mut _ as *mut std::ffi::c_void,
-                        &mut rr3 as *mut _ as *mut std::ffi::c_void,
-                        &mut rr4 as *mut _ as *mut std::ffi::c_void,
-                    ],
+                        (
+                            u32::try_from(restore_blocks).map_err(|_| {
+                                format!(
+                                    "DeepSeek-V4 layer {} restored raw-history grid exceeds u32",
+                                    layer_idx
+                                )
+                            })?,
+                            1,
+                            1,
+                        ),
+                        (restore_threads, 1, 1),
+                        0,
+                        self.stream,
+                        &mut [
+                            &mut rr0 as *mut _ as *mut std::ffi::c_void,
+                            &mut rr1 as *mut _ as *mut std::ffi::c_void,
+                            &mut rr2 as *mut _ as *mut std::ffi::c_void,
+                            &mut rr3 as *mut _ as *mut std::ffi::c_void,
+                            &mut rr4 as *mut _ as *mut std::ffi::c_void,
+                        ],
                     )?;
                 }
             }
         }
 
         let q_a_timing = self.deepseek_v4_timing_start("deepseek_v4 q_a_norm")?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(
-            layer_idx,
-            &desc.wq_a,
-            hidden,
-            q_rank,
-            m,
-        )?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.wq_a, hidden, q_rank, m)?;
         self.launch_rmsnorm(q_rank, q_rank, desc.q_norm_ptr, m, desc.wq_a.n())?;
         self.deepseek_v4_timing_finish(
             DEEPSEEK_V4_PREFILL_TIMING_STAGE_Q_A_NORM,
@@ -33625,10 +34851,16 @@ impl PrefillEngine {
                     .d_deepseek_v4_native_history
                     .as_ref()
                     .ok_or_else(|| {
-                        format!("DeepSeek-V4 layer {} Native main history is absent", layer_idx)
+                        format!(
+                            "DeepSeek-V4 layer {} Native main history is absent",
+                            layer_idx
+                        )
                     })?;
                 let required = compressed_rows.checked_mul(head_dim).ok_or_else(|| {
-                    format!("DeepSeek-V4 layer {} Native main history size overflow", layer_idx)
+                    format!(
+                        "DeepSeek-V4 layer {} Native main history size overflow",
+                        layer_idx
+                    )
                 })?;
                 if required > history.len() {
                     return Err(format!(
@@ -33679,13 +34911,7 @@ impl PrefillEngine {
         }
 
         let q_b_timing = self.deepseek_v4_timing_start("deepseek_v4 q_b_norm_rope")?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(
-            layer_idx,
-            &desc.wq_b,
-            q_rank,
-            query,
-            m,
-        )?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.wq_b, q_rank, query, m)?;
         self.launch_rmsnorm_scale(query, query, 0, 1.0, m * heads, head_dim)?;
 
         let rope_pairs = m
@@ -33732,13 +34958,7 @@ impl PrefillEngine {
         )?;
 
         let kv_index_timing = self.deepseek_v4_timing_start("deepseek_v4 kv_index")?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(
-            layer_idx,
-            &desc.wkv,
-            hidden,
-            kv,
-            m,
-        )?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.wkv, hidden, kv, m)?;
         self.launch_rmsnorm(kv, kv, desc.kv_norm_ptr, m, head_dim)?;
         let kv_pairs = m
             .checked_mul(rope_dim / 2)
@@ -33836,9 +35056,9 @@ impl PrefillEngine {
                     ],
                 )?;
             }
-            let raw_elements = m.checked_mul(head_dim).ok_or_else(|| {
-                format!("DeepSeek-V4 layer {} raw-KV write overflow", layer_idx)
-            })?;
+            let raw_elements = m
+                .checked_mul(head_dim)
+                .ok_or_else(|| format!("DeepSeek-V4 layer {} raw-KV write overflow", layer_idx))?;
             let store_threads = 256u32;
             let store_blocks = raw_elements.div_ceil(store_threads as usize) as u32;
             let mut sr0 = raw_history;
@@ -34059,11 +35279,11 @@ impl PrefillEngine {
             "deepseek_v4 kv_index",
             kv_index_timing,
         )?;
-        let sparse_scores_timing = self.deepseek_v4_timing_start("deepseek_v4 sparse_scores")?;
-        if self
-            .deepseek_v4_prefill_sparse_score_mode
-            .uses_gathered_gemm()
+        if self.deepseek_v4_prefill_sparse_pipeline_mode
+            == DeepseekV4PrefillSparsePipelineMode::TiledFusedGather
         {
+            let sparse_attention_timing =
+                self.deepseek_v4_timing_start("deepseek_v4 fused_sparse_attention")?;
             self.run_deepseek_v4_gathered_sparse_scores(
                 layer_idx,
                 scores,
@@ -34077,204 +35297,243 @@ impl PrefillEngine {
                 selected,
                 end_pos,
                 compressed_rows,
+                Some((attention, desc.attn_sink_ptr)),
+            )?;
+            self.deepseek_v4_timing_finish(
+                DEEPSEEK_V4_PREFILL_TIMING_STAGE_SPARSE_SCORES,
+                "deepseek_v4 fused_sparse_attention",
+                sparse_attention_timing,
             )?;
         } else {
-            let score_threads =
-                std::cmp::max(32, std::cmp::min(1024, head_dim).next_power_of_two()) as u32;
-            let query_bytes = head_dim
-                .checked_mul(std::mem::size_of::<u16>())
-                .ok_or_else(|| {
-                    format!("DeepSeek-V4 layer {} query shared size overflow", layer_idx)
-                })?;
-            let alignment = std::mem::align_of::<f32>();
-            let aligned_query_bytes = query_bytes
-                .checked_add(alignment - 1)
-                .map(|value| value & !(alignment - 1))
-                .ok_or_else(|| {
-                    format!("DeepSeek-V4 layer {} query alignment overflow", layer_idx)
-                })?;
-            let reduction_bytes = usize::try_from(score_threads)
-                .map_err(|_| format!("DeepSeek-V4 layer {} score threads exceed usize", layer_idx))?
-                .checked_mul(std::mem::size_of::<f32>())
-                .ok_or_else(|| {
-                    format!(
-                        "DeepSeek-V4 layer {} reduction shared size overflow",
-                        layer_idx
-                    )
-                })?;
-            let score_smem = aligned_query_bytes
-                .checked_add(reduction_bytes)
-                .ok_or_else(|| {
-                    format!("DeepSeek-V4 layer {} total shared size overflow", layer_idx)
-                })?;
-            let mut ss0 = scores;
-            let mut ss1 = query;
-            let mut ss2 = raw_history;
-            let mut ss3 = compressed_cache_ptr;
-            let mut ss4 = indices;
-            let mut ss5 = i32::try_from(m)
-                .map_err(|_| format!("DeepSeek-V4 layer {} score rows exceed i32", layer_idx))?;
-            let mut ss6 = i32::try_from(heads)
-                .map_err(|_| format!("DeepSeek-V4 layer {} score heads exceed i32", layer_idx))?;
-            let mut ss7 = i32::try_from(head_dim).map_err(|_| {
-                format!(
-                    "DeepSeek-V4 layer {} score dimension exceeds i32",
-                    layer_idx
-                )
-            })?;
-            let mut ss8 = i32::try_from(selected)
-                .map_err(|_| format!("DeepSeek-V4 layer {} score width exceeds i32", layer_idx))?;
-            let mut ss9 = i32::try_from(end_pos)
-                .map_err(|_| format!("DeepSeek-V4 layer {} raw rows exceed i32", layer_idx))?;
-            let mut ss10 = i32::try_from(compressed_rows).map_err(|_| {
-                format!("DeepSeek-V4 layer {} compressed rows exceed i32", layer_idx)
-            })?;
-            let mut ss11 = 1.0f32 / (head_dim as f32).sqrt();
-            unsafe {
-                launch(
-                    self.kernels.deepseek_v4_sparse_scores_query_cached,
-                    (
-                        u32::try_from(heads).map_err(|_| {
-                            format!("DeepSeek-V4 layer {} head grid exceeds u32", layer_idx)
-                        })?,
-                        u32::try_from(m).map_err(|_| {
-                            format!("DeepSeek-V4 layer {} score row grid exceeds u32", layer_idx)
-                        })?,
-                        1,
-                    ),
-                    (score_threads, 1, 1),
-                    u32::try_from(score_smem).map_err(|_| {
-                        format!("DeepSeek-V4 layer {} shared bytes exceed u32", layer_idx)
-                    })?,
-                    self.stream,
-                    &mut [
-                        &mut ss0 as *mut _ as *mut std::ffi::c_void,
-                        &mut ss1 as *mut _ as *mut std::ffi::c_void,
-                        &mut ss2 as *mut _ as *mut std::ffi::c_void,
-                        &mut ss3 as *mut _ as *mut std::ffi::c_void,
-                        &mut ss4 as *mut _ as *mut std::ffi::c_void,
-                        &mut ss5 as *mut _ as *mut std::ffi::c_void,
-                        &mut ss6 as *mut _ as *mut std::ffi::c_void,
-                        &mut ss7 as *mut _ as *mut std::ffi::c_void,
-                        &mut ss8 as *mut _ as *mut std::ffi::c_void,
-                        &mut ss9 as *mut _ as *mut std::ffi::c_void,
-                        &mut ss10 as *mut _ as *mut std::ffi::c_void,
-                        &mut ss11 as *mut _ as *mut std::ffi::c_void,
-                    ],
+            let sparse_scores_timing =
+                self.deepseek_v4_timing_start("deepseek_v4 sparse_scores")?;
+            if self
+                .deepseek_v4_prefill_sparse_score_mode
+                .uses_gathered_gemm()
+            {
+                self.run_deepseek_v4_gathered_sparse_scores(
+                    layer_idx,
+                    scores,
+                    query,
+                    raw_history,
+                    compressed_cache_ptr,
+                    indices,
+                    m,
+                    heads,
+                    head_dim,
+                    selected,
+                    end_pos,
+                    compressed_rows,
+                    None,
                 )?;
-            }
-        }
-        self.deepseek_v4_timing_finish(
-            DEEPSEEK_V4_PREFILL_TIMING_STAGE_SPARSE_SCORES,
-            "deepseek_v4 sparse_scores",
-            sparse_scores_timing,
-        )?;
-
-        let sparse_output_timing = self.deepseek_v4_timing_start("deepseek_v4 sparse_output")?;
-        if self.deepseek_v4_prefill_sparse_output_mode
-            == DeepseekV4PrefillSparseOutputMode::Bf16Fp32Gemm
-        {
-            self.run_deepseek_v4_gemm_sparse_output(
-                layer_idx,
-                attention,
-                scores,
-                indices,
-                raw_history,
-                compressed_cache_ptr,
-                desc.attn_sink_ptr,
-                m,
-                heads,
-                head_dim,
-                selected,
-                end_pos,
-                compressed_rows,
-            )?;
-        } else {
-            let output_threads = std::cmp::max(head_dim, selected)
-                .next_power_of_two()
-                .clamp(32, 1024) as u32;
-            let mut so0 = attention;
-            let mut so1 = scores;
-            let mut so2 = indices;
-            let mut so3 = raw_history;
-            let mut so4 = compressed_cache_ptr;
-            let mut so5 = desc.attn_sink_ptr;
-            let mut so6 = m as i32;
-            let mut so7 = heads as i32;
-            let mut so8 = head_dim as i32;
-            let mut so9 = i32::try_from(selected)
-                .map_err(|_| format!("DeepSeek-V4 layer {} output width exceeds i32", layer_idx))?;
-            let mut so10 = i32::try_from(end_pos).map_err(|_| {
-                format!("DeepSeek-V4 layer {} output raw rows exceed i32", layer_idx)
-            })?;
-            let mut so11 = i32::try_from(compressed_rows).map_err(|_| {
-                format!(
-                    "DeepSeek-V4 layer {} output compressed rows exceed i32",
-                    layer_idx
-                )
-            })?;
-            let output_shared_bytes = usize::try_from(output_threads)
-                .map_err(|_| {
-                    format!(
-                        "DeepSeek-V4 layer {} output threads exceed usize",
-                        layer_idx
-                    )
-                })?
-                .checked_mul(std::mem::size_of::<f32>())
-                .ok_or_else(|| {
-                    format!(
-                        "DeepSeek-V4 layer {} output shared bytes overflow",
-                        layer_idx
-                    )
-                })?;
-            unsafe {
-                launch(
-                    self.kernels.deepseek_v4_sparse_output,
-                    (
-                        u32::try_from(heads).map_err(|_| {
-                            format!(
-                                "DeepSeek-V4 layer {} output head grid exceeds u32",
-                                layer_idx
-                            )
-                        })?,
-                        u32::try_from(m).map_err(|_| {
-                            format!(
-                                "DeepSeek-V4 layer {} output row grid exceeds u32",
-                                layer_idx
-                            )
-                        })?,
-                        1,
-                    ),
-                    (output_threads, 1, 1),
-                    u32::try_from(output_shared_bytes).map_err(|_| {
+            } else {
+                let score_threads =
+                    std::cmp::max(32, std::cmp::min(1024, head_dim).next_power_of_two()) as u32;
+                let query_bytes = head_dim
+                    .checked_mul(std::mem::size_of::<u16>())
+                    .ok_or_else(|| {
+                        format!("DeepSeek-V4 layer {} query shared size overflow", layer_idx)
+                    })?;
+                let alignment = std::mem::align_of::<f32>();
+                let aligned_query_bytes = query_bytes
+                    .checked_add(alignment - 1)
+                    .map(|value| value & !(alignment - 1))
+                    .ok_or_else(|| {
+                        format!("DeepSeek-V4 layer {} query alignment overflow", layer_idx)
+                    })?;
+                let reduction_bytes = usize::try_from(score_threads)
+                    .map_err(|_| {
+                        format!("DeepSeek-V4 layer {} score threads exceed usize", layer_idx)
+                    })?
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| {
                         format!(
-                            "DeepSeek-V4 layer {} output shared bytes exceed u32",
+                            "DeepSeek-V4 layer {} reduction shared size overflow",
                             layer_idx
                         )
-                    })?,
-                    self.stream,
-                    &mut [
-                        &mut so0 as *mut _ as *mut std::ffi::c_void,
-                        &mut so1 as *mut _ as *mut std::ffi::c_void,
-                        &mut so2 as *mut _ as *mut std::ffi::c_void,
-                        &mut so3 as *mut _ as *mut std::ffi::c_void,
-                        &mut so4 as *mut _ as *mut std::ffi::c_void,
-                        &mut so5 as *mut _ as *mut std::ffi::c_void,
-                        &mut so6 as *mut _ as *mut std::ffi::c_void,
-                        &mut so7 as *mut _ as *mut std::ffi::c_void,
-                        &mut so8 as *mut _ as *mut std::ffi::c_void,
-                        &mut so9 as *mut _ as *mut std::ffi::c_void,
-                        &mut so10 as *mut _ as *mut std::ffi::c_void,
-                        &mut so11 as *mut _ as *mut std::ffi::c_void,
-                    ],
-                )?;
+                    })?;
+                let score_smem = aligned_query_bytes
+                    .checked_add(reduction_bytes)
+                    .ok_or_else(|| {
+                        format!("DeepSeek-V4 layer {} total shared size overflow", layer_idx)
+                    })?;
+                let mut ss0 = scores;
+                let mut ss1 = query;
+                let mut ss2 = raw_history;
+                let mut ss3 = compressed_cache_ptr;
+                let mut ss4 = indices;
+                let mut ss5 = i32::try_from(m).map_err(|_| {
+                    format!("DeepSeek-V4 layer {} score rows exceed i32", layer_idx)
+                })?;
+                let mut ss6 = i32::try_from(heads).map_err(|_| {
+                    format!("DeepSeek-V4 layer {} score heads exceed i32", layer_idx)
+                })?;
+                let mut ss7 = i32::try_from(head_dim).map_err(|_| {
+                    format!(
+                        "DeepSeek-V4 layer {} score dimension exceeds i32",
+                        layer_idx
+                    )
+                })?;
+                let mut ss8 = i32::try_from(selected).map_err(|_| {
+                    format!("DeepSeek-V4 layer {} score width exceeds i32", layer_idx)
+                })?;
+                let mut ss9 = i32::try_from(end_pos)
+                    .map_err(|_| format!("DeepSeek-V4 layer {} raw rows exceed i32", layer_idx))?;
+                let mut ss10 = i32::try_from(compressed_rows).map_err(|_| {
+                    format!("DeepSeek-V4 layer {} compressed rows exceed i32", layer_idx)
+                })?;
+                let mut ss11 = 1.0f32 / (head_dim as f32).sqrt();
+                unsafe {
+                    launch(
+                        self.kernels.deepseek_v4_sparse_scores_query_cached,
+                        (
+                            u32::try_from(heads).map_err(|_| {
+                                format!("DeepSeek-V4 layer {} head grid exceeds u32", layer_idx)
+                            })?,
+                            u32::try_from(m).map_err(|_| {
+                                format!(
+                                    "DeepSeek-V4 layer {} score row grid exceeds u32",
+                                    layer_idx
+                                )
+                            })?,
+                            1,
+                        ),
+                        (score_threads, 1, 1),
+                        u32::try_from(score_smem).map_err(|_| {
+                            format!("DeepSeek-V4 layer {} shared bytes exceed u32", layer_idx)
+                        })?,
+                        self.stream,
+                        &mut [
+                            &mut ss0 as *mut _ as *mut std::ffi::c_void,
+                            &mut ss1 as *mut _ as *mut std::ffi::c_void,
+                            &mut ss2 as *mut _ as *mut std::ffi::c_void,
+                            &mut ss3 as *mut _ as *mut std::ffi::c_void,
+                            &mut ss4 as *mut _ as *mut std::ffi::c_void,
+                            &mut ss5 as *mut _ as *mut std::ffi::c_void,
+                            &mut ss6 as *mut _ as *mut std::ffi::c_void,
+                            &mut ss7 as *mut _ as *mut std::ffi::c_void,
+                            &mut ss8 as *mut _ as *mut std::ffi::c_void,
+                            &mut ss9 as *mut _ as *mut std::ffi::c_void,
+                            &mut ss10 as *mut _ as *mut std::ffi::c_void,
+                            &mut ss11 as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )?;
+                }
             }
+            self.deepseek_v4_timing_finish(
+                DEEPSEEK_V4_PREFILL_TIMING_STAGE_SPARSE_SCORES,
+                "deepseek_v4 sparse_scores",
+                sparse_scores_timing,
+            )?;
+
+            let sparse_output_timing =
+                self.deepseek_v4_timing_start("deepseek_v4 sparse_output")?;
+            if self.deepseek_v4_prefill_sparse_output_mode
+                == DeepseekV4PrefillSparseOutputMode::Bf16Fp32Gemm
+            {
+                self.run_deepseek_v4_gemm_sparse_output(
+                    layer_idx,
+                    attention,
+                    scores,
+                    indices,
+                    raw_history,
+                    compressed_cache_ptr,
+                    desc.attn_sink_ptr,
+                    m,
+                    heads,
+                    head_dim,
+                    selected,
+                    end_pos,
+                    compressed_rows,
+                )?;
+            } else {
+                let output_threads = std::cmp::max(head_dim, selected)
+                    .next_power_of_two()
+                    .clamp(32, 1024) as u32;
+                let mut so0 = attention;
+                let mut so1 = scores;
+                let mut so2 = indices;
+                let mut so3 = raw_history;
+                let mut so4 = compressed_cache_ptr;
+                let mut so5 = desc.attn_sink_ptr;
+                let mut so6 = m as i32;
+                let mut so7 = heads as i32;
+                let mut so8 = head_dim as i32;
+                let mut so9 = i32::try_from(selected).map_err(|_| {
+                    format!("DeepSeek-V4 layer {} output width exceeds i32", layer_idx)
+                })?;
+                let mut so10 = i32::try_from(end_pos).map_err(|_| {
+                    format!("DeepSeek-V4 layer {} output raw rows exceed i32", layer_idx)
+                })?;
+                let mut so11 = i32::try_from(compressed_rows).map_err(|_| {
+                    format!(
+                        "DeepSeek-V4 layer {} output compressed rows exceed i32",
+                        layer_idx
+                    )
+                })?;
+                let output_shared_bytes = usize::try_from(output_threads)
+                    .map_err(|_| {
+                        format!(
+                            "DeepSeek-V4 layer {} output threads exceed usize",
+                            layer_idx
+                        )
+                    })?
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| {
+                        format!(
+                            "DeepSeek-V4 layer {} output shared bytes overflow",
+                            layer_idx
+                        )
+                    })?;
+                unsafe {
+                    launch(
+                        self.kernels.deepseek_v4_sparse_output,
+                        (
+                            u32::try_from(heads).map_err(|_| {
+                                format!(
+                                    "DeepSeek-V4 layer {} output head grid exceeds u32",
+                                    layer_idx
+                                )
+                            })?,
+                            u32::try_from(m).map_err(|_| {
+                                format!(
+                                    "DeepSeek-V4 layer {} output row grid exceeds u32",
+                                    layer_idx
+                                )
+                            })?,
+                            1,
+                        ),
+                        (output_threads, 1, 1),
+                        u32::try_from(output_shared_bytes).map_err(|_| {
+                            format!(
+                                "DeepSeek-V4 layer {} output shared bytes exceed u32",
+                                layer_idx
+                            )
+                        })?,
+                        self.stream,
+                        &mut [
+                            &mut so0 as *mut _ as *mut std::ffi::c_void,
+                            &mut so1 as *mut _ as *mut std::ffi::c_void,
+                            &mut so2 as *mut _ as *mut std::ffi::c_void,
+                            &mut so3 as *mut _ as *mut std::ffi::c_void,
+                            &mut so4 as *mut _ as *mut std::ffi::c_void,
+                            &mut so5 as *mut _ as *mut std::ffi::c_void,
+                            &mut so6 as *mut _ as *mut std::ffi::c_void,
+                            &mut so7 as *mut _ as *mut std::ffi::c_void,
+                            &mut so8 as *mut _ as *mut std::ffi::c_void,
+                            &mut so9 as *mut _ as *mut std::ffi::c_void,
+                            &mut so10 as *mut _ as *mut std::ffi::c_void,
+                            &mut so11 as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )?;
+                }
+            }
+            self.deepseek_v4_timing_finish(
+                DEEPSEEK_V4_PREFILL_TIMING_STAGE_SPARSE_OUTPUT,
+                "deepseek_v4 sparse_output",
+                sparse_output_timing,
+            )?;
         }
-        self.deepseek_v4_timing_finish(
-            DEEPSEEK_V4_PREFILL_TIMING_STAGE_SPARSE_OUTPUT,
-            "deepseek_v4 sparse_output",
-            sparse_output_timing,
-        )?;
 
         let output_proj_timing = self.deepseek_v4_timing_start("deepseek_v4 output_proj")?;
         let mut or0 = attention;
@@ -34348,13 +35607,7 @@ impl PrefillEngine {
             groups,
         )?;
         self.launch_transpose_3d_bf16(attention, query, groups, m, o_rank)?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(
-            layer_idx,
-            &desc.wo_b,
-            attention,
-            hidden,
-            m,
-        )?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.wo_b, attention, hidden, m)?;
         self.deepseek_v4_timing_finish(
             DEEPSEEK_V4_PREFILL_TIMING_STAGE_OUTPUT_PROJ,
             "deepseek_v4 output_proj",
@@ -34409,6 +35662,7 @@ impl PrefillEngine {
                 layer_idx, required_state, self.scratch.d_scratch1.len
             ));
         }
+        let attn_norm_timing = self.deepseek_v4_hc_internal_timing_start();
         self.launch_rmsnorm(
             hidden,
             hidden,
@@ -34416,11 +35670,16 @@ impl PrefillEngine {
             m,
             h,
         )?;
+        self.deepseek_v4_hc_internal_timing_finish(
+            DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_NORM,
+            attn_norm_timing,
+        )?;
         self.deepseek_v4_timing_finish(
             DEEPSEEK_V4_PREFILL_TIMING_STAGE_ATTN_HC_PREP_NORM,
             "deepseek_v4 attn_hc_prep_norm",
             attn_hc_timing,
         )?;
+        self.prefetch_deepseek_predicted_w1_for_layer(layer_idx, m, chunk_start)?;
         self.forward_deepseek_v4_attention(layer_idx, m, chunk_start)?;
         let attn_hc_post_timing = self.deepseek_v4_timing_start("deepseek_v4 attn_hc_post")?;
         self.launch_deepseek_v4_hc_post(
@@ -34457,12 +35716,17 @@ impl PrefillEngine {
                 m,
             )?
         };
+        let ffn_norm_timing = self.deepseek_v4_hc_internal_timing_start();
         self.launch_rmsnorm(
             hidden,
             hidden,
             self.layer_weights[layer_idx].post_attn_norm,
             m,
             h,
+        )?;
+        self.deepseek_v4_hc_internal_timing_finish(
+            DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_NORM,
+            ffn_norm_timing,
         )?;
         self.deepseek_v4_timing_finish(
             DEEPSEEK_V4_PREFILL_TIMING_STAGE_FFN_HC_PREP_NORM,
@@ -36021,7 +37285,7 @@ impl PrefillEngine {
         m: usize,
     ) -> Result<(), String> {
         if let Some(desc) = hqq {
-            if hqq_prefill_materialize_bf16_enabled() {
+            if self.config.hqq_prefill_materialize_bf16 {
                 self.hqq_materialized_prefill_gemm_bf16(layer_idx, tensor_name, desc, a, c, m)
             } else {
                 self.hqq_quantized_prefill_gemm_bf16(layer_idx, tensor_name, desc, a, c, m)
@@ -37171,6 +38435,8 @@ impl PrefillEngine {
                 accumulate_gemm_scores: self.kernels.dsa_prefill_accumulate_gemm_scores,
                 topk_sort_rows: self.kernels.dsa_prefill_topk_sort_rows,
                 topk_merge_rows: self.kernels.dsa_prefill_topk_merge_rows,
+                topk_radix_sort_rows: self.kernels.dsa_prefill_topk_radix_sort_rows,
+                topk_linear_merge_rows: self.kernels.dsa_prefill_topk_linear_merge_rows,
             },
             self.stream,
             layer_idx,
@@ -37187,7 +38453,9 @@ impl PrefillEngine {
             1.0f32
                 / ((registration.index_head_dim as f32).sqrt()
                     * (registration.index_n_heads as f32).sqrt()),
+            0,
             DeepseekV4PrefillIndexScoreMode::Scalar,
+            DeepseekV4PrefillTopkMode::Bitonic,
             std::ptr::null_mut(),
             0,
             0,
@@ -47175,14 +48443,12 @@ impl PrefillEngine {
                         "la_conv_state_pre_call",
                         conv_state,
                         0,
-                        conv_dim
-                            .checked_mul(kernel_dim)
-                            .ok_or_else(|| {
-                                format!(
-                                    "linear-attention layer {} convolution state size overflows",
-                                    layer_idx
-                                )
-                            })?,
+                        conv_dim.checked_mul(kernel_dim).ok_or_else(|| {
+                            format!(
+                                "linear-attention layer {} convolution state size overflows",
+                                layer_idx
+                            )
+                        })?,
                     );
                 }
 
@@ -47341,7 +48607,8 @@ impl PrefillEngine {
                         value_dim,
                     );
                     let final_block_start = (trace_last_row / trace_fla_bt) * trace_fla_bt;
-                    let final_block_real_rows = m.saturating_sub(final_block_start).min(trace_fla_bt);
+                    let final_block_real_rows =
+                        m.saturating_sub(final_block_start).min(trace_fla_bt);
                     // A resumed width-4 convolution consumes the three raw
                     // rows immediately before its first local row from the
                     // persistent convolution state. Trace the equivalent
@@ -50271,14 +51538,12 @@ impl PrefillEngine {
                         "la_conv_state_after_prefill",
                         lw.la_conv_state_ptr,
                         0,
-                        conv_dim
-                            .checked_mul(kernel_dim)
-                            .ok_or_else(|| {
-                                format!(
-                                    "linear-attention layer {} convolution state size overflows",
-                                    layer_idx
-                                )
-                            })?,
+                        conv_dim.checked_mul(kernel_dim).ok_or_else(|| {
+                            format!(
+                                "linear-attention layer {} convolution state size overflows",
+                                layer_idx
+                            )
+                        })?,
                     );
                 }
 
@@ -54360,6 +55625,7 @@ impl PrefillEngine {
         let pinning_layer_idx = self
             .moe_ordinal_for_model_layer(layer_idx)
             .unwrap_or(hcs_layer_idx);
+        let mut predicted_w1_for_layer = self.deepseek_predicted_w1_layer == Some(layer_idx);
         let mut cold_slots_needed = 0usize;
         if self.d_expert_w1_ptrs.is_some() && !prefill_disable_ptr_table() {
             let has_moe_data = moe_layer_idx
@@ -54407,6 +55673,21 @@ impl PrefillEngine {
                     cold_slots_needed,
                     cold_slots_needed.saturating_mul(self.cold_expert_bytes) as f64 / (1024.0 * 1024.0),
                 );
+            }
+            if predicted_w1_for_layer && cold_slots_needed > self.max_cold_experts {
+                // A prescan can under-predict the exact route. Finish its
+                // speculative copies before the measured exact-route resize;
+                // the ordinary path then stages every required expert.
+                unsafe {
+                    let err = cuda_sys::lib().cuStreamSynchronize(self.copy_stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "DeepSeek predicted-W1 cancellation sync failed at layer {}: {:?}",
+                            layer_idx, err
+                        ));
+                    }
+                }
+                self.clear_deepseek_predicted_w1_state();
             }
             self.ensure_cold_staging_capacity(cold_slots_needed, m)?;
         }
@@ -54484,6 +55765,7 @@ impl PrefillEngine {
         let mut w2_ptrs_gpu = 0u64;
         let mut w2s_ptrs_gpu = 0u64;
         let mut current_ptrs_reused = false;
+        let mut split_expert_dma = false;
 
         if ptr_prefetched {
             w1_ptrs_gpu = self.ptr_prefetch_ptrs[0];
@@ -54522,6 +55804,30 @@ impl PrefillEngine {
             let synthetic_slots = self.begin_synthetic_repack_layer()?;
             let mut synthetic_batch: Vec<[u64; 4]> = Vec::with_capacity(synthetic_slots);
             let mut synthetic_launched = false;
+            split_expert_dma =
+                synthetic_slots == 0 && self.deepseek_v4_prefill_split_expert_dma_enabled;
+            if predicted_w1_for_layer && !split_expert_dma {
+                return Err(format!(
+                    "DeepSeek predicted-W1 layer {} reached MoE without split expert DMA",
+                    layer_idx
+                ));
+            }
+            let mut deferred_w2_copies: Vec<(u64, usize, usize, u64, usize, usize)> =
+                Vec::with_capacity(cold_slots_needed);
+            let mut predicted_w1_reserved_slots = vec![false; self.max_cold_experts];
+            if predicted_w1_for_layer {
+                for &eid in &active {
+                    let slot = self
+                        .deepseek_predicted_w1_slots
+                        .get(eid)
+                        .copied()
+                        .unwrap_or(usize::MAX);
+                    if slot < predicted_w1_reserved_slots.len() {
+                        predicted_w1_reserved_slots[slot] = true;
+                    }
+                }
+            }
+            let mut predicted_w1_hits = 0usize;
 
             // Clear pointer tables (inactive experts get 0 = won't be accessed by kernel)
             for i in 0..n_experts {
@@ -54573,6 +55879,45 @@ impl PrefillEngine {
 
                 let cold_count_before = cold_count;
                 if let Some(md) = moe_data {
+                    if predicted_w1_for_layer {
+                        let predicted_slot = self
+                            .deepseek_predicted_w1_slots
+                            .get(eid)
+                            .copied()
+                            .unwrap_or(usize::MAX);
+                        if predicted_slot < self.max_cold_experts
+                            && predicted_slot < predicted_w1_reserved_slots.len()
+                            && eid < md.experts.len()
+                        {
+                            let e = &md.experts[eid];
+                            let slot_base = cold_staging_base
+                                + (predicted_slot * self.cold_expert_bytes) as u64;
+                            self.h_expert_w1_ptrs[eid] = slot_base;
+                            self.h_expert_w1s_ptrs[eid] =
+                                slot_base + self.w1_packed_per_expert as u64;
+                            let w2_dst =
+                                self.h_expert_w1s_ptrs[eid] + self.w1_scales_per_expert as u64;
+                            let w2s_dst = w2_dst + self.w2_packed_per_expert as u64;
+                            self.h_expert_w2_ptrs[eid] = w2_dst;
+                            self.h_expert_w2s_ptrs[eid] = w2s_dst;
+                            deferred_w2_copies.push((
+                                w2_dst,
+                                e.w2_packed_ptr as usize,
+                                e.w2_packed_bytes,
+                                w2s_dst,
+                                e.w2_scales_ptr as usize,
+                                e.w2_scales_bytes,
+                            ));
+                            cold_count += 1;
+                            predicted_w1_hits += 1;
+                            continue;
+                        }
+                        while cold_slot < self.max_cold_experts
+                            && predicted_w1_reserved_slots[cold_slot]
+                        {
+                            cold_slot += 1;
+                        }
+                    }
                     // Cold expert: H2D to staging slot. If cold staging is
                     // unexpectedly full, fall back to the contiguous fused
                     // buffer only when that legacy buffer exists.
@@ -54617,18 +55962,29 @@ impl PrefillEngine {
                                     e.w13_scales_bytes,
                                     self.copy_stream,
                                 );
-                                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                    *w2b.device_ptr() + w2_off as u64,
-                                    e.w2_packed_ptr as *const _,
-                                    e.w2_packed_bytes,
-                                    self.copy_stream,
-                                );
-                                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                    *w2sb.device_ptr() + w2s_off as u64,
-                                    e.w2_scales_ptr as *const _,
-                                    e.w2_scales_bytes,
-                                    self.copy_stream,
-                                );
+                                if split_expert_dma {
+                                    deferred_w2_copies.push((
+                                        *w2b.device_ptr() + w2_off as u64,
+                                        e.w2_packed_ptr as usize,
+                                        e.w2_packed_bytes,
+                                        *w2sb.device_ptr() + w2s_off as u64,
+                                        e.w2_scales_ptr as usize,
+                                        e.w2_scales_bytes,
+                                    ));
+                                } else {
+                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                        *w2b.device_ptr() + w2_off as u64,
+                                        e.w2_packed_ptr as *const _,
+                                        e.w2_packed_bytes,
+                                        self.copy_stream,
+                                    );
+                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                        *w2sb.device_ptr() + w2s_off as u64,
+                                        e.w2_scales_ptr as *const _,
+                                        e.w2_scales_bytes,
+                                        self.copy_stream,
+                                    );
+                                }
                             }
                             if let Some(t) = mt_cold {
                                 cold_h2d_ms += t.elapsed().as_secs_f64() * 1000.0;
@@ -54679,27 +56035,38 @@ impl PrefillEngine {
                         }
                         self.h_expert_w1s_ptrs[eid] = slot_base + off;
                         off += self.w1_scales_per_expert as u64;
-                        // w2 packed
-                        unsafe {
-                            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                slot_base + off,
-                                e.w2_packed_ptr as *const _,
-                                e.w2_packed_bytes,
-                                self.copy_stream,
-                            );
-                        }
-                        self.h_expert_w2_ptrs[eid] = slot_base + off;
+                        // w2 packed/scales can be deferred so their transfer
+                        // overlaps the independent W1 projection.
+                        let w2_dst = slot_base + off;
+                        self.h_expert_w2_ptrs[eid] = w2_dst;
                         off += self.w2_packed_per_expert as u64;
-                        // w2 scales
+                        let w2_scales_dst = slot_base + off;
+                        self.h_expert_w2s_ptrs[eid] = w2_scales_dst;
                         unsafe {
-                            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                slot_base + off,
-                                e.w2_scales_ptr as *const _,
-                                e.w2_scales_bytes,
-                                self.copy_stream,
-                            );
+                            if split_expert_dma {
+                                deferred_w2_copies.push((
+                                    w2_dst,
+                                    e.w2_packed_ptr as usize,
+                                    e.w2_packed_bytes,
+                                    w2_scales_dst,
+                                    e.w2_scales_ptr as usize,
+                                    e.w2_scales_bytes,
+                                ));
+                            } else {
+                                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                    w2_dst,
+                                    e.w2_packed_ptr as *const _,
+                                    e.w2_packed_bytes,
+                                    self.copy_stream,
+                                );
+                                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                    w2_scales_dst,
+                                    e.w2_scales_ptr as *const _,
+                                    e.w2_scales_bytes,
+                                    self.copy_stream,
+                                );
+                            }
                         }
-                        self.h_expert_w2s_ptrs[eid] = slot_base + off;
                         if let Some(t) = mt_cold {
                             cold_h2d_ms += t.elapsed().as_secs_f64() * 1000.0;
                         }
@@ -54724,6 +56091,45 @@ impl PrefillEngine {
             if !synthetic_batch.is_empty() {
                 self.launch_synthetic_repack_batch(&synthetic_batch)?;
                 synthetic_launched = true;
+            }
+            if split_expert_dma {
+                unsafe {
+                    cuda_sys::lib().cuEventRecord(self.dma_w1_event, self.copy_stream);
+                    for &(w2_dst, w2_src, w2_bytes, w2s_dst, w2s_src, w2s_bytes) in
+                        &deferred_w2_copies
+                    {
+                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            w2_dst,
+                            w2_src as *const std::ffi::c_void,
+                            w2_bytes,
+                            self.copy_stream,
+                        );
+                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            w2s_dst,
+                            w2s_src as *const std::ffi::c_void,
+                            w2s_bytes,
+                            self.copy_stream,
+                        );
+                    }
+                }
+            }
+            if predicted_w1_for_layer {
+                let predicted_count = self.deepseek_predicted_w1_count;
+                if std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1_DIAG").is_ok() {
+                    eprintln!(
+                        "[DSV4-PREDICTED-W1] routed layer={} chunk={} tokens={} predicted_cold={} exact_cold={} hits={} misses={} extra={}",
+                        layer_idx,
+                        self.active_prefill_chunk_idx,
+                        m,
+                        predicted_count,
+                        cold_count,
+                        predicted_w1_hits,
+                        cold_count.saturating_sub(predicted_w1_hits),
+                        predicted_count.saturating_sub(predicted_w1_hits),
+                    );
+                }
+                self.clear_deepseek_predicted_w1_state();
+                predicted_w1_for_layer = false;
             }
             trace_hcs_count = hcs_count;
             trace_pinned_count = pinned_count;
@@ -54863,7 +56269,15 @@ impl PrefillEngine {
         // Wait for DMA/pointer table upload to complete (stream dependency)
         let mt_dma_wait = if mt { Some(Instant::now()) } else { None };
         unsafe {
-            cuda_sys::lib().cuStreamWaitEvent(self.stream, self.dma_event, 0);
+            cuda_sys::lib().cuStreamWaitEvent(
+                self.stream,
+                if split_expert_dma {
+                    self.dma_w1_event
+                } else {
+                    self.dma_event
+                },
+                0,
+            );
         }
         if let Some(t) = mt1 {
             // Sync to measure actual DMA wait time (timing mode only)
@@ -55241,7 +56655,10 @@ impl PrefillEngine {
                 ));
             }
             let index = moe_layer_idx.ok_or_else(|| {
-                format!("TileQ prefill layer {} has no routed-layer index", layer_idx)
+                format!(
+                    "TileQ prefill layer {} has no routed-layer index",
+                    layer_idx
+                )
             })?;
             self.moe_layers
                 .get(index)
@@ -55509,54 +56926,54 @@ impl PrefillEngine {
         } else {
             unsafe {
                 fused_fn(
-                fused_input_ptr as *const _,      // A: [m*topk, K=hidden] replicated
-                w1_b_param as *const _,           // B: base ref (ptr table overrides per-expert)
-                fused_inter_ptr as *mut _,        // C: written at sorted_id positions [0..m*topk)
-                fused_c_tmp_ptr as *mut _,        // C_tmp
-                std::ptr::null(),                 // b_bias (none)
-                w1s_b_param as *const _,          // scales: base ref (ptr table overrides)
-                std::ptr::null(),                 // s2 (none)
-                std::ptr::null(),                 // zp (none)
-                std::ptr::null(),                 // g_idx (none)
-                std::ptr::null(),                 // perm (none)
-                std::ptr::null(),                 // a_tmp (none)
-                sorted_ids_val as *const _,       // sorted_ids (vLLM format: token*topk+slot)
-                fused_expert_ids_val as *const _, // expert_ids
-                num_tokens_post_val as *const _,  // num_tokens_post_padded
-                topk_weights_ptr as *const _,     // topk_weights
-                block_size,                       // moe_block_size
-                1i32,                             // top_k=1: sorted_id/1 = direct index into A
-                false,                            // mul_topk_weights (false for w1)
-                false,                            // is_ep
-                m_topk as i32,                    // size_m = m*topk (padding threshold = m*topk*1)
-                w1_n as i32,                      // size_n
-                expert_h as i32,                  // size_k
-                *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
-                q_type_ptr,                       // q_type_ptr
-                false,                            // has_bias
-                false,                            // has_act_order
-                true,                             // is_k_full
-                false,                            // has_zp
-                num_groups_w1,                    // num_groups
-                gs,                               // group_size
-                0,                                // dev
-                stream_ptr,                       // stream_ptr (our compute stream)
-                -1,                               // thread_k (auto)
-                -1,                               // thread_n (auto)
-                self.config.sms as i32,           // sms
-                false,                            // use_atomic
-                true,                             // fp32_reduce
-                false,                            // is_zp_float
-                if use_ptr_table {
-                    w1_ptrs_gpu as *const _
-                } else {
-                    std::ptr::null()
-                }, // B_expert_ptrs
-                if use_ptr_table {
-                    w1s_ptrs_gpu as *const _
-                } else {
-                    std::ptr::null()
-                }, // S_expert_ptrs
+                    fused_input_ptr as *const _,      // A: [m*topk, K=hidden] replicated
+                    w1_b_param as *const _, // B: base ref (ptr table overrides per-expert)
+                    fused_inter_ptr as *mut _, // C: written at sorted_id positions [0..m*topk)
+                    fused_c_tmp_ptr as *mut _, // C_tmp
+                    std::ptr::null(),       // b_bias (none)
+                    w1s_b_param as *const _, // scales: base ref (ptr table overrides)
+                    std::ptr::null(),       // s2 (none)
+                    std::ptr::null(),       // zp (none)
+                    std::ptr::null(),       // g_idx (none)
+                    std::ptr::null(),       // perm (none)
+                    std::ptr::null(),       // a_tmp (none)
+                    sorted_ids_val as *const _, // sorted_ids (vLLM format: token*topk+slot)
+                    fused_expert_ids_val as *const _, // expert_ids
+                    num_tokens_post_val as *const _, // num_tokens_post_padded
+                    topk_weights_ptr as *const _, // topk_weights
+                    block_size,             // moe_block_size
+                    1i32,                   // top_k=1: sorted_id/1 = direct index into A
+                    false,                  // mul_topk_weights (false for w1)
+                    false,                  // is_ep
+                    m_topk as i32,          // size_m = m*topk (padding threshold = m*topk*1)
+                    w1_n as i32,            // size_n
+                    expert_h as i32,        // size_k
+                    *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
+                    q_type_ptr,             // q_type_ptr
+                    false,                  // has_bias
+                    false,                  // has_act_order
+                    true,                   // is_k_full
+                    false,                  // has_zp
+                    num_groups_w1,          // num_groups
+                    gs,                     // group_size
+                    0,                      // dev
+                    stream_ptr,             // stream_ptr (our compute stream)
+                    -1,                     // thread_k (auto)
+                    -1,                     // thread_n (auto)
+                    self.config.sms as i32, // sms
+                    false,                  // use_atomic
+                    true,                   // fp32_reduce
+                    false,                  // is_zp_float
+                    if use_ptr_table {
+                        w1_ptrs_gpu as *const _
+                    } else {
+                        std::ptr::null()
+                    }, // B_expert_ptrs
+                    if use_ptr_table {
+                        w1s_ptrs_gpu as *const _
+                    } else {
+                        std::ptr::null()
+                    }, // S_expert_ptrs
                 );
             }
         }
@@ -56654,8 +58071,6 @@ impl PrefillEngine {
             self.t_moe_w1
                 .set(self.t_moe_w1.get() + t.elapsed().as_secs_f64() * 1000.0);
         }
-        let mt3 = if mt { Some(Instant::now()) } else { None };
-
         // 10. MarlinDefault for w2 (down projection)
         // w2 trick: top_k=1, size_m=m*topk so kernel reads A[sorted_id/1] = A[sorted_id] directly
         // This lets each (token,expert) pair access its own intermediate result
@@ -56666,6 +58081,20 @@ impl PrefillEngine {
         } else {
             fused_inter_ptr
         };
+
+        if split_expert_dma {
+            let wait_t = if mt { Some(Instant::now()) } else { None };
+            unsafe {
+                cuda_sys::lib().cuStreamWaitEvent(self.stream, self.dma_event, 0);
+            }
+            if let Some(t) = wait_t {
+                self.stream_sync()?;
+                let wait_ms = t.elapsed().as_secs_f64() * 1000.0;
+                self.t_moe_dma_wait.set(self.t_moe_dma_wait.get() + wait_ms);
+                self.t_moe_dma.set(self.t_moe_dma.get() + wait_ms);
+            }
+        }
+        let mt3 = if mt { Some(Instant::now()) } else { None };
 
         // Zero workspace and C_tmp before fused w2 GEMM
         unsafe {
@@ -56804,54 +58233,54 @@ impl PrefillEngine {
         } else {
             unsafe {
                 fused_fn(
-                w2_input as *const _,             // A: [m*topk, K=inter] indexed by sorted_id
-                w2_b_param as *const _,           // B: base ref (ptr table overrides per-expert)
-                fused_output_ptr as *mut _,       // C: written at sorted_id positions [0..m*topk)
-                fused_c_tmp_ptr as *mut _,        // C_tmp
-                std::ptr::null(),                 // b_bias (none)
-                w2s_b_param as *const _,          // scales: base ref (ptr table overrides)
-                std::ptr::null(),                 // s2 (none)
-                std::ptr::null(),                 // zp (none)
-                std::ptr::null(),                 // g_idx (none)
-                std::ptr::null(),                 // perm (none)
-                std::ptr::null(),                 // a_tmp (none)
-                sorted_ids_val as *const _,       // sorted_ids (vLLM format)
-                fused_expert_ids_val as *const _, // expert_ids
-                num_tokens_post_val as *const _,  // num_tokens_post_padded
-                topk_weights_ptr as *const _,     // topk_weights
-                block_size,                       // moe_block_size
-                1i32,                             // top_k=1: sorted_id/1 = direct index into A
-                false,                            // mul_topk_weights=false (scatter handles it)
-                false,                            // is_ep
-                m_topk as i32,                    // size_m = m*topk (padding threshold = m*topk*1)
-                expert_h as i32,                  // size_n
-                inter as i32,                     // size_k
-                *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
-                q_type_ptr,                       // q_type_ptr
-                false,                            // has_bias
-                false,                            // has_act_order
-                true,                             // is_k_full
-                false,                            // has_zp
-                num_groups_w2,                    // num_groups
-                gs,                               // group_size
-                0,                                // dev
-                stream_ptr,                       // stream_ptr
-                -1,                               // thread_k (auto)
-                -1,                               // thread_n (auto)
-                self.config.sms as i32,           // sms
-                false,                            // use_atomic
-                true,                             // fp32_reduce
-                false,                            // is_zp_float
-                if use_ptr_table {
-                    w2_ptrs_gpu as *const _
-                } else {
-                    std::ptr::null()
-                }, // B_expert_ptrs
-                if use_ptr_table {
-                    w2s_ptrs_gpu as *const _
-                } else {
-                    std::ptr::null()
-                }, // S_expert_ptrs
+                    w2_input as *const _,             // A: [m*topk, K=inter] indexed by sorted_id
+                    w2_b_param as *const _, // B: base ref (ptr table overrides per-expert)
+                    fused_output_ptr as *mut _, // C: written at sorted_id positions [0..m*topk)
+                    fused_c_tmp_ptr as *mut _, // C_tmp
+                    std::ptr::null(),       // b_bias (none)
+                    w2s_b_param as *const _, // scales: base ref (ptr table overrides)
+                    std::ptr::null(),       // s2 (none)
+                    std::ptr::null(),       // zp (none)
+                    std::ptr::null(),       // g_idx (none)
+                    std::ptr::null(),       // perm (none)
+                    std::ptr::null(),       // a_tmp (none)
+                    sorted_ids_val as *const _, // sorted_ids (vLLM format)
+                    fused_expert_ids_val as *const _, // expert_ids
+                    num_tokens_post_val as *const _, // num_tokens_post_padded
+                    topk_weights_ptr as *const _, // topk_weights
+                    block_size,             // moe_block_size
+                    1i32,                   // top_k=1: sorted_id/1 = direct index into A
+                    false,                  // mul_topk_weights=false (scatter handles it)
+                    false,                  // is_ep
+                    m_topk as i32,          // size_m = m*topk (padding threshold = m*topk*1)
+                    expert_h as i32,        // size_n
+                    inter as i32,           // size_k
+                    *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
+                    q_type_ptr,             // q_type_ptr
+                    false,                  // has_bias
+                    false,                  // has_act_order
+                    true,                   // is_k_full
+                    false,                  // has_zp
+                    num_groups_w2,          // num_groups
+                    gs,                     // group_size
+                    0,                      // dev
+                    stream_ptr,             // stream_ptr
+                    -1,                     // thread_k (auto)
+                    -1,                     // thread_n (auto)
+                    self.config.sms as i32, // sms
+                    false,                  // use_atomic
+                    true,                   // fp32_reduce
+                    false,                  // is_zp_float
+                    if use_ptr_table {
+                        w2_ptrs_gpu as *const _
+                    } else {
+                        std::ptr::null()
+                    }, // B_expert_ptrs
+                    if use_ptr_table {
+                        w2s_ptrs_gpu as *const _
+                    } else {
+                        std::ptr::null()
+                    }, // S_expert_ptrs
                 );
             }
         }
@@ -68065,6 +69494,8 @@ impl PrefillKernels {
                     "dsa_prefill_accumulate_gemm_scores_kernel",
                     "dsa_prefill_topk_sort_rows_kernel",
                     "dsa_prefill_topk_merge_rows_kernel",
+                    "dsa_prefill_topk_radix_sort_rows_kernel",
+                    "dsa_prefill_topk_linear_merge_rows_kernel",
                     "mla_pack_qkv_rope_bf16_kernel",
                     "mla_cache_append_k4_kernel",
                     "mla_prefill_absorb_wkc_kernel",
@@ -68085,6 +69516,7 @@ impl PrefillKernels {
                     "deepseek_v4_sqrtsoftplus_topk_kernel",
                     "deepseek_v4_hc_inv_rms_kernel",
                     "deepseek_v4_hc_project_kernel",
+                    "deepseek_v4_hc_normalize_f32_kernel",
                     "deepseek_v4_hc_prepare_kernel",
                     "deepseek_v4_hc_reduce_kernel",
                     "deepseek_v4_hc_post_kernel",
@@ -68093,10 +69525,12 @@ impl PrefillKernels {
                     "deepseek_v4_sparse_scores_kernel",
                     "deepseek_v4_sparse_scores_query_cached_kernel",
                     "deepseek_v4_prefill_gather_scores_bf16_kernel",
+                    "deepseek_v4_prefill_gather_scores_bf16x8_kernel",
                     "deepseek_v4_prefill_gather_scores_fp32_kernel",
                     "deepseek_v4_prefill_scale_finite_scores_kernel",
                     "deepseek_v4_prefill_gather_sparse_values_bf16_kernel",
                     "deepseek_v4_prefill_softmax_weights_bf16_kernel",
+                    "deepseek_v4_prefill_softmax_weights_warp_bf16_kernel",
                     "deepseek_v4_sparse_output_kernel",
                     "deepseek_v4_sparse_output_bf16x2_kernel",
                     "deepseek_v4_sparse_output_cached_exp_kernel",
@@ -68532,6 +69966,8 @@ impl PrefillKernels {
             dsa_prefill_accumulate_gemm_scores: get("dsa_prefill_accumulate_gemm_scores_kernel")?,
             dsa_prefill_topk_sort_rows: get("dsa_prefill_topk_sort_rows_kernel")?,
             dsa_prefill_topk_merge_rows: get("dsa_prefill_topk_merge_rows_kernel")?,
+            dsa_prefill_topk_radix_sort_rows: get("dsa_prefill_topk_radix_sort_rows_kernel")?,
+            dsa_prefill_topk_linear_merge_rows: get("dsa_prefill_topk_linear_merge_rows_kernel")?,
             mla_pack_qkv_rope_bf16: get("mla_pack_qkv_rope_bf16_kernel")?,
             mla_cache_append_k4: get("mla_cache_append_k4_kernel")?,
             mla_prefill_absorb_wkc: get("mla_prefill_absorb_wkc_kernel")?,
@@ -68549,6 +69985,7 @@ impl PrefillKernels {
             deepseek_v4_sqrtsoftplus_topk: get("deepseek_v4_sqrtsoftplus_topk_kernel")?,
             deepseek_v4_hc_inv_rms: get("deepseek_v4_hc_inv_rms_kernel")?,
             deepseek_v4_hc_project: get("deepseek_v4_hc_project_kernel")?,
+            deepseek_v4_hc_normalize_f32: get("deepseek_v4_hc_normalize_f32_kernel")?,
             deepseek_v4_hc_prepare: get("deepseek_v4_hc_prepare_kernel")?,
             deepseek_v4_hc_reduce: get("deepseek_v4_hc_reduce_kernel")?,
             deepseek_v4_hc_post: get("deepseek_v4_hc_post_kernel")?,
@@ -68561,6 +69998,9 @@ impl PrefillKernels {
             deepseek_v4_prefill_gather_scores_bf16: get(
                 "deepseek_v4_prefill_gather_scores_bf16_kernel",
             )?,
+            deepseek_v4_prefill_gather_scores_bf16x8: get(
+                "deepseek_v4_prefill_gather_scores_bf16x8_kernel",
+            )?,
             deepseek_v4_prefill_gather_scores_fp32: get(
                 "deepseek_v4_prefill_gather_scores_fp32_kernel",
             )?,
@@ -68572,6 +70012,9 @@ impl PrefillKernels {
             )?,
             deepseek_v4_prefill_softmax_weights_bf16: get(
                 "deepseek_v4_prefill_softmax_weights_bf16_kernel",
+            )?,
+            deepseek_v4_prefill_softmax_weights_warp_bf16: get(
+                "deepseek_v4_prefill_softmax_weights_warp_bf16_kernel",
             )?,
             // The BF16-pair kernel is exact-bit equivalent to the scalar
             // reference for both even and odd runtime head widths. It halves
@@ -68603,9 +70046,7 @@ impl PrefillKernels {
                 "deepseek_v4_static_compressed_indices_kernel",
             )?,
             deepseek_v4_store_raw_kv: get("deepseek_v4_store_raw_kv_kernel")?,
-            deepseek_v4_restore_raw_history: get(
-                "deepseek_v4_restore_raw_history_kernel",
-            )?,
+            deepseek_v4_restore_raw_history: get("deepseek_v4_restore_raw_history_kernel")?,
             deepseek_v4_pack_fp8_native: get("deepseek_v4_pack_fp8_native_kernel")?,
             deepseek_v4_unpack_fp8_native: get("deepseek_v4_unpack_fp8_native_kernel")?,
             deepseek_v4_pack_fp4_native: get("deepseek_v4_pack_fp4_native_kernel")?,
@@ -68943,17 +70384,6 @@ fn shared_moe_inter_scratch_elements(
     max_tokens
         .saturating_mul(dense_intermediate_size)
         .max(fused_sorted_count.saturating_mul(moe_intermediate_size))
-}
-
-pub fn hqq_prefill_materialize_bf16_enabled() -> bool {
-    std::env::var("KRASIS_HQQ_PREFILL_MATERIALIZE_BF16")
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
 }
 
 fn hqq_prefill_materialize_weight_elems(config: &PrefillModelConfig) -> usize {
@@ -69375,7 +70805,7 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     // Fixed costs (independent of max_tokens):
     let mut fixed: usize = 0;
     fixed = fixed.saturating_add(native_history_fixed_bytes);
-    if hqq_prefill_materialize_bf16_enabled() {
+    if config.hqq_prefill_materialize_bf16 {
         fixed += hqq_prefill_materialize_weight_elems(config) * std::mem::size_of::<u16>();
     }
     // d_workspace: sms * MARLIN_MAX_LOCK_SLOTS_PER_SM * 4
@@ -69547,7 +70977,7 @@ fn estimate_scratch_vram_for_prompt(
     add(max_inter, 2); // scratch1
     add(max_inter, 2); // scratch2
 
-    if hqq_prefill_materialize_bf16_enabled() && max_tokens > 0 {
+    if config.hqq_prefill_materialize_bf16 && max_tokens > 0 {
         add(hqq_prefill_materialize_weight_elems(config), 2);
     }
     add(
@@ -69846,8 +71276,7 @@ pub fn allocate_scratch_for_prompt(
 
     let has_mamba2 = config.layer_types.iter().any(|&t| t == 1);
     let has_la = config.layer_types.iter().any(|&t| t == 3);
-    let deepseek_v4_native_history_elems =
-        deepseek_v4_native_history_elems(config, prompt_tokens)?;
+    let deepseek_v4_native_history_elems = deepseek_v4_native_history_elems(config, prompt_tokens)?;
     // LA pads to chunk_size multiples, so total_len can be up to max_tokens + chunk_size - 1
     let la_max_len = if has_la {
         max_tokens + config.la_chunk_size
@@ -69878,7 +71307,7 @@ pub fn allocate_scratch_for_prompt(
         d_residual: alloc_u16(max_tokens * h, "residual")?,
         d_scratch1: alloc_u16(max_inter, "scratch1")?,
         d_scratch2: alloc_u16(max_inter, "scratch2")?,
-        d_hqq_bf16_weight: if hqq_prefill_materialize_bf16_enabled() && max_tokens > 0 {
+        d_hqq_bf16_weight: if config.hqq_prefill_materialize_bf16 && max_tokens > 0 {
             let elems = hqq_prefill_materialize_weight_elems(config);
             Some(alloc_u16(elems, "hqq_bf16_weight")?)
         } else {
@@ -71736,6 +73165,8 @@ mod kernel_tests {
                     "dsa_prefill_accumulate_gemm_scores_kernel",
                     "dsa_prefill_topk_sort_rows_kernel",
                     "dsa_prefill_topk_merge_rows_kernel",
+                    "dsa_prefill_topk_radix_sort_rows_kernel",
+                    "dsa_prefill_topk_linear_merge_rows_kernel",
                     "mla_pack_qkv_rope_bf16_kernel",
                     "mla_cache_append_k4_kernel",
                     "mla_prefill_absorb_wkc_kernel",
@@ -71751,6 +73182,7 @@ mod kernel_tests {
                     "deepseek_v4_sqrtsoftplus_topk_kernel",
                     "deepseek_v4_hc_inv_rms_kernel",
                     "deepseek_v4_hc_project_kernel",
+                    "deepseek_v4_hc_normalize_f32_kernel",
                     "deepseek_v4_hc_prepare_kernel",
                     "deepseek_v4_hc_reduce_kernel",
                     "deepseek_v4_hc_post_kernel",
@@ -71759,10 +73191,12 @@ mod kernel_tests {
                     "deepseek_v4_sparse_scores_kernel",
                     "deepseek_v4_sparse_scores_query_cached_kernel",
                     "deepseek_v4_prefill_gather_scores_bf16_kernel",
+                    "deepseek_v4_prefill_gather_scores_bf16x8_kernel",
                     "deepseek_v4_prefill_gather_scores_fp32_kernel",
                     "deepseek_v4_prefill_scale_finite_scores_kernel",
                     "deepseek_v4_prefill_gather_sparse_values_bf16_kernel",
                     "deepseek_v4_prefill_softmax_weights_bf16_kernel",
+                    "deepseek_v4_prefill_softmax_weights_warp_bf16_kernel",
                     "deepseek_v4_sparse_output_kernel",
                     "deepseek_v4_sparse_output_bf16x2_kernel",
                     "deepseek_v4_sparse_output_cached_exp_kernel",
@@ -71848,6 +73282,7 @@ mod kernel_tests {
                     "mamba2_gated_group_rmsnorm_kernel",
                     "mamba2_gated_group_rmsnorm_sqrt_approx_div_rn_replay_kernel",
                     "embedding_batched_kernel",
+                    "hqq_dequant_bf16_kernel",
                     "la_triangular_solve_kernel",
                     "la_compute_v_new_kernel",
                     "la_chunk_output_kernel",
@@ -71988,6 +73423,124 @@ mod kernel_tests {
         fn stream(&self) -> cuda_sys::CUstream {
             // Use default stream (null) for tests
             std::ptr::null_mut()
+        }
+    }
+
+    #[test]
+    fn test_hqq_materialized_prefill_dequant_matches_cpu_all_bit_widths() {
+        let ctx = GpuTestCtx::new();
+        let kernel = ctx.get_kernel("hqq_dequant_bf16_kernel");
+        let rows = 3usize;
+        let cols = 12usize;
+        let group_size = 4usize;
+        let groups = cols / group_size;
+
+        for nbits in [4usize, 6, 8] {
+            let packed_stride = match nbits {
+                4 => cols / 2,
+                6 => cols / 4 * 3,
+                8 => cols,
+                _ => unreachable!(),
+            };
+            let mut packed = vec![0u8; rows * packed_stride];
+            let mut quantized = vec![0u8; rows * cols];
+            let q_mask = (1usize << nbits) - 1;
+            for row in 0..rows {
+                for col in 0..cols {
+                    quantized[row * cols + col] = ((row * cols + col * 5 + 3) & q_mask) as u8;
+                }
+                match nbits {
+                    4 => {
+                        for col_pair in 0..cols / 2 {
+                            let q0 = quantized[row * cols + 2 * col_pair];
+                            let q1 = quantized[row * cols + 2 * col_pair + 1];
+                            packed[row * packed_stride + col_pair] = q0 | (q1 << 4);
+                        }
+                    }
+                    6 => {
+                        for group4 in 0..cols / 4 {
+                            let base = row * cols + group4 * 4;
+                            let bits = (quantized[base] as u32)
+                                | ((quantized[base + 1] as u32) << 6)
+                                | ((quantized[base + 2] as u32) << 12)
+                                | ((quantized[base + 3] as u32) << 18);
+                            let dst = row * packed_stride + group4 * 3;
+                            packed[dst] = bits as u8;
+                            packed[dst + 1] = (bits >> 8) as u8;
+                            packed[dst + 2] = (bits >> 16) as u8;
+                        }
+                    }
+                    8 => packed[row * packed_stride..(row + 1) * packed_stride]
+                        .copy_from_slice(&quantized[row * cols..(row + 1) * cols]),
+                    _ => unreachable!(),
+                }
+            }
+
+            let scales = (0..rows * groups)
+                .map(|index| 0.25f32 * ((index % groups) + 1) as f32)
+                .collect::<Vec<_>>();
+            let zeros = (0..rows * groups)
+                .map(|index| ((index / groups) + 2) as f32)
+                .collect::<Vec<_>>();
+            let expected = (0..rows * cols)
+                .map(|index| {
+                    let row = index / cols;
+                    let col = index % cols;
+                    let group = col / group_size;
+                    half::bf16::from_f32(
+                        (quantized[index] as f32 - zeros[row * groups + group])
+                            * scales[row * groups + group],
+                    )
+                    .to_bits()
+                })
+                .collect::<Vec<_>>();
+
+            let d_packed = ctx.upload_u8(&packed);
+            let d_scales = ctx.dev.htod_copy(scales).unwrap();
+            let d_zeros = ctx.dev.htod_copy(zeros).unwrap();
+            let d_output = ctx.alloc_bf16(rows * cols);
+            let threads = 256u32;
+            let blocks = ((rows * cols) as u32).div_ceil(threads);
+            unsafe {
+                let mut a0 = *d_output.device_ptr() as u64;
+                let mut a1 = *d_packed.device_ptr() as u64;
+                let mut a2 = *d_scales.device_ptr() as u64;
+                let mut a3 = *d_zeros.device_ptr() as u64;
+                let mut a4 = rows as i32;
+                let mut a5 = cols as i32;
+                let mut a6 = group_size as i32;
+                let mut a7 = packed_stride as i32;
+                let mut a8 = (groups * std::mem::size_of::<f32>()) as i32;
+                let mut a9 = a8;
+                let mut a10 = nbits as i32;
+                launch(
+                    kernel,
+                    (blocks, 1, 1),
+                    (threads, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut a0 as *mut _ as *mut std::ffi::c_void,
+                        &mut a1 as *mut _ as *mut std::ffi::c_void,
+                        &mut a2 as *mut _ as *mut std::ffi::c_void,
+                        &mut a3 as *mut _ as *mut std::ffi::c_void,
+                        &mut a4 as *mut _ as *mut std::ffi::c_void,
+                        &mut a5 as *mut _ as *mut std::ffi::c_void,
+                        &mut a6 as *mut _ as *mut std::ffi::c_void,
+                        &mut a7 as *mut _ as *mut std::ffi::c_void,
+                        &mut a8 as *mut _ as *mut std::ffi::c_void,
+                        &mut a9 as *mut _ as *mut std::ffi::c_void,
+                        &mut a10 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )
+                .unwrap();
+            }
+            ctx.dev.synchronize().unwrap();
+            assert_eq!(
+                ctx.dev.dtoh_sync_copy(&d_output).unwrap(),
+                expected,
+                "HQQ{nbits} row-major materialization"
+            );
         }
     }
 
@@ -72142,9 +73695,7 @@ mod kernel_tests {
         let dispatcher_block = 64usize;
 
         let quantized: Vec<i8> = (0..output_dim)
-            .flat_map(|out| {
-                (0..input_dim).map(move |k| (((out * 5 + k * 3) % 7) as i8) - 3)
-            })
+            .flat_map(|out| (0..input_dim).map(move |k| (((out * 5 + k * 3) % 7) as i8) - 3))
             .collect();
         let packed = pack_signed_int3_rows(&quantized, output_dim, input_dim).unwrap();
         let scale_values: Vec<f32> = (0..output_dim)
@@ -72322,10 +73873,9 @@ mod kernel_tests {
             let mut rank_values = vec![0.0f32; rank];
             for r in 0..rank {
                 for k in 0..input_dim {
-                    rank_values[r] +=
-                        input_exact[row * input_dim + k]
-                            * inverse_scales_exact[k]
-                            * left_exact[k * rank + r];
+                    rank_values[r] += input_exact[row * input_dim + k]
+                        * inverse_scales_exact[k]
+                        * left_exact[k * rank + r];
                 }
             }
             for out in 0..output_dim {
@@ -73176,6 +74726,191 @@ mod kernel_tests {
     }
 
     #[test]
+    fn test_deepseek_v4_tf32_hc_projection_respects_derived_error_bound() {
+        let ctx = GpuTestCtx::new();
+        let inv_kernel = ctx.get_kernel("deepseek_v4_hc_inv_rms_kernel");
+        let scalar_kernel = ctx.get_kernel("deepseek_v4_hc_project_kernel");
+        let normalize_kernel = ctx.get_kernel("deepseek_v4_hc_normalize_f32_kernel");
+        let rows = 5usize;
+        let tile_capacity = 2usize;
+        let hidden = 64usize;
+        let hc_mult = 3usize;
+        let flat = hidden * hc_mult;
+        let mix_width = (2 + hc_mult) * hc_mult;
+        let rms_eps = 1.0e-6f32;
+        let state_bits = (0..rows * flat)
+            .map(|index| {
+                half::bf16::from_f32((((index * 37 + 11) % 257) as f32 - 128.0) * 0.0078125)
+                    .to_bits()
+            })
+            .collect::<Vec<_>>();
+        let state = state_bits
+            .iter()
+            .map(|bits| half::bf16::from_bits(*bits).to_f32())
+            .collect::<Vec<_>>();
+        let weight = (0..mix_width * flat)
+            .map(|index| (((index * 19 + 7) % 101) as f32 - 50.0) * 0.0005)
+            .collect::<Vec<_>>();
+        let d_state = ctx.dev.htod_copy(state_bits).unwrap();
+        let d_weight = ctx.dev.htod_copy(weight.clone()).unwrap();
+        let d_inv = ctx.alloc_f32(rows);
+        let d_scalar = ctx.alloc_f32(rows * mix_width);
+        let d_candidate = ctx.alloc_f32(rows * mix_width);
+        let d_normalized = ctx.alloc_f32(tile_capacity * flat);
+        let d_workspace = ctx.alloc_f32(rows * mix_width);
+
+        unsafe {
+            let mut i0 = *d_inv.device_ptr() as u64;
+            let mut i1 = *d_state.device_ptr() as u64;
+            let mut i2 = hidden as i32;
+            let mut i3 = hc_mult as i32;
+            let mut i4 = rms_eps;
+            launch(
+                inv_kernel,
+                (rows as u32, 1, 1),
+                (256, 1, 1),
+                256 * 4,
+                ctx.stream(),
+                &mut [
+                    &mut i0 as *mut _ as *mut std::ffi::c_void,
+                    &mut i1 as *mut _ as *mut std::ffi::c_void,
+                    &mut i2 as *mut _ as *mut std::ffi::c_void,
+                    &mut i3 as *mut _ as *mut std::ffi::c_void,
+                    &mut i4 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )
+            .unwrap();
+            let mut s0 = *d_scalar.device_ptr() as u64;
+            let mut s1 = *d_state.device_ptr() as u64;
+            let mut s2 = *d_weight.device_ptr() as u64;
+            let mut s3 = *d_inv.device_ptr() as u64;
+            let mut s4 = hidden as i32;
+            let mut s5 = hc_mult as i32;
+            let mut s6 = mix_width as i32;
+            launch(
+                scalar_kernel,
+                (mix_width as u32, rows as u32, 1),
+                (256, 1, 1),
+                256 * 4,
+                ctx.stream(),
+                &mut [
+                    &mut s0 as *mut _ as *mut std::ffi::c_void,
+                    &mut s1 as *mut _ as *mut std::ffi::c_void,
+                    &mut s2 as *mut _ as *mut std::ffi::c_void,
+                    &mut s3 as *mut _ as *mut std::ffi::c_void,
+                    &mut s4 as *mut _ as *mut std::ffi::c_void,
+                    &mut s5 as *mut _ as *mut std::ffi::c_void,
+                    &mut s6 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )
+            .unwrap();
+        }
+
+        let handle = cublas_result::create_handle().expect("create HC TF32 test cuBLAS handle");
+        unsafe {
+            cublas_result::set_stream(handle, ctx.stream() as cublas_sys::cudaStream_t)
+                .expect("set HC TF32 test cuBLAS stream");
+            assert_eq!(
+                cublas_sys::lib().cublasSetWorkspace_v2(
+                    handle,
+                    *d_workspace.device_ptr() as *mut std::ffi::c_void,
+                    d_workspace.len() * std::mem::size_of::<f32>(),
+                ),
+                cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS,
+            );
+        }
+        let alpha = 1.0f32;
+        let beta = 0.0f32;
+        let mut row_start = 0usize;
+        while row_start < rows {
+            let tile_rows = (rows - row_start).min(tile_capacity);
+            let tile_elements = tile_rows * flat;
+            unsafe {
+                let mut n0 = *d_normalized.device_ptr() as u64;
+                let mut n1 = (*d_state.device_ptr() as u64)
+                    + (row_start * flat * std::mem::size_of::<u16>()) as u64;
+                let mut n2 =
+                    (*d_inv.device_ptr() as u64) + (row_start * std::mem::size_of::<f32>()) as u64;
+                let mut n3 = tile_elements as i64;
+                let mut n4 = flat as i32;
+                launch(
+                    normalize_kernel,
+                    (tile_elements.div_ceil(256) as u32, 1, 1),
+                    (256, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut n0 as *mut _ as *mut std::ffi::c_void,
+                        &mut n1 as *mut _ as *mut std::ffi::c_void,
+                        &mut n2 as *mut _ as *mut std::ffi::c_void,
+                        &mut n3 as *mut _ as *mut std::ffi::c_void,
+                        &mut n4 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )
+                .unwrap();
+                cublas_result::gemm_ex(
+                    handle,
+                    cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                    cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                    mix_width as i32,
+                    tile_rows as i32,
+                    flat as i32,
+                    &alpha as *const f32 as *const std::ffi::c_void,
+                    *d_weight.device_ptr() as *const std::ffi::c_void,
+                    cublas_sys::cudaDataType::CUDA_R_32F,
+                    flat as i32,
+                    *d_normalized.device_ptr() as *const std::ffi::c_void,
+                    cublas_sys::cudaDataType::CUDA_R_32F,
+                    flat as i32,
+                    &beta as *const f32 as *const std::ffi::c_void,
+                    ((*d_candidate.device_ptr() as u64)
+                        + (row_start * mix_width * std::mem::size_of::<f32>()) as u64)
+                        as *mut std::ffi::c_void,
+                    cublas_sys::cudaDataType::CUDA_R_32F,
+                    mix_width as i32,
+                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+                    cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+                )
+                .unwrap();
+            }
+            row_start += tile_rows;
+        }
+        unsafe {
+            assert_eq!(
+                cublas_sys::lib().cublasSetWorkspace_v2(handle, std::ptr::null_mut(), 0),
+                cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS,
+            );
+            cublas_result::destroy_handle(handle).expect("destroy HC TF32 test cuBLAS handle");
+        }
+        ctx.dev.synchronize().unwrap();
+        let inv = ctx.dev.dtoh_sync_copy(&d_inv).unwrap();
+        let scalar = ctx.dev.dtoh_sync_copy(&d_scalar).unwrap();
+        let candidate = ctx.dev.dtoh_sync_copy(&d_candidate).unwrap();
+        let tf32_unit_roundoff = 2.0f32.powi(-11);
+        let fp32_gamma = (flat as f32 * f32::EPSILON) / (1.0 - flat as f32 * f32::EPSILON);
+        for row in 0..rows {
+            for output in 0..mix_width {
+                let sum_abs_products = (0..flat)
+                    .map(|column| {
+                        (state[row * flat + column] * inv[row] * weight[output * flat + column])
+                            .abs()
+                    })
+                    .sum::<f32>();
+                let operand_roundoff =
+                    (2.0 * tf32_unit_roundoff + tf32_unit_roundoff.powi(2)) * sum_abs_products;
+                let bound = operand_roundoff + fp32_gamma * sum_abs_products + 1.0e-6;
+                let index = row * mix_width + output;
+                assert!(
+                    (scalar[index] - candidate[index]).abs() <= bound,
+                    "TF32 HC projection[{row},{output}] exceeds derived bound: scalar={} candidate={} bound={bound}",
+                    scalar[index],
+                    candidate[index],
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_deepseek_v4_parallel_hc_prepare_is_bit_exact() {
         let ctx = GpuTestCtx::new();
         let prepare_kernel = ctx.get_kernel("deepseek_v4_hc_prepare_kernel");
@@ -73487,6 +75222,225 @@ mod kernel_tests {
                 "output[{index}] {actual} != {expected}"
             );
             assert_eq!(actual, round_bf16(actual));
+        }
+    }
+
+    #[test]
+    fn test_deepseek_v4_prefill_bf16x8_gather_matches_scalar_bits() {
+        let ctx = GpuTestCtx::new();
+        let reference = ctx.get_kernel("deepseek_v4_prefill_gather_scores_bf16_kernel");
+        let candidate = ctx.get_kernel("deepseek_v4_prefill_gather_scores_bf16x8_kernel");
+
+        for (tokens, heads, head_dim, topk, raw_rows, compressed_rows) in [
+            (2usize, 64usize, 512usize, 640usize, 128usize, 514usize),
+            (3usize, 3usize, 37usize, 7usize, 3usize, 3usize),
+        ] {
+            let raw = (0..raw_rows * head_dim)
+                .map(|index| half::bf16::from_f32((index as f32 * 0.0137).cos()).to_bits())
+                .collect::<Vec<_>>();
+            let compressed = (0..compressed_rows * head_dim)
+                .map(|index| half::bf16::from_f32((index as f32 * 0.0091).sin()).to_bits())
+                .collect::<Vec<_>>();
+            let mut indices = Vec::with_capacity(tokens * topk);
+            for token in 0..tokens {
+                for selected in 0..topk {
+                    let total_rows = raw_rows + compressed_rows;
+                    indices.push(match selected % 17 {
+                        0 => -1,
+                        1 => (total_rows + token + 5) as i32,
+                        _ => ((selected * 11 + token * 7) % total_rows) as i32,
+                    });
+                }
+            }
+            let d_raw = ctx.dev.htod_copy(raw).unwrap();
+            let d_compressed = ctx.dev.htod_copy(compressed).unwrap();
+            let d_indices = ctx.dev.htod_copy(indices).unwrap();
+            let value_elements = tokens * topk * head_dim;
+            let score_elements = tokens * heads * topk;
+            let d_reference_values = ctx.alloc_bf16(value_elements);
+            let d_candidate_values = ctx.alloc_bf16(value_elements);
+            let d_reference_scores = ctx.alloc_f32(score_elements);
+            let d_candidate_scores = ctx.alloc_f32(score_elements);
+
+            unsafe {
+                let mut r0 = *d_reference_values.device_ptr() as u64;
+                let mut r1 = *d_reference_scores.device_ptr() as u64;
+                let mut r2 = *d_raw.device_ptr() as u64;
+                let mut r3 = *d_compressed.device_ptr() as u64;
+                let mut r4 = *d_indices.device_ptr() as u64;
+                let mut r5 = tokens as i32;
+                let mut r6 = heads as i32;
+                let mut r7 = head_dim as i32;
+                let mut r8 = topk as i32;
+                let mut r9 = raw_rows as i32;
+                let mut r10 = compressed_rows as i32;
+                launch(
+                    reference,
+                    ((value_elements + score_elements).div_ceil(256) as u32, 1, 1),
+                    (256, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut r0 as *mut _ as *mut std::ffi::c_void,
+                        &mut r1 as *mut _ as *mut std::ffi::c_void,
+                        &mut r2 as *mut _ as *mut std::ffi::c_void,
+                        &mut r3 as *mut _ as *mut std::ffi::c_void,
+                        &mut r4 as *mut _ as *mut std::ffi::c_void,
+                        &mut r5 as *mut _ as *mut std::ffi::c_void,
+                        &mut r6 as *mut _ as *mut std::ffi::c_void,
+                        &mut r7 as *mut _ as *mut std::ffi::c_void,
+                        &mut r8 as *mut _ as *mut std::ffi::c_void,
+                        &mut r9 as *mut _ as *mut std::ffi::c_void,
+                        &mut r10 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )
+                .unwrap();
+
+                let mut c0 = *d_candidate_values.device_ptr() as u64;
+                let mut c1 = *d_candidate_scores.device_ptr() as u64;
+                let mut c2 = *d_raw.device_ptr() as u64;
+                let mut c3 = *d_compressed.device_ptr() as u64;
+                let mut c4 = *d_indices.device_ptr() as u64;
+                let mut c5 = tokens as i32;
+                let mut c6 = heads as i32;
+                let mut c7 = head_dim as i32;
+                let mut c8 = topk as i32;
+                let mut c9 = raw_rows as i32;
+                let mut c10 = compressed_rows as i32;
+                let candidate_work = tokens * (topk * head_dim.div_ceil(8) + heads * topk);
+                launch(
+                    candidate,
+                    (candidate_work.div_ceil(256) as u32, 1, 1),
+                    (256, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut c0 as *mut _ as *mut std::ffi::c_void,
+                        &mut c1 as *mut _ as *mut std::ffi::c_void,
+                        &mut c2 as *mut _ as *mut std::ffi::c_void,
+                        &mut c3 as *mut _ as *mut std::ffi::c_void,
+                        &mut c4 as *mut _ as *mut std::ffi::c_void,
+                        &mut c5 as *mut _ as *mut std::ffi::c_void,
+                        &mut c6 as *mut _ as *mut std::ffi::c_void,
+                        &mut c7 as *mut _ as *mut std::ffi::c_void,
+                        &mut c8 as *mut _ as *mut std::ffi::c_void,
+                        &mut c9 as *mut _ as *mut std::ffi::c_void,
+                        &mut c10 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )
+                .unwrap();
+            }
+            ctx.dev.synchronize().unwrap();
+            assert_eq!(
+                ctx.dev.dtoh_sync_copy(&d_candidate_values).unwrap(),
+                ctx.dev.dtoh_sync_copy(&d_reference_values).unwrap(),
+                "BF16x8 gathered values differ for {tokens}x{heads}x{head_dim}x{topk}"
+            );
+            assert_eq!(
+                ctx.dev.dtoh_sync_copy(&d_candidate_scores).unwrap(),
+                ctx.dev.dtoh_sync_copy(&d_reference_scores).unwrap(),
+                "BF16x8 initialized scores differ for {tokens}x{heads}x{head_dim}x{topk}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_deepseek_v4_prefill_warp_softmax_matches_block_bound() {
+        let ctx = GpuTestCtx::new();
+        let reference = ctx.get_kernel("deepseek_v4_prefill_softmax_weights_bf16_kernel");
+        let candidate = ctx.get_kernel("deepseek_v4_prefill_softmax_weights_warp_bf16_kernel");
+
+        for (tokens, heads, topk) in [
+            (3usize, 3usize, 7usize),
+            (2usize, 64usize, 128usize),
+            (2usize, 64usize, 439usize),
+            (2usize, 64usize, 640usize),
+        ] {
+            let scores = (0..tokens * heads * topk)
+                .map(|index| {
+                    if index % 29 == 0 {
+                        f32::NEG_INFINITY
+                    } else {
+                        (index as f32 * 0.00237).sin() * 4.0
+                    }
+                })
+                .collect::<Vec<_>>();
+            let sink = (0..heads)
+                .map(|head| (head as f32 * 0.17).cos() * 0.5)
+                .collect::<Vec<_>>();
+            let d_scores = ctx.dev.htod_copy(scores).unwrap();
+            let d_sink = ctx.dev.htod_copy(sink).unwrap();
+            let d_reference = ctx.alloc_bf16(tokens * heads * topk);
+            let d_candidate = ctx.alloc_bf16(tokens * heads * topk);
+            let reference_threads = topk.next_power_of_two().clamp(32, 1024);
+            const CUDA_WARP_THREADS: usize = 32;
+            const SOFTMAX_WARPS_PER_BLOCK: usize = 8;
+
+            unsafe {
+                let mut r0 = *d_reference.device_ptr() as u64;
+                let mut r1 = *d_scores.device_ptr() as u64;
+                let mut r2 = *d_sink.device_ptr() as u64;
+                let mut r3 = tokens as i32;
+                let mut r4 = heads as i32;
+                let mut r5 = topk as i32;
+                launch(
+                    reference,
+                    (heads as u32, tokens as u32, 1),
+                    (reference_threads as u32, 1, 1),
+                    (reference_threads * std::mem::size_of::<f32>()) as u32,
+                    ctx.stream(),
+                    &mut [
+                        &mut r0 as *mut _ as *mut std::ffi::c_void,
+                        &mut r1 as *mut _ as *mut std::ffi::c_void,
+                        &mut r2 as *mut _ as *mut std::ffi::c_void,
+                        &mut r3 as *mut _ as *mut std::ffi::c_void,
+                        &mut r4 as *mut _ as *mut std::ffi::c_void,
+                        &mut r5 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )
+                .unwrap();
+
+                let mut c0 = *d_candidate.device_ptr() as u64;
+                let mut c1 = *d_scores.device_ptr() as u64;
+                let mut c2 = *d_sink.device_ptr() as u64;
+                let mut c3 = tokens as i32;
+                let mut c4 = heads as i32;
+                let mut c5 = topk as i32;
+                let rows = tokens * heads;
+                launch(
+                    candidate,
+                    (rows.div_ceil(SOFTMAX_WARPS_PER_BLOCK) as u32, 1, 1),
+                    ((CUDA_WARP_THREADS * SOFTMAX_WARPS_PER_BLOCK) as u32, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut c0 as *mut _ as *mut std::ffi::c_void,
+                        &mut c1 as *mut _ as *mut std::ffi::c_void,
+                        &mut c2 as *mut _ as *mut std::ffi::c_void,
+                        &mut c3 as *mut _ as *mut std::ffi::c_void,
+                        &mut c4 as *mut _ as *mut std::ffi::c_void,
+                        &mut c5 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )
+                .unwrap();
+            }
+            ctx.dev.synchronize().unwrap();
+            let reference_weights = ctx.dev.dtoh_sync_copy(&d_reference).unwrap();
+            let candidate_weights = ctx.dev.dtoh_sync_copy(&d_candidate).unwrap();
+            let bound = 2.0 * 2.0f32.powi(-8);
+            for (index, (reference, candidate)) in reference_weights
+                .iter()
+                .zip(candidate_weights.iter())
+                .enumerate()
+            {
+                let reference = half::bf16::from_bits(*reference).to_f32();
+                let candidate = half::bf16::from_bits(*candidate).to_f32();
+                assert!(reference.is_finite() && candidate.is_finite());
+                assert!(
+                    (reference - candidate).abs() <= bound,
+                    "warp softmax weight[{index}] exceeds BF16 reduction bound: reference={reference} candidate={candidate} bound={bound} geometry={tokens}x{heads}x{topk}"
+                );
+            }
         }
     }
 
@@ -74990,8 +76944,7 @@ mod kernel_tests {
             ctx.get_kernel("deepseek_v4_compressed_causal_counts_kernel");
         let static_indices_kernel = ctx.get_kernel("deepseek_v4_static_compressed_indices_kernel");
         let store_raw_kernel = ctx.get_kernel("deepseek_v4_store_raw_kv_kernel");
-        let restore_raw_kernel =
-            ctx.get_kernel("deepseek_v4_restore_raw_history_kernel");
+        let restore_raw_kernel = ctx.get_kernel("deepseek_v4_restore_raw_history_kernel");
         let d_compressed_positions = ctx.alloc_i32(3);
         let d_compressed_causal = ctx.alloc_i32(index_rows);
         let d_static_indices = ctx.alloc_i32(index_rows * index_stride);
@@ -75290,6 +77243,8 @@ mod kernel_tests {
             accumulate_gemm_scores: ctx.get_kernel("dsa_prefill_accumulate_gemm_scores_kernel"),
             topk_sort_rows: ctx.get_kernel("dsa_prefill_topk_sort_rows_kernel"),
             topk_merge_rows: ctx.get_kernel("dsa_prefill_topk_merge_rows_kernel"),
+            topk_radix_sort_rows: ctx.get_kernel("dsa_prefill_topk_radix_sort_rows_kernel"),
+            topk_linear_merge_rows: ctx.get_kernel("dsa_prefill_topk_linear_merge_rows_kernel"),
         };
 
         let rows = 4usize;
@@ -75389,7 +77344,10 @@ mod kernel_tests {
             rope_dim,
             configured_topk,
             1.0f32 / ((head_dim as f32).sqrt() * (num_heads as f32).sqrt()),
+            0,
+            0,
             DeepseekV4PrefillIndexScoreMode::Scalar,
+            DeepseekV4PrefillTopkMode::Bitonic,
             std::ptr::null_mut(),
             0,
             0,
@@ -75536,7 +77494,10 @@ mod kernel_tests {
             rope_dim,
             8,
             1.0f32 / ((head_dim as f32).sqrt() * (num_heads as f32).sqrt()),
+            0,
+            0,
             DeepseekV4PrefillIndexScoreMode::Scalar,
+            DeepseekV4PrefillTopkMode::Bitonic,
             std::ptr::null_mut(),
             0,
             0,
@@ -75568,6 +77529,143 @@ mod kernel_tests {
     }
 
     #[test]
+    fn test_deepseek_v4_prefill_radix_linear_topk_matches_bitonic_bits() {
+        let ctx = GpuTestCtx::new();
+        let kernels = DsaPrefillSelectionKernels {
+            rope_query_bf16: ctx.get_kernel("dsa_prefill_rope_query_bf16_kernel"),
+            fused_scores: ctx.get_kernel("dsa_prefill_fused_scores_kernel"),
+            accumulate_gemm_scores: ctx.get_kernel("dsa_prefill_accumulate_gemm_scores_kernel"),
+            topk_sort_rows: ctx.get_kernel("dsa_prefill_topk_sort_rows_kernel"),
+            topk_merge_rows: ctx.get_kernel("dsa_prefill_topk_merge_rows_kernel"),
+            topk_radix_sort_rows: ctx.get_kernel("dsa_prefill_topk_radix_sort_rows_kernel"),
+            topk_linear_merge_rows: ctx.get_kernel("dsa_prefill_topk_linear_merge_rows_kernel"),
+        };
+        let rows = 3usize;
+        let context_end = 9_980usize;
+        let num_heads = 2usize;
+        let head_dim = 4usize;
+        let configured_topk = 512usize;
+        let positions_host = [9_979i32, 5_000, 1_023];
+        let round_bf16 = |value: f32| half::bf16::from_f32(value).to_f32();
+        let raw_queries_host = (0..rows * num_heads * head_dim)
+            .map(|index| round_bf16(((index * 13 + 5) % 19) as f32 * 0.0625 - 0.5))
+            .collect::<Vec<_>>();
+        // Repeated key rows deliberately create score ties, exercising the
+        // lower-token-index secondary order across base and merge passes.
+        let key_cache_host = (0..context_end * head_dim)
+            .map(|index| {
+                let token = index / head_dim;
+                let dim = index % head_dim;
+                round_bf16((((token % 37) * 7 + dim * 11) % 29) as f32 * 0.03125 - 0.375)
+            })
+            .collect::<Vec<_>>();
+        let head_weights_host = (0..rows * num_heads)
+            .map(|index| round_bf16(0.5 + (index % num_heads) as f32 * 0.125))
+            .collect::<Vec<_>>();
+        let d_raw_queries = ctx.upload_bf16(&f32_to_bf16_bytes(&raw_queries_host));
+        let d_key_cache = ctx.upload_bf16(&f32_to_bf16_bytes(&key_cache_host));
+        let d_head_weights = ctx.upload_bf16(&f32_to_bf16_bytes(&head_weights_host));
+        let d_positions = ctx.upload_i32(
+            &positions_host
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let d_rope_table = ctx.upload_f32(&0.0f32.to_le_bytes());
+        let plan = crate::gpu_decode::plan_dsa_topk(context_end, configured_topk)
+            .expect("production-shape top-k plan");
+        assert_eq!(plan.sort_width, DSA_PREFILL_RADIX_CAPACITY);
+        assert!(plan.initial_runs > 1);
+
+        let run = |mode: DeepseekV4PrefillTopkMode| {
+            let d_rope_queries = ctx.alloc_bf16(raw_queries_host.len());
+            let d_scores = ctx.alloc_f32(rows * context_end);
+            let candidate_elements = rows * plan.candidate_capacity;
+            let d_candidate_scores_a = ctx.alloc_f32(candidate_elements);
+            let d_candidate_scores_b = ctx.alloc_f32(candidate_elements);
+            let d_candidate_indices_a = ctx.alloc_i32(candidate_elements);
+            let d_candidate_indices_b = ctx.alloc_i32(candidate_elements);
+            let d_selected = ctx.alloc_i32(rows * plan.selected);
+            let mut timing = DsaPrefillSelectionTiming::default();
+            let launched = launch_dsa_prefill_selection_rows(
+                kernels,
+                ctx.stream(),
+                *d_raw_queries.device_ptr(),
+                *d_rope_queries.device_ptr(),
+                *d_key_cache.device_ptr(),
+                *d_head_weights.device_ptr(),
+                *d_positions.device_ptr(),
+                *d_rope_table.device_ptr(),
+                *d_rope_table.device_ptr(),
+                rows,
+                context_end,
+                num_heads,
+                head_dim,
+                0,
+                configured_topk,
+                1.0,
+                0,
+                0,
+                DeepseekV4PrefillIndexScoreMode::Scalar,
+                mode,
+                std::ptr::null_mut(),
+                0,
+                0,
+                DsaPrefillSelectionBuffers {
+                    scores_ptr: *d_scores.device_ptr(),
+                    scores_capacity: d_scores.len(),
+                    score_temp_ptr: 0,
+                    score_temp_capacity: 0,
+                    candidate_scores_a_ptr: *d_candidate_scores_a.device_ptr(),
+                    candidate_scores_b_ptr: *d_candidate_scores_b.device_ptr(),
+                    candidate_indices_a_ptr: *d_candidate_indices_a.device_ptr(),
+                    candidate_indices_b_ptr: *d_candidate_indices_b.device_ptr(),
+                    candidate_capacity: candidate_elements,
+                    selected_ptr: *d_selected.device_ptr(),
+                    selected_capacity: d_selected.len(),
+                },
+                None,
+                &mut timing,
+            )
+            .expect("production-shape top-k launch");
+            assert_eq!(launched, plan);
+            self::cuda_sync();
+            (
+                ctx.dev.dtoh_sync_copy(&d_scores).expect("scores D2H"),
+                ctx.dev.dtoh_sync_copy(&d_selected).expect("selected D2H"),
+            )
+        };
+
+        let (reference_scores, reference_selected) = run(DeepseekV4PrefillTopkMode::Bitonic);
+        let (radix_scores, radix_selected) = run(DeepseekV4PrefillTopkMode::RadixLinear);
+        assert_eq!(radix_scores, reference_scores, "top-k mode changed scores");
+        assert_eq!(
+            radix_selected, reference_selected,
+            "radix-linear selection differs from bitonic reference"
+        );
+        for row in 0..rows {
+            let causal_context = positions_host[row] as usize + 1;
+            let scores = &reference_scores[row * context_end..row * context_end + causal_context];
+            let mut expected = (0..causal_context).collect::<Vec<_>>();
+            expected.sort_unstable_by(|left, right| {
+                scores[*right]
+                    .total_cmp(&scores[*left])
+                    .then_with(|| left.cmp(right))
+            });
+            let expected = expected
+                .into_iter()
+                .take(configured_topk)
+                .map(|index| index as i32)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                &radix_selected[row * configured_topk..(row + 1) * configured_topk],
+                expected.as_slice(),
+                "radix-linear CPU selection mismatch at row {row}"
+            );
+        }
+    }
+
+    #[test]
     fn test_deepseek_v4_prefill_index_score_gemm_matches_cpu_bound() {
         let ctx = GpuTestCtx::new();
         let kernels = DsaPrefillSelectionKernels {
@@ -75576,6 +77674,8 @@ mod kernel_tests {
             accumulate_gemm_scores: ctx.get_kernel("dsa_prefill_accumulate_gemm_scores_kernel"),
             topk_sort_rows: ctx.get_kernel("dsa_prefill_topk_sort_rows_kernel"),
             topk_merge_rows: ctx.get_kernel("dsa_prefill_topk_merge_rows_kernel"),
+            topk_radix_sort_rows: ctx.get_kernel("dsa_prefill_topk_radix_sort_rows_kernel"),
+            topk_linear_merge_rows: ctx.get_kernel("dsa_prefill_topk_linear_merge_rows_kernel"),
         };
         let handle = cublas_result::create_handle().expect("create index-score cuBLAS handle");
         unsafe {
@@ -75584,7 +77684,15 @@ mod kernel_tests {
         }
         let round_bf16 = |value: f32| half::bf16::from_f32(value).to_f32();
 
-        for (rows, context_end, num_heads, head_dim, configured_topk, positions_host) in [
+        for (
+            rows,
+            context_end,
+            num_heads,
+            head_dim,
+            configured_topk,
+            positions_host,
+            causal_geometry,
+        ) in [
             (
                 2usize,
                 1024usize,
@@ -75592,8 +77700,28 @@ mod kernel_tests {
                 128usize,
                 640usize,
                 vec![511i32, 1023],
+                None,
             ),
-            (3usize, 37usize, 3usize, 7usize, 7usize, vec![-1i32, 5, 99]),
+            (
+                3usize,
+                37usize,
+                3usize,
+                7usize,
+                7usize,
+                vec![-1i32, 5, 99],
+                None,
+            ),
+            (
+                65usize,
+                37usize,
+                3usize,
+                7usize,
+                7usize,
+                (8i32..73)
+                    .map(|position| (position + 1) / 4 - 1)
+                    .collect::<Vec<_>>(),
+                Some((8usize, 4usize)),
+            ),
         ] {
             let raw_queries_host = (0..rows * num_heads * head_dim)
                 .map(|index| round_bf16((index as f32 * 0.0173).sin() * 0.25))
@@ -75615,110 +77743,167 @@ mod kernel_tests {
                     .collect::<Vec<_>>(),
             );
             let d_rope_table = ctx.upload_f32(&0.0f32.to_le_bytes());
-            let d_scores = ctx.alloc_f32(rows * context_end);
-            let d_score_temp = ctx.alloc_f32(rows * context_end);
-            let topk_plan = crate::gpu_decode::plan_dsa_topk(context_end, configured_topk)
-                .expect("index-score top-k plan");
-            let candidate_elements = rows * topk_plan.candidate_capacity;
-            let d_candidate_scores_a = ctx.alloc_f32(candidate_elements.max(1));
-            let d_candidate_scores_b = ctx.alloc_f32(candidate_elements.max(1));
-            let d_candidate_indices_a = ctx.alloc_i32(candidate_elements.max(1));
-            let d_candidate_indices_b = ctx.alloc_i32(candidate_elements.max(1));
-            let d_selected = ctx.alloc_i32(rows * topk_plan.selected);
-            let d_cublas_workspace = ctx.alloc_f32((rows * context_end).max(1));
-            let mut timing = DsaPrefillSelectionTiming::default();
-
-            let launched = launch_dsa_prefill_selection_rows(
-                kernels,
-                ctx.stream(),
-                *d_raw_queries.device_ptr(),
-                *d_rope_queries.device_ptr(),
-                *d_key_cache.device_ptr(),
-                *d_head_weights.device_ptr(),
-                *d_positions.device_ptr(),
-                *d_rope_table.device_ptr(),
-                *d_rope_table.device_ptr(),
-                rows,
-                context_end,
-                num_heads,
-                head_dim,
-                0,
-                configured_topk,
-                1.0,
+            let mut index_modes = vec![
                 DeepseekV4PrefillIndexScoreMode::Bf16Fp32Gemm,
-                handle,
-                *d_cublas_workspace.device_ptr(),
-                d_cublas_workspace.len() * std::mem::size_of::<f32>(),
-                DsaPrefillSelectionBuffers {
-                    scores_ptr: *d_scores.device_ptr(),
-                    scores_capacity: d_scores.len(),
-                    score_temp_ptr: *d_score_temp.device_ptr(),
-                    score_temp_capacity: d_score_temp.len(),
-                    candidate_scores_a_ptr: if candidate_elements == 0 {
-                        0
-                    } else {
-                        *d_candidate_scores_a.device_ptr()
-                    },
-                    candidate_scores_b_ptr: if candidate_elements == 0 {
-                        0
-                    } else {
-                        *d_candidate_scores_b.device_ptr()
-                    },
-                    candidate_indices_a_ptr: if candidate_elements == 0 {
-                        0
-                    } else {
-                        *d_candidate_indices_a.device_ptr()
-                    },
-                    candidate_indices_b_ptr: if candidate_elements == 0 {
-                        0
-                    } else {
-                        *d_candidate_indices_b.device_ptr()
-                    },
-                    candidate_capacity: candidate_elements,
-                    selected_ptr: *d_selected.device_ptr(),
-                    selected_capacity: d_selected.len(),
-                },
-                None,
-                &mut timing,
-            )
-            .expect("DeepSeek-V4 index-score GEMM dispatcher");
-            assert_eq!(launched, topk_plan);
-            self::cuda_sync();
-            let actual_scores = ctx.dev.dtoh_sync_copy(&d_scores).expect("index scores D2H");
-            let actual_selected = ctx
-                .dev
-                .dtoh_sync_copy(&d_selected)
-                .expect("index selection D2H");
+                DeepseekV4PrefillIndexScoreMode::Bf16Bf16Gemm,
+            ];
+            if causal_geometry.is_some() {
+                index_modes.push(DeepseekV4PrefillIndexScoreMode::Bf16Bf16CausalGemm);
+            }
+            let mut full_bf16_scores = None;
+            let mut full_bf16_selected = None;
+            for index_mode in index_modes {
+                let d_scores = ctx.alloc_f32(rows * context_end);
+                let d_score_temp = ctx.alloc_f32(rows * context_end);
+                let topk_plan = crate::gpu_decode::plan_dsa_topk(context_end, configured_topk)
+                    .expect("index-score top-k plan");
+                let candidate_elements = rows * topk_plan.candidate_capacity;
+                let d_candidate_scores_a = ctx.alloc_f32(candidate_elements.max(1));
+                let d_candidate_scores_b = ctx.alloc_f32(candidate_elements.max(1));
+                let d_candidate_indices_a = ctx.alloc_i32(candidate_elements.max(1));
+                let d_candidate_indices_b = ctx.alloc_i32(candidate_elements.max(1));
+                let d_selected = ctx.alloc_i32(rows * topk_plan.selected);
+                let d_cublas_workspace = ctx.alloc_f32((rows * context_end).max(1));
+                let mut timing = DsaPrefillSelectionTiming::default();
 
-            let gamma_dim =
-                (head_dim as f32 * f32::EPSILON) / (1.0 - head_dim as f32 * f32::EPSILON);
-            for row in 0..rows {
-                let causal_context =
-                    (positions_host[row] + 1).clamp(0, context_end as i32) as usize;
-                let mut row_actual = Vec::with_capacity(causal_context);
-                for token in 0..causal_context {
-                    let mut expected = 0.0f32;
-                    let mut reduction_bound = 0.0f32;
-                    for head in 0..num_heads {
-                        let query_base = (row * num_heads + head) * head_dim;
-                        let key_base = token * head_dim;
-                        let mut dot = 0.0f32;
-                        let mut sum_abs = 0.0f32;
-                        for dim in 0..head_dim {
-                            let product =
-                                raw_queries_host[query_base + dim] * key_cache_host[key_base + dim];
-                            dot += product;
-                            sum_abs += product.abs();
-                        }
-                        let weight = head_weights_host[row * num_heads + head];
-                        expected += weight * dot.max(0.0);
-                        reduction_bound += weight.abs() * 2.0 * gamma_dim * sum_abs;
+                let launched = launch_dsa_prefill_selection_rows(
+                    kernels,
+                    ctx.stream(),
+                    *d_raw_queries.device_ptr(),
+                    *d_rope_queries.device_ptr(),
+                    *d_key_cache.device_ptr(),
+                    *d_head_weights.device_ptr(),
+                    *d_positions.device_ptr(),
+                    *d_rope_table.device_ptr(),
+                    *d_rope_table.device_ptr(),
+                    rows,
+                    context_end,
+                    num_heads,
+                    head_dim,
+                    0,
+                    configured_topk,
+                    1.0,
+                    if index_mode.uses_causal_gemm_bands() {
+                        causal_geometry.expect("causal geometry").0
+                    } else {
+                        0
+                    },
+                    if index_mode.uses_causal_gemm_bands() {
+                        causal_geometry.expect("causal geometry").1
+                    } else {
+                        0
+                    },
+                    index_mode,
+                    DeepseekV4PrefillTopkMode::Bitonic,
+                    handle,
+                    *d_cublas_workspace.device_ptr(),
+                    d_cublas_workspace.len() * std::mem::size_of::<f32>(),
+                    DsaPrefillSelectionBuffers {
+                        scores_ptr: *d_scores.device_ptr(),
+                        scores_capacity: d_scores.len(),
+                        score_temp_ptr: *d_score_temp.device_ptr(),
+                        score_temp_capacity: d_score_temp.len(),
+                        candidate_scores_a_ptr: if candidate_elements == 0 {
+                            0
+                        } else {
+                            *d_candidate_scores_a.device_ptr()
+                        },
+                        candidate_scores_b_ptr: if candidate_elements == 0 {
+                            0
+                        } else {
+                            *d_candidate_scores_b.device_ptr()
+                        },
+                        candidate_indices_a_ptr: if candidate_elements == 0 {
+                            0
+                        } else {
+                            *d_candidate_indices_a.device_ptr()
+                        },
+                        candidate_indices_b_ptr: if candidate_elements == 0 {
+                            0
+                        } else {
+                            *d_candidate_indices_b.device_ptr()
+                        },
+                        candidate_capacity: candidate_elements,
+                        selected_ptr: *d_selected.device_ptr(),
+                        selected_capacity: d_selected.len(),
+                    },
+                    None,
+                    &mut timing,
+                )
+                .expect("DeepSeek-V4 index-score GEMM dispatcher");
+                assert_eq!(launched, topk_plan);
+                self::cuda_sync();
+                let actual_scores = ctx.dev.dtoh_sync_copy(&d_scores).expect("index scores D2H");
+                let actual_selected = ctx
+                    .dev
+                    .dtoh_sync_copy(&d_selected)
+                    .expect("index selection D2H");
+
+                if index_mode == DeepseekV4PrefillIndexScoreMode::Bf16Bf16Gemm {
+                    full_bf16_scores = Some(actual_scores.clone());
+                    full_bf16_selected = Some(actual_selected.clone());
+                } else if index_mode == DeepseekV4PrefillIndexScoreMode::Bf16Bf16CausalGemm {
+                    let full_scores = full_bf16_scores
+                        .as_ref()
+                        .expect("full BF16 GEMM result precedes causal mode");
+                    let full_selected = full_bf16_selected
+                        .as_ref()
+                        .expect("full BF16 GEMM selection precedes causal mode");
+                    assert_eq!(
+                        actual_selected.as_slice(),
+                        full_selected.as_slice(),
+                        "causal-band and full learned-index selections differ"
+                    );
+                    for row in 0..rows {
+                        let causal_context =
+                            (positions_host[row] + 1).clamp(0, context_end as i32) as usize;
+                        assert_eq!(
+                            &actual_scores[row * context_end..row * context_end + causal_context],
+                            &full_scores[row * context_end..row * context_end + causal_context],
+                            "causal-band and full learned-index scores differ at row {row}"
+                        );
                     }
-                    let actual = actual_scores[row * context_end + token];
-                    let bound = reduction_bound + 8.0 * f32::EPSILON * expected.abs().max(1.0);
-                    assert!(
+                }
+
+                let gamma_dim =
+                    (head_dim as f32 * f32::EPSILON) / (1.0 - head_dim as f32 * f32::EPSILON);
+                for row in 0..rows {
+                    let causal_context =
+                        (positions_host[row] + 1).clamp(0, context_end as i32) as usize;
+                    let mut row_actual = Vec::with_capacity(causal_context);
+                    for token in 0..causal_context {
+                        let mut expected = 0.0f32;
+                        let mut reduction_bound = 0.0f32;
+                        let mut bf16_temp_bound = 0.0f32;
+                        for head in 0..num_heads {
+                            let query_base = (row * num_heads + head) * head_dim;
+                            let key_base = token * head_dim;
+                            let mut dot = 0.0f32;
+                            let mut sum_abs = 0.0f32;
+                            for dim in 0..head_dim {
+                                let product = raw_queries_host[query_base + dim]
+                                    * key_cache_host[key_base + dim];
+                                dot += product;
+                                sum_abs += product.abs();
+                            }
+                            let weight = head_weights_host[row * num_heads + head];
+                            expected += weight * dot.max(0.0);
+                            reduction_bound += weight.abs() * 2.0 * gamma_dim * sum_abs;
+                            if index_mode.temporary_is_bf16() {
+                                // BF16 round-to-nearest has unit roundoff 2^-8.
+                                // ReLU is 1-Lipschitz, so bounding the rounded dot
+                                // before weighting also bounds its contribution.
+                                bf16_temp_bound += weight.abs() * dot.abs() * (1.0 / 256.0);
+                            }
+                        }
+                        let bound = reduction_bound
+                            + bf16_temp_bound
+                            + 8.0 * f32::EPSILON * expected.abs().max(1.0);
+                        let actual = actual_scores[row * context_end + token];
+                        assert!(
                         (actual - expected).abs() <= bound,
-                        "index-score GEMM exceeds derived FP32-reduction bound: geometry={}x{}x{}x{} row={} token={} actual={} expected={} bound={}",
+                        "index-score GEMM mode={} exceeds derived reduction bound: geometry={}x{}x{}x{} row={} token={} actual={} expected={} bound={}",
+                        index_mode.label(),
                         rows,
                         context_end,
                         num_heads,
@@ -75729,30 +77914,31 @@ mod kernel_tests {
                         expected,
                         bound,
                     );
-                    row_actual.push(actual);
+                        row_actual.push(actual);
+                    }
+                    let mut expected_indices = (0..causal_context).collect::<Vec<_>>();
+                    expected_indices.sort_unstable_by(|left, right| {
+                        row_actual[*right]
+                            .total_cmp(&row_actual[*left])
+                            .then_with(|| left.cmp(right))
+                    });
+                    let mut expected_selected = expected_indices
+                        .into_iter()
+                        .take(topk_plan.selected)
+                        .map(|index| index as i32)
+                        .collect::<Vec<_>>();
+                    expected_selected.resize(topk_plan.selected, i32::MAX);
+                    assert_eq!(
+                        &actual_selected[row * topk_plan.selected..(row + 1) * topk_plan.selected],
+                        expected_selected.as_slice(),
+                        "index-score GEMM top-k mismatch for geometry={}x{}x{}x{} row={}",
+                        rows,
+                        context_end,
+                        num_heads,
+                        head_dim,
+                        row,
+                    );
                 }
-                let mut expected_indices = (0..causal_context).collect::<Vec<_>>();
-                expected_indices.sort_unstable_by(|left, right| {
-                    row_actual[*right]
-                        .total_cmp(&row_actual[*left])
-                        .then_with(|| left.cmp(right))
-                });
-                let mut expected_selected = expected_indices
-                    .into_iter()
-                    .take(topk_plan.selected)
-                    .map(|index| index as i32)
-                    .collect::<Vec<_>>();
-                expected_selected.resize(topk_plan.selected, i32::MAX);
-                assert_eq!(
-                    &actual_selected[row * topk_plan.selected..(row + 1) * topk_plan.selected],
-                    expected_selected.as_slice(),
-                    "index-score GEMM top-k mismatch for geometry={}x{}x{}x{} row={}",
-                    rows,
-                    context_end,
-                    num_heads,
-                    head_dim,
-                    row,
-                );
             }
         }
         unsafe {
@@ -80384,8 +82570,7 @@ mod kernel_tests {
         for pos in 0..total {
             let block_pos = pos % bt;
             for head in 0..nv {
-                g[pos * nv + head] =
-                    -0.003f32 * block_pos as f32 - 0.0007f32 * head as f32;
+                g[pos * nv + head] = -0.003f32 * block_pos as f32 - 0.0007f32 * head as f32;
                 for dim in 0..dk {
                     let index = (pos * nv + head) * dk + dim;
                     k[index] = ((index as f32 * 0.0019) + 0.17).sin() * 0.12;
@@ -81301,9 +83486,10 @@ mod kernel_tests {
                 rows * width.div_ceil(2)
             };
             let d_codes = ctx.alloc_u8(code_elems);
-            let d_scales = ctx.dev.alloc_zeros::<i8>(
-                rows * quant_cols.div_ceil(block_size),
-            ).unwrap();
+            let d_scales = ctx
+                .dev
+                .alloc_zeros::<i8>(rows * quant_cols.div_ceil(block_size))
+                .unwrap();
             let d_tails = ctx.alloc_bf16(rows * (width - quant_cols));
             let pack = ctx.get_kernel(if code_bits == 8 {
                 "deepseek_v4_pack_fp8_native_kernel"
@@ -81362,7 +83548,8 @@ mod kernel_tests {
                     (block_size * std::mem::size_of::<f32>()) as u32,
                     ctx.stream(),
                     &mut params,
-                ).unwrap();
+                )
+                .unwrap();
 
                 let mut u0 = *d_output.device_ptr() as u64;
                 let mut u1 = *d_codes.device_ptr() as u64;
@@ -81403,7 +83590,8 @@ mod kernel_tests {
                     0,
                     ctx.stream(),
                     &mut params,
-                ).unwrap();
+                )
+                .unwrap();
             }
             cuda_sync();
             assert_eq!(

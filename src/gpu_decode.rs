@@ -8081,15 +8081,46 @@ pub(crate) mod dsa_registration_tests {
     use cudarc::driver::{DevicePtr, LaunchAsync, LaunchConfig};
 
     use super::{
-        create_decode_timing_event, graph_w13_path, marlin_dispatch_for_bits, plan_dsa_topk,
-        peer_selector_check_message, route_prep_rmsnorm_threads, CudaEvent, CudaStream,
+        create_decode_timing_event, graph_w13_path, marlin_dispatch_for_bits,
+        peer_selector_check_message, plan_dsa_topk, route_prep_rmsnorm_threads,
         validate_dsa_indexer_registration, validate_dsa_owner_weight_contract,
-        validate_dsa_runtime_registration, validate_stream_probe_outcome, DsaGraphScoreBackend,
-        DsaIndexerOwnerResource, DsaIndexerOwnerWeightIds, ExpertDataPtr, GpuDecodeStore,
-        GpuWeight, GraphW13Path, PeerDemandEntry, PeerDynamicTier, MODULE_NAME,
+        validate_dsa_runtime_registration, validate_stream_probe_outcome, CudaEvent, CudaStream,
+        DsaGraphScoreBackend, DsaIndexerOwnerResource, DsaIndexerOwnerWeightIds, ExpertDataPtr,
+        GpuDecodeStore, GpuWeight, GraphW13Path, HqqStageAsyncCopyMode, PeerDemandEntry,
+        PeerDynamicTier, MODULE_NAME,
     };
 
     static DSA_CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn hqq_stage_async_copy_mode_is_stage_specific_and_rejects_invalid_values() {
+        assert_eq!(
+            HqqStageAsyncCopyMode::parse(None).unwrap(),
+            HqqStageAsyncCopyMode::Off
+        );
+        assert_eq!(
+            HqqStageAsyncCopyMode::parse(Some("decode")).unwrap(),
+            HqqStageAsyncCopyMode::Decode
+        );
+        assert!(HqqStageAsyncCopyMode::Decode.enabled_for("decode").unwrap());
+        assert!(!HqqStageAsyncCopyMode::Decode
+            .enabled_for("prefill")
+            .unwrap());
+        assert!(HqqStageAsyncCopyMode::parse(Some("both"))
+            .unwrap()
+            .enabled_for("prefill")
+            .unwrap());
+        assert!(HqqStageAsyncCopyMode::parse(Some("invalid")).is_err());
+        assert!(HqqStageAsyncCopyMode::Both.enabled_for("invalid").is_err());
+        assert_eq!(
+            HqqStageAsyncCopyMode::default_for_deepseek_v4(true),
+            HqqStageAsyncCopyMode::Decode
+        );
+        assert_eq!(
+            HqqStageAsyncCopyMode::default_for_deepseek_v4(false),
+            HqqStageAsyncCopyMode::Off
+        );
+    }
 
     #[test]
     fn tileq_graph_w13_never_falls_through_to_marlin() {
@@ -14791,8 +14822,7 @@ struct ExpertCompressionRuntime {
 }
 
 const COMPRESSION_PROGRESS_STRIDE_WORDS: usize = 16;
-const COMPRESSION_PROGRESS_VALUES_PER_SLOT: usize =
-    crate::expert_codec::MAX_STREAM_CHUNKS + 1;
+const COMPRESSION_PROGRESS_VALUES_PER_SLOT: usize = crate::expert_codec::MAX_STREAM_CHUNKS + 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExpertCompressionPipelineMode {
@@ -15029,9 +15059,7 @@ impl ExpertCompressionRuntime {
                 let progress_value_bytes = slots
                     .checked_mul(COMPRESSION_PROGRESS_VALUES_PER_SLOT)
                     .and_then(|values| values.checked_mul(std::mem::size_of::<u32>()))
-                    .ok_or_else(|| {
-                        "expert compression progress-value size overflow".to_string()
-                    })?;
+                    .ok_or_else(|| "expert compression progress-value size overflow".to_string())?;
                 let progress_values = PinnedMapped::new(progress_value_bytes)?;
                 (
                     Some(CudaFunc(extract_cu_function(&decode))),
@@ -15088,11 +15116,7 @@ impl ExpertCompressionRuntime {
         }
     }
 
-    fn configure_streaming_plan(
-        &mut self,
-        chunks: usize,
-        task_count: usize,
-    ) -> Result<(), String> {
+    fn configure_streaming_plan(&mut self, chunks: usize, task_count: usize) -> Result<(), String> {
         if !self.requested_pipeline.includes_streaming()
             || self.streaming_progress.is_none()
             || self.streaming_progress_values.is_none()
@@ -15100,10 +15124,7 @@ impl ExpertCompressionRuntime {
         {
             return Err("expert streaming pipeline was not requested at setup".to_string());
         }
-        if chunks == 0
-            || chunks > crate::expert_codec::MAX_STREAM_CHUNKS
-            || task_count == 0
-        {
+        if chunks == 0 || chunks > crate::expert_codec::MAX_STREAM_CHUNKS || task_count == 0 {
             return Err(format!(
                 "invalid expert streaming plan chunks={chunks} tasks={task_count}",
             ));
@@ -15223,12 +15244,14 @@ impl ExpertCompressionRuntime {
         let event_index = slot
             .checked_mul(crate::expert_codec::MAX_EXPERT_CHUNKS)
             .ok_or_else(|| "expert streaming event index overflow".to_string())?;
-        let first_ready = self.ready_events.get(event_index).ok_or_else(|| {
-            format!("expert streaming first-ready event {slot} is unavailable")
-        })?;
-        let decoded = self.decoded_events.get(event_index).ok_or_else(|| {
-            format!("expert streaming decoded event {slot} is unavailable")
-        })?;
+        let first_ready = self
+            .ready_events
+            .get(event_index)
+            .ok_or_else(|| format!("expert streaming first-ready event {slot} is unavailable"))?;
+        let decoded = self
+            .decoded_events
+            .get(event_index)
+            .ok_or_else(|| format!("expert streaming decoded event {slot} is unavailable"))?;
         let progress_byte_offset = slot
             .checked_mul(COMPRESSION_PROGRESS_STRIDE_WORDS)
             .and_then(|words| words.checked_mul(std::mem::size_of::<u32>()))
@@ -15238,9 +15261,8 @@ impl ExpertCompressionRuntime {
             .checked_mul(COMPRESSION_PROGRESS_VALUES_PER_SLOT)
             .ok_or_else(|| "expert streaming progress-value offset overflow".to_string())?;
         let publish_progress = |value_index: usize| -> Result<(), String> {
-            let source = unsafe {
-                (progress_values.host_ptr as *const u32).add(value_base + value_index)
-            };
+            let source =
+                unsafe { (progress_values.host_ptr as *const u32).add(value_base + value_index) };
             let publish = unsafe {
                 cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                     progress_ptr,
@@ -15345,9 +15367,8 @@ impl ExpertCompressionRuntime {
                 "expert streaming decoder completion event failed: {decoded_record:?}",
             ));
         }
-        let join = unsafe {
-            cuda_sys::lib().cuStreamWaitEvent(self.completion_stream.0, decoded.0, 0)
-        };
+        let join =
+            unsafe { cuda_sys::lib().cuStreamWaitEvent(self.completion_stream.0, decoded.0, 0) };
         if join != cuda_sys::CUresult::CUDA_SUCCESS {
             return Err(format!("expert streaming decoder join failed: {join:?}"));
         }
@@ -17594,24 +17615,71 @@ fn hqq_stage_compaction_enabled() -> bool {
     )
 }
 
-fn hqq_stage_async_copy_enabled() -> bool {
-    matches!(
-        std::env::var("KRASIS_HQQ_STAGE_ASYNC_COPY")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HqqStageAsyncCopyMode {
+    Off,
+    Prefill,
+    Decode,
+    Both,
 }
 
-fn hqq_stage_pinned_host_enabled() -> bool {
-    matches!(
-        std::env::var("KRASIS_HQQ_STAGE_PIN_HOST")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+impl HqqStageAsyncCopyMode {
+    fn default_for_deepseek_v4(deepseek_v4: bool) -> Self {
+        if deepseek_v4 {
+            Self::Decode
+        } else {
+            Self::Off
+        }
+    }
+
+    fn parse(value: Option<&str>) -> Result<Self, String> {
+        let Some(value) = value else {
+            return Ok(Self::Off);
+        };
+        match value.trim().to_ascii_lowercase().as_str() {
+            "0" | "false" | "no" | "off" => Ok(Self::Off),
+            "prefill" => Ok(Self::Prefill),
+            "decode" => Ok(Self::Decode),
+            "1" | "true" | "yes" | "on" | "both" => Ok(Self::Both),
+            other => Err(format!(
+                "KRASIS_HQQ_STAGE_ASYNC_COPY must be one of off, prefill, decode, or both; got {:?}",
+                other
+            )),
+        }
+    }
+
+    fn from_env(default: Self) -> Result<Self, String> {
+        match std::env::var("KRASIS_HQQ_STAGE_ASYNC_COPY") {
+            Ok(value) => Self::parse(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Ok(default),
+            Err(e) => Err(format!("failed to read KRASIS_HQQ_STAGE_ASYNC_COPY: {}", e)),
+        }
+    }
+
+    fn enabled_for(self, stage: &str) -> Result<bool, String> {
+        match stage {
+            "prefill" => Ok(matches!(self, Self::Prefill | Self::Both)),
+            "decode" => Ok(matches!(self, Self::Decode | Self::Both)),
+            other => Err(format!(
+                "HQQ async-copy policy received unsupported runtime stage {:?}",
+                other
+            )),
+        }
+    }
+}
+
+fn resolve_bool_env(name: &str, default: bool) -> Result<bool, String> {
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(format!("read {name}: {error}")),
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            other => Err(format!(
+                "invalid {name}={other:?}; expected 0/1, false/true, no/yes, or off/on"
+            )),
+        },
+    }
 }
 
 impl Default for HqqRuntimeSlotEntry {
@@ -17806,6 +17874,12 @@ pub struct GpuDecodeStore {
     /// level only: both stage-specific formats are built in host RAM, sized into
     /// shared fixed slots, and kept explicitly non-executable until fused kernels exist.
     hqq_runtime_slots: Vec<HqqRuntimeSlotEntry>,
+    /// Architecture-specific HQQ prefill policy, resolved once while staging
+    /// the first tensor. `None` means no HQQ tensor has been staged yet.
+    hqq_runtime_deepseek_v4: Option<bool>,
+    hqq_prefill_materialize_bf16: bool,
+    hqq_stage_pin_host: bool,
+    hqq_stage_async_copy_mode: HqqStageAsyncCopyMode,
     hqq_runtime_staging_stats: HqqRuntimeStagingStats,
     hqq_runtime_registration_stats: HqqRuntimeRegistrationStats,
     hqq_runtime_last_swap: HqqRuntimeSwapStats,
@@ -18913,23 +18987,27 @@ impl GpuDecodeStore {
             .iter()
             .enumerate()
             .map(|(layer_idx, layer)| {
-                let hqq = layer.hqq_exec.as_ref().map(hqq_execution_json_value).or_else(|| {
-                    layer.deepseek_v4.as_ref().and_then(|v4| {
-                        if v4.hqq_tensors.is_empty() {
-                            return None;
-                        }
-                        let mut names: Vec<_> = v4.hqq_tensors.keys().cloned().collect();
-                        names.sort();
-                        let tensors: Vec<_> = names
-                            .iter()
-                            .map(|name| hqq_tensor_exec_json(&v4.hqq_tensors[name], name))
-                            .collect();
-                        Some(serde_json::json!({
-                            "kind": "deepseek_v4",
-                            "tensors": tensors,
-                        }))
-                    })
-                });
+                let hqq = layer
+                    .hqq_exec
+                    .as_ref()
+                    .map(hqq_execution_json_value)
+                    .or_else(|| {
+                        layer.deepseek_v4.as_ref().and_then(|v4| {
+                            if v4.hqq_tensors.is_empty() {
+                                return None;
+                            }
+                            let mut names: Vec<_> = v4.hqq_tensors.keys().cloned().collect();
+                            names.sort();
+                            let tensors: Vec<_> = names
+                                .iter()
+                                .map(|name| hqq_tensor_exec_json(&v4.hqq_tensors[name], name))
+                                .collect();
+                            Some(serde_json::json!({
+                                "kind": "deepseek_v4",
+                                "tensors": tensors,
+                            }))
+                        })
+                    });
                 serde_json::json!({
                     "layer_idx": layer_idx,
                     "hqq": hqq,
@@ -19536,6 +19614,7 @@ impl GpuDecodeStore {
         cols: usize,
         group_size: usize,
         nbits: usize,
+        materialize_bf16: bool,
     ) -> Result<HqqRuntimeFormatDescriptor, String> {
         let t0 = std::time::Instant::now();
         if nbits != 4 && nbits != 6 && nbits != 8 {
@@ -19559,7 +19638,7 @@ impl GpuDecodeStore {
                 packed_cols,
             ));
         }
-        if Self::hqq_prefill_materialize_bf16_enabled() {
+        if materialize_bf16 {
             return Ok(HqqRuntimeFormatDescriptor {
                 stage: "prefill",
                 kind: HqqRuntimeFormatKind::PrefillRowMajorV1,
@@ -19960,17 +20039,6 @@ impl GpuDecodeStore {
             build_ms: t0.elapsed().as_secs_f64() * 1000.0,
             kernel_ready: true,
         })
-    }
-
-    fn hqq_prefill_materialize_bf16_enabled() -> bool {
-        std::env::var("KRASIS_HQQ_PREFILL_MATERIALIZE_BF16")
-            .map(|value| {
-                matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false)
     }
 
     fn build_hqq_decode_runtime_format(
@@ -20912,12 +20980,7 @@ impl GpuDecodeStore {
                     tensor_name, desc.rows, desc.cols, weight.rows, weight.cols
                 ));
             }
-            return self.launch_hqq_decode_gemv_bf16(
-                tensor_name,
-                desc,
-                input_ptr,
-                output_ptr,
-            );
+            return self.launch_hqq_decode_gemv_bf16(tensor_name, desc, input_ptr, output_ptr);
         }
         if weight.dtype != 0 {
             return Err(format!(
@@ -21762,6 +21825,10 @@ impl GpuDecodeStore {
             pending_simple_int4: Vec::new(),
             single_slot_swaps: Vec::new(),
             hqq_runtime_slots: Vec::new(),
+            hqq_runtime_deepseek_v4: None,
+            hqq_prefill_materialize_bf16: false,
+            hqq_stage_pin_host: false,
+            hqq_stage_async_copy_mode: HqqStageAsyncCopyMode::Off,
             hqq_runtime_staging_stats: HqqRuntimeStagingStats::default(),
             hqq_runtime_registration_stats: HqqRuntimeRegistrationStats::default(),
             hqq_runtime_last_swap: HqqRuntimeSwapStats::default(),
@@ -24025,6 +24092,7 @@ impl GpuDecodeStore {
         layer_idx,
         tensor_name,
         backend,
+        deepseek_v4,
         nbits,
         format_version,
         packed_ptr,
@@ -24047,6 +24115,7 @@ impl GpuDecodeStore {
         layer_idx: usize,
         tensor_name: &str,
         backend: &str,
+        deepseek_v4: bool,
         nbits: usize,
         format_version: usize,
         packed_ptr: usize,
@@ -24064,6 +24133,31 @@ impl GpuDecodeStore {
         scales_dtype: &str,
         zeros_dtype: &str,
     ) -> PyResult<()> {
+        if let Some(existing) = self.hqq_runtime_deepseek_v4 {
+            if existing != deepseek_v4 {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "HQQ runtime staging cannot mix DeepSeek-V4 ({deepseek_v4}) and non-DeepSeek ({existing}) tensors in one store"
+                )));
+            }
+        } else {
+            self.hqq_runtime_deepseek_v4 = Some(deepseek_v4);
+            self.hqq_prefill_materialize_bf16 =
+                resolve_bool_env("KRASIS_HQQ_PREFILL_MATERIALIZE_BF16", deepseek_v4)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            self.hqq_stage_pin_host = resolve_bool_env("KRASIS_HQQ_STAGE_PIN_HOST", deepseek_v4)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            self.hqq_stage_async_copy_mode = HqqStageAsyncCopyMode::from_env(
+                HqqStageAsyncCopyMode::default_for_deepseek_v4(deepseek_v4),
+            )
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            log::info!(
+                "HQQ runtime policy: deepseek_v4={} materialize_prefill_bf16={} pin_host={} async_copy={:?}",
+                deepseek_v4,
+                self.hqq_prefill_materialize_bf16,
+                self.hqq_stage_pin_host,
+                self.hqq_stage_async_copy_mode,
+            );
+        }
         if rows == 0 || cols == 0 || group_size == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "HQQ runtime staging invalid shape metadata for layer {} tensor {}: rows={} cols={} group_size={}",
@@ -24098,6 +24192,7 @@ impl GpuDecodeStore {
             cols,
             group_size,
             nbits,
+            self.hqq_prefill_materialize_bf16,
         )
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         let mut decode = Self::build_hqq_decode_runtime_format(
@@ -24110,7 +24205,7 @@ impl GpuDecodeStore {
             nbits,
         )
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        if hqq_stage_pinned_host_enabled() {
+        if self.hqq_stage_pin_host {
             prefill
                 .pin_host_components(&format!(
                     "prefill layer={} tensor={}",
@@ -28526,8 +28621,8 @@ impl GpuDecodeStore {
             let desc = self
                 .hqq_runtime_decode_exec_desc_for_tensor(layer_idx, tensor_name)
                 .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-            let nbits = hqq_nbits_from_desc(&desc)
-                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            let nbits =
+                hqq_nbits_from_desc(&desc).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
             if !matches!(nbits, 4 | 6 | 8) {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "DeepSeek-V4 HQQ attach accepts only HQQ4/HQQ6/HQQ8 descriptors; layer {} tensor {} is HQQ{}",
@@ -33244,9 +33339,7 @@ impl GpuDecodeStore {
                 (hcs.cache_fast_num_layers, hcs.num_experts_per_layer)
             };
             let demand_len = num_layers.checked_mul(experts_per_layer).ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(
-                    "dynamic peer demand table size overflow",
-                )
+                pyo3::exceptions::PyRuntimeError::new_err("dynamic peer demand table size overflow")
             })?;
             if demand_len == 0 {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -33280,10 +33373,9 @@ impl GpuDecodeStore {
                     "create dynamic peer swap event: {create_event:?}",
                 )));
             }
-            let transfer_cost_routes =
-                (peer_h2d_p95_us_per_expert / local_cold_p95_us_per_expert)
-                    .ceil()
-                    .max(1.0) as u64;
+            let transfer_cost_routes = (peer_h2d_p95_us_per_expert / local_cold_p95_us_per_expert)
+                .ceil()
+                .max(1.0) as u64;
             peer.peer_dynamic_tier = Some(PeerDynamicTier {
                 swap_stream: CudaStream(swap_stream),
                 swap_ready_event: CudaEvent(swap_ready_event),
@@ -33499,188 +33591,182 @@ impl GpuDecodeStore {
             pyo3::exceptions::PyRuntimeError::new_err(error)
         })?;
         let copy_stream = self.copy_stream.0;
-        let calibration = (|| -> Result<
-            (Vec<serde_json::Value>, bool, usize, usize, Vec<f64>),
-            String,
-        > {
-            let requested = self
-                .graph
-                .as_ref()
-                .and_then(|graph| graph.expert_compression.as_ref())
-                .ok_or_else(|| "expert compression disappeared during calibration".to_string())?
-                .requested_pipeline;
-            let mut plans = Vec::<(bool, usize, usize)>::new();
-            if requested.includes_grouped() {
-                for groups in [1_usize, 2, crate::expert_codec::MAX_EXPERT_CHUNKS] {
-                    let mut decoder_streams = 1_usize;
-                    while decoder_streams <= groups {
-                        plans.push((false, groups, decoder_streams));
-                        decoder_streams = decoder_streams.saturating_mul(2);
-                    }
-                }
-            }
-            if requested.includes_streaming() {
-                let finest = expert.compressed_stream_plan.count;
-                let mut chunks = 1_usize;
-                while chunks <= finest {
-                    if finest % chunks == 0 {
-                        plans.push((true, chunks, 1));
-                    }
-                    chunks = chunks.saturating_mul(2);
-                }
-            }
-            if plans.is_empty() {
-                return Err(format!(
-                    "expert compression pipeline {} produced no measurable plans",
-                    requested.label(),
-                ));
-            }
-
-            let mut candidates = Vec::new();
-            let mut selected_streaming = false;
-            let mut selected_groups = 0_usize;
-            let mut selected_decoder_streams = 0_usize;
-            let mut selected_samples = Vec::new();
-            let mut selected_p95 = f64::INFINITY;
-            let mut selected_p50 = f64::INFINITY;
-            for (streaming, groups, decoder_streams) in plans {
-                {
-                    let codec = self
-                        .graph
-                        .as_mut()
-                        .and_then(|graph| graph.expert_compression.as_mut())
-                        .ok_or_else(|| {
-                            "expert compression disappeared during calibration".to_string()
-                        })?;
-                    if streaming {
-                        codec.configure_streaming_plan(groups, expert.compressed_tasks)?;
-                    } else {
-                        codec.use_streaming = false;
-                        codec.chunks_per_expert = groups;
-                        codec.decoder_streams_per_expert = decoder_streams;
-                    }
-                }
-                let mut samples = Vec::with_capacity(measured_samples);
-                for sample in 0..warmup_samples.saturating_add(measured_samples) {
-                    let start_result =
-                        unsafe { cuda_sys::lib().cuEventRecord(start.0, copy_stream) };
-                    if start_result != cuda_sys::CUresult::CUDA_SUCCESS {
-                        return Err(format!(
-                            "record expert compression calibration start: {start_result:?}",
-                        ));
-                    }
-                    {
-                        let graph = self.graph.as_mut().ok_or_else(|| {
-                            "store disappeared during expert compression calibration".to_string()
-                        })?;
-                        let codec = graph.expert_compression.as_mut().ok_or_else(|| {
-                            "expert compression disappeared during calibration".to_string()
-                        })?;
-                        codec.enqueue(0, &expert, output, copy_stream)?;
-                        let end_result = unsafe {
-                            cuda_sys::lib().cuEventRecord(end.0, codec.completion_stream.0)
-                        };
-                        if end_result != cuda_sys::CUresult::CUDA_SUCCESS {
-                            return Err(format!(
-                                "record expert compression calibration end: {end_result:?}",
-                            ));
+        let calibration =
+            (|| -> Result<(Vec<serde_json::Value>, bool, usize, usize, Vec<f64>), String> {
+                let requested = self
+                    .graph
+                    .as_ref()
+                    .and_then(|graph| graph.expert_compression.as_ref())
+                    .ok_or_else(|| "expert compression disappeared during calibration".to_string())?
+                    .requested_pipeline;
+                let mut plans = Vec::<(bool, usize, usize)>::new();
+                if requested.includes_grouped() {
+                    for groups in [1_usize, 2, crate::expert_codec::MAX_EXPERT_CHUNKS] {
+                        let mut decoder_streams = 1_usize;
+                        while decoder_streams <= groups {
+                            plans.push((false, groups, decoder_streams));
+                            decoder_streams = decoder_streams.saturating_mul(2);
                         }
                     }
-                    let sync = unsafe { cuda_sys::lib().cuEventSynchronize(end.0) };
-                    if sync != cuda_sys::CUresult::CUDA_SUCCESS {
-                        return Err(format!(
-                            "synchronize expert compression calibration: {sync:?}",
-                        ));
-                    }
-                    let mut elapsed_ms = 0.0f32;
-                    let elapsed = unsafe {
-                        cuda_sys::lib().cuEventElapsedTime(&mut elapsed_ms, start.0, end.0)
-                    };
-                    if elapsed != cuda_sys::CUresult::CUDA_SUCCESS {
-                        return Err(format!(
-                            "time expert compression calibration: {elapsed:?}",
-                        ));
-                    }
-                    if sample >= warmup_samples {
-                        samples.push(elapsed_ms as f64 * 1_000.0);
+                }
+                if requested.includes_streaming() {
+                    let finest = expert.compressed_stream_plan.count;
+                    let mut chunks = 1_usize;
+                    while chunks <= finest {
+                        if finest % chunks == 0 {
+                            plans.push((true, chunks, 1));
+                        }
+                        chunks = chunks.saturating_mul(2);
                     }
                 }
-                samples.sort_by(|left, right| left.total_cmp(right));
-                let percentile = |quantile: f64| -> f64 {
-                    let rank = quantile * (samples.len() - 1) as f64;
-                    let lower = rank.floor() as usize;
-                    let upper = rank.ceil() as usize;
-                    let fraction = rank - lower as f64;
-                    samples[lower] * (1.0 - fraction) + samples[upper] * fraction
-                };
-                let p50 = percentile(0.50);
-                let p95 = percentile(0.95);
-                let mut reconstructed = vec![0_u8; raw_bytes];
-                let download = unsafe {
-                    cuda_sys::lib().cuMemcpyDtoH_v2(
-                        reconstructed.as_mut_ptr() as *mut std::ffi::c_void,
-                        output,
-                        raw_bytes,
-                    )
-                };
-                if download != cuda_sys::CUresult::CUDA_SUCCESS {
+                if plans.is_empty() {
                     return Err(format!(
+                        "expert compression pipeline {} produced no measurable plans",
+                        requested.label(),
+                    ));
+                }
+
+                let mut candidates = Vec::new();
+                let mut selected_streaming = false;
+                let mut selected_groups = 0_usize;
+                let mut selected_decoder_streams = 0_usize;
+                let mut selected_samples = Vec::new();
+                let mut selected_p95 = f64::INFINITY;
+                let mut selected_p50 = f64::INFINITY;
+                for (streaming, groups, decoder_streams) in plans {
+                    {
+                        let codec = self
+                            .graph
+                            .as_mut()
+                            .and_then(|graph| graph.expert_compression.as_mut())
+                            .ok_or_else(|| {
+                                "expert compression disappeared during calibration".to_string()
+                            })?;
+                        if streaming {
+                            codec.configure_streaming_plan(groups, expert.compressed_tasks)?;
+                        } else {
+                            codec.use_streaming = false;
+                            codec.chunks_per_expert = groups;
+                            codec.decoder_streams_per_expert = decoder_streams;
+                        }
+                    }
+                    let mut samples = Vec::with_capacity(measured_samples);
+                    for sample in 0..warmup_samples.saturating_add(measured_samples) {
+                        let start_result =
+                            unsafe { cuda_sys::lib().cuEventRecord(start.0, copy_stream) };
+                        if start_result != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!(
+                                "record expert compression calibration start: {start_result:?}",
+                            ));
+                        }
+                        {
+                            let graph = self.graph.as_mut().ok_or_else(|| {
+                                "store disappeared during expert compression calibration"
+                                    .to_string()
+                            })?;
+                            let codec = graph.expert_compression.as_mut().ok_or_else(|| {
+                                "expert compression disappeared during calibration".to_string()
+                            })?;
+                            codec.enqueue(0, &expert, output, copy_stream)?;
+                            let end_result = unsafe {
+                                cuda_sys::lib().cuEventRecord(end.0, codec.completion_stream.0)
+                            };
+                            if end_result != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(format!(
+                                    "record expert compression calibration end: {end_result:?}",
+                                ));
+                            }
+                        }
+                        let sync = unsafe { cuda_sys::lib().cuEventSynchronize(end.0) };
+                        if sync != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!(
+                                "synchronize expert compression calibration: {sync:?}",
+                            ));
+                        }
+                        let mut elapsed_ms = 0.0f32;
+                        let elapsed = unsafe {
+                            cuda_sys::lib().cuEventElapsedTime(&mut elapsed_ms, start.0, end.0)
+                        };
+                        if elapsed != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!(
+                                "time expert compression calibration: {elapsed:?}",
+                            ));
+                        }
+                        if sample >= warmup_samples {
+                            samples.push(elapsed_ms as f64 * 1_000.0);
+                        }
+                    }
+                    samples.sort_by(|left, right| left.total_cmp(right));
+                    let percentile = |quantile: f64| -> f64 {
+                        let rank = quantile * (samples.len() - 1) as f64;
+                        let lower = rank.floor() as usize;
+                        let upper = rank.ceil() as usize;
+                        let fraction = rank - lower as f64;
+                        samples[lower] * (1.0 - fraction) + samples[upper] * fraction
+                    };
+                    let p50 = percentile(0.50);
+                    let p95 = percentile(0.95);
+                    let mut reconstructed = vec![0_u8; raw_bytes];
+                    let download = unsafe {
+                        cuda_sys::lib().cuMemcpyDtoH_v2(
+                            reconstructed.as_mut_ptr() as *mut std::ffi::c_void,
+                            output,
+                            raw_bytes,
+                        )
+                    };
+                    if download != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
                         "download pipeline={} copies={} decoder_streams={} reconstructed expert: {download:?}",
                         if streaming { "streaming" } else { "grouped" },
                         groups,
                         decoder_streams,
                     ));
-                }
-                if reconstructed != expected {
-                    return Err(format!(
+                    }
+                    if reconstructed != expected {
+                        return Err(format!(
                         "GPU expert decompression was not bit-identical for pipeline={} copies={} decoder_streams={}",
                         if streaming { "streaming" } else { "grouped" },
                         groups,
                         decoder_streams,
                     ));
+                    }
+                    candidates.push(serde_json::json!({
+                        "pipeline": if streaming { "streaming" } else { "grouped" },
+                        "copies_per_expert": groups,
+                        "decoder_streams": decoder_streams,
+                        "min_us": samples[0],
+                        "p50_us": p50,
+                        "p95_us": p95,
+                        "p99_us": percentile(0.99),
+                        "max_us": samples[samples.len() - 1],
+                        "payload_bit_exact": true,
+                    }));
+                    if p95 < selected_p95 || (p95 == selected_p95 && p50 < selected_p50) {
+                        selected_streaming = streaming;
+                        selected_groups = groups;
+                        selected_decoder_streams = decoder_streams;
+                        selected_p95 = p95;
+                        selected_p50 = p50;
+                        selected_samples = samples;
+                    }
                 }
-                candidates.push(serde_json::json!({
-                    "pipeline": if streaming { "streaming" } else { "grouped" },
-                    "copies_per_expert": groups,
-                    "decoder_streams": decoder_streams,
-                    "min_us": samples[0],
-                    "p50_us": p50,
-                    "p95_us": p95,
-                    "p99_us": percentile(0.99),
-                    "max_us": samples[samples.len() - 1],
-                    "payload_bit_exact": true,
-                }));
-                if p95 < selected_p95 || (p95 == selected_p95 && p50 < selected_p50) {
-                    selected_streaming = streaming;
-                    selected_groups = groups;
-                    selected_decoder_streams = decoder_streams;
-                    selected_p95 = p95;
-                    selected_p50 = p50;
-                    selected_samples = samples;
+                if selected_groups == 0 || selected_decoder_streams == 0 {
+                    return Err("expert compression calibration selected no copy plan".to_string());
                 }
-            }
-            if selected_groups == 0 || selected_decoder_streams == 0 {
-                return Err("expert compression calibration selected no copy plan".to_string());
-            }
-            Ok((
-                candidates,
-                selected_streaming,
-                selected_groups,
-                selected_decoder_streams,
-                selected_samples,
-            ))
-        })();
+                Ok((
+                    candidates,
+                    selected_streaming,
+                    selected_groups,
+                    selected_decoder_streams,
+                    selected_samples,
+                ))
+            })();
         unsafe {
             let _ = cuda_sys::lib().cuEventDestroy_v2(start.0);
             let _ = cuda_sys::lib().cuEventDestroy_v2(end.0);
         }
-        let (
-            candidates,
-            selected_streaming,
-            selected_groups,
-            selected_decoder_streams,
-            samples,
-        ) = calibration.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let (candidates, selected_streaming, selected_groups, selected_decoder_streams, samples) =
+            calibration.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         if let Some(codec) = self
             .graph
             .as_mut()
@@ -35766,9 +35852,7 @@ impl GpuDecodeStore {
                             native.block_size as i32,
                         ),
                     )
-                    .map_err(|error| {
-                        format!("{} Native score reduction: {:?}", label, error)
-                    })?;
+                    .map_err(|error| format!("{} Native score reduction: {:?}", label, error))?;
             } else {
                 kernels
                     .deepseek_v4_index_scores_decode
@@ -36245,13 +36329,8 @@ impl GpuDecodeStore {
                 kernels
                     .deepseek_v4_gather_selected_native_kv_scores
                     .clone()
-                    .launch(
-                        LaunchConfig::for_num_elems(gather_elements),
-                        &mut params,
-                    )
-                    .map_err(|error| {
-                        format!("{} selected Native KV gather: {:?}", label, error)
-                    })?;
+                    .launch(LaunchConfig::for_num_elems(gather_elements), &mut params)
+                    .map_err(|error| format!("{} selected Native KV gather: {:?}", label, error))?;
             } else {
                 kernels
                     .deepseek_v4_gather_selected_kv_scores
@@ -38150,7 +38229,7 @@ impl GpuDecodeStore {
         let mut zeros_memcpy_bytes = 0usize;
 
         let compact = hqq_stage_compaction_enabled();
-        let async_copy = hqq_stage_async_copy_enabled();
+        let async_copy = self.hqq_stage_async_copy_mode.enabled_for(stage)?;
         let copy_stream = if async_copy {
             Some(self.copy_stream.0)
         } else {
@@ -38943,12 +39022,11 @@ impl GpuDecodeStore {
                 deepseek_v4_sliding_window = v4.sliding_window;
                 deepseek_v4_native_cache |= v4.raw_native_cache.is_some();
                 if v4.compress_ratio > 0 {
-                    deepseek_v4_min_compress_ratio =
-                        if deepseek_v4_min_compress_ratio == 0 {
-                            v4.compress_ratio
-                        } else {
-                            deepseek_v4_min_compress_ratio.min(v4.compress_ratio)
-                        };
+                    deepseek_v4_min_compress_ratio = if deepseek_v4_min_compress_ratio == 0 {
+                        v4.compress_ratio
+                    } else {
+                        deepseek_v4_min_compress_ratio.min(v4.compress_ratio)
+                    };
                 }
                 if let Some(indexer) = &v4.indexer {
                     deepseek_v4_index_topk = deepseek_v4_index_topk.max(indexer.index_topk);
@@ -39171,16 +39249,41 @@ impl GpuDecodeStore {
             deepseek_v4_static_compress_ratio,
             deepseek_v4_native_cache,
             deepseek_v4_min_compress_ratio,
+            hqq_prefill_materialize_bf16: self.hqq_prefill_materialize_bf16,
         };
         let (fused_moe_w1_ctmp_floats, fused_moe_w2_ctmp_floats) =
             fused_moe_ctmp_floats_for_config(&config);
         config.fused_moe_w1_ctmp_floats = fused_moe_w1_ctmp_floats;
         config.fused_moe_w2_ctmp_floats = fused_moe_w2_ctmp_floats;
+        let deepseek_hqq = config.deepseek_v4_hc_mult > 0
+            && self.hqq_runtime_deepseek_v4 == Some(true)
+            && !self.hqq_runtime_slots.is_empty();
         let deepseek_v4_prefill_sparse_score_mode = DeepseekV4PrefillSparseScoreMode::from_env()?;
         let deepseek_v4_prefill_sparse_output_mode =
             crate::gpu_prefill::DeepseekV4PrefillSparseOutputMode::from_env()?;
+        let deepseek_v4_prefill_sparse_pipeline_mode =
+            crate::gpu_prefill::DeepseekV4PrefillSparsePipelineMode::from_env(deepseek_hqq)?;
+        let deepseek_v4_prefill_gather_mode =
+            crate::gpu_prefill::DeepseekV4PrefillGatherMode::from_env(deepseek_hqq)?;
+        let deepseek_v4_prefill_softmax_mode =
+            crate::gpu_prefill::DeepseekV4PrefillSoftmaxMode::from_env(deepseek_hqq)?;
+        let deepseek_v4_prefill_predicted_w1_enabled =
+            crate::gpu_prefill::deepseek_v4_prefill_predicted_w1_enabled_from_env(deepseek_hqq)?;
+        let deepseek_v4_prefill_split_expert_dma_enabled =
+            resolve_bool_env("KRASIS_PREFILL_SPLIT_EXPERT_DMA", deepseek_hqq)?;
+        if deepseek_v4_prefill_predicted_w1_enabled && !deepseek_v4_prefill_split_expert_dma_enabled
+        {
+            return Err(
+                "KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1 requires KRASIS_PREFILL_SPLIT_EXPERT_DMA"
+                    .to_string(),
+            );
+        }
         let deepseek_v4_prefill_index_score_mode =
-            crate::gpu_prefill::DeepseekV4PrefillIndexScoreMode::from_env()?;
+            crate::gpu_prefill::DeepseekV4PrefillIndexScoreMode::from_env(deepseek_hqq)?;
+        let deepseek_v4_prefill_topk_mode =
+            crate::gpu_prefill::DeepseekV4PrefillTopkMode::from_env(deepseek_hqq)?;
+        let deepseek_v4_prefill_hc_project_mode =
+            crate::gpu_prefill::DeepseekV4PrefillHcProjectMode::from_env(deepseek_hqq)?;
         if config.deepseek_v4_hc_mult > 0 {
             eprintln!(
                 "DeepSeek-V4 prefill sparse-score mode: {}",
@@ -39191,8 +39294,44 @@ impl GpuDecodeStore {
                 deepseek_v4_prefill_sparse_output_mode.label()
             );
             eprintln!(
+                "DeepSeek-V4 prefill sparse-pipeline mode: {}",
+                deepseek_v4_prefill_sparse_pipeline_mode.label()
+            );
+            eprintln!(
+                "DeepSeek-V4 prefill gather mode: {}",
+                deepseek_v4_prefill_gather_mode.label()
+            );
+            eprintln!(
+                "DeepSeek-V4 prefill softmax mode: {}",
+                deepseek_v4_prefill_softmax_mode.label()
+            );
+            eprintln!(
+                "DeepSeek-V4 predicted-W1 prefetch: {}",
+                if deepseek_v4_prefill_predicted_w1_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            eprintln!(
+                "DeepSeek-V4 split expert DMA: {}",
+                if deepseek_v4_prefill_split_expert_dma_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            eprintln!(
                 "DeepSeek-V4 prefill index-score mode: {}",
                 deepseek_v4_prefill_index_score_mode.label()
+            );
+            eprintln!(
+                "DeepSeek-V4 prefill top-k mode: {}",
+                deepseek_v4_prefill_topk_mode.label()
+            );
+            eprintln!(
+                "DeepSeek-V4 prefill HC-project mode: {}",
+                deepseek_v4_prefill_hc_project_mode.label()
             );
         }
 
@@ -39397,7 +39536,10 @@ impl GpuDecodeStore {
                 };
                 let make_projection = |wid: usize,
                                        name: &str|
-                 -> Result<crate::gpu_prefill::DeepseekV4ProjectionPrefillDescriptor, String> {
+                 -> Result<
+                    crate::gpu_prefill::DeepseekV4ProjectionPrefillDescriptor,
+                    String,
+                > {
                     if v4.hqq_tensors.contains_key(name) {
                         let desc = self.hqq_runtime_prefill_exec_desc_for_tensor(i, name)?;
                         return Ok(
@@ -40359,6 +40501,17 @@ impl GpuDecodeStore {
             }
             event
         };
+        let dma_w1_event = unsafe {
+            let mut event: cuda_sys::CUevent = std::ptr::null_mut();
+            let err = cuda_sys::lib().cuEventCreate(
+                &mut event,
+                cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32,
+            );
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("Create W1 DMA event: {:?}", err));
+            }
+            event
+        };
         let cold_staging_reuse_event = unsafe {
             let mut event: cuda_sys::CUevent = std::ptr::null_mut();
             let err = cuda_sys::lib().cuEventCreate(
@@ -40742,7 +40895,14 @@ impl GpuDecodeStore {
             shared_cublas_handle,
             deepseek_v4_prefill_sparse_score_mode,
             deepseek_v4_prefill_sparse_output_mode,
+            deepseek_v4_prefill_sparse_pipeline_mode,
+            deepseek_v4_prefill_gather_mode,
+            deepseek_v4_prefill_softmax_mode,
+            deepseek_v4_prefill_predicted_w1_enabled,
+            deepseek_v4_prefill_split_expert_dma_enabled,
             deepseek_v4_prefill_index_score_mode,
+            deepseek_v4_prefill_topk_mode,
+            deepseek_v4_prefill_hc_project_mode,
             h_logits: Vec::new(),
             reference_debug_trace_enabled: false,
             first_token_margin_projection_request_enabled: false,
@@ -40777,6 +40937,7 @@ impl GpuDecodeStore {
             hcs_cache_fast,
             hcs_num_experts_per_layer: hcs_ne,
             dma_event,
+            dma_w1_event,
             cold_staging_reuse_event,
             compute_event,
             scatter_event,
@@ -40883,6 +41044,9 @@ impl GpuDecodeStore {
             ptr_prefetch_pinned_count: 0,
             ptr_prefetch_cold_count: 0,
             ptr_prefetch_total_count: 0,
+            deepseek_predicted_w1_layer: None,
+            deepseek_predicted_w1_slots: vec![usize::MAX; n_routed.max(1)],
+            deepseek_predicted_w1_count: 0,
             q_type,
             qk_norm_bf16_bufs,
             hqq_bf16_weight_bufs: Vec::new(),
@@ -40943,6 +41107,8 @@ impl GpuDecodeStore {
             t_deepseek_v4_indexer_event: std::array::from_fn(|_| std::cell::Cell::new(0.0)),
             t_deepseek_v4_indexer_sync: std::array::from_fn(|_| std::cell::Cell::new(0.0)),
             deepseek_v4_indexer_calls: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            t_deepseek_v4_hc_internal_wall: std::array::from_fn(|_| std::cell::Cell::new(0.0)),
+            deepseek_v4_hc_internal_calls: std::array::from_fn(|_| std::cell::Cell::new(0)),
             gqa_fa2_calls: std::cell::Cell::new(0),
             gqa_fp8_calls: std::cell::Cell::new(0),
             gqa_bf16_calls: std::cell::Cell::new(0),
@@ -51045,107 +51211,105 @@ impl GpuDecodeStore {
                     "{label}: TileQ v1 requires standard gated SiLU experts at layer {layer_idx}"
                 ));
             }
-            let d_ids =
-                d_upload_base + (ptr_stride * 4 + max_ept * 4 * 3) as u64;
+            let d_ids = d_upload_base + (ptr_stride * 4 + max_ept * 4 * 3) as u64;
             let rank_scratch = *graph.d_batch_partials.device_ptr();
-            let launch_projection =
-                |projection: TileQProjectionPtrs,
-                 packed_ptrs: u64,
-                 scale_ptrs: u64,
-                 input_ptr: u64,
-                 input_stride: usize,
-                 output_ptr: u64,
-                 output_stride: usize,
-                 packed_offset: usize,
-                 scale_offset: usize,
-                 output_offset: usize|
-                 -> Result<(), String> {
-                    unsafe {
-                        k.tileq_rank_project_batched_bf16
-                            .clone()
-                            .launch(
-                                LaunchConfig {
-                                    grid_dim: (1, 1, topk as u32),
-                                    block_dim: (projection.rank as u32, 1, 1),
-                                    shared_mem_bytes: 0,
-                                },
-                                (
-                                    input_ptr,
-                                    d_ids,
-                                    d_wts_hot,
-                                    projection.expert_tiles_ptr,
-                                    projection.expert_inverse_scales_ptr,
-                                    projection.left_factors_ptr,
-                                    rank_scratch,
-                                    projection.input_dim as i32,
-                                    input_stride as i32,
-                                    projection.rank as i32,
-                                    topk as i32,
+            let launch_projection = |projection: TileQProjectionPtrs,
+                                     packed_ptrs: u64,
+                                     scale_ptrs: u64,
+                                     input_ptr: u64,
+                                     input_stride: usize,
+                                     output_ptr: u64,
+                                     output_stride: usize,
+                                     packed_offset: usize,
+                                     scale_offset: usize,
+                                     output_offset: usize|
+             -> Result<(), String> {
+                unsafe {
+                    k.tileq_rank_project_batched_bf16
+                        .clone()
+                        .launch(
+                            LaunchConfig {
+                                grid_dim: (1, 1, topk as u32),
+                                block_dim: (projection.rank as u32, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (
+                                input_ptr,
+                                d_ids,
+                                d_wts_hot,
+                                projection.expert_tiles_ptr,
+                                projection.expert_inverse_scales_ptr,
+                                projection.left_factors_ptr,
+                                rank_scratch,
+                                projection.input_dim as i32,
+                                input_stride as i32,
+                                projection.rank as i32,
+                                topk as i32,
+                            ),
+                        )
+                        .map_err(|error| {
+                            format!("{label} TileQ rank layer={layer_idx}: {error:?}")
+                        })?;
+                    let mut p0 = packed_ptrs;
+                    let mut p1 = scale_ptrs;
+                    let mut p2 = input_ptr;
+                    let mut p3 = rank_scratch;
+                    let mut p4 = d_ids;
+                    let mut p5 = d_wts_hot;
+                    let mut p6 = projection.expert_tiles_ptr;
+                    let mut p7 = projection.right_factors_ptr;
+                    let mut p8 = output_ptr;
+                    let mut p9 = projection.input_dim as i32;
+                    let mut p10 = input_stride as i32;
+                    let mut p11 = projection.output_dim as i32;
+                    let mut p12 = output_stride as i32;
+                    let mut p13 = gs as i32;
+                    let mut p14 = projection.rank as i32;
+                    let mut p15 = topk as i32;
+                    let mut p16 = packed_offset as u64;
+                    let mut p17 = scale_offset as u64;
+                    let mut p18 = output_offset as i32;
+                    let mut params = vec![
+                        &mut p0 as *mut _ as *mut std::ffi::c_void,
+                        &mut p1 as *mut _ as *mut std::ffi::c_void,
+                        &mut p2 as *mut _ as *mut std::ffi::c_void,
+                        &mut p3 as *mut _ as *mut std::ffi::c_void,
+                        &mut p4 as *mut _ as *mut std::ffi::c_void,
+                        &mut p5 as *mut _ as *mut std::ffi::c_void,
+                        &mut p6 as *mut _ as *mut std::ffi::c_void,
+                        &mut p7 as *mut _ as *mut std::ffi::c_void,
+                        &mut p8 as *mut _ as *mut std::ffi::c_void,
+                        &mut p9 as *mut _ as *mut std::ffi::c_void,
+                        &mut p10 as *mut _ as *mut std::ffi::c_void,
+                        &mut p11 as *mut _ as *mut std::ffi::c_void,
+                        &mut p12 as *mut _ as *mut std::ffi::c_void,
+                        &mut p13 as *mut _ as *mut std::ffi::c_void,
+                        &mut p14 as *mut _ as *mut std::ffi::c_void,
+                        &mut p15 as *mut _ as *mut std::ffi::c_void,
+                        &mut p16 as *mut _ as *mut std::ffi::c_void,
+                        &mut p17 as *mut _ as *mut std::ffi::c_void,
+                        &mut p18 as *mut _ as *mut std::ffi::c_void,
+                    ];
+                    k.tileq_int3_gemv_batched_bf16
+                        .clone()
+                        .launch(
+                            LaunchConfig {
+                                grid_dim: (
+                                    ((projection.output_dim + 7) / 8) as u32,
+                                    1,
+                                    topk as u32,
                                 ),
-                            )
-                            .map_err(|error| {
-                                format!("{label} TileQ rank layer={layer_idx}: {error:?}")
-                            })?;
-                        let mut p0 = packed_ptrs;
-                        let mut p1 = scale_ptrs;
-                        let mut p2 = input_ptr;
-                        let mut p3 = rank_scratch;
-                        let mut p4 = d_ids;
-                        let mut p5 = d_wts_hot;
-                        let mut p6 = projection.expert_tiles_ptr;
-                        let mut p7 = projection.right_factors_ptr;
-                        let mut p8 = output_ptr;
-                        let mut p9 = projection.input_dim as i32;
-                        let mut p10 = input_stride as i32;
-                        let mut p11 = projection.output_dim as i32;
-                        let mut p12 = output_stride as i32;
-                        let mut p13 = gs as i32;
-                        let mut p14 = projection.rank as i32;
-                        let mut p15 = topk as i32;
-                        let mut p16 = packed_offset as u64;
-                        let mut p17 = scale_offset as u64;
-                        let mut p18 = output_offset as i32;
-                        let mut params = vec![
-                            &mut p0 as *mut _ as *mut std::ffi::c_void,
-                            &mut p1 as *mut _ as *mut std::ffi::c_void,
-                            &mut p2 as *mut _ as *mut std::ffi::c_void,
-                            &mut p3 as *mut _ as *mut std::ffi::c_void,
-                            &mut p4 as *mut _ as *mut std::ffi::c_void,
-                            &mut p5 as *mut _ as *mut std::ffi::c_void,
-                            &mut p6 as *mut _ as *mut std::ffi::c_void,
-                            &mut p7 as *mut _ as *mut std::ffi::c_void,
-                            &mut p8 as *mut _ as *mut std::ffi::c_void,
-                            &mut p9 as *mut _ as *mut std::ffi::c_void,
-                            &mut p10 as *mut _ as *mut std::ffi::c_void,
-                            &mut p11 as *mut _ as *mut std::ffi::c_void,
-                            &mut p12 as *mut _ as *mut std::ffi::c_void,
-                            &mut p13 as *mut _ as *mut std::ffi::c_void,
-                            &mut p14 as *mut _ as *mut std::ffi::c_void,
-                            &mut p15 as *mut _ as *mut std::ffi::c_void,
-                            &mut p16 as *mut _ as *mut std::ffi::c_void,
-                            &mut p17 as *mut _ as *mut std::ffi::c_void,
-                            &mut p18 as *mut _ as *mut std::ffi::c_void,
-                        ];
-                        k.tileq_int3_gemv_batched_bf16
-                            .clone()
-                            .launch(
-                                LaunchConfig {
-                                    grid_dim: (
-                                        ((projection.output_dim + 7) / 8) as u32,
-                                        1,
-                                        topk as u32,
-                                    ),
-                                    block_dim: (256, 1, 1),
-                                    shared_mem_bytes: 0,
-                                },
-                                &mut params,
-                            )
-                            .map_err(|error| {
-                                format!("{label} TileQ INT3 layer={layer_idx}: {error:?}")
-                            })?;
-                    }
-                    Ok(())
-                };
+                                block_dim: (256, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|error| {
+                            format!("{label} TileQ INT3 layer={layer_idx}: {error:?}")
+                        })?;
+                }
+                Ok(())
+            };
             let gate_packed_bytes = intermediate * expert_hs * 3 / 8;
             let gate_scale_bytes = intermediate * (expert_hs / gs) * 2;
             launch_projection(
@@ -51177,11 +51341,7 @@ impl GpuDecodeStore {
                     .clone()
                     .launch(
                         LaunchConfig {
-                            grid_dim: (
-                                ((intermediate + 255) / 256) as u32,
-                                1,
-                                topk as u32,
-                            ),
+                            grid_dim: (((intermediate + 255) / 256) as u32, 1, topk as u32),
                             block_dim: (256, 1, 1),
                             shared_mem_bytes: 0,
                         },
@@ -51193,9 +51353,7 @@ impl GpuDecodeStore {
                             topk as i32,
                         ),
                     )
-                    .map_err(|error| {
-                        format!("{label} TileQ SiLU layer={layer_idx}: {error:?}")
-                    })?;
+                    .map_err(|error| format!("{label} TileQ SiLU layer={layer_idx}: {error:?}"))?;
             }
             launch_projection(
                 factors.down,
@@ -51464,8 +51622,7 @@ impl GpuDecodeStore {
         hcs.num_cached = hcs.num_cached.saturating_add(1);
         if let Some(dynamic) = self.peer_dynamic_tier.as_mut() {
             dynamic.swaps_committed = dynamic.swaps_committed.saturating_add(1);
-            dynamic.total_swap_elapsed_us +=
-                pending.started.elapsed().as_secs_f64() * 1_000_000.0;
+            dynamic.total_swap_elapsed_us += pending.started.elapsed().as_secs_f64() * 1_000_000.0;
         }
         log::info!(
             "DYNAMIC PEER COMMIT: slot={} victim=L{}E{} incoming=L{}E{} elapsed_us={:.3}",
@@ -51516,11 +51673,9 @@ impl GpuDecodeStore {
         {
             let dynamic = self.peer_dynamic_tier.as_mut().unwrap();
             for candidate in candidates {
-                if let Some(index) = PeerDynamicTier::flat_index(
-                    experts_per_layer,
-                    layer_idx,
-                    candidate.expert_idx,
-                ) {
+                if let Some(index) =
+                    PeerDynamicTier::flat_index(experts_per_layer, layer_idx, candidate.expert_idx)
+                {
                     dynamic.observe(index);
                 }
             }
@@ -51576,16 +51731,12 @@ impl GpuDecodeStore {
                 .enumerate()
                 .filter_map(|(slot, resident)| resident.map(|pair| (slot, pair)))
                 .filter(|(_, pair)| {
-                    !protected.iter().any(|route| {
-                        pair.0 == layer_idx && pair.1 == route.expert_idx
-                    })
+                    !protected
+                        .iter()
+                        .any(|route| pair.0 == layer_idx && pair.1 == route.expert_idx)
                 })
                 .filter_map(|(slot, pair)| {
-                    let index = PeerDynamicTier::flat_index(
-                        experts_per_layer,
-                        pair.0,
-                        pair.1,
-                    )?;
+                    let index = PeerDynamicTier::flat_index(experts_per_layer, pair.0, pair.1)?;
                     let (score, last_seen) = dynamic.score(index);
                     Some((slot, pair, score, last_seen))
                 })
@@ -51635,9 +51786,8 @@ impl GpuDecodeStore {
                 .peer_service_ready_event
                 .as_ref()
                 .ok_or_else(|| "dynamic peer service is pending without an event".to_string())?;
-            let wait = unsafe {
-                cuda_sys::lib().cuStreamWaitEvent(swap_stream, service_event.0, 0)
-            };
+            let wait =
+                unsafe { cuda_sys::lib().cuStreamWaitEvent(swap_stream, service_event.0, 0) };
             if wait != cuda_sys::CUresult::CUDA_SUCCESS {
                 return Err(format!("dynamic peer wait for service: {wait:?}"));
             }
@@ -51647,7 +51797,10 @@ impl GpuDecodeStore {
             let graph = self.graph.as_mut().unwrap();
             let hcs = graph.hcs.as_mut().unwrap();
             let entry = hcs.cache.get(&victim).ok_or_else(|| {
-                format!("dynamic peer victim L{}E{} is not cached", victim.0, victim.1)
+                format!(
+                    "dynamic peer victim L{}E{} is not cached",
+                    victim.0, victim.1
+                )
             })?;
             if entry.pool_slot != Some(slot) || payload_bytes > hcs.pool_slot_size {
                 return Err(format!(
@@ -51731,11 +51884,7 @@ impl GpuDecodeStore {
     /// a slot with it. Primary dynamic-HCS promotion must honor this claim so
     /// the two tiers remain disjoint even across an asynchronous peer swap or
     /// a peer-service deadline fallback.
-    fn peer_claims_expert(
-        graph: &GpuDecodeGraph,
-        layer_idx: usize,
-        expert_idx: usize,
-    ) -> bool {
+    fn peer_claims_expert(graph: &GpuDecodeGraph, layer_idx: usize, expert_idx: usize) -> bool {
         let Some(peer) = graph.peer_expert.as_ref() else {
             return false;
         };
@@ -51823,8 +51972,7 @@ impl GpuDecodeStore {
                 .device
                 .bind_to_thread()
                 .map_err(|error| format!("bind peer context for dynamic admission: {error}"))?;
-            if let Err(error) =
-                peer_store.maybe_queue_peer_dynamic_swap(layer_idx, candidates, &[])
+            if let Err(error) = peer_store.maybe_queue_peer_dynamic_swap(layer_idx, candidates, &[])
             {
                 peer_store.disable_peer_dynamic(error);
             }
@@ -51924,8 +52072,7 @@ impl GpuDecodeStore {
             );
             return Ok(None);
         }
-        if let Err(error) =
-            peer_store.maybe_queue_peer_dynamic_swap(layer_idx, candidates, &routes)
+        if let Err(error) = peer_store.maybe_queue_peer_dynamic_swap(layer_idx, candidates, &routes)
         {
             peer_store.disable_peer_dynamic(error);
         }
@@ -77851,18 +77998,22 @@ impl GpuDecodeStore {
             if moe_idx < store.tileq_layer_backings.len() {
                 let backing = &store.tileq_layer_backings[moe_idx];
                 let regions = [
-                    (backing.w13_packed.as_ptr(), backing.w13_packed.len(), "w13p"),
-                    (backing.w13_scales.as_ptr(), backing.w13_scales.len(), "w13s"),
+                    (
+                        backing.w13_packed.as_ptr(),
+                        backing.w13_packed.len(),
+                        "w13p",
+                    ),
+                    (
+                        backing.w13_scales.as_ptr(),
+                        backing.w13_scales.len(),
+                        "w13s",
+                    ),
                     (backing.w2_packed.as_ptr(), backing.w2_packed.len(), "w2p"),
                     (backing.w2_scales.as_ptr(), backing.w2_scales.len(), "w2s"),
                 ];
                 for (ptr, size, label) in regions {
                     let err = unsafe {
-                        cuda_sys::lib().cuMemHostRegister_v2(
-                            ptr as *mut std::ffi::c_void,
-                            size,
-                            0,
-                        )
+                        cuda_sys::lib().cuMemHostRegister_v2(ptr as *mut std::ffi::c_void, size, 0)
                     };
                     if err != cuda_sys::CUresult::CUDA_SUCCESS {
                         return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -78106,40 +78257,38 @@ impl GpuDecodeStore {
                 ))
             })
         };
-        let upload_projection =
-            |manifest: &crate::weights::tileq::TileQProjectionManifest,
-             label: &str|
-             -> PyResult<(TileQProjectionGpu, TileQProjectionPtrs)> {
-                let expert_tiles = upload_u16(&manifest.expert_tiles, &format!("{label}.tiles"))?;
-                let expert_inverse_scales = upload_u16(
-                    &manifest.expert_inverse_scales_bf16,
-                    &format!("{label}.inverse_scales"),
-                )?;
-                let left_factors =
-                    upload_u16(&manifest.left_factors_bf16, &format!("{label}.left"))?;
-                let right_factors =
-                    upload_u16(&manifest.right_factors_bf16, &format!("{label}.right"))?;
-                let ptrs = TileQProjectionPtrs {
-                    expert_tiles_ptr: *expert_tiles.device_ptr(),
-                    expert_inverse_scales_ptr: *expert_inverse_scales.device_ptr(),
-                    left_factors_ptr: *left_factors.device_ptr(),
-                    right_factors_ptr: *right_factors.device_ptr(),
-                    input_dim: manifest.input_dim,
-                    output_dim: manifest.output_dim,
-                    rank: manifest.rank,
-                    grid_rows: manifest.grid_rows,
-                    grid_cols: manifest.grid_cols,
-                };
-                Ok((
-                    TileQProjectionGpu {
-                        expert_tiles,
-                        expert_inverse_scales,
-                        left_factors,
-                        right_factors,
-                    },
-                    ptrs,
-                ))
+        let upload_projection = |manifest: &crate::weights::tileq::TileQProjectionManifest,
+                                 label: &str|
+         -> PyResult<(TileQProjectionGpu, TileQProjectionPtrs)> {
+            let expert_tiles = upload_u16(&manifest.expert_tiles, &format!("{label}.tiles"))?;
+            let expert_inverse_scales = upload_u16(
+                &manifest.expert_inverse_scales_bf16,
+                &format!("{label}.inverse_scales"),
+            )?;
+            let left_factors = upload_u16(&manifest.left_factors_bf16, &format!("{label}.left"))?;
+            let right_factors =
+                upload_u16(&manifest.right_factors_bf16, &format!("{label}.right"))?;
+            let ptrs = TileQProjectionPtrs {
+                expert_tiles_ptr: *expert_tiles.device_ptr(),
+                expert_inverse_scales_ptr: *expert_inverse_scales.device_ptr(),
+                left_factors_ptr: *left_factors.device_ptr(),
+                right_factors_ptr: *right_factors.device_ptr(),
+                input_dim: manifest.input_dim,
+                output_dim: manifest.output_dim,
+                rank: manifest.rank,
+                grid_rows: manifest.grid_rows,
+                grid_cols: manifest.grid_cols,
             };
+            Ok((
+                TileQProjectionGpu {
+                    expert_tiles,
+                    expert_inverse_scales,
+                    left_factors,
+                    right_factors,
+                },
+                ptrs,
+            ))
+        };
 
         let (gate_gpu, gate) = upload_projection(&layer.gate, "gate")?;
         let (up_gpu, up) = upload_projection(&layer.up, "up")?;
@@ -78292,12 +78441,11 @@ impl GpuDecodeStore {
                     ],
                 )
                 .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-                expert.compressed_stream_plan =
-                    crate::expert_codec::plan_expert_stream_chunks(
-                        blob,
-                        crate::expert_codec::MAX_STREAM_CHUNKS,
-                    )
-                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                expert.compressed_stream_plan = crate::expert_codec::plan_expert_stream_chunks(
+                    blob,
+                    crate::expert_codec::MAX_STREAM_CHUNKS,
+                )
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
             }
         }
         graph.expert_compression = Some(runtime);
