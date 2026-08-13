@@ -50,6 +50,58 @@ __device__ __forceinline__ void apply_swiglu_limit(
     }
 }
 
+// Decode-specialized hyper-connection state reduction. The established
+// implementation assigns one block to a token and strides the full hidden
+// dimension from that block. Decode has one token, so tile the runtime hidden
+// dimension across blocks while preserving each output element's stream
+// accumulation order exactly.
+extern "C" __global__ void deepseek_v4_hc_reduce_tiled_kernel(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ state,
+    const float* __restrict__ pre,
+    int hidden_size,
+    int hc_mult
+) {
+    const int hidden = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+    if (hidden >= hidden_size || hidden_size <= 0 || hc_mult <= 0) {
+        return;
+    }
+    float sum = 0.0f;
+    for (int stream = 0; stream < hc_mult; ++stream) {
+        sum += __bfloat162float(state[(long long)stream * hidden_size + hidden])
+            * pre[stream];
+    }
+    output[hidden] = __float2bfloat16(sum);
+}
+
+// Decode-specialized hyper-connection post mix. Each thread owns one hidden
+// position and retains the established dst-then-src accumulation order; the
+// grid merely exposes independent hidden positions to multiple SMs.
+extern "C" __global__ void deepseek_v4_hc_post_tiled_kernel(
+    __nv_bfloat16* __restrict__ output_state,
+    const __nv_bfloat16* __restrict__ sublayer,
+    const __nv_bfloat16* __restrict__ residual_state,
+    const float* __restrict__ post,
+    const float* __restrict__ comb,
+    int hidden_size,
+    int hc_mult
+) {
+    const int hidden = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+    if (hidden >= hidden_size || hidden_size <= 0 || hc_mult <= 0) {
+        return;
+    }
+    const float sublayer_value = __bfloat162float(sublayer[hidden]);
+    for (int dst = 0; dst < hc_mult; ++dst) {
+        float value = sublayer_value * post[dst];
+        for (int src = 0; src < hc_mult; ++src) {
+            value += __bfloat162float(
+                residual_state[(long long)src * hidden_size + hidden]
+            ) * comb[dst + src * hc_mult];
+        }
+        output_state[(long long)dst * hidden_size + hidden] = __float2bfloat16(value);
+    }
+}
+
 // ── CPU-layout INT4 -> Marlin repack ─────────────────────────────────
 //
 // Genuine layout conversion used by the synthetic cache-format cost probe.

@@ -3123,6 +3123,8 @@ const KERNEL_NAMES: &[&str] = &[
     "deepseek_v4_hc_prepare_kernel",
     "deepseek_v4_hc_reduce_kernel",
     "deepseek_v4_hc_post_kernel",
+    "deepseek_v4_hc_reduce_tiled_kernel",
+    "deepseek_v4_hc_post_tiled_kernel",
     "deepseek_v4_hc_head_prepare_kernel",
     "deepseek_v4_rmsnorm_rows_bf16_kernel",
     "deepseek_v4_tail_rope_bf16_kernel",
@@ -9650,6 +9652,252 @@ pub(crate) mod dsa_registration_tests {
     }
 
     #[test]
+    fn deepseek_v4_hc_tiled_matches_serial_bit_exact() {
+        use crate::weights::marlin::f32_to_bf16;
+
+        let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let device = store.device.clone();
+        let serial_reduce = device
+            .get_func(MODULE_NAME, "deepseek_v4_hc_reduce_kernel")
+            .expect("serial HC reduce kernel");
+        let tiled_reduce = device
+            .get_func(MODULE_NAME, "deepseek_v4_hc_reduce_tiled_kernel")
+            .expect("tiled HC reduce kernel");
+        let serial_post = device
+            .get_func(MODULE_NAME, "deepseek_v4_hc_post_kernel")
+            .expect("serial HC post kernel");
+        let tiled_post = device
+            .get_func(MODULE_NAME, "deepseek_v4_hc_post_tiled_kernel")
+            .expect("tiled HC post kernel");
+
+        for (hidden_size, hc_mult) in [(4096usize, 4usize), (37, 3)] {
+            let state = device
+                .htod_copy(
+                    (0..hidden_size * hc_mult)
+                        .map(|index| f32_to_bf16((index as f32 * 0.017).sin() * 0.25))
+                        .collect::<Vec<_>>(),
+                )
+                .expect("HC state H2D");
+            let sublayer = device
+                .htod_copy(
+                    (0..hidden_size)
+                        .map(|index| f32_to_bf16((index as f32 * 0.031).cos() * 0.125))
+                        .collect::<Vec<_>>(),
+                )
+                .expect("HC sublayer H2D");
+            let pre = device
+                .htod_copy(
+                    (0..hc_mult)
+                        .map(|index| 0.2 + index as f32 * 0.07)
+                        .collect::<Vec<_>>(),
+                )
+                .expect("HC pre H2D");
+            let post = device
+                .htod_copy(
+                    (0..hc_mult)
+                        .map(|index| 0.15 + index as f32 * 0.05)
+                        .collect::<Vec<_>>(),
+                )
+                .expect("HC post H2D");
+            let comb = device
+                .htod_copy(
+                    (0..hc_mult * hc_mult)
+                        .map(|index| 0.025 + index as f32 * 0.003)
+                        .collect::<Vec<_>>(),
+                )
+                .expect("HC comb H2D");
+            let serial_reduce_out = device
+                .alloc_zeros::<u16>(hidden_size)
+                .expect("serial HC reduce output");
+            let tiled_reduce_out = device
+                .alloc_zeros::<u16>(hidden_size)
+                .expect("tiled HC reduce output");
+            let serial_post_out = device
+                .alloc_zeros::<u16>(hidden_size * hc_mult)
+                .expect("serial HC post output");
+            let tiled_post_out = device
+                .alloc_zeros::<u16>(hidden_size * hc_mult)
+                .expect("tiled HC post output");
+            let serial_threads = u32::try_from(hidden_size.min(1024).max(32)).unwrap();
+            let tiled_reduce_config = GpuDecodeStore::deepseek_v4_hc_tiled_launch_config(
+                &tiled_reduce,
+                hidden_size,
+                "test HC reduce",
+            )
+            .expect("tiled HC reduce config");
+            let tiled_post_config = GpuDecodeStore::deepseek_v4_hc_tiled_launch_config(
+                &tiled_post,
+                hidden_size,
+                "test HC post",
+            )
+            .expect("tiled HC post config");
+            let hidden_i32 = i32::try_from(hidden_size).unwrap();
+            let mult_i32 = i32::try_from(hc_mult).unwrap();
+            unsafe {
+                serial_reduce
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (serial_threads, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            *serial_reduce_out.device_ptr(),
+                            *state.device_ptr(),
+                            *pre.device_ptr(),
+                            hidden_i32,
+                            mult_i32,
+                        ),
+                    )
+                    .expect("serial HC reduce");
+                tiled_reduce
+                    .clone()
+                    .launch(
+                        tiled_reduce_config,
+                        (
+                            *tiled_reduce_out.device_ptr(),
+                            *state.device_ptr(),
+                            *pre.device_ptr(),
+                            hidden_i32,
+                            mult_i32,
+                        ),
+                    )
+                    .expect("tiled HC reduce");
+                serial_post
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (serial_threads, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            *serial_post_out.device_ptr(),
+                            *sublayer.device_ptr(),
+                            *state.device_ptr(),
+                            *post.device_ptr(),
+                            *comb.device_ptr(),
+                            hidden_i32,
+                            mult_i32,
+                        ),
+                    )
+                    .expect("serial HC post");
+                tiled_post
+                    .clone()
+                    .launch(
+                        tiled_post_config,
+                        (
+                            *tiled_post_out.device_ptr(),
+                            *sublayer.device_ptr(),
+                            *state.device_ptr(),
+                            *post.device_ptr(),
+                            *comb.device_ptr(),
+                            hidden_i32,
+                            mult_i32,
+                        ),
+                    )
+                    .expect("tiled HC post");
+            }
+            device.synchronize().expect("HC tiled comparison sync");
+            assert_eq!(
+                device.dtoh_sync_copy(&serial_reduce_out).unwrap(),
+                device.dtoh_sync_copy(&tiled_reduce_out).unwrap(),
+                "HC reduction changed at hidden_size={hidden_size} hc_mult={hc_mult}",
+            );
+            assert_eq!(
+                device.dtoh_sync_copy(&serial_post_out).unwrap(),
+                device.dtoh_sync_copy(&tiled_post_out).unwrap(),
+                "HC post changed at hidden_size={hidden_size} hc_mult={hc_mult}",
+            );
+
+            if hidden_size == 4096 {
+                let iterations = 1000usize;
+                let time_post = |tiled: bool| -> f64 {
+                    device.synchronize().expect("HC post pre-timing sync");
+                    let start = create_decode_timing_event().expect("HC post start event");
+                    let end = create_decode_timing_event().expect("HC post end event");
+                    let stream = *device.cu_stream();
+                    assert_eq!(
+                        unsafe { cuda_sys::lib().cuEventRecord(start.0, stream) },
+                        cuda_sys::CUresult::CUDA_SUCCESS,
+                    );
+                    for _ in 0..iterations {
+                        unsafe {
+                            if tiled {
+                                tiled_post
+                                    .clone()
+                                    .launch(
+                                        tiled_post_config,
+                                        (
+                                            *tiled_post_out.device_ptr(),
+                                            *sublayer.device_ptr(),
+                                            *state.device_ptr(),
+                                            *post.device_ptr(),
+                                            *comb.device_ptr(),
+                                            hidden_i32,
+                                            mult_i32,
+                                        ),
+                                    )
+                                    .expect("timed tiled HC post");
+                            } else {
+                                serial_post
+                                    .clone()
+                                    .launch(
+                                        LaunchConfig {
+                                            grid_dim: (1, 1, 1),
+                                            block_dim: (serial_threads, 1, 1),
+                                            shared_mem_bytes: 0,
+                                        },
+                                        (
+                                            *serial_post_out.device_ptr(),
+                                            *sublayer.device_ptr(),
+                                            *state.device_ptr(),
+                                            *post.device_ptr(),
+                                            *comb.device_ptr(),
+                                            hidden_i32,
+                                            mult_i32,
+                                        ),
+                                    )
+                                    .expect("timed serial HC post");
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        unsafe { cuda_sys::lib().cuEventRecord(end.0, stream) },
+                        cuda_sys::CUresult::CUDA_SUCCESS,
+                    );
+                    assert_eq!(
+                        unsafe { cuda_sys::lib().cuEventSynchronize(end.0) },
+                        cuda_sys::CUresult::CUDA_SUCCESS,
+                    );
+                    let mut elapsed_ms = 0.0f32;
+                    assert_eq!(
+                        unsafe {
+                            cuda_sys::lib().cuEventElapsedTime(&mut elapsed_ms, start.0, end.0)
+                        },
+                        cuda_sys::CUresult::CUDA_SUCCESS,
+                    );
+                    unsafe {
+                        let _ = cuda_sys::lib().cuEventDestroy_v2(start.0);
+                        let _ = cuda_sys::lib().cuEventDestroy_v2(end.0);
+                    }
+                    f64::from(elapsed_ms) / iterations as f64
+                };
+                let serial_ms = time_post(false);
+                let tiled_ms = time_post(true);
+                eprintln!(
+                    "DeepSeek-V4 HC post diagnostic hidden_size={hidden_size} hc_mult={hc_mult} tiled_block={} tiled_grid={} serial_ms={serial_ms:.6} tiled_ms={tiled_ms:.6} speedup={:.6}x",
+                    tiled_post_config.block_dim.0,
+                    tiled_post_config.grid_dim.0,
+                    serial_ms / tiled_ms,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn deepseek_v4_router_and_activation_match_shipped_equations() {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
@@ -10274,6 +10522,192 @@ pub(crate) mod dsa_registration_tests {
                 quartet_default_output, quartet_parallel_output,
                 "HQQ6 output changed across explicit stream fork/join"
             );
+
+            // Exercise the complete Candidate-21 Q-B branch on both streams:
+            // HQQ projection followed by row RMSNorm and tail RoPE. The
+            // production path uses raw driver launches for graph capture, but
+            // the exact same compiled kernels and argument contract are used.
+            let norm = device
+                .get_func(MODULE_NAME, "deepseek_v4_rmsnorm_rows_bf16_kernel")
+                .expect("DeepSeek-V4 row RMSNorm kernel");
+            let rope = device
+                .get_func(MODULE_NAME, "deepseek_v4_tail_rope_bf16_kernel")
+                .expect("DeepSeek-V4 tail RoPE kernel");
+            let rope_dim = rows.min(16) & !1usize;
+            let rope_rows = 8usize;
+            let position = device.htod_copy(vec![3i32]).expect("position H2D");
+            let cos = device
+                .htod_copy(
+                    (0..rope_rows * (rope_dim / 2))
+                        .map(|index| (index as f32 * 0.031).cos())
+                        .collect::<Vec<_>>(),
+                )
+                .expect("cos H2D");
+            let sin = device
+                .htod_copy(
+                    (0..rope_rows * (rope_dim / 2))
+                        .map(|index| (index as f32 * 0.031).sin())
+                        .collect::<Vec<_>>(),
+                )
+                .expect("sin H2D");
+            let mut serial_branch = device
+                .alloc_zeros::<u16>(rows)
+                .expect("serial Q-B branch output");
+            let mut parallel_branch = device
+                .alloc_zeros::<u16>(rows)
+                .expect("parallel Q-B branch output");
+            let branch_threads = rows.min(1024).next_power_of_two().max(32) as u32;
+            let launch_projection = |output: &mut cudarc::driver::CudaSlice<u16>,
+                                     stream: Option<&cudarc::driver::CudaStream>| {
+                let config = LaunchConfig {
+                    grid_dim: (rows.div_ceil(8) as u32, 1, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: (cols * 2) as u32,
+                };
+                unsafe {
+                    if let Some(stream) = stream {
+                        quartet
+                            .clone()
+                            .launch_on_stream(
+                                stream,
+                                config,
+                                (
+                                    &packed,
+                                    &scales,
+                                    &zeros,
+                                    &input,
+                                    output,
+                                    rows as i32,
+                                    cols as i32,
+                                    group_size as i32,
+                                    packed_stride as i32,
+                                    scale_stride as i32,
+                                    zero_stride as i32,
+                                ),
+                            )
+                            .expect("parallel Q-B projection");
+                    } else {
+                        quartet
+                            .clone()
+                            .launch(
+                                config,
+                                (
+                                    &packed,
+                                    &scales,
+                                    &zeros,
+                                    &input,
+                                    output,
+                                    rows as i32,
+                                    cols as i32,
+                                    group_size as i32,
+                                    packed_stride as i32,
+                                    scale_stride as i32,
+                                    zero_stride as i32,
+                                ),
+                            )
+                            .expect("serial Q-B projection");
+                    }
+                }
+            };
+            launch_projection(&mut serial_branch, None);
+            let serial_branch_ptr = *serial_branch.device_ptr();
+            unsafe {
+                norm.clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (branch_threads, 1, 1),
+                            shared_mem_bytes: branch_threads * 4,
+                        },
+                        (
+                            serial_branch_ptr,
+                            serial_branch_ptr,
+                            0u64,
+                            1i32,
+                            rows as i32,
+                            1.0f32,
+                            1.0e-6f32,
+                        ),
+                    )
+                    .expect("serial Q-B RMSNorm");
+                rope.clone()
+                    .launch(
+                        LaunchConfig::for_num_elems((rope_dim / 2) as u32),
+                        (
+                            serial_branch_ptr,
+                            &position,
+                            &cos,
+                            &sin,
+                            1i32,
+                            1i32,
+                            rows as i32,
+                            rope_dim as i32,
+                            rope_rows as i32,
+                            0i32,
+                        ),
+                    )
+                    .expect("serial Q-B RoPE");
+            }
+            let branch_stream = device
+                .fork_default_stream()
+                .expect("create complete Q-B branch stream");
+            branch_stream
+                .wait_for_default()
+                .expect("complete Q-B branch fork");
+            launch_projection(&mut parallel_branch, Some(&branch_stream));
+            let parallel_branch_ptr = *parallel_branch.device_ptr();
+            unsafe {
+                norm.clone()
+                    .launch_on_stream(
+                        &branch_stream,
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (branch_threads, 1, 1),
+                            shared_mem_bytes: branch_threads * 4,
+                        },
+                        (
+                            parallel_branch_ptr,
+                            parallel_branch_ptr,
+                            0u64,
+                            1i32,
+                            rows as i32,
+                            1.0f32,
+                            1.0e-6f32,
+                        ),
+                    )
+                    .expect("parallel Q-B RMSNorm");
+                rope.clone()
+                    .launch_on_stream(
+                        &branch_stream,
+                        LaunchConfig::for_num_elems((rope_dim / 2) as u32),
+                        (
+                            parallel_branch_ptr,
+                            &position,
+                            &cos,
+                            &sin,
+                            1i32,
+                            1i32,
+                            rows as i32,
+                            rope_dim as i32,
+                            rope_rows as i32,
+                            0i32,
+                        ),
+                    )
+                    .expect("parallel Q-B RoPE");
+            }
+            device
+                .wait_for(&branch_stream)
+                .expect("complete Q-B branch join");
+            device.synchronize().expect("complete Q-B branch sync");
+            assert_eq!(
+                device
+                    .dtoh_sync_copy(&serial_branch)
+                    .expect("serial Q-B branch D2H"),
+                device
+                    .dtoh_sync_copy(&parallel_branch)
+                    .expect("parallel Q-B branch D2H"),
+                "complete Q-B output changed across explicit stream fork/join",
+            );
             let mut max_threads = 0i32;
             unsafe {
                 let result = cuda_sys::lib().cuDeviceGetAttribute(
@@ -10320,7 +10754,11 @@ pub(crate) mod dsa_registration_tests {
             .expect("N32 INT4 W13 kernel");
 
         for &(k, n, group_size, k_splits) in
-            &[(512usize, 96usize, 128usize, 1usize), (512, 80, 64, 2)]
+            &[
+                (512usize, 96usize, 128usize, 1usize),
+                (512, 80, 64, 2),
+                (512, 128, 128, 1),
+            ]
         {
             let topk = 3usize;
             let packed_words = (k / 16) * (2 * n);
@@ -10381,8 +10819,18 @@ pub(crate) mod dsa_registration_tests {
             let weights = device
                 .htod_copy(vec![1.0f32; topk])
                 .expect("W13 weights H2D");
+            let inv_weight_host = if n % 64 == 0 {
+                let forward = crate::weights::marlin::generate_weight_perm_int4();
+                let mut inverse = vec![0i32; 1024];
+                for (index, source) in forward.into_iter().enumerate() {
+                    inverse[source] = index as i32;
+                }
+                inverse
+            } else {
+                (0..1024i32).collect::<Vec<_>>()
+            };
             let inv_weight_perm = device
-                .htod_copy((0..1024i32).collect::<Vec<_>>())
+                .htod_copy(inv_weight_host)
                 .expect("W13 weight permutation H2D");
             let inv_scale_perm = device
                 .htod_copy((0..64i32).collect::<Vec<_>>())
@@ -10405,7 +10853,8 @@ pub(crate) mod dsa_registration_tests {
                                 shared_mem_bytes: (k * 2
                                     + 1024 * 4
                                     + 64 * 4
-                                    + 16 * tile_width * 4) as u32,
+                                    + 16 * tile_width * 4)
+                                    as u32,
                             },
                             (
                                 &packed_ptrs,
@@ -10450,7 +10899,11 @@ pub(crate) mod dsa_registration_tests {
             .expect("N32 INT4 W2 kernel");
 
         for &(k, n, group_size) in
-            &[(512usize, 96usize, 128usize), (1024, 80, 64)]
+            &[
+                (512usize, 96usize, 128usize),
+                (1024, 80, 64),
+                (512, 128, 128),
+            ]
         {
             let topk = 3usize;
             let packed_words = (k / 16) * (2 * n);
@@ -10519,8 +10972,18 @@ pub(crate) mod dsa_registration_tests {
             let weights = device
                 .htod_copy(vec![1.0f32, 0.0, 0.75])
                 .expect("W2 weights H2D");
+            let inv_weight_host = if n % 64 == 0 {
+                let forward = crate::weights::marlin::generate_weight_perm_int4();
+                let mut inverse = vec![0i32; 1024];
+                for (index, source) in forward.into_iter().enumerate() {
+                    inverse[source] = index as i32;
+                }
+                inverse
+            } else {
+                (0..1024i32).collect::<Vec<_>>()
+            };
             let inv_weight_perm = device
-                .htod_copy((0..1024i32).collect::<Vec<_>>())
+                .htod_copy(inv_weight_host)
                 .expect("W2 weight permutation H2D");
             let inv_scale_perm = device
                 .htod_copy((0..64i32).collect::<Vec<_>>())
@@ -10548,7 +11011,8 @@ pub(crate) mod dsa_registration_tests {
                                 shared_mem_bytes: (k * 2
                                     + 1024 * 4
                                     + 64 * 4
-                                    + reduction_bytes) as u32,
+                                    + reduction_bytes)
+                                    as u32,
                             },
                             (
                                 &packed_ptrs,
@@ -14326,6 +14790,8 @@ struct CachedKernels {
     deepseek_v4_hc_prepare: cudarc::driver::CudaFunction,
     deepseek_v4_hc_reduce: cudarc::driver::CudaFunction,
     deepseek_v4_hc_post: cudarc::driver::CudaFunction,
+    deepseek_v4_hc_reduce_tiled: cudarc::driver::CudaFunction,
+    deepseek_v4_hc_post_tiled: cudarc::driver::CudaFunction,
     deepseek_v4_hc_head_prepare: cudarc::driver::CudaFunction,
     deepseek_v4_rmsnorm_rows_bf16: cudarc::driver::CudaFunction,
     deepseek_v4_tail_rope_bf16: cudarc::driver::CudaFunction,
@@ -18844,6 +19310,8 @@ pub struct GpuDecodeStore {
     deepseek_v4_parallel_wkv_stream: CudaStream,
     deepseek_v4_parallel_wkv_fork_event: CudaEvent,
     deepseek_v4_parallel_wkv_join_event: CudaEvent,
+    deepseek_v4_parallel_qb: bool,
+    deepseek_v4_hc_tiled: bool,
     /// cuBLAS handle bound to spec_stream for speculative gate GEMV.
     spec_blas_handle: CublasHandle,
     /// Raw CUfunction handles for launching topk kernels on spec_stream via cuLaunchKernel.
@@ -23222,6 +23690,14 @@ impl GpuDecodeStore {
             ))
         })?;
 
+        let deepseek_v4_parallel_wkv = env_truthy("KRASIS_DECODE_V4_PARALLEL_WKV");
+        let deepseek_v4_parallel_qb = env_truthy("KRASIS_DECODE_V4_PARALLEL_QB");
+        let deepseek_v4_hc_tiled = env_truthy("KRASIS_DECODE_V4_HC_TILED");
+        if deepseek_v4_parallel_qb && !deepseek_v4_parallel_wkv {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "KRASIS_DECODE_V4_PARALLEL_QB=1 requires KRASIS_DECODE_V4_PARALLEL_WKV=1",
+            ));
+        }
         let compute_stream = unsafe {
             let mut stream: cuda_sys::CUstream = std::ptr::null_mut();
             let err = cuda_sys::lib().cuStreamCreate(
@@ -23286,7 +23762,7 @@ impl GpuDecodeStore {
             deepseek_v4_parallel_wkv_stream,
             deepseek_v4_parallel_wkv_fork_event,
             deepseek_v4_parallel_wkv_join_event,
-        ) = if env_truthy("KRASIS_DECODE_V4_PARALLEL_WKV") {
+        ) = if deepseek_v4_parallel_wkv {
             unsafe {
                 let mut stream: cuda_sys::CUstream = std::ptr::null_mut();
                 let create_stream = cuda_sys::lib().cuStreamCreate(
@@ -23505,6 +23981,8 @@ impl GpuDecodeStore {
             deepseek_v4_parallel_wkv_join_event: CudaEvent(
                 deepseek_v4_parallel_wkv_join_event,
             ),
+            deepseek_v4_parallel_qb,
+            deepseek_v4_hc_tiled,
             spec_blas_handle: CublasHandle(spec_blas_handle),
             raw_sigmoid_topk: CudaFunc(std::ptr::null_mut()),
             raw_softmax_topk: CudaFunc(std::ptr::null_mut()),
@@ -25133,6 +25611,8 @@ impl GpuDecodeStore {
                 deepseek_v4_hc_prepare: get("deepseek_v4_hc_prepare_kernel")?,
                 deepseek_v4_hc_reduce: get("deepseek_v4_hc_reduce_kernel")?,
                 deepseek_v4_hc_post: get("deepseek_v4_hc_post_kernel")?,
+                deepseek_v4_hc_reduce_tiled: get("deepseek_v4_hc_reduce_tiled_kernel")?,
+                deepseek_v4_hc_post_tiled: get("deepseek_v4_hc_post_tiled_kernel")?,
                 deepseek_v4_hc_head_prepare: get("deepseek_v4_hc_head_prepare_kernel")?,
                 deepseek_v4_rmsnorm_rows_bf16: get("deepseek_v4_rmsnorm_rows_bf16_kernel")?,
                 deepseek_v4_tail_rope_bf16: get("deepseek_v4_tail_rope_bf16_kernel")?,
@@ -36733,6 +37213,75 @@ impl GpuDecodeStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn launch_deepseek_v4_rmsnorm_rows_on_stream(
+        &self,
+        graph: &GpuDecodeGraph,
+        output_ptr: u64,
+        input_ptr: u64,
+        weight_ptr: u64,
+        rows: usize,
+        width: usize,
+        scale: f32,
+        stream: cuda_sys::CUstream,
+        label: &str,
+    ) -> Result<(), String> {
+        if output_ptr == 0
+            || input_ptr == 0
+            || rows == 0
+            || width == 0
+            || !scale.is_finite()
+            || stream.is_null()
+        {
+            return Err(format!("{} streamed row RMSNorm has an invalid contract", label));
+        }
+        let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
+        let threads = u32::try_from(width.min(1024).next_power_of_two().max(32))
+            .map_err(|_| format!("{} row RMSNorm threads exceed u32", label))?;
+        let grid_x = u32::try_from(rows)
+            .map_err(|_| format!("{} row count exceeds u32", label))?;
+        let shared_mem_bytes = threads
+            .checked_mul(std::mem::size_of::<f32>() as u32)
+            .ok_or_else(|| format!("{} row RMSNorm shared-memory overflow", label))?;
+        let mut a0 = output_ptr;
+        let mut a1 = input_ptr;
+        let mut a2 = weight_ptr;
+        let mut a3 = i32::try_from(rows)
+            .map_err(|_| format!("{} row count exceeds i32", label))?;
+        let mut a4 = i32::try_from(width)
+            .map_err(|_| format!("{} row width exceeds i32", label))?;
+        let mut a5 = scale;
+        let mut a6 = graph.eps;
+        let mut params: [*mut std::ffi::c_void; 7] = [
+            &mut a0 as *mut _ as *mut std::ffi::c_void,
+            &mut a1 as *mut _ as *mut std::ffi::c_void,
+            &mut a2 as *mut _ as *mut std::ffi::c_void,
+            &mut a3 as *mut _ as *mut std::ffi::c_void,
+            &mut a4 as *mut _ as *mut std::ffi::c_void,
+            &mut a5 as *mut _ as *mut std::ffi::c_void,
+            &mut a6 as *mut _ as *mut std::ffi::c_void,
+        ];
+        let launch = unsafe {
+            cuda_sys::lib().cuLaunchKernel(
+                extract_cu_function(&kernels.deepseek_v4_rmsnorm_rows_bf16),
+                grid_x,
+                1,
+                1,
+                threads,
+                1,
+                1,
+                shared_mem_bytes,
+                stream,
+                params.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        if launch != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("{} streamed row RMSNorm: {:?}", label, launch));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn launch_deepseek_v4_hc_prepare_for_graph(
         &self,
         graph: &GpuDecodeGraph,
@@ -36857,15 +37406,28 @@ impl GpuDecodeStore {
                 )
                 .map_err(|error| format!("{} HC mix preparation: {:?}", label, error))?;
             mark_hc(3, "deepseek-v4-hc-sinkhorn-end")?;
-            kernels
-                .deepseek_v4_hc_reduce
+            let reduce_kernel = if self.deepseek_v4_hc_tiled {
+                &kernels.deepseek_v4_hc_reduce_tiled
+            } else {
+                &kernels.deepseek_v4_hc_reduce
+            };
+            let reduce_config = if self.deepseek_v4_hc_tiled {
+                Self::deepseek_v4_hc_tiled_launch_config(
+                    reduce_kernel,
+                    graph.hidden_size,
+                    &format!("{} HC state reduction", label),
+                )?
+            } else {
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (hidden_threads, 1, 1),
+                    shared_mem_bytes: 0,
+                }
+            };
+            reduce_kernel
                 .clone()
                 .launch(
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (hidden_threads, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
+                    reduce_config,
                     (
                         hidden_out_ptr,
                         state_ptr,
@@ -36905,16 +37467,29 @@ impl GpuDecodeStore {
         let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
         let threads = u32::try_from(graph.hidden_size.min(1024).max(32))
             .map_err(|_| format!("{} HC post width exceeds u32", label))?;
+        let post_kernel = if self.deepseek_v4_hc_tiled {
+            &kernels.deepseek_v4_hc_post_tiled
+        } else {
+            &kernels.deepseek_v4_hc_post
+        };
+        let post_config = if self.deepseek_v4_hc_tiled {
+            Self::deepseek_v4_hc_tiled_launch_config(
+                post_kernel,
+                graph.hidden_size,
+                &format!("{} HC post", label),
+            )?
+        } else {
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (threads, 1, 1),
+                shared_mem_bytes: 0,
+            }
+        };
         unsafe {
-            kernels
-                .deepseek_v4_hc_post
+            post_kernel
                 .clone()
                 .launch(
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (threads, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
+                    post_config,
                     (
                         output_state_ptr,
                         sublayer_ptr,
@@ -37027,15 +37602,28 @@ impl GpuDecodeStore {
                     ),
                 )
                 .map_err(|error| format!("DeepSeek-V4 final HC weights: {:?}", error))?;
-            kernels
-                .deepseek_v4_hc_reduce
+            let reduce_kernel = if self.deepseek_v4_hc_tiled {
+                &kernels.deepseek_v4_hc_reduce_tiled
+            } else {
+                &kernels.deepseek_v4_hc_reduce
+            };
+            let reduce_config = if self.deepseek_v4_hc_tiled {
+                Self::deepseek_v4_hc_tiled_launch_config(
+                    reduce_kernel,
+                    graph.hidden_size,
+                    "DeepSeek-V4 final HC reduction",
+                )?
+            } else {
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (hidden_threads, 1, 1),
+                    shared_mem_bytes: 0,
+                }
+            };
+            reduce_kernel
                 .clone()
                 .launch(
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (hidden_threads, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
+                    reduce_config,
                     (
                         hidden_out_ptr,
                         state_ptr,
@@ -37047,6 +37635,36 @@ impl GpuDecodeStore {
                 .map_err(|error| format!("DeepSeek-V4 final HC reduction: {:?}", error))?;
         }
         Ok(())
+    }
+
+    fn deepseek_v4_hc_tiled_launch_config(
+        kernel: &cudarc::driver::CudaFunction,
+        hidden_size: usize,
+        label: &str,
+    ) -> Result<cudarc::driver::LaunchConfig, String> {
+        if hidden_size == 0 {
+            return Err(format!("{label} hidden size is zero"));
+        }
+        let (_, block_threads) = kernel
+            .occupancy_max_potential_block_size(
+                dsa_zero_dynamic_smem_for_occupancy,
+                0,
+                0,
+                None,
+            )
+            .map_err(|error| format!("query {label} launch occupancy: {error:?}"))?;
+        if block_threads < 32 || block_threads > 1024 || block_threads % 32 != 0 {
+            return Err(format!(
+                "{label} occupancy returned invalid block width {block_threads}"
+            ));
+        }
+        let hidden_u32 = u32::try_from(hidden_size)
+            .map_err(|_| format!("{label} hidden size exceeds u32"))?;
+        Ok(cudarc::driver::LaunchConfig {
+            grid_dim: (hidden_u32.div_ceil(block_threads), 1, 1),
+            block_dim: (block_threads, 1, 1),
+            shared_mem_bytes: 0,
+        })
     }
 
     fn launch_deepseek_v4_hc_replicate_for_graph(
@@ -37147,6 +37765,91 @@ impl GpuDecodeStore {
                     ),
                 )
                 .map_err(|error| format!("{} RoPE: {:?}", label, error))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_deepseek_v4_tail_rope_on_stream(
+        &self,
+        graph: &GpuDecodeGraph,
+        values_ptr: u64,
+        position_ptr: u64,
+        cos_ptr: u64,
+        sin_ptr: u64,
+        heads: usize,
+        head_dim: usize,
+        rope_dim: usize,
+        rope_rows: usize,
+        inverse: bool,
+        stream: cuda_sys::CUstream,
+        label: &str,
+    ) -> Result<(), String> {
+        let pairs = heads
+            .checked_mul(rope_dim / 2)
+            .ok_or_else(|| format!("{} streamed RoPE work overflow", label))?;
+        if values_ptr == 0
+            || position_ptr == 0
+            || cos_ptr == 0
+            || sin_ptr == 0
+            || heads == 0
+            || head_dim == 0
+            || rope_dim == 0
+            || rope_dim > head_dim
+            || rope_dim % 2 != 0
+            || rope_rows == 0
+            || stream.is_null()
+        {
+            return Err(format!("{} streamed RoPE contract mismatch", label));
+        }
+        let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
+        let pairs_u32 = u32::try_from(pairs)
+            .map_err(|_| format!("{} streamed RoPE work exceeds u32", label))?;
+        let threads = 1024u32;
+        let grid_x = pairs_u32.div_ceil(threads);
+        let mut a0 = values_ptr;
+        let mut a1 = position_ptr;
+        let mut a2 = cos_ptr;
+        let mut a3 = sin_ptr;
+        let mut a4 = 1i32;
+        let mut a5 = i32::try_from(heads)
+            .map_err(|_| format!("{} head count exceeds i32", label))?;
+        let mut a6 = i32::try_from(head_dim)
+            .map_err(|_| format!("{} head width exceeds i32", label))?;
+        let mut a7 = i32::try_from(rope_dim)
+            .map_err(|_| format!("{} RoPE width exceeds i32", label))?;
+        let mut a8 = i32::try_from(rope_rows)
+            .map_err(|_| format!("{} RoPE rows exceed i32", label))?;
+        let mut a9 = if inverse { 1i32 } else { 0i32 };
+        let mut params: [*mut std::ffi::c_void; 10] = [
+            &mut a0 as *mut _ as *mut std::ffi::c_void,
+            &mut a1 as *mut _ as *mut std::ffi::c_void,
+            &mut a2 as *mut _ as *mut std::ffi::c_void,
+            &mut a3 as *mut _ as *mut std::ffi::c_void,
+            &mut a4 as *mut _ as *mut std::ffi::c_void,
+            &mut a5 as *mut _ as *mut std::ffi::c_void,
+            &mut a6 as *mut _ as *mut std::ffi::c_void,
+            &mut a7 as *mut _ as *mut std::ffi::c_void,
+            &mut a8 as *mut _ as *mut std::ffi::c_void,
+            &mut a9 as *mut _ as *mut std::ffi::c_void,
+        ];
+        let launch = unsafe {
+            cuda_sys::lib().cuLaunchKernel(
+                extract_cu_function(&kernels.deepseek_v4_tail_rope_bf16),
+                grid_x,
+                1,
+                1,
+                threads,
+                1,
+                1,
+                0,
+                stream,
+                params.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        if launch != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("{} streamed RoPE: {:?}", label, launch));
         }
         Ok(())
     }
@@ -37791,6 +38494,7 @@ impl GpuDecodeStore {
         mark_prefix(6, "deepseek-v4-q-a-norm-end")?;
 
         let parallel_wkv = !self.deepseek_v4_parallel_wkv_stream.0.is_null();
+        let parallel_qb = self.deepseek_v4_parallel_qb;
         let graph_stream = *self.device.cu_stream();
         if parallel_wkv {
             let desc = v4.hqq_tensors.get("wkv").ok_or_else(|| {
@@ -37831,6 +38535,54 @@ impl GpuDecodeStore {
                 *workspace.d_kv.device_ptr(),
                 self.deepseek_v4_parallel_wkv_stream.0,
             )?;
+            if parallel_qb {
+                let q_b_desc = v4.hqq_tensors.get("wq_b").ok_or_else(|| {
+                    format!(
+                        "{} parallel Q-B requires an HQQ execution descriptor",
+                        label
+                    )
+                })?;
+                if (q_b_desc.rows, q_b_desc.cols) != (wq_b.rows, wq_b.cols) {
+                    return Err(format!(
+                        "{} parallel Q-B descriptor shape {:?} != weight shape {:?}",
+                        label,
+                        (q_b_desc.rows, q_b_desc.cols),
+                        (wq_b.rows, wq_b.cols),
+                    ));
+                }
+                self.launch_hqq_decode_gemv_bf16_on_stream(
+                    "wq_b",
+                    q_b_desc,
+                    *workspace.d_q_rank.device_ptr(),
+                    *workspace.d_query.device_ptr(),
+                    self.deepseek_v4_parallel_wkv_stream.0,
+                )?;
+                self.launch_deepseek_v4_rmsnorm_rows_on_stream(
+                    graph,
+                    *workspace.d_query.device_ptr(),
+                    *workspace.d_query.device_ptr(),
+                    0,
+                    heads,
+                    head_dim,
+                    1.0,
+                    self.deepseek_v4_parallel_wkv_stream.0,
+                    &format!("{} query", label),
+                )?;
+                self.launch_deepseek_v4_tail_rope_on_stream(
+                    graph,
+                    *workspace.d_query.device_ptr(),
+                    position_ptr,
+                    v4.rope_cos_ptr,
+                    v4.rope_sin_ptr,
+                    heads,
+                    head_dim,
+                    rope_dim,
+                    v4.rope_rows,
+                    false,
+                    self.deepseek_v4_parallel_wkv_stream.0,
+                    &format!("{} query", label),
+                )?;
+            }
         }
 
         if let Some(compressor) = v4.compressor.as_ref() {
@@ -37867,37 +38619,38 @@ impl GpuDecodeStore {
             mark_prefix(10, "deepseek-v4-index-topk-end")?;
         }
 
-        self.deepseek_v4_projection_gemv_bf16(
-            &v4,
-            "wq_b",
-            wq_b,
-            *workspace.d_q_rank.device_ptr(),
-            *workspace.d_query.device_ptr(),
-        )?;
-        self.launch_deepseek_v4_rmsnorm_rows_for_graph(
-            graph,
-            *workspace.d_query.device_ptr(),
-            *workspace.d_query.device_ptr(),
-            0,
-            heads,
-            head_dim,
-            1.0,
-            &format!("{} query", label),
-        )?;
-        self.launch_deepseek_v4_tail_rope_for_graph(
-            graph,
-            *workspace.d_query.device_ptr(),
-            position_ptr,
-            v4.rope_cos_ptr,
-            v4.rope_sin_ptr,
-            heads,
-            head_dim,
-            rope_dim,
-            v4.rope_rows,
-            false,
-            &format!("{} query", label),
-        )?;
-        mark_prefix(11, "deepseek-v4-q-b-norm-rope-end")?;
+        if !parallel_qb {
+            self.deepseek_v4_projection_gemv_bf16(
+                &v4,
+                "wq_b",
+                wq_b,
+                *workspace.d_q_rank.device_ptr(),
+                *workspace.d_query.device_ptr(),
+            )?;
+            self.launch_deepseek_v4_rmsnorm_rows_for_graph(
+                graph,
+                *workspace.d_query.device_ptr(),
+                *workspace.d_query.device_ptr(),
+                0,
+                heads,
+                head_dim,
+                1.0,
+                &format!("{} query", label),
+            )?;
+            self.launch_deepseek_v4_tail_rope_for_graph(
+                graph,
+                *workspace.d_query.device_ptr(),
+                position_ptr,
+                v4.rope_cos_ptr,
+                v4.rope_sin_ptr,
+                heads,
+                head_dim,
+                rope_dim,
+                v4.rope_rows,
+                false,
+                &format!("{} query", label),
+            )?;
+        }
 
         if parallel_wkv {
             let join_record = unsafe {
@@ -37928,6 +38681,7 @@ impl GpuDecodeStore {
                 *workspace.d_kv.device_ptr(),
             )?;
         }
+        mark_prefix(11, "deepseek-v4-q-b-norm-rope-end")?;
         self.launch_deepseek_v4_rmsnorm_rows_for_graph(
             graph,
             *workspace.d_kv.device_ptr(),
@@ -47008,8 +47762,10 @@ impl GpuDecodeStore {
                 let w13_tile_width = if w13_n32 { 32 } else { 16 };
                 let w13_threads = if w13_n32 { 512 } else { 256 };
                 let w13_n_tiles = w13_n.div_ceil(w13_tile_width);
-                let w13_smem =
-                    (expert_hs * 2 + 1024 * 4 + 64 * 4 + 16 * w13_tile_width * 4) as u32;
+                let w13_smem = (expert_hs * 2
+                    + 1024 * 4
+                    + 64 * 4
+                    + 16 * w13_tile_width * 4) as u32;
                 if graph_w13_path == GraphW13Path::TileQ {
                     Self::launch_batched_expert_stack(
                         graph,
@@ -73254,6 +74010,11 @@ impl GpuDecodeStore {
                     let mut la_state_rw_bytes = 0usize;
                     let mut gqa_input_bytes = 0usize;
                     let mut gqa_output_bytes = 0usize;
+                    let mut deepseek_hqq_projection_bytes = 0usize;
+                    let mut deepseek_grouped_output_bytes = 0usize;
+                    let mut deepseek_compressor_bytes = 0usize;
+                    let mut deepseek_indexer_bytes = 0usize;
+                    let mut deepseek_hyper_connection_bytes = 0usize;
                     for layer in &graph.layers {
                         match layer.hqq_exec.as_ref() {
                             Some(HqqExecutionDescriptor::LinearAttention(desc)) => {
@@ -73285,6 +74046,60 @@ impl GpuDecodeStore {
                             }
                             _ => {}
                         }
+                        if let Some(v4) = layer.deepseek_v4.as_ref() {
+                            deepseek_hqq_projection_bytes =
+                                deepseek_hqq_projection_bytes.saturating_add(
+                                    v4.hqq_tensors
+                                        .values()
+                                        .map(hqq_exec_storage_bytes)
+                                        .sum::<usize>(),
+                                );
+                            if let Some(weight) = graph.weights.get(v4.wo_a_wid) {
+                                deepseek_grouped_output_bytes = deepseek_grouped_output_bytes
+                                    .saturating_add(weight.stored_bytes());
+                            }
+                            if let Some(compressor) = v4.compressor.as_ref() {
+                                for wid in [
+                                    compressor.wkv_wid,
+                                    compressor.wgate_wid,
+                                    compressor.ape_wid,
+                                ] {
+                                    if let Some(weight) = graph.weights.get(wid) {
+                                        deepseek_compressor_bytes = deepseek_compressor_bytes
+                                            .saturating_add(weight.stored_bytes());
+                                    }
+                                }
+                            }
+                            if let Some(indexer) = v4.indexer.as_ref() {
+                                for wid in [
+                                    indexer.compressor.wkv_wid,
+                                    indexer.compressor.wgate_wid,
+                                    indexer.compressor.ape_wid,
+                                    indexer.wq_b_wid,
+                                    indexer.weights_proj_wid,
+                                ] {
+                                    if let Some(weight) = graph.weights.get(wid) {
+                                        deepseek_indexer_bytes = deepseek_indexer_bytes
+                                            .saturating_add(weight.stored_bytes());
+                                    }
+                                }
+                            }
+                            if let Some(hc) = v4.hyper_connection.as_ref() {
+                                for wid in [hc.attn_fn_wid, hc.ffn_fn_wid] {
+                                    if let Some(weight) = graph.weights.get(wid) {
+                                        deepseek_hyper_connection_bytes =
+                                            deepseek_hyper_connection_bytes
+                                                .saturating_add(weight.stored_bytes());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(head) = graph.deepseek_v4_head.as_ref() {
+                        if let Some(weight) = graph.weights.get(head.fn_wid) {
+                            deepseek_hyper_connection_bytes = deepseek_hyper_connection_bytes
+                                .saturating_add(weight.stored_bytes());
+                        }
                     }
                     let lm_head_bytes = graph
                         .weights
@@ -73311,8 +74126,19 @@ impl GpuDecodeStore {
                         gqa_output_bytes as f64 / 1_000_000.0,
                         lm_head_bytes as f64 / 1_000_000.0,
                     );
+                    eprintln!(
+                        "  \x1b[36m│\x1b[0m    V4 HQQ proj:{:7.1} MB grouped O:{:7.1} MB \x1b[36m│\x1b[0m",
+                        deepseek_hqq_projection_bytes as f64 / 1_000_000.0,
+                        deepseek_grouped_output_bytes as f64 / 1_000_000.0,
+                    );
+                    eprintln!(
+                        "  \x1b[36m│\x1b[0m    V4 compressor:{:6.1} MB indexer:{:7.1} MB HC:{:5.1} MB \x1b[36m│\x1b[0m",
+                        deepseek_compressor_bytes as f64 / 1_000_000.0,
+                        deepseek_indexer_bytes as f64 / 1_000_000.0,
+                        deepseek_hyper_connection_bytes as f64 / 1_000_000.0,
+                    );
                     log::info!(
-                        "DECODE GRAPH MANDATORY BYTES routed_w13={} routed_w2={} shared_expert={} router={} la_input={} la_output={} la_state_read_write={} gqa_input={} gqa_output={} lm_head={}",
+                        "DECODE GRAPH MANDATORY BYTES routed_w13={} routed_w2={} shared_expert={} router={} la_input={} la_output={} la_state_read_write={} gqa_input={} gqa_output={} deepseek_hqq_projection={} deepseek_grouped_output={} deepseek_compressor={} deepseek_indexer={} deepseek_hyper_connection={} lm_head={}",
                         routed_w13_bytes,
                         routed_w2_bytes,
                         shared_expert_bytes,
@@ -73322,6 +74148,11 @@ impl GpuDecodeStore {
                         la_state_rw_bytes,
                         gqa_input_bytes,
                         gqa_output_bytes,
+                        deepseek_hqq_projection_bytes,
+                        deepseek_grouped_output_bytes,
+                        deepseek_compressor_bytes,
+                        deepseek_indexer_bytes,
+                        deepseek_hyper_connection_bytes,
                         lm_head_bytes,
                     );
                 }
