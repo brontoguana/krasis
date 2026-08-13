@@ -281,7 +281,8 @@ extern "C" __global__ void deepseek_v4_index_scores_decode_kernel(
     const int* __restrict__ compressed_count,
     int score_capacity,
     int num_heads,
-    int head_dim)
+    int head_dim,
+    int clear_inactive_tail)
 {
     if (compressed_count == nullptr || score_capacity <= 0 || num_heads <= 0 ||
         head_dim <= 0 || (blockDim.x & 31) != 0) return;
@@ -323,9 +324,11 @@ extern "C" __global__ void deepseek_v4_index_scores_decode_kernel(
         }
         __syncthreads();
     }
-    for (int token = context + (int)blockIdx.x; token < score_capacity;
-         token += (int)gridDim.x) {
-        output[token] = -INFINITY;
+    if (clear_inactive_tail) {
+        for (int token = context + (int)blockIdx.x; token < score_capacity;
+             token += (int)gridDim.x) {
+            output[token] = -INFINITY;
+        }
     }
 }
 
@@ -343,7 +346,8 @@ extern "C" __global__ void deepseek_v4_index_scores_native_decode_kernel(
     int score_capacity,
     int num_heads,
     int head_dim,
-    int block_size)
+    int block_size,
+    int clear_inactive_tail)
 {
     if (compressed_count == nullptr || key_codes == nullptr ||
         key_scale_exponents == nullptr || score_capacity <= 0 || num_heads <= 0 ||
@@ -394,9 +398,11 @@ extern "C" __global__ void deepseek_v4_index_scores_native_decode_kernel(
         }
         __syncthreads();
     }
-    for (int token = context + (int)blockIdx.x; token < score_capacity;
-         token += (int)gridDim.x) {
-        output[token] = -INFINITY;
+    if (clear_inactive_tail) {
+        for (int token = context + (int)blockIdx.x; token < score_capacity;
+             token += (int)gridDim.x) {
+            output[token] = -INFINITY;
+        }
     }
 }
 

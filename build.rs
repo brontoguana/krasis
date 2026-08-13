@@ -375,13 +375,13 @@ fn compile_cuda_kernels() {
             for line in String::from_utf8_lossy(&output.stderr).lines() {
                 println!("cargo:warning=nvcc decode: {line}");
             }
-            println!(
-                "cargo:warning=nvcc failed with status {} — GPU decode kernels disabled",
+            panic!(
+                "nvcc failed to compile required GPU decode kernels with status {}",
                 output.status
             );
         }
         Err(e) => {
-            println!("cargo:warning=nvcc execution error: {e} — GPU decode kernels disabled");
+            panic!("failed to execute nvcc for required GPU decode kernels: {e}");
         }
     }
 }

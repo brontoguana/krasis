@@ -984,3 +984,61 @@ extern "C" __global__ void deepseek_v4_sparse_output_selected_cached_exp_kernel(
         output_row[dim] = dsv4_attn_f32_to_bf16(accumulator / denominator);
     }
 }
+
+// Convert sparse attention scores into normalized BF16 probabilities for a
+// following tensor-core value GEMM. The attention sink contributes to the
+// denominator exactly as in the established sparse-output kernel, but has no
+// value row and therefore is not written to the probability matrix.
+extern "C" __global__ void deepseek_v4_sparse_softmax_bf16_kernel(
+    __nv_bfloat16* __restrict__ probabilities,
+    const float* __restrict__ scores,
+    const float* __restrict__ attention_sink,
+    int tokens,
+    int heads,
+    int topk)
+{
+    int head = (int)blockIdx.x;
+    int token = (int)blockIdx.y;
+    if (head >= heads || token >= tokens || probabilities == nullptr ||
+        scores == nullptr || attention_sink == nullptr || topk <= 0) return;
+    const float* score_row = scores + ((int64_t)token * heads + head) * topk;
+    __nv_bfloat16* probability_row =
+        probabilities + ((int64_t)token * heads + head) * topk;
+    extern __shared__ float reduction[];
+    float local_max = threadIdx.x == 0 ? attention_sink[head] : -INFINITY;
+    for (int selected = (int)threadIdx.x; selected < topk;
+         selected += (int)blockDim.x) {
+        local_max = fmaxf(local_max, score_row[selected]);
+    }
+    reduction[threadIdx.x] = local_max;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if ((int)threadIdx.x < stride) reduction[threadIdx.x] =
+            fmaxf(reduction[threadIdx.x], reduction[threadIdx.x + stride]);
+        __syncthreads();
+    }
+    float row_max = reduction[0];
+    float local_sum = threadIdx.x == 0
+        ? expf(attention_sink[head] - row_max)
+        : 0.0f;
+    for (int selected = (int)threadIdx.x; selected < topk;
+         selected += (int)blockDim.x) {
+        float value = score_row[selected];
+        local_sum += isfinite(value) ? expf(value - row_max) : 0.0f;
+    }
+    reduction[threadIdx.x] = local_sum;
+    __syncthreads();
+    for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {
+        if ((int)threadIdx.x < stride) reduction[threadIdx.x] += reduction[threadIdx.x + stride];
+        __syncthreads();
+    }
+    float inverse_denominator = 1.0f / reduction[0];
+    for (int selected = (int)threadIdx.x; selected < topk;
+         selected += (int)blockDim.x) {
+        float value = score_row[selected];
+        float probability = isfinite(value)
+            ? expf(value - row_max) * inverse_denominator
+            : 0.0f;
+        probability_row[selected] = dsv4_attn_f32_to_bf16(probability);
+    }
+}

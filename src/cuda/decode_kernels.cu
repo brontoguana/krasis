@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include <cub/block/block_radix_sort.cuh>
 #include <limits.h>
 #include "deepseek_v4_hc.cuh"
 #include "deepseek_v4_attention.cuh"
@@ -2376,6 +2377,97 @@ extern "C" __global__ void dsa_topk_sort_chunks_g(
     }
 }
 
+// Graph-addressable radix base sort for DeepSeek Native learned-index decode.
+// The fixed 1,024-item capacity is an execution bound. The dispatcher validates
+// the runtime plan against it, while every replay derives its live context and
+// active run count from d_seq_len just like the established bitonic hierarchy.
+static constexpr int DSA_TOPK_RADIX_THREADS = 256;
+static constexpr int DSA_TOPK_RADIX_ITEMS_PER_THREAD = 4;
+static constexpr int DSA_TOPK_RADIX_CAPACITY =
+    DSA_TOPK_RADIX_THREADS * DSA_TOPK_RADIX_ITEMS_PER_THREAD;
+
+__device__ __forceinline__ uint32_t dsa_topk_ordered_score_bits(float score) {
+    if (score == 0.0f) score = 0.0f;
+    uint32_t bits = __float_as_uint(score);
+    return (bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u);
+}
+
+__device__ __forceinline__ float dsa_topk_score_from_ordered_bits(uint32_t ordered) {
+    uint32_t bits = (ordered & 0x80000000u)
+        ? (ordered ^ 0x80000000u)
+        : ~ordered;
+    return __uint_as_float(bits);
+}
+
+__device__ __forceinline__ uint64_t dsa_topk_radix_key(float score, int index) {
+    uint32_t ordered_score = dsa_topk_ordered_score_bits(score);
+    uint32_t ordered_index = 0xffffffffu - static_cast<uint32_t>(index);
+    return (static_cast<uint64_t>(ordered_score) << 32) | ordered_index;
+}
+
+extern "C" __global__ void dsa_topk_radix_sort_chunks_g(
+    const float* __restrict__ input_scores,
+    float* __restrict__ output_scores,
+    int* __restrict__ output_indices,
+    int* __restrict__ final_indices,
+    const int* __restrict__ d_seq_len,
+    int score_capacity,
+    int topk,
+    int sort_width
+) {
+    if (input_scores == nullptr || output_scores == nullptr ||
+        output_indices == nullptr || final_indices == nullptr ||
+        d_seq_len == nullptr || score_capacity <= 0 || topk <= 0 ||
+        topk > DSA_TOPK_RADIX_CAPACITY || sort_width < topk ||
+        sort_width > DSA_TOPK_RADIX_CAPACITY ||
+        blockDim.x != DSA_TOPK_RADIX_THREADS) {
+        return;
+    }
+    int context = min(max(*d_seq_len, 0), score_capacity);
+    int padded_topk = 1;
+    while (padded_topk < topk) padded_topk <<= 1;
+    int live_sort_width = context <= topk ? padded_topk : sort_width;
+    int active_runs = max((context + live_sort_width - 1) / live_sort_width, 1);
+    int run = blockIdx.x;
+    if (run >= active_runs) return;
+
+    using BlockSort = cub::BlockRadixSort<
+        uint64_t,
+        DSA_TOPK_RADIX_THREADS,
+        DSA_TOPK_RADIX_ITEMS_PER_THREAD>;
+    __shared__ typename BlockSort::TempStorage sort_storage;
+    uint64_t keys[DSA_TOPK_RADIX_ITEMS_PER_THREAD];
+    int input_base = run * live_sort_width;
+#pragma unroll
+    for (int item = 0; item < DSA_TOPK_RADIX_ITEMS_PER_THREAD; ++item) {
+        int within_run = threadIdx.x * DSA_TOPK_RADIX_ITEMS_PER_THREAD + item;
+        int token = input_base + within_run;
+        float score = within_run < live_sort_width && token < context
+            ? input_scores[token]
+            : -INFINITY;
+        int index = within_run < live_sort_width && token < context
+            ? token
+            : INT_MAX;
+        keys[item] = dsa_topk_radix_key(score, index);
+    }
+    BlockSort(sort_storage).SortDescending(keys);
+
+#pragma unroll
+    for (int item = 0; item < DSA_TOPK_RADIX_ITEMS_PER_THREAD; ++item) {
+        int output_item = threadIdx.x * DSA_TOPK_RADIX_ITEMS_PER_THREAD + item;
+        if (output_item >= topk) continue;
+        uint64_t key = keys[item];
+        float score = dsa_topk_score_from_ordered_bits(
+            static_cast<uint32_t>(key >> 32));
+        int index = static_cast<int>(
+            0xffffffffu - static_cast<uint32_t>(key));
+        int output = run * topk + output_item;
+        output_scores[output] = score;
+        output_indices[output] = index;
+        if (active_runs == 1) final_indices[output_item] = index;
+    }
+}
+
 extern "C" __global__ void dsa_topk_merge_runs(
     const float* __restrict__ input_scores,
     const int* __restrict__ input_indices,
@@ -2470,6 +2562,100 @@ extern "C" __global__ void dsa_topk_merge_runs_g(
         if (output_runs == 1) {
             final_indices[item] = shared_indices[item];
         }
+    }
+}
+
+// Graph-addressable deterministic linear merge for the radix base runs. Each
+// rank uses merge-path partitioning under the exact score/index comparator.
+extern "C" __global__ void dsa_topk_linear_merge_runs_g(
+    const float* __restrict__ input_scores,
+    const int* __restrict__ input_indices,
+    float* __restrict__ output_scores,
+    int* __restrict__ output_indices,
+    int* __restrict__ final_indices,
+    const int* __restrict__ d_seq_len,
+    int score_capacity,
+    int topk,
+    int sort_width,
+    int merge_pass
+) {
+    if (input_scores == nullptr || input_indices == nullptr ||
+        output_scores == nullptr || output_indices == nullptr ||
+        final_indices == nullptr || d_seq_len == nullptr ||
+        score_capacity <= 0 || topk <= 0 || sort_width < 2 * topk ||
+        merge_pass < 0) {
+        return;
+    }
+    int context = min(max(*d_seq_len, 0), score_capacity);
+    int padded_topk = 1;
+    while (padded_topk < topk) padded_topk <<= 1;
+    int base_sort_width = context <= topk ? padded_topk : sort_width;
+    int input_runs = max((context + base_sort_width - 1) / base_sort_width, 1);
+    for (int pass = 0; pass < merge_pass; ++pass) {
+        input_runs = (input_runs + 1) / 2;
+    }
+    if (input_runs <= 1) return;
+    int output_runs = (input_runs + 1) / 2;
+    int output_run = blockIdx.x;
+    if (output_run >= output_runs) return;
+
+    int first_run = output_run * 2;
+    int second_run = first_run + 1;
+    int first_count = topk;
+    int second_count = second_run < input_runs ? topk : 0;
+    const float* first_scores = input_scores + first_run * topk;
+    const int* first_indices = input_indices + first_run * topk;
+    const float* second_scores = input_scores + second_run * topk;
+    const int* second_indices = input_indices + second_run * topk;
+    int output_base = output_run * topk;
+
+    for (int rank = threadIdx.x; rank < topk; rank += blockDim.x) {
+        int low = max(0, rank - second_count);
+        int high = min(rank, first_count);
+        int first_take = low;
+        while (low <= high) {
+            int candidate_first = (low + high) / 2;
+            int candidate_second = rank - candidate_first;
+            bool first_too_large = candidate_first > 0 &&
+                candidate_second < second_count &&
+                dsa_topk_precedes(
+                    second_scores[candidate_second],
+                    second_indices[candidate_second],
+                    first_scores[candidate_first - 1],
+                    first_indices[candidate_first - 1]);
+            bool first_too_small = candidate_second > 0 &&
+                candidate_first < first_count &&
+                dsa_topk_precedes(
+                    first_scores[candidate_first],
+                    first_indices[candidate_first],
+                    second_scores[candidate_second - 1],
+                    second_indices[candidate_second - 1]);
+            if (first_too_large) {
+                high = candidate_first - 1;
+            } else if (first_too_small) {
+                low = candidate_first + 1;
+            } else {
+                first_take = candidate_first;
+                break;
+            }
+        }
+        int second_take = rank - first_take;
+        bool choose_first = first_take < first_count &&
+            (second_take >= second_count ||
+             dsa_topk_precedes(
+                 first_scores[first_take],
+                 first_indices[first_take],
+                 second_scores[second_take],
+                 second_indices[second_take]));
+        float score = choose_first
+            ? first_scores[first_take]
+            : second_scores[second_take];
+        int index = choose_first
+            ? first_indices[first_take]
+            : second_indices[second_take];
+        output_scores[output_base + rank] = score;
+        output_indices[output_base + rank] = index;
+        if (output_runs == 1) final_indices[rank] = index;
     }
 }
 
@@ -6131,6 +6317,132 @@ extern "C" __global__ void marlin_gemv_int4_v2_batched(
     }
 }
 
+// Wider output tile for the same Marlin INT4 batched GEMV equation.  One warp
+// owns 32 adjacent output columns for one of the same 16 K slices, improving
+// packed-weight coalescing and halving repeated block setup.  K-slice
+// boundaries and the ordered 0..15 reduction are unchanged.
+extern "C" __global__ void marlin_gemv_int4_v2_batched_n32(
+    const unsigned long long* __restrict__ packed_ptrs,
+    const unsigned long long* __restrict__ scales_ptrs,
+    const unsigned short* __restrict__ input,
+    float* __restrict__ partial_out,
+    const int* __restrict__ inv_weight_perm,
+    const int* __restrict__ inv_scale_perm,
+    int K, int N, int group_size, int k_splits,
+    const float* __restrict__ weights
+) {
+    int expert_idx = blockIdx.z;
+    if (weights[expert_idx] == 0.0f) return;
+    const unsigned int* packed = (const unsigned int*)packed_ptrs[expert_idx];
+    const unsigned short* scales = (const unsigned short*)scales_ptrs[expert_idx];
+    float* my_partial = partial_out + expert_idx * k_splits * N;
+
+    extern __shared__ char smem_raw[];
+    unsigned short* s_input = (unsigned short*)smem_raw;
+    int* s_inv_wperm = (int*)(smem_raw + K * 2);
+    int* s_inv_sperm = (int*)(smem_raw + K * 2 + 1024 * 4);
+    float* s_reduce = (float*)(smem_raw + K * 2 + 1024 * 4 + 64 * 4);
+
+    int tid = threadIdx.x;
+    for (int i = tid; i < K; i += 256) s_input[i] = input[i];
+    for (int i = tid; i < 1024; i += 256) s_inv_wperm[i] = inv_weight_perm[i];
+    if (tid < 64) s_inv_sperm[tid] = inv_scale_perm[tid];
+    __syncthreads();
+
+    int tn = tid & 31;
+    int k_slice = tid >> 5;
+    int n_tile = blockIdx.x;
+    int ksplit = blockIdx.y;
+    int n = n_tile * 32 + tn;
+    bool valid = n < N;
+
+    int k_tiles_total = K >> 4;
+    int out_cols = N << 1;
+    int tiles_per_split = k_tiles_total / k_splits;
+    int split_start = ksplit * tiles_per_split;
+    int split_end = (ksplit == k_splits - 1)
+        ? k_tiles_total : split_start + tiles_per_split;
+    int split_tiles = split_end - split_start;
+    int tiles_per_slice = split_tiles / 16;
+    int kt_start = split_start + k_slice * tiles_per_slice;
+    int kt_end = (k_slice == 15) ? split_end : kt_start + tiles_per_slice;
+
+    int marlin_n_tile = n >> 4;
+    int marlin_tn = n & 15;
+    int tile_base = (marlin_n_tile << 8) + marlin_tn;
+    int perm_u32_col[16];
+    int perm_shift[16];
+    #pragma unroll
+    for (int tk = 0; tk < 16; tk++) {
+        int tile_pos = tile_base + (tk << 4);
+        int chunk = tile_pos >> 10;
+        int local_idx = tile_pos & 1023;
+        int perm_pos = (chunk << 10) + s_inv_wperm[local_idx];
+        perm_u32_col[tk] = perm_pos >> 3;
+        perm_shift[tk] = (perm_pos & 7) << 2;
+    }
+
+    float acc = 0.0f;
+    int cur_scale_group = -1;
+    float cached_scale = 0.0f;
+    for (int kt = kt_start; valid && kt < kt_end; kt++) {
+        int k_base = kt << 4;
+        int row_base = kt * out_cols;
+        int sg_start = k_base / group_size;
+        int sg_end = (k_base + 15) / group_size;
+        if (sg_start != cur_scale_group) {
+            cur_scale_group = sg_start;
+            int scale_flat = sg_start * N + n;
+            int schunk = scale_flat >> 6;
+            int slocal = scale_flat & 63;
+            int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+            unsigned short scale_bits = scales[sperm_pos];
+            cached_scale = __bfloat162float(
+                *reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+        }
+        if (sg_start == sg_end) {
+            #pragma unroll
+            for (int tk = 0; tk < 16; tk++) {
+                unsigned int word = packed[row_base + perm_u32_col[tk]];
+                int raw = (word >> perm_shift[tk]) & 0xF;
+                float x = __bfloat162float(
+                    *reinterpret_cast<const __nv_bfloat16*>(&s_input[k_base + tk]));
+                acc += (float)(raw - 8) * cached_scale * x;
+            }
+        } else {
+            #pragma unroll
+            for (int tk = 0; tk < 16; tk++) {
+                int k = k_base + tk;
+                int sg = k / group_size;
+                if (sg != cur_scale_group) {
+                    cur_scale_group = sg;
+                    int scale_flat = sg * N + n;
+                    int schunk = scale_flat >> 6;
+                    int slocal = scale_flat & 63;
+                    int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+                    unsigned short scale_bits = scales[sperm_pos];
+                    cached_scale = __bfloat162float(
+                        *reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+                }
+                unsigned int word = packed[row_base + perm_u32_col[tk]];
+                int raw = (word >> perm_shift[tk]) & 0xF;
+                float x = __bfloat162float(
+                    *reinterpret_cast<const __nv_bfloat16*>(&s_input[k]));
+                acc += (float)(raw - 8) * cached_scale * x;
+            }
+        }
+    }
+
+    s_reduce[k_slice * 32 + tn] = acc;
+    __syncthreads();
+    if (k_slice == 0 && valid) {
+        float sum = 0.0f;
+        #pragma unroll
+        for (int ks = 0; ks < 16; ks++) sum += s_reduce[ks * 32 + tn];
+        my_partial[ksplit * N + n] = sum;
+    }
+}
+
 // INT4 batched GEMV variant for the graph hot path when k_splits == 1.
 // It preserves the same accumulation order as marlin_gemv_int4_v2_batched
 // and reduce_ksplits_bf16_batched, but writes the final BF16 output directly.
@@ -6533,6 +6845,147 @@ extern "C" __global__ void fused_silu_w2_batched(
 
     if (k_slice == 0) {
         __nv_bfloat16 result = __float2bfloat16(acc);
+        out[n] = *reinterpret_cast<unsigned short*>(&result);
+    }
+}
+
+// Wider-output version of fused_silu_w2_batched for INT4 Marlin weights.
+// Each block owns 32 outputs instead of 16, halving the number of times the
+// same per-expert SwiGLU activation is reconstructed.  The 16 K-slice partials
+// are reduced with the exact same binary tree as the original 16-lane shuffle.
+extern "C" __global__ void fused_silu_w2_batched_n32(
+    const unsigned long long* __restrict__ w2_packed_ptrs,
+    const unsigned long long* __restrict__ w2_scales_ptrs,
+    const unsigned short* __restrict__ gate_ups,
+    unsigned short* __restrict__ expert_outs,
+    const int* __restrict__ inv_weight_perm,
+    const int* __restrict__ inv_scale_perm,
+    int K, int N, int group_size,
+    float swiglu_limit,
+    int swiglu_mode,
+    const float* __restrict__ weights
+) {
+    int expert_idx = blockIdx.z;
+    if (weights[expert_idx] == 0.0f) return;
+    const unsigned int* packed = (const unsigned int*)w2_packed_ptrs[expert_idx];
+    const unsigned short* w2_scales = (const unsigned short*)w2_scales_ptrs[expert_idx];
+    const unsigned short* gate_up = gate_ups + expert_idx * 2 * K;
+    unsigned short* out = expert_outs + expert_idx * N;
+
+    extern __shared__ char smem_raw[];
+    unsigned short* s_input = (unsigned short*)smem_raw;
+    int* s_inv_wperm = (int*)(smem_raw + K * 2);
+    int* s_inv_sperm = (int*)(smem_raw + K * 2 + 1024 * 4);
+    float* s_reduce = (float*)(smem_raw + K * 2 + 1024 * 4 + 64 * 4);
+
+    int tid = threadIdx.x;
+    for (int i = tid; i < K; i += 256) {
+        float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
+        float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
+        float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(g, silu_g, u, swiglu_limit, swiglu_mode);
+        __nv_bfloat16 val = __float2bfloat16(silu_g * u);
+        s_input[i] = *reinterpret_cast<unsigned short*>(&val);
+    }
+    for (int i = tid; i < 1024; i += 256) s_inv_wperm[i] = inv_weight_perm[i];
+    if (tid < 64) s_inv_sperm[tid] = inv_scale_perm[tid];
+    __syncthreads();
+
+    int tn = tid & 31;
+    int k_slice = tid >> 5;
+    int n = blockIdx.x * 32 + tn;
+    bool valid = n < N;
+    int k_tiles_total = K >> 4;
+    int out_cols = N << 1;
+    int tiles_per_slice = k_tiles_total >> 4;
+    int kt_start = k_slice * tiles_per_slice;
+    int kt_end = (k_slice == 15) ? k_tiles_total : kt_start + tiles_per_slice;
+
+    int marlin_n_tile = n >> 4;
+    int marlin_tn = n & 15;
+    int tile_base = (marlin_n_tile << 8) + marlin_tn;
+    int perm_u32_col[16];
+    int perm_shift[16];
+    #pragma unroll
+    for (int tk = 0; tk < 16; tk++) {
+        int tile_pos = tile_base + (tk << 4);
+        int chunk = tile_pos >> 10;
+        int local_idx = tile_pos & 1023;
+        int perm_pos = (chunk << 10) + s_inv_wperm[local_idx];
+        perm_u32_col[tk] = perm_pos >> 3;
+        perm_shift[tk] = (perm_pos & 7) << 2;
+    }
+
+    float acc = 0.0f;
+    int cur_scale_group = -1;
+    float cached_scale = 0.0f;
+    for (int kt = kt_start; valid && kt < kt_end; kt++) {
+        int k_base = kt << 4;
+        int row_base = kt * out_cols;
+        int sg_start = k_base / group_size;
+        int sg_end = (k_base + 15) / group_size;
+        if (sg_start != cur_scale_group) {
+            cur_scale_group = sg_start;
+            int scale_flat = sg_start * N + n;
+            int schunk = scale_flat >> 6;
+            int slocal = scale_flat & 63;
+            int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+            unsigned short scale_bits = w2_scales[sperm_pos];
+            cached_scale = __bfloat162float(
+                *reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+        }
+        if (sg_start == sg_end) {
+            #pragma unroll
+            for (int tk = 0; tk < 16; tk++) {
+                unsigned int word = packed[row_base + perm_u32_col[tk]];
+                int raw = (word >> perm_shift[tk]) & 0xF;
+                float x = __bfloat162float(
+                    *reinterpret_cast<const __nv_bfloat16*>(&s_input[k_base + tk]));
+                acc += (float)(raw - 8) * cached_scale * x;
+            }
+        } else {
+            #pragma unroll
+            for (int tk = 0; tk < 16; tk++) {
+                int k = k_base + tk;
+                int sg = k / group_size;
+                if (sg != cur_scale_group) {
+                    cur_scale_group = sg;
+                    int scale_flat = sg * N + n;
+                    int schunk = scale_flat >> 6;
+                    int slocal = scale_flat & 63;
+                    int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+                    unsigned short scale_bits = w2_scales[sperm_pos];
+                    cached_scale = __bfloat162float(
+                        *reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+                }
+                unsigned int word = packed[row_base + perm_u32_col[tk]];
+                int raw = (word >> perm_shift[tk]) & 0xF;
+                float x = __bfloat162float(
+                    *reinterpret_cast<const __nv_bfloat16*>(&s_input[k]));
+                acc += (float)(raw - 8) * cached_scale * x;
+            }
+        }
+    }
+
+    s_reduce[k_slice * 32 + tn] = acc;
+    __syncthreads();
+    if (k_slice == 0 && valid) {
+        // Equivalent to __shfl_down_sync(..., 8/4/2/1, 16) for lane zero.
+        float r0 = s_reduce[tn] + s_reduce[8 * 32 + tn];
+        float r1 = s_reduce[1 * 32 + tn] + s_reduce[9 * 32 + tn];
+        float r2 = s_reduce[2 * 32 + tn] + s_reduce[10 * 32 + tn];
+        float r3 = s_reduce[3 * 32 + tn] + s_reduce[11 * 32 + tn];
+        float r4 = s_reduce[4 * 32 + tn] + s_reduce[12 * 32 + tn];
+        float r5 = s_reduce[5 * 32 + tn] + s_reduce[13 * 32 + tn];
+        float r6 = s_reduce[6 * 32 + tn] + s_reduce[14 * 32 + tn];
+        float r7 = s_reduce[7 * 32 + tn] + s_reduce[15 * 32 + tn];
+        float q0 = r0 + r4;
+        float q1 = r1 + r5;
+        float q2 = r2 + r6;
+        float q3 = r3 + r7;
+        float p0 = q0 + q2;
+        float p1 = q1 + q3;
+        __nv_bfloat16 result = __float2bfloat16(p0 + p1);
         out[n] = *reinterpret_cast<unsigned short*>(&result);
     }
 }
@@ -8155,6 +8608,75 @@ extern "C" __global__ void hqq6_decode_gemv_bf16(
         acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
     }
 
+    if (lane == 0) {
+        __nv_bfloat16 result = __float2bfloat16(acc);
+        output[row] = *reinterpret_cast<unsigned short*>(&result);
+    }
+}
+
+// HQQ6 stores four consecutive values in exactly three bytes.  The scalar
+// decode kernel above reloads those same three bytes once per value.  This
+// variant assigns one packed quartet to each lane, loads it once, and consumes
+// all four values.  Runtime validation requires quartet-aligned columns and
+// groups, so no model geometry is compiled into the kernel.
+extern "C" __global__ void hqq6_decode_gemv_bf16_vec4(
+    const unsigned char* __restrict__ packed_w,
+    const float* __restrict__ scales,
+    const float* __restrict__ zeros,
+    const unsigned short* __restrict__ input,
+    unsigned short* __restrict__ output,
+    int rows,
+    int cols,
+    int group_size,
+    int packed_row_stride_bytes,
+    int scales_row_stride_bytes,
+    int zeros_row_stride_bytes
+) {
+    extern __shared__ unsigned short s_input[];
+    int tid = threadIdx.x;
+
+    for (int i = tid; i < cols; i += blockDim.x) {
+        s_input[i] = input[i];
+    }
+    __syncthreads();
+
+    int warp_id = tid >> 5;
+    int lane = tid & 31;
+    int warps_per_block = blockDim.x >> 5;
+    int row = blockIdx.x * warps_per_block + warp_id;
+    if (row >= rows) return;
+
+    const unsigned char* w_row =
+        packed_w + (long long)row * packed_row_stride_bytes;
+    const float* s_row = (const float*)((const char*)scales
+        + (long long)row * scales_row_stride_bytes);
+    const float* z_row = (const float*)((const char*)zeros
+        + (long long)row * zeros_row_stride_bytes);
+
+    float acc = 0.0f;
+    int quartets = cols >> 2;
+    for (int quartet = lane; quartet < quartets; quartet += 32) {
+        const unsigned char* tri = w_row + quartet * 3;
+        unsigned int bits = ((unsigned int)tri[0])
+            | (((unsigned int)tri[1]) << 8)
+            | (((unsigned int)tri[2]) << 16);
+        int col = quartet << 2;
+        int group = col / group_size;
+        float scale = s_row[group];
+        float zero = z_row[group];
+
+        #pragma unroll
+        for (int offset = 0; offset < 4; ++offset) {
+            int q = (bits >> (offset * 6)) & 0x3F;
+            float x = __bfloat162float(
+                *reinterpret_cast<const __nv_bfloat16*>(&s_input[col + offset]));
+            acc += ((float)q - zero) * scale * x;
+        }
+    }
+
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    }
     if (lane == 0) {
         __nv_bfloat16 result = __float2bfloat16(acc);
         output[row] = *reinterpret_cast<unsigned short*>(&result);

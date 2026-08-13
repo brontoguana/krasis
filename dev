@@ -1727,6 +1727,12 @@ do_test_kernels() {
             filter="gpu_decode::dsa_registration_tests::hqq4_warp_geometry_is_bit_exact"
         elif [[ "$1" == "hqq4_group_cache" ]]; then
             filter="gpu_decode::dsa_registration_tests::hqq4_group_cache_is_bit_exact"
+        elif [[ "$1" == "hqq6_quartet_decode" ]]; then
+            filter="gpu_decode::dsa_registration_tests::hqq6_quartet_decode_matches_scalar_within_bf16_rounding"
+        elif [[ "$1" == "int4_w13_n32" ]]; then
+            filter="gpu_decode::dsa_registration_tests::int4_w13_n32_matches_n16_bit_exact"
+        elif [[ "$1" == "int4_w2_n32" ]]; then
+            filter="gpu_decode::dsa_registration_tests::int4_w2_n32_matches_n16_bit_exact"
         elif [[ "$1" == "hqq_stage_async_copy_mode" ]]; then
             filter="gpu_decode::dsa_registration_tests::hqq_stage_async_copy_mode_is_stage_specific_and_rejects_invalid_values"
         elif [[ "$1" == "shared_w2_reduce" ]]; then
