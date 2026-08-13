@@ -33,6 +33,98 @@ Adjacent control evidence:
 [report](20260813_deepseek_v4_hqq6_native_decode_control_benchmark_report.log),
 and [runtime](20260813_deepseek_v4_hqq6_native_decode_control_krasis.log).
 
+### Attention-side selector-group ablation
+
+The first post-promotion timing-disabled ablation explicitly disabled HQQ6
+vec4/warp autotuning, Native radix top-k, parallel WKV/Q-B, and tiled HC while
+retaining the four promoted MoE-side policies. Prefill at
+1K/5K/10K/20K/35K/39,920 was
+`168.2/757.1/1,496.5/2,173.0/2,623.1/2,506.1 tok/s`; internal decode was
+`34.09/35.82/34.20 tok/s`, and HTTP was `60.33/45.78/37.45 tok/s`.
+
+This run recovered the prior control's 10K/20K prefill class while retaining
+roughly half of the promoted decode uplift, but the unusually high 5K result
+also confirms meaningful midrange run variance. It therefore narrows the next
+ablation to the attention-side group but does not by itself identify a single
+causal selector. HCS remained `6,660/11,008`; minimum free VRAM was
+`1,193 MiB`; the run exited zero with no copy failure, budget skip, CUDA/OOM
+error, or below-margin event. Evidence:
+[stdout](20260813_deepseek_v4_hqq6_native_ablate_attention_benchmark_stdout.log),
+[report](20260813_deepseek_v4_hqq6_native_ablate_attention_benchmark_report.log),
+and [runtime](20260813_deepseek_v4_hqq6_native_ablate_attention_krasis.log).
+
+An immediately adjacent promoted-default repeat produced prefill
+`171.2/761.3/1,465.4/1,816.6/2,530.6/2,497.6 tok/s`, internal decode
+`37.40/38.34/36.44 tok/s`, and HTTP `69.09/49.99/40.68 tok/s`. Thus the prior
+10K slowdown did not reproduce, while 20K remained volatile; both this repeat
+and the attention-disabled run also moved 5K from the earlier `~540 tok/s`
+class to `~760 tok/s`. Selector causality must therefore be judged from
+decode and repeated adjacent measurements, not a single prefill row. HCS was
+`6,660/11,008`, minimum free VRAM `1,189 MiB`, and the run was failure-free:
+[stdout](20260813_deepseek_v4_hqq6_native_default_repeat_benchmark_stdout.log),
+[report](20260813_deepseek_v4_hqq6_native_default_repeat_benchmark_report.log),
+and [runtime](20260813_deepseek_v4_hqq6_native_default_repeat_krasis.log).
+
+The next complementary split disabled only HQQ6 vec4 and descriptor warp
+autotuning while retaining every Native/parallel/HC and MoE policy. Prefill
+matched the immediately adjacent full-default repeat almost row-for-row:
+`168.1/756.5/1,466.2/1,817.3/2,529.2/2,496.2 tok/s`. Internal decode was
+`35.54/36.12/36.11 tok/s`, versus adjacent default
+`37.40/38.34/36.44 tok/s`; the pair therefore adds up to about 6% decode with
+no measured prefill cost and remains justified. HTTP was
+`60.80/46.01/39.13 tok/s`; minimum free VRAM was `1,189 MiB`, and the run was
+failure-free:
+[stdout](20260813_deepseek_v4_hqq6_native_ablate_hqq6_projection_benchmark_stdout.log),
+[report](20260813_deepseek_v4_hqq6_native_ablate_hqq6_projection_benchmark_report.log),
+and [runtime](20260813_deepseek_v4_hqq6_native_ablate_hqq6_projection_krasis.log).
+
+The complementary split retained HQQ6 vec4/warp and disabled Native radix
+top-k, parallel WKV/Q-B, and tiled HC. Internal decode was
+`36.44/38.30/37.04 tok/s`, statistically mixed versus the adjacent default's
+`37.40/38.34/36.44`; the four-policy group has no demonstrated timing-off
+throughput gain as a whole. Prefill was highly non-monotonic at
+`167.9/391.5/937.8/1,837.1/2,610.1/2,496.4 tok/s`, despite these being
+decode-only selectors, reinforcing that the midrange rows are affected by
+run/init variance and cannot be assigned to prefill execution. HTTP was
+`66.45/49.08/40.06 tok/s`; minimum free VRAM was `1,193 MiB`, with no failure:
+[stdout](20260813_deepseek_v4_hqq6_native_ablate_native_group_benchmark_stdout.log),
+[report](20260813_deepseek_v4_hqq6_native_ablate_native_group_benchmark_report.log),
+and [runtime](20260813_deepseek_v4_hqq6_native_ablate_native_group_krasis.log).
+
+Keeping radix top-k on while disabling parallel WKV/Q-B and tiled HC produced
+internal decode `35.64/38.31/36.79 tok/s`, nearly the same as the four-off
+group (`36.44/38.30/37.04`). Radix alone therefore has no demonstrated
+timing-off throughput value when the trio is absent. Prefill again flipped to
+the fast midrange class at `171.0/752.0/1,457.3/2,167.7/2,607.0/2,495.4`,
+which makes the unrelated run-state variance conclusive. HTTP was
+`63.97/49.14/39.72 tok/s`; minimum free VRAM was `1,193 MiB`; no failure:
+[stdout](20260813_deepseek_v4_hqq6_native_ablate_parallel_hc_benchmark_stdout.log),
+[report](20260813_deepseek_v4_hqq6_native_ablate_parallel_hc_benchmark_report.log),
+and [runtime](20260813_deepseek_v4_hqq6_native_ablate_parallel_hc_krasis.log).
+
+Finally, disabling radix alone in the otherwise complete stack improved all
+three internal decode rows to `37.98/38.86/36.77 tok/s`, versus adjacent full
+default `37.40/38.34/36.44`, and improved HTTP to
+`69.46/50.01/40.86 tok/s`. Prefill was
+`150.0/762.0/1,494.9/2,306.5/2,609.9/2,497.6 tok/s`; minimum free VRAM was
+`1,189 MiB`. This reciprocal result confirms radix adds overhead in the
+production policy interaction, so the refined default disables radix while
+retaining its explicit opt-in. Evidence:
+[stdout](20260813_deepseek_v4_hqq6_native_ablate_radix_benchmark_stdout.log),
+[report](20260813_deepseek_v4_hqq6_native_ablate_radix_benchmark_report.log),
+and [runtime](20260813_deepseek_v4_hqq6_native_ablate_radix_krasis.log).
+
+The final rebuilt, no-selector refined-default benchmark confirmed the
+nine-policy production result: prefill
+`171.3/697.7/1,464.6/2,277.0/2,620.6/2,504.5 tok/s`; internal decode
+`37.04/38.16/36.53 tok/s`; HTTP `70.30/49.37/40.27 tok/s`. Warmup completed
+in `79.8 s`, versus `105.5 s` for the adjacent ten-policy default repeat.
+HCS was `6,660/11,008`; minimum free VRAM was `1,189 MiB`; no copy failure,
+budget skip, CUDA/OOM error, or below-margin event occurred. Evidence:
+[stdout](20260813_deepseek_v4_hqq6_native_refined_default_benchmark_stdout.log),
+[report](20260813_deepseek_v4_hqq6_native_refined_default_benchmark_report.log),
+and [runtime](20260813_deepseek_v4_hqq6_native_refined_default_krasis.log).
+
 ## DeepSeek shared-HQQ/Native promoted defaults — 2026-08-12
 
 This timing-disabled standard benchmark used fixed HQQ6 with Native KV on the

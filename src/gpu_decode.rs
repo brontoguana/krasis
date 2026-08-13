@@ -19325,7 +19325,7 @@ impl DeepseekV4DecodePolicy {
             )?,
             index_radix_topk: resolve_bool_env(
                 "KRASIS_DECODE_V4_INDEX_RADIX_TOPK",
-                default_enabled,
+                false,
             )?,
             parallel_wkv: resolve_bool_env(
                 "KRASIS_DECODE_V4_PARALLEL_WKV",
