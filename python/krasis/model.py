@@ -9150,7 +9150,14 @@ class KrasisModel:
         device = torch.device(self.ranks[0].device)
         gpu_idx = device.index or 0
 
-        store = GpuDecodeStore(gpu_idx)
+        deepseek_v4_hqq6_native_int4 = bool(
+            self.cfg.is_deepseek_v4
+            and self.quant_cfg.attention == "hqq6"
+            and self.quant_cfg.kv_cache_format == "native"
+            and self.quant_cfg.gpu_expert_bits == 4
+            and self.quant_cfg.cpu_expert_bits == 4
+        )
+        store = GpuDecodeStore(gpu_idx, deepseek_v4_hqq6_native_int4)
         # Compute max QKV buffer size across all layer types.
         # Use dimension attributes (not weight tensors) since streaming may have
         # offloaded weights to CPU, leaving tensor attributes as None.

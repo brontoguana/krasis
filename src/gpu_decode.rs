@@ -8378,7 +8378,7 @@ pub(crate) mod dsa_registration_tests {
     #[test]
     fn softmax_topk_parallel_scores_matches_serial_bit_exact() {
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let serial = device
             .get_func(MODULE_NAME, "softmax_topk")
@@ -8521,7 +8521,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let kernel = device
             .get_func(MODULE_NAME, "fused_add_rmsnorm")
@@ -8596,7 +8596,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let kernel = device
             .get_func(MODULE_NAME, "deepseek_v4_rmsnorm_rows_bf16_kernel")
@@ -8675,7 +8675,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let reference = device
             .get_func(MODULE_NAME, "deepseek_v4_sparse_scores_kernel")
@@ -8877,7 +8877,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let reference = device
             .get_func(MODULE_NAME, "deepseek_v4_sparse_output_kernel")
@@ -9002,7 +9002,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let reference = device
             .get_func(
@@ -9144,7 +9144,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let scorer = device
             .get_func(MODULE_NAME, "deepseek_v4_index_scores_native_decode_kernel")
@@ -9538,7 +9538,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         for (groups, rows_per_group, cols_per_group) in [(8usize, 128usize, 1024usize), (3, 7, 37)]
         {
@@ -9656,7 +9656,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let serial_reduce = device
             .get_func(MODULE_NAME, "deepseek_v4_hc_reduce_kernel")
@@ -9902,7 +9902,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let router = device
             .get_func(MODULE_NAME, "deepseek_v4_sqrtsoftplus_topk")
@@ -10304,7 +10304,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let kernel = device
             .get_func(MODULE_NAME, "hqq4_decode_gemv_f32")
@@ -10395,7 +10395,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let scalar = device
             .get_func(MODULE_NAME, "hqq6_decode_gemv_bf16")
@@ -10744,7 +10744,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let n16 = device
             .get_func(MODULE_NAME, "marlin_gemv_int4_v2_batched")
@@ -10889,7 +10889,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let n16 = device
             .get_func(MODULE_NAME, "fused_silu_w2_batched")
@@ -11048,7 +11048,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let baseline = device
             .get_func(MODULE_NAME, "hqq4_decode_gemv_f32")
@@ -11137,7 +11137,7 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let kernel = device
             .get_func(MODULE_NAME, "reduce_ksplits_sigmoid_accum_bf16")
@@ -11207,7 +11207,7 @@ pub(crate) mod dsa_registration_tests {
     fn gpu_route_split_classifier_partitions_weights_exactly() {
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
         let mut store =
-            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let max_ept = 4usize;
         store
             .configure(4, 1, 8, 1e-6, max_ept, 4, 8, 4, 4, 4, 4)
@@ -11425,7 +11425,7 @@ pub(crate) mod dsa_registration_tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut store =
-            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         store
             .configure(8, 2, 16, 1e-6, 2, 8, 16, 4, 4, 8, 8)
             .expect("small graph");
@@ -11510,7 +11510,7 @@ pub(crate) mod dsa_registration_tests {
         );
 
         let mut source =
-            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("source CUDA decode store");
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("source CUDA decode store");
         source
             .configure(8, 2, 16, 1e-6, 2, 8, 16, 4, 4, 8, 8)
             .expect("source graph");
@@ -11561,7 +11561,7 @@ pub(crate) mod dsa_registration_tests {
         assert_eq!(copied, vec![3, 1, 2, 0]);
 
         let mut local_destination =
-            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("local destination store");
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("local destination store");
         local_destination
             .configure(8, 2, 16, 1e-6, 2, 8, 16, 4, 4, 8, 8)
             .expect("local destination graph");
@@ -11639,7 +11639,7 @@ pub(crate) mod dsa_registration_tests {
 
         let gpu_ordinal = dsa_cuda_test_gpu_ordinal();
 
-        let mut store = GpuDecodeStore::new(gpu_ordinal).expect("CUDA decode store");
+        let mut store = GpuDecodeStore::new(gpu_ordinal, false).expect("CUDA decode store");
         store
             .device
             .bind_to_thread()
@@ -12049,7 +12049,7 @@ pub(crate) mod dsa_registration_tests {
         }
 
         let mut store =
-            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let selector_max_context = 1_048_576usize;
         store
             .configure(4, 1, 8, 1e-6, 2, 4, 8, 4, 4, 8, 8)
@@ -15000,6 +15000,7 @@ struct GpuDecodeGraph {
     weights: Vec<GpuWeight>,
     layers: Vec<GpuDecodeLayer>,
     deepseek_v4_head: Option<DeepseekV4HeadRegistration>,
+    deepseek_v4_decode_policy: DeepseekV4DecodePolicy,
 
     embedding_ptr: u64,
     embedding_scale: f32,
@@ -15829,7 +15830,7 @@ struct GpuDecodeGraph {
     h_wts_full: Vec<f32>,
     h_wts_hot: Vec<f32>,
 
-    // ── Marlin w13 ksplit autotune (KRASIS_MARLIN_AUTOTUNE=1). Measured at
+    // ── Marlin w13 ksplit autotune. Measured at
     //    graph-capture time on the real loaded expert shape; overrides the
     //    occupancy formula per (k, n, batch_z, is_int8). ──
     ksplit_autotune: std::collections::HashMap<(usize, usize, usize, bool), usize>,
@@ -19292,6 +19293,65 @@ fn validate_stream_probe_outcome(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DeepseekV4DecodePolicy {
+    hqq6_vec4: bool,
+    hqq6_warp_autotune: bool,
+    int4_w13_n32: bool,
+    int4_w2_n32: bool,
+    index_radix_topk: bool,
+    parallel_wkv: bool,
+    parallel_qb: bool,
+    hc_tiled: bool,
+    marlin_autotune: bool,
+    shared_w2_autotune: bool,
+}
+
+impl DeepseekV4DecodePolicy {
+    fn from_env(default_enabled: bool) -> Result<Self, String> {
+        let policy = Self {
+            hqq6_vec4: resolve_bool_env("KRASIS_DECODE_V4_HQQ6_VEC4", default_enabled)?,
+            hqq6_warp_autotune: resolve_bool_env(
+                "KRASIS_DECODE_V4_HQQ6_WARP_AUTOTUNE",
+                default_enabled,
+            )?,
+            int4_w13_n32: resolve_bool_env(
+                "KRASIS_DECODE_INT4_W13_N32",
+                default_enabled,
+            )?,
+            int4_w2_n32: resolve_bool_env(
+                "KRASIS_DECODE_INT4_W2_N32",
+                default_enabled,
+            )?,
+            index_radix_topk: resolve_bool_env(
+                "KRASIS_DECODE_V4_INDEX_RADIX_TOPK",
+                default_enabled,
+            )?,
+            parallel_wkv: resolve_bool_env(
+                "KRASIS_DECODE_V4_PARALLEL_WKV",
+                default_enabled,
+            )?,
+            parallel_qb: resolve_bool_env(
+                "KRASIS_DECODE_V4_PARALLEL_QB",
+                default_enabled,
+            )?,
+            hc_tiled: resolve_bool_env("KRASIS_DECODE_V4_HC_TILED", default_enabled)?,
+            marlin_autotune: resolve_bool_env("KRASIS_MARLIN_AUTOTUNE", default_enabled)?,
+            shared_w2_autotune: resolve_bool_env(
+                "KRASIS_SHARED_W2_AUTOTUNE",
+                default_enabled,
+            )?,
+        };
+        if policy.parallel_qb && !policy.parallel_wkv {
+            return Err(
+                "KRASIS_DECODE_V4_PARALLEL_QB requires KRASIS_DECODE_V4_PARALLEL_WKV"
+                    .to_string(),
+            );
+        }
+        Ok(policy)
+    }
+}
+
 #[pyclass]
 pub struct GpuDecodeStore {
     device: Arc<CudaDevice>,
@@ -19304,14 +19364,15 @@ pub struct GpuDecodeStore {
     /// Dedicated stream for APFL speculative routing (gate GEMV + topk).
     /// Runs independently from default stream so spec routing overlaps with expert loop.
     spec_stream: CudaStream,
-    /// Opt-in stream and dependency events used to overlap DeepSeek-V4 WKV
-    /// projection with the independent compressor/indexer/Q-B prefix.
-    /// Null when the measured candidate is disabled.
+    /// Policy-controlled stream and dependency events used to overlap
+    /// DeepSeek-V4 WKV projection with the independent compressor/indexer/Q-B
+    /// prefix. Null when the accepted policy or an explicit override disables it.
     deepseek_v4_parallel_wkv_stream: CudaStream,
     deepseek_v4_parallel_wkv_fork_event: CudaEvent,
     deepseek_v4_parallel_wkv_join_event: CudaEvent,
     deepseek_v4_parallel_qb: bool,
     deepseek_v4_hc_tiled: bool,
+    deepseek_v4_decode_policy: DeepseekV4DecodePolicy,
     /// cuBLAS handle bound to spec_stream for speculative gate GEMV.
     spec_blas_handle: CublasHandle,
     /// Raw CUfunction handles for launching topk kernels on spec_stream via cuLaunchKernel.
@@ -22589,7 +22650,7 @@ impl GpuDecodeStore {
                     hqq_expected_layout(6, "decode")?,
                     true,
                 )?;
-                if env_truthy("KRASIS_DECODE_V4_HQQ6_VEC4") {
+                if self.deepseek_v4_decode_policy.hqq6_vec4 {
                     if desc.cols % 4 != 0 || desc.group_size % 4 != 0 {
                         return Err(format!(
                             "HQQ6 quartet decode requires cols/group_size divisible by 4 for {}: cols={} group_size={}",
@@ -22824,9 +22885,7 @@ impl GpuDecodeStore {
                     tensor_name, desc.rows, desc.cols, weight.rows, weight.cols
                 ));
             }
-            if hqq_nbits_from_desc(desc)? == 6
-                && env_truthy("KRASIS_DECODE_V4_HQQ6_VEC4")
-            {
+            if hqq_nbits_from_desc(desc)? == 6 && self.deepseek_v4_decode_policy.hqq6_vec4 {
                 return self.launch_hqq6_decode_gemv_bf16_vec4(
                     tensor_name,
                     desc,
@@ -23674,8 +23733,8 @@ impl GpuDecodeStore {
     }
 
     #[new]
-    #[pyo3(signature = (device_ordinal=0))]
-    fn new(device_ordinal: usize) -> PyResult<Self> {
+    #[pyo3(signature = (device_ordinal=0, deepseek_v4_hqq6_native_int4=false))]
+    fn new(device_ordinal: usize, deepseek_v4_hqq6_native_int4: bool) -> PyResult<Self> {
         let device = CudaDevice::new(device_ordinal).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "Failed to create CUDA device {}: {:?}",
@@ -23690,14 +23749,17 @@ impl GpuDecodeStore {
             ))
         })?;
 
-        let deepseek_v4_parallel_wkv = env_truthy("KRASIS_DECODE_V4_PARALLEL_WKV");
-        let deepseek_v4_parallel_qb = env_truthy("KRASIS_DECODE_V4_PARALLEL_QB");
-        let deepseek_v4_hc_tiled = env_truthy("KRASIS_DECODE_V4_HC_TILED");
-        if deepseek_v4_parallel_qb && !deepseek_v4_parallel_wkv {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "KRASIS_DECODE_V4_PARALLEL_QB=1 requires KRASIS_DECODE_V4_PARALLEL_WKV=1",
-            ));
-        }
+        let deepseek_v4_decode_policy =
+            DeepseekV4DecodePolicy::from_env(deepseek_v4_hqq6_native_int4)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let deepseek_v4_parallel_wkv = deepseek_v4_decode_policy.parallel_wkv;
+        let deepseek_v4_parallel_qb = deepseek_v4_decode_policy.parallel_qb;
+        let deepseek_v4_hc_tiled = deepseek_v4_decode_policy.hc_tiled;
+        log::info!(
+            "DeepSeek-V4 decode policy: accepted_default={} resolved={:?}",
+            deepseek_v4_hqq6_native_int4,
+            deepseek_v4_decode_policy,
+        );
         let compute_stream = unsafe {
             let mut stream: cuda_sys::CUstream = std::ptr::null_mut();
             let err = cuda_sys::lib().cuStreamCreate(
@@ -23983,6 +24045,7 @@ impl GpuDecodeStore {
             ),
             deepseek_v4_parallel_qb,
             deepseek_v4_hc_tiled,
+            deepseek_v4_decode_policy,
             spec_blas_handle: CublasHandle(spec_blas_handle),
             raw_sigmoid_topk: CudaFunc(std::ptr::null_mut()),
             raw_softmax_topk: CudaFunc(std::ptr::null_mut()),
@@ -25014,6 +25077,7 @@ impl GpuDecodeStore {
             weights: Vec::with_capacity(num_layers * 8),
             layers: Vec::with_capacity(num_layers),
             deepseek_v4_head: None,
+            deepseek_v4_decode_policy: self.deepseek_v4_decode_policy,
             embedding_ptr: 0,
             embedding_scale: 1.0,
             final_logit_softcap: 0.0,
@@ -38274,7 +38338,7 @@ impl GpuDecodeStore {
         let native_score_cache = indexer.compressor.native_cache.as_ref();
         let occupancy_grid_enabled = env_truthy("KRASIS_DECODE_V4_INDEX_OCCUPANCY_GRID");
         let skip_inactive_tail_clear = env_truthy("KRASIS_DECODE_V4_INDEX_SKIP_TAIL_CLEAR");
-        let radix_topk_enabled = env_truthy("KRASIS_DECODE_V4_INDEX_RADIX_TOPK");
+        let radix_topk_enabled = self.deepseek_v4_decode_policy.index_radix_topk;
         if (occupancy_grid_enabled || skip_inactive_tail_clear || radix_topk_enabled)
             && native_score_cache.is_none()
         {
@@ -45572,7 +45636,7 @@ impl GpuDecodeStore {
     /// populates d_batch_upload with expert pointers. The first decode token
     /// is computed correctly during capture (real execution on step 0 provides
     /// correct routing data for the CPU-side work between captures).
-    /// Measured w13 ksplit autotune (KRASIS_MARLIN_AUTOTUNE=1).
+    /// Measured W13 k-split autotune.
     ///
     /// Runs once at graph-capture time, before any per-layer graph bakes a
     /// ksplit value in. For every distinct routed-expert shape in the model it
@@ -46143,7 +46207,7 @@ impl GpuDecodeStore {
             }
         }
 
-        if env_truthy("KRASIS_SHARED_W2_AUTOTUNE") {
+        if self.deepseek_v4_decode_policy.shared_w2_autotune {
             let mut w2_shapes: Vec<(usize, usize, bool, u64, u64, usize)> = Vec::new();
             if matches!(graph.shared_expert_bits, 4 | 8) {
                 let shared_is_int8 = graph.shared_expert_bits == 8;
@@ -46395,8 +46459,8 @@ impl GpuDecodeStore {
         if env_truthy("KRASIS_HQQ4_WARP_AUTOTUNE") && self.hqq4_decode_warps_per_block.is_empty() {
             self.autotune_hqq4_la_warps()?;
         }
-        if env_truthy("KRASIS_DECODE_V4_HQQ6_VEC4")
-            && env_truthy("KRASIS_DECODE_V4_HQQ6_WARP_AUTOTUNE")
+        if self.deepseek_v4_decode_policy.hqq6_vec4
+            && self.deepseek_v4_decode_policy.hqq6_warp_autotune
             && self.hqq6_decode_vec4_warps_per_block.is_empty()
         {
             self.autotune_deepseek_v4_hqq6_vec4_warps()?;
@@ -46481,7 +46545,7 @@ impl GpuDecodeStore {
         let num_graphs = num_moe + 1; // routing(0) + (num_moe-1) combined + final
 
         // ── Measured w13 ksplit autotune (before any graph bakes a ksplit) ──
-        if env_truthy("KRASIS_MARLIN_AUTOTUNE") && graph.ksplit_autotune.is_empty() {
+        if self.deepseek_v4_decode_policy.marlin_autotune && graph.ksplit_autotune.is_empty() {
             if let Err(e) = self.autotune_w13_ksplits(&mut graph) {
                 self.graph = Some(graph);
                 return Err(format!("ksplit autotune failed: {}", e));
@@ -47758,7 +47822,7 @@ impl GpuDecodeStore {
                 // Batched w13 GEMV v2
                 let w13_n32 = graph_w13_path == GraphW13Path::Marlin
                     && !is_int8
-                    && env_truthy("KRASIS_DECODE_INT4_W13_N32");
+                    && self.deepseek_v4_decode_policy.int4_w13_n32;
                 let w13_tile_width = if w13_n32 { 32 } else { 16 };
                 let w13_threads = if w13_n32 { 512 } else { 256 };
                 let w13_n_tiles = w13_n.div_ceil(w13_tile_width);
@@ -47894,7 +47958,7 @@ impl GpuDecodeStore {
                     && !is_relu2
                     && !is_int8
                     && expert_bits == 4
-                    && env_truthy("KRASIS_DECODE_INT4_W2_N32");
+                    && self.deepseek_v4_decode_policy.int4_w2_n32;
                 let w2_tile_width = if w2_n32 { 32 } else { 16 };
                 let w2_threads = if w2_n32 { 512 } else { 256 };
                 let w2_n_tiles = expert_hs.div_ceil(w2_tile_width);
@@ -54093,7 +54157,7 @@ impl GpuDecodeStore {
 
         let w13_n32 = !direct_w13_bf16
             && !is_int8
-            && env_truthy("KRASIS_DECODE_INT4_W13_N32");
+            && graph.deepseek_v4_decode_policy.int4_w13_n32;
         let w13_tile_width = if w13_n32 { 32 } else { 16 };
         let w13_threads = if w13_n32 { 512 } else { 256 };
         let w13_n_tiles = w13_n.div_ceil(w13_tile_width);
@@ -54178,7 +54242,7 @@ impl GpuDecodeStore {
             && !is_relu2
             && !is_int8
             && graph.expert_bits == 4
-            && env_truthy("KRASIS_DECODE_INT4_W2_N32");
+            && graph.deepseek_v4_decode_policy.int4_w2_n32;
         let w2_tile_width = if w2_n32 { 32 } else { 16 };
         let w2_threads = if w2_n32 { 512 } else { 256 };
         let w2_n_tiles = expert_hs.div_ceil(w2_tile_width);

@@ -1,5 +1,38 @@
 # Krasis Benchmark Results
 
+## DeepSeek HQQ6/Native promoted decode policy and adjacent control — 2026-08-13
+
+These timing-disabled standard benchmarks compare the ten accepted DeepSeek
+decode policies against an adjacent legacy-policy control on the exact same
+built source, HQQ6/Native config, 450 W RTX PRO 6000, independently generated
+route heatmaps, and `6,660/11,008`-expert timed HCS pools. The promoted policy's
+internal decode improved by `23.9%/25.9%/27.3%` at 50/100/250 tokens; HTTP
+round trip improved by `21.4%/29.1%/24.0%`.
+
+| Measurement | Promoted policy | Adjacent control |
+|---|---:|---:|
+| Internal prefill, 1K / 5K / 10K | 168.1 / 537.9 / 1,080.1 tok/s | 114.0 / 541.8 / 1,466.4 tok/s |
+| Internal prefill, 20K / 35K / 39,920 | 1,914.2 / 2,614.4 / 2,497.2 tok/s | 2,141.3 / 2,610.7 / 2,497.2 tok/s |
+| Internal decode, 50 / 100 / 250 | 36.78 / 38.57 / 37.72 tok/s | 29.68 / 30.63 / 29.63 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 66.98 / 51.43 / 40.52 tok/s | 55.17 / 39.83 / 32.67 tok/s |
+| HCS coverage | 6,660/11,008 (60.5%) | 6,660/11,008 (60.5%) |
+| Minimum free VRAM | 1,189 MiB | 1,195 MiB |
+
+The promoted policy preserved long-prompt prefill and matched the control at
+5K, but its 10K and 20K rows were `26.3%` and `10.6%` slower. The decode gain
+was explicitly prioritized over that midrange tradeoff, so this policy is now
+the scoped default for the validated DeepSeek-V4 HQQ6/Native INT4 mode while
+selector-level ablation continues. Both runs exited zero and reported no
+copy failure, budget skip, CUDA/OOM error, or below-margin event against the
+unchanged 600 MiB safety contract. Promoted-policy evidence:
+[stdout](20260813_deepseek_v4_hqq6_native_decode_candidate_benchmark_stdout.log),
+[report](20260813_deepseek_v4_hqq6_native_decode_candidate_benchmark_report.log),
+and [runtime](20260813_deepseek_v4_hqq6_native_decode_candidate_krasis.log).
+Adjacent control evidence:
+[stdout](20260813_deepseek_v4_hqq6_native_decode_control_benchmark_stdout.log),
+[report](20260813_deepseek_v4_hqq6_native_decode_control_benchmark_report.log),
+and [runtime](20260813_deepseek_v4_hqq6_native_decode_control_krasis.log).
+
 ## DeepSeek shared-HQQ/Native promoted defaults — 2026-08-12
 
 This timing-disabled standard benchmark used fixed HQQ6 with Native KV on the
