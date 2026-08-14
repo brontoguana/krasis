@@ -93,6 +93,23 @@ extern "C" __global__ void deepseek_v4_hc_project_kernel(
     }
 }
 
+// Convert a contiguous token tile of BF16 residual state to normalized FP32.
+// The output is consumed directly by the prefill tensor-core GEMM. Runtime
+// geometry controls both the tile and row width; no model-specific dimensions
+// are compiled into this kernel.
+extern "C" __global__ void deepseek_v4_hc_normalize_f32_kernel(
+    float* __restrict__ output,
+    const __nv_bfloat16* __restrict__ state,
+    const float* __restrict__ inv_rms,
+    int64_t elements,
+    int flat_size)
+{
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (linear >= elements || flat_size <= 0) return;
+    int token = (int)(linear / flat_size);
+    output[linear] = dsv4_hc_bf16_to_f32(state[linear]) * inv_rms[token];
+}
+
 // Produces pre/post weights and the balanced [dst, src] combination matrix.
 // The matrix layout is dst + src*hc, matching the shipped reshape/view order.
 extern "C" __global__ void deepseek_v4_hc_prepare_kernel(

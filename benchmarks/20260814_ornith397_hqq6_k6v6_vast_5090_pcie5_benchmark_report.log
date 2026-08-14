@@ -1,0 +1,49 @@
+================================================================
+Krasis Benchmark — 2026-08-14 20:43:12
+================================================================
+Model:            Ornith-1.0-397B
+Architecture:     qwen3_5_moe_text, 60 layers, 512 experts, top-10, 15 GQA + 45 linear
+PP Partition:     [60] (1 GPUs)
+
+Hardware:
+  CPU:            Intel(R) Core(TM) Ultra 7 265K (20 cores)
+  RAM:            251 GB total, 209.3 GB used by process
+  GPU 0:           NVIDIA GeForce RTX 5090 (32607 MB), 6580 MB allocated
+
+Quantization:
+  GPU experts:    INT4 (Marlin)
+  CPU experts:    INT4
+  Attention:      HQQ6
+  Shared expert:  INT8
+  Dense MLP:      INT8
+  LM head:        INT8
+  KV cache:       k6v6
+
+Strategy:
+  Layer group size: 2 (layer_grouped(2))
+  Prefill threshold: 1
+  Mode:           gpu_decode (layer_grouped(2))
+
+Prefill (internal) — 6 runs at different lengths:
+  Run 1:  181.6 tok/s (1,000 tokens in 5505.8ms)
+  Run 2:  685.2 tok/s (5,000 tokens in 7297.2ms)
+  Run 3:  1,114.1 tok/s (10,000 tokens in 8976.1ms)
+  Run 4:  1,037.2 tok/s (20,000 tokens in 19281.8ms)
+  Run 5:  1,037.9 tok/s (35,000 tokens in 33722.3ms)
+  Run 6:  969.1 tok/s (39,920 tokens in 41192.4ms)
+  Best:   1,114.1 tok/s (10,000 tokens)
+
+Decode (internal) — 50/100/250 tokens, 3 separate prompts:
+   50 tokens: 10.13 tok/s (98.7ms/tok)
+  100 tokens: 9.76 tok/s (102.5ms/tok)
+  250 tokens: 9.55 tok/s (104.7ms/tok)
+  Best:    10.13 tok/s
+  HCS:     2320/30720 experts (7.6%)
+  Min free VRAM: 908 MB
+
+Round trip (network) — 50/100/250 tokens via HTTP:
+   50 tokens: 19.83 tok/s (7.50s total)
+  100 tokens: 12.30 tok/s (13.06s total)
+  250 tokens: 10.52 tok/s (28.67s total)
+  Best:    19.83 tok/s
+================================================================

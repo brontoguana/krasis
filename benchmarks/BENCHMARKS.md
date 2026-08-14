@@ -1,5 +1,95 @@
 # Krasis Benchmark Results
 
+## Ornith-1.0-397B on Vast RTX 5090 PCIe 5.0 — 2026-08-14
+
+This timing-disabled standard benchmark used one 32 GB GeForce RTX 5090 with a
+600 W configured power limit on a measured live PCIe Gen5 x16 link, an Intel
+Core Ultra 7 265K, and 251 GiB system RAM. The model was the launcher's pinned
+`ornith-ai/Ornith-1.0-397B` revision
+`5e3e761811e804c295c1d3c0ce68b21da6154209`, with INT4 experts, HQQ6 attention,
+k6v6 KV, layer group 2, and the unchanged 600 MiB safety margin. The run used
+public source `ff96d91c544bc82caa200956fd72c9a3ff229c1a` plus only the reviewed
+DeepSeek HC symbol restoration published with this evidence and required by
+the common PTX loader; no timing, trace, or telemetry selector was enabled.
+
+| Measurement | Result |
+|---|---:|
+| Internal prefill, 1K / 5K / 10K | 181.6 / 685.2 / 1,114.1 tok/s |
+| Internal prefill, 20K / 35K / 39,920 | 1,037.2 / 1,037.9 / 969.1 tok/s |
+| Internal decode, 50 / 100 / 250 | 10.13 / 9.76 / 9.55 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 19.83 / 12.30 / 10.52 tok/s |
+| HCS residency | 2,320/30,720 experts (7.6%) |
+| Final dynamic HCS hit rate | 41.87% |
+| Decode minimum free VRAM | 908 MiB |
+| Process RAM reported by benchmark | 209.3 GB |
+
+The exact pinned download contained 122 safetensor shards totaling
+793,604,898,928 bytes. The one-time Marlin conversion produced the expected
+199.7 GB artifact in 344 seconds. Adaptive calibration reached the complete
+39,920-token suite with successive long-probe low-waters of
+1,888/1,244/1,212/1,206 MiB, close to but never below the 1,200 MiB calibration
+guard. The final counters were `budget_skips=0`, `no_slot=2470`, and
+`copy_failures=0`; the nonzero no-slot count is retained verbatim. The card was
+measured at Gen5 x16 and 100% utilization during live prefill, not inferred
+from idle capability, and returned to 15 MiB/0% use after exit.
+
+Reproduction:
+`./dev benchmark tests/vast-ornith397-5090-hqq6-k6v6.conf`.
+Evidence: [config](../tests/vast-ornith397-5090-hqq6-k6v6.conf),
+[stdout](20260814_ornith397_hqq6_k6v6_vast_5090_pcie5_benchmark_stdout.log),
+[report](20260814_ornith397_hqq6_k6v6_vast_5090_pcie5_benchmark_report.log),
+[runtime](20260814_ornith397_hqq6_k6v6_vast_5090_pcie5_krasis.log), and
+[system/PCIe evidence](20260814_ornith397_hqq6_k6v6_vast_5090_pcie5_system.log).
+
+## DeepSeek-V4-Flash-0731 on Vast RTX 5090 PCIe 5.0 — 2026-08-14
+
+This timing-disabled standard benchmark used one 32 GB GeForce RTX 5090 with a
+configured 600 W power limit on a live PCIe Gen5 x16 link, an Intel Core Ultra
+7 265K, and 251 GiB system RAM. The model was the launcher's exact pinned
+`deepseek-ai/DeepSeek-V4-Flash-0731` revision
+`9e165c30e2704aec5d9d593cce3eebd58bbef1cb`, with INT4 experts, HQQ6 attention,
+Native KV, and the unchanged 600 MiB safety margin. The run used public source
+`ff96d91c544bc82caa200956fd72c9a3ff229c1a` plus the reviewed 17-line restoration
+of the already-required `deepseek_v4_hc_normalize_f32_kernel`; no timing, trace,
+or telemetry selector was enabled.
+
+| Measurement | Result |
+|---|---:|
+| Internal prefill, 1K / 5K / 10K | 243.5 / 1,199.9 / 2,150.8 tok/s |
+| Internal prefill, 20K / 35K / 39,920 | 1,725.2 / 1,707.3 / 1,494.5 tok/s |
+| Internal decode, 50 / 100 / 250 | 18.87 / 17.78 / 17.30 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 31.04 / 24.26 / 20.56 tok/s |
+| HCS residency | 1,420/11,008 experts (12.9%) |
+| Final dynamic HCS hit rate | 63.10% |
+| Decode minimum free VRAM | 862 MiB |
+| Process RAM reported by benchmark | 152.4 GB |
+
+Adaptive calibration completed through 39,920 tokens with measured prefill
+low-waters of 1,148/1,248/1,188/1,264/1,208/1,264 MiB at
+500/4K/8K/16K/32K/39,920 tokens. An external live sample during timed prefill
+touched exactly 600 MiB free, and the runtime emitted no below-margin warning.
+The final HCS counters were `budget_skips=0`, `no_slot=642`, and
+`copy_failures=0`; the nonzero no-slot count is retained verbatim, and this
+32 GB run could keep only 12.9% of experts resident. The card was measured at
+Gen5 x16 under 100% prefill load, not inferred from its idle capability.
+
+Reproduction:
+`./dev benchmark tests/vast-deepseek-v4-flash-0731-5090-hqq6-native.conf`.
+Evidence: [config](../tests/vast-deepseek-v4-flash-0731-5090-hqq6-native.conf),
+[stdout](20260814_deepseek_v4_hqq6_native_vast_5090_pcie5_benchmark_stdout.log),
+[report](20260814_deepseek_v4_hqq6_native_vast_5090_pcie5_benchmark_report.log),
+[runtime](20260814_deepseek_v4_hqq6_native_vast_5090_pcie5_krasis.log), and
+[system/PCIe evidence](20260814_deepseek_v4_hqq6_native_vast_5090_pcie5_system.log).
+
+The initial clean-clone run built the 143.4 GB Marlin cache but failed closed
+before calibration because the committed Rust loader requested the HC
+normalization symbol while the committed CUDA header omitted its definition.
+PTX inventory isolated that as the sole missing required entry; after restoring
+it, the rebuilt PTX contained 236 entries and no required omissions. The failed
+run is retained as required evidence:
+[stdout](20260814_deepseek_v4_hqq6_native_vast_5090_missing_ptx_failed_benchmark_stdout.log)
+and [runtime](20260814_deepseek_v4_hqq6_native_vast_5090_missing_ptx_failed_krasis.log).
+
 ## Representative shared HQQ/MoE default validation — 2026-08-13
 
 These adjacent timing-disabled standard benchmarks validate descriptor-sized

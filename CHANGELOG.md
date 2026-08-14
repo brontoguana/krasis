@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- Added the timing-disabled Vast RTX 5090 PCIe Gen5 x16 benchmark for the
+  launcher-pinned Ornith-1.0-397B HQQ6/k6v6/INT4 profile. Prefill measured
+  181.6/685.2/1,114.1/1,037.2/1,037.9/969.1 tok/s at
+  1K/5K/10K/20K/35K/39,920 tokens; internal decode measured
+  10.13/9.76/9.55 tok/s; HTTP measured 19.83/12.30/10.52 tok/s. The 32 GB card
+  retained 2,320/30,720 experts with a 41.87% final dynamic hit rate,
+  `budget_skips=0`, `copy_failures=0`, and a 908 MiB decode floor. Calibration
+  completed through 39,920 tokens with a 1,206 MiB minimum against the 1,200
+  MiB calibration guard. Complete reproducible evidence is indexed under
+  `benchmarks/`.
+
+- Restored the committed CUDA definition for the DeepSeek-V4 prefill HC
+  normalization kernel. The Rust prefill loader already required this symbol,
+  but a clean source build omitted it from `prefill_kernels.ptx` and failed
+  closed at prefill-engine allocation with `CUDA_ERROR_NOT_FOUND`. The kernel
+  retains fully runtime-provided token and HC geometry and changes no policy or
+  behavior for other model paths.
+
+- Added the timing-disabled Vast RTX 5090 PCIe Gen5 x16 benchmark for the pinned
+  DeepSeek-V4-Flash-0731 HQQ6/Native/INT4 profile. Prefill measured
+  243.5/1,199.9/2,150.8/1,725.2/1,707.3/1,494.5 tok/s at
+  1K/5K/10K/20K/35K/39,920 tokens; internal decode measured
+  18.87/17.78/17.30 tok/s at 50/100/250 outputs; HTTP measured
+  31.04/24.26/20.56 tok/s. The 32 GB card retained 1,420/11,008 experts with a
+  63.10% final dynamic hit rate, zero budget skips and copy failures, and an
+  862 MiB decode floor. Complete successful and failed-start evidence is
+  indexed under `benchmarks/`.
+
 - Reworked the primary launcher around one pinned capability and download
   contract for all 14 production-supported checkpoints. Qwen3.5-397B and
   GLM-5.2 are now selectable downloads; current Ornith downloads use the

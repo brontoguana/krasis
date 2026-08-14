@@ -1,0 +1,41 @@
+Krasis DeepSeek-V4-Flash-0731 Vast RTX 5090 system evidence
+Captured: 2026-08-14
+
+Source
+  Krasis base commit: ff96d91c544bc82caa200956fd72c9a3ff229c1a
+  Additional reviewed fix: 17-line definition of
+    deepseek_v4_hc_normalize_f32_kernel
+  Final generated prefill PTX entries: 236
+  Required loader entries missing after fix: none
+
+Model
+  Repository: deepseek-ai/DeepSeek-V4-Flash-0731
+  Revision: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
+  Safetensors: 48 shards, 166886535336 bytes (155.425 GiB)
+  config.json SHA-256:
+    6c8f3d2d3b48707541b88f32f22ef3f0f8a6b57d8523281e2b8d3cdb0ae9a023
+  model.safetensors.index.json SHA-256:
+    98efab455cf08dfbbbaaba6f570e1bf10bf927d2b4c3c453a59c2f6f0e3be92b
+
+Benchmark command (inside tmux, timing/trace instrumentation absent)
+  ./dev benchmark tests/vast-deepseek-v4-flash-0731-5090-hqq6-native.conf
+
+Hardware query after benchmark
+  NVIDIA GeForce RTX 5090, GPU-b354658b-6570-830b-4534-f6eb52c26ac1,
+    32607 MiB, 600.00 W, PCIe max generation 5, max width 16
+  CPU: Intel(R) Core(TM) Ultra 7 265K, 20 logical CPUs
+  RAM: 251 GiB total, no swap
+
+Live nvidia-smi samples under active GPU prefill
+  Query fields: memory.used, memory.free, utilization.gpu, power.draw,
+    pcie.link.gen.current, pcie.link.width.current
+  30847 MiB, 1264 MiB, 100 %, 374.64 W, 5, 16
+  31439 MiB,  672 MiB, 100 %, 411.47 W, 5, 16
+  31511 MiB,  600 MiB, 100 %, 325.87 W, 5, 16
+
+Post-run state
+  GPU memory used: 15 MiB
+  GPU memory free: 32097 MiB
+  GPU utilization: 0%
+  Host RAM available: 245 GiB
+  Workspace disk: 1.0 TiB total, 303 GiB used, 722 GiB available

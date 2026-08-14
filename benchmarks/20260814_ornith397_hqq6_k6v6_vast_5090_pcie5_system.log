@@ -1,0 +1,69 @@
+Vast RTX 5090 Ornith-1.0-397B system and acquisition evidence
+Date: 2026-08-14 UTC
+
+Host
+  Kernel: Linux 6.8.0-111-generic x86_64
+  CPU: Intel Core Ultra 7 265K, 20 CPUs available to the container
+  RAM: 251 GiB total, no swap
+  GPU: NVIDIA GeForce RTX 5090
+  VRAM: 32,607 MiB
+  Driver: 595.71.05
+  CUDA toolkit: 13.2
+  Power limit: 600 W
+  PCIe capability: Gen5 x16
+
+Source and model
+  Krasis source: ff96d91c544bc82caa200956fd72c9a3ff229c1a
+  Additional reviewed source diff: runtime-geometry restoration of
+    deepseek_v4_hc_normalize_f32_kernel in src/cuda/deepseek_v4_hc.cuh
+  Model: ornith-ai/Ornith-1.0-397B
+  Revision: 5e3e761811e804c295c1d3c0ce68b21da6154209
+  Destination: /root/.krasis/models/ornith-ai/Ornith-1.0-397B
+  Safetensor shards: 122
+  Safetensor bytes: 793,604,898,928 (739.102 GiB)
+  Download command: managed-environment `hf download` with exact revision,
+    native safetensor/config/tokenizer allowlist, eight workers, and no
+    branch/latest resolution
+  Download result: exit 0
+  Final model directory: 740 GiB allocated by `du`
+
+Integrity fingerprints
+  config.json:
+    a343d268c6213a262539573413ae5b24d97f3510e33a2a08f4556aaef85c1c01
+  generation_config.json:
+    303aba891d66ab63908a7b3cc9163bcb835fdf8b9f6301c73216f3f1eb3992dd
+  tokenizer.json:
+    06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523
+  tokenizer_config.json:
+    792fa3f0cb88b111e54ef3134c873531008c4df471d108da17903426e308aa7b
+
+Benchmark command and caches
+  Command: ./dev benchmark tests/vast-ornith397-5090-hqq6-k6v6.conf
+  Run directory: logs/dev-benchmark_20260814_202524
+  Timing/trace/telemetry instrumentation: disabled
+  Config: INT4 experts, HQQ6 attention, k6v6 KV, layer group 2,
+    20 CPU threads, one exact-UUID GPU, 600 MiB safety margin
+  Marlin build: 60 layers, 199.7 GB in 344 seconds
+  Final Krasis cache directory: 193 GiB allocated by `du`
+  Final filesystem: 1.0 TiB total, 943 GiB used, 82 GiB available
+
+Live load observations
+  During adaptive and timed prefill, `nvidia-smi` repeatedly reported PCIe
+  generation 5, width 16, and 100% GPU utilization. Observed power samples
+  included 271.30 W, 277.64 W, 274.70 W, and 308.28 W under the configured
+  600 W limit. The link returned to Gen1 x16 at idle after the benchmark.
+  GPU after benchmark: 15 MiB used, 0% utilization.
+
+Runtime memory and safety
+  Calibration prefill minima at successive long probes:
+    1,888 / 1,244 / 1,212 / 1,206 MiB
+  Final calibrated prompt cap: 39,920 tokens
+  Calibration target floor: 1,200 MiB
+  Runtime safety margin: 600 MiB
+  HCS after timed decode: 2,320 / 30,720 experts (7.6%)
+  Final dynamic HCS hit rate: 41.87%
+  Decode minimum free VRAM: 908 MiB
+  Final counters: budget_skips=0, no_slot=2470, copy_failures=0
+  Benchmark process RAM: 209.3 GB
+  No below-margin warning, CUDA error, OOM, nonzero budget skip, or copy
+  failure appeared in the successful run.
