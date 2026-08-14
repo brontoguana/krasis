@@ -6,7 +6,10 @@
   contract: the multi-GPU QCN release-test variant now uses INT4 experts with
   HQQ6+8/k6v6 instead of requesting launcher-rejected INT8 experts. Corrected
   the `./dev speed-test` help text to name its existing fixed HQQ4/k4v4
-  configuration; benchmark behavior is unchanged.
+  configuration; benchmark behavior is unchanged. Reference validation now
+  accepts an explicit `KRASIS_REFERENCE_OUTPUT_DIR`, allowing detached clean
+  release worktrees to use the authoritative private witness tree. An invalid
+  explicit directory fails closed and never falls back to another artifact.
 
 - Added the timing-disabled Vast RTX 5090 PCIe Gen5 x16 benchmark for the
   launcher-pinned Ornith-1.0-397B HQQ6/k6v6/INT4 profile. Prefill measured

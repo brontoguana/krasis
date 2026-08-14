@@ -1,11 +1,75 @@
 """No-GPU contracts for reference-test verdict aggregation."""
 
+import os
+import tempfile
 import unittest
+from unittest.mock import patch
 
-from tests.reference_test import build_server_command, judge_prompt
+from tests.reference_test import (
+    build_server_command,
+    find_reference_data,
+    judge_prompt,
+    list_available_references,
+)
 
 
 class ReferenceJudgementTests(unittest.TestCase):
+    def test_explicit_reference_output_dir_supports_detached_worktrees(self) -> None:
+        with tempfile.TemporaryDirectory() as ref_root:
+            model_dir = os.path.join(ref_root, "Qwen3-Coder-Next")
+            os.makedirs(model_dir)
+            reference_path = os.path.join(model_dir, "greedy_reference.json")
+            with open(reference_path, "w", encoding="utf-8") as handle:
+                handle.write("{}")
+
+            with patch.dict(
+                os.environ,
+                {"KRASIS_REFERENCE_OUTPUT_DIR": ref_root},
+                clear=False,
+            ):
+                self.assertEqual(
+                    find_reference_data("Qwen3-Coder-Next", "/detached/krasis"),
+                    reference_path,
+                )
+                self.assertEqual(
+                    list_available_references("/detached/krasis"),
+                    ["Qwen3-Coder-Next"],
+                )
+
+    def test_invalid_explicit_reference_output_dir_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            sibling_model_dir = os.path.join(
+                temp_root,
+                "krasis-internal",
+                "reference-outputs",
+                "output",
+                "Qwen3-Coder-Next",
+            )
+            os.makedirs(sibling_model_dir)
+            with open(
+                os.path.join(sibling_model_dir, "greedy_reference.json"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                handle.write("{}")
+
+            missing_root = os.path.join(temp_root, "missing-reference-root")
+            with patch.dict(
+                os.environ,
+                {"KRASIS_REFERENCE_OUTPUT_DIR": missing_root},
+                clear=False,
+            ):
+                self.assertIsNone(
+                    find_reference_data(
+                        "Qwen3-Coder-Next",
+                        os.path.join(temp_root, "krasis"),
+                    )
+                )
+                self.assertEqual(
+                    list_available_references(os.path.join(temp_root, "krasis")),
+                    [],
+                )
+
     def test_reference_server_command_preserves_selected_gpu_override(self) -> None:
         command = build_server_command("/env/python", "model.conf", "1,3")
         self.assertEqual(

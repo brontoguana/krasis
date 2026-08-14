@@ -152,11 +152,24 @@ def detect_linear_attention(cfg: Dict[str, str]) -> bool:
     return False
 
 
+def reference_output_base(script_dir: str) -> str:
+    """Resolve the authoritative reference-output directory.
+
+    Detached release worktrees do not necessarily sit beside the private
+    evidence repository.  An explicit path therefore takes precedence and is
+    fail-closed: if it is wrong, callers see no references rather than falling
+    back to a different tree.
+    """
+    explicit = os.environ.get("KRASIS_REFERENCE_OUTPUT_DIR")
+    if explicit:
+        return os.path.abspath(os.path.expanduser(explicit))
+    internal_dir = os.path.join(os.path.dirname(script_dir), "krasis-internal")
+    return os.path.join(internal_dir, "reference-outputs", "output")
+
+
 def find_reference_data(model_name: str, script_dir: str, profile_id: Optional[str] = None) -> Optional[str]:
     """Find reference data JSON for a model."""
-    # krasis-internal sits beside krasisx
-    internal_dir = os.path.join(os.path.dirname(script_dir), "krasis-internal")
-    ref_base = os.path.join(internal_dir, "reference-outputs", "output")
+    ref_base = reference_output_base(script_dir)
     try:
         ref_dirs = os.listdir(ref_base)
     except OSError:
@@ -177,8 +190,7 @@ def find_reference_data(model_name: str, script_dir: str, profile_id: Optional[s
 
 def list_available_references(script_dir: str) -> List[str]:
     """List all available reference data directories."""
-    internal_dir = os.path.join(os.path.dirname(script_dir), "krasis-internal")
-    ref_base = os.path.join(internal_dir, "reference-outputs", "output")
+    ref_base = reference_output_base(script_dir)
     if not os.path.isdir(ref_base):
         return []
     return sorted(os.listdir(ref_base))
