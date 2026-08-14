@@ -3737,6 +3737,8 @@ run_launcher_matrix_test() {
     KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="$run_type" \
         run_repo_python -m unittest discover -s "$SCRIPT_DIR/tests" -p 'test_launcher_matrix.py' "$@"
     KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="$run_type" \
+        run_repo_python -m unittest discover -s "$SCRIPT_DIR/tests" -p 'test_hf_downloader.py' "$@"
+    KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="$run_type" \
         run_repo_python -m unittest tests.test_multi_gpu_planner "$@"
 }
 

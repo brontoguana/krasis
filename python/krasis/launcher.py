@@ -35,6 +35,7 @@ from krasis.config import (
     HQQ_ATTENTION_GROUP_SIZE_CHOICES,
     HQQ_CACHE_PROFILE_BASELINE,
     HQQ_CACHE_PROFILE_CHOICES,
+    ModelConfig,
 )
 from krasis.config import GPU_EXPERT_INT4_CALIB_CHOICES
 from krasis.console_input import (
@@ -482,6 +483,45 @@ def _find_nvidia_smi() -> Optional[str]:
 # Model scanning
 # ═══════════════════════════════════════════════════════════════════════
 
+def _model_info_from_path(model_path: str, name: Optional[str] = None) -> Dict[str, Any]:
+    """Build launcher metadata through the same parser used by model loading."""
+    from krasis.hf_downloader import supported_model_for_path
+    from krasis.vram_budget import estimate_int4_expert_cache_bytes
+
+    cfg = ModelConfig.from_model_path(model_path)
+    support_spec = supported_model_for_path(model_path)
+    kv_dims = []
+    for layer_idx in range(cfg.num_hidden_layers):
+        if cfg.is_full_attention_layer(layer_idx):
+            if cfg.is_mla:
+                kv_dims.append(cfg.kv_lora_rank + cfg.qk_rope_head_dim)
+            else:
+                kv_dims.append(
+                    2
+                    * cfg.gqa_num_kv_heads_for_layer(layer_idx)
+                    * cfg.gqa_head_dim_for_layer(layer_idx)
+                )
+    return {
+        "name": name or os.path.basename(model_path),
+        "path": model_path,
+        "arch": cfg.model_type or "?",
+        "layers": cfg.num_hidden_layers,
+        "experts": cfg.n_routed_experts,
+        "shared_experts": cfg.n_shared_experts,
+        "dense_layers": cfg.num_hidden_layers - cfg.num_moe_layers,
+        "moe_layers": cfg.num_moe_layers,
+        "native_dtype": "bfloat16",
+        "ram_gb": estimate_int4_expert_cache_bytes(cfg) / (1024**3),
+        "num_kv_layers": cfg.num_full_attention_layers,
+        "kv_dim": max(kv_dims, default=0),
+        "max_context": (
+            min(cfg.max_position_embeddings, support_spec.max_context_tokens)
+            if support_spec and support_spec.max_context_tokens
+            else cfg.max_position_embeddings
+        ),
+        "support_key": support_spec.key if support_spec else "",
+    }
+
 def scan_models(search_dir: str, native_only: bool = False) -> List[Dict[str, Any]]:
     """Scan directory for HF model directories with config.json.
 
@@ -513,43 +553,8 @@ def scan_models(search_dir: str, native_only: bool = False) -> List[Dict[str, An
         name = rel if rel != "." else os.path.basename(model_dir)
 
         try:
-            with open(config_path) as f:
-                raw = json.load(f)
-            cfg = raw.get("text_config", raw)
-
-            arch = cfg.get("model_type", "?")
-            layers = cfg.get("num_hidden_layers", 0)
-            experts = cfg.get("n_routed_experts", cfg.get("num_experts", 0))
-            shared = cfg.get("n_shared_experts", 0)
-            hidden = cfg.get("hidden_size", 0)
-            inter = cfg.get("moe_intermediate_size", cfg.get("intermediate_size", 0))
-
-            # Estimate expert RAM (BF16)
-            ram_gb = 0.0
-            if experts and hidden and inter:
-                ram_gb = (3 * hidden * inter * 2 * experts * (layers - cfg.get("first_k_dense_replace", 0))) / (1024**3)
-
-            # Determine number of dense (non-MoE) layers
-            if "first_k_dense_replace" in cfg:
-                first_k_dense = cfg["first_k_dense_replace"]
-            elif "decoder_sparse_step" in cfg:
-                step = cfg["decoder_sparse_step"]
-                first_k_dense = 0 if step <= 1 else step
-            else:
-                first_k_dense = 0
-
-            models.append({
-                "name": name,
-                "path": model_dir,
-                "arch": arch,
-                "layers": layers,
-                "experts": experts,
-                "shared_experts": shared,
-                "dense_layers": first_k_dense,
-                "native_dtype": raw.get("torch_dtype", "bfloat16"),
-                "ram_gb": ram_gb,
-            })
-        except (json.JSONDecodeError, KeyError, TypeError):
+            models.append(_model_info_from_path(model_dir, name))
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
             continue
 
     # Sort by name for consistent display
@@ -1107,7 +1112,7 @@ OPTIONS = [
     ConfigOption("KV format", "kv_dtype",
                  choices=["k4v4", "k6v6", "bf16"], affects_budget=True),
     ConfigOption("Model quantization", "gpu_expert_bits",
-                 choices=[4, 8], affects_budget=True),
+                 choices=[4], affects_budget=True),
     ConfigOption("Expert group size", "expert_group_size",
                  choices=[32, 64, 128], affects_budget=True, advanced=True),
     ConfigOption("Expert INT4 calib", "gpu_expert_int4_calib",
@@ -1361,7 +1366,10 @@ def _model_selection_screen(
             else:
                 expert_str = "dense"
 
-            ram_str = f" | ~{m['ram_gb']:.0f} GB" if m["ram_gb"] > 0 else ""
+            ram_str = (
+                f" | ~{m['ram_gb']:.0f} GiB INT4 experts"
+                if m["ram_gb"] > 0 else ""
+            )
 
             lines.append(f"{prefix}{hl}{m['name']}{NC}")
             lines.append(f"       {DIM}{m['arch']} | {m['layers']} layers | {expert_str}{ram_str}{NC}")
@@ -1751,7 +1759,19 @@ class Launcher:
         arch = str((self.model_info or {}).get("arch", "")).strip().lower().replace("-", "_")
         return arch == "gemma4_text"
 
+    def _supported_model_spec(self) -> Optional[Any]:
+        from krasis.hf_downloader import supported_model_for_path, supported_model_spec
+
+        support_key = str((self.model_info or {}).get("support_key", "")).strip()
+        if support_key:
+            return supported_model_spec(support_key)
+        model_path = str((self.model_info or {}).get("path", self.cfg.model_path or ""))
+        return supported_model_for_path(model_path) if model_path else None
+
     def _attention_choices(self) -> List[str]:
+        spec = self._supported_model_spec()
+        if spec is not None:
+            return list(spec.attention_modes)
         if self._is_deepseek_v4():
             return list(DEEPSEEK_V4_ATTENTION_QUANT_CHOICES)
         if self._is_gemma4():
@@ -1759,11 +1779,17 @@ class Launcher:
         return list(INTERACTIVE_ATTENTION_QUANT_CHOICES)
 
     def _kv_choices(self) -> List[str]:
+        spec = self._supported_model_spec()
+        if spec is not None:
+            return list(spec.kv_modes)
         if self._is_deepseek_v4():
             return list(DEEPSEEK_V4_KV_CHOICES)
         return ["k4v4", "k6v6", "bf16"]
 
     def _multi_gpu_choices(self) -> List[str]:
+        spec = self._supported_model_spec()
+        if spec is not None:
+            return list(spec.multi_gpu_modes)
         if self._is_deepseek_v4():
             # `auto` remains meaningful for one selected GPU. No DeepSeek
             # multi-GPU topology is launcher-qualified yet: serial layer split
@@ -1773,7 +1799,16 @@ class Launcher:
         return ["auto", "layer-split", "peer"]
 
     def _apply_model_recommended_defaults(self) -> None:
-        if self._is_deepseek_v4():
+        spec = self._supported_model_spec()
+        if spec is not None:
+            if not self.cfg._attention_quant_explicit:
+                self._set_interactive_attention_quant(spec.default_attention)
+            if not self.cfg._kv_dtype_explicit:
+                self.cfg.kv_dtype = spec.default_kv
+            if spec.max_context_tokens:
+                if not self.cfg.max_context_tokens:
+                    self.cfg.max_context_tokens = spec.max_context_tokens
+        elif self._is_deepseek_v4():
             if not self.cfg._attention_quant_explicit:
                 self._set_interactive_attention_quant("hqq6")
             if not self.cfg._kv_dtype_explicit:
@@ -1802,16 +1837,54 @@ class Launcher:
                 f"{(self.model_info or {}).get('name', 'Selected model')} does not support "
                 f"cache mode {self.cfg.kv_dtype!r}; supported modes: {', '.join(kv_choices)}"
             )
+        spec = self._supported_model_spec()
+        if (
+            spec is not None
+            and (self.cfg.attention_quant, self.cfg.kv_dtype)
+            not in spec.runtime_profiles
+        ):
+            profiles = ", ".join(
+                f"{attention}/{kv}" for attention, kv in spec.runtime_profiles
+            )
+            raise ValueError(
+                f"{spec.display_name} has not been launcher-qualified with "
+                f"{self.cfg.attention_quant}/{self.cfg.kv_dtype}; measured profiles: "
+                f"{profiles}"
+            )
         if self.cfg.multi_gpu_mode not in topology_choices:
             raise ValueError(
                 f"{(self.model_info or {}).get('name', 'Selected model')} does not support "
                 f"topology mode {self.cfg.multi_gpu_mode!r}; supported modes: "
                 f"{', '.join(topology_choices)}"
             )
+        if self.cfg.gpu_expert_bits != 4 or self.cfg.cpu_expert_bits != 4:
+            raise ValueError(
+                "The production launcher supports INT4 experts only; "
+                f"got GPU INT{self.cfg.gpu_expert_bits} / CPU INT{self.cfg.cpu_expert_bits}."
+            )
+        if (
+            spec is not None
+            and spec.max_context_tokens
+            and self.cfg.max_context_tokens > spec.max_context_tokens
+        ):
+            raise ValueError(
+                f"{spec.display_name} launcher support is qualified only through "
+                f"{spec.max_context_tokens:,} context tokens."
+            )
 
     def _validate_model_topology(self) -> None:
         selected_count = len(self.cfg.selected_gpu_indices)
-        if not self._is_deepseek_v4() or selected_count <= 1:
+        if selected_count <= 1:
+            return
+        spec = self._supported_model_spec()
+        if spec is not None:
+            if spec.multi_gpu_qualified:
+                return
+            raise ValueError(
+                f"{spec.display_name} multi-GPU execution is not yet "
+                "launcher-qualified; select one GPU."
+            )
+        if not self._is_deepseek_v4():
             return
         raise ValueError(
             "DeepSeek-V4 multi-GPU execution is not yet launcher-qualified. Serial "
@@ -2243,14 +2316,16 @@ class Launcher:
             status.append("safetensors")
         else:
             status.append("no safetensors")
-        int4 = format_bytes(candidate.int4_payload_bytes)
+        runtime_ram = format_bytes(getattr(candidate, "runtime_ram_bytes", 0))
         size = format_bytes(candidate.selected_bytes or candidate.safetensors_total_bytes * 2)
         meta = f"{candidate.pipeline_tag or 'model'} | {', '.join(status)}"
         stats = f"{candidate.downloads:,} downloads | {candidate.likes:,} likes | updated {candidate.last_modified}"
         display_name = getattr(candidate, "display_name", "")
         revision = getattr(candidate, "revision", "")
         line1 = f"{display_name}  {DIM}{candidate.repo_id}{NC}" if display_name else f"{candidate.repo_id}"
-        line2 = f"{meta} | download {size} | INT4 RAM ~{int4} + metadata | {stats}"
+        line2 = f"{meta} | download {size} | model RAM floor ~{runtime_ram} | {stats}"
+        if getattr(candidate, "metadata_error", ""):
+            line2 = f"metadata error: {candidate.metadata_error}"
         if revision:
             line2 = f"{line2} | revision {revision[:12]}"
         return line1, line2
@@ -2282,8 +2357,22 @@ class Launcher:
                 prefix = f"  {CYAN}\u25b8{NC} " if i == cursor else "    "
                 hl = BOLD if i == cursor else ""
                 line1 = f"{prefix}{hl}{model.display_name}{NC}  {DIM}{model.repo_id}{NC}"
-                line2 = f"       {DIM}{model.notes} | local {model.local_dir_name}{NC}"
-                line3 = f"       {DIM}Config: {model.recommended_config} | revision {model.revision[:12]}{NC}"
+                ram = "unavailable"
+                if getattr(model, "runtime_ram_bytes", 0):
+                    from krasis.hf_downloader import format_bytes
+                    ram = f"~{format_bytes(model.runtime_ram_bytes)}"
+                line2 = (
+                    f"       {DIM}{model.support_notes} | model RAM floor {ram}"
+                    f" | local {model.local_dir_name}{NC}"
+                )
+                metadata_error = getattr(model, "metadata_error", "")
+                if metadata_error:
+                    line3 = f"       {RED}Pinned metadata error: {metadata_error}{NC}"
+                else:
+                    line3 = (
+                        f"       {DIM}Config: {model.recommended_config}"
+                        f" | revision {model.revision[:12]}{NC}"
+                    )
                 lines.extend([
                     _truncate_ansi(line1, width),
                     _truncate_ansi(line2, width),
@@ -2373,7 +2462,8 @@ class Launcher:
                 f"  Destination: {dest}",
                 "",
                 f"  {DIM}Krasis downloads only supported safetensors/config/tokenizer files and skips GGUF/bin/checkpoints by default.{NC}",
-                f"  {DIM}INT4 RAM is estimated from remote safetensors metadata and excludes runtime headroom.{NC}",
+                f"  Persistent model RAM floor: ~{format_bytes(candidate.runtime_ram_bytes)}",
+                f"  {DIM}Calculated from the pinned config for the validated INT4/HQQ default; add OS headroom and any optional conversation cache.{NC}",
                 "",
             ]
             if candidate.gated:
@@ -2466,7 +2556,10 @@ class Launcher:
         return True
 
     def _hf_downloader_screen(self) -> bool:
-        from krasis.hf_downloader import get_supported_model_details, supported_models
+        from krasis.hf_downloader import (
+            get_supported_model_details,
+            get_supported_model_summaries,
+        )
 
         cursor = 0
         options = [
@@ -2507,7 +2600,14 @@ class Launcher:
                     _hide_cursor()
                     continue
                 if label == "Download supported model":
-                    selected = self._supported_hf_models_screen(supported_models())
+                    self._message_screen(
+                        "Hugging Face models",
+                        ["Reading pinned model metadata and calculating INT4 runtime RAM..."],
+                        wait=False,
+                    )
+                    selected = self._supported_hf_models_screen(
+                        get_supported_model_summaries()
+                    )
                     if not selected:
                         continue
                     self._message_screen("Hugging Face model", [f"Reading file metadata for {selected.repo_id}..."], wait=False)
@@ -2535,6 +2635,17 @@ class Launcher:
                     self._show_attention_unavailable()
                 else:
                     self.cfg._attention_quant_explicit = True
+                    spec = self._supported_model_spec()
+                    if (
+                        spec is not None
+                        and (self.cfg.attention_quant, self.cfg.kv_dtype)
+                        not in spec.runtime_profiles
+                    ):
+                        self.cfg.kv_dtype = next(
+                            kv for attention, kv in spec.runtime_profiles
+                            if attention == self.cfg.attention_quant
+                        )
+                        self.cfg._kv_dtype_explicit = True
                 return
             if opt.key == "kv_dtype":
                 choices = self._kv_choices()
@@ -2551,6 +2662,18 @@ class Launcher:
             setattr(self.cfg, opt.key, new_val)
             if opt.key == "kv_dtype":
                 self.cfg._kv_dtype_explicit = True
+                spec = self._supported_model_spec()
+                if (
+                    spec is not None
+                    and (self.cfg.attention_quant, self.cfg.kv_dtype)
+                    not in spec.runtime_profiles
+                ):
+                    attention = next(
+                        attention for attention, kv in spec.runtime_profiles
+                        if kv == self.cfg.kv_dtype
+                    )
+                    self._set_interactive_attention_quant(attention)
+                    self.cfg._attention_quant_explicit = True
             if opt.key == "gpu_expert_bits":
                 # The launcher exposes one expert quantization choice, so keep
                 # the underlying runtime config keys aligned.
@@ -2742,63 +2865,11 @@ class Launcher:
         if not os.path.isfile(config_path):
             return
         try:
-            with open(config_path) as f:
-                raw = json.load(f)
-            cfg = raw.get("text_config", raw)
-            # Determine number of dense (non-MoE) layers
-            if "first_k_dense_replace" in cfg:
-                first_k_dense = cfg["first_k_dense_replace"]
-            elif "decoder_sparse_step" in cfg:
-                step = cfg["decoder_sparse_step"]
-                first_k_dense = 0 if step <= 1 else step
-            else:
-                first_k_dense = 0
-
-            # Compute KV cache dimensions for max-context estimate
-            num_layers = cfg.get("num_hidden_layers", 0)
-            is_mla = "kv_lora_rank" in cfg
-
-            # Count layers that need KV cache (hybrid models skip linear attention layers)
-            full_attn_interval = cfg.get("full_attention_interval", 0)
-            if "layer_types" in cfg:
-                num_kv_layers = sum(
-                    1 for t in cfg["layer_types"]
-                    if t in ("full_attention", "sliding_attention")
-                )
-            elif full_attn_interval > 0:
-                num_kv_layers = sum(
-                    1 for i in range(num_layers)
-                    if (i + 1) % full_attn_interval == 0
-                )
-            else:
-                num_kv_layers = num_layers
-
-            # Bytes per token per layer in KV cache
-            if is_mla:
-                kv_dim = cfg.get("kv_lora_rank", 512) + cfg.get("qk_rope_head_dim", 64)
-            else:
-                num_kv_heads = cfg.get("num_key_value_heads", cfg.get("num_attention_heads", 1))
-                head_dim = cfg.get("head_dim", 128)
-                kv_dim = num_kv_heads * head_dim * 2  # K + V
-
-            max_context = cfg.get("max_position_embeddings", 131072)
-
-            self.model_info = {
-                "name": os.path.basename(self.cfg.model_path),
-                "path": self.cfg.model_path,
-                "arch": cfg.get("model_type", "?"),
-                "layers": num_layers,
-                "experts": cfg.get("n_routed_experts", cfg.get("num_experts", 0)),
-                "shared_experts": cfg.get("n_shared_experts", 0),
-                "dense_layers": first_k_dense,
-                "native_dtype": raw.get("torch_dtype", "bfloat16"),
-                "ram_gb": 0,
-                "num_kv_layers": num_kv_layers,
-                "kv_dim": kv_dim,
-                "max_context": max_context,
-            }
-        except (json.JSONDecodeError, KeyError, TypeError):
-            pass
+            self.model_info = _model_info_from_path(self.cfg.model_path)
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Could not parse model configuration at {self.cfg.model_path}: {exc}"
+            ) from exc
 
     def print_summary(self) -> None:
         """Print non-interactive launch summary."""
@@ -3588,9 +3659,9 @@ def main():
                       file=sys.stderr)
                 sys.exit(1)
 
-        launcher._read_model_info()
-        launcher._apply_model_recommended_defaults()
         try:
+            launcher._read_model_info()
+            launcher._apply_model_recommended_defaults()
             launcher._validate_model_capabilities()
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Reworked the primary launcher around one pinned capability and download
+  contract for all 14 production-supported checkpoints. Qwen3.5-397B and
+  GLM-5.2 are now selectable downloads; current Ornith downloads use the
+  upstream `ornith-ai` namespace while existing installs continue to resolve.
+  Each model now receives its measured INT4 attention/KV profiles, validated
+  default, qualified topology modes, and context cap instead of inheriting a
+  global menu. Unmeasured profile cross-products, unqualified multi-GPU starts,
+  INT8 experts, and GLM-5.2 contexts above 4,096 tokens fail before model load.
+  Installed-model metadata and pre-launch budgets now use the runtime's
+  normalized architecture parser, fixing Step's sparse expert schedule and
+  Nemotron's Mamba2/latent-MoE accounting. The download list calculates and
+  displays a persistent model-RAM floor from routed INT4 experts plus dual HQQ
+  staging at each pinned revision, with OS and optional conversation-cache
+  headroom called out separately. All 14 revisions resolved to filtered native
+  safetensors manifests and passed real-config budget calculation; launcher,
+  downloader, planner, model/config, and native Windows launcher gates pass.
+
 - Added the timing-disabled RTX PRO 6000 standard benchmark for the current
   DeepSeek-V4 launcher default, INT4 experts with HQQ6 attention and Native
   cache. Internal prefill measured 124.9/532.8/841.9/1,117.9/1,202.0/1,207.2

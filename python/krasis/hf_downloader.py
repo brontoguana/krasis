@@ -7,6 +7,7 @@ import inspect
 import os
 from pathlib import Path
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -120,6 +121,23 @@ class SupportedHFModel:
     revision: str
     recommended_config: str
     notes: str
+    default_attention: str
+    default_kv: str
+    runtime_profiles: tuple[tuple[str, str], ...]
+    multi_gpu_modes: tuple[str, ...] = ("auto",)
+    multi_gpu_qualified: bool = False
+    max_context_tokens: int = 0
+
+    @property
+    def attention_modes(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(attention for attention, _kv in self.runtime_profiles))
+
+    @property
+    def kv_modes(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(kv for _attention, kv in self.runtime_profiles))
+
+
+HQQ4_HQQ6_PROFILES = (("hqq4", "k4v4"), ("hqq6", "k6v6"))
 
 
 SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
@@ -131,6 +149,11 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         revision="a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
         recommended_config="tests/qcn-k4v4-hqq4-int4-benchmark.conf",
         notes="Current production coding model.",
+        default_attention="hqq4",
+        default_kv="k4v4",
+        runtime_profiles=HQQ4_HQQ6_PROFILES,
+        multi_gpu_modes=("auto", "peer"),
+        multi_gpu_qualified=True,
     ),
     SupportedHFModel(
         key="step37",
@@ -140,6 +163,9 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         revision="5f6244077ac62e04eec3f320501ff8c2b293373a",
         recommended_config="tests/step37-flash-4-4-hqq4-k4v4-a16.conf",
         notes="Validated StepFun sparse MoE target with HQQ4 attention and k4v4 KV.",
+        default_attention="hqq4",
+        default_kv="k4v4",
+        runtime_profiles=HQQ4_HQQ6_PROFILES,
     ),
     SupportedHFModel(
         key="dsv4",
@@ -147,10 +173,21 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         repo_id="deepseek-ai/DeepSeek-V4-Flash-0731",
         local_dir_name="deepseek-ai/DeepSeek-V4-Flash-0731",
         revision="9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
-        recommended_config="testconfigs/deepseek-v4-flash-0731-4-4-a16.conf",
+        recommended_config="tests/deepseek-v4-flash-0731-hqq6-native.conf",
         notes=(
             "Quality-gated DeepSeek-V4-Flash-0731 target with INT4 experts; "
             "fresh launcher selections default to HQQ6 attention and Native cache."
+        ),
+        default_attention="hqq6",
+        default_kv="native",
+        runtime_profiles=(
+            ("hqq6", "native"),
+            ("hqq4", "native"),
+            ("hqq46_auto", "native"),
+            ("hqq68_auto", "native"),
+            ("hqq8", "native"),
+            ("hqq8", "bf16"),
+            ("bf16", "bf16"),
         ),
     ),
     SupportedHFModel(
@@ -161,6 +198,9 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         revision="cbd3fa9f933d55ef16a84236559f4ee2a0526848",
         recommended_config="tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
         notes="Validated Nemotron-H Nano target with HQQ4 attention and k4v4 KV.",
+        default_attention="hqq4",
+        default_kv="k4v4",
+        runtime_profiles=(("hqq4", "k4v4"),),
     ),
     SupportedHFModel(
         key="nemotron-super",
@@ -170,6 +210,9 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         revision="d51eab0d1f979ebc26b546e634a04f450d99158e",
         recommended_config="tests/nemotron-super-4-4-hqq4-k4v4-a16.conf",
         notes="Validated Nemotron-H Super target with HQQ4 attention and k4v4 KV.",
+        default_attention="hqq4",
+        default_kv="k4v4",
+        runtime_profiles=(("hqq4", "k4v4"),),
     ),
     SupportedHFModel(
         key="qwen36-35b",
@@ -179,24 +222,33 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         revision="995ad96eacd98c81ed38be0c5b274b04031597b0",
         recommended_config="tests/qwen36-35b-5090-hqq4-k4v4-benchmark.conf",
         notes="Qwen 35B-class MoE target with canonical HQQ8 heatmap reused across HQQ/KV profiles.",
+        default_attention="hqq4",
+        default_kv="k4v4",
+        runtime_profiles=HQQ4_HQQ6_PROFILES,
     ),
     SupportedHFModel(
         key="ornith35",
         display_name="Ornith-1.0-35B",
-        repo_id="deepreinforce-ai/Ornith-1.0-35B",
-        local_dir_name="deepreinforce-ai/Ornith-1.0-35B",
+        repo_id="ornith-ai/Ornith-1.0-35B",
+        local_dir_name="ornith-ai/Ornith-1.0-35B",
         revision="5df2ed3f675c7beaa490328cc70bb573b65fb660",
         recommended_config="tests/ornith35-stats-hqq6-k6v6.conf",
         notes="Validated Ornith 35B-class Qwen3.5-MoE target with HQQ6 attention and k6v6 KV.",
+        default_attention="hqq6",
+        default_kv="k6v6",
+        runtime_profiles=HQQ4_HQQ6_PROFILES,
     ),
     SupportedHFModel(
         key="ornith397",
         display_name="Ornith-1.0-397B",
-        repo_id="deepreinforce-ai/Ornith-1.0-397B",
-        local_dir_name="deepreinforce-ai/Ornith-1.0-397B",
+        repo_id="ornith-ai/Ornith-1.0-397B",
+        local_dir_name="ornith-ai/Ornith-1.0-397B",
         revision="5e3e761811e804c295c1d3c0ce68b21da6154209",
         recommended_config="tests/ornith397-stats-hqq6-k6v6.conf",
         notes="Validated Ornith 397B-class Qwen3.5-MoE target with HQQ6 attention and k6v6 KV.",
+        default_attention="hqq6",
+        default_kv="k6v6",
+        runtime_profiles=HQQ4_HQQ6_PROFILES,
     ),
     SupportedHFModel(
         key="qwen35-35b",
@@ -206,6 +258,11 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         revision="b1fc3d59ae0ab1e4279e04a8dd0fc4dc361fc2b6",
         recommended_config="tests/q35b-4-4-hqq6-k6v6-diagnostic.conf",
         notes="Validated Qwen 35B-class MoE target.",
+        default_attention="hqq6",
+        default_kv="k6v6",
+        runtime_profiles=HQQ4_HQQ6_PROFILES,
+        multi_gpu_modes=("auto", "layer-split"),
+        multi_gpu_qualified=True,
     ),
     SupportedHFModel(
         key="qwen35-122b",
@@ -215,6 +272,31 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         revision="b000b2eb18a7f4cdf3153c4215842da339e09d99",
         recommended_config="tests/q122b-k4v4-hqq6-int4-benchmark.conf",
         notes="Large Qwen MoE target for multi-GPU/high-memory runs.",
+        default_attention="hqq6",
+        default_kv="k4v4",
+        runtime_profiles=(
+            ("hqq6", "k4v4"),
+            ("hqq6", "k6v6"),
+            ("hqq4", "k4v4"),
+        ),
+        multi_gpu_modes=("auto", "peer"),
+        multi_gpu_qualified=True,
+    ),
+    SupportedHFModel(
+        key="qwen35-397b",
+        display_name="Qwen3.5-397B-A17B",
+        repo_id="Qwen/Qwen3.5-397B-A17B",
+        local_dir_name="Qwen3.5-397B-A17B",
+        revision="8472618112abcbd45acbcdc58436aff4233c23f7",
+        recommended_config="tests/q397-k4v4-hqq6-int4-benchmark.conf",
+        notes="Validated 397B Qwen MoE target with published Krasis speed and quality evidence.",
+        default_attention="hqq6",
+        default_kv="k4v4",
+        runtime_profiles=(
+            ("hqq6", "k4v4"),
+            ("hqq6", "k6v6"),
+            ("hqq4", "k4v4"),
+        ),
     ),
     SupportedHFModel(
         key="qwen3-235b",
@@ -224,6 +306,13 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         revision="8efa61729e24bd65b1d152b5ab5409052aa80e65",
         recommended_config="tests/q235-k4v4-hqq6-int4-benchmark.conf",
         notes="Large Qwen MoE target.",
+        default_attention="hqq6",
+        default_kv="k4v4",
+        runtime_profiles=(
+            ("hqq6", "k4v4"),
+            ("hqq6", "k6v6"),
+            ("hqq4", "k4v4"),
+        ),
     ),
     SupportedHFModel(
         key="gemma4-26b-a4b-it",
@@ -231,8 +320,32 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         repo_id="google/gemma-4-26b-a4b-it",
         local_dir_name="gemma-4-26b-a4b-it",
         revision="6e6f6edea8c52db2094dca3086e4b963a0034dfc",
-        recommended_config="tests/gemma-4-4-k6v6-a16.conf",
+        recommended_config="tests/gemma-4-4-hqq6-k6v6-a16.conf",
         notes="Gemma4 text plus lazy image path; non-ring k6v6 is the validated fast text mode.",
+        default_attention="hqq6",
+        default_kv="k6v6",
+        runtime_profiles=(
+            ("hqq6", "k6v6"),
+            ("hqq4", "k4v4"),
+            ("hqq46_auto", "k6v6"),
+            ("hqq68_auto", "k6v6"),
+            ("bf16", "k6v6"),
+        ),
+    ),
+    SupportedHFModel(
+        key="glm52",
+        display_name="GLM-5.2",
+        repo_id="zai-org/GLM-5.2",
+        local_dir_name="GLM-5.2",
+        revision="b4734de4facf877f85769a911abafc5283eab3d9",
+        recommended_config="tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf",
+        notes="Validated sparse-DSA production target; launcher context is capped to the qualified 4K mode.",
+        default_attention="hqq4",
+        default_kv="k4v4",
+        runtime_profiles=(("hqq4", "k4v4"),),
+        multi_gpu_modes=("auto", "peer"),
+        multi_gpu_qualified=True,
+        max_context_tokens=4096,
     ),
 )
 
@@ -260,6 +373,9 @@ class HFModelCandidate:
     recommended_config: str = ""
     support_notes: str = ""
     supported_download: bool = False
+    runtime_ram_bytes: int = 0
+    runtime_ram_source: str = ""
+    metadata_error: str = ""
 
     @property
     def has_safetensors(self) -> bool:
@@ -339,6 +455,34 @@ def supported_model_spec(value: str) -> SupportedHFModel:
         }:
             return spec
     raise ValueError(f"unsupported Krasis model: {value}")
+
+
+def supported_model_for_path(model_path: str) -> Optional[SupportedHFModel]:
+    """Resolve an installed catalog model without depending on its org directory.
+
+    Existing installs predate some upstream namespace moves, so the checkpoint
+    basename is part of the stable local identity. Exact catalog keys/repo IDs
+    remain preferred and ambiguous basenames fail visibly.
+    """
+    normalized = Path(os.path.expanduser(model_path)).as_posix().rstrip("/").lower()
+    basename = normalized.rsplit("/", 1)[-1]
+    matches = []
+    for spec in SUPPORTED_HF_MODELS:
+        identities = {
+            spec.key.lower(),
+            spec.repo_id.lower(),
+            spec.local_dir_name.lower(),
+            spec.repo_id.rsplit("/", 1)[-1].lower(),
+            spec.local_dir_name.rsplit("/", 1)[-1].lower(),
+        }
+        if normalized in identities or basename in identities or any(
+            normalized.endswith(f"/{identity}") for identity in identities if "/" in identity
+        ):
+            matches.append(spec)
+    if len(matches) > 1:
+        keys = ", ".join(spec.key for spec in matches)
+        raise ValueError(f"installed model path {model_path!r} matches multiple catalog entries: {keys}")
+    return matches[0] if matches else None
 
 
 def _apply_supported_spec(candidate: HFModelCandidate, spec: SupportedHFModel) -> HFModelCandidate:
@@ -613,7 +757,85 @@ def get_supported_model_details(key_or_repo: str) -> HFModelCandidate:
         files_metadata=True,
         token=_token_arg(),
     )
-    return _apply_supported_spec(candidate_from_info(info, include_files=True), spec)
+    candidate = _apply_supported_spec(candidate_from_info(info, include_files=True), spec)
+    return _populate_supported_runtime_ram(candidate, spec)
+
+
+def _populate_supported_runtime_ram(
+    candidate: HFModelCandidate,
+    spec: SupportedHFModel,
+) -> HFModelCandidate:
+    from huggingface_hub import hf_hub_download
+    from krasis.vram_budget import estimate_int4_runtime_ram_bytes
+
+    config_path = hf_hub_download(
+        repo_id=spec.repo_id,
+        filename="config.json",
+        revision=spec.revision,
+        token=_token_arg(),
+    )
+    candidate.runtime_ram_bytes, candidate.runtime_ram_source = (
+        estimate_int4_runtime_ram_bytes(
+            os.path.dirname(config_path),
+            spec.default_attention,
+            hqq_auto_budget_pct=(10.0 if spec.default_attention.endswith("_auto") else None),
+        )
+    )
+    return candidate
+
+
+def _supported_model_summary(spec: SupportedHFModel) -> HFModelCandidate:
+    HfApi, *_ = _require_hf()
+
+    info = HfApi().model_info(
+        spec.repo_id,
+        revision=spec.revision,
+        files_metadata=False,
+        token=_token_arg(),
+    )
+    candidate = _apply_supported_spec(
+        candidate_from_info(info, include_files=False), spec
+    )
+    return _populate_supported_runtime_ram(candidate, spec)
+
+
+def get_supported_model_summaries() -> List[HFModelCandidate]:
+    """Fetch pinned catalog metadata and calculated runtime RAM concurrently.
+
+    Individual failures remain visible in the list instead of silently
+    substituting an unpinned revision or an invented RAM value.
+    """
+    summaries: Dict[str, HFModelCandidate] = {}
+    with ThreadPoolExecutor(max_workers=min(4, len(SUPPORTED_HF_MODELS))) as pool:
+        futures = {
+            pool.submit(_supported_model_summary, spec): spec
+            for spec in SUPPORTED_HF_MODELS
+        }
+        for future in as_completed(futures):
+            spec = futures[future]
+            try:
+                summaries[spec.key] = future.result()
+            except Exception as exc:
+                candidate = HFModelCandidate(
+                    repo_id=spec.repo_id,
+                    pipeline_tag="",
+                    tags=[],
+                    gated=False,
+                    private=False,
+                    downloads=0,
+                    likes=0,
+                    last_modified="unknown",
+                    safetensors_params=0,
+                    safetensors_total_bytes=0,
+                    selected_bytes=0,
+                    selected_file_count=0,
+                    selected_files=[],
+                    safetensors_file_count=0,
+                    summary="Pinned metadata unavailable",
+                    metadata_error=str(exc),
+                )
+                summaries[spec.key] = _apply_supported_spec(candidate, spec)
+    return [summaries[spec.key] for spec in SUPPORTED_HF_MODELS]
 
 
 def destination_for_repo(models_dir: str, repo_id: str) -> str:
@@ -631,14 +853,14 @@ def destination_for_supported_model(models_dir: str, model: Any) -> str:
 def format_bytes(num_bytes: int) -> str:
     if num_bytes <= 0:
         return "unknown"
-    units = ["B", "KB", "MB", "GB", "TB"]
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
     value = float(num_bytes)
     unit = units[0]
     for unit in units:
         if value < 1024 or unit == units[-1]:
             break
         value /= 1024
-    if unit in ("B", "KB", "MB"):
+    if unit in ("B", "KiB", "MiB"):
         return f"{value:.0f} {unit}"
     return f"{value:.1f} {unit}"
 

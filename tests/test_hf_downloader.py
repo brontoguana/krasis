@@ -21,6 +21,9 @@ from krasis.hf_downloader import (
 
 
 class HFDownloaderTests(unittest.TestCase):
+    def test_format_bytes_uses_binary_units(self):
+        self.assertEqual(hf_downloader.format_bytes(1024**3), "1.0 GiB")
+
     def test_parse_hf_repo_id_accepts_urls_and_repo_ids(self):
         self.assertEqual(parse_hf_repo_id("Qwen/Qwen3-Coder-Next"), "Qwen/Qwen3-Coder-Next")
         self.assertEqual(
@@ -162,12 +165,14 @@ class HFDownloaderTests(unittest.TestCase):
                 "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
                 "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
                 "Qwen/Qwen3.6-35B-A3B",
-                "deepreinforce-ai/Ornith-1.0-35B",
-                "deepreinforce-ai/Ornith-1.0-397B",
+                "ornith-ai/Ornith-1.0-35B",
+                "ornith-ai/Ornith-1.0-397B",
                 "Qwen/Qwen3.5-35B-A3B",
                 "Qwen/Qwen3.5-122B-A10B",
+                "Qwen/Qwen3.5-397B-A17B",
                 "Qwen/Qwen3-235B-A22B",
                 "google/gemma-4-26b-a4b-it",
+                "zai-org/GLM-5.2",
             ],
         )
         self.assertEqual(len({m.key for m in models}), len(models))
@@ -179,6 +184,87 @@ class HFDownloaderTests(unittest.TestCase):
                 os.path.exists(os.path.join(repo_root, model.recommended_config)),
                 model.recommended_config,
             )
+            self.assertIn(model.default_attention, model.attention_modes)
+            self.assertIn(model.default_kv, model.kv_modes)
+            self.assertIn(
+                (model.default_attention, model.default_kv),
+                model.runtime_profiles,
+            )
+            self.assertEqual(len(model.runtime_profiles), len(set(model.runtime_profiles)))
+            self.assertTrue(model.multi_gpu_modes)
+
+        glm52 = next(model for model in models if model.key == "glm52")
+        self.assertEqual(glm52.max_context_tokens, 4096)
+        self.assertEqual(glm52.attention_modes, ("hqq4",))
+        self.assertEqual(glm52.kv_modes, ("k4v4",))
+
+    def test_supported_model_profiles_are_measured_and_defaults_match_configs(self):
+        from krasis.launcher import _load_config
+
+        expected_profiles = {
+            "qcn": (("hqq4", "k4v4"), ("hqq6", "k6v6")),
+            "step37": (("hqq4", "k4v4"), ("hqq6", "k6v6")),
+            "dsv4": (
+                ("hqq6", "native"),
+                ("hqq4", "native"),
+                ("hqq46_auto", "native"),
+                ("hqq68_auto", "native"),
+                ("hqq8", "native"),
+                ("hqq8", "bf16"),
+                ("bf16", "bf16"),
+            ),
+            "nemotron-nano": (("hqq4", "k4v4"),),
+            "nemotron-super": (("hqq4", "k4v4"),),
+            "qwen36-35b": (("hqq4", "k4v4"), ("hqq6", "k6v6")),
+            "ornith35": (("hqq4", "k4v4"), ("hqq6", "k6v6")),
+            "ornith397": (("hqq4", "k4v4"), ("hqq6", "k6v6")),
+            "qwen35-35b": (("hqq4", "k4v4"), ("hqq6", "k6v6")),
+            "qwen35-122b": (
+                ("hqq6", "k4v4"),
+                ("hqq6", "k6v6"),
+                ("hqq4", "k4v4"),
+            ),
+            "qwen35-397b": (
+                ("hqq6", "k4v4"),
+                ("hqq6", "k6v6"),
+                ("hqq4", "k4v4"),
+            ),
+            "qwen3-235b": (
+                ("hqq6", "k4v4"),
+                ("hqq6", "k6v6"),
+                ("hqq4", "k4v4"),
+            ),
+            "gemma4-26b-a4b-it": (
+                ("hqq6", "k6v6"),
+                ("hqq4", "k4v4"),
+                ("hqq46_auto", "k6v6"),
+                ("hqq68_auto", "k6v6"),
+                ("bf16", "k6v6"),
+            ),
+            "glm52": (("hqq4", "k4v4"),),
+        }
+        repo_root = os.path.dirname(os.path.dirname(__file__))
+        self.assertEqual(set(expected_profiles), {model.key for model in supported_models()})
+        for model in supported_models():
+            with self.subTest(model=model.key):
+                self.assertEqual(model.runtime_profiles, expected_profiles[model.key])
+                saved = _load_config(os.path.join(repo_root, model.recommended_config))
+                self.assertEqual(saved.get("CFG_ATTENTION_QUANT"), model.default_attention)
+                self.assertEqual(saved.get("CFG_KV_DTYPE"), model.default_kv)
+                self.assertEqual(saved.get("CFG_GPU_EXPERT_BITS"), "4")
+                self.assertEqual(saved.get("CFG_CPU_EXPERT_BITS"), "4")
+
+    def test_supported_model_path_resolution_survives_ornith_namespace_move(self):
+        old = hf_downloader.supported_model_for_path(
+            "/models/deepreinforce-ai/Ornith-1.0-397B"
+        )
+        canonical = hf_downloader.supported_model_for_path(
+            "/models/ornith-ai/Ornith-1.0-397B"
+        )
+        self.assertIsNotNone(old)
+        self.assertIsNotNone(canonical)
+        self.assertEqual(old.key, "ornith397")
+        self.assertEqual(canonical.key, "ornith397")
 
     def test_destination_for_supported_model_uses_krasis_model_name(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -212,11 +298,14 @@ class HFDownloaderTests(unittest.TestCase):
                 )
 
         original = hf_downloader._require_hf
+        original_ram = hf_downloader._populate_supported_runtime_ram
         hf_downloader._require_hf = lambda: (FakeApi, lambda: "hf_test", None, None, None, None, None)
+        hf_downloader._populate_supported_runtime_ram = lambda candidate, _spec: candidate
         try:
             candidate = get_supported_model_details("qcn")
         finally:
             hf_downloader._require_hf = original
+            hf_downloader._populate_supported_runtime_ram = original_ram
 
         spec = supported_models()[0]
         self.assertEqual(calls, [(spec.repo_id, spec.revision, True, True)])
@@ -245,6 +334,8 @@ class HFDownloaderTests(unittest.TestCase):
         self.assertEqual(calls[0]["repo_id"], "Org/Model")
         self.assertEqual(calls[0]["revision"], "abc123")
         self.assertEqual(calls[0]["max_workers"], 3)
+        self.assertEqual(calls[0]["allow_patterns"], hf_downloader.KRASIS_HF_ALLOW_PATTERNS)
+        self.assertEqual(calls[0]["ignore_patterns"], hf_downloader.KRASIS_HF_IGNORE_PATTERNS)
 
     def test_validate_local_model_reports_missing_required_files(self):
         with tempfile.TemporaryDirectory() as tmp:

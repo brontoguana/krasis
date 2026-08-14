@@ -86,6 +86,85 @@ def _read_model_config(model_path: str) -> Dict[str, Any]:
     return cfg
 
 
+def _normalized_launcher_config(model_path: str) -> tuple[Dict[str, Any], ModelConfig]:
+    """Return budget input normalized by the runtime's architecture parser.
+
+    Launcher budgeting must use the same aliases and layer schedules as model
+    loading. Reading raw Transformers keys independently made Step appear dense
+    and treated every Nemotron block as both attention and MoE.
+    """
+    cfg = _read_model_config(model_path)
+    model_cfg = ModelConfig.from_model_path(model_path)
+    cfg.update({
+        "model_type": model_cfg.model_type,
+        "hidden_size": model_cfg.hidden_size,
+        "intermediate_size": model_cfg.intermediate_size,
+        "moe_intermediate_size": model_cfg.moe_intermediate_size,
+        "num_hidden_layers": model_cfg.num_hidden_layers,
+        "num_attention_heads": model_cfg.num_attention_heads,
+        "num_key_value_heads": model_cfg.num_key_value_heads,
+        "head_dim": model_cfg.gqa_head_dim or model_cfg.attention_head_dim or model_cfg.head_dim,
+        "n_routed_experts": model_cfg.n_routed_experts,
+        "num_experts_per_tok": model_cfg.num_experts_per_tok,
+        "n_shared_experts": model_cfg.n_shared_experts,
+        "shared_expert_intermediate_size": model_cfg.effective_shared_expert_intermediate,
+        "first_k_dense_replace": model_cfg.first_k_dense_replace,
+        "max_position_embeddings": model_cfg.max_position_embeddings,
+        "moe_latent_size": model_cfg.moe_latent_size,
+        "mlp_hidden_act": model_cfg.mlp_hidden_act,
+    })
+    if model_cfg.layer_types is not None:
+        cfg["layer_types"] = list(model_cfg.layer_types)
+    if model_cfg.moe_layer_indices is not None:
+        cfg["moe_layer_indices"] = list(model_cfg.moe_layer_indices)
+    return cfg, model_cfg
+
+
+def _model_kv_bytes_per_token_for_layer(
+    model_cfg: ModelConfig,
+    cfg: Dict[str, Any],
+    layer_idx: int,
+    kv_dtype: str,
+) -> int:
+    if not model_cfg.is_full_attention_layer(layer_idx):
+        return 0
+    if model_cfg.is_mla:
+        return int(
+            (model_cfg.kv_lora_rank + model_cfg.qk_rope_head_dim)
+            * _kv_dtype_bytes(kv_dtype, cfg)
+        )
+    dtype_bytes = _kv_dtype_bytes(kv_dtype, cfg)
+    return int(
+        2
+        * model_cfg.gqa_num_kv_heads_for_layer(layer_idx)
+        * model_cfg.gqa_head_dim_for_layer(layer_idx)
+        * dtype_bytes
+    )
+
+
+def _persistent_recurrent_state_bytes(model_cfg: ModelConfig, start: int, end: int) -> int:
+    """Runtime FP32 recurrent state resident on a rank for hybrid layers."""
+    total = 0
+    for layer_idx in range(start, end):
+        if model_cfg.is_linear_attention_layer(layer_idx):
+            nk = model_cfg.linear_num_key_heads
+            nv = model_cfg.linear_num_value_heads
+            dk = model_cfg.linear_key_head_dim
+            dv = model_cfg.linear_value_head_dim
+            conv_dim = nk * dk * 2 + nv * dv
+            total += conv_dim * model_cfg.linear_conv_kernel_dim * 4
+            total += nv * dk * dv * 4
+        elif model_cfg.is_mamba2_layer(layer_idx):
+            total += model_cfg.mamba_conv_dim * model_cfg.mamba_conv_kernel * 4
+            total += (
+                model_cfg.mamba_num_heads
+                * model_cfg.mamba_head_dim
+                * model_cfg.ssm_state_size
+                * 4
+            )
+    return total
+
+
 def _detect_gpu_vram_bytes() -> int:
     """Auto-detect per-GPU VRAM in bytes via nvidia-smi."""
     try:
@@ -287,9 +366,10 @@ def _linear_attention_bytes_per_layer(cfg: Dict[str, Any], quantization: str) ->
 
 def _expert_bytes_per_expert(cfg: Dict[str, Any], bits: int = 4, group_size: int = 128) -> int:
     """Expert buffer size for Marlin INT4/INT8 on GPU."""
-    hidden = cfg["hidden_size"]
+    hidden = cfg.get("moe_latent_size", 0) or cfg["hidden_size"]
     intermediate = cfg.get("moe_intermediate_size", 0)
-    total_params = 3 * hidden * intermediate
+    matrix_count = 2 if cfg.get("mlp_hidden_act") == "relu2" else 3
+    total_params = matrix_count * hidden * intermediate
     if bits == 4:
         packed = total_params // 2
         scales = (total_params // group_size) * 2
@@ -297,6 +377,55 @@ def _expert_bytes_per_expert(cfg: Dict[str, Any], bits: int = 4, group_size: int
         packed = total_params
         scales = (total_params // group_size) * 2
     return packed + scales
+
+
+def estimate_int4_expert_cache_bytes(
+    model_cfg: ModelConfig,
+    group_size: int = 128,
+) -> int:
+    """Exact Marlin INT4 routed-expert cache bytes from normalized geometry."""
+    if model_cfg.n_routed_experts <= 0 or model_cfg.num_moe_layers <= 0:
+        return 0
+    cfg = {
+        "hidden_size": model_cfg.hidden_size,
+        "moe_latent_size": model_cfg.moe_latent_size,
+        "moe_intermediate_size": model_cfg.moe_intermediate_size,
+        "mlp_hidden_act": model_cfg.mlp_hidden_act,
+    }
+    return (
+        _expert_bytes_per_expert(cfg, 4, group_size)
+        * model_cfg.n_routed_experts
+        * model_cfg.num_moe_layers
+    )
+
+
+def estimate_int4_runtime_ram_bytes(
+    model_path: str,
+    attention_quant: str,
+    hqq_group_size: int = HQQ_DEFAULT_GROUP_SIZE,
+    hqq_auto_budget_pct: Optional[float] = None,
+) -> tuple[int, str]:
+    """Estimate persistent INT4 runtime RAM from checkpoint dimensions.
+
+    This is the same expert-cache plus dual HQQ host-staging contract shown by
+    the launcher's detailed budget. It intentionally excludes optional prefix
+    cache and operating-system headroom, which are separately user-controlled.
+    """
+    _cfg, model_cfg = _normalized_launcher_config(model_path)
+    expert_bytes = estimate_int4_expert_cache_bytes(model_cfg, hqq_group_size)
+    hqq_bytes = 0
+    source = "normalized model dimensions"
+    if attention_quant in HQQ_ATTENTION_QUANTS:
+        layer_bytes, hqq_source = _hqq_attention_layer_bytes_for_budget(
+            model_path,
+            HQQ_CACHE_PROFILE_BASELINE,
+            attention_quant,
+            hqq_group_size,
+            hqq_auto_budget_pct,
+        )
+        hqq_bytes = sum(layer_bytes.values()) * 2
+        source = f"expert cache + dual HQQ staging ({hqq_source})"
+    return expert_bytes + hqq_bytes, source
 
 
 def _component_weight_bytes(params: int, quant: str, group_size: int = 128) -> int:
@@ -701,9 +830,10 @@ def _hqq_attention_layer_bytes_for_budget(
 
 def _cpu_expert_bytes_per_expert(cfg: Dict[str, Any], bits: int = 4, group_size: int = 128) -> int:
     """CPU expert size (INT4 or INT8 with group scales)."""
-    hidden = cfg["hidden_size"]
+    hidden = cfg.get("moe_latent_size", 0) or cfg["hidden_size"]
     intermediate = cfg.get("moe_intermediate_size", 0)
-    total_params = 3 * hidden * intermediate
+    matrix_count = 2 if cfg.get("mlp_hidden_act") == "relu2" else 3
+    total_params = matrix_count * hidden * intermediate
     if bits == 4:
         return total_params // 2 + (total_params // group_size) * 2
     else:  # INT8
@@ -920,10 +1050,8 @@ def compute_launcher_budget(
     """
     import math
 
-    cfg = _read_model_config(model_path)
-    model_context_limit = int(
-        ModelConfig.from_model_path(model_path).max_position_embeddings
-    )
+    cfg, model_cfg = _normalized_launcher_config(model_path)
+    model_context_limit = int(model_cfg.max_position_embeddings)
     if model_context_limit <= 0:
         raise ValueError(
             f"Model has invalid max_position_embeddings={model_context_limit}"
@@ -951,19 +1079,14 @@ def compute_launcher_budget(
     total_layers = cfg["num_hidden_layers"]
     is_deepseek_v4 = str(cfg.get("model_type", "")).lower().replace("-", "_") == "deepseek_v4"
     is_mla = _is_mla(cfg)
-    hybrid = _is_hybrid(cfg)
-    n_experts = cfg.get("n_routed_experts", cfg.get("num_experts", 0))
-
-    if "first_k_dense_replace" in cfg:
-        first_k_dense = cfg["first_k_dense_replace"]
-    elif "decoder_sparse_step" in cfg:
-        step = cfg["decoder_sparse_step"]
-        first_k_dense = 0 if step <= 1 else step
-    else:
-        first_k_dense = 0
-
-    # Pre-compute hybrid layer types
-    full_attn_interval = cfg.get("full_attention_interval", 0)
+    hybrid = model_cfg.is_hybrid
+    n_experts = model_cfg.n_routed_experts
+    first_k_dense = model_cfg.first_k_dense_replace
+    moe_layer_indices = {
+        layer_idx
+        for layer_idx in range(total_layers)
+        if model_cfg.is_moe_layer(layer_idx)
+    }
 
     # Linear attention estimates are only used by non-HQQ component estimates.
     # HQQ uses the dedicated artifact-layout estimator below so packed payload
@@ -1045,9 +1168,13 @@ def compute_launcher_budget(
     elif is_mla:
         kv_ptl = (cfg["kv_lora_rank"] + cfg["qk_rope_head_dim"]) * kv_b
     else:
-        n_kv_heads = cfg.get("num_key_value_heads", cfg["num_attention_heads"])
-        head_dim = cfg.get("head_dim", cfg["hidden_size"] // cfg["num_attention_heads"])
-        kv_ptl = 2 * n_kv_heads * head_dim * kv_b
+        kv_ptl = 0
+    kv_bytes_by_layer = [
+        0
+        if is_deepseek_v4
+        else _model_kv_bytes_per_token_for_layer(model_cfg, cfg, layer_idx, kv_dtype)
+        for layer_idx in range(total_layers)
+    ]
 
     cuda_overhead = DEFAULT_CUDA_OVERHEAD_MB
 
@@ -1065,7 +1192,7 @@ def compute_launcher_budget(
 
     # Gate weights and norms are PERMANENT on GPU for ALL layers (not streamed).
     # Additionally, f32 copies of gate weights are kept for routing precision.
-    total_moe_layers_all = total_layers - first_k_dense
+    total_moe_layers_all = len(moe_layer_indices)
     gate_bytes_all_layers = hidden * n_experts * 2 * total_moe_layers_all  # BF16
     gate_f32_bytes_all_layers = hidden * n_experts * 4 * total_moe_layers_all  # F32 routing copy
     norm_bytes_all_layers = 2 * hidden * 2 * total_layers  # BF16
@@ -1083,11 +1210,8 @@ def compute_launcher_budget(
     # Estimate up to 10k tokens, but cap to what the KV cache can actually hold.
     top_k = cfg.get("num_experts_per_tok", cfg.get("num_selected_experts", 8))
     moe_inter = cfg.get("moe_intermediate_size", 0)
-    if hybrid:
-        total_full_attn = sum(1 for i in range(total_model_layers) if (i + 1) % full_attn_interval == 0)
-    else:
-        total_full_attn = total_model_layers
-    kv_total_per_token = kv_ptl * total_full_attn
+    total_full_attn = model_cfg.num_full_attention_layers
+    kv_total_per_token = sum(kv_bytes_by_layer)
     max_kv_tokens = (
         effective_context_limit
         if is_deepseek_v4
@@ -1121,16 +1245,18 @@ def compute_launcher_budget(
         n_layers = pp_partition[rank_idx]
 
         # Count full attention vs linear attention layers IN THIS RANK
-        if hybrid:
-            rank_full_attn = sum(1 for i in range(rank_start, rank_end) if (i + 1) % full_attn_interval == 0)
-            rank_linear_attn = n_layers - rank_full_attn
-        else:
-            rank_full_attn = n_layers
-            rank_linear_attn = 0
+        rank_full_attn = sum(
+            1 for i in range(rank_start, rank_end)
+            if model_cfg.is_full_attention_layer(i)
+        )
+        rank_linear_attn = sum(
+            1 for i in range(rank_start, rank_end)
+            if model_cfg.is_linear_attention_layer(i)
+        )
 
         # Expert related components (per-rank)
-        dn = max(0, min(rank_end, first_k_dense) - rank_start)
-        mn = n_layers - dn
+        mn = sum(1 for i in range(rank_start, rank_end) if i in moe_layer_indices)
+        dn = n_layers - mn
 
         # layer_group_size controls expert DMA pipelining (HCS), NOT attention/shared
         # expert streaming. Attention and shared experts are permanently on GPU for
@@ -1191,12 +1317,16 @@ def compute_launcher_budget(
             ebuf_bytes = 0
             emode = "n/a"
 
+        recurrent_state_bytes = _persistent_recurrent_state_bytes(
+            model_cfg, rank_start, rank_end
+        )
         total_bytes = (
             rank_attn_bytes + rank_norm_bytes +
             base_embed_bytes + base_lmhead_bytes +
             shared_bytes + dense_mlp_bytes +
             gate_bytes +
             ebuf_bytes +
+            recurrent_state_bytes +
             rust_prefill_workspace_bytes +
             prefill_workspace_bytes +
             cuda_overhead * 1024 * 1024
@@ -1205,7 +1335,7 @@ def compute_launcher_budget(
         # KV cache only for layers in this rank's partition. DeepSeek-V4 has a
         # fixed raw ring plus ratio-dependent compressed/index state, so its
         # exact nonlinear model is inverted rather than approximated per token.
-        kv_per_rank = kv_ptl * rank_full_attn
+        kv_per_rank = sum(kv_bytes_by_layer[rank_start:rank_end])
         if is_deepseek_v4:
             kv_tokens = _deepseek_v4_tokens_for_rank_budget(
                 cfg,
@@ -1270,6 +1400,7 @@ def compute_launcher_budget(
             "cuda_overhead_mb": cuda_overhead,
             "prefill_scratch_mb": rust_prefill_workspace_bytes / MB,
             "prefill_workspace_mb": prefill_workspace_bytes / MB,
+            "recurrent_state_mb": recurrent_state_bytes / MB,
             "total_mb": total_bytes / MB,
             "free_mb": free_bytes / MB,
             "kv_tokens": kv_tokens,
@@ -1282,7 +1413,7 @@ def compute_launcher_budget(
     worst = max(ranks, key=lambda r: r["total_mb"])
     over_budget = worst["total_mb"] > gpu_vram_mb
 
-    total_moe_layers = total_layers - first_k_dense
+    total_moe_layers = len(moe_layer_indices)
     MB = 1024 * 1024
 
     # ── System RAM: mmap'd GPU Marlin expert cache plus HQQ host staging ──
@@ -1302,7 +1433,9 @@ def compute_launcher_budget(
     peak_vram_mb = max(r["total_with_kv_mb"] for r in ranks) if ranks else 0
 
     arch = "DeepSeek-V4 compressed attention" if is_deepseek_v4 else "MLA" if is_mla else "GQA"
-    if hybrid:
+    if model_cfg.is_nemotron_h:
+        arch += "+Mamba2"
+    elif hybrid:
         arch += "+DeltaNet"
 
     return {
@@ -1320,7 +1453,8 @@ def compute_launcher_budget(
         "kv_dtype": kv_dtype,
         "max_context_tokens": effective_context_limit,
         "hybrid": hybrid,
-        "num_full_attention_layers": _num_full_attention_layers(cfg) if hybrid else total_layers,
+        "num_full_attention_layers": model_cfg.num_full_attention_layers,
+        "num_moe_layers": total_moe_layers,
         "ram_gpu_experts_mb": ram_gpu_experts_mb,
         "ram_hqq_host_staging_mb": ram_hqq_host_staging_mb,
         "ram_total_mb": ram_total_mb,

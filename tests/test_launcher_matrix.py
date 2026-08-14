@@ -281,6 +281,275 @@ class LauncherMatrixTest(unittest.TestCase):
             launcher.cfg.attention_quant = supported_attention
             launcher._validate_model_capabilities()
 
+    def test_every_download_catalog_entry_drives_launcher_capabilities(self) -> None:
+        from krasis.hf_downloader import supported_models
+
+        measured_topologies = {
+            "qcn": ("auto", "peer"),
+            "qwen35-35b": ("auto", "layer-split"),
+            "qwen35-122b": ("auto", "peer"),
+            "glm52": ("auto", "peer"),
+        }
+        expert_option = next(
+            option for option in launcher_mod.OPTIONS
+            if option.key == "gpu_expert_bits"
+        )
+        self.assertEqual(expert_option.choices, [4])
+
+        for spec in supported_models():
+            with self.subTest(model=spec.key):
+                launcher = Launcher.__new__(Launcher)
+                launcher.cfg = LauncherConfig()
+                launcher.model_info = {
+                    "name": spec.display_name,
+                    "path": f"/models/{spec.local_dir_name}",
+                    "arch": "catalog-test",
+                    "support_key": spec.key,
+                }
+                launcher._apply_model_recommended_defaults()
+                self.assertEqual(launcher.cfg.attention_quant, spec.default_attention)
+                self.assertEqual(launcher.cfg.kv_dtype, spec.default_kv)
+                self.assertEqual(launcher._attention_choices(), list(spec.attention_modes))
+                self.assertEqual(launcher._kv_choices(), list(spec.kv_modes))
+                self.assertEqual(launcher._multi_gpu_choices(), list(spec.multi_gpu_modes))
+                self.assertEqual(
+                    spec.multi_gpu_modes,
+                    measured_topologies.get(spec.key, ("auto",)),
+                )
+                self.assertEqual(
+                    spec.multi_gpu_qualified,
+                    spec.key in measured_topologies,
+                )
+                if spec.max_context_tokens:
+                    self.assertEqual(
+                        launcher.cfg.max_context_tokens,
+                        spec.max_context_tokens,
+                    )
+                launcher._validate_model_capabilities()
+                for attention, kv in spec.runtime_profiles:
+                    launcher.cfg.attention_quant = attention
+                    launcher.cfg.kv_dtype = kv
+                    launcher._validate_model_capabilities()
+
+                unmeasured = next(
+                    (
+                        (attention, kv)
+                        for attention in spec.attention_modes
+                        for kv in spec.kv_modes
+                        if (attention, kv) not in spec.runtime_profiles
+                    ),
+                    None,
+                )
+                if unmeasured is not None:
+                    launcher.cfg.attention_quant, launcher.cfg.kv_dtype = unmeasured
+                    with self.assertRaisesRegex(ValueError, "has not been launcher-qualified"):
+                        launcher._validate_model_capabilities()
+
+                launcher.cfg.attention_quant = spec.default_attention
+                launcher.cfg.kv_dtype = spec.default_kv
+                launcher.cfg.selected_gpu_indices = [0, 1]
+                if spec.multi_gpu_qualified:
+                    launcher._validate_model_topology()
+                else:
+                    with self.assertRaisesRegex(ValueError, "not yet launcher-qualified"):
+                        launcher._validate_model_topology()
+                launcher.cfg.selected_gpu_indices = []
+
+                launcher.cfg.gpu_expert_bits = 8
+                launcher.cfg.cpu_expert_bits = 8
+                with self.assertRaisesRegex(ValueError, "INT4 experts only"):
+                    launcher._validate_model_capabilities()
+
+    def test_profile_cycles_keep_catalog_pairs_qualified(self) -> None:
+        from krasis.hf_downloader import supported_model_spec
+
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = LauncherConfig()
+        spec = supported_model_spec("qcn")
+        launcher.model_info = {
+            "name": spec.display_name,
+            "path": f"/models/{spec.local_dir_name}",
+            "arch": "qwen3_next",
+            "support_key": spec.key,
+        }
+        launcher._apply_model_recommended_defaults()
+        attention_option = next(
+            option for option in launcher_mod.OPTIONS
+            if option.key == "attention_quant"
+        )
+        launcher._cycle_value(attention_option, 1)
+        self.assertEqual(
+            (launcher.cfg.attention_quant, launcher.cfg.kv_dtype),
+            ("hqq6", "k6v6"),
+        )
+        launcher._validate_model_capabilities()
+
+    def test_every_catalog_entry_is_selectable_in_download_screen(self) -> None:
+        from krasis.hf_downloader import supported_models
+
+        launcher = Launcher.__new__(Launcher)
+        candidates = []
+        for spec in supported_models():
+            candidate = mock.Mock()
+            candidate.display_name = spec.display_name
+            candidate.repo_id = spec.repo_id
+            candidate.support_notes = spec.notes
+            candidate.runtime_ram_bytes = 1024**3
+            candidate.local_dir_name = spec.local_dir_name
+            candidate.metadata_error = ""
+            candidate.recommended_config = spec.recommended_config
+            candidate.revision = spec.revision
+            candidates.append(candidate)
+
+        for target_idx, candidate in enumerate(candidates):
+            with self.subTest(model=candidate.repo_id):
+                keys = [launcher_mod.KEY_DOWN] * target_idx + [launcher_mod.KEY_ENTER]
+                with mock.patch.object(launcher_mod, "_read_key", side_effect=keys):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        selected = launcher._supported_hf_models_screen(candidates)
+                self.assertIs(selected, candidate)
+
+    def test_glm52_launcher_rejects_unqualified_context_before_load(self) -> None:
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = LauncherConfig()
+        launcher.cfg.max_context_tokens = 8192
+        launcher.model_info = {
+            "name": "GLM-5.2",
+            "path": "/models/GLM-5.2",
+            "arch": "glm_moe_dsa",
+            "support_key": "glm52",
+        }
+        launcher._apply_model_recommended_defaults()
+        with self.assertRaisesRegex(ValueError, "qualified only through 4,096"):
+            launcher._validate_model_capabilities()
+
+    def test_launcher_metadata_and_budget_use_normalized_step_and_nemotron_layers(self) -> None:
+        step_cfg = {
+            "model_type": "step3p5",
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "moe_intermediate_size": 64,
+            "num_hidden_layers": 4,
+            "num_attention_heads": 4,
+            "num_attention_groups": 2,
+            "head_dim": 32,
+            "vocab_size": 1024,
+            "moe_num_experts": 8,
+            "moe_top_k": 2,
+            "moe_layers_enum": "1,2,3",
+            "share_expert_dim": 64,
+            "layer_types": [
+                "full_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "full_attention",
+            ],
+            "attention_other_setting": {
+                "attention_type": "sliding_attention",
+                "num_attention_heads": 6,
+                "num_attention_groups": 2,
+                "head_dim": 32,
+            },
+            "max_position_embeddings": 4096,
+            "tie_word_embeddings": True,
+        }
+        nemotron_cfg = {
+            "model_type": "nemotron_h",
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "moe_intermediate_size": 64,
+            "mlp_hidden_act": "relu2",
+            "num_hidden_layers": 4,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 32,
+            "vocab_size": 1024,
+            "num_local_experts": 8,
+            "experts_per_token": 2,
+            "hybrid_override_pattern": "MEM*",
+            "mamba_num_heads": 4,
+            "mamba_head_dim": 32,
+            "ssm_state_size": 16,
+            "expand": 2,
+            "conv_kernel": 4,
+            "n_groups": 1,
+            "max_position_embeddings": 4096,
+            "tie_word_embeddings": True,
+        }
+        with tempfile.TemporaryDirectory(prefix="krasis-launcher-normalized-") as root:
+            for name, config in (("Step-3.7-Flash", step_cfg), ("Nemotron", nemotron_cfg)):
+                model_dir = Path(root) / name
+                model_dir.mkdir()
+                (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+            step_path = str(Path(root) / "Step-3.7-Flash")
+            step_info = launcher_mod._model_info_from_path(step_path)
+            self.assertEqual(step_info["experts"], 8)
+            self.assertEqual(step_info["moe_layers"], 3)
+            self.assertEqual(step_info["dense_layers"], 1)
+            self.assertGreater(step_info["ram_gb"], 0)
+            step_budget = vram_budget_mod.compute_launcher_budget(
+                step_path,
+                [4],
+                attention_quant="hqq4",
+                kv_dtype="k4v4",
+                gpu_vram_mb=24_000,
+                total_ram_gb=128,
+                kv_cache_mb=200,
+            )
+            self.assertEqual(step_budget["n_experts"], 8)
+            self.assertEqual(step_budget["num_moe_layers"], 3)
+            self.assertEqual(step_budget["num_full_attention_layers"], 4)
+            self.assertGreater(step_budget["ram_total_mb"], 0)
+
+            nemotron_path = str(Path(root) / "Nemotron")
+            nemotron_info = launcher_mod._model_info_from_path(nemotron_path)
+            self.assertEqual(nemotron_info["experts"], 8)
+            self.assertEqual(nemotron_info["moe_layers"], 1)
+            self.assertEqual(nemotron_info["num_kv_layers"], 1)
+            nemotron_budget = vram_budget_mod.compute_launcher_budget(
+                nemotron_path,
+                [4],
+                attention_quant="hqq4",
+                kv_dtype="k4v4",
+                gpu_vram_mb=24_000,
+                total_ram_gb=128,
+                kv_cache_mb=200,
+            )
+            self.assertEqual(nemotron_budget["num_moe_layers"], 1)
+            self.assertEqual(nemotron_budget["num_full_attention_layers"], 1)
+            nemotron_model_cfg = vram_budget_mod.ModelConfig.from_model_path(
+                nemotron_path
+            )
+            params_per_expert = 2 * 128 * 64
+            bytes_per_expert = params_per_expert // 2 + (params_per_expert // 128) * 2
+            self.assertEqual(
+                vram_budget_mod.estimate_int4_expert_cache_bytes(
+                    nemotron_model_cfg
+                ),
+                bytes_per_expert * 8,
+            )
+            self.assertGreater(
+                nemotron_budget["ranks"][0]["recurrent_state_mb"],
+                0,
+            )
+
+    def test_linear_attention_recurrent_budget_matches_runtime_state_shapes(self) -> None:
+        cfg = mock.Mock()
+        cfg.is_linear_attention_layer.side_effect = lambda layer_idx: layer_idx == 0
+        cfg.is_mamba2_layer.return_value = False
+        cfg.linear_num_key_heads = 2
+        cfg.linear_num_value_heads = 4
+        cfg.linear_key_head_dim = 8
+        cfg.linear_value_head_dim = 16
+        cfg.linear_conv_kernel_dim = 3
+        expected_conv_bytes = (2 * 2 * 8 + 4 * 16) * 3 * 4
+        expected_recurrent_bytes = 4 * 8 * 16 * 4
+        self.assertEqual(
+            vram_budget_mod._persistent_recurrent_state_bytes(cfg, 0, 1),
+            expected_conv_bytes + expected_recurrent_bytes,
+        )
+
     def test_deepseek_v4_native_budget_uses_exact_nonlinear_layout(self) -> None:
         cfg = {
             "model_type": "deepseek_v4",
