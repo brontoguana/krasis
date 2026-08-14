@@ -11,6 +11,7 @@ from tests.reference_test import (
     judge_prompt,
     list_available_references,
 )
+from tests.validate_model import _resolve_reference_dir
 
 
 class ReferenceJudgementTests(unittest.TestCase):
@@ -68,6 +69,30 @@ class ReferenceJudgementTests(unittest.TestCase):
                 self.assertEqual(
                     list_available_references(os.path.join(temp_root, "krasis")),
                     [],
+                )
+                self.assertIsNone(
+                    _resolve_reference_dir("Qwen3-Coder-Next")
+                )
+
+    def test_validate_model_uses_explicit_reference_output_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as ref_root:
+            model_dir = os.path.join(ref_root, "Qwen3-Coder-Next-prefill")
+            os.makedirs(model_dir)
+            with open(
+                os.path.join(model_dir, "greedy_reference.json"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                handle.write("{}")
+
+            with patch.dict(
+                os.environ,
+                {"KRASIS_REFERENCE_OUTPUT_DIR": ref_root},
+                clear=False,
+            ):
+                self.assertEqual(
+                    os.fspath(_resolve_reference_dir("Qwen3-Coder-Next")),
+                    os.path.realpath(model_dir),
                 )
 
     def test_reference_server_command_preserves_selected_gpu_override(self) -> None:

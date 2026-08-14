@@ -214,6 +214,14 @@ def is_quantized_model(config_path: str) -> bool:
     )
 
 
+def _reference_roots() -> List[Path]:
+    """Return reference roots, honoring an explicit fail-closed authority."""
+    explicit = os.environ.get("KRASIS_REFERENCE_OUTPUT_DIR")
+    if explicit:
+        return [Path(explicit).expanduser().resolve()]
+    return [INTERNAL_REFERENCE_DIR, LOCAL_REFERENCE_DIR]
+
+
 def _resolve_reference_dir(model_name: str, profile_id: Optional[str] = None) -> Optional[Path]:
     """Find reference data directory for a model, checking name mapping."""
     # Try mapped name first, then exact name
@@ -223,7 +231,7 @@ def _resolve_reference_dir(model_name: str, profile_id: Optional[str] = None) ->
         candidates.append(mapped)
     candidates.append(model_name)
 
-    for ref_dir in [INTERNAL_REFERENCE_DIR, LOCAL_REFERENCE_DIR]:
+    for ref_dir in _reference_roots():
         if not ref_dir.is_dir():
             continue
         for name in candidates:
@@ -244,9 +252,9 @@ def load_reference(model_name: str, profile_id: Optional[str] = None) -> Tuple[D
             model=model_name,
             requested_profile=profile_id or "auto",
         )
+        searched = "\n           ".join(str(path) for path in _reference_roots())
         die(f"No reference outputs found for {model_name}.\n"
-            f"  Searched: {INTERNAL_REFERENCE_DIR}\n"
-            f"           {LOCAL_REFERENCE_DIR}\n"
+            f"  Searched: {searched}\n"
             f"  Name mappings tried: {_REF_DIR_MAP.get(model_name, model_name)}\n"
             f"  Generate with: ./dev generate-reference {model_name}")
     ref_path = None
