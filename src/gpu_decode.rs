@@ -19308,20 +19308,23 @@ struct DeepseekV4DecodePolicy {
 }
 
 impl DeepseekV4DecodePolicy {
-    fn from_env(default_enabled: bool) -> Result<Self, String> {
+    fn from_env(deepseek_specific_default: bool) -> Result<Self, String> {
         let policy = Self {
-            hqq6_vec4: resolve_bool_env("KRASIS_DECODE_V4_HQQ6_VEC4", default_enabled)?,
+            hqq6_vec4: resolve_bool_env(
+                "KRASIS_DECODE_V4_HQQ6_VEC4",
+                deepseek_specific_default,
+            )?,
             hqq6_warp_autotune: resolve_bool_env(
                 "KRASIS_DECODE_V4_HQQ6_WARP_AUTOTUNE",
-                default_enabled,
+                deepseek_specific_default,
             )?,
             int4_w13_n32: resolve_bool_env(
                 "KRASIS_DECODE_INT4_W13_N32",
-                default_enabled,
+                deepseek_specific_default,
             )?,
             int4_w2_n32: resolve_bool_env(
                 "KRASIS_DECODE_INT4_W2_N32",
-                default_enabled,
+                deepseek_specific_default,
             )?,
             index_radix_topk: resolve_bool_env(
                 "KRASIS_DECODE_V4_INDEX_RADIX_TOPK",
@@ -19329,17 +19332,24 @@ impl DeepseekV4DecodePolicy {
             )?,
             parallel_wkv: resolve_bool_env(
                 "KRASIS_DECODE_V4_PARALLEL_WKV",
-                default_enabled,
+                deepseek_specific_default,
             )?,
             parallel_qb: resolve_bool_env(
                 "KRASIS_DECODE_V4_PARALLEL_QB",
-                default_enabled,
+                deepseek_specific_default,
             )?,
-            hc_tiled: resolve_bool_env("KRASIS_DECODE_V4_HC_TILED", default_enabled)?,
-            marlin_autotune: resolve_bool_env("KRASIS_MARLIN_AUTOTUNE", default_enabled)?,
+            hc_tiled: resolve_bool_env(
+                "KRASIS_DECODE_V4_HC_TILED",
+                deepseek_specific_default,
+            )?,
+            // These autotuners measure the loaded model's real shapes and
+            // weights, and retain the formula/current kernel unless the
+            // measured alternative clears the configured margin. They are
+            // shared MoE policy, not DeepSeek-specific policy.
+            marlin_autotune: resolve_bool_env("KRASIS_MARLIN_AUTOTUNE", true)?,
             shared_w2_autotune: resolve_bool_env(
                 "KRASIS_SHARED_W2_AUTOTUNE",
-                default_enabled,
+                true,
             )?,
         };
         if policy.parallel_qb && !policy.parallel_wkv {
@@ -26413,7 +26423,11 @@ impl GpuDecodeStore {
             self.hqq_prefill_materialize_bf16 =
                 resolve_bool_env("KRASIS_HQQ_PREFILL_MATERIALIZE_BF16", deepseek_v4)
                     .map_err(pyo3::exceptions::PyValueError::new_err)?;
-            self.hqq_stage_pin_host = resolve_bool_env("KRASIS_HQQ_STAGE_PIN_HOST", deepseek_v4)
+            // Pin the already-materialized, descriptor-sized HQQ stage
+            // buffers for every architecture. Registration remains
+            // fail-closed and the explicit environment override remains
+            // available for diagnosis or constrained host policy.
+            self.hqq_stage_pin_host = resolve_bool_env("KRASIS_HQQ_STAGE_PIN_HOST", true)
                 .map_err(pyo3::exceptions::PyValueError::new_err)?;
             self.hqq_stage_async_copy_mode = HqqStageAsyncCopyMode::from_env(
                 HqqStageAsyncCopyMode::default_for_deepseek_v4(deepseek_v4),

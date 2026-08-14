@@ -1,5 +1,93 @@
 # Krasis Benchmark Results
 
+## Representative shared HQQ/MoE default validation — 2026-08-13
+
+These adjacent timing-disabled standard benchmarks validate descriptor-sized
+pinned HQQ host staging plus runtime-measured routed/shared W13 and shared-W2
+K-split tuning on three materially different HQQ6/INT4 architectures: Gemma-4
+26B, Step-3.7, and Ornith-397B. The control explicitly disables all three
+mechanisms; the candidate enables only those three while async HQQ copying,
+BF16 prefill materialization, expert prefetch, and split expert launch remain
+off. All runs used the same 450 W RTX PRO 6000, approved heatmaps, exact
+current source, and the unchanged 600 MiB safety margin.
+
+| Model | Timing-disabled prefill, control -> candidate | Best internal decode | Best HTTP | HCS | Candidate floor |
+|---|---|---:|---:|---:|---:|
+| Gemma-4 26B | 1K `1966.7 -> 2600.3`; 5K `1870.2 -> 1959.6`; 10K `1076.1 -> 1090.6`; 11,824 `913.6 -> 975.7` tok/s | `63.89 -> 65.43` | `116.06 -> 121.95` | `3840/3840` | 76,771 MiB |
+| Step-3.7 | 1K `581.5 -> 808.1`; 5K `2345.2 -> 3031.2`; 10K `3376.5 -> 4016.7`; 14,473 `3719.6 -> 4236.8` tok/s | `52.83 -> 53.24` | `106.56 -> 107.81` | `10989 -> 10956 / 12096` | 1,361 MiB |
+| Ornith-397B | 1K `173.8 -> 203.0`; 5K `688.2 -> 770.0`; 10K `1143.3 -> 1281.4`; 20K `1601.0 -> 1730.8`; 35K `1942.1 -> 2026.5`; 39,920 `1994.4 -> 2076.4` tok/s | `20.67 -> 21.55` | `36.06 -> 37.91` | `12874/30720` | 1,173 MiB |
+
+Every measured prefill row improved. Gemma warmup was unchanged
+(`51.7 -> 51.6 s`), Step improved `29.7 -> 27.3 s`, and Ornith improved
+`87.0 -> 81.1 s`. Instrumented causal controls measured the same-byte HQQ
+stage boundary falling by about 40% on Gemma, 50% on Step, and 53-56% on
+Ornith. Runtime autotuning retained existing routed/shared kernels where they
+won and installed only measured improvements; no model or GPU constants were
+introduced. All six speed runs exited zero with no copy failure, budget skip,
+no-slot event, CUDA/OOM error, or below-margin event.
+
+The exact rebuilt global-default source then completed a timing-disabled
+Gemma benchmark with all three selector variables absent. It reproduced the
+candidate performance class at prefill
+`2611.4/1965.4/1092.2/924.1 tok/s`, internal decode `65.37 tok/s`, HTTP
+`119.38 tok/s`, HCS `3840/3840`, and 76,771 MiB minimum free VRAM. The
+11,824-token row varied below the explicit candidate but remained above the
+all-off control. Evidence:
+[no-override stdout](20260813_gemma_hqq6_shared_defaults_nooverride_benchmark_stdout.log)
+and [no-override report](20260813_gemma_hqq6_shared_defaults_nooverride_benchmark_report.log).
+
+Step's authoritative `greedy_chat_thinking_off` llama-witness comparison is a
+relative quality pass rather than an absolute HQQ6-quality claim. The all-off
+control matched 7/8 first tokens and failed long cases 6/7/8; the candidate
+matched 8/8 first tokens, improved cases 6 and 7 to exact `16/16` sequences,
+and improved case 8's prefix from `3/16` to `4/16`, although case 8 remained
+an absolute FAIL. Candidate/control evidence:
+[Gemma candidate stdout](20260813_gemma_hqq6_shared_defaults_candidate_benchmark_stdout.log),
+[Gemma candidate report](20260813_gemma_hqq6_shared_defaults_candidate_benchmark_report.log),
+[Gemma control stdout](20260813_gemma_hqq6_shared_defaults_control_benchmark_stdout.log),
+[Gemma control report](20260813_gemma_hqq6_shared_defaults_control_benchmark_report.log),
+[Step candidate stdout](20260813_step37_hqq6_shared_defaults_candidate_benchmark_stdout.log),
+[Step candidate report](20260813_step37_hqq6_shared_defaults_candidate_benchmark_report.log),
+[Step control stdout](20260813_step37_hqq6_shared_defaults_control_benchmark_stdout.log),
+[Step control report](20260813_step37_hqq6_shared_defaults_control_benchmark_report.log),
+[Step candidate witness](20260813_step37_hqq6_shared_defaults_candidate_witness.log),
+[Step control witness](20260813_step37_hqq6_shared_defaults_control_witness.log),
+[Ornith candidate stdout](20260813_ornith397_hqq6_shared_defaults_candidate_benchmark_stdout.log),
+[Ornith candidate report](20260813_ornith397_hqq6_shared_defaults_candidate_benchmark_report.log),
+[Ornith control stdout](20260813_ornith397_hqq6_shared_defaults_control_benchmark_stdout.log),
+and [Ornith control report](20260813_ornith397_hqq6_shared_defaults_control_benchmark_report.log).
+
+The local Qwen3.5-397B converted caches were present but its source model
+directory and complete Hugging Face snapshot were not, so no Qwen3.5-397B run
+is claimed. Ornith-397B is recorded only as the locally complete 397B
+Qwen-family architecture proxy.
+
+### Instrumented causal attribution
+
+Instrumentation was enabled only to identify mechanisms; none of these
+throughput headlines are speed evidence. Exact same-byte HQQ swaps and the
+runtime-selected kernel choices are preserved in the following full logs:
+[Gemma control](20260813_gemma_hqq6_shared_defaults_attribution_control_stdout.log),
+[Gemma candidate](20260813_gemma_hqq6_shared_defaults_attribution_candidate_stdout.log),
+[Gemma pageable swap control](20260813_gemma_hqq6_pageable_swap_control_interrupted_stdout.log),
+[Step control](20260813_step37_hqq6_shared_defaults_attribution_control_stdout.log),
+[Step candidate](20260813_step37_hqq6_shared_defaults_attribution_candidate_stdout.log),
+[Ornith control](20260813_ornith397_hqq6_shared_defaults_attribution_control_stdout.log),
+and [Ornith candidate](20260813_ornith397_hqq6_shared_defaults_attribution_candidate_stdout.log).
+Their generated reports are also retained:
+[Gemma control report](20260813_gemma_hqq6_shared_defaults_attribution_control_report.log),
+[Gemma candidate report](20260813_gemma_hqq6_shared_defaults_attribution_candidate_report.log),
+[Step control report](20260813_step37_hqq6_shared_defaults_attribution_control_report.log),
+[Step candidate report](20260813_step37_hqq6_shared_defaults_attribution_candidate_report.log),
+[Ornith control report](20260813_ornith397_hqq6_shared_defaults_attribution_control_report.log),
+and [Ornith candidate report](20260813_ornith397_hqq6_shared_defaults_attribution_candidate_report.log).
+
+One pre-attribution Gemma start failed closed before model allocation because
+an incorrect external CUDA-isolation command targeted the occupied Lore GPU;
+the supported `--selected-gpus 1` override was used thereafter. No result was
+taken from the failed start. Its log is retained for reproducibility:
+[failed start](20260813_gemma_hqq6_gpu_selection_failed_start_benchmark_stdout.log).
+
 ## DeepSeek HQQ6/Native promoted decode policy and adjacent control — 2026-08-13
 
 These timing-disabled standard benchmarks compare the ten accepted DeepSeek

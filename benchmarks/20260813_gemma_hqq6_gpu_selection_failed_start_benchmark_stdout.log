@@ -1,0 +1,23 @@
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d
+Loaded config from tests/gemma-4-4-hqq6-k4v4-a16.conf: {'model_path': '/home/main/.krasis/models/gemma-4-26b-a4b-it', 'selected_gpus': 'GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'host': '0.0.0.0', 'port': 18019, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — gemma-4-26b-a4b-it[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d (config; CUDA_VISIBLE_DEVICES=GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=19431 MB, free=621 MB, total=20052 MB
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/main/Documents/Claude/krasis/python/krasis/server.py", line 5354, in <module>
+    main()
+  File "/home/main/Documents/Claude/krasis/python/krasis/server.py", line 3114, in main
+    _model.load(gpu_only=gpu_only)
+  File "/home/main/Documents/Claude/krasis/python/krasis/model.py", line 2151, in load
+    raise RuntimeError(msg)
+RuntimeError: GPU cuda:0 has only 621 MB free (97% used). A zombie process may be holding GPU memory. Try: sudo kill -9 $(nvidia-smi --query-compute-apps=pid --format=csv,noheader) or reboot to clear stuck GPU memory.
