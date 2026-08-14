@@ -4070,7 +4070,7 @@ case "$cmd" in
         echo ""
         echo "Configs: qcn, dsv4, gemma"
         echo "         (or path to .conf file)"
-        echo "Standard speed benchmark config: tests/qcn-k4v4-hqq8-int4-benchmark.conf"
+        echo "Standard speed benchmark config: tests/qcn-k4v4-hqq4-int4-benchmark.conf"
         echo ""
         echo "Examples:"
         echo "  ./dev build"

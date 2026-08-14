@@ -62,6 +62,23 @@ class PeerPlan:
     predicted_primary_only_seconds_per_token: float
 
 
+def peer_plan_is_admissible(
+    *,
+    peer_plan: PeerPlan,
+    layer_split_seconds_per_token: float,
+    uncertainty_seconds: float,
+    admitted_route_counts: Sequence[bool],
+) -> bool:
+    """Return whether a measured peer plan can perform useful peer work."""
+    return bool(
+        peer_plan.peer_residents
+        and peer_plan.captured_routes_per_token > 0.0
+        and any(admitted_route_counts)
+        and peer_plan.predicted_seconds_per_token + uncertainty_seconds
+        < layer_split_seconds_per_token
+    )
+
+
 def _percentile(values: Sequence[float], quantile: float) -> float:
     ordered = sorted(values)
     rank = quantile * (len(ordered) - 1)

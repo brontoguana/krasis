@@ -3,6 +3,7 @@ import unittest
 from krasis.multi_gpu_planner import (
     DeviceServiceProfile,
     optimize_contiguous_splits,
+    peer_plan_is_admissible,
     predict_peer_expert_plan,
 )
 
@@ -143,6 +144,64 @@ class MultiGpuPlannerTest(unittest.TestCase):
                 rtt_p95_us=1.0,
                 terminal_bytes=0,
             )
+
+    def test_peer_admission_rejects_empty_disjoint_tier(self):
+        profile = _profile(0, 20, 1_000)
+        plan = predict_peer_expert_plan(
+            heatmap_counts={"0,0": 100, "0,1": 80},
+            total_decode_tokens=100,
+            ranking=[(0, 0), (0, 1)],
+            primary_capacity_experts=2,
+            peer_capacity_experts=2,
+            layer_resident_bytes=[16 * 1024],
+            layer_is_moe=[True],
+            primary_profile=profile,
+            expert_bytes=self.expert_bytes,
+            service_p95_us_by_routes=[20.0, 35.0],
+            rtt_p95_us=25.0,
+            terminal_bytes=0,
+        )
+        self.assertEqual(plan.peer_residents, ())
+        self.assertEqual(plan.captured_routes_per_token, 0.0)
+        self.assertFalse(
+            peer_plan_is_admissible(
+                peer_plan=plan,
+                layer_split_seconds_per_token=(
+                    plan.predicted_seconds_per_token * 2.0
+                ),
+                uncertainty_seconds=0.0,
+                admitted_route_counts=[True, True],
+            )
+        )
+
+    def test_peer_admission_accepts_faster_heat_capturing_tier(self):
+        profile = _profile(0, 20, 1_000)
+        plan = predict_peer_expert_plan(
+            heatmap_counts={"0,0": 100, "0,1": 80, "0,2": 60},
+            total_decode_tokens=100,
+            ranking=[(0, 0), (0, 1), (0, 2)],
+            primary_capacity_experts=1,
+            peer_capacity_experts=2,
+            layer_resident_bytes=[16 * 1024],
+            layer_is_moe=[True],
+            primary_profile=profile,
+            expert_bytes=self.expert_bytes,
+            service_p95_us_by_routes=[20.0, 35.0, 50.0],
+            rtt_p95_us=25.0,
+            terminal_bytes=0,
+        )
+        self.assertTrue(plan.peer_residents)
+        self.assertGreater(plan.captured_routes_per_token, 0.0)
+        self.assertTrue(
+            peer_plan_is_admissible(
+                peer_plan=plan,
+                layer_split_seconds_per_token=(
+                    plan.predicted_seconds_per_token * 2.0
+                ),
+                uncertainty_seconds=0.0,
+                admitted_route_counts=[True, True, True],
+            )
+        )
 
 
 if __name__ == "__main__":

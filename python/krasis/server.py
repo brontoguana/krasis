@@ -4401,7 +4401,10 @@ def main():
                     float(_expert_compression_calibration["p50_us"]) / 1_000_000.0
                 )
 
-            from krasis.multi_gpu_planner import predict_peer_expert_plan
+            from krasis.multi_gpu_planner import (
+                peer_plan_is_admissible,
+                predict_peer_expert_plan,
+            )
 
             peer_plan = predict_peer_expert_plan(
                 heatmap_counts=raw_heatmap,
@@ -4428,11 +4431,13 @@ def main():
                 _layer_split_plan.predicted_seconds_per_token * 1_000.0
             )
             selector_uncertainty_ms = _layer_split_plan.uncertainty_seconds * 1_000.0
-            peer_is_faster = (
-                peer_plan.predicted_seconds_per_token
-                + _layer_split_plan.uncertainty_seconds
-                < _layer_split_plan.predicted_seconds_per_token
-                and any(admitted_route_counts)
+            peer_is_faster = peer_plan_is_admissible(
+                peer_plan=peer_plan,
+                layer_split_seconds_per_token=(
+                    _layer_split_plan.predicted_seconds_per_token
+                ),
+                uncertainty_seconds=_layer_split_plan.uncertainty_seconds,
+                admitted_route_counts=admitted_route_counts,
             )
             _detail(
                 "Multi-GPU mode predictions: "
@@ -4440,6 +4445,7 @@ def main():
                 f"peer={peer_prediction_ms:.3f} ms/token, "
                 f"uncertainty={selector_uncertainty_ms:.3f} ms, "
                 f"peer_capacity={peer_capacity_experts:,} experts, "
+                f"peer_residents={len(peer_plan.peer_residents):,}, "
                 f"captured_cold={peer_plan.captured_cold_fraction:.2%} "
                 f"({peer_plan.captured_routes_per_token:.3f} routes/token)"
             )
@@ -4467,6 +4473,8 @@ def main():
                     f"peer={peer_prediction_ms:.3f} ms/token, "
                     f"layer-split={split_prediction_ms:.3f} ms/token, "
                     f"uncertainty={selector_uncertainty_ms:.3f} ms, "
+                    f"peer_residents={len(peer_plan.peer_residents)}, "
+                    f"captured_routes={peer_plan.captured_routes_per_token:.6f}, "
                     f"admitted_routes={admitted_route_counts}"
                 )
             if args.multi_gpu_mode == "peer" or peer_is_faster:

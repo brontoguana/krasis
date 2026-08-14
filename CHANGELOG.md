@@ -13,6 +13,11 @@
   accepts an explicit `KRASIS_REFERENCE_OUTPUT_DIR`, allowing detached clean
   release worktrees to use the authoritative private witness tree. An invalid
   explicit directory fails closed and never falls back to another artifact.
+  Multi-GPU peer admission now also requires a nonempty disjoint expert tier
+  that captures measured heatmap routes. This prevents a fully resident
+  primary GPU from being misclassified as a faster peer plan with zero peer
+  work; automatic selection retains its measured layer-split plan, while
+  forced peer mode continues to fail visibly.
 
 - Added the timing-disabled Vast RTX 5090 PCIe Gen5 x16 benchmark for the
   launcher-pinned Ornith-1.0-397B HQQ6/k6v6/INT4 profile. Prefill measured
