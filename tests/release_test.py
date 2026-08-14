@@ -40,7 +40,7 @@ CACHE_DIR = os.path.expanduser("~/.krasis/cache")
 DEFAULT_PORT = 8012
 DEFAULT_HOST = "127.0.0.1"
 BENCHMARK_TIMEOUT = 1200  # 20 min for model load + warmup + benchmark
-CACHE_BUILD_TIMEOUT = 1800  # 30 min for cache building (INT8 takes longer)
+CACHE_BUILD_TIMEOUT = 1800  # 30 min for cache building
 AWQ_CALIBRATE_TIMEOUT = 1800  # Deprecated AWQ calibration helper retained but no longer used by release variants
 PERPLEXITY_TIMEOUT = 1800  # 30 min for model load + 10K token eval
 PERPLEXITY_MAX_TOKENS = 20000
@@ -59,7 +59,7 @@ SUPPORTED_MODELS = [
 CONFIG_VARIANTS = [
     {"name": "INT4 k4v4 HQQ4", "bits": 4, "kv": "k4v4", "attention": "hqq4"},
     {"name": "INT4 k6v6 HQQ6+8", "bits": 4, "kv": "k6v6", "attention": "hqq68_auto", "hqq_auto_budget_pct": 25.0},
-    {"name": "INT8 k6v6 HQQ6+8 Multi-GPU", "bits": 8, "kv": "k6v6", "attention": "hqq68_auto", "hqq_auto_budget_pct": 25.0, "multi_gpu": True},
+    {"name": "INT4 k6v6 HQQ6+8 Multi-GPU", "bits": 4, "kv": "k6v6", "attention": "hqq68_auto", "hqq_auto_budget_pct": 25.0, "multi_gpu": True},
 ]
 
 REFERENCE_VALIDATE_MAX_PROMPTS = 4

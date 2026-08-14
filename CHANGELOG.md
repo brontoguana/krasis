@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Aligned the full prerelease gate with the launcher's production INT4-only
+  contract: the multi-GPU QCN release-test variant now uses INT4 experts with
+  HQQ6+8/k6v6 instead of requesting launcher-rejected INT8 experts. Corrected
+  the `./dev speed-test` help text to name its existing fixed HQQ4/k4v4
+  configuration; benchmark behavior is unchanged.
+
 - Added the timing-disabled Vast RTX 5090 PCIe Gen5 x16 benchmark for the
   launcher-pinned Ornith-1.0-397B HQQ6/k6v6/INT4 profile. Prefill measured
   181.6/685.2/1,114.1/1,037.2/1,037.9/969.1 tok/s at

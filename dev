@@ -23,7 +23,7 @@
 #                                    Add --resume-from <json> to append prompts to an existing artifact
 #   ./dev approved-heatmap-eval <config> <heatmap.json>
 #                                    Benchmark a config with an approved heatmap artifact
-#   ./dev speed-test                Run the fixed standard speed benchmark (QCN INT4 HQQ8 k4v4)
+#   ./dev speed-test                Run the fixed standard speed benchmark (QCN INT4 HQQ4 k4v4)
 #   ./dev perplexity <config>       Run perplexity eval (WikiText-2 by default) and exit
 #   ./dev quality-ppl <config>      Measure PPL through a running Rust prefill test endpoint
 #   ./dev release-test <model>      Run full release test (launcher matrix + release config matrix, produces report)
@@ -4080,7 +4080,7 @@ case "$cmd" in
         echo "  ./dev sidecar-key --json"
         echo "  ./dev run qcn"
         echo "  ./dev run qcn --benchmark"
-        echo "  ./dev speed-test"
+        echo "  ./dev speed-test    # QCN INT4 HQQ4 k4v4"
         echo "  ./dev benchmark qcn --timing    Profile decode components"
         echo "  ./dev benchmark qcn             Normal speed benchmark"
         echo "  ./dev decode-harness qcn --prompt-len 8192 --steps 64"
