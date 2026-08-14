@@ -360,6 +360,21 @@ class LauncherMatrixTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "INT4 experts only"):
                     launcher._validate_model_capabilities()
 
+    def test_qcn_release_matrix_uses_launcher_qualified_profiles(self) -> None:
+        from krasis.hf_downloader import supported_model_spec
+        from tests.release_test import CONFIG_VARIANTS
+
+        spec = supported_model_spec("qcn")
+        for variant in CONFIG_VARIANTS:
+            with self.subTest(variant=variant["name"]):
+                self.assertEqual(variant["bits"], 4)
+                self.assertIn(
+                    (variant["attention"], variant["kv"]),
+                    spec.runtime_profiles,
+                )
+                if variant.get("multi_gpu"):
+                    self.assertIn("peer", spec.multi_gpu_modes)
+
     def test_profile_cycles_keep_catalog_pairs_qualified(self) -> None:
         from krasis.hf_downloader import supported_model_spec
 

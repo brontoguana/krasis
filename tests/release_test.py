@@ -58,8 +58,8 @@ SUPPORTED_MODELS = [
 
 CONFIG_VARIANTS = [
     {"name": "INT4 k4v4 HQQ4", "bits": 4, "kv": "k4v4", "attention": "hqq4"},
-    {"name": "INT4 k6v6 HQQ6+8", "bits": 4, "kv": "k6v6", "attention": "hqq68_auto", "hqq_auto_budget_pct": 25.0},
-    {"name": "INT4 k6v6 HQQ6+8 Multi-GPU", "bits": 4, "kv": "k6v6", "attention": "hqq68_auto", "hqq_auto_budget_pct": 25.0, "multi_gpu": True},
+    {"name": "INT4 k6v6 HQQ6", "bits": 4, "kv": "k6v6", "attention": "hqq6"},
+    {"name": "INT4 k6v6 HQQ6 Multi-GPU", "bits": 4, "kv": "k6v6", "attention": "hqq6", "multi_gpu": True},
 ]
 
 REFERENCE_VALIDATE_MAX_PROMPTS = 4

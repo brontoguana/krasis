@@ -4,7 +4,10 @@
 
 - Aligned the full prerelease gate with the launcher's production INT4-only
   contract: the multi-GPU QCN release-test variant now uses INT4 experts with
-  HQQ6+8/k6v6 instead of requesting launcher-rejected INT8 experts. Corrected
+  fixed HQQ6/k6v6 instead of requesting launcher-rejected INT8 experts and an
+  unqualified mixed-HQQ profile. A launcher-contract regression now requires
+  every QCN release variant to remain INT4 and use a qualified attention/KV
+  pair, including qualified peer topology for the multi-GPU leg. Corrected
   the `./dev speed-test` help text to name its existing fixed HQQ4/k4v4
   configuration; benchmark behavior is unchanged. Reference validation now
   accepts an explicit `KRASIS_REFERENCE_OUTPUT_DIR`, allowing detached clean
