@@ -1,5 +1,38 @@
 # Krasis Benchmark Results
 
+## v1.0.21-rc.3 QCN release matrix — 2026-08-15
+
+The authoritative timing-disabled `./dev release-test QCN` ran from public
+commit `83d6b0ce461546418a6f4dac2edf895c17b99fa5` after an exact detached
+`./dev build`. Launcher, downloader, and planner contracts passed
+`43/43`, `18/18`, and `8/8`. All three launcher-qualified INT4 profiles then
+completed their benchmark, 14-prompt HTTP suite, canonical Gutenberg
+2K/10K/25K prompts, and authoritative four-prompt llama-witness gate. Every
+witness row matched its reference first token (`12/12` total).
+
+| Configuration | Peak prefill | Internal decode | HTTP round trip | HCS | Minimum free VRAM |
+|---|---:|---:|---:|---:|---:|
+| INT4, HQQ4, K4V4, one GPU | 10,394.0 tok/s | 89.21 tok/s | 158.35 tok/s | 24,576/24,576 | 53,259 MiB |
+| INT4, HQQ6, K6V6, one GPU | 9,551.1 tok/s | 88.74 tok/s | 151.04 tok/s | 24,576/24,576 | 52,855 MiB |
+| INT4, HQQ6, K6V6, two GPUs | 9,533.4 tok/s | 78.62 tok/s | 176.67 tok/s | 24,576/24,576 | 54,435 MiB primary; 1,168 MiB auxiliary |
+
+The two-GPU startup measured a `[46,2]` layer split at `5.280 ms/token` and
+an apparent peer plan at `2.361 ms/token`, but the primary GPU already covered
+all experts. The disjoint peer tier therefore contained zero residents and
+captured `0.000 routes/token`; automatic selection correctly rejected peer
+mode and retained the measured layer split. The constrained A4500 stayed
+568 MiB above the unchanged 600 MiB safety margin. No HCS copy failure,
+budget skip, CUDA/OOM error, below-margin event, or incomplete phase occurred.
+
+Evidence:
+[complete release-test log](20260815_v1021rc3_final_release_test_qcn.log),
+[INT4 HQQ4/K4V4 report](20260815_v1021rc3_qcn_int4_hqq4_k4v4_benchmark_report.log),
+[server log](20260815_v1021rc3_qcn_int4_hqq4_k4v4_server.log),
+[INT4 HQQ6/K6V6 report](20260815_v1021rc3_qcn_int4_hqq6_k6v6_benchmark_report.log),
+[server log](20260815_v1021rc3_qcn_int4_hqq6_k6v6_server.log),
+[two-GPU INT4 HQQ6/K6V6 report](20260815_v1021rc3_qcn_int4_hqq6_k6v6_multigpu_benchmark_report.log),
+and [server log](20260815_v1021rc3_qcn_int4_hqq6_k6v6_multigpu_server.log).
+
 ## Ornith-1.0-397B on Vast RTX 5090 PCIe 5.0 — 2026-08-14
 
 This timing-disabled standard benchmark used one 32 GB GeForce RTX 5090 with a

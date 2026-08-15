@@ -1,0 +1,816 @@
+
+[1mKrasis Launch Configuration[0m
+  Krasis home:     /home/main/.krasis
+  Models dir:      /home/main/.krasis/models
+  Model:           Qwen3-Coder-Next
+  PP partition:    48
+  Layer group:     2 layers (double-buffered)
+  KV cache:        1,000 MB
+  Max context:     model limit
+  KV dtype:        k6v6
+  Quantization:    INT4 g128
+  Expert INT4:     amax
+  Attention quant: HQQ6
+  Shared expert:   int8
+  LM head quant:   int8
+  VRAM safety:     600 MB
+  HCS RAM saver:   On (lower RAM)
+  Cold-mass prune: Off
+  Server:          0.0.0.0:8012
+  GPUs:            2x [1,0]
+
+  Experts:        3,168 MB  (INT4 g128)
+  Attention:      1,368 MB  (HQQ6)
+  Overhead:       3,954 MB
+  Total:    8,568 / 20,470 MB (rank 0)
+  HCS:     14,148 MB  (~37% coverage)
+  KV capacity: ~98K tokens (k6v6)
+  Expert cache: 39.8 GB / 995 GB RAM
+  Estimated peak: 9,567 MB VRAM / 39.8 GB system RAM
+
+  CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d
+
+[0;32mStarting Krasis server...[0m
+
+  Config: /tmp/krasis-p87nbpwj.conf
+[2m$ /home/main/miniconda3/envs/ktransformers/bin/python3.11 -m krasis.server --config /tmp/krasis-p87nbpwj.conf --benchmark --vram-report[0m
+
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d
+Loaded config from /tmp/krasis-p87nbpwj.conf: {'model_path': '/home/main/.krasis/models/Qwen3-Coder-Next', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d', 'num_gpus': 2, 'layer_group_size': 2, 'kv_cache_mb': 1000, 'max_context_tokens': 0, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 4, 'expert_group_size': 128, 'gpu_expert_int4_calib': 'amax', 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'hqq_cache_profile': 'baseline', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 8012, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'hcs': True, 'multi_gpu_hcs': False, 'multi_gpu_mode': 'auto', 'dynamic_peer': False, 'hcs_host_cache_mode': 'source', 'dynamic_hcs': True, 'dynamic_hcs_tail_blocks': 2, 'adaptive_cold_mass_pruning': 'off', 'expert_compression': False, 'expert_compression_pipeline': 'grouped', 'stream_attention': False, 'draft_k': 3, 'draft_context': 512, 'temperature': 0.6, 'force_load': False, 'force_rebuild_cache': False, 'force_rebuild_hqq_cache': False, 'build_cache': False, 'enable_thinking': True, 'prefix_cache': True, 'prefix_cache_ram_fraction': 0.25}
+
+[1m[36m▸ Krasis — Qwen3-Coder-Next[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 2[0m
+  [32mMulti-GPU mode: auto[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d (config; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,GPU-8bc77bf7-8edc-3a8a-b81f-aa6b516fd22d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k6v6[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=570 MB, free=96687 MB, total=97258 MB
+  [33m[VRAM before-load][0m cuda:1: alloc=0 MB, reserved=0 MB, used=196 MB, free=19856 MB, total=20052 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4408 MB, free=92849 MB, total=97258 MB
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:1: alloc=0 MB, reserved=0 MB, used=196 MB, free=19856 MB, total=20052 MB
+  [0;32mHQQ attention artifacts validated (1368 MB cached), 92849 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 48 layers...
+    GPU Marlin cache loaded: 39.9 GB in 26s
+  [0;32mExpert weights loaded in 26s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4408 MB, free=92849 MB, total=97258 MB
+  [33m[VRAM after-phase2-expert-weights][0m cuda:1: alloc=0 MB, reserved=0 MB, used=196 MB, free=19856 MB, total=20052 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4408 MB, free=92849 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:1: alloc=0 MB, reserved=0 MB, used=196 MB, free=19856 MB, total=20052 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4640 MB, reserved=4664 MB, used=5412 MB, free=91845 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:1: alloc=0 MB, reserved=0 MB, used=196 MB, free=19856 MB, total=20052 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4640 MB, reserved=4664 MB, used=5412 MB, free=91845 MB, total=97258 MB
+  [33m[VRAM after-full-load][0m cuda:1: alloc=0 MB, reserved=0 MB, used=196 MB, free=19856 MB, total=20052 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x457648f0)[0m
+  [32mReleased redundant GPU execution source tensors (489 MB)[0m
+  [2mVRAM monitor started (startup measurement 1 ms; runtime 50 ms)[0m
+  [2mcuda:0: 0 MB total[0m
+  [2mcuda:1: 0 MB total[0m
+  [2mVRAM report enabled (periodic samples + events)[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=32 from /tmp/krasis-rc3-final.qifSyS/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=32)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=32)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=32)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 2.3s[0m
+  [2mcuda:0 warmup:  peak 7,936 MB used / 97,258 MB total  (min free: 89,321 MB)[0m
+  [2mcuda:1 warmup:  peak 306 MB used / 20,052 MB total  (min free: 19,746 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 91,043 MB / 97,258 MB[0m
+  [32mCalibration prefill guard: 1,200 MB (runtime safety remains 600 MB)[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0209ms 2:0.0210ms 4:0.0230ms 8:0.0290ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0209 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0110ms 2:0.0084ms 4:0.0084ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 32 tokens in 1.48s (21.7 tok/s)  VRAM: 90993 MB free now, 90993 MB min free during decode[0m
+  [32mShort calibration: baseline=91,043 MB, prefill post-alloc=90,077 MB, prefill min=89,237 MB, decode min=90,993 MB, post-cleanup=90,993 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.4481 MB/token[0m
+  [32mAdaptive long calibration fail-closed entry check: 4,000 tokens require 2,509 MB, 91,043 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 39,920 tokens (model-estimated initial probe (projected 0.4481 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0206ms 2:0.0211ms 4:0.0229ms 8:0.0291ms] -> keeping formula ksplits=2 (0.0211 ms median; best 1 at 0.0206 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0084ms 4:0.0083ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 32 tokens in 1.58s (20.3 tok/s)  VRAM: 90991 MB free now, 90991 MB min free during decode[0m
+  [32mLong calibration: baseline=90,993 MB, prefill post-alloc=72,063 MB, prefill min=71,223 MB, decode min=90,991 MB, post-cleanup=90,991 MB[0m
+  [32mScratch reservation: max=22,178 MB (at 50,000 tokens)[0m
+  [32mVRAM monitor runtime cadence restored: 1 ms -> 50 ms[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 90,991 MB[0m
+  [32mTransient deltas: short prefill=1,806 MB, long prefill=19,770 MB, short decode=50 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 90,341 MB[0m
+  [32mPrefill HCS budgets: short=88,585 MB, long=70,621 MB[0m
+  [32mWorst-case prefill scratch reservation: 22,178 MB at 50,000 tokens[0m
+
+[1m[36m▸ Computing multi-GPU layer split (2 GPUs)[0m
+
+[1m[36m▸ Calibrating multi-GPU device service rates[0m
+  [32m  GPU0 cuda:0: H2D p50/p95=103.8/106.2 us (15.63 GB/s), D2D p50/p95=18.7/19.3 us (867.95 GB/s)[0m
+  [32m  GPU1 cuda:1: H2D p50/p95=105.1/108.4 us (15.44 GB/s), D2D p50/p95=67.0/68.2 us (242.18 GB/s)[0m
+  [32mSpeed-aware split: reference=[40] (5.70 ms/token predicted), selected=[46] (5.28 ms/token, 7.37% reduction, admitted, uncertainty=0.18 ms)[0m
+  [32mHCS budgets: GPU0 90,341 MB, GPU1 18,549 MB = 108,890 MB total[0m
+  [32m  GPU0: layers [0..46) = 46 layers (83.0%)[0m
+  [32m  GPU1: layers [46..48) = 2 layers (17.0%)[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [32mApproved route heatmap loaded from cache: qcn_hqq6_p00006 (manifest-approved runtime compatibility)[0m
+  [32mUsing approved route heatmap; quick startup heatmap collection skipped[0m
+  [32mHeatmap: 20,867 experts ranked from 20,867 entries[0m
+
+[1m[36m▸ Calibrating peer-expert multi-GPU mode[0m
+  [32mPeer host-bounce RTT: p50/p95/p99=18.415/20.433/29.587 us, max=31.709 us, payload=4,096 bytes each way[0m
+  [2mPeer calibration HCS: HCS pool: 10/24576 experts loaded in 0.00s (0.0% coverage), 15.5 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 0 slots (budget too small)[0m
+  [32mMulti-GPU mode predictions: layer-split=5.280 ms/token, peer=2.361 ms/token, uncertainty=0.182 ms, peer_capacity=12,281 experts, peer_residents=0, captured_cold=0.00% (0.000 routes/token)[0m
+
+[1m[36m▸ Multi-GPU selector chose serial layer split[0m
+  [2mVRAM calibration: baseline 90991 MB | prefill 466.6 KB/tok, decode -1.2 KB/tok | HCS allowance prefill: short 88585 MB, long 70621 MB | decode: short 90341 MB, long 90389 MB | idle floors prefill=2406 MB decode=650 MB | decode-resident HCS budget=90341 MB[0m
+  [2mGPU0 HCS: 23552 experts for layers [0..46) (20008 ranked + 3544 unranked), reclaimable: 90,341 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/24576 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 23552 experts in 2.40s (36432.0 MB, host_mode=source) | total: 23552/24576 (95.8%) coverage[0m
+  [2mLoaded in 2.4s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[36m▸ Multi-GPU decode setup (2 GPUs)[0m
+  [32m  GPU0: layers [0..46) = 46 layers (35 LA + 11 GQA, 46 MoE + 0 dense)[0m
+  [32m  GPU1: layers [46..48) = 2 layers (1 LA + 1 GQA, 2 MoE + 0 dense)[0m
+  [2m  GQA cache offsets: [11][0m
+  [2m  Attention layers are PERMANENT on each GPU (copied at setup, never evicted)[0m
+  [2mCreating aux decode store 1 on cuda:1 for layers [46..48)...[0m
+  [2m  cuda:0 after aux store setup: 54,441 MB free / 97,258 MB total[0m
+  [2m  cuda:1 after aux store setup: 18,572 MB free / 20,052 MB total[0m
+
+[1m[36m▸ Calibrating multi-GPU aux decode overhead[0m
+  [32mAux decode overhead calibration: 11 tokens generated OK[0m
+  [2m  GPU1 decode transient: baseline=18,572 MB, min=18,570 MB, current=18,570 MB, overhead=2 MB[0m
+  [2m  GPU1 HCS: 1024 experts for layers [46..48) (859 ranked + 165 unranked)[0m
+  [32m  GPU1 HCS budget: 17,370 MB hard (aux_free=18,570 MB, decode_transient=2 MB, runtime_reserve=600 MB)[0m
+  [32m  GPU1 HCS: HCS pool: 1024/24576 experts loaded in 0.13s (4.2% coverage), 17369.9 MB VRAM, 10205 free slots, gpu_route_sync=false, mapped_reads=false | soft: 0 slots (budget too small)[0m
+
+[1m[36m▸ Validating multi-GPU decode[0m
+  [32mMulti-GPU decode validation: 11 tokens generated OK[0m
+  [2m  cuda:0 during multi-GPU decode: min_free=53,627 MB, current_free=54,435 MB / 97,258 MB total[0m
+  [2m  cuda:1 during multi-GPU decode: min_free=1,200 MB, current_free=1,200 MB / 20,052 MB total[0m
+  [2m  GPU1 (cuda:1): min_free=1200 MB during decode, current_free=1200 MB (budget safe)[0m
+
+[1m[36m▸ Multi-GPU decode ready (2 GPUs, splits=[46])[0m
+
+[1m[36m▸ VRAM allocation summary[0m
+  [32m  GPU0 (cuda:0): layers [0..46) = 46 (35LA+11GQA, 46MoE)[0m
+  [32m    Attention: 312 MB[0m
+  [32m    HCS:   reclaimable=90,341MB = 90,341 MB total[0m
+  [32m    VRAM:  42,823 MB used / 97,258 MB total (54,435 MB free)[0m
+  [32m  GPU1 (cuda:1): layers [46..48) = 2 (1LA+1GQA, 2MoE)[0m
+  [32m    Attention: 12 MB (HQQ6, permanent)[0m
+  [32m    HCS:   18,549 MB (100% hard, no prefill)[0m
+  [32m    VRAM:  18,852 MB used / 20,052 MB total (1,200 MB free)[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mQwen3-Coder-Next[0m
+  [32mAddress:[0m  [1m0.0.0.0:8012[0m
+  [32mContext:[0m  97,520 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   2-GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:8012/v1[0m
+    Chat endpoint: http://127.0.0.1:8012/v1/chat/completions
+    Models:        http://127.0.0.1:8012/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mQwen3-Coder-Next[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mQwen3-Coder-Next[0m
+  GPUs:     NVIDIA RTX PRO 6000 Blackwell Workstation Edition + NVIDIA RTX A4500
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/5K/10K/20K/35K/39,920)[0m
+  Prefill sizing:  [33mruntime-calibrated prefill cap 39,920 tokens (long probe low-water 71,221 MB, safety 600 MB)[0m
+  Warmup prefill:  3 prompts, ~25,000 tokens each
+  Timed prefill:   6 prompts at 1K/5K/10K/20K/35K/39,920 tokens
+    [1] 1,000 tokens
+    [2] 5,000 tokens
+    [3] 10,000 tokens
+    [4] 20,000 tokens
+    [5] 35,000 tokens
+    [6] 39,920 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0210ms 2:0.0210ms 4:0.0230ms 8:0.0294ms] -> keeping formula ksplits=2 (0.0210 ms median; best 2 at 0.0210 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0086ms 4:0.0084ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0760ms 2:0.0808ms 4:0.0880ms 8:0.1137ms] -> keeping formula ksplits=1 (0.0760 ms median; best 1 at 0.0760 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0175ms 2:0.0152ms 4:0.0161ms 8:0.0166ms] -> override ksplits=2 (0.0152 ms median vs formula 4 at 0.0161 ms, >5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0141ms candidates [2:0.0123ms] -> K-split 2 at 0.0123ms (>5.0% margin)
+[ksplit-autotune] complete: 1 W13 override(s), 1 shared-W2 override(s) installed
+  [32mdecode: 7 tokens in 0.16s (43.9 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0209ms 2:0.0211ms 4:0.0230ms 8:0.0294ms] -> keeping formula ksplits=2 (0.0211 ms median; best 1 at 0.0209 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0112ms 2:0.0087ms 4:0.0083ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0062ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 7 tokens in 0.11s (63.7 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+  Warmup complete.
+  Prefill warmup (3 runs, ~25,000 tokens each)...
+    [1/3] 25,000 tokens
+    [2/3] 25,000 tokens
+    [3/3] 25,000 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0208ms 2:0.0211ms 4:0.0229ms 8:0.0290ms] -> keeping formula ksplits=2 (0.0211 ms median; best 1 at 0.0208 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0110ms 2:0.0087ms 4:0.0084ms 8:0.0084ms] -> keeping formula ksplits=8 (0.0084 ms median; best 4 at 0.0084 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0062ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 49 tokens in 0.64s (77.1 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+    50 tokens done
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0208ms 2:0.0210ms 4:0.0230ms 8:0.0293ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0208 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0110ms 2:0.0087ms 4:0.0084ms 8:0.0085ms] -> keeping formula ksplits=8 (0.0085 ms median; best 4 at 0.0084 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 99 tokens in 1.27s (77.9 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+    100 tokens done
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0208ms 2:0.0211ms 4:0.0228ms 8:0.0292ms] -> keeping formula ksplits=2 (0.0211 ms median; best 1 at 0.0208 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0086ms 4:0.0083ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 4 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0062ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 249 tokens in 3.16s (78.8 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+    250 tokens done
+  Warmup complete (18.0s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K/5K/10K/20K/35K/39,920 tokens, 6 runs[0m
+  Run 1: 2,130.5 tok/s (1,000 tokens in 469.4ms)
+  Run 2: 6,637.1 tok/s (5,000 tokens in 753.3ms)
+  Run 3: 8,589.4 tok/s (10,000 tokens in 1164.2ms)
+  Run 4: 9,497.1 tok/s (20,000 tokens in 2105.9ms)
+  Run 5: 9,533.4 tok/s (35,000 tokens in 3671.3ms)
+  Run 6: 9,419.3 tok/s (39,920 tokens in 4238.1ms)
+  [1mBest: 9,533.4 tok/s (35,000 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0210ms 2:0.0209ms 4:0.0230ms 8:0.0291ms] -> keeping formula ksplits=2 (0.0209 ms median; best 2 at 0.0209 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0110ms 2:0.0088ms 4:0.0083ms 8:0.0084ms] -> keeping formula ksplits=8 (0.0084 ms median; best 4 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 49 tokens in 0.64s (76.8 tok/s)  VRAM: GPU0 54439MB min, GPU1 1168MB min[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0209ms 2:0.0210ms 4:0.0230ms 8:0.0293ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0209 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0088ms 4:0.0084ms 8:0.0084ms] -> keeping formula ksplits=8 (0.0084 ms median; best 4 at 0.0084 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 99 tokens in 1.26s (78.8 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0209ms 2:0.0211ms 4:0.0230ms 8:0.0292ms] -> keeping formula ksplits=2 (0.0211 ms median; best 1 at 0.0209 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0109ms 2:0.0087ms 4:0.0084ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 249 tokens in 3.21s (77.5 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+   50 tokens: 76.56 tok/s (13.1ms/tok)
+  100 tokens: 78.62 tok/s (12.7ms/tok)
+  250 tokens: 77.47 tok/s (12.9ms/tok)
+  [1mBest: 78.62 tok/s[0m
+  HCS:  24576/24576 experts loaded (100.0%)
+  VRAM: 54435 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+  [32mprefill: 10 tokens in 0.33s (29.9 tok/s)  VRAM: 1168 MB free now, 54109 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0208ms 2:0.0210ms 4:0.0230ms 8:0.0291ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0208 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0086ms 4:0.0084ms 8:0.0084ms] -> keeping formula ksplits=8 (0.0084 ms median; best 8 at 0.0084 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 7 tokens in 0.11s (63.8 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+  [32mprefill: 57 tokens in 0.40s (142.5 tok/s)  VRAM: 1168 MB free now, 52901 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0210ms 2:0.0210ms 4:0.0228ms 8:0.0293ms] -> keeping formula ksplits=2 (0.0210 ms median; best 2 at 0.0210 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0110ms 2:0.0087ms 4:0.0083ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 4 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 49 tokens in 0.64s (77.0 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+  [32mprefill: 62 tokens in 0.39s (157.5 tok/s)  VRAM: 1168 MB free now, 53025 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0208ms 2:0.0211ms 4:0.0228ms 8:0.0290ms] -> keeping formula ksplits=2 (0.0211 ms median; best 1 at 0.0208 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0109ms 2:0.0087ms 4:0.0084ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 99 tokens in 1.27s (78.1 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+  [32mprefill: 57 tokens in 0.41s (140.1 tok/s)  VRAM: 1168 MB free now, 53045 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0208ms 2:0.0209ms 4:0.0231ms 8:0.0292ms] -> keeping formula ksplits=2 (0.0209 ms median; best 1 at 0.0208 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0086ms 4:0.0084ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 249 tokens in 3.21s (77.5 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+   50 tokens: 176.67 tok/s (1.42s total)
+  100 tokens: 108.99 tok/s (2.05s total)
+  250 tokens: 87.26 tok/s (4.00s total)
+  [1mBest: 176.67 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m[32mBENCHMARK COMPLETE[0m
+  Model:                 [1mQwen3-Coder-Next[0m
+  Config:                INT4/4 HQQ6 KV=k6v6 2 GPU
+  Prefill (internal):    [32m[1m9,533.4 tok/s[0m  (best of 1K/5K/10K/20K/35K/39,920)
+  Decode (internal):     [32m[1m78.62 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m176.67 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          24576/24576 (100.0%)
+  Min free VRAM:         54435 MB
+  Log:     [2mlogs/release-test_20260815_010556/config3-INT4-k6v6-HQQ6-Multi-GPU_20260815_011455/benchmark_report.log[0m
+
+
+[1m[32mSERVER READY: 0.0.0.0:8012[0m
+  [2mPress Q or Ctrl-C to stop[0m
+  [32mprefill: 9 tokens in 0.33s (27.5 tok/s)  VRAM: 1168 MB free now, 53625 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0209ms 2:0.0210ms 4:0.0231ms 8:0.0290ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0209 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0090ms 4:0.0083ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 4 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 7 tokens in 0.11s (62.6 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+  [32mprefill: 9 tokens in 0.33s (27.7 tok/s)  VRAM: 1168 MB free now, 53629 MB min free during prefill[0m
+  [32mdecode: 11 tokens in 0.13s (81.5 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+  [32mprefill: 35 tokens in 0.34s (102.7 tok/s)  VRAM: 1168 MB free now, 53627 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0209ms 2:0.0210ms 4:0.0227ms 8:0.0292ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0209 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0110ms 2:0.0087ms 4:0.0084ms 8:0.0085ms] -> keeping formula ksplits=8 (0.0085 ms median; best 4 at 0.0084 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 33 tokens in 0.44s (74.4 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+  [32mprefill: 82 tokens in 0.40s (203.0 tok/s)  VRAM: 1168 MB free now, 52979 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0207ms 2:0.0210ms 4:0.0231ms 8:0.0290ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0207 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0087ms 4:0.0083ms 8:0.0085ms] -> keeping formula ksplits=8 (0.0085 ms median; best 4 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 84 tokens in 1.11s (75.6 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+  [32mprefill: 15 tokens in 0.33s (45.3 tok/s)  VRAM: 1168 MB free now, 53625 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0209ms 2:0.0212ms 4:0.0228ms 8:0.0290ms] -> keeping formula ksplits=2 (0.0212 ms median; best 1 at 0.0209 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0087ms 4:0.0084ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0062ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 11 tokens in 0.16s (67.6 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+  [32mprefill: 43 tokens in 0.40s (108.7 tok/s)  VRAM: 1168 MB free now, 52877 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0209ms 2:0.0210ms 4:0.0229ms 8:0.0295ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0209 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0110ms 2:0.0087ms 4:0.0084ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 13 tokens in 0.19s (68.6 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+  [32mprefill: 73 tokens in 0.41s (177.7 tok/s)  VRAM: 1168 MB free now, 53015 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0208ms 2:0.0209ms 4:0.0230ms 8:0.0292ms] -> keeping formula ksplits=2 (0.0209 ms median; best 1 at 0.0208 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0112ms 2:0.0087ms 4:0.0085ms 8:0.0084ms] -> keeping formula ksplits=8 (0.0084 ms median; best 8 at 0.0084 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0062ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 12 tokens in 0.18s (67.5 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+  [32mprefill: 17 tokens in 0.33s (51.0 tok/s)  VRAM: 1168 MB free now, 53627 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0206ms 2:0.0210ms 4:0.0227ms 8:0.0292ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0206 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0083ms 4:0.0084ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 176 tokens in 2.23s (79.1 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+  [32mprefill: 19 tokens in 0.33s (57.1 tok/s)  VRAM: 1168 MB free now, 54027 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0209ms 2:0.0211ms 4:0.0229ms 8:0.0294ms] -> keeping formula ksplits=2 (0.0211 ms median; best 1 at 0.0209 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0086ms 4:0.0084ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 183 tokens in 2.38s (76.9 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+  [32mprefill: 15 tokens in 0.33s (45.1 tok/s)  VRAM: 1168 MB free now, 53627 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0209ms 2:0.0211ms 4:0.0230ms 8:0.0293ms] -> keeping formula ksplits=2 (0.0211 ms median; best 1 at 0.0209 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0109ms 2:0.0088ms 4:0.0085ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 255 tokens in 3.29s (77.6 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+  [32mprefill: 46 tokens in 0.40s (116.4 tok/s)  VRAM: 1168 MB free now, 52945 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0209ms 2:0.0208ms 4:0.0229ms 8:0.0291ms] -> keeping formula ksplits=2 (0.0208 ms median; best 2 at 0.0208 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0087ms 4:0.0084ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 195 tokens in 2.56s (76.1 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+  [32mprefill: 15 tokens in 0.33s (45.2 tok/s)  VRAM: 1168 MB free now, 54107 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0208ms 2:0.0211ms 4:0.0228ms 8:0.0292ms] -> keeping formula ksplits=2 (0.0211 ms median; best 1 at 0.0208 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0087ms 4:0.0084ms 8:0.0084ms] -> keeping formula ksplits=8 (0.0084 ms median; best 4 at 0.0084 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 255 tokens in 3.27s (77.9 tok/s)  VRAM: GPU0 54439MB min, GPU1 1168MB min[0m
+  [32mprefill: 288 tokens in 0.42s (682.9 tok/s)  VRAM: 1168 MB free now, 52851 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0207ms 2:0.0211ms 4:0.0230ms 8:0.0292ms] -> keeping formula ksplits=2 (0.0211 ms median; best 1 at 0.0207 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0109ms 2:0.0088ms 4:0.0084ms 8:0.0082ms] -> keeping formula ksplits=8 (0.0082 ms median; best 8 at 0.0082 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 255 tokens in 3.43s (74.4 tok/s)  VRAM: GPU0 54443MB min, GPU1 1168MB min[0m
+  [32mprefill: 561 tokens in 0.44s (1274.7 tok/s)  VRAM: 1168 MB free now, 52999 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0207ms 2:0.0210ms 4:0.0229ms 8:0.0293ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0207 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0109ms 2:0.0084ms 4:0.0082ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 4 at 0.0082 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 255 tokens in 3.34s (76.3 tok/s)  VRAM: GPU0 54443MB min, GPU1 1168MB min[0m
+  [32mprefill: 16 tokens in 0.33s (48.2 tok/s)  VRAM: 1168 MB free now, 53631 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0207ms 2:0.0210ms 4:0.0231ms 8:0.0290ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0207 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0110ms 2:0.0089ms 4:0.0085ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 255 tokens in 3.33s (76.5 tok/s)  VRAM: GPU0 54439MB min, GPU1 1168MB min[0m
+  [32mprefill: 2203 tokens in 0.55s (3972.1 tok/s)  VRAM: 1168 MB free now, 52011 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0208ms 2:0.0211ms 4:0.0229ms 8:0.0292ms] -> keeping formula ksplits=2 (0.0211 ms median; best 1 at 0.0208 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0110ms 2:0.0088ms 4:0.0084ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 158 tokens in 2.16s (73.3 tok/s)  VRAM: GPU0 54443MB min, GPU1 1168MB min[0m
+  [32mprefill: 8703 tokens in 1.06s (8194.9 tok/s)  VRAM: 1168 MB free now, 49639 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0207ms 2:0.0210ms 4:0.0229ms 8:0.0292ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0207 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0086ms 4:0.0084ms 8:0.0084ms] -> keeping formula ksplits=8 (0.0084 ms median; best 4 at 0.0084 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0082ms] -> keeping v1 (best 2 at 0.0082ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 255 tokens in 3.60s (70.8 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+  [32mprefill: 23191 tokens in 2.45s (9458.8 tok/s)  VRAM: 1168 MB free now, 42851 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0207ms 2:0.0212ms 4:0.0231ms 8:0.0291ms] -> keeping formula ksplits=2 (0.0212 ms median; best 1 at 0.0207 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0110ms 2:0.0088ms 4:0.0083ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 255 tokens in 4.12s (61.9 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+  [32mprefill: 9 tokens in 0.34s (26.5 tok/s)  VRAM: 1168 MB free now, 54105 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0209ms 2:0.0211ms 4:0.0229ms 8:0.0293ms] -> keeping formula ksplits=2 (0.0211 ms median; best 1 at 0.0209 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0088ms 4:0.0084ms 8:0.0083ms] -> keeping formula ksplits=8 (0.0083 ms median; best 8 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 11 tokens in 0.16s (69.0 tok/s)  VRAM: GPU0 54435MB min, GPU1 1168MB min[0m
+  [32mprefill: 15 tokens in 0.33s (45.0 tok/s)  VRAM: 1168 MB free now, 53627 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=2048 n=1024 z=10 int8=false candidates [1:0.0207ms 2:0.0210ms 4:0.0229ms 8:0.0295ms] -> keeping formula ksplits=2 (0.0210 ms median; best 1 at 0.0207 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=2048 n=1024 z=1 int8=false candidates [1:0.0111ms 2:0.0087ms 4:0.0083ms 8:0.0085ms] -> keeping formula ksplits=8 (0.0085 ms median; best 4 at 0.0083 ms is within the 5.0% margin)
+[shared-w2-autotune] layer=0 shape k=512 n=2048 int8=false v1=0.0063ms candidates [2:0.0083ms] -> keeping v1 (best 2 at 0.0083ms is within 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 8 tokens in 0.12s (65.3 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+  [32mprefill: 15 tokens in 0.34s (44.7 tok/s)  VRAM: 1168 MB free now, 53937 MB min free during prefill[0m
+  [32mdecode: 50 tokens in 0.62s (80.7 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+  [32mprefill: 15 tokens in 0.35s (43.1 tok/s)  VRAM: 1168 MB free now, 54035 MB min free during prefill[0m
+  [32mdecode: 50 tokens in 0.62s (80.5 tok/s)  VRAM: GPU0 54437MB min, GPU1 1168MB min[0m
+
+[1m[36mVRAM REPORT SUMMARY[0m
+  Event                              Time      GPU0      GPU1
+  model_loaded                       0.0s   91353MB   19746MB
+  warmup_start                       0.3s   91267MB   19746MB
+  warmup_end                         2.6s   91043MB   19746MB
+  calibration_start                  2.6s   91043MB   19746MB
+  calibration_end                   16.4s   90991MB   19746MB
+  hcs_init_start                    46.4s   90991MB   19648MB
+  hcs_init_end                      48.9s   54449MB   19648MB
+  validation_start                  48.9s   54449MB   19648MB
+  validation_end                    48.9s   54449MB   19648MB
+  multi_gpu_setup_start             49.0s   54449MB   19648MB
+  multi_gpu_setup_end               64.7s   54435MB    1200MB
+  server_ready                      66.0s   54435MB    1200MB
+  prefill_start                     74.7s   54435MB    1200MB
+  prefill_end                       75.0s   54435MB    1200MB
+  hcs_soft_load_start               75.0s   54435MB    1200MB
+  hcs_soft_load_end                 75.4s   54435MB    1200MB
+  decode_start                      75.4s   54435MB    1200MB
+  decode_end                        75.5s   54435MB    1168MB
+  prefill_start                     75.8s   54435MB    1168MB
+  prefill_end                       76.1s   54437MB    1168MB
+  hcs_soft_load_start               76.1s   54437MB    1168MB
+  hcs_soft_load_end                 76.5s   54437MB    1168MB
+  decode_start                      76.5s   54437MB    1168MB
+  decode_end                        76.6s   54437MB    1168MB
+  prefill_start                     76.9s   54437MB    1168MB
+  prefill_end                       79.5s   52295MB    1168MB
+  hcs_soft_load_start               79.5s   52295MB    1168MB
+  hcs_soft_load_end                 79.9s   52295MB    1168MB
+  prefill_start                     80.2s   54439MB    1168MB
+  prefill_end                       82.8s   52293MB    1168MB
+  hcs_soft_load_start               82.8s   52293MB    1168MB
+  hcs_soft_load_end                 83.2s   52293MB    1168MB
+  prefill_start                     83.5s   54437MB    1168MB
+  prefill_end                       86.1s   52295MB    1168MB
+  hcs_soft_load_start               86.1s   52295MB    1168MB
+  hcs_soft_load_end                 86.5s   52295MB    1168MB
+  prefill_start                     86.7s   54439MB    1168MB
+  prefill_end                       87.1s   54437MB    1168MB
+  hcs_soft_load_start               87.1s   54437MB    1168MB
+  hcs_soft_load_end                 87.5s   54437MB    1168MB
+  decode_start                      87.5s   54437MB    1168MB
+  decode_end                        88.1s   54437MB    1168MB
+  prefill_start                     88.4s   54437MB    1168MB
+  prefill_end                       88.8s   54435MB    1168MB
+  hcs_soft_load_start               88.8s   54435MB    1168MB
+  hcs_soft_load_end                 89.1s   54435MB    1168MB
+  decode_start                      89.1s   54435MB    1168MB
+  decode_end                        90.4s   54435MB    1168MB
+  prefill_start                     90.7s   54435MB    1168MB
+  prefill_end                       91.1s   54437MB    1168MB
+  hcs_soft_load_start               91.1s   54437MB    1168MB
+  hcs_soft_load_end                 91.4s   54437MB    1168MB
+  decode_start                      91.4s   54437MB    1168MB
+  decode_end                        94.6s   54437MB    1168MB
+  prefill_start                     94.8s   54437MB    1168MB
+  prefill_end                       95.3s   54345MB    1168MB
+  hcs_soft_load_start               95.3s   54345MB    1168MB
+  hcs_soft_load_end                 95.7s   54345MB    1168MB
+  prefill_start                     95.9s   54441MB    1168MB
+  prefill_end                       96.7s   54023MB    1168MB
+  hcs_soft_load_start               96.7s   54023MB    1168MB
+  hcs_soft_load_end                 97.1s   54023MB    1168MB
+  prefill_start                     97.3s   54439MB    1168MB
+  prefill_end                       98.5s   53571MB    1168MB
+  hcs_soft_load_start               98.5s   53571MB    1168MB
+  hcs_soft_load_end                 98.9s   53571MB    1168MB
+  prefill_start                     99.2s   54435MB    1168MB
+  prefill_end                      101.3s   52707MB    1168MB
+  hcs_soft_load_start              101.3s   52707MB    1168MB
+  hcs_soft_load_end                101.6s   52707MB    1168MB
+  prefill_start                    102.0s   54435MB    1168MB
+  prefill_end                      105.6s   51431MB    1168MB
+  hcs_soft_load_start              105.6s   51431MB    1168MB
+  hcs_soft_load_end                106.0s   51431MB    1168MB
+  prefill_start                    106.4s   54439MB    1168MB
+  prefill_end                      110.6s   51017MB    1168MB
+  hcs_soft_load_start              110.6s   51017MB    1168MB
+  hcs_soft_load_end                111.0s   51017MB    1168MB
+  prefill_start                    111.2s   54441MB    1168MB
+  prefill_end                      111.7s   54439MB    1168MB
+  hcs_soft_load_start              111.7s   54439MB    1168MB
+  hcs_soft_load_end                112.0s   54439MB    1168MB
+  decode_start                     112.0s   54439MB    1168MB
+  decode_end                       112.7s   54439MB    1168MB
+  prefill_start                    112.9s   54439MB    1168MB
+  prefill_end                      113.3s   54437MB    1168MB
+  hcs_soft_load_start              113.3s   54437MB    1168MB
+  hcs_soft_load_end                113.7s   54437MB    1168MB
+  decode_start                     113.7s   54437MB    1168MB
+  decode_end                       115.0s   54437MB    1168MB
+  prefill_start                    115.2s   54437MB    1168MB
+  prefill_end                      115.6s   54435MB    1168MB
+  hcs_soft_load_start              115.6s   54435MB    1168MB
+  hcs_soft_load_end                116.0s   54435MB    1168MB
+  decode_start                     116.0s   54435MB    1168MB
+  decode_end                       119.2s   54435MB    1168MB
+  evict_start                      119.3s   54435MB    1168MB
+  evict_end                        119.3s   54435MB    1168MB
+  prefill_start                    119.3s   54435MB    1168MB
+  prefill_end                      119.7s   54435MB    1168MB
+  reload_start                     119.7s   54435MB    1168MB
+  decode_start                     120.1s   54435MB    1168MB
+  decode_end                       120.2s   54435MB    1168MB
+  cleanup_end                      120.2s   54435MB    1168MB
+  evict_start                      120.2s   54435MB    1168MB
+  evict_end                        120.2s   54435MB    1168MB
+  prefill_start                    120.2s   54435MB    1168MB
+  prefill_end                      120.6s   54437MB    1168MB
+  reload_start                     120.6s   54437MB    1168MB
+  decode_start                     120.9s   54437MB    1168MB
+  decode_end                       121.6s   54437MB    1168MB
+  cleanup_end                      121.6s   54437MB    1168MB
+  evict_start                      121.6s   54437MB    1168MB
+  evict_end                        121.6s   54437MB    1168MB
+  prefill_start                    121.6s   54437MB    1168MB
+  prefill_end                      122.0s   54435MB    1168MB
+  reload_start                     122.0s   54435MB    1168MB
+  decode_start                     122.4s   54435MB    1168MB
+  decode_end                       123.6s   54435MB    1168MB
+  cleanup_end                      123.6s   54435MB    1168MB
+  evict_start                      123.6s   54435MB    1168MB
+  evict_end                        123.6s   54435MB    1168MB
+  prefill_start                    123.6s   54435MB    1168MB
+  prefill_end                      124.0s   54437MB    1168MB
+  reload_start                     124.0s   54437MB    1168MB
+  decode_start                     124.4s   54437MB    1168MB
+  decode_end                       127.6s   54437MB    1168MB
+  cleanup_end                      127.6s   54437MB    1168MB
+  evict_start                      127.8s   54437MB    1168MB
+  evict_end                        127.8s   54437MB    1168MB
+  prefill_start                    127.8s   54437MB    1168MB
+  prefill_end                      128.2s   54435MB    1168MB
+  reload_start                     128.2s   54435MB    1168MB
+  decode_start                     128.5s   54435MB    1168MB
+  decode_end                       128.7s   54435MB    1168MB
+  cleanup_end                      128.7s   54435MB    1168MB
+  evict_start                      128.7s   54435MB    1168MB
+  evict_end                        128.7s   54435MB    1168MB
+  prefill_start                    128.7s   54435MB    1168MB
+  prefill_end                      129.0s   54437MB    1168MB
+  reload_start                     129.0s   54437MB    1168MB
+  decode_start                     129.4s   54437MB    1168MB
+  decode_end                       129.5s   54437MB    1168MB
+  cleanup_end                      129.5s   54437MB    1168MB
+  evict_start                      129.5s   54437MB    1168MB
+  evict_end                        129.5s   54437MB    1168MB
+  prefill_start                    129.5s   54437MB    1168MB
+  prefill_end                      129.9s   54437MB    1168MB
+  reload_start                     129.9s   54437MB    1168MB
+  decode_start                     130.2s   54437MB    1168MB
+  decode_end                       130.7s   54437MB    1168MB
+  cleanup_end                      130.7s   54437MB    1168MB
+  evict_start                      130.7s   54437MB    1168MB
+  evict_end                        130.7s   54437MB    1168MB
+  prefill_start                    130.7s   54437MB    1168MB
+  prefill_end                      131.1s   54435MB    1168MB
+  reload_start                     131.1s   54435MB    1168MB
+  decode_start                     131.5s   54435MB    1168MB
+  decode_end                       132.6s   54435MB    1168MB
+  cleanup_end                      132.6s   54435MB    1168MB
+  evict_start                      132.6s   54435MB    1168MB
+  evict_end                        132.6s   54435MB    1168MB
+  prefill_start                    132.6s   54435MB    1168MB
+  prefill_end                      132.9s   54435MB    1168MB
+  reload_start                     132.9s   54435MB    1168MB
+  decode_start                     133.3s   54435MB    1168MB
+  decode_end                       133.4s   54435MB    1168MB
+  cleanup_end                      133.4s   54435MB    1168MB
+  evict_start                      133.5s   54435MB    1168MB
+  evict_end                        133.5s   54435MB    1168MB
+  prefill_start                    133.5s   54435MB    1168MB
+  prefill_end                      133.9s   54435MB    1168MB
+  reload_start                     133.9s   54435MB    1168MB
+  decode_start                     134.2s   54435MB    1168MB
+  decode_end                       134.4s   54435MB    1168MB
+  cleanup_end                      134.4s   54435MB    1168MB
+  evict_start                      134.4s   54435MB    1168MB
+  evict_end                        134.4s   54435MB    1168MB
+  prefill_start                    134.4s   54435MB    1168MB
+  prefill_end                      134.8s   54435MB    1168MB
+  reload_start                     134.8s   54435MB    1168MB
+  decode_start                     135.2s   54435MB    1168MB
+  decode_end                       135.4s   54435MB    1168MB
+  cleanup_end                      135.4s   54435MB    1168MB
+  evict_start                      135.4s   54435MB    1168MB
+  evict_end                        135.4s   54435MB    1168MB
+  prefill_start                    135.4s   54435MB    1168MB
+  prefill_end                      135.7s   54435MB    1168MB
+  reload_start                     135.7s   54435MB    1168MB
+  decode_start                     136.1s   54435MB    1168MB
+  decode_end                       138.3s   54435MB    1168MB
+  cleanup_end                      138.3s   54435MB    1168MB
+  evict_start                      138.3s   54435MB    1168MB
+  evict_end                        138.3s   54435MB    1168MB
+  prefill_start                    138.3s   54435MB    1168MB
+  prefill_end                      138.7s   54435MB    1168MB
+  reload_start                     138.7s   54435MB    1168MB
+  decode_start                     139.0s   54435MB    1168MB
+  decode_end                       141.4s   54435MB    1168MB
+  cleanup_end                      141.4s   54435MB    1168MB
+  evict_start                      141.4s   54435MB    1168MB
+  evict_end                        141.4s   54435MB    1168MB
+  prefill_start                    141.4s   54435MB    1168MB
+  prefill_end                      141.8s   54435MB    1168MB
+  reload_start                     141.8s   54435MB    1168MB
+  decode_start                     142.1s   54435MB    1168MB
+  decode_end                       145.4s   54435MB    1168MB
+  cleanup_end                      145.4s   54435MB    1168MB
+  evict_start                      145.4s   54435MB    1168MB
+  evict_end                        145.4s   54435MB    1168MB
+  prefill_start                    145.4s   54435MB    1168MB
+  prefill_end                      145.8s   54437MB    1168MB
+  reload_start                     145.8s   54437MB    1168MB
+  decode_start                     146.2s   54437MB    1168MB
+  decode_end                       148.8s   54437MB    1168MB
+  cleanup_end                      148.8s   54437MB    1168MB
+  evict_start                      148.8s   54437MB    1168MB
+  evict_end                        148.8s   54437MB    1168MB
+  prefill_start                    148.8s   54437MB    1168MB
+  prefill_end                      149.1s   54439MB    1168MB
+  reload_start                     149.1s   54439MB    1168MB
+  decode_start                     149.5s   54439MB    1168MB
+  decode_end                       152.8s   54439MB    1168MB
+  cleanup_end                      152.8s   54439MB    1168MB
+  evict_start                      152.8s   54439MB    1168MB
+  evict_end                        152.8s   54439MB    1168MB
+  prefill_start                    152.8s   54439MB    1168MB
+  prefill_end                      153.2s   54411MB    1168MB
+  reload_start                     153.2s   54411MB    1168MB
+  decode_start                     153.6s   54443MB    1168MB
+  decode_end                       157.0s   54443MB    1168MB
+  cleanup_end                      157.0s   54443MB    1168MB
+  evict_start                      157.0s   54443MB    1168MB
+  evict_end                        157.0s   54443MB    1168MB
+  prefill_start                    157.0s   54443MB    1168MB
+  prefill_end                      157.4s   54411MB    1168MB
+  reload_start                     157.4s   54411MB    1168MB
+  decode_start                     157.8s   54443MB    1168MB
+  decode_end                       161.2s   54443MB    1168MB
+  cleanup_end                      161.2s   54443MB    1168MB
+  evict_start                      161.2s   54443MB    1168MB
+  evict_end                        161.2s   54443MB    1168MB
+  prefill_start                    161.2s   54443MB    1168MB
+  prefill_end                      161.5s   54439MB    1168MB
+  reload_start                     161.5s   54439MB    1168MB
+  decode_start                     161.9s   54439MB    1168MB
+  decode_end                       165.2s   54439MB    1168MB
+  cleanup_end                      165.2s   54439MB    1168MB
+  evict_start                      165.2s   54439MB    1168MB
+  evict_end                        165.2s   54439MB    1168MB
+  prefill_start                    165.2s   54439MB    1168MB
+  prefill_end                      165.8s   54251MB    1168MB
+  reload_start                     165.8s   54251MB    1168MB
+  decode_start                     166.2s   54443MB    1168MB
+  decode_end                       168.3s   54443MB    1168MB
+  cleanup_end                      168.3s   54443MB    1168MB
+  evict_start                      168.3s   54443MB    1168MB
+  evict_end                        168.3s   54443MB    1168MB
+  prefill_start                    168.3s   54443MB    1168MB
+  prefill_end                      169.4s   53701MB    1168MB
+  reload_start                     169.4s   53701MB    1168MB
+  decode_start                     169.8s   54437MB    1168MB
+  decode_end                       173.4s   54437MB    1168MB
+  cleanup_end                      173.4s   54437MB    1168MB
+  evict_start                      173.4s   54437MB    1168MB
+  evict_end                        173.4s   54437MB    1168MB
+  prefill_start                    173.4s   54437MB    1168MB
+  prefill_end                      175.9s   52451MB    1168MB
+  reload_start                     175.9s   52451MB    1168MB
+  decode_start                     176.3s   54435MB    1168MB
+  decode_end                       180.4s   54435MB    1168MB
+  cleanup_end                      180.4s   54435MB    1168MB
+  evict_start                      180.7s   54435MB    1168MB
+  evict_end                        180.7s   54435MB    1168MB
+  prefill_start                    180.7s   54435MB    1168MB
+  prefill_end                      181.1s   54435MB    1168MB
+  reload_start                     181.1s   54435MB    1168MB
+  decode_start                     181.4s   54435MB    1168MB
+  decode_end                       181.6s   54435MB    1168MB
+  cleanup_end                      181.6s   54435MB    1168MB
+  evict_start                      181.6s   54435MB    1168MB
+  evict_end                        181.6s   54435MB    1168MB
+  prefill_start                    181.6s   54435MB    1168MB
+  prefill_end                      181.9s   54437MB    1168MB
+  reload_start                     181.9s   54437MB    1168MB
+  decode_start                     182.3s   54437MB    1168MB
+  decode_end                       182.4s   54437MB    1168MB
+  cleanup_end                      182.4s   54437MB    1168MB
+  evict_start                      182.4s   54437MB    1168MB
+  evict_end                        182.4s   54437MB    1168MB
+  prefill_start                    182.4s   54437MB    1168MB
+  prefill_end                      182.8s   54437MB    1168MB
+  reload_start                     182.8s   54437MB    1168MB
+  decode_start                     183.1s   54437MB    1168MB
+  decode_end                       183.8s   54437MB    1168MB
+  cleanup_end                      183.8s   54437MB    1168MB
+  evict_start                      183.8s   54437MB    1168MB
+  evict_end                        183.8s   54437MB    1168MB
+  prefill_start                    183.8s   54437MB    1168MB
+  prefill_end                      184.1s   54437MB    1168MB
+  reload_start                     184.1s   54437MB    1168MB
+  decode_start                     184.5s   54437MB    1168MB
+  decode_end                       185.1s   54437MB    1168MB
+  cleanup_end                      185.1s   54437MB    1168MB
+  server_shutdown                  185.2s   54437MB    1168MB
+  [2mFull report: /tmp/krasis-rc3-final.qifSyS/logs/release-test_20260815_010556/config3-INT4-k6v6-HQQ6-Multi-GPU_20260815_011455/vram_report.csv[0m

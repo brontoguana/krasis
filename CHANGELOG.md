@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Completed the exact-source `v1.0.21-rc.3` release gate. A detached
+  `./dev build` produced the CPython 3.11 wheel with all FLA, Marlin, and
+  FlashAttention sidecars and verified both import origins. The timing-disabled
+  `./dev release-test QCN` then passed launcher/downloader/planner
+  `43/43 + 18/18 + 8/8` and all three launcher-qualified INT4 configurations,
+  including 42 sanity prompts, nine canonical large prompts, and `12/12`
+  llama-witness first-token matches. The two-GPU row measured and retained its
+  `[46,2]` layer split after rejecting a zero-resident/zero-route peer tier;
+  its A4500 floor was 1,168 MiB against the 600 MiB safety margin. Complete
+  timing-disabled evidence is indexed under `benchmarks/`.
+
 - Aligned the full prerelease gate with the launcher's production INT4-only
   contract: the multi-GPU QCN release-test variant now uses INT4 experts with
   fixed HQQ6/k6v6 instead of requesting launcher-rejected INT8 experts and an
