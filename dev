@@ -2015,7 +2015,17 @@ do_reference_inventory() {
 }
 
 witness_model_paths() {
-    local model="${1,,}"
+    local requested="$1"
+    if [[ -d "$requested" ]]; then
+        local resolved basename
+        resolved=$(realpath "$requested")
+        basename=$(basename "$resolved")
+        echo "$resolved"
+        echo ""
+        echo "$HOME/.krasis/witness-gguf/${basename}-bf16.gguf"
+        return 0
+    fi
+    local model="${requested,,}"
     case "$model" in
         qcn|qwen3-coder-next)
             echo "$HOME/.krasis/models/Qwen3-Coder-Next"
@@ -2541,6 +2551,7 @@ do_witness_gguf_preflight() {
         echo "  Preflights BF16 GGUF witness conversion without starting conversion."
         echo "  Records source files, expected output, resource estimates, converter command, and support gates."
         echo "  --converter-dry-run traverses the converter and tensor mappings without writing output data."
+        echo "  A direct local checkpoint directory is accepted for uncatalogued derivatives."
         echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, dsv4, dsv4-0731"
         return 0
     fi
@@ -2615,6 +2626,20 @@ do_witness_gguf_preflight() {
         transformers_version=$(jq -r '.transformers_version // ""' "$config")
     else
         status=1
+    fi
+
+    # A direct model directory is an explicit validation target. Classify it
+    # from normalized checkpoint metadata instead of forcing callers to add a
+    # model-name alias for every derivative.
+    if [[ -d "$model" ]]; then
+        case "$model_type:$text_model_type" in
+            deepseek_v4:*) model_key="dsv4" ;;
+            glm_moe_dsa:*) model_key="glm52" ;;
+            step3p7:step3p5) model_key="step37" ;;
+            qwen3_moe:*) model_key="q235" ;;
+            nemotron_h:*) model_key="nemotron-nano" ;;
+            *:qwen3_5_moe_text) model_key="qwen35" ;;
+        esac
     fi
 
     local expected_arch expected_model_type expected_text_model_type
@@ -3021,6 +3046,7 @@ do_witness_gguf_convert() {
         echo "  Converts a local safetensors model to BF16 GGUF only after the built preflight gate passes."
         echo "  Writes logs and conversion manifest under logs/witness-gguf-convert_*."
         echo "  Refuses to overwrite an existing expected output unless --force is supplied."
+        echo "  A direct local checkpoint directory is accepted for uncatalogued derivatives."
         echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, dsv4, dsv4-0731"
         return 0
     fi
@@ -3181,6 +3207,7 @@ do_witness_capture() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]"
         echo "  Captures llama-witness JSON from stored input_token_ids only."
+        echo "  A direct local checkpoint directory is accepted with --reference for its frozen input-token source."
         echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
         return 0
     fi
@@ -3243,7 +3270,9 @@ do_witness_capture() {
     local run_dir
     run_dir=$(create_run_dir "witness-capture")
     if [[ -z "$output" ]]; then
-        output="$run_dir/${model}_${profile}.json"
+        local output_model_name
+        output_model_name=$(basename "${model%/}")
+        output="$run_dir/${output_model_name}_${profile}.json"
     fi
     mkdir -p "$(dirname "$output")"
 

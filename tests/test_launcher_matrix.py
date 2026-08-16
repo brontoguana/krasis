@@ -26,6 +26,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 NONEXISTENT_MODEL = "/tmp/nonexistent-krasis-launcher-matrix-model"
 
 
+def _minimal_qwen3_config(model_type: str = "qwen3") -> dict[str, object]:
+    return {
+        "model_type": model_type,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "vocab_size": 1024,
+        "max_position_embeddings": 4096,
+        "tie_word_embeddings": True,
+    }
+
+
 def _parse_key_value_config(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     with path.open(encoding="utf-8") as f:
@@ -149,6 +164,207 @@ def _run_server_start_smoke(config_path: Path, scenario: str, expected_fragments
 
 
 class LauncherMatrixTest(unittest.TestCase):
+    def test_model_scan_surfaces_unvalidated_incomplete_and_invalid_checkpoints(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="krasis-model-scan-") as root:
+            root_path = Path(root)
+
+            runnable = root_path / "local-qwen3-derivative"
+            runnable.mkdir()
+            (runnable / "config.json").write_text(
+                json.dumps(_minimal_qwen3_config()), encoding="utf-8"
+            )
+            (runnable / "model.safetensors").write_bytes(b"")
+
+            incomplete = root_path / "partial-download"
+            incomplete.mkdir()
+            (incomplete / "config.json").write_text(
+                json.dumps(_minimal_qwen3_config()), encoding="utf-8"
+            )
+            (incomplete / "model-00001-of-00002.safetensors").write_bytes(b"")
+            (incomplete / "model.safetensors.index.json").write_text(
+                json.dumps({
+                    "weight_map": {
+                        "model.layers.0.weight": "model-00001-of-00002.safetensors",
+                        "model.layers.1.weight": "model-00002-of-00002.safetensors",
+                    }
+                }),
+                encoding="utf-8",
+            )
+
+            unsupported = root_path / "qwen38-dense"
+            unsupported.mkdir()
+            (unsupported / "config.json").write_text(
+                json.dumps(_minimal_qwen3_config("qwen3_5_text")), encoding="utf-8"
+            )
+            (unsupported / "model.safetensors").write_bytes(b"")
+
+            unsafe_index = root_path / "unsafe-index"
+            unsafe_index.mkdir()
+            (unsafe_index / "config.json").write_text(
+                json.dumps(_minimal_qwen3_config()), encoding="utf-8"
+            )
+            (unsafe_index / "model-00001-of-00001.safetensors").write_bytes(b"")
+            (unsafe_index / "model.safetensors.index.json").write_text(
+                json.dumps({
+                    "weight_map": {
+                        "model.layers.0.weight": "../model-00001-of-00001.safetensors",
+                    }
+                }),
+                encoding="utf-8",
+            )
+
+            invalid = root_path / "broken-config"
+            invalid.mkdir()
+            (invalid / "config.json").write_text("{not-json", encoding="utf-8")
+            (invalid / "model.safetensors").write_bytes(b"")
+
+            models = launcher_mod.scan_models(root, native_only=True)
+            by_name = {model["name"]: model for model in models}
+
+            self.assertEqual(set(by_name), {
+                "broken-config",
+                "local-qwen3-derivative",
+                "partial-download",
+                "qwen38-dense",
+                "unsafe-index",
+            })
+            self.assertTrue(by_name["local-qwen3-derivative"]["runnable"])
+            self.assertEqual(
+                by_name["local-qwen3-derivative"]["validation_status"],
+                "unvalidated",
+            )
+            self.assertFalse(by_name["partial-download"]["runnable"])
+            self.assertIn(
+                "missing model-00002-of-00002.safetensors",
+                by_name["partial-download"]["compatibility_error"],
+            )
+            self.assertFalse(by_name["qwen38-dense"]["runnable"])
+            self.assertIn(
+                "no native Rust/CUDA runtime contract",
+                by_name["qwen38-dense"]["compatibility_error"],
+            )
+            self.assertFalse(by_name["broken-config"]["runnable"])
+            self.assertIn(
+                "Model configuration is not runnable",
+                by_name["broken-config"]["compatibility_error"],
+            )
+            self.assertFalse(by_name["unsafe-index"]["runnable"])
+            self.assertIn(
+                "invalid shard mappings",
+                by_name["unsafe-index"]["compatibility_error"],
+            )
+
+    def test_uncatalogued_deepseek_v4_uses_native_sequence_state_metadata(self) -> None:
+        from tests.test_model_config import _deepseek_v4_config
+
+        with tempfile.TemporaryDirectory(prefix="krasis-local-dsv4-") as root:
+            model_dir = Path(root) / "DeepSeek-V4-local-derivative"
+            model_dir.mkdir()
+            (model_dir / "config.json").write_text(
+                json.dumps(_deepseek_v4_config()), encoding="utf-8"
+            )
+            (model_dir / "model.safetensors").write_bytes(b"")
+
+            info = launcher_mod._model_info_from_path(str(model_dir))
+            self.assertEqual(info["arch"], "deepseek_v4")
+            self.assertEqual(info["support_key"], "")
+            self.assertEqual(info["validation_status"], "unvalidated")
+            self.assertTrue(info["runnable"])
+            self.assertEqual(info["kv_dim"], 0)
+
+    def test_catalog_basename_does_not_inherit_validation_without_revision_provenance(self) -> None:
+        from krasis.hf_downloader import supported_model_spec
+
+        with tempfile.TemporaryDirectory(prefix="krasis-catalog-identity-") as root:
+            model_dir = Path(root) / "Qwen3-Coder-Next"
+            model_dir.mkdir()
+            (model_dir / "config.json").write_text(
+                json.dumps(_minimal_qwen3_config()), encoding="utf-8"
+            )
+            (model_dir / "model.safetensors").write_bytes(b"")
+
+            unproven = launcher_mod._model_info_from_path(str(model_dir))
+            self.assertEqual(unproven["support_key"], "qcn")
+            self.assertEqual(unproven["validation_status"], "unvalidated")
+            self.assertIn("does not prove the pinned revision", unproven["compatibility_basis"])
+
+            revision = supported_model_spec("qcn").revision
+            metadata_dir = model_dir / ".cache" / "huggingface" / "download"
+            metadata_dir.mkdir(parents=True)
+            for filename in ("config.json", "model.safetensors"):
+                (metadata_dir / f"{filename}.metadata").write_text(
+                    f"{revision}\nobject-id\n0\n", encoding="utf-8"
+                )
+
+            proven = launcher_mod._model_info_from_path(str(model_dir))
+            self.assertEqual(proven["support_key"], "qcn")
+            self.assertEqual(proven["validation_status"], "validated")
+            self.assertIn(revision, proven["compatibility_basis"])
+
+    def test_unvalidated_model_requires_explicit_attempt_confirmation(self) -> None:
+        model = {
+            "name": "local/DeepSeek-derivative",
+            "path": "/models/local/DeepSeek-derivative",
+            "arch": "deepseek_v4",
+            "layers": 43,
+            "experts": 256,
+            "shared_experts": 1,
+            "ram_gb": 136.0,
+            "validation_status": "unvalidated",
+            "runnable": True,
+            "compatibility_error": "",
+            "compatibility_basis": (
+                "Recognized deepseek_v4 runtime; this checkpoint has not passed "
+                "Krasis validation."
+            ),
+        }
+        keys = [
+            launcher_mod.KEY_DOWN,
+            launcher_mod.KEY_ENTER,
+            launcher_mod.KEY_DOWN,
+            launcher_mod.KEY_ENTER,
+        ]
+        with mock.patch.object(launcher_mod, "_read_key", side_effect=keys):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                selected = launcher_mod._model_selection_screen([model])
+        self.assertIs(selected, model)
+        rendered = launcher_mod._ANSI_RE.sub("", output.getvalue())
+        self.assertIn("[Unvalidated]", rendered)
+        self.assertIn("has not passed llama-witness", rendered)
+
+    def test_blocked_model_is_visible_but_cannot_reach_load(self) -> None:
+        model = {
+            "name": "future-model",
+            "path": "/models/future-model",
+            "arch": "future_arch",
+            "layers": 0,
+            "experts": 0,
+            "shared_experts": 0,
+            "ram_gb": 0.0,
+            "validation_status": "unvalidated",
+            "runnable": False,
+            "compatibility_error": "No native runtime for future_arch.",
+        }
+        keys = [
+            launcher_mod.KEY_DOWN,
+            launcher_mod.KEY_ENTER,
+            "acknowledge",
+            launcher_mod.KEY_ESCAPE,
+        ]
+        with mock.patch.object(launcher_mod, "_read_key", side_effect=keys):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                selected = launcher_mod._model_selection_screen([model])
+        self.assertIsNone(selected)
+        rendered = launcher_mod._ANSI_RE.sub("", output.getvalue())
+        self.assertIn("[Cannot run]", rendered)
+        self.assertIn("This checkpoint cannot be attempted", rendered)
+
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = LauncherConfig()
+        launcher.model_info = model
+        with self.assertRaisesRegex(ValueError, "future_arch"):
+            launcher._validate_model_capabilities()
+
     def test_layer_group_one_survives_saved_and_cli_launcher_paths(self) -> None:
         cfg = LauncherConfig()
         cfg.apply_saved({"CFG_LAYER_GROUP_SIZE": "1"})
@@ -215,6 +431,65 @@ class LauncherMatrixTest(unittest.TestCase):
                 vram_budget_mod._detect_windows_total_ram_gb(),
                 192,
             )
+
+    def test_launcher_budget_display_omits_redundant_footer(self) -> None:
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = _base_config()
+        launcher.cfg.attention_quant = "hqq4"
+        launcher.cfg.kv_dtype = "k4v4"
+        launcher.selected_gpus = [
+            {"index": 0, "name": "Test GPU", "vram_mb": 24_000},
+        ]
+        launcher.hw = {
+            "gpu_count": 1,
+            "gpu_model": "Test GPU",
+            "gpu_vram_mb": 24_000,
+            "total_ram_gb": 128,
+        }
+        launcher.model_info = None
+        launcher.budget_error = None
+        launcher.krasis_home = "/tmp/krasis-test-home"
+        launcher.models_dir = "/tmp/krasis-test-models"
+        launcher.budget = {
+            "worst_rank": 0,
+            "gpu_vram_mb": 24_000,
+            "total_ram_gb": 128,
+            "ram_gpu_experts_mb": 8_192,
+            "ram_hqq_host_staging_mb": 2_048,
+            "ram_total_mb": 10_240,
+            "peak_vram_mb": 12_000,
+            "peak_system_ram_mb": 10_240,
+            "hqq_budget_source": "estimated from model dimensions (hqq4, group_size=128)",
+            "ranks": [{
+                "expert_buffer_mb": 4_096,
+                "attention_mb": 2_048,
+                "free_mb": 12_000,
+                "free_after_kv_mb": 10_976,
+                "kv_alloc_tokens": 16_384,
+                "total_mb": 6_144,
+                "total_with_kv_mb": 7_168,
+            }],
+        }
+        launcher._compute_budget = lambda: launcher.budget
+
+        interactive = launcher_mod._ANSI_RE.sub(
+            "", launcher._render_config_screen(cursor=0)
+        )
+        summary_output = io.StringIO()
+        with contextlib.redirect_stdout(summary_output):
+            launcher.print_summary()
+        summary = launcher_mod._ANSI_RE.sub("", summary_output.getvalue())
+
+        self.assertIn("Attention:", interactive)
+        self.assertIn("Attention:", summary)
+        self.assertNotIn("Attention budget:", interactive)
+        self.assertNotIn("Attention budget:", summary)
+        self.assertNotIn("Estimated peak:", interactive)
+        self.assertNotIn("Estimated peak:", summary)
+        self.assertNotIn("tokens k4v4 KV", interactive)
+        self.assertNotIn("KV capacity:", summary)
+        self.assertIn("KV cache:", summary)
+        self.assertIn("16K tokens, k4v4", summary)
 
     def test_deepseek_v4_launcher_capabilities_are_model_specific(self) -> None:
         launcher = Launcher.__new__(Launcher)

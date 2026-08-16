@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- Made local checkpoint discovery explicit and fail-closed. The launcher now
+  keeps every config+safetensors directory visible, including invalid configs
+  and incomplete shard inventories, and labels each entry as a validated
+  checkpoint profile, unvalidated structurally recognized checkpoint, or
+  unable to run with the concrete reason. Selecting an unvalidated checkpoint
+  requires a second explicit `Attempt launch` confirmation; incompatible or
+  incomplete checkpoints cannot reach model load. Explicit `--model-path` and
+  non-interactive runs show the same unvalidated status and still enforce the
+  structural preflight. Catalog validation now additionally requires local
+  Hugging Face metadata for every weight file to name the pinned revision, so
+  a derivative renamed to an official directory basename cannot inherit a
+  validated badge; real pinned DeepSeek-V4 and QCN installs retain theirs. No
+  unknown architecture is routed through generic defaults. DeepSeek-V4
+  discovery also uses its architecture-owned nonlinear
+  sequence-state budget rather than trying to derive a conventional GQA KV
+  width. The built launcher matrix passes `49/49`, with downloader `18/18`
+  and planner `8/8` also passing.
+
+- Condensed the launcher budget display without changing its calculations. The
+  interactive panel no longer repeats its VRAM/System RAM totals as an
+  `Estimated peak` footer, repeats KV capacity below the configuration section,
+  or exposes internal attention-budget provenance. The final launch summary
+  likewise omits the redundant peak and provenance lines, and combines KV size
+  and capacity into one row included in its total. The built launcher matrix
+  passes `44/44`, with downloader `18/18` and planner `8/8` also passing.
+
 - Completed the exact-source `v1.0.21-rc.3` release gate. A detached
   `./dev build` produced the CPython 3.11 wheel with all FLA, Marlin, and
   FlashAttention sidecars and verified both import origins. The timing-disabled

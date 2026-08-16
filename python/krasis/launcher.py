@@ -483,6 +483,156 @@ def _find_nvidia_smi() -> Optional[str]:
 # Model scanning
 # ═══════════════════════════════════════════════════════════════════════
 
+# These are runtime architecture contracts, not checkpoint validation. A local
+# derivative with one of these model types may be structurally runnable while
+# still remaining explicitly unvalidated until it passes the normal witness and
+# launcher acceptance gates.
+_STRUCTURALLY_SUPPORTED_MODEL_TYPES = frozenset({
+    "deepseek_v2",
+    "deepseek_v3",
+    "deepseek_v4",
+    "gemma4_text",
+    "glm_moe_dsa",
+    "nemotron_h",
+    "qwen3",
+    "qwen3_moe",
+    "qwen3_5_moe_text",
+    "qwen3_next",
+    "step3p5",
+    "step3p7",
+})
+
+
+def _checkpoint_inventory_error(model_path: str) -> str:
+    """Return a concrete local checkpoint completeness error, if any."""
+    try:
+        filenames = set(os.listdir(model_path))
+    except OSError as exc:
+        return f"Could not read checkpoint directory: {exc}"
+
+    shards = sorted(name for name in filenames if name.endswith(".safetensors"))
+    if not shards:
+        return "No safetensors weights were found."
+
+    index_path = os.path.join(model_path, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        try:
+            with open(index_path, encoding="utf-8") as handle:
+                index = json.load(handle)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            return f"Could not parse model.safetensors.index.json: {exc}"
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            return "model.safetensors.index.json has no usable weight_map."
+        invalid_mappings = [
+            tensor_name for tensor_name, value in weight_map.items()
+            if not isinstance(value, str)
+            or not value.endswith(".safetensors")
+            or os.path.basename(value) != value
+        ]
+        if invalid_mappings:
+            preview = ", ".join(str(name) for name in invalid_mappings[:3])
+            suffix = (
+                "" if len(invalid_mappings) <= 3
+                else f" (+{len(invalid_mappings) - 3} more)"
+            )
+            return f"Checkpoint index has invalid shard mappings for {preview}{suffix}."
+        expected_shards = set(weight_map.values())
+        missing = sorted(expected_shards - filenames)
+        if missing:
+            preview = ", ".join(missing[:3])
+            suffix = "" if len(missing) <= 3 else f" (+{len(missing) - 3} more)"
+            return f"Checkpoint download is incomplete; missing {preview}{suffix}."
+        return ""
+
+    if "model.safetensors" in filenames:
+        return ""
+    return (
+        "Sharded safetensors were found without model.safetensors.index.json; "
+        "the checkpoint inventory cannot be validated."
+    )
+
+
+def _raw_model_type(model_path: str) -> str:
+    """Read only the displayed model type when full normalization fails."""
+    try:
+        with open(os.path.join(model_path, "config.json"), encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return "?"
+    cfg = raw.get("text_config", raw.get("language_config", raw))
+    if not isinstance(cfg, dict):
+        return "?"
+    return str(cfg.get("model_type") or raw.get("model_type") or "?")
+
+
+def _has_pinned_catalog_provenance(model_path: str, support_spec: Any) -> bool:
+    """Return whether HF metadata binds every model weight to the pinned revision."""
+    revision = str(getattr(support_spec, "revision", "") or "")
+    if not revision:
+        return False
+
+    required = {"config.json"}
+    index_path = os.path.join(model_path, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        try:
+            with open(index_path, encoding="utf-8") as handle:
+                weight_map = json.load(handle).get("weight_map", {})
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+        if not isinstance(weight_map, dict) or not weight_map:
+            return False
+        required.add("model.safetensors.index.json")
+        required.update(
+            value for value in weight_map.values() if isinstance(value, str)
+        )
+    elif os.path.isfile(os.path.join(model_path, "model.safetensors")):
+        required.add("model.safetensors")
+    else:
+        return False
+
+    metadata_dir = os.path.join(model_path, ".cache", "huggingface", "download")
+    for filename in required:
+        metadata_path = os.path.join(metadata_dir, f"{filename}.metadata")
+        try:
+            with open(metadata_path, encoding="utf-8") as handle:
+                file_revision = handle.readline().strip()
+        except OSError:
+            return False
+        if file_revision != revision:
+            return False
+    return True
+
+
+def _unavailable_model_info(model_path: str, name: str, error: Exception) -> Dict[str, Any]:
+    """Keep a discovered checkpoint visible when normalized parsing fails."""
+    from krasis.hf_downloader import supported_model_for_path
+
+    try:
+        support_spec = supported_model_for_path(model_path)
+    except ValueError:
+        support_spec = None
+    return {
+        "name": name,
+        "path": model_path,
+        "arch": _raw_model_type(model_path),
+        "layers": 0,
+        "experts": 0,
+        "shared_experts": 0,
+        "dense_layers": 0,
+        "moe_layers": 0,
+        "native_dtype": "unknown",
+        "ram_gb": 0.0,
+        "num_kv_layers": 0,
+        "kv_dim": 0,
+        "max_context": 0,
+        "support_key": support_spec.key if support_spec else "",
+        "validation_status": "unvalidated",
+        "runnable": False,
+        "compatibility_error": f"Model configuration is not runnable: {error}",
+        "compatibility_basis": "",
+    }
+
 def _model_info_from_path(model_path: str, name: Optional[str] = None) -> Dict[str, Any]:
     """Build launcher metadata through the same parser used by model loading."""
     from krasis.hf_downloader import supported_model_for_path
@@ -493,6 +643,11 @@ def _model_info_from_path(model_path: str, name: Optional[str] = None) -> Dict[s
     kv_dims = []
     for layer_idx in range(cfg.num_hidden_layers):
         if cfg.is_full_attention_layer(layer_idx):
+            if cfg.is_deepseek_v4:
+                # V4 owns a nonlinear raw/compressed/index sequence-state
+                # model. The launcher renders its capacity from the existing
+                # measured budget result below, not a fake GQA KV dimension.
+                continue
             if cfg.is_mla:
                 kv_dims.append(cfg.kv_lora_rank + cfg.qk_rope_head_dim)
             else:
@@ -501,6 +656,21 @@ def _model_info_from_path(model_path: str, name: Optional[str] = None) -> Dict[s
                     * cfg.gqa_num_kv_heads_for_layer(layer_idx)
                     * cfg.gqa_head_dim_for_layer(layer_idx)
                 )
+    inventory_error = _checkpoint_inventory_error(model_path)
+    architecture_supported = bool(
+        support_spec or cfg.model_type in _STRUCTURALLY_SUPPORTED_MODEL_TYPES
+    )
+    pinned_catalog_provenance = bool(
+        not inventory_error
+        and support_spec
+        and _has_pinned_catalog_provenance(model_path, support_spec)
+    )
+    compatibility_error = inventory_error
+    if not compatibility_error and not architecture_supported:
+        compatibility_error = (
+            f"Krasis has no native Rust/CUDA runtime contract for architecture "
+            f"{(cfg.model_type or '?')!r}."
+        )
     return {
         "name": name or os.path.basename(model_path),
         "path": model_path,
@@ -520,6 +690,19 @@ def _model_info_from_path(model_path: str, name: Optional[str] = None) -> Dict[s
             else cfg.max_position_embeddings
         ),
         "support_key": support_spec.key if support_spec else "",
+        "validation_status": "validated" if pinned_catalog_provenance else "unvalidated",
+        "runnable": not compatibility_error,
+        "compatibility_error": compatibility_error,
+        "compatibility_basis": (
+            f"Pinned Krasis checkpoint revision {support_spec.revision}."
+            if pinned_catalog_provenance
+            else (
+                f"Directory name matches the {support_spec.display_name} profile, but "
+                "local Hugging Face metadata does not prove the pinned revision."
+                if support_spec
+                else f"Recognized {cfg.model_type} runtime; this checkpoint has not passed Krasis validation."
+            )
+        ),
     }
 
 def scan_models(search_dir: str, native_only: bool = False) -> List[Dict[str, Any]]:
@@ -554,8 +737,11 @@ def scan_models(search_dir: str, native_only: bool = False) -> List[Dict[str, An
 
         try:
             models.append(_model_info_from_path(model_dir, name))
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-            continue
+        except Exception as exc:
+            # Discovery is deliberately exhaustive. A bad or unsupported local
+            # checkpoint remains visible with the exact parse error, but cannot
+            # proceed to model load.
+            models.append(_unavailable_model_info(model_dir, name, exc))
 
     # Sort by name for consistent display
     models.sort(key=lambda m: m["name"].lower())
@@ -1371,8 +1557,20 @@ def _model_selection_screen(
                 if m["ram_gb"] > 0 else ""
             )
 
-            lines.append(f"{prefix}{hl}{m['name']}{NC}")
-            lines.append(f"       {DIM}{m['arch']} | {m['layers']} layers | {expert_str}{ram_str}{NC}")
+            if not m.get("runnable", True):
+                status = f"{RED}Cannot run{NC}"
+            elif m.get("validation_status") == "validated":
+                status = f"{GREEN}Validated{NC}"
+            else:
+                status = f"{YELLOW}Unvalidated{NC}"
+
+            lines.append(f"{prefix}{hl}{m['name']}{NC}  [{status}]")
+            if m.get("layers", 0):
+                lines.append(f"       {DIM}{m['arch']} | {m['layers']} layers | {expert_str}{ram_str}{NC}")
+            else:
+                lines.append(f"       {DIM}{m['arch']}{NC}")
+            if m.get("compatibility_error"):
+                lines.append(f"       {RED}{m['compatibility_error']}{NC}")
 
         lines.append(f"\n  {DIM}[\u2191\u2193] Select  [Enter] Confirm  [Esc] Quit{NC}")
 
@@ -1385,9 +1583,63 @@ def _model_selection_screen(
         elif key == KEY_DOWN:
             cursor = (cursor + 1) % len(rows)
         elif key == KEY_ENTER:
-            return rows[cursor]
+            selected = rows[cursor]
+            if selected.get("action") == "download":
+                return selected
+            if not selected.get("runnable", True):
+                _clear_screen()
+                sys.stdout.write(
+                    f"\n  {RED}This checkpoint cannot be attempted.{NC}\n\n"
+                    f"  {selected.get('compatibility_error', 'No compatible runtime was detected.')}\n\n"
+                    f"  {DIM}[Any key] Back{NC}\n"
+                )
+                sys.stdout.flush()
+                _read_key()
+                continue
+            if (
+                selected.get("validation_status") != "validated"
+                and not _confirm_unvalidated_model(selected)
+            ):
+                continue
+            return selected
         elif key == KEY_QUIT or key == KEY_ESCAPE:
             return None
+
+
+def _confirm_unvalidated_model(model: Dict[str, Any]) -> bool:
+    """Require an explicit opt-in before attempting an unvalidated checkpoint."""
+    cursor = 0
+    options = ["Back", "Attempt launch"]
+    while True:
+        _clear_screen()
+        lines = [
+            f"  {BOLD}Unvalidated checkpoint{NC}",
+            "",
+            f"  {model.get('name', 'Selected model')}",
+            f"  {DIM}{model.get('compatibility_basis', '')}{NC}",
+            "",
+            "  Krasis recognizes the runtime structure, but this exact checkpoint",
+            "  has not passed llama-witness, quality, calibration, or launcher gates.",
+            "  A failed or incorrect run will not be silently replaced by defaults.",
+            "",
+        ]
+        for index, option in enumerate(options):
+            prefix = f"  {CYAN}\u25b8{NC} " if index == cursor else "    "
+            style = BOLD if index == cursor else ""
+            lines.append(f"{prefix}{style}{option}{NC}")
+        lines.append(f"\n  {DIM}[\u2191\u2193] Select  [Enter] Confirm  [Esc] Back{NC}")
+        sys.stdout.write("\n".join(lines) + "\n")
+        sys.stdout.flush()
+
+        key = _read_key()
+        if key == KEY_UP:
+            cursor = (cursor - 1) % len(options)
+        elif key == KEY_DOWN:
+            cursor = (cursor + 1) % len(options)
+        elif key == KEY_ENTER:
+            return options[cursor] == "Attempt launch"
+        elif key in (KEY_QUIT, KEY_ESCAPE):
+            return False
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1823,6 +2075,13 @@ class Launcher:
                 self.cfg.kv_dtype = "k6v6"
 
     def _validate_model_capabilities(self) -> None:
+        if self.model_info and not self.model_info.get("runnable", True):
+            raise ValueError(
+                self.model_info.get(
+                    "compatibility_error",
+                    "The selected checkpoint has no compatible Krasis runtime.",
+                )
+            )
         attention_choices = self._attention_choices()
         kv_choices = self._kv_choices()
         topology_choices = self._multi_gpu_choices()
@@ -1976,6 +2235,12 @@ class Launcher:
             mi = self.model_info
             expert_str = f"{mi['experts']} experts" if mi["experts"] else "dense"
             lines.append(f"  Model: {BOLD}{model_name}{NC} ({mi['arch']}, {mi['layers']} layers, {expert_str})")
+            if mi.get("validation_status") == "validated":
+                lines.append(f"  Status: {GREEN}Validated checkpoint profile{NC}")
+            else:
+                lines.append(
+                    f"  Status: {YELLOW}Unvalidated checkpoint — explicit attempt{NC}"
+                )
         else:
             lines.append(f"  Model: {BOLD}{model_name}{NC}")
 
@@ -2096,8 +2361,6 @@ class Launcher:
                 else "fp8" if self.cfg.kv_dtype == "fp8_e4m3"
                 else "bf16"
             )
-            kv_alloc_tokens = _allocated_kv_tokens(rank)
-
             total_used = experts_mb + attention_mb + overhead_mb + kv_alloc
 
             # HCS coverage: VRAM available for expert caching vs total expert cache
@@ -2118,9 +2381,6 @@ class Launcher:
             ram_hqq_gb = b.get('ram_hqq_host_staging_mb', 0) / 1024
             ram_tot_gb = b.get('ram_total_mb', 0) / 1024
             sys_ram_gb = b['total_ram_gb']
-            peak_vram_mb = int(b.get("peak_vram_mb", rank.get("total_with_kv_mb", total_used)))
-            peak_ram_gb = b.get("peak_system_ram_mb", b.get("ram_total_mb", 0)) / 1024
-
             COL_W = 36  # visible width per column
 
             def _pad_col(text, width=COL_W):
@@ -2152,16 +2412,9 @@ class Launcher:
             for l_line, r_line in zip(left, right):
                 lines.append(f"  {_pad_col(l_line)}  {r_line}")
 
-            # Token estimate + over-budget warning below tables
-            lines.append(
-                f"    Estimated peak: VRAM {CYAN}{peak_vram_mb:,} MB{NC} / {int(gpu_vram):,} MB, "
-                f"System RAM {GREEN}{peak_ram_gb:.1f} GB{NC} / {sys_ram_gb:.0f} GB"
-            )
-            hqq_source = b.get("hqq_budget_source")
-            if isinstance(hqq_source, str) and hqq_source.startswith(("derived ", "legacy ", "estimated ")):
-                source_label = hqq_source if hqq_source.startswith("estimated ") else hqq_source.split(" from ", 1)[0]
-                lines.append(f"    {DIM}Attention budget: {source_label}{NC}")
-            lines.append(f"    {DIM}~{_format_tokens(kv_alloc_tokens)} tokens {kv_label} KV{NC}")
+            # Keep only actionable warnings below the tables. Peak usage is
+            # already represented by their totals, and KV capacity is shown in
+            # the configuration section above.
             free_after_kv = rank.get("free_after_kv_mb", rank["free_mb"])
             if free_after_kv < 0:
                 over = int(-free_after_kv)
@@ -2701,6 +2954,17 @@ class Launcher:
         if self.cfg.model_path and os.path.isdir(self.cfg.model_path):
             self._read_model_info()
             print(f"Model: {self.cfg.model_path} (from --model-path)")
+            if not (self.model_info or {}).get("runnable", True):
+                print(
+                    f"{RED}Error:{NC} "
+                    f"{(self.model_info or {}).get('compatibility_error', 'checkpoint is not runnable')}"
+                )
+                return False
+            if (self.model_info or {}).get("validation_status") != "validated":
+                print(
+                    f"{YELLOW}Warning:{NC} this exact checkpoint is unvalidated; "
+                    "--model-path is treated as an explicit request to attempt it."
+                )
         else:
             _hide_cursor()
             try:
@@ -2878,6 +3142,11 @@ class Launcher:
         print(f"  Krasis home:     {self.krasis_home}")
         print(f"  Models dir:      {self.models_dir}")
         print(f"  Model:           {model_name}")
+        if self.model_info:
+            if self.model_info.get("validation_status") == "validated":
+                print("  Model status:    Validated checkpoint profile")
+            else:
+                print("  Model status:    UNVALIDATED — explicit local checkpoint attempt")
         print(f"  PP partition:    {self.cfg.pp_partition}")
         layer_word = "layer" if self.cfg.layer_group_size == 1 else "layers"
         print(
@@ -2960,31 +3229,25 @@ class Launcher:
             )
             print(f"  Attention:   {attention_mb:>8,} MB  ({attn_label})")
             print(f"  Overhead:    {overhead_mb:>8,} MB")
-            print(f"  Total: {rank['total_mb']:>8,.0f} / {gpu_vram:,} MB (rank {wr})")
+            total_with_kv_mb = rank.get("total_with_kv_mb", rank["total_mb"])
+            kv_alloc_mb = max(0, total_with_kv_mb - rank["total_mb"])
+            kv_tokens = _allocated_kv_tokens(rank)
+            kv_detail = (
+                f"(~{_format_tokens(kv_tokens)} tokens, {kv_label})"
+                if kv_tokens > 0
+                else f"({kv_label})"
+            )
+            print(f"  KV cache:    {kv_alloc_mb:>8,.0f} MB  {kv_detail}")
+            print(f"  Total: {total_with_kv_mb:>8,.0f} / {gpu_vram:,} MB (rank {wr})")
             permanent_mb = attention_mb + overhead_mb + min(self.cfg.kv_cache_mb, max(0, rank["free_mb"]))
             free_for_hcs = max(0, int(gpu_vram - permanent_mb))
             total_expert_cache = budget.get("ram_gpu_experts_mb", 0)
             hcs_pct = (free_for_hcs / total_expert_cache * 100) if total_expert_cache > 0 else 0
             print(f"  HCS:   {free_for_hcs:>8,} MB  (~{hcs_pct:.0f}% coverage)")
-            if rank["free_mb"] > 0:
-                print(
-                    "  KV capacity: "
-                    f"~{_format_tokens(_allocated_kv_tokens(rank))} "
-                    f"tokens ({kv_label})"
-                )
-            else:
+            if rank["free_mb"] <= 0:
                 print(f"  {RED}WARNING: OVER BUDGET by {-rank['free_mb']:,.0f} MB{NC}")
             ram_gb = budget.get('ram_total_mb', 0) / 1024
             print(f"  Expert cache: {ram_gb:.1f} GB / {budget['total_ram_gb']} GB RAM")
-            peak_vram_mb = int(budget.get("peak_vram_mb", rank.get("total_with_kv_mb", rank["total_mb"])))
-            peak_ram_gb = budget.get("peak_system_ram_mb", budget.get("ram_total_mb", 0)) / 1024
-            print(
-                f"  Estimated peak: {peak_vram_mb:,} MB VRAM / {peak_ram_gb:.1f} GB system RAM"
-            )
-            hqq_source = budget.get("hqq_budget_source")
-            if isinstance(hqq_source, str) and hqq_source.startswith(("derived ", "legacy ", "estimated ")):
-                source_label = hqq_source if hqq_source.startswith("estimated ") else hqq_source.split(" from ", 1)[0]
-                print(f"  Attention budget: {source_label}")
         elif self.budget_error:
             print(f"\n  Budget unavailable: {self.budget_error.splitlines()[0]}")
         print()
