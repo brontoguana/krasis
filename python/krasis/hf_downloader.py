@@ -152,7 +152,7 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         default_attention="hqq4",
         default_kv="k4v4",
         runtime_profiles=HQQ4_HQQ6_PROFILES,
-        multi_gpu_modes=("auto", "peer"),
+        multi_gpu_modes=("auto", "layer-split", "peer"),
         multi_gpu_qualified=True,
     ),
     SupportedHFModel(
@@ -189,6 +189,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
             ("hqq8", "bf16"),
             ("bf16", "bf16"),
         ),
+        multi_gpu_modes=("auto", "peer"),
+        multi_gpu_qualified=True,
     ),
     SupportedHFModel(
         key="nemotron-nano",
@@ -279,7 +281,7 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
             ("hqq6", "k6v6"),
             ("hqq4", "k4v4"),
         ),
-        multi_gpu_modes=("auto", "peer"),
+        multi_gpu_modes=("auto", "layer-split", "peer"),
         multi_gpu_qualified=True,
     ),
     SupportedHFModel(

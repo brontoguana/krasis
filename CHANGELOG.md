@@ -2,6 +2,79 @@
 
 ## Unreleased
 
+- Improved DeepSeek-V4-Flash-0731 full-GPU prefill on the RTX A6000 without
+  changing its INT4/HQQ6/Native production profile. The runtime now prescans
+  every real chunk, balances the architecture's runtime-derived multi-chunk
+  plan, uses the complete logical prompt for measured HCS protection, retains
+  the measured startup memory high-water beyond calibration, and batches
+  learned-index heads in existing workspace. An independent timing-disabled
+  standard repeat improved 35K and 39,920-token prefill from
+  `919.0/983.7` to `1,099.8/1,162.1 tok/s` (`+19.7%/+18.1%`); 1K/5K/10K/20K
+  measured `118.6/535.9/1,016.7/1,225.1 tok/s`. Internal decode remained
+  `13.45/13.50/12.97 tok/s`, HCS remained 2,775/11,008, and decode minimum
+  free VRAM was 1,042 MiB against the unchanged 600 MiB margin. The focused
+  native gate passed 28/28, the established llama-witness had no FAIL, and the
+  normal-launch large network suite passed 18/18 through 62,403 prompt tokens.
+  Other architecture chunk policies and non-causal learned-index diagnostic
+  modes retain their prior behavior.
+
+- Generalized multi-GPU peer expert serving from one auxiliary GPU to any
+  selected peer count. Automatic mode now measures each device and the
+  simultaneous fan-out path, assigns disjoint expert residency, and compares
+  the complete predicted critical path with every compatible alternative.
+  The former fixed peer-latency gate is removed; measured transfer latency,
+  expert service, capacity, route demand, contention, and uncertainty decide
+  admission. Incompatible execution graphs remain fail-closed. QCN,
+  Qwen3.5-122B, DeepSeek-V4-Flash-0731, and GLM paths passed their focused
+  topology gates. Qwen3.5-122B passed its expanded `14/14` witness after
+  automatic mode measured and selected a two-layer/46-layer split instead of
+  peer serving. QCN and Qwen3.5-122B now expose that proven layer-split path as
+  an explicit diagnostic/A-B choice as well as through `auto`. GLM proved the
+  inverse choice: simultaneous peer fan-out was
+  `35.298 us` p95—above the removed historical gate—yet the complete measured
+  peer path was `152.498 ms/token` versus `327.562 ms/token` layer split. Auto
+  selected peer and passed the exact eight-token witness with zero peer/HCS
+  failures. Final focused gates passed native N-peer `4/4` and launcher,
+  heatmap, and planner `49/49 + 18/18 + 19/19`.
+
+- Fixed GLM sparse-prefill correctness across different request chunk lengths
+  and enabled the validated optimized native path by default only for the
+  registered native-DSA capability. Explicit environment overrides retain the
+  scalar, grouped-exact, score-reuse, and gathered timing/correctness controls;
+  no failed fast-path implementation was removed. The authoritative GLM
+  witness passes, including reference/native first token `2132` and `8/8`
+  decode containment. A timing-disabled RTX PRO 6000 benchmark improved the
+  3,196-token result from the prior approximately `45 tok/s` baseline to
+  `149.8 tok/s`, while decode remained `5.03/5.10/4.95 tok/s` and minimum free
+  VRAM was `1,137 MiB` against the unchanged `600 MiB` margin. Restored the DSA
+  selection planner's fail-closed rejection when chunk rows exceed the causal
+  context end; a prior score-buffer extension had accidentally replaced that
+  validation while leaving its regression test intact. Controlled CUDA tests
+  cover row-count invariance and exact full-geometry comparisons. Reference
+  validation now preserves the same opaque GPU selectors accepted by the
+  launcher, including stable UUIDs and PCI bus IDs, while still rejecting
+  duplicate selections.
+
+- Added a test-only UUID-bound RTX A6000 profile for the production
+  DeepSeek-V4-Flash-0731 INT4/HQQ6/Native configuration and archived its
+  timing-disabled standard benchmark. The run measured peak prefill
+  `1,162.0 tok/s`, internal decode `13.36/14.26/13.51 tok/s`, HTTP
+  `24.37/18.64/14.67 tok/s`, `2,775/11,008` resident experts, and a
+  `1,042 MiB` decode floor against the unchanged `600 MiB` margin. Runtime
+  calibration reached 39,920 tokens; final HCS counters had zero budget skips,
+  no-slot events, or copy failures, and no CUDA/OOM or below-margin event was
+  recorded.
+
+- Enabled split hot/cold expert launch by default for the native DSA runtime
+  contract used by GLM-5.2. The policy is selected from registered runtime
+  architecture capabilities rather than a checkpoint name, GPU identity, or
+  fixed geometry; all non-DSA model families remain default-off. An explicit
+  `KRASIS_SPLIT_EXPERT_LAUNCH=0` retains the timing/correctness control path,
+  while `=1` remains available for deliberate experiments on other compatible
+  architectures. The full built DSA Rust/CUDA group passed `33/33` on an RTX
+  A6000, including exact split classification, GLM-sized DSA allocation/top-k,
+  HQQ, routing, and Marlin kernels.
+
 - Made local checkpoint discovery explicit and fail-closed. The launcher now
   keeps every config+safetensors directory visible, including invalid configs
   and incomplete shard inventories, and labels each entry as a validated

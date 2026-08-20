@@ -2043,10 +2043,9 @@ class Launcher:
         if spec is not None:
             return list(spec.multi_gpu_modes)
         if self._is_deepseek_v4():
-            # `auto` remains meaningful for one selected GPU. No DeepSeek
-            # multi-GPU topology is launcher-qualified yet: serial layer split
-            # lacks the custom auxiliary attention graph, while peer expert
-            # serving still needs its own live DeepSeek acceptance run.
+            # `auto` remains meaningful for one selected GPU. An uncatalogued
+            # DeepSeek checkpoint cannot inherit the pinned official model's
+            # measured peer-topology evidence merely from its architecture.
             return ["auto"]
         return ["auto", "layer-split", "peer"]
 
@@ -2146,10 +2145,9 @@ class Launcher:
         if not self._is_deepseek_v4():
             return
         raise ValueError(
-            "DeepSeek-V4 multi-GPU execution is not yet launcher-qualified. Serial "
-            "layer-split lacks its custom auxiliary attention graph, and peer expert "
-            "serving still requires a dedicated live DeepSeek acceptance run. Select "
-            "one GPU."
+            "DeepSeek-V4 multi-GPU execution is not yet launcher-qualified for "
+            "this uncatalogued checkpoint; peer expert serving requires "
+            "provenance-bound acceptance evidence; select one GPU."
         )
 
     def _ensure_interactive_attention_ready(self) -> bool:

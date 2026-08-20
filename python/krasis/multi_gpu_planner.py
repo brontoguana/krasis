@@ -62,6 +62,22 @@ class PeerPlan:
     predicted_primary_only_seconds_per_token: float
 
 
+@dataclass(frozen=True)
+class MultiPeerPlan:
+    """Prediction for one primary plus any number of expert-serving peers."""
+
+    peer_residents_by_peer: tuple[tuple[tuple[int, int], ...], ...]
+    primary_residents: tuple[tuple[int, int], ...]
+    captured_routes_per_token_by_peer: tuple[float, ...]
+    captured_routes_per_token: float
+    cold_routes_before_per_token: float
+    cold_routes_after_per_token: float
+    captured_cold_fraction: float
+    fanout_rtt_p95_us: float
+    predicted_seconds_per_token: float
+    predicted_primary_only_seconds_per_token: float
+
+
 def peer_plan_is_admissible(
     *,
     peer_plan: PeerPlan,
@@ -76,6 +92,35 @@ def peer_plan_is_admissible(
         and any(admitted_route_counts)
         and peer_plan.predicted_seconds_per_token + uncertainty_seconds
         < layer_split_seconds_per_token
+    )
+
+
+def multi_peer_plan_is_admissible(
+    *,
+    peer_plan: MultiPeerPlan,
+    alternative_seconds_per_token: float,
+    uncertainty_seconds: float,
+    admitted_route_counts_by_peer: Sequence[Sequence[bool]],
+) -> bool:
+    """Return whether a measured N-peer plan beats the serial alternative."""
+    if len(admitted_route_counts_by_peer) != len(
+        peer_plan.peer_residents_by_peer
+    ):
+        raise ValueError("peer plan/admission cardinality mismatch")
+    every_selected_peer_has_a_measured_tier = all(
+        residents and captured > 0.0 and any(admitted_counts)
+        for residents, captured, admitted_counts in zip(
+            peer_plan.peer_residents_by_peer,
+            peer_plan.captured_routes_per_token_by_peer,
+            admitted_route_counts_by_peer,
+        )
+    )
+    return bool(
+        any(peer_plan.peer_residents_by_peer)
+        and peer_plan.captured_routes_per_token > 0.0
+        and every_selected_peer_has_a_measured_tier
+        and peer_plan.predicted_seconds_per_token + uncertainty_seconds
+        < alternative_seconds_per_token
     )
 
 
@@ -378,6 +423,39 @@ def _service_curve_us(expected_routes: float, curve_us: Sequence[float]) -> floa
     )
 
 
+def _effective_admitted_routes(
+    expected_routes: float,
+    admitted_route_counts: Sequence[bool],
+) -> float:
+    """Apply the runtime's measured route-count truncation to expected mass.
+
+    Rust truncates a peer candidate batch until its exact integer route count
+    is admitted. The heatmap stores aggregate route mass rather than batch
+    co-occurrence, so interpolate that same integer mapping at the expected
+    per-layer route count instead of pretending every resident hit is served.
+    """
+    if expected_routes <= 0.0:
+        return 0.0
+    if not admitted_route_counts:
+        return 0.0
+
+    def admitted_for_integer(route_count: int) -> int:
+        candidate = min(route_count, len(admitted_route_counts))
+        while candidate > 0 and not admitted_route_counts[candidate - 1]:
+            candidate -= 1
+        return candidate
+
+    capped = min(expected_routes, float(len(admitted_route_counts)))
+    lower = math.floor(capped)
+    upper = math.ceil(capped)
+    lower_admitted = admitted_for_integer(lower)
+    upper_admitted = admitted_for_integer(upper)
+    if lower == upper:
+        return float(lower_admitted)
+    fraction = capped - lower
+    return lower_admitted * (1.0 - fraction) + upper_admitted * fraction
+
+
 def predict_peer_expert_plan(
     *,
     heatmap_counts: dict[str, int],
@@ -402,16 +480,107 @@ def predict_peer_expert_plan(
     service measurements deliberately make this a conservative admission
     model; no advertised device specification participates.
     """
+    multi = predict_multi_peer_expert_plan(
+        heatmap_counts=heatmap_counts,
+        total_decode_tokens=total_decode_tokens,
+        ranking=ranking,
+        primary_capacity_experts=primary_capacity_experts,
+        peer_capacity_experts=[peer_capacity_experts],
+        layer_resident_bytes=layer_resident_bytes,
+        layer_is_moe=layer_is_moe,
+        primary_profile=primary_profile,
+        expert_bytes=expert_bytes,
+        service_p95_us_by_routes_by_peer=[service_p95_us_by_routes],
+        rtt_p95_us_by_peer=[rtt_p95_us],
+        fanout_rtt_p95_us=rtt_p95_us,
+        terminal_bytes=terminal_bytes,
+        local_cold_seconds_per_expert=local_cold_seconds_per_expert,
+    )
+    return PeerPlan(
+        peer_residents=multi.peer_residents_by_peer[0],
+        primary_residents=multi.primary_residents,
+        captured_routes_per_token=multi.captured_routes_per_token,
+        cold_routes_before_per_token=multi.cold_routes_before_per_token,
+        cold_routes_after_per_token=multi.cold_routes_after_per_token,
+        captured_cold_fraction=multi.captured_cold_fraction,
+        predicted_seconds_per_token=multi.predicted_seconds_per_token,
+        predicted_primary_only_seconds_per_token=(
+            multi.predicted_primary_only_seconds_per_token
+        ),
+    )
+
+
+def predict_multi_peer_expert_plan(
+    *,
+    heatmap_counts: dict[str, int],
+    total_decode_tokens: int,
+    ranking: Sequence[tuple[int, int]],
+    primary_capacity_experts: int,
+    peer_capacity_experts: Sequence[int],
+    layer_resident_bytes: Sequence[int],
+    layer_is_moe: Sequence[bool],
+    primary_profile: DeviceServiceProfile,
+    expert_bytes: int,
+    service_p95_us_by_routes_by_peer: Sequence[Sequence[float]],
+    rtt_p95_us_by_peer: Sequence[float],
+    terminal_bytes: int,
+    fanout_rtt_p95_us: float | None = None,
+    local_cold_seconds_per_expert: float | None = None,
+    admitted_route_counts_by_peer: Sequence[Sequence[bool]] | None = None,
+) -> MultiPeerPlan:
+    """Predict a measured primary-plus-N-peer expert topology.
+
+    Residents are disjoint. Heat-ranked experts after the primary tier are
+    assigned greedily to the peer that adds the least per-layer concurrent
+    service time, subject to each peer's measured capacity. This avoids a
+    singular "secondary" assumption and balances route mass using the exact
+    service curve measured on each selected device.
+    """
+    peer_capacities = tuple(int(value) for value in peer_capacity_experts)
+    service_curves = tuple(
+        tuple(float(value) for value in curve)
+        for curve in service_p95_us_by_routes_by_peer
+    )
+    peer_rtts = tuple(float(value) for value in rtt_p95_us_by_peer)
+    peer_count = len(peer_capacities)
+    if peer_count == 0:
+        raise ValueError("multi-peer planning requires at least one peer")
+    if len(service_curves) != peer_count or len(peer_rtts) != peer_count:
+        raise ValueError("peer capacity/service/RTT cardinality mismatch")
+    if admitted_route_counts_by_peer is None:
+        admitted_masks = tuple(
+            tuple(True for _ in service_curve) for service_curve in service_curves
+        )
+    else:
+        admitted_masks = tuple(
+            tuple(bool(value) for value in mask)
+            for mask in admitted_route_counts_by_peer
+        )
+        if len(admitted_masks) != peer_count:
+            raise ValueError("peer admission-mask cardinality mismatch")
+        if any(
+            len(mask) != len(service_curve)
+            for mask, service_curve in zip(admitted_masks, service_curves)
+        ):
+            raise ValueError("peer admission-mask/service-curve cardinality mismatch")
     if total_decode_tokens <= 0:
         raise ValueError("heatmap total_decode_tokens must be positive")
     if len(layer_resident_bytes) != len(layer_is_moe):
         raise ValueError("layer byte and MoE masks differ in length")
-    if primary_capacity_experts < 0 or peer_capacity_experts < 0:
+    if primary_capacity_experts < 0 or any(value < 0 for value in peer_capacities):
         raise ValueError("expert capacities must be non-negative")
     if expert_bytes <= 0 or terminal_bytes < 0:
         raise ValueError("expert and terminal byte geometry is invalid")
-    if not math.isfinite(rtt_p95_us) or rtt_p95_us <= 0.0:
-        raise ValueError("peer RTT must be finite and positive")
+    if any(not math.isfinite(value) or value <= 0.0 for value in peer_rtts):
+        raise ValueError("peer RTTs must be finite and positive")
+    if fanout_rtt_p95_us is None:
+        fanout_rtt_p95_us = max(peer_rtts)
+    fanout_rtt_p95_us = float(fanout_rtt_p95_us)
+    if not math.isfinite(fanout_rtt_p95_us) or fanout_rtt_p95_us <= 0.0:
+        raise ValueError("peer fanout RTT must be finite and positive")
+    for curve in service_curves:
+        if not curve or any(not math.isfinite(value) or value <= 0.0 for value in curve):
+            raise ValueError("each peer service curve must contain finite positive measurements")
     if local_cold_seconds_per_expert is None:
         local_cold_seconds_per_expert = (
             expert_bytes * primary_profile.h2d_seconds_per_byte
@@ -422,17 +591,8 @@ def predict_peer_expert_plan(
     ):
         raise ValueError("local cold-expert service time must be finite and positive")
 
-    ordered = tuple(dict.fromkeys((int(layer), int(expert)) for layer, expert in ranking))
-    primary_residents = ordered[:primary_capacity_experts]
-    primary_set = set(primary_residents)
-    peer_residents = tuple(
-        pair for pair in ordered if pair not in primary_set
-    )[:peer_capacity_experts]
-    peer_set = set(peer_residents)
-
+    route_mass: dict[tuple[int, int], float] = {}
     layer_total = [0.0] * len(layer_resident_bytes)
-    layer_primary = [0.0] * len(layer_resident_bytes)
-    layer_peer = [0.0] * len(layer_resident_bytes)
     for key, raw_count in heatmap_counts.items():
         if key == "_metadata":
             continue
@@ -446,26 +606,132 @@ def predict_peer_expert_plan(
         if layer < 0 or layer >= len(layer_resident_bytes) or count < 0:
             raise ValueError(f"heatmap entry outside loaded geometry: {key!r}={count}")
         per_token = count / total_decode_tokens
+        route_mass[pair] = per_token
         layer_total[layer] += per_token
+
+    ordered = tuple(dict.fromkeys((int(layer), int(expert)) for layer, expert in ranking))
+    primary_residents = ordered[:primary_capacity_experts]
+    primary_set = set(primary_residents)
+    peer_resident_lists: list[list[tuple[int, int]]] = [[] for _ in range(peer_count)]
+    peer_layer_routes = [
+        [0.0] * len(layer_resident_bytes) for _ in range(peer_count)
+    ]
+    for pair in ordered:
+        if pair in primary_set:
+            continue
+        available = [
+            peer_index
+            for peer_index, capacity in enumerate(peer_capacities)
+            if len(peer_resident_lists[peer_index]) < capacity
+        ]
+        if not available:
+            break
+        layer = pair[0]
+        mass = route_mass.get(pair, 0.0)
+
+        def assignment_key(peer_index: int) -> tuple[float, float, float, int]:
+            projected_owned = peer_layer_routes[peer_index][layer] + mass
+            projected = _effective_admitted_routes(
+                projected_owned,
+                admitted_masks[peer_index],
+            )
+            active_peers = [
+                other
+                for other in range(peer_count)
+                if (other == peer_index and projected > 0.0)
+                or (
+                    other != peer_index
+                    and _effective_admitted_routes(
+                        peer_layer_routes[other][layer],
+                        admitted_masks[other],
+                    )
+                    > 0.0
+                )
+            ]
+            service_only = [
+                _service_curve_us(
+                    projected
+                    if other == peer_index
+                    else _effective_admitted_routes(
+                        peer_layer_routes[other][layer],
+                        admitted_masks[other],
+                    ),
+                    service_curves[other],
+                )
+                for other in active_peers
+            ]
+            individual_paths = [
+                peer_rtts[other] + service
+                for other, service in zip(active_peers, service_only)
+            ]
+            projected_service = (
+                peer_rtts[peer_index]
+                + _service_curve_us(projected, service_curves[peer_index])
+                if projected > 0.0
+                else 0.0
+            )
+            projected_critical = (
+                max(
+                    max(individual_paths),
+                    fanout_rtt_p95_us + max(service_only),
+                )
+                if service_only
+                else 0.0
+            )
+            fill = len(peer_resident_lists[peer_index]) / max(
+                1, peer_capacities[peer_index]
+            )
+            return projected_critical, projected_service, fill, peer_index
+
+        selected_peer = min(available, key=assignment_key)
+        peer_resident_lists[selected_peer].append(pair)
+        peer_layer_routes[selected_peer][layer] += mass
+
+    peer_residents_by_peer = tuple(
+        tuple(residents) for residents in peer_resident_lists
+    )
+    peer_sets = tuple(set(residents) for residents in peer_residents_by_peer)
+
+    layer_primary = [0.0] * len(layer_resident_bytes)
+    layer_peer = [[0.0] * len(layer_resident_bytes) for _ in range(peer_count)]
+    for pair, per_token in route_mass.items():
+        layer = pair[0]
         if pair in primary_set:
             layer_primary[layer] += per_token
-        elif pair in peer_set:
-            layer_peer[layer] += per_token
+            continue
+        for peer_index, peer_set in enumerate(peer_sets):
+            if pair in peer_set:
+                layer_peer[peer_index][layer] += per_token
+                break
 
     predicted_peer = 0.0
     predicted_primary = 0.0
     cold_before = 0.0
     cold_after = 0.0
     captured = 0.0
+    captured_by_peer = [0.0] * peer_count
     for layer, resident_bytes in enumerate(layer_resident_bytes):
         routes = layer_total[layer]
         primary_hot = min(routes, layer_primary[layer])
-        peer_routes = min(max(0.0, routes - primary_hot), layer_peer[layer])
         before = max(0.0, routes - primary_hot)
-        after = max(0.0, before - peer_routes)
+        peer_routes = []
+        remaining = before
+        for peer_index in range(peer_count):
+            served = min(
+                remaining,
+                _effective_admitted_routes(
+                    layer_peer[peer_index][layer],
+                    admitted_masks[peer_index],
+                ),
+            )
+            peer_routes.append(served)
+            captured_by_peer[peer_index] += served
+            remaining = max(0.0, remaining - served)
+        captured_layer = sum(peer_routes)
+        after = remaining
         cold_before += before
         cold_after += after
-        captured += peer_routes
+        captured += captured_layer
 
         primary_only_compute = resident_bytes + routes * expert_bytes
         predicted_primary += (
@@ -473,29 +739,45 @@ def predict_peer_expert_plan(
             + before * local_cold_seconds_per_expert
         )
 
-        local_routes = max(0.0, routes - peer_routes)
+        local_routes = max(0.0, routes - captured_layer)
         local_seconds = (
             (resident_bytes + local_routes * expert_bytes)
             * primary_profile.d2d_seconds_per_byte
             + after * local_cold_seconds_per_expert
         )
-        peer_seconds = 0.0
-        if peer_routes > 0.0:
-            peer_seconds = (
-                rtt_p95_us
-                + _service_curve_us(peer_routes, service_p95_us_by_routes)
-            ) / 1_000_000.0
-        predicted_peer += max(local_seconds, peer_seconds)
+        peer_seconds = [
+            (
+                peer_rtts[peer_index]
+                + _service_curve_us(count, service_curves[peer_index])
+            )
+            / 1_000_000.0
+            if count > 0.0
+            else 0.0
+            for peer_index, count in enumerate(peer_routes)
+        ]
+        active_service_us = [
+            _service_curve_us(count, service_curves[peer_index])
+            for peer_index, count in enumerate(peer_routes)
+            if count > 0.0
+        ]
+        fanout_peer_seconds = (
+            (fanout_rtt_p95_us + max(active_service_us)) / 1_000_000.0
+            if active_service_us
+            else 0.0
+        )
+        predicted_peer += max([local_seconds, fanout_peer_seconds, *peer_seconds])
 
     predicted_peer += terminal_bytes * primary_profile.d2d_seconds_per_byte
     predicted_primary += terminal_bytes * primary_profile.d2d_seconds_per_byte
-    return PeerPlan(
-        peer_residents=peer_residents,
+    return MultiPeerPlan(
+        peer_residents_by_peer=peer_residents_by_peer,
         primary_residents=primary_residents,
+        captured_routes_per_token_by_peer=tuple(captured_by_peer),
         captured_routes_per_token=captured,
         cold_routes_before_per_token=cold_before,
         cold_routes_after_per_token=cold_after,
         captured_cold_fraction=(captured / cold_before if cold_before > 0.0 else 0.0),
+        fanout_rtt_p95_us=fanout_rtt_p95_us,
         predicted_seconds_per_token=predicted_peer,
         predicted_primary_only_seconds_per_token=predicted_primary,
     )

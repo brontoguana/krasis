@@ -1519,13 +1519,17 @@ extern "C" __global__ void dsa_prefill_fused_scores_kernel(
     }
 }
 
-// Accumulate one learned-index head after a BF16-input/FP32-accumulate GEMM.
+// Accumulate one or more learned-index heads after a
+// BF16-input/FP32-accumulate strided-batched GEMM.
 // The temporary matrix and final score matrix are both row-major
 // [row_count, score_context_end] and [row_count, output_context_end]
 // respectively. The separate strides let a causal band omit future columns
 // while retaining the full score-row layout consumed by the exact top-k.
-// Heads are launched sequentially so this epilogue preserves the model's head
-// summation order while applying ReLU and the BF16-rounded per-row head weight.
+// Heads inside the batch are accumulated in ascending order so this epilogue
+// preserves the model's head summation order while applying ReLU and the
+// BF16-rounded per-row head weight.  The temporary batch stride is explicit:
+// the caller derives the largest batch that fits the already allocated score
+// workspace rather than reserving model- or GPU-specific storage.
 // Future positions are deliberately left untouched because the existing top-k
 // kernel applies the causal boundary.
 extern "C" __global__ void dsa_prefill_accumulate_gemm_scores_kernel(
@@ -1537,14 +1541,17 @@ extern "C" __global__ void dsa_prefill_accumulate_gemm_scores_kernel(
     int output_context_end,
     int score_context_end,
     int num_heads,
-    int head,
+    int head_start,
+    int head_count,
+    int head_score_stride,
     int initialize,
     int head_scores_bf16)
 {
     int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = (int64_t)row_count * score_context_end;
     if (linear >= total || positions == nullptr || num_heads <= 0 ||
-        head < 0 || head >= num_heads) {
+        head_start < 0 || head_count <= 0 || head_start >= num_heads ||
+        head_count > num_heads - head_start || head_score_stride <= 0) {
         return;
     }
     int row = (int)(linear / score_context_end);
@@ -1552,16 +1559,22 @@ extern "C" __global__ void dsa_prefill_accumulate_gemm_scores_kernel(
     int causal_context = min(max(positions[row] + 1, 0), score_context_end);
     if (token >= causal_context) return;
 
-    float head_score = head_scores_bf16
-        ? bf16_to_float(reinterpret_cast<const __nv_bfloat16*>(head_scores)[linear])
-        : reinterpret_cast<const float*>(head_scores)[linear];
-    float contribution = bf16_to_float(
-        head_weights[(int64_t)row * num_heads + head]) *
-        fmaxf(head_score, 0.0f);
     int64_t output_index = (int64_t)row * output_context_end + token;
-    output[output_index] = initialize
-        ? contribution
-        : output[output_index] + contribution;
+    float accumulated = initialize ? 0.0f : output[output_index];
+    for (int head_offset = 0; head_offset < head_count; ++head_offset) {
+        int head = head_start + head_offset;
+        int64_t score_index =
+            (int64_t)head_offset * head_score_stride + linear;
+        float head_score = head_scores_bf16
+            ? bf16_to_float(
+                reinterpret_cast<const __nv_bfloat16*>(head_scores)[score_index])
+            : reinterpret_cast<const float*>(head_scores)[score_index];
+        float contribution = bf16_to_float(
+            head_weights[(int64_t)row * num_heads + head]) *
+            fmaxf(head_score, 0.0f);
+        accumulated = accumulated + contribution;
+    }
+    output[output_index] = accumulated;
 }
 
 __device__ inline bool dsa_prefill_topk_precedes(
@@ -2317,6 +2330,603 @@ extern "C" __global__ void mla_prefill_sparse_attention_k4_kernel(
         }
         output_head[dim] = value * inv_sum;
     }
+}
+
+/*
+ * Numerically identical sparse MLA equation with one deliberate scheduling
+ * change: each selected score is evaluated once and retained in the existing
+ * shared selected-row buffer. The accepted scalar kernel evaluates the same
+ * deterministic dot product once for the maximum and again for the softmax;
+ * retaining it removes the duplicate K4 unpack/dot work without changing the
+ * dot-product, reduction, exponential, or value-accumulation order.
+ */
+extern "C" __global__ void mla_prefill_sparse_attention_k4_score_reuse_kernel(
+    float* __restrict__ output,
+    const float* __restrict__ q_absorbed,
+    const __nv_bfloat16* __restrict__ packed_q,
+    const unsigned char* __restrict__ ckv_cache,
+    const unsigned char* __restrict__ kpe_cache,
+    const int* __restrict__ selected_indices,
+    const int* __restrict__ positions,
+    float sm_scale,
+    int rows,
+    int num_heads,
+    int qk_dim,
+    int nope_dim,
+    int rope_dim,
+    int ckv_cache_dim,
+    int selected_per_row,
+    int max_context)
+{
+    int head = blockIdx.x;
+    int row = blockIdx.y;
+    if (row >= rows || head >= num_heads) return;
+
+    int tid = threadIdx.x;
+    int warp_id = tid / warpSize;
+    int lane_id = tid % warpSize;
+    int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+    int seq_len = min(max(positions[row] + 1, 0), max_context);
+    int selected_count = min(seq_len, max(selected_per_row, 0));
+
+    extern __shared__ float shared[];
+    float* shared_q_absorbed = shared;
+    float* shared_q_pe = shared_q_absorbed + ckv_cache_dim;
+    float* shared_reduce = shared_q_pe + rope_dim;
+    float* shared_scores_weights = shared_reduce + num_warps;
+
+    const float* q_absorbed_head =
+        q_absorbed + ((int64_t)row * num_heads + head) * ckv_cache_dim;
+    const __nv_bfloat16* packed_q_pe =
+        packed_q + ((int64_t)row * num_heads + head) * qk_dim + nope_dim;
+    const int* selected_row =
+        selected_indices + (int64_t)row * selected_per_row;
+    float* output_head =
+        output + ((int64_t)row * num_heads + head) * ckv_cache_dim;
+
+    for (int dim = tid; dim < ckv_cache_dim; dim += blockDim.x) {
+        shared_q_absorbed[dim] = q_absorbed_head[dim];
+    }
+    for (int dim = tid; dim < rope_dim; dim += blockDim.x) {
+        shared_q_pe[dim] = bf16_to_float(packed_q_pe[dim]);
+    }
+    __syncthreads();
+
+    if (selected_count <= 0) {
+        for (int dim = tid; dim < ckv_cache_dim; dim += blockDim.x) {
+            output_head[dim] = 0.0f;
+        }
+        return;
+    }
+
+    float local_max = -1e30f;
+    for (int slot = tid; slot < selected_count; slot += blockDim.x) {
+        int position = selected_row[slot];
+        float score = -1e30f;
+        if (position >= 0 && position < seq_len) {
+            score =
+                mla_prefill_dot_k4(
+                    ckv_cache, position, ckv_cache_dim, shared_q_absorbed) +
+                mla_prefill_dot_k4(
+                    kpe_cache, position, rope_dim, shared_q_pe);
+            score *= sm_scale;
+        }
+        shared_scores_weights[slot] = score;
+        local_max = fmaxf(local_max, score);
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_max = fmaxf(
+            local_max,
+            __shfl_down_sync(0xffffffff, local_max, offset));
+    }
+    if (lane_id == 0) shared_reduce[warp_id] = local_max;
+    __syncthreads();
+    if (tid == 0) {
+        float maximum = shared_reduce[0];
+        for (int warp = 1; warp < num_warps; warp++) {
+            maximum = fmaxf(maximum, shared_reduce[warp]);
+        }
+        shared_reduce[0] = maximum;
+    }
+    __syncthreads();
+    float maximum = shared_reduce[0];
+
+    float local_sum = 0.0f;
+    for (int slot = tid; slot < selected_count; slot += blockDim.x) {
+        int position = selected_row[slot];
+        float weight = 0.0f;
+        if (position >= 0 && position < seq_len) {
+            weight = __expf(shared_scores_weights[slot] - maximum);
+        }
+        shared_scores_weights[slot] = weight;
+        local_sum += weight;
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
+    }
+    if (lane_id == 0) shared_reduce[warp_id] = local_sum;
+    __syncthreads();
+    if (tid == 0) {
+        float sum = 0.0f;
+        for (int warp = 0; warp < num_warps; warp++) {
+            sum += shared_reduce[warp];
+        }
+        shared_reduce[0] = sum;
+    }
+    __syncthreads();
+    float inv_sum = shared_reduce[0] > 0.0f ? 1.0f / shared_reduce[0] : 0.0f;
+
+    for (int dim = tid; dim < ckv_cache_dim; dim += blockDim.x) {
+        float value = 0.0f;
+        for (int slot = 0; slot < selected_count; slot++) {
+            int position = selected_row[slot];
+            if (position >= 0 && position < seq_len) {
+                value += shared_scores_weights[slot] *
+                    mla_prefill_load_k4_value(
+                        ckv_cache, position, ckv_cache_dim, dim);
+            }
+        }
+        output_head[dim] = value * inv_sum;
+    }
+}
+
+/*
+ * Exact grouped score producer. One block owns one query row and a runtime
+ * group of heads. Selected packed K4 rows are copied to shared memory once per
+ * warp-sized slot tile, then consumed by every head in the group. The score
+ * itself calls the same scalar K4 dot helper, in the same cKV-then-rope order,
+ * as mla_prefill_sparse_attention_k4_kernel.
+ */
+extern "C" __global__ void mla_prefill_sparse_scores_k4_grouped_exact_kernel(
+    float* __restrict__ scores,
+    const float* __restrict__ q_absorbed,
+    const __nv_bfloat16* __restrict__ packed_q,
+    const unsigned char* __restrict__ ckv_cache,
+    const unsigned char* __restrict__ kpe_cache,
+    const int* __restrict__ selected_indices,
+    const int* __restrict__ positions,
+    float sm_scale,
+    int tile_start,
+    int tile_rows,
+    int num_heads,
+    int qk_dim,
+    int nope_dim,
+    int rope_dim,
+    int ckv_cache_dim,
+    int selected_per_row,
+    int max_context)
+{
+    int tile_row = blockIdx.y;
+    int heads_per_block = blockDim.x / warpSize;
+    if (tile_row >= tile_rows || heads_per_block <= 0) return;
+
+    int tid = threadIdx.x;
+    int local_head = tid / warpSize;
+    int slot_lane = tid % warpSize;
+    int head = (int)blockIdx.x * heads_per_block + local_head;
+    int global_row = tile_start + tile_row;
+    int seq_len = min(max(positions[global_row] + 1, 0), max_context);
+    int selected_count = min(seq_len, max(selected_per_row, 0));
+    int combined_dim = ckv_cache_dim + rope_dim;
+    int ckv_row_bytes = (ckv_cache_dim / 16) * 10;
+    int kpe_row_bytes = (rope_dim / 16) * 10;
+
+    extern __shared__ unsigned char shared_bytes[];
+    float* shared_query = reinterpret_cast<float*>(shared_bytes);
+    int64_t query_elements = (int64_t)heads_per_block * combined_dim;
+    unsigned char* shared_ckv = reinterpret_cast<unsigned char*>(
+        shared_query + query_elements);
+    unsigned char* shared_kpe = shared_ckv + warpSize * ckv_row_bytes;
+
+    for (int64_t linear = tid; linear < query_elements; linear += blockDim.x) {
+        int query_head = (int)(linear / combined_dim);
+        int dim = (int)(linear - (int64_t)query_head * combined_dim);
+        int global_head = (int)blockIdx.x * heads_per_block + query_head;
+        float value = 0.0f;
+        if (global_head < num_heads) {
+            int64_t head_base = (int64_t)global_row * num_heads + global_head;
+            value = dim < ckv_cache_dim
+                ? q_absorbed[head_base * ckv_cache_dim + dim]
+                : bf16_to_float(
+                    packed_q[head_base * qk_dim + nope_dim + dim - ckv_cache_dim]);
+        }
+        shared_query[linear] = value;
+    }
+    __syncthreads();
+
+    const int* selected_row =
+        selected_indices + (int64_t)global_row * selected_per_row;
+    for (int slot_base = 0; slot_base < selected_count; slot_base += warpSize) {
+        int ckv_tile_bytes = warpSize * ckv_row_bytes;
+        for (int linear = tid; linear < ckv_tile_bytes; linear += blockDim.x) {
+            int tile_slot = linear / ckv_row_bytes;
+            int byte = linear - tile_slot * ckv_row_bytes;
+            int slot = slot_base + tile_slot;
+            int position = slot < selected_count ? selected_row[slot] : -1;
+            shared_ckv[linear] = position >= 0 && position < seq_len
+                ? ckv_cache[(int64_t)position * ckv_row_bytes + byte]
+                : 0;
+        }
+        int kpe_tile_bytes = warpSize * kpe_row_bytes;
+        for (int linear = tid; linear < kpe_tile_bytes; linear += blockDim.x) {
+            int tile_slot = linear / kpe_row_bytes;
+            int byte = linear - tile_slot * kpe_row_bytes;
+            int slot = slot_base + tile_slot;
+            int position = slot < selected_count ? selected_row[slot] : -1;
+            shared_kpe[linear] = position >= 0 && position < seq_len
+                ? kpe_cache[(int64_t)position * kpe_row_bytes + byte]
+                : 0;
+        }
+        __syncthreads();
+
+        int slot = slot_base + slot_lane;
+        if (head < num_heads && slot < selected_count) {
+            int position = selected_row[slot];
+            float score = -1e30f;
+            if (position >= 0 && position < seq_len) {
+                const float* query_head = shared_query + local_head * combined_dim;
+                score =
+                    mla_prefill_dot_k4(
+                        shared_ckv, slot_lane, ckv_cache_dim, query_head) +
+                    mla_prefill_dot_k4(
+                        shared_kpe,
+                        slot_lane,
+                        rope_dim,
+                        query_head + ckv_cache_dim);
+                score *= sm_scale;
+            }
+            scores[((int64_t)tile_row * num_heads + head) * selected_per_row + slot] =
+                score;
+        }
+        __syncthreads();
+    }
+}
+
+/* Preserve the accepted block-wide max and sum reduction order while moving
+ * the retained weights and reciprocal sum to a runtime-sized global tile. */
+extern "C" __global__ void mla_prefill_sparse_softmax_exact_kernel(
+    float* __restrict__ weights,
+    float* __restrict__ inv_sums,
+    const float* __restrict__ scores,
+    const int* __restrict__ selected_indices,
+    const int* __restrict__ positions,
+    int tile_start,
+    int tile_rows,
+    int num_heads,
+    int selected_per_row,
+    int max_context)
+{
+    int head = blockIdx.x;
+    int tile_row = blockIdx.y;
+    if (tile_row >= tile_rows || head >= num_heads) return;
+
+    int tid = threadIdx.x;
+    int warp_id = tid / warpSize;
+    int lane_id = tid % warpSize;
+    int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+    int global_row = tile_start + tile_row;
+    int seq_len = min(max(positions[global_row] + 1, 0), max_context);
+    int selected_count = min(seq_len, max(selected_per_row, 0));
+    int64_t score_base =
+        ((int64_t)tile_row * num_heads + head) * selected_per_row;
+    const int* selected_row =
+        selected_indices + (int64_t)global_row * selected_per_row;
+
+    extern __shared__ float shared_reduce[];
+    float local_max = -1e30f;
+    for (int slot = tid; slot < selected_count; slot += blockDim.x) {
+        local_max = fmaxf(local_max, scores[score_base + slot]);
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_max = fmaxf(
+            local_max,
+            __shfl_down_sync(0xffffffff, local_max, offset));
+    }
+    if (lane_id == 0) shared_reduce[warp_id] = local_max;
+    __syncthreads();
+    if (tid == 0) {
+        float maximum = shared_reduce[0];
+        for (int warp = 1; warp < num_warps; warp++) {
+            maximum = fmaxf(maximum, shared_reduce[warp]);
+        }
+        shared_reduce[0] = maximum;
+    }
+    __syncthreads();
+    float maximum = shared_reduce[0];
+
+    float local_sum = 0.0f;
+    for (int slot = tid; slot < selected_count; slot += blockDim.x) {
+        int position = selected_row[slot];
+        float weight = 0.0f;
+        if (position >= 0 && position < seq_len) {
+            weight = __expf(scores[score_base + slot] - maximum);
+        }
+        weights[score_base + slot] = weight;
+        local_sum += weight;
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
+    }
+    if (lane_id == 0) shared_reduce[warp_id] = local_sum;
+    __syncthreads();
+    if (tid == 0) {
+        float sum = 0.0f;
+        for (int warp = 0; warp < num_warps; warp++) {
+            sum += shared_reduce[warp];
+        }
+        inv_sums[(int64_t)tile_row * num_heads + head] =
+            sum > 0.0f ? 1.0f / sum : 0.0f;
+    }
+}
+
+/* Exact value reduction with packed K4 rows shared across a runtime head
+ * group. Each output thread visits selected slots in the original ascending
+ * order and uses mla_prefill_load_k4_value for the same scale*q rounding. */
+extern "C" __global__ void mla_prefill_sparse_output_k4_grouped_exact_kernel(
+    float* __restrict__ output,
+    const float* __restrict__ weights,
+    const float* __restrict__ inv_sums,
+    const unsigned char* __restrict__ ckv_cache,
+    const int* __restrict__ selected_indices,
+    const int* __restrict__ positions,
+    int tile_start,
+    int tile_rows,
+    int num_heads,
+    int ckv_cache_dim,
+    int selected_per_row,
+    int max_context)
+{
+    int tile_row = blockIdx.y;
+    int heads_per_block = blockDim.x / warpSize;
+    if (tile_row >= tile_rows || heads_per_block <= 0) return;
+
+    int tid = threadIdx.x;
+    int local_head = tid / warpSize;
+    int dim_lane = tid % warpSize;
+    int head = (int)blockIdx.x * heads_per_block + local_head;
+    int dim_base = (int)blockIdx.z * warpSize;
+    int dim_span = min(warpSize, ckv_cache_dim - dim_base);
+    int dim = dim_base + dim_lane;
+    int global_row = tile_start + tile_row;
+    int seq_len = min(max(positions[global_row] + 1, 0), max_context);
+    int selected_count = min(seq_len, max(selected_per_row, 0));
+    int full_row_bytes = (ckv_cache_dim / 16) * 10;
+    int dim_row_bytes = (dim_span / 16) * 10;
+    int source_byte_offset = (dim_base / 16) * 10;
+    const int* selected_row =
+        selected_indices + (int64_t)global_row * selected_per_row;
+    int64_t weight_base =
+        ((int64_t)tile_row * num_heads + head) * selected_per_row;
+
+    extern __shared__ unsigned char shared_ckv[];
+    float value = 0.0f;
+    for (int slot_base = 0; slot_base < selected_count; slot_base += warpSize) {
+        int tile_bytes = warpSize * dim_row_bytes;
+        for (int linear = tid; linear < tile_bytes; linear += blockDim.x) {
+            int tile_slot = linear / dim_row_bytes;
+            int byte = linear - tile_slot * dim_row_bytes;
+            int slot = slot_base + tile_slot;
+            int position = slot < selected_count ? selected_row[slot] : -1;
+            shared_ckv[linear] = position >= 0 && position < seq_len
+                ? ckv_cache[(int64_t)position * full_row_bytes + source_byte_offset + byte]
+                : 0;
+        }
+        __syncthreads();
+
+        if (head < num_heads && dim < ckv_cache_dim) {
+            int tile_count = min(warpSize, selected_count - slot_base);
+            for (int tile_slot = 0; tile_slot < tile_count; tile_slot++) {
+                int slot = slot_base + tile_slot;
+                int position = selected_row[slot];
+                if (position >= 0 && position < seq_len) {
+                    value += weights[weight_base + slot] *
+                        mla_prefill_load_k4_value(
+                            shared_ckv, tile_slot, dim_span, dim_lane);
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    if (head < num_heads && dim < ckv_cache_dim) {
+        output[((int64_t)global_row * num_heads + head) * ckv_cache_dim + dim] =
+            value * inv_sums[(int64_t)tile_row * num_heads + head];
+    }
+}
+
+/*
+ * Prepare one runtime-sized tile for the gathered-GEMM sparse MLA path.
+ * Selected compact K4 rows are dequantized once to FP32 and shared by all
+ * query heads. The absorbed and positional query portions are packed into the
+ * same logical width without losing the scalar kernel's FP32 absorbed-query
+ * precision. Invalid/sentinel selections initialize every head score to
+ * -infinity so beta=1 GEMM preserves the causal validity contract.
+ */
+extern "C" __global__ void mla_prefill_gather_query_k4_f32_kernel(
+    float* __restrict__ gathered_kv,
+    float* __restrict__ query,
+    float* __restrict__ scores,
+    const float* __restrict__ q_absorbed,
+    const __nv_bfloat16* __restrict__ packed_q,
+    const unsigned char* __restrict__ ckv_cache,
+    const unsigned char* __restrict__ kpe_cache,
+    const int* __restrict__ selected_indices,
+    const int* __restrict__ positions,
+    int tile_start,
+    int tile_rows,
+    int num_heads,
+    int packed_q_dim,
+    int nope_dim,
+    int rope_dim,
+    int ckv_cache_dim,
+    int selected_per_row,
+    int max_context)
+{
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int combined_dim = ckv_cache_dim + rope_dim;
+    int64_t gathered_per_row = (int64_t)selected_per_row * combined_dim;
+    int64_t gathered_elements = (int64_t)tile_rows * gathered_per_row;
+    int64_t query_per_row = (int64_t)num_heads * combined_dim;
+    int64_t query_elements = (int64_t)tile_rows * query_per_row;
+    int64_t score_per_row = (int64_t)num_heads * selected_per_row;
+    int64_t score_elements = (int64_t)tile_rows * score_per_row;
+    int64_t total = gathered_elements + query_elements + score_elements;
+    if (linear >= total || gathered_kv == nullptr || query == nullptr ||
+        scores == nullptr || q_absorbed == nullptr || packed_q == nullptr ||
+        ckv_cache == nullptr || kpe_cache == nullptr ||
+        selected_indices == nullptr || positions == nullptr || tile_start < 0 ||
+        tile_rows <= 0 || num_heads <= 0 || packed_q_dim <= 0 || nope_dim < 0 ||
+        rope_dim < 0 || ckv_cache_dim <= 0 ||
+        nope_dim + rope_dim > packed_q_dim ||
+        selected_per_row <= 0 || max_context <= 0) {
+        return;
+    }
+
+    if (linear < gathered_elements) {
+        int tile_row = (int)(linear / gathered_per_row);
+        int64_t within = linear - (int64_t)tile_row * gathered_per_row;
+        int selected = (int)(within / combined_dim);
+        int dim = (int)(within - (int64_t)selected * combined_dim);
+        int global_row = tile_start + tile_row;
+        int seq_len = min(max(positions[global_row] + 1, 0), max_context);
+        int position = selected_indices[(int64_t)global_row * selected_per_row + selected];
+        float value = 0.0f;
+        if (position >= 0 && position < seq_len) {
+            value = dim < ckv_cache_dim
+                ? mla_prefill_load_k4_value(
+                    ckv_cache, position, ckv_cache_dim, dim)
+                : mla_prefill_load_k4_value(
+                    kpe_cache, position, rope_dim, dim - ckv_cache_dim);
+        }
+        gathered_kv[linear] = value;
+        return;
+    }
+
+    linear -= gathered_elements;
+    if (linear < query_elements) {
+        int tile_row = (int)(linear / query_per_row);
+        int64_t within = linear - (int64_t)tile_row * query_per_row;
+        int head = (int)(within / combined_dim);
+        int dim = (int)(within - (int64_t)head * combined_dim);
+        int global_row = tile_start + tile_row;
+        int64_t head_base = ((int64_t)global_row * num_heads + head);
+        query[linear] = dim < ckv_cache_dim
+            ? q_absorbed[head_base * ckv_cache_dim + dim]
+            : bf16_to_float(
+                packed_q[head_base * packed_q_dim + nope_dim + dim - ckv_cache_dim]);
+        return;
+    }
+
+    int64_t score_linear = linear - query_elements;
+    int tile_row = (int)(score_linear / score_per_row);
+    int selected = (int)(score_linear % selected_per_row);
+    int global_row = tile_start + tile_row;
+    int seq_len = min(max(positions[global_row] + 1, 0), max_context);
+    int position = selected_indices[(int64_t)global_row * selected_per_row + selected];
+    scores[score_linear] = position >= 0 && position < seq_len ? 0.0f : -INFINITY;
+}
+
+/* One warp computes one score row and retains FP32 normalized weights. */
+extern "C" __global__ void mla_prefill_softmax_weights_warp_f32_kernel(
+    float* __restrict__ weights,
+    const float* __restrict__ scores,
+    int rows,
+    int num_heads,
+    int selected_per_row)
+{
+    if (weights == nullptr || scores == nullptr || rows <= 0 ||
+        num_heads <= 0 || selected_per_row <= 0) {
+        return;
+    }
+    int lane = (int)threadIdx.x & (warpSize - 1);
+    int warp_in_block = (int)threadIdx.x / warpSize;
+    int warps_per_block = (int)blockDim.x / warpSize;
+    int64_t score_row = (int64_t)blockIdx.x * warps_per_block + warp_in_block;
+    int64_t score_rows = (int64_t)rows * num_heads;
+    if (score_row >= score_rows) return;
+
+    const float* score = scores + score_row * selected_per_row;
+    float local_max = -INFINITY;
+    for (int selected = lane; selected < selected_per_row; selected += warpSize) {
+        local_max = fmaxf(local_max, score[selected]);
+    }
+    unsigned mask = 0xffffffffu;
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_max = fmaxf(local_max, __shfl_down_sync(mask, local_max, offset));
+    }
+    float row_max = __shfl_sync(mask, local_max, 0);
+
+    float local_sum = 0.0f;
+    for (int selected = lane; selected < selected_per_row; selected += warpSize) {
+        float value = score[selected];
+        if (isfinite(value)) local_sum += __expf(value - row_max);
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_sum += __shfl_down_sync(mask, local_sum, offset);
+    }
+    float denominator = __shfl_sync(mask, local_sum, 0);
+    float* weight = weights + score_row * selected_per_row;
+    for (int selected = lane; selected < selected_per_row; selected += warpSize) {
+        float value = score[selected];
+        float normalized = isfinite(value) && denominator > 0.0f
+            ? __expf(value - row_max) / denominator
+            : 0.0f;
+        weight[selected] = normalized;
+    }
+}
+
+/* Reorder the FP32 sparse-attention result from [row, head, ckv] to a
+ * head-major BF16 tile consumed by strided-batched cuBLAS WVC projection. */
+extern "C" __global__ void mla_prefill_pack_attention_head_major_bf16_kernel(
+    __nv_bfloat16* __restrict__ packed,
+    const float* __restrict__ attention,
+    int tile_start,
+    int tile_rows,
+    int rows,
+    int num_heads,
+    int ckv_cache_dim)
+{
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = (int64_t)tile_rows * num_heads * ckv_cache_dim;
+    if (linear >= total || packed == nullptr || attention == nullptr ||
+        tile_start < 0 || tile_rows <= 0 || rows <= 0 || num_heads <= 0 ||
+        ckv_cache_dim <= 0 || tile_start + tile_rows > rows) {
+        return;
+    }
+    int dim = (int)(linear % ckv_cache_dim);
+    int64_t head_row = linear / ckv_cache_dim;
+    int tile_row = (int)(head_row % tile_rows);
+    int head = (int)(head_row / tile_rows);
+    int global_row = tile_start + tile_row;
+    int64_t source = ((int64_t)global_row * num_heads + head) * ckv_cache_dim + dim;
+    packed[linear] = float_to_bf16(attention[source]);
+}
+
+/* Restore a head-major BF16 WVC tile to the runtime [row, head, value] layout. */
+extern "C" __global__ void mla_prefill_scatter_wvc_head_major_bf16_kernel(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ head_major,
+    int tile_start,
+    int tile_rows,
+    int rows,
+    int num_heads,
+    int value_head_dim)
+{
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = (int64_t)tile_rows * num_heads * value_head_dim;
+    if (linear >= total || output == nullptr || head_major == nullptr ||
+        tile_start < 0 || tile_rows <= 0 || rows <= 0 || num_heads <= 0 ||
+        value_head_dim <= 0 || tile_start + tile_rows > rows) {
+        return;
+    }
+    int dim = (int)(linear % value_head_dim);
+    int64_t head_row = linear / value_head_dim;
+    int tile_row = (int)(head_row % tile_rows);
+    int head = (int)(head_row / tile_rows);
+    int global_row = tile_start + tile_row;
+    int64_t destination =
+        ((int64_t)global_row * num_heads + head) * value_head_dim + dim;
+    output[destination] = head_major[linear];
 }
 
 /*

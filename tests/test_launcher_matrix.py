@@ -560,9 +560,10 @@ class LauncherMatrixTest(unittest.TestCase):
         from krasis.hf_downloader import supported_models
 
         measured_topologies = {
-            "qcn": ("auto", "peer"),
+            "qcn": ("auto", "layer-split", "peer"),
+            "dsv4": ("auto", "peer"),
             "qwen35-35b": ("auto", "layer-split"),
-            "qwen35-122b": ("auto", "peer"),
+            "qwen35-122b": ("auto", "layer-split", "peer"),
             "glm52": ("auto", "peer"),
         }
         expert_option = next(

@@ -1,5 +1,159 @@
 # Krasis Benchmark Results
 
+## DeepSeek-V4-Flash-0731 optimized prefill on RTX A6000 — 2026-08-19
+
+This timing-disabled standard benchmark used the same official checkpoint,
+RTX A6000, INT4/HQQ6/Native profile, test-only UUID-bound configuration, and
+600 MiB runtime safety margin as the 2026-08-18 baseline below. The optimized
+runtime prescans every real prefill chunk, balances DeepSeek's runtime-derived
+chunk plan, preserves the measured startup memory high-water beyond the
+calibrated prompt range, and batches learned-index heads using existing
+workspace. No timing or trace instrumentation was enabled for this result.
+
+| Prompt | Baseline | Final repeat | Change |
+|---:|---:|---:|---:|
+| 1K | 112.6 tok/s | 118.6 tok/s | +5.3% |
+| 5K | 484.1 tok/s | 535.9 tok/s | +10.7% |
+| 10K | 1,020.5 tok/s | 1,016.7 tok/s | -0.4% |
+| 20K | 1,162.0 tok/s | 1,225.1 tok/s | +5.4% |
+| 35K | 919.0 tok/s | 1,099.8 tok/s | +19.7% |
+| 39,920 | 983.7 tok/s | 1,162.1 tok/s | +18.1% |
+
+| Measurement | Final repeat |
+|---|---:|
+| Internal decode, 50 / 100 / 250 | 13.45 / 13.50 / 12.97 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 24.55 / 17.37 / 14.19 tok/s |
+| HCS residency | 2,775/11,008 experts (25.2%) |
+| Decode minimum free VRAM | 1,042 MiB |
+
+The independent final run reproduced the preceding clean 39,920-token result
+within 0.4% (`1,162.1` versus `1,157.8 tok/s`). A timing-enabled attribution
+run is archived separately and is not speed evidence: it measured a 39.9%
+reduction in selected-score time, 31.7% in the complete learned indexer, and
+14.5% in native prefill at 39,920 tokens, while MoE and sparse attention were
+flat. Short-row variance was traced outside the changed indexer to scratch
+setup and exposed expert DMA; this is why the final independent clean curve,
+not the best observed row from each run, is reported above.
+
+The final native DeepSeek gate passed 28/28. The established four-case
+llama-witness retained prefill/first-token 4/4 with no FAIL, and the canonical
+normal-launch large network suite passed 18/18 through 62,403 prompt tokens.
+Its prefill low-waters were 642/666/658/672 MiB at
+2,043/8,623/23,348/62,403 tokens, all above the unchanged 600 MiB margin. The
+final benchmark had zero HCS copy failures or budget skips and no CUDA/OOM,
+illegal-access, panic, traceback, or below-margin event. Both GPUs were idle
+after teardown.
+
+Reproduction:
+`./dev benchmark tests/deepseek-v4-flash-0731-hqq6-native-a6000.conf`.
+Final evidence: [config](../tests/deepseek-v4-flash-0731-hqq6-native-a6000.conf),
+[stdout](20260819_deepseek_v4_flash_0731_prefill_final_repeat_hqq6_native_a6000_benchmark_stdout.log),
+[report](20260819_deepseek_v4_flash_0731_prefill_final_repeat_hqq6_native_a6000_benchmark_report.log),
+and [runtime](20260819_deepseek_v4_flash_0731_prefill_final_repeat_hqq6_native_a6000_krasis.log).
+The earlier completed standard runs are preserved as
+[initial optimized stdout](20260819_deepseek_v4_flash_0731_prefill_optimized_hqq6_native_a6000_benchmark_stdout.log),
+[reserve-floor clean stdout](20260819_deepseek_v4_flash_0731_prefill_reserve_floor_clean_hqq6_native_a6000_benchmark_stdout.log),
+[timing-enabled attribution stdout](20260819_deepseek_v4_flash_0731_prefill_variance_attribution_timing_hqq6_native_a6000_benchmark_stdout.log),
+and [first final clean stdout](20260819_deepseek_v4_flash_0731_prefill_final_clean_hqq6_native_a6000_benchmark_stdout.log),
+with matching report/runtime files alongside each artifact.
+
+## GLM-5.2 optimized sparse prefill on RTX PRO 6000 — 2026-08-19
+
+This timing-disabled standard benchmark used GLM-5.2 on one NVIDIA RTX PRO
+6000 Blackwell Workstation Edition, an AMD EPYC 7742, and 995 GB system RAM.
+The accepted production profile remained INT4 experts, HQQ4 attention, k4v4
+KV, layer group 2, the approved route heatmap, and the unchanged 600 MiB
+runtime safety margin. The candidate changed only the native sparse-prefill
+implementation; GPU prefill, runtime calibration, and decode policy remained
+enabled and unchanged.
+
+| Measurement | Result |
+|---|---:|
+| Internal prefill, 1K / 3,196 | 64.2 / **149.8 tok/s** |
+| Internal decode, 50 / 100 / 250 | 5.03 / 5.10 / 4.95 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 8.77 / 6.41 / 5.28 tok/s |
+| HCS residency | 3,887/19,200 experts (20.2%) |
+| Decode minimum free VRAM | 1,137 MiB |
+| Process RAM reported by benchmark | 371.2 GB |
+
+The 3,196-token result is approximately 3.3 times the prior approximately
+45 tok/s accepted baseline. Runtime calibration measured a 3,196-token long
+prefill low-water of 1,117 MiB and therefore selected that length as the safe
+cap for this 4,096-token profile. Decode counters remained
+`budget_skips=0` and `copy_failures=0`; internal decode ended with
+`no_slot=0`, while the later HTTP phase recorded 51 no-slot promotion events.
+No CUDA/OOM, illegal-access, panic, or below-600-MiB runtime event occurred.
+
+The accelerated path passed the authoritative GLM llama-witness before this
+benchmark: reference/native first token `2132`, exact run `4/8`, containment
+`8/8`, and first-token top-ID overlap `7/10`. The run used local HEAD
+`8c6dca91aff5f1edfa1b7a8035b71f558274db56` plus the reviewed, uncommitted
+development changes, so it is a current-worktree optimization result rather
+than a clean-commit release regression baseline.
+
+Reproduction used the test-only RTX PRO configuration through the supported
+command, with the then-explicit accepted candidate gates:
+
+```bash
+KRASIS_DSA_OWNER_ROW_INDEPENDENT_PROJECTION=1 \
+KRASIS_DSA_MLA_GATHERED_GEMM=1 \
+KRASIS_DSA_MLA_GATHERED_WVC=1 \
+KRASIS_DSA_MLA_SCORE_REUSE=0 \
+KRASIS_DSA_MLA_GROUPED_EXACT=0 \
+./dev benchmark tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtxpro-local.conf
+```
+
+Evidence:
+[config](../tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtxpro-local.conf),
+[stdout](20260819_glm52_sparse_prefill_optimized_rtxpro_benchmark_stdout.log),
+[report](20260819_glm52_sparse_prefill_optimized_rtxpro_benchmark_report.log),
+and [runtime](20260819_glm52_sparse_prefill_optimized_rtxpro_krasis.log).
+
+## DeepSeek-V4-Flash-0731 on RTX A6000 48 GB — 2026-08-18
+
+This timing-disabled standard benchmark used the official pinned
+`deepseek-ai/DeepSeek-V4-Flash-0731` revision
+`9e165c30e2704aec5d9d593cce3eebd58bbef1cb` on one NVIDIA RTX A6000
+48 GB, an AMD EPYC 7742, and 995 GB system RAM. The production profile used
+INT4 experts, HQQ6 attention, Native cache, layer group 1, and the unchanged
+600 MiB runtime safety margin. A test-only config binds the card by UUID
+because the installed RTX A6000 and RTX PRO 6000 make the former `6000` name
+selector ambiguous.
+
+| Measurement | Result |
+|---|---:|
+| Internal prefill, 1K / 5K / 10K | 112.6 / 484.1 / 1,020.5 tok/s |
+| Internal prefill, 20K / 35K / 39,920 | 1,162.0 / 919.0 / 983.7 tok/s |
+| Internal decode, 50 / 100 / 250 | 13.36 / 14.26 / 13.51 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 24.37 / 18.64 / 14.67 tok/s |
+| HCS residency | 2,775/11,008 experts (25.2%) |
+| Final dynamic HCS hit rate | 75.85% |
+| Decode minimum free VRAM | 1,042 MiB |
+| Process RAM reported by benchmark | 152.2 GB |
+
+Runtime calibration reached the complete 39,920-token suite with measured
+prefill low-waters of 1,190/1,166/1,214/1,244/1,222/1,214 MiB at
+500/4K/8K/16K/32K/39,920 tokens. It derived a 34,790 MiB decode HCS budget.
+No approved heatmap matched the new runtime signature, so startup generated a
+fresh six-prompt heatmap with the exact run parameters before admitting 2,790
+experts; pressure control then evicted one 15-expert chunk and settled at
+2,775 residents. Final counters were `budget_skips=0`, `no_slot=0`, and
+`copy_failures=0`; no CUDA/OOM or below-margin event occurred. Both GPUs were
+fully released after exit.
+
+The run was built from local HEAD `8c6dca91aff5f1edfa1b7a8035b71f558274db56`
+plus the already-present uncommitted development source changes, so it is a
+current-worktree hardware characterization rather than a clean-commit release
+regression baseline. The exact compiled-source diff is preserved in the
+private run evidence.
+
+Reproduction:
+`./dev benchmark tests/deepseek-v4-flash-0731-hqq6-native-a6000.conf`.
+Evidence: [config](../tests/deepseek-v4-flash-0731-hqq6-native-a6000.conf),
+[stdout](20260818_deepseek_v4_flash_0731_hqq6_native_a6000_benchmark_stdout.log),
+[report](20260818_deepseek_v4_flash_0731_hqq6_native_a6000_benchmark_report.log),
+and [runtime](20260818_deepseek_v4_flash_0731_hqq6_native_a6000_krasis.log).
+
 ## v1.0.21-rc.3 QCN release matrix — 2026-08-15
 
 The authoritative timing-disabled `./dev release-test QCN` ran from public

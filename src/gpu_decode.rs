@@ -20,9 +20,7 @@ use std::sync::Arc;
 use cudarc::cublas::result as cublas_result;
 use cudarc::cublas::{sys as cublas_sys, CudaBlas};
 use cudarc::driver::sys as cuda_sys;
-use cudarc::driver::{
-    CudaDevice, CudaSlice, DevicePtr, DeviceSlice, LaunchAsync, LaunchConfig,
-};
+use cudarc::driver::{CudaDevice, CudaSlice, DevicePtr, DeviceSlice, LaunchAsync, LaunchConfig};
 
 use crate::adaptive_cold_drop::{AdaptiveColdDropRuntime, AdaptiveColdDropShadow};
 use crate::cpu_tail::{
@@ -145,6 +143,16 @@ fn env_enabled_default(name: &str, default: bool) -> bool {
             _ => default,
         })
         .unwrap_or(default)
+}
+
+fn split_expert_launch_enabled(dsa_runtime_registered: bool, override_value: Option<&str>) -> bool {
+    override_value
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => dsa_runtime_registered,
+        })
+        .unwrap_or(dsa_runtime_registered)
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -3064,8 +3072,8 @@ fn occupancy_active_blocks_per_multiprocessor(
     dynamic_shared_bytes: usize,
     label: &str,
 ) -> Result<usize, String> {
-    let block_threads = i32::try_from(block_threads)
-        .map_err(|_| format!("{label} block width exceeds i32"))?;
+    let block_threads =
+        i32::try_from(block_threads).map_err(|_| format!("{label} block width exceeds i32"))?;
     let mut active_blocks = 0i32;
     let result = unsafe {
         cuda_sys::lib().cuOccupancyMaxActiveBlocksPerMultiprocessor(
@@ -7750,8 +7758,7 @@ pub(crate) struct DsaTopkPlan {
 
 const DSA_TOPK_RADIX_THREADS: usize = 256;
 const DSA_TOPK_RADIX_ITEMS_PER_THREAD: usize = 4;
-const DSA_TOPK_RADIX_CAPACITY: usize =
-    DSA_TOPK_RADIX_THREADS * DSA_TOPK_RADIX_ITEMS_PER_THREAD;
+const DSA_TOPK_RADIX_CAPACITY: usize = DSA_TOPK_RADIX_THREADS * DSA_TOPK_RADIX_ITEMS_PER_THREAD;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DsaGraphScoreBackend {
@@ -8126,17 +8133,28 @@ pub(crate) mod dsa_registration_tests {
     use cudarc::driver::{DevicePtr, LaunchAsync, LaunchConfig};
 
     use super::{
-        create_decode_timing_event, graph_w13_path, marlin_dispatch_for_bits,
-        occupancy_active_blocks_per_multiprocessor,
-        peer_selector_check_message, plan_dsa_topk, route_prep_rmsnorm_threads,
-        validate_dsa_indexer_registration, validate_dsa_owner_weight_contract,
-        validate_dsa_runtime_registration, validate_stream_probe_outcome, CudaEvent, CudaStream,
-        DsaGraphScoreBackend, DsaIndexerOwnerResource, DsaIndexerOwnerWeightIds, ExpertDataPtr,
-        GpuDecodeStore, GpuWeight, GraphW13Path, HqqStageAsyncCopyMode, PeerDemandEntry,
-        PeerDynamicTier, DSA_TOPK_RADIX_THREADS, MODULE_NAME,
+        claimed_peer_route_slots, create_decode_timing_event, dynamic_peer_shard, graph_w13_path,
+        layer_split_sequence_state_contract, marlin_dispatch_for_bits,
+        measured_peer_route_admission,
+        occupancy_active_blocks_per_multiprocessor, peer_selector_check_message, plan_dsa_topk,
+        route_prep_rmsnorm_threads, split_expert_launch_enabled, validate_dsa_indexer_registration,
+        validate_dsa_owner_weight_contract, validate_dsa_runtime_registration,
+        validate_stream_probe_outcome, CudaEvent, CudaStream, DsaGraphScoreBackend,
+        DsaIndexerOwnerResource, DsaIndexerOwnerWeightIds, ExpertDataPtr, GpuDecodeStore,
+        GpuAttnConfig, GpuWeight, GraphW13Path, HqqStageAsyncCopyMode, PeerDemandEntry,
+        PeerDynamicTier, PeerRoutedExpert, PendingPeerDispatch, DSA_TOPK_RADIX_THREADS,
+        MODULE_NAME,
     };
 
     static DSA_CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn split_expert_launch_defaults_on_for_native_dsa_and_honors_overrides() {
+        assert!(split_expert_launch_enabled(true, None));
+        assert!(!split_expert_launch_enabled(false, None));
+        assert!(!split_expert_launch_enabled(true, Some("0")));
+        assert!(split_expert_launch_enabled(false, Some("yes")));
+    }
 
     #[test]
     fn hqq_stage_async_copy_mode_is_stage_specific_and_rejects_invalid_values() {
@@ -8183,7 +8201,7 @@ pub(crate) mod dsa_registration_tests {
         assert!(!warning);
         assert!(message.starts_with("PEER SELECTOR CHECK:"));
         assert!(message.contains("actual_ms_per_token=197.000000"));
-        assert!(message.contains("alternative_layer_split_ms=361.000000"));
+        assert!(message.contains("alternative_ms=361.000000"));
     }
 
     #[test]
@@ -8192,6 +8210,130 @@ pub(crate) mod dsa_registration_tests {
         assert!(warning);
         assert!(message.starts_with("PEER SELECTOR WARNING:"));
         assert!(message.contains("measured result is above the alternative prediction"));
+    }
+
+    #[test]
+    fn n_peer_route_admission_charges_measured_fanout_tail() {
+        let service = [20.0, 35.0, 50.0];
+        assert_eq!(
+            measured_peer_route_admission(&service, 25.0, 30.0, 50.0, 3),
+            vec![false, true, true]
+        );
+        assert_eq!(
+            measured_peer_route_admission(&service, 25.0, 90.0, 50.0, 3),
+            vec![false, false, true]
+        );
+        assert_eq!(
+            measured_peer_route_admission(&service, 120.0, 30.0, 50.0, 3),
+            vec![false, false, false]
+        );
+    }
+
+    #[test]
+    fn n_peer_auto_excludes_unimplemented_sequence_state_layer_split() {
+        let mamba = GpuAttnConfig::Mamba2 {
+            in_proj: 0,
+            out_proj: 0,
+            conv_weight_ptr: 0,
+            a_ptr: 0,
+            d_ptr: 0,
+            dt_bias_ptr: 0,
+            norm_weight_ptr: 0,
+            num_heads: 1,
+            head_dim: 1,
+            state_size: 1,
+            expand: 1,
+            conv_kernel: 1,
+            conv_dim: 1,
+            conv_state_ptr: 0,
+            ssm_state_ptr: 0,
+        };
+        assert_eq!(
+            layer_split_sequence_state_contract(&mamba, 0),
+            Some("Mamba2 sequence-state")
+        );
+
+        let attention_free = GpuAttnConfig::GQA {
+            q_proj: 0,
+            k_proj: 0,
+            v_proj: 0,
+            o_proj: 0,
+            fused_qkv: None,
+            head_gate_proj: None,
+            num_heads: 0,
+            num_kv_heads: 0,
+            head_dim: 0,
+            rope_half_dim: 0,
+            rope_cos_ptr: 0,
+            rope_sin_ptr: 0,
+            sm_scale: 0.0,
+            q_norm_ptr: 0,
+            k_norm_ptr: 0,
+            gated: false,
+        };
+        assert_eq!(
+            layer_split_sequence_state_contract(&attention_free, 0),
+            Some("attention-free sequence-state")
+        );
+        assert_eq!(
+            layer_split_sequence_state_contract(&attention_free, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn n_peer_dynamic_shards_are_deterministic_and_cover_every_peer() {
+        assert_eq!(dynamic_peer_shard(0, 0, 8, 0), None);
+        let owners = (0..12)
+            .map(|expert| dynamic_peer_shard(3, expert, 12, 4).unwrap())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(owners, std::collections::HashSet::from([0, 1, 2, 3]));
+        assert_eq!(
+            dynamic_peer_shard(7, 9, 128, 5),
+            dynamic_peer_shard(7, 9, 128, 5)
+        );
+    }
+
+    #[test]
+    fn n_peer_route_claims_accept_disjoint_slots_and_reject_duplicates() {
+        let route = |expert_idx, batch_slot| PeerRoutedExpert {
+            expert_idx,
+            weight: 0.25,
+            batch_slot,
+        };
+        let disjoint = vec![
+            PendingPeerDispatch {
+                peer_index: 0,
+                routes: vec![route(4, 0), route(5, 2)],
+                started: std::time::Instant::now(),
+            },
+            PendingPeerDispatch {
+                peer_index: 1,
+                routes: vec![route(6, 1)],
+                started: std::time::Instant::now(),
+            },
+            PendingPeerDispatch {
+                peer_index: 2,
+                routes: vec![route(7, 3)],
+                started: std::time::Instant::now(),
+            },
+        ];
+        assert_eq!(claimed_peer_route_slots(&disjoint).unwrap().len(), 4);
+        let duplicated = vec![
+            PendingPeerDispatch {
+                peer_index: 0,
+                routes: vec![route(4, 1)],
+                started: std::time::Instant::now(),
+            },
+            PendingPeerDispatch {
+                peer_index: 1,
+                routes: vec![route(5, 1)],
+                started: std::time::Instant::now(),
+            },
+        ];
+        assert!(claimed_peer_route_slots(&duplicated)
+            .unwrap_err()
+            .contains("multiple peers claimed routed slot 1"));
     }
 
     #[test]
@@ -8378,7 +8520,8 @@ pub(crate) mod dsa_registration_tests {
     #[test]
     fn softmax_topk_parallel_scores_matches_serial_bit_exact() {
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let serial = device
             .get_func(MODULE_NAME, "softmax_topk")
@@ -8521,7 +8664,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let kernel = device
             .get_func(MODULE_NAME, "fused_add_rmsnorm")
@@ -8596,7 +8740,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let kernel = device
             .get_func(MODULE_NAME, "deepseek_v4_rmsnorm_rows_bf16_kernel")
@@ -8675,7 +8820,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let reference = device
             .get_func(MODULE_NAME, "deepseek_v4_sparse_scores_kernel")
@@ -8877,7 +9023,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let reference = device
             .get_func(MODULE_NAME, "deepseek_v4_sparse_output_kernel")
@@ -9002,7 +9149,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let reference = device
             .get_func(
@@ -9144,7 +9292,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let scorer = device
             .get_func(MODULE_NAME, "deepseek_v4_index_scores_native_decode_kernel")
@@ -9221,29 +9370,27 @@ pub(crate) mod dsa_registration_tests {
                       grid: usize,
                       clear_inactive_tail: bool| {
             unsafe {
-                kernel
-                    .clone()
-                    .launch(
-                        LaunchConfig {
-                            grid_dim: (u32::try_from(grid).expect("score grid u32"), 1, 1),
-                            block_dim: (score_threads, 1, 1),
-                            shared_mem_bytes: u32::try_from(shared_bytes)
-                                .expect("score shared bytes u32"),
-                        },
-                        (
-                            output,
-                            &codes,
-                            &scale_exponents,
-                            &query,
-                            &head_weights,
-                            compressed_count,
-                            i32::try_from(score_capacity).expect("score capacity i32"),
-                            i32::try_from(index_heads).expect("index heads i32"),
-                            i32::try_from(index_head_dim).expect("index head dim i32"),
-                            i32::try_from(block_size).expect("block size i32"),
-                            if clear_inactive_tail { 1i32 } else { 0i32 },
-                        ),
-                    )
+                kernel.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (u32::try_from(grid).expect("score grid u32"), 1, 1),
+                        block_dim: (score_threads, 1, 1),
+                        shared_mem_bytes: u32::try_from(shared_bytes)
+                            .expect("score shared bytes u32"),
+                    },
+                    (
+                        output,
+                        &codes,
+                        &scale_exponents,
+                        &query,
+                        &head_weights,
+                        compressed_count,
+                        i32::try_from(score_capacity).expect("score capacity i32"),
+                        i32::try_from(index_heads).expect("index heads i32"),
+                        i32::try_from(index_head_dim).expect("index head dim i32"),
+                        i32::try_from(block_size).expect("block size i32"),
+                        if clear_inactive_tail { 1i32 } else { 0i32 },
+                    ),
+                )
             }
             .expect("Native learned-index score launch");
         };
@@ -9294,8 +9441,7 @@ pub(crate) mod dsa_registration_tests {
             let block_threads = if radix_linear {
                 u32::try_from(DSA_TOPK_RADIX_THREADS).expect("radix block width u32")
             } else {
-                u32::try_from(topk_plan.sort_width.clamp(1, 256))
-                    .expect("top-k block width u32")
+                u32::try_from(topk_plan.sort_width.clamp(1, 256)).expect("top-k block width u32")
             };
             let shared_bytes = if radix_linear {
                 0
@@ -9318,30 +9464,27 @@ pub(crate) mod dsa_registration_tests {
                 (*scores_a.device_ptr(), *indices_a.device_ptr())
             };
             unsafe {
-                base_sort
-                    .clone()
-                    .launch(
-                        LaunchConfig {
-                            grid_dim: (
-                                u32::try_from(topk_plan.initial_runs)
-                                    .expect("top-k initial runs u32"),
-                                1,
-                                1,
-                            ),
-                            block_dim: (block_threads, 1, 1),
-                            shared_mem_bytes: shared_bytes,
-                        },
-                        (
-                            *scores.device_ptr(),
-                            base_scores,
-                            base_indices,
-                            *final_indices.device_ptr(),
-                            *compressed_count.device_ptr(),
-                            capacity_i32,
-                            selected_i32,
-                            sort_width_i32,
+                base_sort.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (
+                            u32::try_from(topk_plan.initial_runs).expect("top-k initial runs u32"),
+                            1,
+                            1,
                         ),
-                    )
+                        block_dim: (block_threads, 1, 1),
+                        shared_mem_bytes: shared_bytes,
+                    },
+                    (
+                        *scores.device_ptr(),
+                        base_scores,
+                        base_indices,
+                        *final_indices.device_ptr(),
+                        *compressed_count.device_ptr(),
+                        capacity_i32,
+                        selected_i32,
+                        sort_width_i32,
+                    ),
+                )
             }
             .expect("graph top-k base sort");
             if topk_plan.initial_runs > 1 {
@@ -9371,32 +9514,29 @@ pub(crate) mod dsa_registration_tests {
                         *indices_a.device_ptr()
                     };
                     unsafe {
-                        merge
-                            .clone()
-                            .launch(
-                                LaunchConfig {
-                                    grid_dim: (
-                                        u32::try_from(output_runs)
-                                            .expect("top-k output runs u32"),
-                                        1,
-                                        1,
-                                    ),
-                                    block_dim: (block_threads, 1, 1),
-                                    shared_mem_bytes: shared_bytes,
-                                },
-                                (
-                                    input_scores,
-                                    input_indices,
-                                    output_scores,
-                                    output_indices,
-                                    *final_indices.device_ptr(),
-                                    *compressed_count.device_ptr(),
-                                    capacity_i32,
-                                    selected_i32,
-                                    sort_width_i32,
-                                    i32::try_from(merge_pass).expect("merge pass i32"),
+                        merge.clone().launch(
+                            LaunchConfig {
+                                grid_dim: (
+                                    u32::try_from(output_runs).expect("top-k output runs u32"),
+                                    1,
+                                    1,
                                 ),
-                            )
+                                block_dim: (block_threads, 1, 1),
+                                shared_mem_bytes: shared_bytes,
+                            },
+                            (
+                                input_scores,
+                                input_indices,
+                                output_scores,
+                                output_indices,
+                                *final_indices.device_ptr(),
+                                *compressed_count.device_ptr(),
+                                capacity_i32,
+                                selected_i32,
+                                sort_width_i32,
+                                i32::try_from(merge_pass).expect("merge pass i32"),
+                            ),
+                        )
                     }
                     .expect("graph top-k merge");
                     input_runs = output_runs;
@@ -9479,8 +9619,7 @@ pub(crate) mod dsa_registration_tests {
                 occupancy_bitonic,
                 "Native learned-index graph top-k changed with occupancy/no-tail grid at context {context}",
             );
-            let occupancy_radix =
-                run_graph_topk(&occupancy_output, &compressed_count, true, true);
+            let occupancy_radix = run_graph_topk(&occupancy_output, &compressed_count, true, true);
             assert_eq!(
                 occupancy_bitonic,
                 occupancy_radix,
@@ -9489,7 +9628,9 @@ pub(crate) mod dsa_registration_tests {
         }
         let timed_context = score_capacity.saturating_sub(3);
         let timed_count = device
-            .htod_copy(vec![i32::try_from(timed_context).expect("timed context i32")])
+            .htod_copy(vec![
+                i32::try_from(timed_context).expect("timed context i32")
+            ])
             .expect("timed compressed count H2D");
         let iterations = 100usize;
         let time_topk = |radix_linear: bool| {
@@ -9530,7 +9671,6 @@ pub(crate) mod dsa_registration_tests {
             "DeepSeek-V4 Native learned-index occupancy/top-k diagnostic sms={sm_grid} active_blocks_per_sm={active_blocks} sm_grid={sm_grid} occupancy_grid={occupancy_grid} score_capacity={score_capacity} timed_context={timed_context} iterations={iterations} bitonic_ms={bitonic_ms:.6} radix_linear_ms={radix_linear_ms:.6} speedup={:.6}x",
             bitonic_ms / radix_linear_ms,
         );
-
     }
 
     #[test]
@@ -9538,7 +9678,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         for (groups, rows_per_group, cols_per_group) in [(8usize, 128usize, 1024usize), (3, 7, 37)]
         {
@@ -9647,7 +9788,6 @@ pub(crate) mod dsa_registration_tests {
                 max_abs,
                 max_ulp_distance,
             );
-
         }
     }
 
@@ -9656,7 +9796,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let serial_reduce = device
             .get_func(MODULE_NAME, "deepseek_v4_hc_reduce_kernel")
@@ -9902,7 +10043,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let router = device
             .get_func(MODULE_NAME, "deepseek_v4_sqrtsoftplus_topk")
@@ -10304,7 +10446,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let kernel = device
             .get_func(MODULE_NAME, "hqq4_decode_gemv_f32")
@@ -10395,7 +10538,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let scalar = device
             .get_func(MODULE_NAME, "hqq6_decode_gemv_bf16")
@@ -10557,58 +10701,59 @@ pub(crate) mod dsa_registration_tests {
                 .alloc_zeros::<u16>(rows)
                 .expect("parallel Q-B branch output");
             let branch_threads = rows.min(1024).next_power_of_two().max(32) as u32;
-            let launch_projection = |output: &mut cudarc::driver::CudaSlice<u16>,
-                                     stream: Option<&cudarc::driver::CudaStream>| {
-                let config = LaunchConfig {
-                    grid_dim: (rows.div_ceil(8) as u32, 1, 1),
-                    block_dim: (256, 1, 1),
-                    shared_mem_bytes: (cols * 2) as u32,
-                };
-                unsafe {
-                    if let Some(stream) = stream {
-                        quartet
-                            .clone()
-                            .launch_on_stream(
-                                stream,
-                                config,
-                                (
-                                    &packed,
-                                    &scales,
-                                    &zeros,
-                                    &input,
-                                    output,
-                                    rows as i32,
-                                    cols as i32,
-                                    group_size as i32,
-                                    packed_stride as i32,
-                                    scale_stride as i32,
-                                    zero_stride as i32,
-                                ),
-                            )
-                            .expect("parallel Q-B projection");
-                    } else {
-                        quartet
-                            .clone()
-                            .launch(
-                                config,
-                                (
-                                    &packed,
-                                    &scales,
-                                    &zeros,
-                                    &input,
-                                    output,
-                                    rows as i32,
-                                    cols as i32,
-                                    group_size as i32,
-                                    packed_stride as i32,
-                                    scale_stride as i32,
-                                    zero_stride as i32,
-                                ),
-                            )
-                            .expect("serial Q-B projection");
+            let launch_projection =
+                |output: &mut cudarc::driver::CudaSlice<u16>,
+                 stream: Option<&cudarc::driver::CudaStream>| {
+                    let config = LaunchConfig {
+                        grid_dim: (rows.div_ceil(8) as u32, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: (cols * 2) as u32,
+                    };
+                    unsafe {
+                        if let Some(stream) = stream {
+                            quartet
+                                .clone()
+                                .launch_on_stream(
+                                    stream,
+                                    config,
+                                    (
+                                        &packed,
+                                        &scales,
+                                        &zeros,
+                                        &input,
+                                        output,
+                                        rows as i32,
+                                        cols as i32,
+                                        group_size as i32,
+                                        packed_stride as i32,
+                                        scale_stride as i32,
+                                        zero_stride as i32,
+                                    ),
+                                )
+                                .expect("parallel Q-B projection");
+                        } else {
+                            quartet
+                                .clone()
+                                .launch(
+                                    config,
+                                    (
+                                        &packed,
+                                        &scales,
+                                        &zeros,
+                                        &input,
+                                        output,
+                                        rows as i32,
+                                        cols as i32,
+                                        group_size as i32,
+                                        packed_stride as i32,
+                                        scale_stride as i32,
+                                        zero_stride as i32,
+                                    ),
+                                )
+                                .expect("serial Q-B projection");
+                        }
                     }
-                }
-            };
+                };
             launch_projection(&mut serial_branch, None);
             let serial_branch_ptr = *serial_branch.device_ptr();
             unsafe {
@@ -10720,10 +10865,8 @@ pub(crate) mod dsa_registration_tests {
             let mut threads = 32usize;
             while threads <= max_threads as usize {
                 let quartet_output = launch(&quartet, threads);
-                for (row, (&expected_bits, &actual_bits)) in scalar_output
-                    .iter()
-                    .zip(quartet_output.iter())
-                    .enumerate()
+                for (row, (&expected_bits, &actual_bits)) in
+                    scalar_output.iter().zip(quartet_output.iter()).enumerate()
                 {
                     let expected = bf16_to_f32(expected_bits);
                     let actual = bf16_to_f32(actual_bits);
@@ -10744,7 +10887,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let n16 = device
             .get_func(MODULE_NAME, "marlin_gemv_int4_v2_batched")
@@ -10753,13 +10897,11 @@ pub(crate) mod dsa_registration_tests {
             .get_func(MODULE_NAME, "marlin_gemv_int4_v2_batched_n32")
             .expect("N32 INT4 W13 kernel");
 
-        for &(k, n, group_size, k_splits) in
-            &[
-                (512usize, 96usize, 128usize, 1usize),
-                (512, 80, 64, 2),
-                (512, 128, 128, 1),
-            ]
-        {
+        for &(k, n, group_size, k_splits) in &[
+            (512usize, 96usize, 128usize, 1usize),
+            (512, 80, 64, 2),
+            (512, 128, 128, 1),
+        ] {
             let topk = 3usize;
             let packed_words = (k / 16) * (2 * n);
             let scale_elems = k.div_ceil(group_size) * n;
@@ -10784,8 +10926,7 @@ pub(crate) mod dsa_registration_tests {
                             (0..scale_elems)
                                 .map(|index| {
                                     f32_to_bf16(
-                                        0.002f32
-                                            + (expert * scale_elems + index) as f32 * 0.000001,
+                                        0.002f32 + (expert * scale_elems + index) as f32 * 0.000001,
                                     )
                                 })
                                 .collect::<Vec<_>>(),
@@ -10848,12 +10989,13 @@ pub(crate) mod dsa_registration_tests {
                         .clone()
                         .launch(
                             LaunchConfig {
-                                grid_dim: (n.div_ceil(tile_width) as u32, k_splits as u32, topk as u32),
+                                grid_dim: (
+                                    n.div_ceil(tile_width) as u32,
+                                    k_splits as u32,
+                                    topk as u32,
+                                ),
                                 block_dim: (threads, 1, 1),
-                                shared_mem_bytes: (k * 2
-                                    + 1024 * 4
-                                    + 64 * 4
-                                    + 16 * tile_width * 4)
+                                shared_mem_bytes: (k * 2 + 1024 * 4 + 64 * 4 + 16 * tile_width * 4)
                                     as u32,
                             },
                             (
@@ -10889,7 +11031,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let n16 = device
             .get_func(MODULE_NAME, "fused_silu_w2_batched")
@@ -10898,13 +11041,11 @@ pub(crate) mod dsa_registration_tests {
             .get_func(MODULE_NAME, "fused_silu_w2_batched_n32")
             .expect("N32 INT4 W2 kernel");
 
-        for &(k, n, group_size) in
-            &[
-                (512usize, 96usize, 128usize),
-                (1024, 80, 64),
-                (512, 128, 128),
-            ]
-        {
+        for &(k, n, group_size) in &[
+            (512usize, 96usize, 128usize),
+            (1024, 80, 64),
+            (512, 128, 128),
+        ] {
             let topk = 3usize;
             let packed_words = (k / 16) * (2 * n);
             let scale_elems = k.div_ceil(group_size) * n;
@@ -10929,8 +11070,7 @@ pub(crate) mod dsa_registration_tests {
                             (0..scale_elems)
                                 .map(|index| {
                                     f32_to_bf16(
-                                        0.002f32
-                                            + (expert * scale_elems + index) as f32 * 0.000001,
+                                        0.002f32 + (expert * scale_elems + index) as f32 * 0.000001,
                                     )
                                 })
                                 .collect::<Vec<_>>(),
@@ -11008,10 +11148,7 @@ pub(crate) mod dsa_registration_tests {
                             LaunchConfig {
                                 grid_dim: (n.div_ceil(tile_width) as u32, 1, topk as u32),
                                 block_dim: (threads, 1, 1),
-                                shared_mem_bytes: (k * 2
-                                    + 1024 * 4
-                                    + 64 * 4
-                                    + reduction_bytes)
+                                shared_mem_bytes: (k * 2 + 1024 * 4 + 64 * 4 + reduction_bytes)
                                     as u32,
                             },
                             (
@@ -11048,7 +11185,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::f32_to_bf16;
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let baseline = device
             .get_func(MODULE_NAME, "hqq4_decode_gemv_f32")
@@ -11137,7 +11275,8 @@ pub(crate) mod dsa_registration_tests {
         use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
 
         let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
-        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
+        let store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA decode store");
         let device = store.device.clone();
         let kernel = device
             .get_func(MODULE_NAME, "reduce_ksplits_sigmoid_accum_bf16")
@@ -11509,8 +11648,8 @@ pub(crate) mod dsa_registration_tests {
                 .device_ptr()
         );
 
-        let mut source =
-            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("source CUDA decode store");
+        let mut source = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false)
+            .expect("source CUDA decode store");
         source
             .configure(8, 2, 16, 1e-6, 2, 8, 16, 4, 4, 8, 8)
             .expect("source graph");
@@ -11560,8 +11699,8 @@ pub(crate) mod dsa_registration_tests {
             .expect("replica D2H");
         assert_eq!(copied, vec![3, 1, 2, 0]);
 
-        let mut local_destination =
-            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("local destination store");
+        let mut local_destination = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false)
+            .expect("local destination store");
         local_destination
             .configure(8, 2, 16, 1e-6, 2, 8, 16, 4, 4, 8, 8)
             .expect("local destination graph");
@@ -14530,9 +14669,10 @@ struct PeerExpertRuntime {
     sequence: u32,
     service_p95_us_by_routes: Vec<f64>,
     rtt_p95_us: f64,
+    fanout_rtt_p95_us: f64,
     local_cold_p95_us_per_expert: f64,
     predicted_peer_ms_per_token: f64,
-    alternative_split_ms_per_token: f64,
+    alternative_ms_per_token: f64,
     selector_uncertainty_ms: f64,
     prediction_checked: bool,
     admitted_route_counts: Vec<bool>,
@@ -14676,10 +14816,10 @@ impl Drop for PeerDynamicTier {
 fn peer_selector_check_message(
     actual_ms: f64,
     predicted_peer_ms: f64,
-    alternative_split_ms: f64,
+    alternative_ms: f64,
     uncertainty_ms: f64,
 ) -> (bool, String) {
-    let alternative_materially_better = actual_ms > alternative_split_ms + uncertainty_ms;
+    let alternative_materially_better = actual_ms > alternative_ms + uncertainty_ms;
     let label = if alternative_materially_better {
         "PEER SELECTOR WARNING"
     } else {
@@ -14693,29 +14833,59 @@ fn peer_selector_check_message(
     (
         alternative_materially_better,
         format!(
-            "{label}: actual_ms_per_token={actual_ms:.6} predicted_peer_ms={predicted_peer_ms:.6} alternative_layer_split_ms={alternative_split_ms:.6} uncertainty_ms={uncertainty_ms:.6}{suffix}"
+            "{label}: actual_ms_per_token={actual_ms:.6} predicted_peer_ms={predicted_peer_ms:.6} alternative_ms={alternative_ms:.6} uncertainty_ms={uncertainty_ms:.6}{suffix}"
         ),
     )
+}
+
+fn measured_peer_route_admission(
+    service_p95_us_by_routes: &[f64],
+    standalone_rtt_p95_us: f64,
+    fanout_rtt_p95_us: f64,
+    local_cold_p95_us_per_expert: f64,
+    topk: usize,
+) -> Vec<bool> {
+    let effective_rtt_p95_us = standalone_rtt_p95_us.max(fanout_rtt_p95_us);
+    (1..=topk)
+        .map(|count| {
+            effective_rtt_p95_us + service_p95_us_by_routes[count - 1]
+                < local_cold_p95_us_per_expert * count as f64
+        })
+        .collect()
+}
+
+fn layer_split_sequence_state_contract(
+    attn: &GpuAttnConfig,
+    post_attn_norm_ptr: u64,
+) -> Option<&'static str> {
+    match attn {
+        GpuAttnConfig::Mamba2 { .. } => Some("Mamba2 sequence-state"),
+        GpuAttnConfig::GQA { num_heads: 0, .. } if post_attn_norm_ptr == 0 => {
+            Some("attention-free sequence-state")
+        }
+        _ => None,
+    }
 }
 
 fn check_peer_mode_prediction(graph: &mut GpuDecodeGraph, generated: usize, elapsed_seconds: f64) {
     if generated == 0 {
         return;
     }
-    let Some(peer) = graph.peer_expert.as_mut() else {
+    let Some(peer) = graph.peer_experts.first() else {
         return;
     };
     if peer.prediction_checked {
         return;
     }
-    peer.prediction_checked = true;
+    let predicted_peer_ms = peer.predicted_peer_ms_per_token;
+    let alternative_ms = peer.alternative_ms_per_token;
+    let uncertainty_ms = peer.selector_uncertainty_ms;
+    for peer in &mut graph.peer_experts {
+        peer.prediction_checked = true;
+    }
     let actual_ms = elapsed_seconds / generated as f64 * 1_000.0;
-    let (_, message) = peer_selector_check_message(
-        actual_ms,
-        peer.predicted_peer_ms_per_token,
-        peer.alternative_split_ms_per_token,
-        peer.selector_uncertainty_ms,
-    );
+    let (_, message) =
+        peer_selector_check_message(actual_ms, predicted_peer_ms, alternative_ms, uncertainty_ms);
     eprintln!("{message}");
 }
 
@@ -14727,8 +14897,43 @@ struct PeerRoutedExpert {
 }
 
 struct PendingPeerDispatch {
+    peer_index: usize,
     routes: Vec<PeerRoutedExpert>,
     started: std::time::Instant,
+}
+
+fn dynamic_peer_shard(
+    layer_idx: usize,
+    expert_idx: usize,
+    experts_per_layer: usize,
+    peer_count: usize,
+) -> Option<usize> {
+    if peer_count == 0 {
+        return None;
+    }
+    Some(
+        layer_idx
+            .wrapping_mul(experts_per_layer.max(1))
+            .wrapping_add(expert_idx)
+            % peer_count,
+    )
+}
+
+fn claimed_peer_route_slots(
+    pending_peers: &[PendingPeerDispatch],
+) -> Result<HashSet<usize>, String> {
+    let mut claimed = HashSet::new();
+    for pending in pending_peers {
+        for route in &pending.routes {
+            if !claimed.insert(route.batch_slot) {
+                return Err(format!(
+                    "multiple peers claimed routed slot {} (latest peer {})",
+                    route.batch_slot, pending.peer_index,
+                ));
+            }
+        }
+    }
+    Ok(claimed)
 }
 
 impl PeerExpertRuntime {
@@ -15033,10 +15238,10 @@ struct GpuDecodeGraph {
     // HCS: Hot Cache Strategy state
     hcs: Option<HcsState>,
 
-    // Optional secondary-GPU expert server. The primary retains every layer;
-    // this tier only duplicates heat-ranked routed experts and contributes a
-    // weighted output through a portable pinned-host mailbox.
-    peer_expert: Option<PeerExpertRuntime>,
+    // Optional expert-serving GPU vector. The primary retains every layer;
+    // each peer owns a globally disjoint HCS tier and contributes one weighted
+    // partial through its own portable pinned-host mailbox.
+    peer_experts: Vec<PeerExpertRuntime>,
 
     // GPU scratch buffers
     d_hidden: cudarc::driver::CudaSlice<u16>,
@@ -19310,10 +19515,7 @@ struct DeepseekV4DecodePolicy {
 impl DeepseekV4DecodePolicy {
     fn from_env(deepseek_specific_default: bool) -> Result<Self, String> {
         let policy = Self {
-            hqq6_vec4: resolve_bool_env(
-                "KRASIS_DECODE_V4_HQQ6_VEC4",
-                deepseek_specific_default,
-            )?,
+            hqq6_vec4: resolve_bool_env("KRASIS_DECODE_V4_HQQ6_VEC4", deepseek_specific_default)?,
             hqq6_warp_autotune: resolve_bool_env(
                 "KRASIS_DECODE_V4_HQQ6_WARP_AUTOTUNE",
                 deepseek_specific_default,
@@ -19322,14 +19524,8 @@ impl DeepseekV4DecodePolicy {
                 "KRASIS_DECODE_INT4_W13_N32",
                 deepseek_specific_default,
             )?,
-            int4_w2_n32: resolve_bool_env(
-                "KRASIS_DECODE_INT4_W2_N32",
-                deepseek_specific_default,
-            )?,
-            index_radix_topk: resolve_bool_env(
-                "KRASIS_DECODE_V4_INDEX_RADIX_TOPK",
-                false,
-            )?,
+            int4_w2_n32: resolve_bool_env("KRASIS_DECODE_INT4_W2_N32", deepseek_specific_default)?,
+            index_radix_topk: resolve_bool_env("KRASIS_DECODE_V4_INDEX_RADIX_TOPK", false)?,
             parallel_wkv: resolve_bool_env(
                 "KRASIS_DECODE_V4_PARALLEL_WKV",
                 deepseek_specific_default,
@@ -19338,24 +19534,17 @@ impl DeepseekV4DecodePolicy {
                 "KRASIS_DECODE_V4_PARALLEL_QB",
                 deepseek_specific_default,
             )?,
-            hc_tiled: resolve_bool_env(
-                "KRASIS_DECODE_V4_HC_TILED",
-                deepseek_specific_default,
-            )?,
+            hc_tiled: resolve_bool_env("KRASIS_DECODE_V4_HC_TILED", deepseek_specific_default)?,
             // These autotuners measure the loaded model's real shapes and
             // weights, and retain the formula/current kernel unless the
             // measured alternative clears the configured margin. They are
             // shared MoE policy, not DeepSeek-specific policy.
             marlin_autotune: resolve_bool_env("KRASIS_MARLIN_AUTOTUNE", true)?,
-            shared_w2_autotune: resolve_bool_env(
-                "KRASIS_SHARED_W2_AUTOTUNE",
-                true,
-            )?,
+            shared_w2_autotune: resolve_bool_env("KRASIS_SHARED_W2_AUTOTUNE", true)?,
         };
         if policy.parallel_qb && !policy.parallel_wkv {
             return Err(
-                "KRASIS_DECODE_V4_PARALLEL_QB requires KRASIS_DECODE_V4_PARALLEL_WKV"
-                    .to_string(),
+                "KRASIS_DECODE_V4_PARALLEL_QB requires KRASIS_DECODE_V4_PARALLEL_WKV".to_string(),
             );
         }
         Ok(policy)
@@ -19478,8 +19667,7 @@ pub struct GpuDecodeStore {
     /// by rows, cols, group size, and all three descriptor row strides.
     /// Empty/default keeps the established 8-warp launch. Store-scoped so
     /// independent GPUs never share a measured choice.
-    hqq6_decode_vec4_warps_per_block:
-        HashMap<(usize, usize, usize, usize, usize, usize), usize>,
+    hqq6_decode_vec4_warps_per_block: HashMap<(usize, usize, usize, usize, usize, usize), usize>,
     #[cfg(feature = "gpu-debug")]
     debug_stop_layer: usize,
     #[cfg(feature = "gpu-debug")]
@@ -22720,10 +22908,10 @@ impl GpuDecodeStore {
         let mut a2 = desc.zeros_ptr;
         let mut a3 = input_ptr;
         let mut a4 = output_ptr;
-        let mut a5 = i32::try_from(desc.rows)
-            .map_err(|_| format!("{} rows exceed i32", tensor_name))?;
-        let mut a6 = i32::try_from(desc.cols)
-            .map_err(|_| format!("{} columns exceed i32", tensor_name))?;
+        let mut a5 =
+            i32::try_from(desc.rows).map_err(|_| format!("{} rows exceed i32", tensor_name))?;
+        let mut a6 =
+            i32::try_from(desc.cols).map_err(|_| format!("{} columns exceed i32", tensor_name))?;
         let mut a7 = i32::try_from(desc.group_size)
             .map_err(|_| format!("{} group size exceeds i32", tensor_name))?;
         let mut a8 = i32::try_from(desc.packed_row_stride_bytes)
@@ -22852,9 +23040,8 @@ impl GpuDecodeStore {
                 &mut a15 as *mut _ as *mut std::ffi::c_void,
                 &mut a16 as *mut _ as *mut std::ffi::c_void,
             ];
-            let grid_x = u32::try_from(sidecar.row_group_count).map_err(|_| {
-                format!("{} sidecar row-group count exceeds u32", tensor_name)
-            })?;
+            let grid_x = u32::try_from(sidecar.row_group_count)
+                .map_err(|_| format!("{} sidecar row-group count exceeds u32", tensor_name))?;
             let launch = unsafe {
                 cuda_sys::lib().cuLaunchKernel(
                     extract_cu_function(&kernel),
@@ -23306,18 +23493,17 @@ impl GpuDecodeStore {
                 .iter()
                 .filter(|&&value| value <= desc.rows.max(1))
             {
-                self.hqq6_decode_vec4_warps_per_block
-                    .insert(
-                        (
-                            desc.rows,
-                            desc.cols,
-                            desc.group_size,
-                            desc.packed_row_stride_bytes,
-                            desc.scales_row_stride_bytes,
-                            desc.zeros_row_stride_bytes,
-                        ),
-                        candidate,
-                    );
+                self.hqq6_decode_vec4_warps_per_block.insert(
+                    (
+                        desc.rows,
+                        desc.cols,
+                        desc.group_size,
+                        desc.packed_row_stride_bytes,
+                        desc.scales_row_stride_bytes,
+                        desc.zeros_row_stride_bytes,
+                    ),
+                    candidate,
+                );
                 let launch = |store: &GpuDecodeStore, reps: usize| -> Result<(), String> {
                     for _ in 0..reps {
                         store.launch_hqq6_decode_gemv_bf16_vec4(
@@ -23389,18 +23575,17 @@ impl GpuDecodeStore {
                 .map(|(candidate, ms)| format!("{}:{:.4}ms", candidate, ms))
                 .collect::<Vec<_>>()
                 .join(" ");
-            self.hqq6_decode_vec4_warps_per_block
-                .insert(
-                    (
-                        desc.rows,
-                        desc.cols,
-                        desc.group_size,
-                        desc.packed_row_stride_bytes,
-                        desc.scales_row_stride_bytes,
-                        desc.zeros_row_stride_bytes,
-                    ),
-                    best_warps,
-                );
+            self.hqq6_decode_vec4_warps_per_block.insert(
+                (
+                    desc.rows,
+                    desc.cols,
+                    desc.group_size,
+                    desc.packed_row_stride_bytes,
+                    desc.scales_row_stride_bytes,
+                    desc.zeros_row_stride_bytes,
+                ),
+                best_warps,
+            );
             eprintln!(
                 "[deepseek-hqq6-warp-autotune] tensor={} shape={}x{} candidates [{}] -> {} warps ({:.4} ms median)",
                 tensor_name, desc.rows, desc.cols, details, best_warps, best_ms
@@ -23655,6 +23840,384 @@ impl GpuDecodeStore {
             desc.q_proj.tensor_bytes + desc.k_proj.tensor_bytes + desc.v_proj.tensor_bytes + desc.o_proj.tensor_bytes,
         );
         Ok(())
+    }
+
+    /// Measure the transport critical path when the primary fans one hidden
+    /// vector out to every selected peer concurrently.  Individual RTTs do
+    /// not expose shared root-complex or host-memory contention, so the
+    /// topology selector uses this distribution in addition to each peer's
+    /// standalone RTT and expert-service curve.
+    fn measure_peer_fanout_round_trip_json_impl(
+        &mut self,
+        peer_store_addrs: &[usize],
+        warmup_samples: usize,
+        measured_samples: usize,
+        timeout_ms: u64,
+    ) -> PyResult<String> {
+        if peer_store_addrs.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer fanout RTT requires at least one peer store",
+            ));
+        }
+        if measured_samples == 0 || timeout_ms == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer fanout RTT requires non-zero samples and timeout",
+            ));
+        }
+        let mut unique_addrs = HashSet::with_capacity(peer_store_addrs.len());
+        for (peer_index, &peer_store_addr) in peer_store_addrs.iter().enumerate() {
+            if peer_store_addr == 0 || peer_store_addr == self as *mut Self as usize {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "peer fanout RTT peer {peer_index} is not a distinct live store",
+                )));
+            }
+            if !unique_addrs.insert(peer_store_addr) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "peer fanout RTT contains duplicate store address at peer {peer_index}",
+                )));
+            }
+        }
+        let iterations = warmup_samples
+            .checked_add(measured_samples)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "peer fanout RTT sample count exceeds the mailbox sequence range",
+                )
+            })?;
+        let (hidden_size, primary_publish, primary_wait) = {
+            let graph = self.graph.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("primary store is not configured")
+            })?;
+            let kernels = graph.kernels.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("primary kernels are not cached")
+            })?;
+            (
+                graph.hidden_size,
+                extract_cu_function(&kernels.peer_publish_request),
+                extract_cu_function(&kernels.peer_wait_response),
+            )
+        };
+        for (peer_index, &peer_store_addr) in peer_store_addrs.iter().enumerate() {
+            let peer_store = unsafe { &mut *(peer_store_addr as *mut GpuDecodeStore) };
+            if !peer_store.expert_only_peer_store {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "peer fanout RTT address {peer_index} is not an expert-only store",
+                )));
+            }
+            let peer_hidden = peer_store
+                .graph
+                .as_ref()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "peer fanout RTT store {peer_index} is not configured",
+                    ))
+                })?
+                .hidden_size;
+            if hidden_size != peer_hidden {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "peer fanout RTT hidden-size mismatch at peer {peer_index}: primary={hidden_size} peer={peer_hidden}",
+                )));
+            }
+        }
+        let message_bytes = hidden_size
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("peer fanout RTT byte overflow")
+            })?;
+        if message_bytes % std::mem::size_of::<u32>() != 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "peer fanout RTT hidden payload is not u32 aligned",
+            ));
+        }
+        let mailbox_bytes = PEER_MAILBOX_CONTROL_BYTES
+            .checked_add(message_bytes.saturating_mul(2))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("peer fanout RTT mailbox overflow")
+            })?;
+
+        self.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "bind primary context for peer fanout RTT: {error}",
+            ))
+        })?;
+        let source = (0..hidden_size)
+            .map(|index| ((index.wrapping_mul(131) ^ (index >> 3)) & 0xffff) as u16)
+            .collect::<Vec<_>>();
+        let d_source = self.device.htod_sync_copy(&source).map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "upload peer fanout RTT source: {error:?}",
+            ))
+        })?;
+        struct FanoutEndpoint {
+            store_addr: usize,
+            mailbox: PeerRttMailboxGuard,
+            d_result: cudarc::driver::CudaSlice<u16>,
+        }
+        let mut endpoints = Vec::with_capacity(peer_store_addrs.len());
+        for &store_addr in peer_store_addrs {
+            let mailbox = PeerRttMailboxGuard::new(
+                PinnedMapped::new_portable(mailbox_bytes)
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
+            );
+            let d_result = unsafe { self.device.alloc::<u16>(hidden_size) }.map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "allocate peer fanout RTT result: {error:?}",
+                ))
+            })?;
+            endpoints.push(FanoutEndpoint {
+                store_addr,
+                mailbox,
+                d_result,
+            });
+        }
+
+        // Start every persistent responder before publishing the first
+        // request. Each peer has its own mapped mailbox and CUDA stream.
+        for (peer_index, endpoint) in endpoints.iter_mut().enumerate() {
+            let peer_store = unsafe { &mut *(endpoint.store_addr as *mut GpuDecodeStore) };
+            peer_store.device.bind_to_thread().map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "bind peer {peer_index} for fanout RTT: {error}",
+                ))
+            })?;
+            let peer_mapping = endpoint
+                .mailbox
+                .device_pointer_for_current_context()
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            let peer_round_trip = peer_store
+                .graph
+                .as_ref()
+                .and_then(|graph| graph.kernels.as_ref())
+                .map(|kernels| kernels.peer_mailbox_round_trip_loop.clone())
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "peer {peer_index} kernels are not cached for fanout RTT",
+                    ))
+                })?;
+            unsafe {
+                peer_round_trip
+                    .launch(
+                        cudarc::driver::LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            peer_mapping,
+                            peer_mapping + PEER_MAILBOX_CONTROL_BYTES as u64,
+                            peer_mapping + PEER_MAILBOX_CONTROL_BYTES as u64 + message_bytes as u64,
+                            (message_bytes / std::mem::size_of::<u32>()) as i32,
+                            iterations,
+                        ),
+                    )
+                    .map_err(|error| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "launch persistent peer {peer_index} fanout RTT kernel: {error:?}",
+                        ))
+                    })?;
+            }
+            endpoint.mailbox.mark_peer_active();
+        }
+
+        self.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "restore primary context for peer fanout RTT: {error}",
+            ))
+        })?;
+        let stream = *self.device.cu_stream();
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        let mut samples = Vec::with_capacity(measured_samples);
+        for sample in 0..iterations as usize {
+            let sequence = u32::try_from(sample + 1).unwrap();
+            let started = std::time::Instant::now();
+
+            // Publish all requests first. Responses and their primary waits
+            // are queued only after every peer can begin, matching N-peer
+            // runtime fan-out instead of serial single-peer RTTs.
+            for (peer_index, endpoint) in endpoints.iter().enumerate() {
+                let host_request =
+                    unsafe { endpoint.mailbox.host_ptr.add(PEER_MAILBOX_CONTROL_BYTES) };
+                let download = unsafe {
+                    cuda_sys::lib().cuMemcpyDtoHAsync_v2(
+                        host_request as *mut std::ffi::c_void,
+                        *d_source.device_ptr(),
+                        message_bytes,
+                        stream,
+                    )
+                };
+                if download != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "peer fanout RTT request D2H for peer {peer_index}: {download:?}",
+                    )));
+                }
+                let mut control = endpoint.mailbox.device_ptr;
+                let mut sequence_arg = sequence;
+                let mut params: [*mut std::ffi::c_void; 2] = [
+                    &mut control as *mut _ as *mut std::ffi::c_void,
+                    &mut sequence_arg as *mut _ as *mut std::ffi::c_void,
+                ];
+                let launch = unsafe {
+                    cuda_sys::lib().cuLaunchKernel(
+                        primary_publish,
+                        1,
+                        1,
+                        1,
+                        1,
+                        1,
+                        1,
+                        0,
+                        stream,
+                        params.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                    )
+                };
+                if launch != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "peer fanout RTT publish for peer {peer_index}: {launch:?}",
+                    )));
+                }
+            }
+            for (peer_index, endpoint) in endpoints.iter().enumerate() {
+                let mut control = endpoint.mailbox.device_ptr;
+                let mut sequence_arg = sequence;
+                let mut params: [*mut std::ffi::c_void; 2] = [
+                    &mut control as *mut _ as *mut std::ffi::c_void,
+                    &mut sequence_arg as *mut _ as *mut std::ffi::c_void,
+                ];
+                let wait = unsafe {
+                    cuda_sys::lib().cuLaunchKernel(
+                        primary_wait,
+                        1,
+                        1,
+                        1,
+                        1,
+                        1,
+                        1,
+                        0,
+                        stream,
+                        params.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                    )
+                };
+                if wait != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "peer fanout RTT response wait for peer {peer_index}: {wait:?}",
+                    )));
+                }
+                let host_response = unsafe {
+                    endpoint
+                        .mailbox
+                        .host_ptr
+                        .add(PEER_MAILBOX_CONTROL_BYTES + message_bytes)
+                };
+                let upload = unsafe {
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        *endpoint.d_result.device_ptr(),
+                        host_response as *const std::ffi::c_void,
+                        message_bytes,
+                        stream,
+                    )
+                };
+                if upload != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "peer fanout RTT response H2D for peer {peer_index}: {upload:?}",
+                    )));
+                }
+            }
+            loop {
+                let status = unsafe { cuda_sys::lib().cuStreamQuery(stream) };
+                if status == cuda_sys::CUresult::CUDA_SUCCESS {
+                    break;
+                }
+                if status != cuda_sys::CUresult::CUDA_ERROR_NOT_READY {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "peer fanout RTT primary stream query: {status:?}",
+                    )));
+                }
+                if started.elapsed() >= timeout {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "peer fanout RTT timed out at sequence {sequence} after {timeout_ms} ms",
+                    )));
+                }
+                std::hint::spin_loop();
+            }
+            if sample >= warmup_samples {
+                samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+            }
+        }
+
+        for (peer_index, endpoint) in endpoints.iter_mut().enumerate() {
+            let peer_store = unsafe { &mut *(endpoint.store_addr as *mut GpuDecodeStore) };
+            peer_store.device.bind_to_thread().map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "bind peer {peer_index} for fanout RTT completion: {error}",
+                ))
+            })?;
+            peer_store.device.synchronize().map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "synchronize peer {peer_index} fanout RTT: {error:?}",
+                ))
+            })?;
+            endpoint.mailbox.mark_peer_complete();
+        }
+        self.device.bind_to_thread().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "restore primary after peer fanout RTT: {error}",
+            ))
+        })?;
+        for (peer_index, endpoint) in endpoints.iter().enumerate() {
+            let returned = self
+                .device
+                .dtoh_sync_copy(&endpoint.d_result)
+                .map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "download peer {peer_index} fanout RTT result: {error:?}",
+                    ))
+                })?;
+            if returned != source {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "peer {peer_index} fanout RTT returned a non-identical hidden payload",
+                )));
+            }
+        }
+
+        samples.sort_by(|left, right| left.total_cmp(right));
+        let percentile = |quantile: f64| -> f64 {
+            let rank = quantile * (samples.len() - 1) as f64;
+            let lower = rank.floor() as usize;
+            let upper = rank.ceil() as usize;
+            let fraction = rank - lower as f64;
+            samples[lower] * (1.0 - fraction) + samples[upper] * fraction
+        };
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|value| (value - mean) * (value - mean))
+            .sum::<f64>()
+            / samples.len() as f64;
+        let aggregate_message_bytes =
+            message_bytes.checked_mul(endpoints.len()).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "peer fanout RTT aggregate payload overflow",
+                )
+            })?;
+        Ok(serde_json::json!({
+            "peer_count": endpoints.len(),
+            "message_bytes_each_direction_per_peer": message_bytes,
+            "aggregate_message_bytes_each_direction": aggregate_message_bytes,
+            "warmup_samples": warmup_samples,
+            "measured_samples": measured_samples,
+            "min_us": samples[0],
+            "p50_us": percentile(0.50),
+            "p95_us": percentile(0.95),
+            "p99_us": percentile(0.99),
+            "max_us": samples[samples.len() - 1],
+            "mean_us": mean,
+            "stddev_us": variance.sqrt(),
+            "payload_bit_exact": true,
+        })
+        .to_string())
     }
 }
 
@@ -24047,12 +24610,8 @@ impl GpuDecodeStore {
             prefetch_stream: CudaStream(prefetch_stream),
             spec_stream: CudaStream(spec_stream),
             deepseek_v4_parallel_wkv_stream: CudaStream(deepseek_v4_parallel_wkv_stream),
-            deepseek_v4_parallel_wkv_fork_event: CudaEvent(
-                deepseek_v4_parallel_wkv_fork_event,
-            ),
-            deepseek_v4_parallel_wkv_join_event: CudaEvent(
-                deepseek_v4_parallel_wkv_join_event,
-            ),
+            deepseek_v4_parallel_wkv_fork_event: CudaEvent(deepseek_v4_parallel_wkv_fork_event),
+            deepseek_v4_parallel_wkv_join_event: CudaEvent(deepseek_v4_parallel_wkv_join_event),
             deepseek_v4_parallel_qb,
             deepseek_v4_hc_tiled,
             deepseek_v4_decode_policy,
@@ -25101,7 +25660,7 @@ impl GpuDecodeStore {
             decode_trace: None,
             apfl: None,
             hcs: None,
-            peer_expert: None,
+            peer_experts: Vec::new(),
             d_hidden,
             d_residual,
             d_scratch,
@@ -25704,9 +26263,7 @@ impl GpuDecodeStore {
                 deepseek_v4_sparse_output_selected_cached_exp: get(
                     "deepseek_v4_sparse_output_selected_cached_exp_kernel",
                 )?,
-                deepseek_v4_sparse_softmax_bf16: get(
-                    "deepseek_v4_sparse_softmax_bf16_kernel",
-                )?,
+                deepseek_v4_sparse_softmax_bf16: get("deepseek_v4_sparse_softmax_bf16_kernel")?,
                 deepseek_v4_compressor_decode: get("deepseek_v4_compressor_decode_kernel")?,
                 deepseek_v4_compressor_finalize_decode: get(
                     "deepseek_v4_compressor_finalize_decode_kernel",
@@ -31699,10 +32256,7 @@ impl GpuDecodeStore {
             d_indices: alloc_i32(plan.max_selected, "attention indices")?,
             d_selected_kv: alloc_u16(selected_kv_elems, "selected attention KV")?,
             d_attention_scores: alloc_f32(attention_score_elems, "attention scores")?,
-            d_attention_probabilities: alloc_u16(
-                attention_score_elems,
-                "attention probabilities",
-            )?,
+            d_attention_probabilities: alloc_u16(attention_score_elems, "attention probabilities")?,
             d_compressed_count: alloc_i32(1, "compressed count")?,
             d_topk_scores_a: if plan.max_topk_candidate_capacity > 0 {
                 Some(alloc_f32(
@@ -35228,6 +35782,24 @@ impl GpuDecodeStore {
         .to_string())
     }
 
+    /// Measure the simultaneous primary-to-all-peer host-bounce critical path.
+    /// This captures root-complex and host-memory contention that cannot be
+    /// derived by summing or taking the maximum of standalone peer RTTs.
+    fn measure_peer_fanout_round_trip_json(
+        &mut self,
+        peer_store_addrs: Vec<usize>,
+        warmup_samples: usize,
+        measured_samples: usize,
+        timeout_ms: u64,
+    ) -> PyResult<String> {
+        self.measure_peer_fanout_round_trip_json_impl(
+            &peer_store_addrs,
+            warmup_samples,
+            measured_samples,
+            timeout_ms,
+        )
+    }
+
     /// Measure real resident-expert service on an expert-only store.  Each
     /// route-count distribution runs the ordinary Marlin W13/activation/W2 and
     /// weighted-reduction kernels against actual HCS pointers.  Startup uses
@@ -35443,24 +36015,125 @@ impl GpuDecodeStore {
         .to_string())
     }
 
-    /// Attach an expert-only secondary store to this primary decode store.
-    /// Both latency inputs are startup measurements from this exact topology;
+    /// Return the exact structural incompatibility for serial layer-split
+    /// decode, if any. This is derived from registered runtime resources,
+    /// allowing startup to exclude an invalid topology before creating an
+    /// auxiliary store.
+    fn layer_split_compatibility_error(&self) -> Option<String> {
+        let graph = match self.graph.as_ref() {
+            Some(graph) => graph,
+            None => return Some("layer-split decode requires a configured decode store".into()),
+        };
+        if let Some((layer_idx, _)) = graph
+            .layers
+            .iter()
+            .enumerate()
+            .find(|(_, layer)| layer.deepseek_v4.is_some())
+        {
+            return Some(format!(
+                "serial layer-split decode does not support the registered custom compressed-attention/sequence-state contract at layer {layer_idx}",
+            ));
+        }
+        if graph.deepseek_v4_head.is_some() {
+            return Some(
+                "serial layer-split decode does not support the registered custom sequence-state output head"
+                    .into(),
+            );
+        }
+        if let Some((layer_idx, contract)) = graph
+            .layers
+            .iter()
+            .enumerate()
+            .find_map(|(layer_idx, layer)| {
+                layer_split_sequence_state_contract(
+                    &layer.attn,
+                    layer.post_attn_norm_ptr,
+                )
+                .map(|contract| (layer_idx, contract))
+            })
+        {
+            return Some(format!(
+                "serial layer-split decode does not support the registered {contract} contract at layer {layer_idx}",
+            ));
+        }
+        None
+    }
+
+    /// Return the exact structural incompatibility for expert serving, if any.
+    /// This is architecture-derived from the configured runtime graph; model
+    /// names and catalog badges never participate.
+    fn peer_expert_compatibility_error(&self) -> Option<String> {
+        let graph = match self.graph.as_ref() {
+            Some(graph) => graph,
+            None => return Some("peer expert serving requires a configured decode store".into()),
+        };
+        let mut routed_layers = 0usize;
+        for (layer_idx, moe) in graph.moe_layers.iter().enumerate() {
+            let Some(moe) = moe.as_ref() else {
+                continue;
+            };
+            routed_layers += 1;
+            let gemma4 = graph
+                .layers
+                .get(layer_idx)
+                .map(|layer| matches!(layer.mlp, GpuMlpConfig::Gemma4MoE { .. }))
+                .unwrap_or(false);
+            if moe.moe_input_size != 0
+                || moe.latent_down_wid.is_some()
+                || moe.latent_up_wid.is_some()
+                || gemma4
+            {
+                return Some(format!(
+                    "peer expert serving requires standard hidden-width routed experts; layer {layer_idx} has moe_input_size={} latent_down={} latent_up={} gemma4={gemma4}",
+                    moe.moe_input_size,
+                    moe.latent_down_wid.is_some(),
+                    moe.latent_up_wid.is_some(),
+                ));
+            }
+        }
+        if routed_layers == 0 {
+            return Some("peer expert serving requires at least one routed MoE layer".into());
+        }
+        None
+    }
+
+    /// Attach one expert-only peer store to this primary decode store.
+    /// All latency inputs are startup measurements from this exact topology;
     /// they define admission/deadline policy and are never inferred from a GPU
-    /// model name.
+    /// model name. Repeated calls append globally disjoint peers.
     fn attach_peer_expert_store(
         &mut self,
         peer_store_addr: usize,
         service_p95_us_by_routes: Vec<f64>,
         rtt_p95_us: f64,
+        fanout_rtt_p95_us: f64,
         local_cold_p95_us_per_expert: f64,
         peer_h2d_p95_us_per_expert: f64,
         predicted_peer_ms_per_token: f64,
-        alternative_split_ms_per_token: f64,
+        alternative_ms_per_token: f64,
         selector_uncertainty_ms: f64,
     ) -> PyResult<String> {
         if peer_store_addr == 0 || peer_store_addr == self as *mut Self as usize {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "peer expert store address must name a distinct live store",
+            ));
+        }
+        if let Some(error) = self.peer_expert_compatibility_error() {
+            return Err(pyo3::exceptions::PyValueError::new_err(error));
+        }
+        if self
+            .graph
+            .as_ref()
+            .map(|graph| {
+                graph
+                    .peer_experts
+                    .iter()
+                    .any(|runtime| runtime.store_addr == peer_store_addr)
+            })
+            .unwrap_or(false)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "peer expert store is already attached",
             ));
         }
         if service_p95_us_by_routes.is_empty()
@@ -35469,14 +36142,16 @@ impl GpuDecodeStore {
                 .any(|value| !value.is_finite() || *value <= 0.0)
             || !rtt_p95_us.is_finite()
             || rtt_p95_us <= 0.0
+            || !fanout_rtt_p95_us.is_finite()
+            || fanout_rtt_p95_us <= 0.0
             || !local_cold_p95_us_per_expert.is_finite()
             || local_cold_p95_us_per_expert <= 0.0
             || !peer_h2d_p95_us_per_expert.is_finite()
             || peer_h2d_p95_us_per_expert <= 0.0
             || !predicted_peer_ms_per_token.is_finite()
             || predicted_peer_ms_per_token <= 0.0
-            || !alternative_split_ms_per_token.is_finite()
-            || alternative_split_ms_per_token <= 0.0
+            || !alternative_ms_per_token.is_finite()
+            || alternative_ms_per_token <= 0.0
             || !selector_uncertainty_ms.is_finite()
             || selector_uncertainty_ms < 0.0
         {
@@ -35538,18 +36213,51 @@ impl GpuDecodeStore {
                 "peer expert store has no HCS-resident experts",
             ));
         }
+        let peer_residents = peer
+            .graph
+            .as_ref()
+            .and_then(|graph| graph.hcs.as_ref())
+            .map(|hcs| hcs.cache.keys().copied().collect::<HashSet<_>>())
+            .unwrap_or_default();
+        let existing_peer_overlap = self
+            .graph
+            .as_ref()
+            .map(|graph| {
+                graph.peer_experts.iter().find_map(|runtime| {
+                    let existing = unsafe { &*(runtime.store_addr as *const GpuDecodeStore) };
+                    let overlap = existing
+                        .graph
+                        .as_ref()
+                        .and_then(|existing_graph| existing_graph.hcs.as_ref())
+                        .map(|hcs| {
+                            hcs.cache
+                                .keys()
+                                .filter(|pair| peer_residents.contains(pair))
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    (overlap > 0).then_some(overlap)
+                })
+            })
+            .flatten();
+        if let Some(overlap) = existing_peer_overlap {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "peer HCS overlaps an attached peer by {overlap} experts",
+            )));
+        }
         if service_p95_us_by_routes.len() < topk {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "peer service curve has {} route counts but layer top-k is {topk}",
                 service_p95_us_by_routes.len(),
             )));
         }
-        let admitted_route_counts = (1..=topk)
-            .map(|count| {
-                rtt_p95_us + service_p95_us_by_routes[count - 1]
-                    < local_cold_p95_us_per_expert * count as f64
-            })
-            .collect::<Vec<_>>();
+        let admitted_route_counts = measured_peer_route_admission(
+            &service_p95_us_by_routes,
+            rtt_p95_us,
+            fanout_rtt_p95_us,
+            local_cold_p95_us_per_expert,
+            topk,
+        );
         let admitted_max_routes = admitted_route_counts
             .iter()
             .enumerate()
@@ -35558,7 +36266,7 @@ impl GpuDecodeStore {
             .max()
             .ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err(format!(
-                    "peer service curve is slower than the measured local cold path for every route count: rtt_p95_us={rtt_p95_us:.3} local_cold_p95_us_per_expert={local_cold_p95_us_per_expert:.3}",
+                    "peer service curve is slower than the measured local cold path for every route count: standalone_rtt_p95_us={rtt_p95_us:.3} fanout_rtt_p95_us={fanout_rtt_p95_us:.3} local_cold_p95_us_per_expert={local_cold_p95_us_per_expert:.3}",
                 ))
             })?;
         {
@@ -35726,7 +36434,7 @@ impl GpuDecodeStore {
         graph.gpu_route_sync = false;
         graph.gpu_route_sync_hot_nosync = false;
         graph.gpu_route_sync_hot_full_graph = false;
-        graph.peer_expert = Some(PeerExpertRuntime {
+        graph.peer_experts.push(PeerExpertRuntime {
             store_addr: peer_store_addr,
             mailbox,
             peer_mapping,
@@ -35735,9 +36443,10 @@ impl GpuDecodeStore {
             sequence: 0,
             service_p95_us_by_routes: service_p95_us_by_routes.clone(),
             rtt_p95_us,
+            fanout_rtt_p95_us,
             local_cold_p95_us_per_expert,
             predicted_peer_ms_per_token,
-            alternative_split_ms_per_token,
+            alternative_ms_per_token,
             selector_uncertainty_ms,
             prediction_checked: false,
             admitted_route_counts: admitted_route_counts.clone(),
@@ -35752,14 +36461,17 @@ impl GpuDecodeStore {
             total_dispatch_elapsed_us: 0.0,
             max_dispatch_elapsed_us: 0.0,
         });
+        let peer_count = graph.peer_experts.len();
         log::info!(
-            "PEER EXPERT: attached store=0x{:x} cached={} hidden={} topk={} service_p95_us_by_routes={:?} rtt_p95_us={:.3} local_cold_p95_us_per_expert={:.3} peer_h2d_p95_us_per_expert={:.3} admitted_route_counts={:?} admitted_max_routes={} dynamic={}",
+            "PEER EXPERT: attached ordinal={} store=0x{:x} cached={} hidden={} topk={} service_p95_us_by_routes={:?} rtt_p95_us={:.3} fanout_rtt_p95_us={:.3} local_cold_p95_us_per_expert={:.3} peer_h2d_p95_us_per_expert={:.3} admitted_route_counts={:?} admitted_max_routes={} dynamic={}",
+            peer_count,
             peer_store_addr,
             peer_cached,
             hidden_size,
             topk,
             service_p95_us_by_routes,
             rtt_p95_us,
+            fanout_rtt_p95_us,
             local_cold_p95_us_per_expert,
             peer_h2d_p95_us_per_expert,
             admitted_route_counts,
@@ -35767,7 +36479,7 @@ impl GpuDecodeStore {
             peer.peer_dynamic_tier.is_some(),
         );
         Ok(format!(
-            "peer expert store attached: {peer_cached} experts, RTT p95 {rtt_p95_us:.3} us, local cold p95 {local_cold_p95_us_per_expert:.3} us/expert, admitted routes 1..{admitted_max_routes}"
+            "peer {peer_count} expert store attached: {peer_cached} experts, standalone/fanout RTT p95 {rtt_p95_us:.3}/{fanout_rtt_p95_us:.3} us, local cold p95 {local_cold_p95_us_per_expert:.3} us/expert, admitted routes 1..{admitted_max_routes}"
         ))
     }
 
@@ -35776,40 +36488,51 @@ impl GpuDecodeStore {
             .graph
             .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("store is not configured"))?;
-        let peer = graph.peer_expert.as_ref().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("peer expert store is not attached")
-        })?;
-        let dynamic_peer = unsafe { &*(peer.store_addr as *const GpuDecodeStore) }
-            .peer_dynamic_tier
-            .as_ref()
-            .map(PeerDynamicTier::stats_json)
-            .unwrap_or_else(|| serde_json::json!({"enabled": false}));
-        Ok(serde_json::json!({
-            "requests": peer.requests,
-            "hits": peer.hits,
-            "misses": peer.misses,
-            "deadline_fallbacks": peer.deadline_fallbacks,
-            "unavailable_fallbacks": peer.unavailable_fallbacks,
-            "output_bytes": peer.output_bytes,
-            "completed_dispatches": peer.completed_dispatches,
-            "average_dispatch_elapsed_us": if peer.completed_dispatches > 0 {
-                peer.total_dispatch_elapsed_us / peer.completed_dispatches as f64
-            } else {
-                0.0
-            },
-            "max_dispatch_elapsed_us": peer.max_dispatch_elapsed_us,
-            "service_p95_us_by_routes": peer.service_p95_us_by_routes,
-            "rtt_p95_us": peer.rtt_p95_us,
-            "local_cold_p95_us_per_expert": peer.local_cold_p95_us_per_expert,
-            "predicted_peer_ms_per_token": peer.predicted_peer_ms_per_token,
-            "alternative_split_ms_per_token": peer.alternative_split_ms_per_token,
-            "selector_uncertainty_ms": peer.selector_uncertainty_ms,
-            "prediction_checked": peer.prediction_checked,
-            "admitted_route_counts": peer.admitted_route_counts,
-            "admitted_max_routes": peer.admitted_max_routes,
-            "dynamic_peer": dynamic_peer,
-        })
-        .to_string())
+        if graph.peer_experts.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "peer expert stores are not attached",
+            ));
+        }
+        let peers = graph
+            .peer_experts
+            .iter()
+            .enumerate()
+            .map(|(peer_index, peer)| {
+                let dynamic_peer = unsafe { &*(peer.store_addr as *const GpuDecodeStore) }
+                    .peer_dynamic_tier
+                    .as_ref()
+                    .map(PeerDynamicTier::stats_json)
+                    .unwrap_or_else(|| serde_json::json!({"enabled": false}));
+                serde_json::json!({
+                    "peer_index": peer_index,
+                    "requests": peer.requests,
+                    "hits": peer.hits,
+                    "misses": peer.misses,
+                    "deadline_fallbacks": peer.deadline_fallbacks,
+                    "unavailable_fallbacks": peer.unavailable_fallbacks,
+                    "output_bytes": peer.output_bytes,
+                    "completed_dispatches": peer.completed_dispatches,
+                    "average_dispatch_elapsed_us": if peer.completed_dispatches > 0 {
+                        peer.total_dispatch_elapsed_us / peer.completed_dispatches as f64
+                    } else {
+                        0.0
+                    },
+                    "max_dispatch_elapsed_us": peer.max_dispatch_elapsed_us,
+                    "service_p95_us_by_routes": peer.service_p95_us_by_routes,
+                    "rtt_p95_us": peer.rtt_p95_us,
+                    "fanout_rtt_p95_us": peer.fanout_rtt_p95_us,
+                    "local_cold_p95_us_per_expert": peer.local_cold_p95_us_per_expert,
+                    "predicted_peer_ms_per_token": peer.predicted_peer_ms_per_token,
+                    "alternative_ms_per_token": peer.alternative_ms_per_token,
+                    "selector_uncertainty_ms": peer.selector_uncertainty_ms,
+                    "prediction_checked": peer.prediction_checked,
+                    "admitted_route_counts": peer.admitted_route_counts,
+                    "admitted_max_routes": peer.admitted_max_routes,
+                    "dynamic_peer": dynamic_peer,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(serde_json::json!({"peer_count": peers.len(), "peers": peers}).to_string())
     }
 
     /// Measure the production compressed H2D + GPU decode path against one
@@ -37310,23 +38033,24 @@ impl GpuDecodeStore {
             || !scale.is_finite()
             || stream.is_null()
         {
-            return Err(format!("{} streamed row RMSNorm has an invalid contract", label));
+            return Err(format!(
+                "{} streamed row RMSNorm has an invalid contract",
+                label
+            ));
         }
         let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
         let threads = u32::try_from(width.min(1024).next_power_of_two().max(32))
             .map_err(|_| format!("{} row RMSNorm threads exceed u32", label))?;
-        let grid_x = u32::try_from(rows)
-            .map_err(|_| format!("{} row count exceeds u32", label))?;
+        let grid_x = u32::try_from(rows).map_err(|_| format!("{} row count exceeds u32", label))?;
         let shared_mem_bytes = threads
             .checked_mul(std::mem::size_of::<f32>() as u32)
             .ok_or_else(|| format!("{} row RMSNorm shared-memory overflow", label))?;
         let mut a0 = output_ptr;
         let mut a1 = input_ptr;
         let mut a2 = weight_ptr;
-        let mut a3 = i32::try_from(rows)
-            .map_err(|_| format!("{} row count exceeds i32", label))?;
-        let mut a4 = i32::try_from(width)
-            .map_err(|_| format!("{} row width exceeds i32", label))?;
+        let mut a3 = i32::try_from(rows).map_err(|_| format!("{} row count exceeds i32", label))?;
+        let mut a4 =
+            i32::try_from(width).map_err(|_| format!("{} row width exceeds i32", label))?;
         let mut a5 = scale;
         let mut a6 = graph.eps;
         let mut params: [*mut std::ffi::c_void; 7] = [
@@ -37724,20 +38448,15 @@ impl GpuDecodeStore {
             return Err(format!("{label} hidden size is zero"));
         }
         let (_, block_threads) = kernel
-            .occupancy_max_potential_block_size(
-                dsa_zero_dynamic_smem_for_occupancy,
-                0,
-                0,
-                None,
-            )
+            .occupancy_max_potential_block_size(dsa_zero_dynamic_smem_for_occupancy, 0, 0, None)
             .map_err(|error| format!("query {label} launch occupancy: {error:?}"))?;
         if block_threads < 32 || block_threads > 1024 || block_threads % 32 != 0 {
             return Err(format!(
                 "{label} occupancy returned invalid block width {block_threads}"
             ));
         }
-        let hidden_u32 = u32::try_from(hidden_size)
-            .map_err(|_| format!("{label} hidden size exceeds u32"))?;
+        let hidden_u32 =
+            u32::try_from(hidden_size).map_err(|_| format!("{label} hidden size exceeds u32"))?;
         Ok(cudarc::driver::LaunchConfig {
             grid_dim: (hidden_u32.div_ceil(block_threads), 1, 1),
             block_dim: (block_threads, 1, 1),
@@ -37890,14 +38609,14 @@ impl GpuDecodeStore {
         let mut a2 = cos_ptr;
         let mut a3 = sin_ptr;
         let mut a4 = 1i32;
-        let mut a5 = i32::try_from(heads)
-            .map_err(|_| format!("{} head count exceeds i32", label))?;
-        let mut a6 = i32::try_from(head_dim)
-            .map_err(|_| format!("{} head width exceeds i32", label))?;
-        let mut a7 = i32::try_from(rope_dim)
-            .map_err(|_| format!("{} RoPE width exceeds i32", label))?;
-        let mut a8 = i32::try_from(rope_rows)
-            .map_err(|_| format!("{} RoPE rows exceed i32", label))?;
+        let mut a5 =
+            i32::try_from(heads).map_err(|_| format!("{} head count exceeds i32", label))?;
+        let mut a6 =
+            i32::try_from(head_dim).map_err(|_| format!("{} head width exceeds i32", label))?;
+        let mut a7 =
+            i32::try_from(rope_dim).map_err(|_| format!("{} RoPE width exceeds i32", label))?;
+        let mut a8 =
+            i32::try_from(rope_rows).map_err(|_| format!("{} RoPE rows exceed i32", label))?;
         let mut a9 = if inverse { 1i32 } else { 0i32 };
         let mut params: [*mut std::ffi::c_void; 10] = [
             &mut a0 as *mut _ as *mut std::ffi::c_void,
@@ -38594,7 +39313,10 @@ impl GpuDecodeStore {
                     .cuEventRecord(self.deepseek_v4_parallel_wkv_fork_event.0, graph_stream)
             };
             if fork_record != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(format!("{} parallel WKV fork record: {:?}", label, fork_record));
+                return Err(format!(
+                    "{} parallel WKV fork record: {:?}",
+                    label, fork_record
+                ));
             }
             let fork_wait = unsafe {
                 cuda_sys::lib().cuStreamWaitEvent(
@@ -38738,7 +39460,10 @@ impl GpuDecodeStore {
                 )
             };
             if join_record != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(format!("{} parallel WKV join record: {:?}", label, join_record));
+                return Err(format!(
+                    "{} parallel WKV join record: {:?}",
+                    label, join_record
+                ));
             }
             let join_wait = unsafe {
                 cuda_sys::lib().cuStreamWaitEvent(
@@ -39115,8 +39840,7 @@ impl GpuDecodeStore {
                     *workspace.d_selected_kv.device_ptr() as *const std::ffi::c_void,
                     cublas_sys::cudaDataType::CUDA_R_16BF,
                     head_dim_i32,
-                    *workspace.d_attention_probabilities.device_ptr()
-                        as *const std::ffi::c_void,
+                    *workspace.d_attention_probabilities.device_ptr() as *const std::ffi::c_void,
                     cublas_sys::cudaDataType::CUDA_R_16BF,
                     selected_i32,
                     &output_beta as *const f32 as *const std::ffi::c_void,
@@ -39950,7 +40674,7 @@ impl GpuDecodeStore {
         } else {
             plan.sort_width.clamp(1, 256)
         })
-            .map_err(|_| format!("{} graph top-k block width exceeds u32", label))?;
+        .map_err(|_| format!("{} graph top-k block width exceeds u32", label))?;
         let launch_shared_bytes = if use_radix_linear {
             0
         } else {
@@ -46571,7 +47295,13 @@ impl GpuDecodeStore {
         // from d_wts_full while the in-graph batched expert kernels keep reading
         // the d_batch_upload weights region (demand-cold-only at replay); the
         // hot/staged portion is pre-launched directly on the replay stream.
-        let split_requested = env_truthy("KRASIS_SPLIT_EXPERT_LAUNCH");
+        // Native DSA currently identifies the validated GLM decode contract.
+        // Its measured workload benefits from overlapping resident expert
+        // compute with cold-expert DMA. Other architectures remain default-off,
+        // and an explicit environment value preserves diagnostic A/B control.
+        let split_override = std::env::var("KRASIS_SPLIT_EXPERT_LAUNCH").ok();
+        let split_requested =
+            split_expert_launch_enabled(graph.dsa_runtime_registered, split_override.as_deref());
         graph.split_expert_launch = split_requested;
         if graph.gpu_route_sync {
             let Some(mapped) = graph.mapped_cold_buf.as_ref() else {
@@ -47108,7 +47838,7 @@ impl GpuDecodeStore {
                 *self.blas.handle(),
                 capture_stream as cublas_sys::cudaStream_t,
             )
-                .map_err(|e| format!("cublasSetStream to capture: {:?}", e))?;
+            .map_err(|e| format!("cublasSetStream to capture: {:?}", e))?;
         }
 
         // Shared memory opt-in for gated_delta_net_step (same as monolithic capture)
@@ -47222,13 +47952,8 @@ impl GpuDecodeStore {
             }
 
             // Run the segment kernels
-            let seg_result = self.run_graph_segment(
-                &mut graph,
-                graph_idx,
-                &moe_indices,
-                do_embedding,
-                do_final,
-            );
+            let seg_result =
+                self.run_graph_segment(&mut graph, graph_idx, &moe_indices, do_embedding, do_final);
             if let Err(e) = seg_result {
                 // Must still end capture to restore stream state
                 let mut dummy: CUgraph = std::ptr::null_mut();
@@ -47840,10 +48565,7 @@ impl GpuDecodeStore {
                 let w13_tile_width = if w13_n32 { 32 } else { 16 };
                 let w13_threads = if w13_n32 { 512 } else { 256 };
                 let w13_n_tiles = w13_n.div_ceil(w13_tile_width);
-                let w13_smem = (expert_hs * 2
-                    + 1024 * 4
-                    + 64 * 4
-                    + 16 * w13_tile_width * 4) as u32;
+                let w13_smem = (expert_hs * 2 + 1024 * 4 + 64 * 4 + 16 * w13_tile_width * 4) as u32;
                 if graph_w13_path == GraphW13Path::TileQ {
                     Self::launch_batched_expert_stack(
                         graph,
@@ -47996,8 +48718,7 @@ impl GpuDecodeStore {
                 }
                 let w2_smem_base = (w2_input_k * 2 + 1024 * 4 + 64 * 4) as u32;
                 let w2_smem_coalesced = (w2_input_k * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32;
-                let w2_smem_n32 =
-                    (w2_input_k * 2 + 1024 * 4 + 64 * 4 + 16 * 32 * 4) as u32;
+                let w2_smem_n32 = (w2_input_k * 2 + 1024 * 4 + 64 * 4 + 16 * 32 * 4) as u32;
                 let w2_smem = if relu2_w2_coalesced {
                     w2_smem_coalesced
                 } else if w2_n32 {
@@ -48206,7 +48927,7 @@ impl GpuDecodeStore {
                             format!("multi_expert_weighted_add[{}]: {:?}", layer_idx, e)
                         })?;
                 }
-                if let Some(peer) = graph.peer_expert.as_ref() {
+                if !graph.peer_experts.is_empty() {
                     if expert_hs != graph.hidden_size
                         || moe.moe_input_size != 0
                         || moe.latent_down_wid.is_some()
@@ -48224,21 +48945,25 @@ impl GpuDecodeStore {
                             gemma4_expert_layer,
                         ));
                     }
-                    unsafe {
-                        k.add_peer_bf16_if_active
-                            .clone()
-                            .launch(
-                                LaunchConfig::for_num_elems(expert_hs as u32),
-                                (
-                                    *graph.d_moe_out.device_ptr(),
-                                    *peer.d_output.device_ptr(),
-                                    *peer.d_active.device_ptr(),
-                                    expert_hs as i32,
-                                ),
-                            )
-                            .map_err(|error| {
-                                format!("peer expert output add[{}]: {:?}", layer_idx, error)
-                            })?;
+                    for (peer_index, peer) in graph.peer_experts.iter().enumerate() {
+                        unsafe {
+                            k.add_peer_bf16_if_active
+                                .clone()
+                                .launch(
+                                    LaunchConfig::for_num_elems(expert_hs as u32),
+                                    (
+                                        *graph.d_moe_out.device_ptr(),
+                                        *peer.d_output.device_ptr(),
+                                        *peer.d_active.device_ptr(),
+                                        expert_hs as i32,
+                                    ),
+                                )
+                                .map_err(|error| {
+                                    format!(
+                                        "peer {peer_index} expert output add[{layer_idx}]: {error:?}"
+                                    )
+                                })?;
+                        }
                     }
                 }
                 if moe_route_clock_active {
@@ -54169,14 +54894,11 @@ impl GpuDecodeStore {
             return Ok(());
         }
 
-        let w13_n32 = !direct_w13_bf16
-            && !is_int8
-            && graph.deepseek_v4_decode_policy.int4_w13_n32;
+        let w13_n32 = !direct_w13_bf16 && !is_int8 && graph.deepseek_v4_decode_policy.int4_w13_n32;
         let w13_tile_width = if w13_n32 { 32 } else { 16 };
         let w13_threads = if w13_n32 { 512 } else { 256 };
         let w13_n_tiles = w13_n.div_ceil(w13_tile_width);
-        let w13_smem =
-            (expert_hs * 2 + 1024 * 4 + 64 * 4 + 16 * w13_tile_width * 4) as u32;
+        let w13_smem = (expert_hs * 2 + 1024 * 4 + 64 * 4 + 16 * w13_tile_width * 4) as u32;
         let w13_kernel = if is_int8 {
             k.marlin_gemv_int8_v2_batched.clone()
         } else if w13_n32 {
@@ -54700,37 +55422,37 @@ impl GpuDecodeStore {
     }
 
     /// True while the auxiliary tier either owns this expert or is replacing
-    /// a slot with it. Primary dynamic-HCS promotion must honor this claim so
-    /// the two tiers remain disjoint even across an asynchronous peer swap or
-    /// a peer-service deadline fallback.
+    /// a slot with it. Primary dynamic-HCS promotion must honor every peer's
+    /// claim so all tiers remain disjoint across asynchronous swaps and
+    /// peer-service deadline fallbacks.
     fn peer_claims_expert(graph: &GpuDecodeGraph, layer_idx: usize, expert_idx: usize) -> bool {
-        let Some(peer) = graph.peer_expert.as_ref() else {
-            return false;
-        };
-        let peer_store = unsafe { &*(peer.store_addr as *const GpuDecodeStore) };
-        let resident = peer_store
-            .graph
-            .as_ref()
-            .and_then(|peer_graph| peer_graph.hcs.as_ref())
-            .map(|hcs| hcs.cache.contains_key(&(layer_idx, expert_idx)))
-            .unwrap_or(false);
-        resident
-            || peer_store
-                .peer_dynamic_tier
+        graph.peer_experts.iter().any(|peer| {
+            let peer_store = unsafe { &*(peer.store_addr as *const GpuDecodeStore) };
+            let resident = peer_store
+                .graph
                 .as_ref()
-                .and_then(|dynamic| dynamic.pending.as_ref())
-                .map(|pending| pending.incoming == (layer_idx, expert_idx))
-                .unwrap_or(false)
+                .and_then(|peer_graph| peer_graph.hcs.as_ref())
+                .map(|hcs| hcs.cache.contains_key(&(layer_idx, expert_idx)))
+                .unwrap_or(false);
+            resident
+                || peer_store
+                    .peer_dynamic_tier
+                    .as_ref()
+                    .and_then(|dynamic| dynamic.pending.as_ref())
+                    .map(|pending| pending.incoming == (layer_idx, expert_idx))
+                    .unwrap_or(false)
+        })
     }
 
     fn set_peer_active(
         graph: &GpuDecodeGraph,
         stream: cuda_sys::CUstream,
+        peer_index: usize,
         active: i32,
     ) -> Result<(), String> {
-        let Some(peer) = graph.peer_expert.as_ref() else {
-            return Ok(());
-        };
+        let peer = graph.peer_experts.get(peer_index).ok_or_else(|| {
+            format!("peer activation index {peer_index} is outside the attached vector")
+        })?;
         let result = unsafe {
             cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                 *peer.d_active.device_ptr(),
@@ -54742,8 +55464,84 @@ impl GpuDecodeStore {
         if result == cuda_sys::CUresult::CUDA_SUCCESS {
             Ok(())
         } else {
-            Err(format!("upload peer activation flag: {result:?}"))
+            Err(format!(
+                "upload peer {peer_index} activation flag: {result:?}"
+            ))
         }
+    }
+
+    fn classify_peer_candidates(
+        primary_device: &Arc<CudaDevice>,
+        graph: &GpuDecodeGraph,
+        layer_idx: usize,
+        candidates: &[PeerRoutedExpert],
+    ) -> Result<(Vec<Vec<PeerRoutedExpert>>, Vec<Vec<PeerRoutedExpert>>), String> {
+        let peer_count = graph.peer_experts.len();
+        let mut routes_by_peer = vec![Vec::new(); peer_count];
+        let mut dynamic_by_peer = vec![Vec::new(); peer_count];
+        if peer_count == 0 {
+            return Ok((routes_by_peer, dynamic_by_peer));
+        }
+        let store_addrs = graph
+            .peer_experts
+            .iter()
+            .map(|peer| peer.store_addr)
+            .collect::<Vec<_>>();
+        for (peer_index, store_addr) in store_addrs.iter().copied().enumerate() {
+            let peer_store = unsafe { &mut *(store_addr as *mut GpuDecodeStore) };
+            peer_store.device.bind_to_thread().map_err(|error| {
+                format!("bind peer {peer_index} context for route lookup: {error}")
+            })?;
+            if let Err(error) = peer_store.poll_peer_dynamic_swap() {
+                peer_store.disable_peer_dynamic(error);
+            }
+        }
+        for candidate in candidates.iter().copied() {
+            let mut owner = None;
+            for (peer_index, store_addr) in store_addrs.iter().copied().enumerate() {
+                let peer_store = unsafe { &*(store_addr as *const GpuDecodeStore) };
+                if peer_store.peer_has_expert(layer_idx, candidate.expert_idx) {
+                    if let Some(existing) = owner {
+                        primary_device.bind_to_thread().map_err(|error| {
+                            format!(
+                                "restore primary context after duplicate peer ownership: {error}"
+                            )
+                        })?;
+                        return Err(format!(
+                            "peer HCS ownership is not disjoint for L{layer_idx}E{}: peers {existing} and {peer_index}",
+                            candidate.expert_idx,
+                        ));
+                    }
+                    owner = Some(peer_index);
+                }
+            }
+            if let Some(peer_index) = owner {
+                routes_by_peer[peer_index].push(candidate);
+            } else {
+                // Dynamic observations are sharded deterministically so two
+                // peers can never race to claim the same previously-cold
+                // expert. Runtime geometry supplies the hash dimensions.
+                let experts_per_layer = graph
+                    .moe_layers
+                    .get(layer_idx)
+                    .and_then(Option::as_ref)
+                    .map(|moe| moe.experts.len())
+                    .unwrap_or(1)
+                    .max(1);
+                let dynamic_peer = dynamic_peer_shard(
+                    layer_idx,
+                    candidate.expert_idx,
+                    experts_per_layer,
+                    peer_count,
+                )
+                .unwrap();
+                dynamic_by_peer[dynamic_peer].push(candidate);
+            }
+        }
+        primary_device
+            .bind_to_thread()
+            .map_err(|error| format!("restore primary context after peer lookup: {error}"))?;
+        Ok((routes_by_peer, dynamic_by_peer))
     }
 
     fn begin_peer_dispatch(
@@ -54751,28 +55549,18 @@ impl GpuDecodeStore {
         graph: &mut GpuDecodeGraph,
         copy_stream: cuda_sys::CUstream,
         layer_idx: usize,
+        peer_index: usize,
         candidates: &[PeerRoutedExpert],
+        dynamic_candidates: &[PeerRoutedExpert],
     ) -> Result<Option<PendingPeerDispatch>, String> {
-        let Some(store_addr) = graph.peer_expert.as_ref().map(|peer| peer.store_addr) else {
-            return Ok(None);
-        };
+        let store_addr = graph
+            .peer_experts
+            .get(peer_index)
+            .map(|peer| peer.store_addr)
+            .ok_or_else(|| format!("peer dispatch index {peer_index} is unavailable"))?;
         let peer_store = unsafe { &mut *(store_addr as *mut GpuDecodeStore) };
-        peer_store
-            .device
-            .bind_to_thread()
-            .map_err(|error| format!("bind peer context for route lookup: {error}"))?;
-        if let Err(error) = peer_store.poll_peer_dynamic_swap() {
-            peer_store.disable_peer_dynamic(error);
-        }
-        let mut routes: Vec<_> = candidates
-            .iter()
-            .copied()
-            .filter(|candidate| peer_store.peer_has_expert(layer_idx, candidate.expert_idx))
-            .collect();
-        primary_device
-            .bind_to_thread()
-            .map_err(|error| format!("restore primary context after peer lookup: {error}"))?;
-        let peer = graph.peer_expert.as_mut().unwrap();
+        let mut routes = candidates.to_vec();
+        let peer = graph.peer_experts.get_mut(peer_index).unwrap();
         routes.truncate(peer.admitted_max_routes);
         while !routes.is_empty()
             && !peer
@@ -54791,7 +55579,8 @@ impl GpuDecodeStore {
                 .device
                 .bind_to_thread()
                 .map_err(|error| format!("bind peer context for dynamic admission: {error}"))?;
-            if let Err(error) = peer_store.maybe_queue_peer_dynamic_swap(layer_idx, candidates, &[])
+            if let Err(error) =
+                peer_store.maybe_queue_peer_dynamic_swap(layer_idx, dynamic_candidates, &[])
             {
                 peer_store.disable_peer_dynamic(error);
             }
@@ -54803,7 +55592,7 @@ impl GpuDecodeStore {
         peer.sequence = peer
             .sequence
             .checked_add(1)
-            .ok_or_else(|| "peer mailbox sequence exhausted".to_string())?;
+            .ok_or_else(|| format!("peer {peer_index} mailbox sequence exhausted"))?;
         let sequence = peer.sequence;
         let hidden_bytes = graph.hidden_size * std::mem::size_of::<u16>();
         let request_ptr = peer.host_request_ptr();
@@ -54825,7 +55614,9 @@ impl GpuDecodeStore {
             )
         };
         if download != cuda_sys::CUresult::CUDA_SUCCESS {
-            return Err(format!("queue primary hidden D2H for peer: {download:?}"));
+            return Err(format!(
+                "queue primary hidden D2H for peer {peer_index}: {download:?}"
+            ));
         }
         let publish = graph
             .kernels
@@ -54856,7 +55647,9 @@ impl GpuDecodeStore {
             )
         };
         if publish_result != cuda_sys::CUresult::CUDA_SUCCESS {
-            return Err(format!("queue peer request doorbell: {publish_result:?}"));
+            return Err(format!(
+                "queue peer {peer_index} request doorbell: {publish_result:?}"
+            ));
         }
 
         let route_pairs: Vec<(usize, f32)> = routes
@@ -54891,7 +55684,8 @@ impl GpuDecodeStore {
             );
             return Ok(None);
         }
-        if let Err(error) = peer_store.maybe_queue_peer_dynamic_swap(layer_idx, candidates, &routes)
+        if let Err(error) =
+            peer_store.maybe_queue_peer_dynamic_swap(layer_idx, dynamic_candidates, &routes)
         {
             peer_store.disable_peer_dynamic(error);
         }
@@ -54899,7 +55693,11 @@ impl GpuDecodeStore {
             .bind_to_thread()
             .map_err(|error| format!("restore primary context after peer queue: {error}"))?;
         peer.requests = peer.requests.saturating_add(1);
-        Ok(Some(PendingPeerDispatch { routes, started }))
+        Ok(Some(PendingPeerDispatch {
+            peer_index,
+            routes,
+            started,
+        }))
     }
 
     fn complete_peer_dispatch(
@@ -54910,15 +55708,20 @@ impl GpuDecodeStore {
         pending: &PendingPeerDispatch,
     ) -> Result<bool, String> {
         let (store_addr, deadline_us) = graph
-            .peer_expert
-            .as_ref()
+            .peer_experts
+            .get(pending.peer_index)
             .map(|peer| {
                 (
                     peer.store_addr,
                     peer.local_cold_p95_us_per_expert * pending.routes.len() as f64,
                 )
             })
-            .ok_or_else(|| "peer dispatch completed without attached runtime".to_string())?;
+            .ok_or_else(|| {
+                format!(
+                    "peer dispatch {} completed without attached runtime",
+                    pending.peer_index
+                )
+            })?;
         let peer_store = unsafe { &mut *(store_addr as *mut GpuDecodeStore) };
         peer_store
             .device
@@ -54950,20 +55753,21 @@ impl GpuDecodeStore {
             .bind_to_thread()
             .map_err(|error| format!("restore primary context after peer completion: {error}"))?;
         if !completed {
-            let peer = graph.peer_expert.as_mut().unwrap();
+            let peer = graph.peer_experts.get_mut(pending.peer_index).unwrap();
             peer.deadline_fallbacks = peer.deadline_fallbacks.saturating_add(1);
             log::warn!(
-                "PEER EXPERT FALLBACK: layer={} reason=measured_deadline deadline_us={:.3} elapsed_us={:.3} routes={}",
+                "PEER EXPERT FALLBACK: peer={} layer={} reason=measured_deadline deadline_us={:.3} elapsed_us={:.3} routes={}",
+                pending.peer_index,
                 layer_idx,
                 deadline_us,
                 pending.started.elapsed().as_secs_f64() * 1_000_000.0,
                 pending.routes.len(),
             );
-            Self::set_peer_active(graph, replay_stream, 0)?;
+            Self::set_peer_active(graph, replay_stream, pending.peer_index, 0)?;
             return Ok(false);
         }
 
-        let peer = graph.peer_expert.as_mut().unwrap();
+        let peer = graph.peer_experts.get_mut(pending.peer_index).unwrap();
         peer.hits = peer.hits.saturating_add(pending.routes.len() as u64);
         let elapsed_us = pending.started.elapsed().as_secs_f64() * 1_000_000.0;
         peer.completed_dispatches = peer.completed_dispatches.saturating_add(1);
@@ -54982,7 +55786,7 @@ impl GpuDecodeStore {
             return Err(format!("upload peer expert partial: {upload:?}"));
         }
         peer.output_bytes = peer.output_bytes.saturating_add(hidden_bytes as u64);
-        Self::set_peer_active(graph, replay_stream, 1)?;
+        Self::set_peer_active(graph, replay_stream, pending.peer_index, 1)?;
         Ok(true)
     }
 
@@ -56390,8 +57194,7 @@ impl GpuDecodeStore {
                     }
 
                     let mut peer_served_count = 0usize;
-                    let mut pending_peer: Option<PendingPeerDispatch> = None;
-                    let mut peer_fallback_routes: Vec<(usize, usize, f32)> = Vec::new();
+                    let mut pending_peers: Vec<PendingPeerDispatch> = Vec::new();
 
                     // HCS and already-complete APFL slots occupy the current
                     // prefix. Preserve that exact boundary before demand-cold
@@ -56443,7 +57246,7 @@ impl GpuDecodeStore {
                     // ordinary path before peer admission.  The peer then
                     // handles only surviving demand-cold routes, preserving
                     // the 75/8 contract used by the benchmark controls.
-                    if graph.peer_expert.is_some() && !cold_experts.is_empty() {
+                    if !graph.peer_experts.is_empty() && !cold_experts.is_empty() {
                         let candidates = cold_experts
                             .iter()
                             .map(|&(topk_pos, eid, weight)| PeerRoutedExpert {
@@ -56452,34 +57255,34 @@ impl GpuDecodeStore {
                                 batch_slot: topk_pos,
                             })
                             .collect::<Vec<_>>();
-                        pending_peer = Self::begin_peer_dispatch(
+                        let (routes_by_peer, dynamic_by_peer) = Self::classify_peer_candidates(
                             &self.device,
                             graph,
-                            copy_stream,
                             moe_layer_idx,
                             &candidates,
                         )?;
-                        if let Some(pending) = pending_peer.as_ref() {
-                            for &(topk_pos, eid, weight) in &cold_experts {
-                                if pending
-                                    .routes
-                                    .iter()
-                                    .any(|route| route.batch_slot == topk_pos)
-                                {
-                                    peer_fallback_routes.push((topk_pos, eid, weight));
-                                }
+                        for peer_index in 0..graph.peer_experts.len() {
+                            if let Some(pending) = Self::begin_peer_dispatch(
+                                &self.device,
+                                graph,
+                                copy_stream,
+                                moe_layer_idx,
+                                peer_index,
+                                &routes_by_peer[peer_index],
+                                &dynamic_by_peer[peer_index],
+                            )? {
+                                pending_peers.push(pending);
+                            } else {
+                                Self::set_peer_active(graph, replay_stream, peer_index, 0)?;
                             }
-                            cold_experts.retain(|(topk_pos, _, _)| {
-                                !pending
-                                    .routes
-                                    .iter()
-                                    .any(|route| route.batch_slot == *topk_pos)
-                            });
-                        } else {
-                            Self::set_peer_active(graph, replay_stream, 0)?;
                         }
-                    } else if graph.peer_expert.is_some() {
-                        Self::set_peer_active(graph, replay_stream, 0)?;
+                        let claimed_slots = claimed_peer_route_slots(&pending_peers)
+                            .map_err(|error| format!("{error} at layer {moe_layer_idx}"))?;
+                        cold_experts.retain(|(topk_pos, _, _)| !claimed_slots.contains(topk_pos));
+                    } else if !graph.peer_experts.is_empty() {
+                        for peer_index in 0..graph.peer_experts.len() {
+                            Self::set_peer_active(graph, replay_stream, peer_index, 0)?;
+                        }
                     }
 
                     graph.dma_cold_experts += cold_experts.len() as u64;
@@ -56960,7 +57763,7 @@ impl GpuDecodeStore {
                     // peer only at this existing layer boundary.  A measured
                     // deadline miss materializes those same routes through the
                     // ordinary canonical host-cache path and logs the fallback.
-                    if let Some(pending) = pending_peer.as_ref() {
+                    for pending in &pending_peers {
                         if Self::complete_peer_dispatch(
                             &self.device,
                             graph,
@@ -56968,7 +57771,8 @@ impl GpuDecodeStore {
                             moe_layer_idx,
                             pending,
                         )? {
-                            peer_served_count = pending.routes.len();
+                            peer_served_count =
+                                peer_served_count.saturating_add(pending.routes.len());
                         } else {
                             if !graph.cpu_tail_workers.is_empty()
                                 || graph.synthetic_repack.is_some()
@@ -56980,8 +57784,10 @@ impl GpuDecodeStore {
                             }
                             graph.dma_cold_experts = graph
                                 .dma_cold_experts
-                                .saturating_add(peer_fallback_routes.len() as u64);
-                            for &(topk_pos, eid, weight) in &peer_fallback_routes {
+                                .saturating_add(pending.routes.len() as u64);
+                            for route in &pending.routes {
+                                let (topk_pos, eid, weight) =
+                                    (route.batch_slot, route.expert_idx, route.weight);
                                 let ci = cold_ptrs_list.len();
                                 let base = *graph_buf_base.get(ci).ok_or_else(|| {
                                     format!(
@@ -72207,14 +73013,15 @@ impl GpuDecodeStore {
                     saving_pct,
                 );
             }
-            if let Some(peer) = graph.peer_expert.as_ref() {
+            for (peer_index, peer) in graph.peer_experts.iter().enumerate() {
                 let average_dispatch_us = if peer.completed_dispatches > 0 {
                     peer.total_dispatch_elapsed_us / peer.completed_dispatches as f64
                 } else {
                     0.0
                 };
                 eprintln!(
-                    "PEER EXPERT SUMMARY requests={} completed={} hits={} misses={} deadline_fallbacks={} unavailable_fallbacks={} avg_dispatch_us={:.6} max_dispatch_us={:.6} output_bytes={}",
+                    "PEER EXPERT SUMMARY peer={} requests={} completed={} hits={} misses={} deadline_fallbacks={} unavailable_fallbacks={} avg_dispatch_us={:.6} max_dispatch_us={:.6} output_bytes={}",
+                    peer_index,
                     peer.requests,
                     peer.completed_dispatches,
                     peer.hits,
@@ -72226,7 +73033,8 @@ impl GpuDecodeStore {
                     peer.output_bytes,
                 );
                 log::info!(
-                    "PEER EXPERT SUMMARY requests={} completed={} hits={} misses={} deadline_fallbacks={} unavailable_fallbacks={} avg_dispatch_us={:.6} max_dispatch_us={:.6} output_bytes={}",
+                    "PEER EXPERT SUMMARY peer={} requests={} completed={} hits={} misses={} deadline_fallbacks={} unavailable_fallbacks={} avg_dispatch_us={:.6} max_dispatch_us={:.6} output_bytes={}",
+                    peer_index,
                     peer.requests,
                     peer.completed_dispatches,
                     peer.hits,
@@ -73265,8 +74073,7 @@ impl GpuDecodeStore {
                                     graph.t_graph_v4_index_prepare / n * 1000.0;
                                 let v4_index_score_ms_tok =
                                     graph.t_graph_v4_index_score / n * 1000.0;
-                                let v4_index_topk_ms_tok =
-                                    graph.t_graph_v4_index_topk / n * 1000.0;
+                                let v4_index_topk_ms_tok = graph.t_graph_v4_index_topk / n * 1000.0;
                                 let v4_q_b_norm_rope_ms_tok =
                                     graph.t_graph_v4_prefix_q_b_norm_rope / n * 1000.0;
                                 let v4_kv_index_assembly_ms_tok =
@@ -74125,8 +74932,8 @@ impl GpuDecodeStore {
                             _ => {}
                         }
                         if let Some(v4) = layer.deepseek_v4.as_ref() {
-                            deepseek_hqq_projection_bytes =
-                                deepseek_hqq_projection_bytes.saturating_add(
+                            deepseek_hqq_projection_bytes = deepseek_hqq_projection_bytes
+                                .saturating_add(
                                     v4.hqq_tensors
                                         .values()
                                         .map(hqq_exec_storage_bytes)
@@ -74137,11 +74944,9 @@ impl GpuDecodeStore {
                                     .saturating_add(weight.stored_bytes());
                             }
                             if let Some(compressor) = v4.compressor.as_ref() {
-                                for wid in [
-                                    compressor.wkv_wid,
-                                    compressor.wgate_wid,
-                                    compressor.ape_wid,
-                                ] {
+                                for wid in
+                                    [compressor.wkv_wid, compressor.wgate_wid, compressor.ape_wid]
+                                {
                                     if let Some(weight) = graph.weights.get(wid) {
                                         deepseek_compressor_bytes = deepseek_compressor_bytes
                                             .saturating_add(weight.stored_bytes());
@@ -84475,16 +85280,15 @@ impl Drop for GpuDecodeStore {
                 let _ = cuda_sys::lib().cuStreamDestroy_v2(self.spec_stream.0);
             }
             if !self.deepseek_v4_parallel_wkv_fork_event.0.is_null() {
-                let _ = cuda_sys::lib()
-                    .cuEventDestroy_v2(self.deepseek_v4_parallel_wkv_fork_event.0);
+                let _ =
+                    cuda_sys::lib().cuEventDestroy_v2(self.deepseek_v4_parallel_wkv_fork_event.0);
             }
             if !self.deepseek_v4_parallel_wkv_join_event.0.is_null() {
-                let _ = cuda_sys::lib()
-                    .cuEventDestroy_v2(self.deepseek_v4_parallel_wkv_join_event.0);
+                let _ =
+                    cuda_sys::lib().cuEventDestroy_v2(self.deepseek_v4_parallel_wkv_join_event.0);
             }
             if !self.deepseek_v4_parallel_wkv_stream.0.is_null() {
-                let _ = cuda_sys::lib()
-                    .cuStreamDestroy_v2(self.deepseek_v4_parallel_wkv_stream.0);
+                let _ = cuda_sys::lib().cuStreamDestroy_v2(self.deepseek_v4_parallel_wkv_stream.0);
             }
             if !self.spec_blas_handle.0.is_null() {
                 let _ = cublas_result::destroy_handle(self.spec_blas_handle.0);

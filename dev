@@ -1606,7 +1606,7 @@ do_session_cache_benchmark() {
 }
 
 do_peer_rtt() {
-    [[ $# -lt 2 ]] && err "Usage: ./dev peer-rtt <primary-gpu> <peer-gpu> [--message-bytes N] [--warmup N] [--samples N] [--gate-us F] [--timeout-ms N] [--output PATH]"
+    [[ $# -lt 2 ]] && err "Usage: ./dev peer-rtt <primary-gpu> <peer-gpu> [--message-bytes N] [--warmup N] [--samples N] [--timeout-ms N] [--output PATH]"
     (
         cd "$SCRIPT_DIR"
         KRASIS_BUILD_PEER_RTT_PROBE=1 PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
@@ -1721,6 +1721,8 @@ do_test_kernels() {
             filter="gpu_decode::dsa_registration_tests::peer_selector_check_"
         elif [[ "$1" == "dynamic_peer" ]]; then
             filter="gpu_decode::dsa_registration_tests::dynamic_peer_demand_"
+        elif [[ "$1" == "n_peer" ]]; then
+            filter="gpu_decode::dsa_registration_tests::n_peer_"
         elif [[ "$1" == "dsa_registration" ]]; then
             filter="dsa_registration_tests"
         elif [[ "$1" == "hqq4_warp_geometry" ]]; then
@@ -1745,6 +1747,8 @@ do_test_kernels() {
             filter="deepseek_v4_"
         elif [[ "$1" == "deepseek_v4_grouped_wo_a" ]]; then
             filter="gpu_decode::dsa_registration_tests::deepseek_v4_grouped_wo_a_batched_gemv_matches_individual_within_one_bf16_ulp"
+        elif [[ "$1" == "chunk_plan" ]]; then
+            filter="gpu_prefill::chunk_plan_tests"
         elif [[ "$1" == "split_dense_scratch" ]]; then
             filter="chunk_plan_tests::shared_intermediate_scratch"
         elif [[ "$1" == "context_window" ]]; then
@@ -3945,7 +3949,7 @@ case "$cmd" in
         echo "  session-cache-test <port>      Compare active/RAM cached continuations with full prefill"
         echo "  session-cache-operations <port> Test eviction, branches, cancellation and concurrency"
         echo "  session-cache-benchmark <port> Benchmark interleaved agent conversations cache off/on"
-        echo "  peer-rtt <primary> <peer>      Measure pinned-host peer-GPU round-trip feasibility"
+        echo "  peer-rtt <primary> <peer>      Measure pinned-host peer-GPU round-trip latency"
         echo "  expert-compression-probe ...  Measure real Marlin cache entropy and lossless ratio"
         echo "  expert-compression-gpu ...    Gate bit-exact GPU entropy decode on real experts"
         echo "  expert-compression-build ...  Build a versioned expert compression sidecar"

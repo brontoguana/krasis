@@ -31,7 +31,6 @@ mod probe {
         message_bytes: usize,
         warmup: usize,
         samples: usize,
-        gate_us: f64,
         timeout_ms: u64,
         output: Option<PathBuf>,
     }
@@ -75,8 +74,6 @@ mod probe {
         primary_can_access_peer: bool,
         peer_can_access_primary: bool,
         distribution: Distribution,
-        gate_threshold_us: f64,
-        gate_passed: bool,
         payload_bit_exact: bool,
     }
 
@@ -301,7 +298,7 @@ mod probe {
 
         let distribution = distribution(&samples_us);
         let report = Report {
-            schema_version: 1,
+            schema_version: 2,
             transport: "portable_mapped_pinned_host_mailbox_gpu_ordered",
             message_bytes_each_direction: args.message_bytes,
             round_trip_payload_bytes: args.message_bytes * 2,
@@ -312,8 +309,6 @@ mod probe {
             peer: peer_report,
             primary_can_access_peer,
             peer_can_access_primary,
-            gate_threshold_us: args.gate_us,
-            gate_passed: distribution.p95_us <= args.gate_us,
             payload_bit_exact,
             distribution,
         };
@@ -322,12 +317,6 @@ mod probe {
         if let Some(path) = &args.output {
             std::fs::write(path, format!("{json}\n"))
                 .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
-        }
-        if !report.gate_passed {
-            return Err(format!(
-                "peer RTT gate failed: p95 {:.3} us exceeds {:.3} us",
-                report.distribution.p95_us, report.gate_threshold_us
-            ));
         }
         Ok(())
     }
@@ -342,7 +331,6 @@ mod probe {
             message_bytes: 12 * 1024,
             warmup: 1_000,
             samples: 10_000,
-            gate_us: 30.0,
             timeout_ms: 1_000,
             output: None,
         };
@@ -353,7 +341,6 @@ mod probe {
                 }
                 "--warmup" => args.warmup = parse_required(raw.next(), "--warmup")?,
                 "--samples" => args.samples = parse_required(raw.next(), "--samples")?,
-                "--gate-us" => args.gate_us = parse_required(raw.next(), "--gate-us")?,
                 "--timeout-ms" => args.timeout_ms = parse_required(raw.next(), "--timeout-ms")?,
                 "--output" => {
                     args.output = Some(PathBuf::from(
@@ -378,7 +365,7 @@ mod probe {
     }
 
     fn usage() -> String {
-        "Usage: ./dev peer-rtt <primary-gpu> <peer-gpu> [--message-bytes N] [--warmup N] [--samples N] [--gate-us F] [--timeout-ms N] [--output PATH]".to_string()
+        "Usage: ./dev peer-rtt <primary-gpu> <peer-gpu> [--message-bytes N] [--warmup N] [--samples N] [--timeout-ms N] [--output PATH]".to_string()
     }
 
     fn device_report(device: &CudaDevice) -> ProbeResult<DeviceReport> {

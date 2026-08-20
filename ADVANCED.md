@@ -135,6 +135,7 @@ a reason to parse unstructured text as a tool call.
 | `--num-gpus N` | all | Number of GPUs to use |
 | `--selected-gpus IDX` | all | Comma-separated GPU indices (e.g. `0,2`) |
 | `--pp-partition STR` | auto | Layer partition across GPUs (e.g. `24,24`) |
+| `--multi-gpu-mode MODE` | auto | Measure and select a compatible topology (`auto`), or explicitly request `layer-split` or `peer` for validation/A-B work |
 | `--host ADDR` | 0.0.0.0 | Server bind address |
 | `--port PORT` | 8012 | Server port |
 | `--ssh-tunnel TARGET` | off | Reverse SSH tunnel target (`user@host` or `user@host:ssh_port`). Remote `127.0.0.1:<server port>` forwards to local Krasis over SSH with key-only batch mode. |
@@ -159,6 +160,18 @@ implementation remains in the tree for historical reference, but active
 configs should use HQQ attention plus `k6v6`, `k4v4`, or `bf16` KV.
 
 When BF16 is selected for experts or major components, treat that run as validation-only rather than production.
+
+For `--multi-gpu-mode auto`, startup evaluates only topologies implemented by
+the loaded execution graph. Serial layer split supports an arbitrary selected
+GPU count. Routed-MoE graphs with the standard hidden-width expert contract can
+also use one primary plus an arbitrary vector of expert-serving peers. Peer
+ownership is disjoint and requests are dispatched concurrently. Selection uses
+measured device transfer rates, standalone and simultaneous fan-out latency,
+real expert-service curves, post-calibration VRAM capacity, and route-heatmap
+mass; no fixed latency threshold or advertised PCIe specification decides
+admission. Dense, projected/latent-expert, model-specific sequence-state, and
+other incompatible graph contracts remain visibly excluded rather than being
+routed through a fallback.
 
 ### Memory & Caching
 
@@ -240,8 +253,8 @@ mode when the measured available RAM cannot safely hold the soft mirror.
 | `--krasis-threads N` | 40 | CPU threads for expert computation |
 | `--gguf-path PATH` | — | GGUF file for CPU experts (instead of native cache) |
 
-Experimental decode environment variables (default off; single-GPU graph decode
-path). Previous-token prefetch and adaptive cold-drop require host-visible
+Experimental decode environment variables (single-GPU graph decode path; most
+default off). Previous-token prefetch and adaptive cold-drop require host-visible
 legacy route synchronization; split expert launch supports legacy and ordinary
 GPU route synchronization but fails closed with the separate all-hot no-sync
 graph contract:
@@ -252,7 +265,7 @@ graph contract:
 | `KRASIS_PREFETCH_DEPTH=N` | 4 | Prefetch lookahead depth in MoE layers (staging VRAM = depth × top-k × expert size) |
 | `KRASIS_PREFETCH_BUDGET_OFF=1` | off | Disable the per-token prefetch byte budget (A/B diagnostics only) |
 | `KRASIS_PREFETCH_GATE=0` | on | Disable the demand-first temporal gate. When the gate is on (default with prefetch), each prefetch issuance waits GPU-side on the boundary's demand cold-DMA event, so prefetch bytes transfer during the segment's compute window instead of contending on the copy engine with the demand copies the graph is waiting on |
-| `KRASIS_SPLIT_EXPERT_LAUNCH=1` | off | Launch hot/staged experts before the cold-DMA wait so hot compute overlaps demand copies. Exact full/hot/cold weight masks preserve every routed contribution; compatible with legacy and ordinary GPU route synchronization. Latent-MoE graphs fail closed because their expert-input projection executes inside the captured segment and is not available for a safe pre-launch |
+| `KRASIS_SPLIT_EXPERT_LAUNCH=0\|1` | native DSA: on; other: off | Launch hot/staged experts before the cold-DMA wait so hot compute overlaps demand copies. The native DSA runtime contract enables this automatically from registered architecture capabilities; `0` explicitly disables it for diagnostics. Exact full/hot/cold weight masks preserve every routed contribution; compatible with legacy and ordinary GPU route synchronization. Latent-MoE graphs fail closed because their expert-input projection executes inside the captured segment and is not available for a safe pre-launch |
 | `KRASIS_CPU_TAIL_RACE=1` | off | After any adaptive cold-mass pruning, let a persistent Rust worker attempt the lowest-ranked surviving demand-cold expert directly from the existing INT4 Marlin host allocation while the GPU copies the other cold experts. A completed CPU result replaces that expert's weight H2D and GPU GEMV; a miss falls back to the normal GPU path without waiting. Requires split launch and legacy host-visible route synchronization; speculative decode, prefetch/APFL, GPU route sync, non-INT4, latent, biased, ungated, clamped, and non-SiLU experts fail visibly. CPU activations use the existing INT16-quantized Marlin-native kernel, so this is a separate approximate quality-gated mode even when cold-mass pruning is off |
 | `KRASIS_CPU_TAIL_WORKERS=2` | off | Experimental second CPU-tail worker. Requires `KRASIS_CPU_TAIL_RACE=1` and a `KRASIS_CPU_TAIL_CALIBRATION_JSON` artifact whose matched live-DMA two-team optimizer recommends a non-overlapping two-team split. The runtime revalidates both CPU sets against the current affinity mask and fails visibly on absent, overlapping, or stale placement evidence. At most two experts are claimed per cold queue; unset or `1` preserves single-worker behavior |
 | `KRASIS_CPU_TAIL_TRANSPOSED=1` | off | Temporary CPU-tail architecture experiment; also requires `KRASIS_CPU_TAIL_RACE=1`. After startup HCS selection, duplicate every non-resident routed expert into a CPU-transposed INT4 layout while leaving the Marlin host cache and every GPU/prefill/HCS path unchanged. Required bytes are derived from the actual selected set and tensors, checked against runtime `MemAvailable` plus proportional headroom, and allocation fails visibly rather than building a partial tier. Later-evicted startup residents use Marlin fallback; promotions retain unused duplicates. This can consume hundreds of GiB and is not a production cache mode |

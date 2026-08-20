@@ -860,8 +860,6 @@ def normalize_selected_gpus(raw: Optional[str]) -> Optional[str]:
         gpu = part.strip()
         if not gpu:
             continue
-        if not gpu.isdigit():
-            raise ValueError(f"selected GPU entry is not an integer: {gpu!r}")
         if gpu in seen:
             raise ValueError(f"selected GPU entry is duplicated: {gpu}")
         seen.add(gpu)

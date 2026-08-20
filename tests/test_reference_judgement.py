@@ -11,6 +11,7 @@ from tests.reference_test import (
     judge_prompt,
     list_available_references,
 )
+from tests.reference_contract import normalize_selected_gpus
 from tests.validate_model import _resolve_reference_dir
 
 
@@ -110,6 +111,18 @@ class ReferenceJudgementTests(unittest.TestCase):
                 "1,3",
             ],
         )
+
+    def test_reference_contract_preserves_opaque_gpu_selectors(self) -> None:
+        self.assertEqual(
+            normalize_selected_gpus(
+                " GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d, 00000000:81:00.0 "
+            ),
+            "GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d,00000000:81:00.0",
+        )
+
+    def test_reference_contract_rejects_duplicate_opaque_gpu_selectors(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicated"):
+            normalize_selected_gpus("GPU-test,GPU-test")
 
     def test_multitoken_prefill_pass_cannot_hide_decode_failure(self) -> None:
         verdict = judge_prompt(

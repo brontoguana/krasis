@@ -2,8 +2,10 @@ import unittest
 
 from krasis.multi_gpu_planner import (
     DeviceServiceProfile,
+    multi_peer_plan_is_admissible,
     optimize_contiguous_splits,
     peer_plan_is_admissible,
+    predict_multi_peer_expert_plan,
     predict_peer_expert_plan,
 )
 
@@ -202,6 +204,305 @@ class MultiGpuPlannerTest(unittest.TestCase):
                 admitted_route_counts=[True, True, True],
             )
         )
+
+    def test_multi_peer_plan_is_disjoint_and_balances_route_mass(self):
+        profile = _profile(0, 1, 1_000)
+        counts = {
+            "0,0": 100,
+            "0,1": 90,
+            "0,2": 80,
+            "0,3": 70,
+            "0,4": 60,
+        }
+        plan = predict_multi_peer_expert_plan(
+            heatmap_counts=counts,
+            total_decode_tokens=100,
+            ranking=[(0, index) for index in range(5)],
+            primary_capacity_experts=1,
+            peer_capacity_experts=[2, 2],
+            layer_resident_bytes=[16 * 1024],
+            layer_is_moe=[True],
+            primary_profile=profile,
+            expert_bytes=self.expert_bytes,
+            service_p95_us_by_routes_by_peer=[
+                [20.0, 35.0, 50.0, 65.0],
+                [20.0, 35.0, 50.0, 65.0],
+            ],
+            rtt_p95_us_by_peer=[25.0, 25.0],
+            terminal_bytes=0,
+        )
+        first, second = map(set, plan.peer_residents_by_peer)
+        self.assertFalse(first.intersection(second))
+        self.assertFalse(first.intersection(plan.primary_residents))
+        self.assertFalse(second.intersection(plan.primary_residents))
+        self.assertEqual(len(first), 2)
+        self.assertEqual(len(second), 2)
+        self.assertTrue(all(plan.captured_routes_per_token_by_peer))
+        self.assertAlmostEqual(
+            sum(plan.captured_routes_per_token_by_peer),
+            plan.captured_routes_per_token,
+        )
+
+    def test_four_peer_static_plan_uses_every_capacity_without_overlap(self):
+        counts = {f"0,{expert}": 100 - expert for expert in range(9)}
+        plan = predict_multi_peer_expert_plan(
+            heatmap_counts=counts,
+            total_decode_tokens=100,
+            ranking=[(0, expert) for expert in range(9)],
+            primary_capacity_experts=1,
+            peer_capacity_experts=[2, 2, 2, 2],
+            layer_resident_bytes=[16 * 1024],
+            layer_is_moe=[True],
+            primary_profile=_profile(0, 1, 1_000),
+            expert_bytes=self.expert_bytes,
+            service_p95_us_by_routes_by_peer=[
+                [20.0, 35.0],
+                [22.0, 38.0],
+                [24.0, 41.0],
+                [26.0, 44.0],
+            ],
+            rtt_p95_us_by_peer=[25.0, 28.0, 31.0, 34.0],
+            fanout_rtt_p95_us=40.0,
+            terminal_bytes=0,
+        )
+        primary = set(plan.primary_residents)
+        peers = [set(residents) for residents in plan.peer_residents_by_peer]
+        self.assertEqual([len(residents) for residents in peers], [2, 2, 2, 2])
+        all_claimed = set(primary)
+        for residents in peers:
+            self.assertFalse(all_claimed.intersection(residents))
+            all_claimed.update(residents)
+        self.assertEqual(len(all_claimed), 9)
+        self.assertTrue(all(plan.captured_routes_per_token_by_peer))
+
+    def test_multi_peer_admission_uses_measurements_not_fixed_rtt_gate(self):
+        profile = _profile(0, 1, 1_000)
+        plan = predict_multi_peer_expert_plan(
+            heatmap_counts={"0,0": 100, "0,1": 100, "0,2": 100},
+            total_decode_tokens=100,
+            ranking=[(0, 0), (0, 1), (0, 2)],
+            primary_capacity_experts=1,
+            peer_capacity_experts=[1, 1],
+            layer_resident_bytes=[16 * 1024],
+            layer_is_moe=[True],
+            primary_profile=profile,
+            expert_bytes=self.expert_bytes,
+            service_p95_us_by_routes_by_peer=[[50.0], [60.0]],
+            rtt_p95_us_by_peer=[200.0, 250.0],
+            terminal_bytes=0,
+        )
+        self.assertTrue(
+            multi_peer_plan_is_admissible(
+                peer_plan=plan,
+                alternative_seconds_per_token=(
+                    plan.predicted_seconds_per_token * 2.0
+                ),
+                uncertainty_seconds=0.0,
+                admitted_route_counts_by_peer=[[True], [True]],
+            )
+        )
+
+    def test_multi_peer_admission_rejects_any_resident_peer_without_measured_gain(self):
+        profile = _profile(0, 1, 1_000)
+        plan = predict_multi_peer_expert_plan(
+            heatmap_counts={"0,0": 100, "0,1": 100, "0,2": 100},
+            total_decode_tokens=100,
+            ranking=[(0, 0), (0, 1), (0, 2)],
+            primary_capacity_experts=1,
+            peer_capacity_experts=[1, 1],
+            layer_resident_bytes=[16 * 1024],
+            layer_is_moe=[True],
+            primary_profile=profile,
+            expert_bytes=self.expert_bytes,
+            service_p95_us_by_routes_by_peer=[[50.0], [60.0]],
+            rtt_p95_us_by_peer=[200.0, 250.0],
+            terminal_bytes=0,
+        )
+        self.assertFalse(
+            multi_peer_plan_is_admissible(
+                peer_plan=plan,
+                alternative_seconds_per_token=(
+                    plan.predicted_seconds_per_token * 2.0
+                ),
+                uncertainty_seconds=0.0,
+                admitted_route_counts_by_peer=[[True], [False]],
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "cardinality"):
+            multi_peer_plan_is_admissible(
+                peer_plan=plan,
+                alternative_seconds_per_token=(
+                    plan.predicted_seconds_per_token * 2.0
+                ),
+                uncertainty_seconds=0.0,
+                admitted_route_counts_by_peer=[[True]],
+            )
+
+    def test_multi_peer_admission_rejects_an_empty_selected_peer_tier(self):
+        plan = predict_multi_peer_expert_plan(
+            heatmap_counts={"0,0": 100},
+            total_decode_tokens=100,
+            ranking=[(0, 0)],
+            primary_capacity_experts=0,
+            peer_capacity_experts=[1, 1],
+            layer_resident_bytes=[1],
+            layer_is_moe=[True],
+            primary_profile=_profile(0, 1, 1_000),
+            expert_bytes=1,
+            service_p95_us_by_routes_by_peer=[[1.0], [1.0]],
+            rtt_p95_us_by_peer=[1.0, 1.0],
+            terminal_bytes=0,
+        )
+        self.assertEqual(
+            tuple(len(residents) for residents in plan.peer_residents_by_peer),
+            (1, 0),
+        )
+        self.assertFalse(
+            multi_peer_plan_is_admissible(
+                peer_plan=plan,
+                alternative_seconds_per_token=1.0,
+                uncertainty_seconds=0.0,
+                admitted_route_counts_by_peer=[[True], [True]],
+            )
+        )
+
+    def test_multi_peer_prediction_counts_only_measured_admitted_route_mass(self):
+        plan = predict_multi_peer_expert_plan(
+            heatmap_counts={"0,0": 100, "0,1": 100, "0,2": 100},
+            total_decode_tokens=100,
+            ranking=[(0, 0), (0, 1), (0, 2)],
+            primary_capacity_experts=0,
+            peer_capacity_experts=[3],
+            layer_resident_bytes=[1],
+            layer_is_moe=[True],
+            primary_profile=_profile(0, 1, 1_000),
+            expert_bytes=1,
+            service_p95_us_by_routes_by_peer=[[1.0, 2.0, 3.0]],
+            rtt_p95_us_by_peer=[1.0],
+            terminal_bytes=0,
+            admitted_route_counts_by_peer=[[True, False, False]],
+        )
+        self.assertEqual(plan.captured_routes_per_token_by_peer, (1.0,))
+        self.assertEqual(plan.captured_routes_per_token, 1.0)
+        self.assertEqual(plan.cold_routes_after_per_token, 2.0)
+
+    def test_multi_peer_admission_rejects_a_zero_capture_peer(self):
+        plan = predict_multi_peer_expert_plan(
+            heatmap_counts={"0,0": 100},
+            total_decode_tokens=100,
+            ranking=[(0, 0), (0, 1)],
+            primary_capacity_experts=0,
+            peer_capacity_experts=[1, 1],
+            layer_resident_bytes=[1],
+            layer_is_moe=[True],
+            primary_profile=_profile(0, 1, 1_000),
+            expert_bytes=1,
+            service_p95_us_by_routes_by_peer=[[1.0], [1.0]],
+            rtt_p95_us_by_peer=[1.0, 1.0],
+            terminal_bytes=0,
+        )
+        self.assertEqual(plan.captured_routes_per_token_by_peer, (1.0, 0.0))
+        self.assertFalse(
+            multi_peer_plan_is_admissible(
+                peer_plan=plan,
+                alternative_seconds_per_token=1.0,
+                uncertainty_seconds=0.0,
+                admitted_route_counts_by_peer=[[True], [True]],
+            )
+        )
+
+    def test_multi_peer_admission_rejects_a_zero_capacity_peer(self):
+        plan = predict_multi_peer_expert_plan(
+            heatmap_counts={"0,0": 100, "0,1": 100},
+            total_decode_tokens=100,
+            ranking=[(0, 0), (0, 1)],
+            primary_capacity_experts=0,
+            peer_capacity_experts=[2, 0],
+            layer_resident_bytes=[1],
+            layer_is_moe=[True],
+            primary_profile=_profile(0, 1, 1_000),
+            expert_bytes=1,
+            service_p95_us_by_routes_by_peer=[[1.0, 2.0], [1.0, 2.0]],
+            rtt_p95_us_by_peer=[1.0, 1.0],
+            terminal_bytes=0,
+        )
+        self.assertEqual(tuple(map(len, plan.peer_residents_by_peer)), (2, 0))
+        self.assertFalse(
+            multi_peer_plan_is_admissible(
+                peer_plan=plan,
+                alternative_seconds_per_token=1.0,
+                uncertainty_seconds=0.0,
+                admitted_route_counts_by_peer=[[True, True], [True, True]],
+            )
+        )
+
+    def test_multi_peer_prediction_charges_measured_concurrent_fanout(self):
+        kwargs = {
+            "heatmap_counts": {"0,0": 100, "0,1": 100},
+            "total_decode_tokens": 100,
+            "ranking": [(0, 0), (0, 1)],
+            "primary_capacity_experts": 0,
+            "peer_capacity_experts": [1, 1],
+            "layer_resident_bytes": [1],
+            "layer_is_moe": [True],
+            "primary_profile": _profile(0, 100, 100_000),
+            "expert_bytes": 1,
+            "service_p95_us_by_routes_by_peer": [[20.0], [20.0]],
+            "rtt_p95_us_by_peer": [25.0, 25.0],
+            "terminal_bytes": 0,
+        }
+        uncongested = predict_multi_peer_expert_plan(
+            **kwargs,
+            fanout_rtt_p95_us=30.0,
+        )
+        contended = predict_multi_peer_expert_plan(
+            **kwargs,
+            fanout_rtt_p95_us=500.0,
+        )
+        self.assertEqual(uncongested.fanout_rtt_p95_us, 30.0)
+        self.assertEqual(contended.fanout_rtt_p95_us, 500.0)
+        self.assertGreater(
+            contended.predicted_seconds_per_token,
+            uncongested.predicted_seconds_per_token,
+        )
+
+    def test_multi_peer_plan_can_fill_capacity_with_unseen_experts(self):
+        plan = predict_multi_peer_expert_plan(
+            heatmap_counts={"0,0": 10},
+            total_decode_tokens=10,
+            ranking=[(0, 0), (1, 0), (1, 1)],
+            primary_capacity_experts=0,
+            peer_capacity_experts=[2, 1],
+            layer_resident_bytes=[1, 1],
+            layer_is_moe=[True, True],
+            primary_profile=_profile(0, 100, 100_000),
+            expert_bytes=1,
+            service_p95_us_by_routes_by_peer=[[20.0], [20.0]],
+            rtt_p95_us_by_peer=[25.0, 25.0],
+            terminal_bytes=0,
+            fanout_rtt_p95_us=30.0,
+        )
+        self.assertEqual(
+            sum(len(residents) for residents in plan.peer_residents_by_peer),
+            3,
+        )
+
+    def test_multi_peer_plan_rejects_measurement_cardinality_mismatch(self):
+        with self.assertRaisesRegex(ValueError, "cardinality"):
+            predict_multi_peer_expert_plan(
+                heatmap_counts={"0,0": 1},
+                total_decode_tokens=1,
+                ranking=[(0, 0)],
+                primary_capacity_experts=0,
+                peer_capacity_experts=[1, 1],
+                layer_resident_bytes=[1],
+                layer_is_moe=[True],
+                primary_profile=_profile(0, 1, 1),
+                expert_bytes=1,
+                service_p95_us_by_routes_by_peer=[[1.0]],
+                rtt_p95_us_by_peer=[1.0, 1.0],
+                terminal_bytes=0,
+            )
 
 
 if __name__ == "__main__":
