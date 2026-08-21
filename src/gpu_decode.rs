@@ -10757,6 +10757,9 @@ pub(crate) mod dsa_registration_tests {
         let scorer = device
             .get_func(MODULE_NAME, "deepseek_v4_index_scores_native_decode_kernel")
             .expect("Native learned-index scorer");
+        let bf16_scorer = device
+            .get_func(MODULE_NAME, "deepseek_v4_index_scores_decode_kernel")
+            .expect("BF16 learned-index scorer");
         let score_threads = 256u32;
         let index_heads = 64usize;
         let index_head_dim = 128usize;
@@ -10791,24 +10794,38 @@ pub(crate) mod dsa_registration_tests {
             .expect("score capacity overflow");
         let code_stride = index_head_dim.div_ceil(2);
         let scale_stride = index_head_dim.div_ceil(block_size);
+        let codes_host = (0..score_capacity * code_stride)
+            .map(|index| {
+                let low = (index.wrapping_mul(5).wrapping_add(3) & 0x0f) as u8;
+                let high = (index.wrapping_mul(11).wrapping_add(7) & 0x0f) as u8;
+                low | (high << 4)
+            })
+            .collect::<Vec<_>>();
+        let scale_exponents_host = (0..score_capacity * scale_stride)
+            .map(|index| (index % 7) as i8 - 3)
+            .collect::<Vec<_>>();
         let codes = device
-            .htod_copy(
-                (0..score_capacity * code_stride)
-                    .map(|index| {
-                        let low = (index.wrapping_mul(5).wrapping_add(3) & 0x0f) as u8;
-                        let high = (index.wrapping_mul(11).wrapping_add(7) & 0x0f) as u8;
-                        low | (high << 4)
-                    })
-                    .collect::<Vec<_>>(),
-            )
+            .htod_copy(codes_host.clone())
             .expect("Native learned-index codes H2D");
         let scale_exponents = device
-            .htod_copy(
-                (0..score_capacity * scale_stride)
-                    .map(|index| (index % 7) as i8 - 3)
-                    .collect::<Vec<_>>(),
-            )
+            .htod_copy(scale_exponents_host.clone())
             .expect("Native learned-index scales H2D");
+        let fp4_levels = [0.0f32, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+        let expanded_host = (0..score_capacity * index_head_dim)
+            .map(|linear| {
+                let row = linear / index_head_dim;
+                let dim = linear % index_head_dim;
+                let pair = codes_host[row * code_stride + dim / 2];
+                let code = if dim & 1 == 0 { pair & 0x0f } else { pair >> 4 };
+                let magnitude = fp4_levels[(code & 7) as usize];
+                let signed = if code & 8 == 0 { magnitude } else { -magnitude };
+                let exponent = scale_exponents_host[row * scale_stride + dim / block_size];
+                f32_to_bf16(signed * 2.0f32.powi(exponent as i32))
+            })
+            .collect::<Vec<_>>();
+        let expanded = device
+            .htod_copy(expanded_host)
+            .expect("Expanded BF16 learned-index cache H2D");
         let query = device
             .htod_copy(
                 (0..index_heads * index_head_dim)
@@ -10852,6 +10869,32 @@ pub(crate) mod dsa_registration_tests {
                 )
             }
             .expect("Native learned-index score launch");
+        };
+        let launch_bf16 = |output: &mut cudarc::driver::CudaSlice<f32>,
+                           compressed_count: &cudarc::driver::CudaSlice<i32>,
+                           grid: usize| {
+            unsafe {
+                bf16_scorer.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (u32::try_from(grid).expect("BF16 score grid u32"), 1, 1),
+                        block_dim: (score_threads, 1, 1),
+                        shared_mem_bytes: u32::try_from(shared_bytes)
+                            .expect("BF16 score shared bytes u32"),
+                    },
+                    (
+                        output,
+                        &expanded,
+                        &query,
+                        &head_weights,
+                        compressed_count,
+                        i32::try_from(score_capacity).expect("BF16 score capacity i32"),
+                        i32::try_from(index_heads).expect("BF16 index heads i32"),
+                        i32::try_from(index_head_dim).expect("BF16 index head dim i32"),
+                        1i32,
+                    ),
+                )
+            }
+            .expect("BF16 learned-index score launch");
         };
         let mut contexts = vec![
             1usize,
@@ -11027,6 +11070,9 @@ pub(crate) mod dsa_registration_tests {
             let mut sm_output = device
                 .alloc_zeros::<f32>(score_capacity)
                 .expect("SM-grid score allocation");
+            let mut bf16_output = device
+                .alloc_zeros::<f32>(score_capacity)
+                .expect("BF16 score allocation");
             launch(
                 &scorer,
                 &mut sm_output,
@@ -11041,6 +11087,11 @@ pub(crate) mod dsa_registration_tests {
                 occupancy_grid.min(score_capacity),
                 false,
             );
+            launch_bf16(
+                &mut bf16_output,
+                &compressed_count,
+                sm_grid.min(score_capacity),
+            );
             device.synchronize().expect("Native learned-index sync");
             let sm_host = device
                 .dtoh_sync_copy(&sm_output)
@@ -11048,12 +11099,22 @@ pub(crate) mod dsa_registration_tests {
             let occupancy_host = device
                 .dtoh_sync_copy(&occupancy_output)
                 .expect("occupancy-grid scores D2H");
+            let bf16_host = device
+                .dtoh_sync_copy(&bf16_output)
+                .expect("BF16 scores D2H");
             assert!(
                 sm_host[..context]
                     .iter()
                     .zip(&occupancy_host[..context])
                     .all(|(&lhs, &rhs)| lhs.to_bits() == rhs.to_bits()),
                 "Native learned-index live scores changed with occupancy/no-tail grid at context {context}",
+            );
+            assert!(
+                sm_host[..context]
+                    .iter()
+                    .zip(&bf16_host[..context])
+                    .all(|(&lhs, &rhs)| lhs.to_bits() == rhs.to_bits()),
+                "Native learned-index scores differ from the expanded BF16 scorer at context {context}",
             );
             let select_topk = |scores: &[f32]| {
                 let mut indices = (0..context).collect::<Vec<_>>();

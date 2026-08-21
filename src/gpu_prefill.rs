@@ -35019,7 +35019,11 @@ impl PrefillEngine {
                 ));
             }
             let history_ptr = *history.device_ptr();
-            if self.active_prefill_chunk_idx == 0 && first_group > 0 {
+            // Native history is one request-scoped scratch buffer shared by
+            // every layer and by the main and learned-index compressors. It
+            // cannot retain this compressor's prefix across either layers or
+            // prefill chunks, so restore the current owner before appending.
+            if first_group > 0 {
                 self.unpack_deepseek_v4_native_cache(native, history_ptr, first_group, 0, label)?;
             }
             Some(history_ptr)
@@ -92345,6 +92349,8 @@ mod kernel_tests {
 
         for code_bits in [8usize, 4usize] {
             let rows = 3usize;
+            let destination_row = 14_792usize;
+            let cache_rows = destination_row + rows;
             let width = 128usize;
             let quant_cols = if code_bits == 8 { 64usize } else { width };
             let block_size = if code_bits == 8 { 64usize } else { 32usize };
@@ -92362,16 +92368,16 @@ mod kernel_tests {
             let d_values = ctx.upload_bf16(&bytes);
             let d_output = ctx.alloc_bf16(rows * width);
             let code_elems = if code_bits == 8 {
-                rows * quant_cols
+                cache_rows * quant_cols
             } else {
-                rows * width.div_ceil(2)
+                cache_rows * width.div_ceil(2)
             };
             let d_codes = ctx.alloc_u8(code_elems);
             let d_scales = ctx
                 .dev
-                .alloc_zeros::<i8>(rows * quant_cols.div_ceil(block_size))
+                .alloc_zeros::<i8>(cache_rows * quant_cols.div_ceil(block_size))
                 .unwrap();
-            let d_tails = ctx.alloc_bf16(rows * (width - quant_cols));
+            let d_tails = ctx.alloc_bf16(cache_rows * (width - quant_cols));
             let pack = ctx.get_kernel(if code_bits == 8 {
                 "deepseek_v4_pack_fp8_native_kernel"
             } else {
@@ -92391,7 +92397,7 @@ mod kernel_tests {
             let mut p5 = width as i32;
             let mut p6 = quant_cols as i32;
             let mut p7 = block_size as i32;
-            let mut p8 = 0i32;
+            let mut p8 = destination_row as i32;
             unsafe {
                 let mut params = if code_bits == 8 {
                     vec![
@@ -92440,7 +92446,7 @@ mod kernel_tests {
                 let mut u5 = width as i32;
                 let mut u6 = quant_cols as i32;
                 let mut u7 = block_size as i32;
-                let mut u8 = 0i32;
+                let mut u8 = destination_row as i32;
                 let mut params = if code_bits == 8 {
                     vec![
                         &mut u0 as *mut _ as *mut std::ffi::c_void,
