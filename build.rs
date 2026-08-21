@@ -189,12 +189,19 @@ fn run_status_timed(
 }
 
 fn nvcc_host_compiler_args() -> Vec<String> {
-    match std::env::var("KRASIS_NVCC_CCBIN") {
+    let mut args = match std::env::var("KRASIS_NVCC_CCBIN") {
         Ok(path) if !path.trim().is_empty() => {
             vec!["-ccbin".to_string(), path]
         }
         _ => Vec::new(),
+    };
+    // glibc 2.43 exposes rsqrt/rsqrtf under _GNU_SOURCE with a noexcept
+    // declaration that conflicts with CUDA 13.0/13.1's math_functions.h.
+    // Keep the standard/default interfaces while hiding those GNU additions.
+    if cfg!(target_os = "linux") {
+        args.extend(["-U_GNU_SOURCE".to_string(), "-D_DEFAULT_SOURCE".to_string()]);
     }
+    args
 }
 
 fn compile_peer_rtt_kernels() {
