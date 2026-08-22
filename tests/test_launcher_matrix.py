@@ -269,8 +269,125 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(info["arch"], "deepseek_v4")
             self.assertEqual(info["support_key"], "")
             self.assertEqual(info["validation_status"], "unvalidated")
+            self.assertFalse(info["dspark_qualified"])
             self.assertTrue(info["runnable"])
             self.assertEqual(info["kv_dim"], 0)
+
+            launcher = Launcher.__new__(Launcher)
+            launcher.cfg = LauncherConfig()
+            launcher.cfg.dspark_mode = "shared"
+            launcher.model_info = info
+            launcher._apply_model_recommended_defaults()
+            with self.assertRaisesRegex(ValueError, "launcher-qualified only"):
+                launcher._validate_model_capabilities()
+
+    def test_pinned_deepseek_v4_0731_exposes_dspark_modes(self) -> None:
+        from krasis.hf_downloader import supported_model_spec
+        from tests.test_model_config import _deepseek_v4_config
+
+        with tempfile.TemporaryDirectory(prefix="krasis-dsv4-dspark-") as root:
+            model_dir = Path(root) / "deepseek-ai" / "DeepSeek-V4-Flash-0731"
+            model_dir.mkdir(parents=True)
+            config = _deepseek_v4_config()
+            config.update({
+                "dspark_block_size": 5,
+                "dspark_noise_token_id": 1,
+                "dspark_target_layer_ids": [0],
+                "dspark_markov_rank": 1,
+            })
+            (model_dir / "config.json").write_text(
+                json.dumps(config), encoding="utf-8"
+            )
+            (model_dir / "model.safetensors").write_bytes(b"")
+            revision = supported_model_spec("dsv4").revision
+            metadata_dir = model_dir / ".cache" / "huggingface" / "download"
+            metadata_dir.mkdir(parents=True)
+            for filename in ("config.json", "model.safetensors"):
+                (metadata_dir / f"{filename}.metadata").write_text(
+                    f"{revision}\nobject-id\n0\n", encoding="utf-8"
+                )
+
+            info = launcher_mod._model_info_from_path(str(model_dir))
+            self.assertEqual(info["validation_status"], "validated")
+            self.assertTrue(info["dspark_qualified"])
+            option = next(
+                item for item in launcher_mod.OPTIONS if item.key == "dspark_mode"
+            )
+            self.assertTrue(
+                launcher_mod._is_option_visible(
+                    option, info, LauncherConfig(), show_advanced=True
+                )
+            )
+
+            launcher = Launcher.__new__(Launcher)
+            launcher.cfg = LauncherConfig()
+            launcher.cfg.dspark_mode = "resident"
+            launcher.cfg.selected_gpu_indices = [0]
+            launcher.model_info = info
+            launcher._apply_model_recommended_defaults()
+            launcher._validate_model_capabilities()
+            launcher._validate_model_topology()
+
+            invalid_capabilities = (
+                ("attention_quant", "hqq4", "HQQ6 attention / Native cache"),
+                ("kv_dtype", "bf16", "has not been launcher-qualified"),
+                ("hcs", False, "requires HCS"),
+                ("dynamic_hcs", False, "dynamic HCS enabled"),
+                ("hcs_host_cache_mode", "mirror", "source HCS host cache"),
+                ("draft_model", "/tmp/draft", "another draft model"),
+                (
+                    "adaptive_cold_mass_pruning",
+                    "75/8",
+                    "adaptive cold-mass pruning",
+                ),
+                ("expert_compression", True, "expert compression"),
+                ("shared_expert_quant", "bf16", "measured INT8"),
+                ("dense_mlp_quant", "bf16", "measured INT8"),
+                ("lm_head_quant", "bf16", "measured INT8"),
+            )
+            for attribute, invalid_value, error_pattern in invalid_capabilities:
+                original_value = getattr(launcher.cfg, attribute)
+                setattr(launcher.cfg, attribute, invalid_value)
+                with self.subTest(attribute=attribute):
+                    with self.assertRaisesRegex(ValueError, error_pattern):
+                        launcher._validate_model_capabilities()
+                setattr(launcher.cfg, attribute, original_value)
+
+            launcher.cfg.selected_gpu_indices = [0, 1]
+            with self.assertRaisesRegex(ValueError, "exactly one selected GPU"):
+                launcher._validate_model_topology()
+
+            launcher.cfg.selected_gpu_indices = [0]
+            launcher.budget_error = "missing auxiliary tensor"
+            launcher._compute_budget = mock.Mock(return_value=None)
+            with self.assertRaisesRegex(ValueError, "missing auxiliary tensor"):
+                launcher._validate_dspark_preload_budget()
+
+            budget = {
+                "over_budget": True,
+                "worst_rank": 0,
+                "ranks": [{"total_mb": 25_000.0}],
+                "gpu_vram_mb": 24_000.0,
+                "ram_total_mb": 1_000.0,
+                "total_ram_gb": 64.0,
+            }
+            launcher._compute_budget = mock.Mock(return_value=budget)
+            with self.assertRaisesRegex(ValueError, "permanent VRAM does not fit"):
+                launcher._validate_dspark_preload_budget()
+
+            budget = {
+                **budget,
+                "over_budget": False,
+                "ram_total_mb": 70.0 * 1024.0,
+            }
+            launcher._compute_budget = mock.Mock(return_value=budget)
+            with self.assertRaisesRegex(ValueError, "host cache does not fit"):
+                launcher._validate_dspark_preload_budget()
+
+            budget = {**budget, "ram_total_mb": 60.0 * 1024.0}
+            launcher._compute_budget = mock.Mock(return_value=budget)
+            launcher._validate_dspark_preload_budget()
+            self.assertIs(launcher.budget, budget)
 
     def test_catalog_basename_does_not_inherit_validation_without_revision_provenance(self) -> None:
         from krasis.hf_downloader import supported_model_spec
@@ -875,6 +992,106 @@ class LauncherMatrixTest(unittest.TestCase):
             tokens,
         )
 
+    def test_dspark_marlin_budget_matches_cache_format_geometry(self) -> None:
+        group_size = vram_budget_mod._effective_marlin_group_size(4096, 2048, 128)
+        self.assertEqual(group_size, 128)
+        per_expert = vram_budget_mod._marlin_int4_expert_bytes(
+            4096,
+            2048,
+            group_size,
+            gated=True,
+            pad_routed_w2=True,
+        )
+        self.assertEqual(per_expert, 12_976_128)
+        shared_expert = vram_budget_mod._marlin_int4_expert_bytes(
+            4096,
+            2048,
+            group_size,
+            gated=True,
+            pad_routed_w2=False,
+        )
+        expected_cache = (
+            vram_budget_mod.MARLIN_CACHE_HEADER_BYTES
+            + 3 * (256 * per_expert + shared_expert)
+        )
+        self.assertEqual(expected_cache, 10_004_594_752)
+
+        # Exercise the dimension-derived group reduction and routed W2 padding
+        # without tying either contract to a known checkpoint or GPU.
+        reduced = vram_budget_mod._effective_marlin_group_size(2880, 2880, 128)
+        self.assertEqual(reduced, 64)
+        padded = vram_budget_mod._marlin_int4_expert_bytes(
+            2880, 2880, reduced, gated=True, pad_routed_w2=True
+        )
+        unpadded = vram_budget_mod._marlin_int4_expert_bytes(
+            2880, 2880, reduced, gated=True, pad_routed_w2=False
+        )
+        self.assertGreater(padded, unpadded)
+
+    def test_dspark_launcher_budget_orders_off_shared_and_resident(self) -> None:
+        from tests.test_model_config import _deepseek_v4_config
+
+        with tempfile.TemporaryDirectory(prefix="krasis-dspark-budget-") as root:
+            config = _deepseek_v4_config()
+            config.update({
+                "max_position_embeddings": 4096,
+                "tie_word_embeddings": True,
+            })
+            model_dir = Path(root) / "DeepSeek-V4-Flash-0731"
+            model_dir.mkdir()
+            (model_dir / "config.json").write_text(
+                json.dumps(config), encoding="utf-8"
+            )
+
+            common = dict(
+                model_path=str(model_dir),
+                pp_partition=[4],
+                attention_quant="bf16",
+                kv_dtype="native",
+                gpu_vram_mb=200_000,
+                total_ram_gb=1024,
+                kv_cache_mb=0,
+            )
+            with mock.patch.object(
+                vram_budget_mod,
+                "_dspark_dense_graph_bytes",
+                return_value=123_456_789,
+            ):
+                off = vram_budget_mod.compute_launcher_budget(
+                    **common, dspark_mode="off"
+                )
+                shared = vram_budget_mod.compute_launcher_budget(
+                    **common, dspark_mode="shared"
+                )
+                resident = vram_budget_mod.compute_launcher_budget(
+                    **common, dspark_mode="resident"
+                )
+
+            self.assertLess(off["ranks"][0]["total_mb"], shared["ranks"][0]["total_mb"])
+            self.assertLess(
+                shared["ranks"][0]["total_mb"], resident["ranks"][0]["total_mb"]
+            )
+            self.assertEqual(shared["ram_dspark_experts_mb"], resident["ram_dspark_experts_mb"])
+            self.assertGreater(shared["ram_dspark_experts_mb"], 0)
+            self.assertEqual(shared["ranks"][0]["dspark_resident_experts_mb"], 0)
+            self.assertGreater(resident["ranks"][0]["dspark_resident_experts_mb"], 0)
+            self.assertGreater(shared["ranks"][0]["dspark_runtime_mb"], 0)
+            self.assertGreater(
+                shared["hcs_cacheable_experts_mb"],
+                resident["hcs_cacheable_experts_mb"],
+            )
+
+            with self.assertRaisesRegex(ValueError, "exactly one pipeline rank"):
+                with mock.patch.object(
+                    vram_budget_mod,
+                    "_dspark_dense_graph_bytes",
+                    return_value=1,
+                ):
+                    vram_budget_mod.compute_launcher_budget(
+                        **{**common, "pp_partition": [2, 2]},
+                        dspark_mode="shared",
+                    )
+
     def test_deepseek_v4_hqq_fallback_uses_real_phase_one_shapes(self) -> None:
         cfg = {
             "model_type": "deepseek_v4",
@@ -911,6 +1128,21 @@ class LauncherMatrixTest(unittest.TestCase):
             benchmark_source,
         )
         self.assertNotIn('cleanup_gpu "$conf"\n', benchmark_source)
+
+    def test_dev_cleanup_matches_stable_gpu_uuids(self):
+        dev_source = (REPO_ROOT / "dev").read_text(encoding="utf-8")
+        cleanup_start = dev_source.index("cleanup_gpu() {")
+        cleanup_end = dev_source.index("\nextract_selected_gpus_arg() {", cleanup_start)
+        cleanup_source = dev_source[cleanup_start:cleanup_end]
+
+        self.assertIn(
+            '[[ "$gpu_idx" == "$sg" || "$gpu_uuid" == "$sg" || "${gpu_pci,,}" == "${sg,,}" ]]',
+            cleanup_source,
+        )
+        self.assertIn(
+            "--query-gpu=index,uuid,pci.bus_id,memory.used,memory.total",
+            cleanup_source,
+        )
 
     def test_dev_reference_cleanup_uses_selected_gpu_override(self):
         dev_source = (REPO_ROOT / "dev").read_text(encoding="utf-8")
@@ -1641,6 +1873,7 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.draft_model = "~/models/draft"
         cfg.draft_k = 5
         cfg.draft_context = 1024
+        cfg.dspark_mode = "shared"
         cfg.temperature = 0.25
         cfg.force_load = True
         cfg.force_rebuild_cache = True
@@ -1702,6 +1935,7 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(values.get("CFG_DRAFT_MODEL"), "~/models/draft")
             self.assertEqual(values.get("CFG_DRAFT_K"), "5")
             self.assertEqual(values.get("CFG_DRAFT_CONTEXT"), "1024")
+            self.assertEqual(values.get("CFG_DSPARK_MODE"), "shared")
             self.assertEqual(values.get("CFG_TEMPERATURE"), "0.25")
             self.assertEqual(values.get("CFG_FORCE_LOAD"), "1")
             self.assertEqual(values.get("CFG_FORCE_REBUILD_CACHE"), "1")
@@ -1757,6 +1991,7 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(loaded.draft_model, os.path.expanduser("~/models/draft"))
             self.assertEqual(loaded.draft_k, 5)
             self.assertEqual(loaded.draft_context, 1024)
+            self.assertEqual(loaded.dspark_mode, "shared")
             self.assertEqual(loaded.temperature, 0.25)
             self.assertTrue(loaded.force_load)
             self.assertTrue(loaded.force_rebuild_cache)

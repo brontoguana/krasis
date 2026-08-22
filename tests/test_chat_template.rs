@@ -145,12 +145,10 @@ fn deepseek_v4_renders_openai_tool_calls() {
         )
         .unwrap();
     assert!(rendered.contains("<｜DSML｜invoke name=\"weather\">"));
-    assert!(rendered.contains(
-        "<｜DSML｜parameter name=\"city\" string=\"true\">London</｜DSML｜parameter>"
-    ));
-    assert!(rendered.contains(
-        "<｜DSML｜parameter name=\"days\" string=\"false\">2</｜DSML｜parameter>"
-    ));
+    assert!(rendered
+        .contains("<｜DSML｜parameter name=\"city\" string=\"true\">London</｜DSML｜parameter>"));
+    assert!(rendered
+        .contains("<｜DSML｜parameter name=\"days\" string=\"false\">2</｜DSML｜parameter>"));
     assert!(rendered.contains("<｜end▁of▁sentence｜>"));
 }
 

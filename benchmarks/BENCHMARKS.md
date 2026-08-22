@@ -1,5 +1,703 @@
 # Krasis Benchmark Results
 
+## DeepSeek-V4-Flash-0731 deferred-DMA accepted speed gate — 2026-08-22
+
+This timing-disabled A6000 standard benchmark validates deferred cold DMA as
+the default compatible-path scheduler. Internal decode was
+`13.42/13.90/13.47 tok/s` at 50/100/250 target tokens, versus the prior
+accepted `12.96/13.51/12.94 tok/s`: gains of `3.5%/2.9%/4.1%`. HTTP rows were
+`24.07/17.66/14.39 tok/s`. HCS loaded 2,775/11,008 experts, decode held a
+1,042 MiB floor against the unchanged 600 MiB margin, and the final request
+recorded a 75.17% HCS hit rate with zero budget skips, no-slot events, or copy
+failures. Instrumentation and component timing were disabled.
+
+Evidence: [report](20260822_deepseek_v4_flash_0731_deferred_dma_default_speed_hqq6_native_a6000_benchmark_report.log),
+[stdout](20260822_deepseek_v4_flash_0731_deferred_dma_default_speed_hqq6_native_a6000_benchmark_stdout.log),
+[runtime](20260822_deepseek_v4_flash_0731_deferred_dma_default_speed_hqq6_native_a6000_runtime.log),
+and [command](20260822_deepseek_v4_flash_0731_deferred_dma_default_speed_hqq6_native_a6000_command.log).
+
+## DeepSeek-V4-Flash-0731 deferred-DMA paired candidate — 2026-08-22
+
+This timing-enabled A6000 run differs from the current-build control only by
+`KRASIS_DEFERRED_COLD_DMA=1`. Preparing each layer's ordinary cold-copy plan
+before submitting the same copies consecutively raised accepted-row demand H2D
+bandwidth from `21.09/21.14/21.02` to `22.89/22.82/22.88 GB/s`. Internal decode
+improved from `12.58/13.40/12.62` to `13.63/13.76/13.47 tok/s` at 50/100/250
+target tokens. The 100-token candidate moved slightly more cold experts than
+the control (`57.2` versus `56.2` per token) yet still improved, independently
+confirming the scheduling gain.
+
+All six calibration probes measured `22.24--22.27 GB/s`, versus
+`20.03--20.08 GB/s` in the control. Decode stayed at least 1,040 MiB free with
+zero budget skips, no-slot events, copy failures, CUDA/OOM, or below-margin
+events. Timing was enabled, so a separate timing-disabled standard benchmark
+is required for the accepted speed result.
+
+Evidence: [report](20260822_deepseek_v4_flash_0731_deferred_dma_candidate_timing_hqq6_native_a6000_benchmark_report.log),
+[stdout](20260822_deepseek_v4_flash_0731_deferred_dma_candidate_timing_hqq6_native_a6000_benchmark_stdout.log),
+[runtime](20260822_deepseek_v4_flash_0731_deferred_dma_candidate_timing_hqq6_native_a6000_runtime.log),
+and [command](20260822_deepseek_v4_flash_0731_deferred_dma_candidate_timing_hqq6_native_a6000_command.log).
+
+## DeepSeek-V4-Flash-0731 deferred-DMA current-build control — 2026-08-22
+
+This timing-enabled A6000 standard run is the paired control for the portable
+deferred cold-DMA experiment. The candidate was present in the binary but
+disabled. Internal decode was `12.58/13.40/12.62 tok/s` at 50/100/250 target
+tokens. Accepted-row demand H2D bandwidth was `21.09/21.14/21.02 GB/s` with
+`60.8/56.2/64.3` cold experts per token. The full calibration remained above
+the 600 MiB contract and decode reached a 1,038 MiB floor. There were zero
+budget skips, no-slot events, or copy failures. Because timing was enabled,
+these speeds are diagnostic rather than production regression results.
+
+Evidence: [report](20260822_deepseek_v4_flash_0731_deferred_dma_control_timing_hqq6_native_a6000_benchmark_report.log),
+[stdout](20260822_deepseek_v4_flash_0731_deferred_dma_control_timing_hqq6_native_a6000_benchmark_stdout.log),
+[runtime](20260822_deepseek_v4_flash_0731_deferred_dma_control_timing_hqq6_native_a6000_runtime.log),
+and [command](20260822_deepseek_v4_flash_0731_deferred_dma_control_timing_hqq6_native_a6000_command.log).
+
+## DeepSeek-V4-Flash-0731 low-residency locality diagnostic — 2026-08-22
+
+This instrumentation-enabled A6000 run measured actual Dynamic HCS against
+same-route global-LRU shadows at both FreeToken's 2,424-slot capacity and
+Krasis's measured 2,775-slot capacity. It also measured static prompt/heatmap
+retention variants. Timing and locality instrumentation were enabled, so its
+speed numbers are diagnostic and are not production regression results.
+
+| Target decode | Actual HCS hit / cold per token | Global LRU, 2,424 slots | Global LRU, 2,775 slots |
+|---:|---:|---:|---:|
+| 50 | 78.01% / 56.7 | 73.15% | 73.90% |
+| 100 | 78.14% / 56.4 | 76.50% | 78.80% |
+| 250 | 76.38% / 61.0 | 79.05% / 54.05 cold | 81.83% |
+
+The 250-token 2,424-slot shadow nearly exactly reproduced FreeToken's
+independently measured 78.92% hit rate and 54.38 cold experts/token. LRU is
+therefore better on the long request at low residency, but not at 50 tokens
+and not clearly at 100. Every static prompt/heatmap retention variant lost to
+actual Dynamic HCS, so changing only the fixed retention percentage is not
+supported. The immediate-copy demand path reached 21.95/22.03/22.22 GB/s on
+the three timed rows, below the isolated 26--27 GB/s copy path.
+
+The full 39,920-token calibration held 1,246 MiB free. Timed prefill sampled
+601 MiB against the 600 MiB safety contract. There were zero below-margin,
+CUDA/OOM, budget-skip, no-slot, or copy failures.
+
+Evidence: [report](20260822_deepseek_v4_flash_0731_lru_locality_timing_hqq6_native_a6000_benchmark_report.log),
+[stdout](20260822_deepseek_v4_flash_0731_lru_locality_timing_hqq6_native_a6000_benchmark_stdout.log),
+[runtime](20260822_deepseek_v4_flash_0731_lru_locality_timing_hqq6_native_a6000_runtime.log),
+and [command](20260822_deepseek_v4_flash_0731_lru_locality_timing_hqq6_native_a6000_command.log).
+
+## DeepSeek-V4-Flash-0731 same-host comparison controls — 2026-08-22
+
+These timing-disabled standard Krasis runs are the controls for a same-host
+product comparison on Loom's RTX A6000 and RTX PRO 6000. Both used the exact
+official DeepSeek-V4-Flash-0731 source, INT4 Marlin routed experts, HQQ6
+attention, native KV, runtime VRAM calibration, held-out route heatmaps, and
+the unchanged 600 MiB safety margin. Component timing and trace diagnostics
+were disabled.
+
+| Measurement | RTX A6000 48 GB | RTX PRO 6000 96 GB |
+|---|---:|---:|
+| Prefill, 1K | 101.5 | 167.9 tok/s |
+| Prefill, 5K | 263.5 | 771.8 tok/s |
+| Prefill, 10K | 1,036.8 | 1,497.6 tok/s |
+| Prefill, 20K | 1,311.8 | 1,908.9 tok/s |
+| Prefill, 35K | 1,094.5 | 2,669.8 tok/s |
+| Prefill, 39,920 | 1,168.1 | 2,657.2 tok/s |
+| Internal decode, 50 / 100 / 250 | 12.96 / 13.51 / 12.94 | 37.20 / 38.17 / 36.63 tok/s |
+| HTTP, 50 / 100 / 250 | 24.07 / 17.50 / 14.38 | 69.68 / 48.29 / 40.94 tok/s |
+| HCS / decode floor | 2,775 / 11,008; 1,040 MiB | 6,660 / 11,008; 1,189 MiB |
+
+The A6000 final HCS summary had a 75.67% hit rate; the PRO final summary had a
+94.91% hit rate. Both runs recorded zero budget skips and zero copy failures.
+The PRO timed-prefill execution reached a directly sampled 604 MiB free VRAM,
+remaining above the 600 MiB contract.
+
+A6000 evidence: [report](20260822_deepseek_v4_flash_0731_freetoken_compare_hqq6_native_a6000_benchmark_report.log),
+[stdout](20260822_deepseek_v4_flash_0731_freetoken_compare_hqq6_native_a6000_benchmark_stdout.log),
+[runtime](20260822_deepseek_v4_flash_0731_freetoken_compare_hqq6_native_a6000_runtime.log),
+and [command](20260822_deepseek_v4_flash_0731_freetoken_compare_hqq6_native_a6000_command.log).
+
+RTX PRO evidence: [report](20260822_deepseek_v4_flash_0731_freetoken_compare_hqq6_native_pro_benchmark_report.log),
+[stdout](20260822_deepseek_v4_flash_0731_freetoken_compare_hqq6_native_pro_benchmark_stdout.log),
+[runtime](20260822_deepseek_v4_flash_0731_freetoken_compare_hqq6_native_pro_runtime.log),
+and [command](20260822_deepseek_v4_flash_0731_freetoken_compare_hqq6_native_pro_command.log).
+
+## Qwen3-235B portable predicted-W1 measured rejection on RTX A6000 — 2026-08-21
+
+This timing-disabled candidate run is paired with the repaired split-launch
+control below. Source, cache, config, heatmap, HCS, split launch, and split
+prefill DMA were identical; portable predicted-W1 was explicitly forced on to
+quantify the full standard curve after `auto` found a non-monotonic result.
+
+| Measurement | Split-only control | Predicted-W1 forced | Change |
+|---|---:|---:|---:|
+| Prefill, 1K | 152.6 | 170.6 tok/s | +11.8% |
+| Prefill, 5K | 572.4 | 669.7 tok/s | +17.0% |
+| Prefill, 10K | 803.0 | 811.3 tok/s | +1.0% |
+| Prefill, 14,857 | 800.9 | 797.1 tok/s | -0.5% |
+| Internal decode, 50 / 100 / 250 | 7.64 / 7.74 / 7.64 | 7.57 / 7.70 / 7.56 tok/s | -0.9 / -0.5 / -1.0% |
+| HTTP, 50 / 100 / 250 | 14.07 / 10.06 / 8.27 | 13.99 / 9.89 / 8.20 tok/s | -0.6 / -1.7 / -0.8% |
+
+Before this run, the replicated order-balanced `auto` selector measured
+control/candidate seconds of `4.7069/4.7046` versus `3.9896/3.9914` at 500
+tokens, `5.8195/5.8167` versus `4.7185/4.7152` at 2,725, and
+`16.2675/16.4074` versus `16.4289/16.4676` at 14,857. All A/B first tokens
+were 151667. Because the candidate stops winning at long context, the current
+single-threshold policy correctly refused promotion. No bounded interval is
+inferred from only three calibration points; Qwen3-235B remains default-off.
+
+HCS remained 3,560/12,032, the decode floor remained 1,092 MiB, and no
+CUDA/OOM, below-margin, copy, budget, or no-slot failure occurred.
+
+Evidence: [report](20260821_qwen3_235b_carryover_predicted_forced_timing_clean_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_qwen3_235b_carryover_predicted_forced_timing_clean_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_qwen3_235b_carryover_predicted_forced_timing_clean_hqq6_k6v6_a6000_krasis.log),
+[command](20260821_qwen3_235b_carryover_predicted_forced_timing_clean_hqq6_k6v6_a6000_command.log),
+and [heatmap](20260821_qwen3_235b_carryover_predicted_forced_timing_clean_hqq6_k6v6_a6000_heatmap.json).
+
+## Qwen3-235B timing-disabled repaired split-launch control on RTX A6000 — 2026-08-21
+
+This is the clean production-speed control for the portable predicted-W1
+comparison. It used the pinned official source, independently built 117.1 GB
+Marlin INT4 cache, HQQ6 attention, k6v6 cache, exact archived heatmap, repaired
+split hot/cold decode launch, split prefill expert DMA, and the unchanged
+600 MiB margin. Component instrumentation and portable predicted-W1 were off.
+
+| Measurement | Result |
+|---|---:|
+| Prefill, 1K / 5K / 10K / 14,857 | 152.6 / 572.4 / 803.0 / 800.9 tok/s |
+| Internal decode, 50 / 100 / 250 | 7.64 / 7.74 / 7.64 tok/s |
+| HTTP, 50 / 100 / 250 | 14.07 / 10.06 / 8.27 tok/s |
+| HCS / decode floor | 3,560 / 12,032 experts; 1,092 MiB free |
+
+No CUDA/OOM, below-margin, copy, budget, or no-slot failure occurred.
+
+Evidence: [report](20260821_qwen3_235b_carryover_split_only_timing_clean_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_qwen3_235b_carryover_split_only_timing_clean_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_qwen3_235b_carryover_split_only_timing_clean_hqq6_k6v6_a6000_krasis.log),
+[command](20260821_qwen3_235b_carryover_split_only_timing_clean_hqq6_k6v6_a6000_command.log),
+and [heatmap](20260821_qwen3_235b_carryover_split_only_timing_clean_hqq6_k6v6_a6000_heatmap.json).
+
+## Qwen3-235B repaired split-launch diagnostic on RTX A6000 — 2026-08-21
+
+This instrumentation-enabled standard run reused the split-off control's exact
+source, cache, config, and heatmap while enabling repaired split hot/cold
+decode launch and split prefill expert DMA. Portable predicted-W1 remained
+disabled. It is diagnostic evidence, not a production speed claim.
+
+| Measurement | Split-off control | Split-on diagnostic | Change |
+|---|---:|---:|---:|
+| Prefill, 1K | 127.1 | 145.5 tok/s | +14.5% |
+| Prefill, 5K | 551.3 | 537.5 tok/s | -2.5% |
+| Prefill, 10K | 788.0 | 788.7 tok/s | +0.1% |
+| Prefill, 14,857 | 611.6 | 784.4 tok/s | +28.3% diagnostic anomaly; repeat required |
+| Internal decode, 50 / 100 / 250 | 6.40 / 6.47 / 6.37 | 7.42 / 7.53 / 7.38 tok/s | +15.9 / +16.4 / +15.9% |
+| HTTP, 50 / 100 / 250 | 11.73 / 8.29 / 6.87 | 13.58 / 9.35 / 7.95 tok/s | +15.8 / +12.8 / +15.7% |
+| HCS / decode floor | 3,560 experts; 1,092 MiB | 3,560 experts; 1,092 MiB | unchanged |
+
+Formal decode rows overlapped 32.9-33.6 ms/token of resident expert work with
+cold demand transfers. The 14,857-token report-level prefill gain is retained
+but not yet accepted as causal: native core prefill remained essentially flat
+(`16.64` versus `16.72 s`), placing the difference in surrounding request
+staging or run variance. A timing-disabled replicated comparison is required.
+No CUDA/OOM, below-margin, copy, budget, or no-slot failure occurred.
+
+Evidence: [report](20260821_qwen3_235b_carryover_split_on_timing_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_qwen3_235b_carryover_split_on_timing_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_qwen3_235b_carryover_split_on_timing_hqq6_k6v6_a6000_krasis.log),
+[command](20260821_qwen3_235b_carryover_split_on_timing_hqq6_k6v6_a6000_command.log),
+and [heatmap](20260821_qwen3_235b_carryover_split_on_timing_hqq6_k6v6_a6000_heatmap.json).
+
+## Qwen3-235B split-off carryover diagnostic on RTX A6000 — 2026-08-21
+
+This instrumentation-enabled standard run established the route-identical
+control for repaired split hot/cold launch and portable predicted-W1. It used
+the pinned official Qwen3-235B-A22B source, independently built 117.1 GB
+Marlin cache, HQQ6 attention, k6v6 cache, and the unchanged 600 MiB margin.
+Both overlap policies were forced off while prescan accuracy and component
+timing were enabled. These are diagnostic values, not production speed claims.
+
+| Measurement | Result |
+|---|---:|
+| Prefill, 1K / 5K / 10K / 14,857 | 127.1 / 551.3 / 788.0 / 611.6 tok/s |
+| Internal decode, 50 / 100 / 250 | 6.40 / 6.47 / 6.37 tok/s |
+| HTTP, 50 / 100 / 250 | 11.73 / 8.29 / 6.87 tok/s |
+| HCS / decode floor | 3,560 / 12,032 experts; 1,092 MiB free |
+
+The all-cold short calibration routed 752 experts/token and 6,979.50 MiB/token;
+active demand H2D was 337.23 ms/token at 21.02 GB/s. At 500 tokens, MoE was
+94.7% of prefill and DMA wait was 5,182.6 ms of the 5,859.8 ms native prefill.
+At the runtime-derived 14,857-token probe, exposed DMA wait fell to 48.6 ms,
+while attention and MoE compute consumed 50.6% and 46.9% respectively.
+Prescan reached 100% active recall at 14,857 tokens but selected all 128
+experts per layer, identifying a likely dense-overlap rather than byte-saving
+opportunity. No CUDA/OOM, below-margin, copy, budget, or no-slot failure
+occurred.
+
+Evidence: [report](20260821_qwen3_235b_carryover_split_off_timing_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_qwen3_235b_carryover_split_off_timing_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_qwen3_235b_carryover_split_off_timing_hqq6_k6v6_a6000_krasis.log),
+[command](20260821_qwen3_235b_carryover_split_off_timing_hqq6_k6v6_a6000_command.log),
+and [heatmap](20260821_qwen3_235b_carryover_split_off_timing_hqq6_k6v6_a6000_heatmap.json).
+
+## Ornith-1.5-397B measured predicted-W1 auto run on RTX A6000 — 2026-08-21
+
+This timing-disabled standard run is the exact paired comparison to the
+split-only control below. Both runs used identical final source, config,
+six-prompt heatmap, repaired split hot/cold decode launch, and split prefill
+expert DMA. The sole experimental difference was
+`KRASIS_PREFILL_PREDICTED_W1=auto` instead of `0`.
+
+The replicated, order-balanced native selector measured a robust loss at 500
+tokens, then robust wins at 4,467 and 39,920 tokens. It therefore admitted the
+portable overlap only from 4,467 computed suffix tokens. Every selector A/B
+produced first token `760`.
+
+| Measurement | Split-only control | Measured auto | Change |
+|---|---:|---:|---:|
+| Prefill, 1K | 113.0 | 110.8 tok/s | -1.9% |
+| Prefill, 5K | 360.3 | 445.7 tok/s | +23.7% |
+| Prefill, 10K | 531.3 | 690.0 tok/s | +29.9% |
+| Prefill, 20K | 658.1 | 793.7 tok/s | +20.6% |
+| Prefill, 35K | 614.9 | 728.3 tok/s | +18.4% |
+| Prefill, 39,920 | 638.7 | 769.8 tok/s | +20.5% |
+| Internal decode, 50 / 100 / 250 | 7.89 / 7.75 / 7.28 | 8.00 / 7.82 / 7.27 tok/s | control retained |
+| HTTP, 50 / 100 / 250 | 13.60 / 9.67 / 7.98 | 13.79 / 9.71 / 8.01 tok/s | control retained |
+| HCS / decode floor | 5,010 experts; 1,042 MiB | 5,010 experts; 1,042 MiB | unchanged |
+
+Selector control/candidate means were `6.467/7.635 s` at 500,
+`12.386/9.578 s` at 4,467, and `61.187/49.673 s` at 39,920. The closest
+selector floor was 702 MiB against the unchanged 600 MiB safety margin. There
+were no CUDA/OOM, below-margin, copy, budget, or no-slot failures.
+
+Reproduction:
+
+```bash
+KRASIS_SPLIT_EXPERT_LAUNCH=1 \
+KRASIS_PREFILL_SPLIT_EXPERT_DMA=1 \
+KRASIS_PREFILL_PREDICTED_W1=auto \
+./dev benchmark tests/ornith15-397b-hqq6-k6v6-a6000-carryover.conf \
+  --heatmap-path tests/ornith15-397b-carryover-heatmap.json
+```
+
+Evidence: [report](20260821_ornith15_397b_carryover_auto_timing_clean_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_ornith15_397b_carryover_auto_timing_clean_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_ornith15_397b_carryover_auto_timing_clean_hqq6_k6v6_a6000_krasis.log),
+[command](20260821_ornith15_397b_carryover_auto_timing_clean_hqq6_k6v6_a6000_command.log),
+and [heatmap](20260821_ornith15_397b_carryover_auto_timing_clean_hqq6_k6v6_a6000_heatmap.json).
+
+## Ornith-1.5-397B timing-disabled split-only control on RTX A6000 — 2026-08-21
+
+This production-speed control used repaired split hot/cold decode launch and
+split prefill expert DMA, with portable predicted-W1 explicitly disabled. It
+used the same exact runtime, config, and 1.5 heatmap as the measured auto run.
+
+| Measurement | Result |
+|---|---:|
+| Prefill, 1K / 5K / 10K / 20K / 35K / 39,920 | 113.0 / 360.3 / 531.3 / 658.1 / 614.9 / 638.7 tok/s |
+| Internal decode, 50 / 100 / 250 | 7.89 / 7.75 / 7.28 tok/s |
+| HTTP, 50 / 100 / 250 | 13.60 / 9.67 / 7.98 tok/s |
+| HCS / decode floor | 5,010 / 30,720 experts; 1,042 MiB free |
+
+The 39,920-token calibration floor was 1,262 MiB and no CUDA/OOM,
+below-margin, copy, budget, or no-slot failure occurred.
+
+Reproduction:
+
+```bash
+KRASIS_SPLIT_EXPERT_LAUNCH=1 \
+KRASIS_PREFILL_SPLIT_EXPERT_DMA=1 \
+KRASIS_PREFILL_PREDICTED_W1=0 \
+./dev benchmark tests/ornith15-397b-hqq6-k6v6-a6000-carryover.conf \
+  --heatmap-path tests/ornith15-397b-carryover-heatmap.json
+```
+
+Evidence: [report](20260821_ornith15_397b_carryover_split_only_timing_clean_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_ornith15_397b_carryover_split_only_timing_clean_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_ornith15_397b_carryover_split_only_timing_clean_hqq6_k6v6_a6000_krasis.log),
+[command](20260821_ornith15_397b_carryover_split_only_timing_clean_hqq6_k6v6_a6000_command.log),
+and [heatmap](20260821_ornith15_397b_carryover_split_only_timing_clean_hqq6_k6v6_a6000_heatmap.json).
+
+## Ornith-1.5-397B repaired split-launch and prefill diagnostic on RTX A6000 — 2026-08-21
+
+This instrumentation-enabled standard run reused the control's exact 1.5
+heatmap and enabled repaired split hot/cold decode launch, split prefill expert
+DMA, prescan accuracy, and prefill component timing. It is diagnostic evidence,
+not a production speed claim.
+
+| Measurement | Forced-off control | Split/prescan diagnostic |
+|---|---:|---:|
+| Prefill, 1K / 5K / 10K / 20K / 35K / 39,920 | 115.6 / 348.7 / 497.1 / 612.7 / 584.1 / 601.1 | 114.8 / 360.6 / 528.9 / 653.6 / 611.0 / 634.5 tok/s |
+| Internal decode, 50 / 100 / 250 | 7.74 / 7.59 / 7.12 | 8.11 / 7.93 / 7.39 tok/s |
+| HTTP, 50 / 100 / 250 | 13.34 / 9.44 / 7.83 | 13.96 / 9.85 / 8.14 tok/s |
+| HCS / decode floor | 5,010 experts; 1,044 MiB | 5,010 experts; 1,044 MiB |
+
+The repaired path launched `14.5–15.6 ms/token` of resident work during demand
+DMA on the formal decode rows. Prescan at 5K–39,920 had 95.3–99.2% recall but
+predicted 488.8–508.2 of 512 experts per layer, so byte reduction is minimal;
+the remaining opportunity is transfer/compute overlap. No CUDA/OOM,
+below-margin, copy, budget, or no-slot failure occurred.
+
+Reproduction:
+
+```bash
+KRASIS_SPLIT_EXPERT_LAUNCH=1 \
+KRASIS_PREFILL_SPLIT_EXPERT_DMA=1 \
+KRASIS_PREFILL_PRESCAN_ACCURACY=1 \
+KRASIS_PREFILL_TIMING=1 \
+./dev benchmark tests/ornith15-397b-hqq6-k6v6-a6000-carryover.conf \
+  --heatmap-path tests/ornith15-397b-carryover-heatmap.json --timing
+```
+
+Evidence: [report](20260821_ornith15_397b_carryover_combo_timing_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_ornith15_397b_carryover_combo_timing_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_ornith15_397b_carryover_combo_timing_hqq6_k6v6_a6000_krasis.log),
+and [command](20260821_ornith15_397b_carryover_combo_timing_hqq6_k6v6_a6000_command.log).
+
+## Ornith-1.5-397B split-off diagnostic control on RTX A6000 — 2026-08-21
+
+This instrumentation-enabled control used the independently built 1.5 Marlin
+cache, HQQ6 attention, k6v6 cache, the unchanged 600 MiB safety margin, and
+`KRASIS_SPLIT_EXPERT_LAUNCH=0`. It built the fresh six-prompt 1.5 heatmap used
+by later paired runs.
+
+| Measurement | Result |
+|---|---:|
+| Prefill, 1K / 5K / 10K / 20K / 35K / 39,920 | 115.6 / 348.7 / 497.1 / 612.7 / 584.1 / 601.1 tok/s |
+| Internal decode, 50 / 100 / 250 | 7.74 / 7.59 / 7.12 tok/s |
+| HTTP, 50 / 100 / 250 | 13.34 / 9.44 / 7.83 tok/s |
+| HCS / decode floor | 5,010 / 30,720 experts; 1,044 MiB free |
+
+All-cold calibration measured 600 experts and 3,712.50 MiB per token, with
+172.18–172.42 ms/token active H2D at 21.87–21.90 GB/s. Split-hot work was
+exactly zero. The 39,920-token calibration floor was 1,234 MiB and no runtime
+failure occurred.
+
+Evidence: [report](20260821_ornith15_397b_carryover_split_off_timing_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_ornith15_397b_carryover_split_off_timing_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_ornith15_397b_carryover_split_off_timing_hqq6_k6v6_a6000_krasis.log),
+[command](20260821_ornith15_397b_carryover_split_off_timing_hqq6_k6v6_a6000_command.log),
+and [heatmap](20260821_ornith15_397b_carryover_split_off_timing_hqq6_k6v6_a6000_heatmap.json).
+
+## Ornith-1.0-397B exact-source measured predicted-W1 auto run on RTX A6000 — 2026-08-21
+
+This timing-disabled standard run is the exact paired comparison to the
+split-only control below. Both runs used identical final source, config,
+six-prompt heatmap, repaired split hot/cold decode launch, and split prefill
+expert DMA. The sole experimental difference was
+`KRASIS_PREFILL_PREDICTED_W1=auto` instead of `0`.
+
+The replicated, order-balanced native selector measured a robust loss at 500
+tokens, then robust wins at 4,467 and 39,920 tokens. It therefore admitted the
+portable overlap only from 4,467 computed suffix tokens. Every selector A/B
+produced first token `90700`.
+
+| Measurement | Split-only control | Measured auto | Change |
+|---|---:|---:|---:|
+| Prefill, 1K | 115.9 | 115.0 tok/s | -0.8% |
+| Prefill, 5K | 364.3 | 466.6 tok/s | +28.1% |
+| Prefill, 10K | 537.1 | 703.2 tok/s | +30.9% |
+| Prefill, 20K | 661.3 | 794.2 tok/s | +20.1% |
+| Prefill, 35K | 618.6 | 738.4 tok/s | +19.4% |
+| Prefill, 39,920 | 642.0 | 773.5 tok/s | +20.5% |
+| Internal decode, 50 / 100 / 250 | 8.51 / 8.24 / 7.78 | 8.31 / 8.06 / 7.65 tok/s | control retained |
+| HTTP, 50 / 100 / 250 | 13.64 / 10.20 / 8.45 | 12.97 / 10.00 / 8.31 tok/s | control retained |
+| HCS / decode floor | 5,010 experts; 1,042 MiB | 5,010 experts; 1,040 MiB | unchanged |
+
+Selector control/candidate means were `6.168/7.206 s` at 500,
+`11.913/9.074 s` at 4,467, and `59.946/49.415 s` at 39,920. The closest
+selector floor was 702 MiB against the unchanged 600 MiB safety margin. There
+were no CUDA/OOM, below-margin, copy, budget, or no-slot failures.
+
+Reproduction:
+
+```bash
+KRASIS_SPLIT_EXPERT_LAUNCH=1 \
+KRASIS_PREFILL_SPLIT_EXPERT_DMA=1 \
+KRASIS_PREFILL_PREDICTED_W1=auto \
+./dev benchmark tests/ornith10-397b-hqq6-k6v6-a6000-carryover.conf \
+  --heatmap-path benchmarks/20260821_ornith10_397b_carryover_split_only_exact_timing_clean_hqq6_k6v6_a6000_heatmap.json
+```
+
+Evidence: [report](20260821_ornith10_397b_carryover_auto_exact_timing_clean_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_ornith10_397b_carryover_auto_exact_timing_clean_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_ornith10_397b_carryover_auto_exact_timing_clean_hqq6_k6v6_a6000_krasis.log),
+[command](20260821_ornith10_397b_carryover_auto_exact_timing_clean_hqq6_k6v6_a6000_command.log),
+and [heatmap](20260821_ornith10_397b_carryover_auto_exact_timing_clean_hqq6_k6v6_a6000_heatmap.json).
+
+## Ornith-1.0-397B exact-source split-only control on RTX A6000 — 2026-08-21
+
+This timing-disabled standard control used final source, repaired split hot/cold
+decode launch, split prefill expert DMA, and `KRASIS_PREFILL_PREDICTED_W1=0`.
+It built the fresh exact-source six-prompt heatmap that the final auto repeat
+also consumes, preserving the strict runtime-signature contract.
+
+| Measurement | Result |
+|---|---:|
+| Prefill, 1K / 5K / 10K / 20K / 35K / 39,920 | 115.9 / 364.3 / 537.1 / 661.3 / 618.6 / 642.0 tok/s |
+| Internal decode, 50 / 100 / 250 | 8.51 / 8.24 / 7.78 tok/s |
+| HTTP, 50 / 100 / 250 | 13.64 / 10.20 / 8.45 tok/s |
+| HCS / decode floor | 5,010 / 30,720 experts; 1,042 MiB free |
+
+No CUDA/OOM, below-margin, copy, budget, or no-slot failure was present.
+
+Reproduction:
+
+```bash
+KRASIS_SPLIT_EXPERT_LAUNCH=1 \
+KRASIS_PREFILL_SPLIT_EXPERT_DMA=1 \
+KRASIS_PREFILL_PREDICTED_W1=0 \
+./dev benchmark tests/ornith10-397b-hqq6-k6v6-a6000-carryover.conf
+```
+
+Evidence: [report](20260821_ornith10_397b_carryover_split_only_exact_timing_clean_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_ornith10_397b_carryover_split_only_exact_timing_clean_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_ornith10_397b_carryover_split_only_exact_timing_clean_hqq6_k6v6_a6000_krasis.log),
+[command](20260821_ornith10_397b_carryover_split_only_exact_timing_clean_hqq6_k6v6_a6000_command.log),
+and [heatmap](20260821_ornith10_397b_carryover_split_only_exact_timing_clean_hqq6_k6v6_a6000_heatmap.json).
+
+## Ornith-1.0-397B measured portable predicted-W1 auto run on RTX A6000 — 2026-08-21
+
+This timing-disabled standard benchmark used the repaired split hot/cold decode
+launch, split prefill expert DMA, and the explicit `auto` portable predicted-W1
+policy. A fresh six-prompt heatmap was built for the exact runtime signature.
+After final HCS admission, replicated order-balanced native timings measured a
+loss at 500 tokens and robust wins at 4,467 and 39,920 tokens, so the runtime
+selected a conservative 4,467-token threshold. All selector A/Bs produced the
+same first token.
+
+| Measurement | Result |
+|---|---:|
+| Prefill, 1K / 5K / 10K / 20K / 35K / 39,920 | 113.5 / 455.0 / 701.5 / 795.5 / 736.7 / 771.7 tok/s |
+| Internal decode, 50 / 100 / 250 | 8.43 / 8.19 / 7.77 tok/s |
+| HTTP, 50 / 100 / 250 | 13.56 / 10.29 / 8.44 tok/s |
+| HCS / decode floor | 5,010 / 30,720 experts; 1,042 MiB free |
+| Selector, control versus candidate | 6.241s vs 7.352s at 500; 12.563s vs 9.958s at 4,467; 60.679s vs 49.600s at 39,920 |
+
+The closest selector prefill floor was 632 MiB against the unchanged 600 MiB
+runtime safety margin. No CUDA/OOM, below-margin, copy, budget, or no-slot
+failure was present. The exact timing-disabled split-only comparison is tracked
+as a separate standard run rather than inferred from the earlier diagnostic.
+
+Reproduction:
+
+```bash
+KRASIS_SPLIT_EXPERT_LAUNCH=1 \
+KRASIS_PREFILL_SPLIT_EXPERT_DMA=1 \
+KRASIS_PREFILL_PREDICTED_W1=auto \
+./dev benchmark tests/ornith10-397b-hqq6-k6v6-a6000-carryover.conf
+```
+
+Evidence: [report](20260821_ornith10_397b_carryover_auto_timing_clean_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_ornith10_397b_carryover_auto_timing_clean_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_ornith10_397b_carryover_auto_timing_clean_hqq6_k6v6_a6000_krasis.log),
+[command](20260821_ornith10_397b_carryover_auto_timing_clean_hqq6_k6v6_a6000_command.log),
+and [heatmap](20260821_ornith10_397b_carryover_auto_timing_clean_hqq6_k6v6_a6000_heatmap.json).
+
+## Ornith-1.0-397B portable predicted-W1 diagnostic on RTX A6000 — 2026-08-21
+
+This completed standard run evaluated an explicit, default-off portable
+predicted-W1 candidate on the repaired split-launch binary. It built a fresh
+six-prompt held-out heatmap for the exact runtime source, used INT4 experts,
+HQQ6 attention, k6v6 cache, and the unchanged 600 MiB safety margin. Decode and
+prefill component timing were enabled, so these numbers are diagnostic and are
+not a production speed claim.
+
+| Measurement | Prior split/prescan diagnostic | Predicted-W1 diagnostic |
+|---|---:|---:|
+| Prefill, 1K / 5K / 10K / 20K / 35K / 39,920 | 110.9 / 350.2 / 521.1 / 645.1 / 604.0 / 627.9 | 108.6 / 466.9 / 698.6 / 790.6 / 736.3 / 770.1 tok/s |
+| Internal decode, 50 / 100 / 250 | 8.25 / 8.02 / 7.53 | 8.41 / 8.17 / 7.73 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 12.78 / 9.88 / 8.15 | 13.52 / 10.13 / 8.41 tok/s |
+| HCS residency | 5,010/30,720 | 5,010/30,720 experts |
+| Decode minimum free VRAM | 1,040 | 1,042 MiB |
+
+The candidate was neutral/slightly negative at 1K but improved every row from
+5K through 39,920 by 20-34% in the complete standard report. Component timing
+localized the mechanism: a 25K warmup reduced MoE from the previous
+approximately 14.8 seconds to 8.79 seconds by staging W1 during the layer mixer
+and W2 during W1 compute; observed DMA wait was about 0.9 ms. This scheduling
+gain remains valuable even when the predicted route set is nearly dense.
+
+The candidate must not be enabled unconditionally. On 29-65 token inputs it
+prefetched roughly 158-271 experts/layer with low exact overlap, then exposed
+3.5-3.8 seconds of DMA wait. At 500 tokens, many layers also carried 50-147
+overpredicted W1 rows plus 50-105 exact misses. A production policy therefore
+requires runtime-measured admission; the explicit switch remains default-off.
+The 39,920-token calibration floor was 1,232 MiB and the closest live formal
+sample was 639 MiB, both above the unchanged margin. HCS capacity and cold
+decode route counts matched the paired diagnostic, and no CUDA/OOM,
+below-margin, budget, no-slot, or copy failure occurred.
+
+The exact heatmap SHA-256 is
+`658fc4f6dcbfbb83259cca83eaf8ed3dacaf4a142a615f79a4519a3514715c7f`.
+Reproduction:
+
+```bash
+KRASIS_SPLIT_EXPERT_LAUNCH=1 \
+KRASIS_PREFILL_SPLIT_EXPERT_DMA=1 \
+KRASIS_PREFILL_PREDICTED_W1=1 \
+KRASIS_PREFILL_PREDICTED_W1_DIAG=1 \
+KRASIS_PREFILL_TIMING=1 \
+./dev benchmark tests/ornith10-397b-hqq6-k6v6-a6000-carryover.conf --timing
+```
+
+Evidence: [report](20260821_ornith10_397b_carryover_predicted_w1_timing_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_ornith10_397b_carryover_predicted_w1_timing_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_ornith10_397b_carryover_predicted_w1_timing_hqq6_k6v6_a6000_runtime.log),
+[command](20260821_ornith10_397b_carryover_predicted_w1_timing_hqq6_k6v6_a6000_command.log),
+and [heatmap](20260821_ornith10_397b_carryover_predicted_w1_timing_hqq6_k6v6_a6000_heatmap.json).
+
+## Ornith-1.0-397B repaired split-launch and prefill diagnostic on RTX A6000 — 2026-08-21
+
+This paired diagnostic reused the control's exact held-out heatmap and enabled
+the repaired decode split launch, current-layer prefill W1/W2 split DMA,
+full-prompt prescan accuracy measurement, and prefill component timing. It is
+instrumentation evidence, not a production speed claim.
+
+| Measurement | Forced-off control | Combined diagnostic |
+|---|---:|---:|
+| Prefill, 1K / 5K / 10K / 20K / 35K / 39,920 | 111.2 / 339.0 / 488.5 / 601.8 / 577.8 / 595.5 | 110.9 / 350.2 / 521.1 / 645.1 / 604.0 / 627.9 tok/s |
+| Internal decode, 50 / 100 / 250 | 7.80 / 7.64 / 7.21 | 8.25 / 8.02 / 7.53 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 12.23 / 9.41 / 7.83 | 12.78 / 9.88 / 8.15 tok/s |
+| HCS residency | 5,010/30,720 | 5,010/30,720 experts |
+| Decode minimum free VRAM | 1,042 | 1,040 MiB |
+
+The repaired path was genuinely active. On route-identical warmup rows it
+launched about `15-16 ms/token` of resident expert work while demand H2D was
+active, improving total decode time by roughly 4-5%. The complete internal rows
+improved by 4.4-5.8% without changing cold-route counts or HCS capacity.
+
+Prescan accuracy was strongly workload-size dependent: at 1K it measured
+87.5% active recall and 74.3% precision, while 5K-39,920 measured 95.3-99.2%
+recall. Those longer requests already predicted 489-508 of 512 experts per
+layer, leaving little traffic to eliminate through sparsity alone. The later
+explicit candidate nevertheless proved that staging W1 earlier than the
+existing dense pointer-prefetch schedule can hide substantial transfer time;
+see the diagnostic above. No default policy is inferred from this paired run.
+
+Reproduction:
+
+```bash
+KRASIS_SPLIT_EXPERT_LAUNCH=1 \
+KRASIS_PREFILL_SPLIT_EXPERT_DMA=1 \
+KRASIS_PREFILL_PRESCAN_ACCURACY=1 \
+KRASIS_PREFILL_TIMING=1 \
+./dev benchmark tests/ornith10-397b-hqq6-k6v6-a6000-carryover.conf \
+  --heatmap-path tests/ornith10-397b-carryover-heatmap.json --timing
+```
+
+Evidence: [report](20260821_ornith10_397b_carryover_combo_timing_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_ornith10_397b_carryover_combo_timing_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_ornith10_397b_carryover_combo_timing_hqq6_k6v6_a6000_krasis.log),
+and [command](20260821_ornith10_397b_carryover_combo_timing_hqq6_k6v6_a6000_command.log).
+
+## Ornith-1.0-397B optimization-carryover control on RTX A6000 — 2026-08-21
+
+This is the instrumentation-enabled control for the repaired split-launch and
+generic prefill carryover campaign. It used the exact UUID-bound RTX A6000 test
+profile with INT4 experts, HQQ6 attention, k6v6 cache, the unchanged 600 MiB
+safety margin, and `KRASIS_SPLIT_EXPERT_LAUNCH=0`. Decode timing was enabled,
+so these figures are diagnostic evidence and must not be used as a production
+speed claim.
+
+| Measurement | Result |
+|---|---:|
+| Instrumented prefill, 1K / 5K / 10K / 20K / 35K / 39,920 | 111.2 / 339.0 / 488.5 / 601.8 / 577.8 / 595.5 tok/s |
+| Instrumented internal decode, 50 / 100 / 250 | 7.80 / 7.64 / 7.21 tok/s |
+| HTTP round trip, 50 / 100 / 250 | 12.23 / 9.41 / 7.83 tok/s |
+| HCS residency | 5,010/30,720 experts |
+| Decode minimum free VRAM | 1,042 MiB |
+
+Before HCS admission, the control measured 600 cold expert routes and
+3,712.50 MiB of expert DMA per token, with 178.46 ms/token of active H2D at
+21.13 GB/s. After admission, representative timed decode still exposed
+62–73 ms/token of active H2D. Every split-hot measurement was exactly zero, as
+required by the forced-off control. The six-prompt held-out heatmap used for
+the paired candidates has SHA-256
+`be833bf771393dc0e9c25e7077e6209de23c7ba7a22a150b5aadab89fdab192b`.
+There were no CUDA/OOM, below-margin, budget-skip, no-slot, or HCS copy
+failures.
+
+Reproduction:
+
+```bash
+KRASIS_SPLIT_EXPERT_LAUNCH=0 \
+./dev benchmark tests/ornith10-397b-hqq6-k6v6-a6000-carryover.conf --timing
+```
+
+Evidence: [report](20260821_ornith10_397b_carryover_split_off_timing_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260821_ornith10_397b_carryover_split_off_timing_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260821_ornith10_397b_carryover_split_off_timing_hqq6_k6v6_a6000_krasis.log),
+and [command](20260821_ornith10_397b_carryover_split_off_timing_hqq6_k6v6_a6000_command.log).
+
+## DeepSeek-V4-Flash-0731 D-Spark comparison on RTX A6000 — 2026-08-20
+
+This comparison used the official pinned DeepSeek-V4-Flash-0731 checkpoint on
+one RTX A6000 with INT4 experts, HQQ6 attention, Native cache, and the unchanged
+600 MiB runtime safety margin. All three runs used the supported
+`./dev benchmark` command. The final resident/shared runs were made only after
+correctness acceptance and measured optimization; ordinary benchmark decode
+reported `service_timing=disabled`.
+
+| Mode | Internal decode, 50 / 100 / 250 | HTTP, 50 / 100 / 250 | Target HCS | Minimum free VRAM |
+|---|---:|---:|---:|---:|
+| Target only | **13.25 / 13.57 / 13.17 tok/s** | **24.71 / 17.25 / 14.50 tok/s** | 2,775/11,008 | 1,040 MiB |
+| D-Spark resident | 7.17 / 8.51 / 6.82 tok/s | 13.81 / 10.87 / 7.48 tok/s | 2,700/11,008 | 1,064 MiB |
+| D-Spark shared HCS | 7.55 / 9.08 / 8.34 tok/s | 14.33 / 11.35 / 9.09 tok/s | 2,700/11,008 | 1,066 MiB |
+
+Both optional D-Spark modes are numerically accepted: resident and shared each
+passed the 14-case network/session suite and retained zero authoritative
+llama-witness failures with all four prefill and first-token checks matching.
+The exact-source native D-Spark gate passed 6/6. Resident keeps all 768
+auxiliary experts in VRAM; shared lets target and auxiliary experts compete in
+the measured HCS pool. Each mode calibrates every checkpoint-derived verifier
+width after final HCS admission and selected two rows for these benchmark
+starts.
+
+Shared HCS is the faster D-Spark topology, but neither mode beats target-only
+decode on this card. Measured attribution explains the result: resident
+displaces too many target experts, while shared restores target coverage at the
+cost of streaming auxiliary experts; in both cases transactional target
+verification still exposes enough cold expert traffic to outweigh accepted
+speculative tokens. Both switches therefore remain optional and `off` remains
+the default.
+
+Prefill is decode-independent but is retained verbatim for completeness:
+
+| Prompt | Target only | Resident | Shared HCS |
+|---:|---:|---:|---:|
+| 1K | 90.8 | 132.1 | 132.4 tok/s |
+| 5K | 572.4 | 541.8 | 585.6 tok/s |
+| 10K | 1,011.0 | 794.9 | 728.8 tok/s |
+| 20K | 1,243.7 | 1,304.6 | 1,303.7 tok/s |
+| 35K | 1,074.2 | 1,053.0 | 856.7 tok/s |
+| 39,920 | 1,141.0 | 978.0 | 544.1 tok/s |
+
+The shared 39,920-token row reproduced an intermittent long-prompt collapse
+previously seen once in resident mode despite D-Spark being decode-only. It is
+preserved as evidence and is not used as a D-Spark prefill claim. The same
+shared process completed its startup 39,920-token calibration probe in about
+48.0 seconds before the later timed row took 73.4 seconds, so the optional mode
+does not structurally force that slow path. No CUDA/OOM, below-margin, HCS copy,
+budget, or no-slot failure occurred in any accepted final run.
+
+Reproduction:
+
+```bash
+./dev benchmark tests/deepseek-v4-flash-0731-hqq6-native-a6000.conf
+./dev benchmark tests/deepseek-v4-flash-0731-dspark-resident-a6000.conf
+./dev benchmark tests/deepseek-v4-flash-0731-dspark-shared-a6000.conf
+```
+
+Final evidence:
+[target report](20260820_deepseek_v4_flash_0731_dspark_compare_target_hqq6_native_a6000_benchmark_report.log),
+[target stdout](20260820_deepseek_v4_flash_0731_dspark_compare_target_hqq6_native_a6000_benchmark_stdout.log),
+[resident report](20260820_deepseek_v4_flash_0731_dspark_compare_resident_timing_clean_hqq6_native_a6000_benchmark_report.log),
+[resident stdout](20260820_deepseek_v4_flash_0731_dspark_compare_resident_timing_clean_hqq6_native_a6000_benchmark_stdout.log),
+[shared report](20260820_deepseek_v4_flash_0731_dspark_compare_shared_timing_clean_hqq6_native_a6000_benchmark_report.log),
+and [shared stdout](20260820_deepseek_v4_flash_0731_dspark_compare_shared_timing_clean_hqq6_native_a6000_benchmark_stdout.log).
+The earlier completed instrumented-service resident/shared standard runs remain
+archived beside these files but are not used for the final speed comparison.
+
 ## DeepSeek-V4-Flash-0731 optimized prefill on RTX A6000 — 2026-08-19
 
 This timing-disabled standard benchmark used the same official checkpoint,

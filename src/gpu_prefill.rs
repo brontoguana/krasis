@@ -7578,7 +7578,8 @@ fn launch_dsa_prefill_gemm_scores(
                 let query_head_ptr = query_band_ptr
                     .checked_add(
                         u64::try_from(
-                            head_start.checked_mul(index_head_dim)
+                            head_start
+                                .checked_mul(index_head_dim)
                                 .and_then(|elements| {
                                     elements.checked_mul(std::mem::size_of::<u16>())
                                 })
@@ -9079,6 +9080,63 @@ fn write_native_le_slice<T: Copy>(
 //  Prefill Engine
 // ════════════════════════════════════════════════════════════════════════
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortablePredictedW1Policy {
+    Off,
+    Forced,
+    AutoUncalibrated,
+    AutoCalibration(bool),
+    AutoThreshold(usize),
+    AutoDisabled,
+}
+
+impl PortablePredictedW1Policy {
+    pub(crate) fn requested(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    pub(crate) fn is_auto(self) -> bool {
+        matches!(
+            self,
+            Self::AutoUncalibrated
+                | Self::AutoCalibration(_)
+                | Self::AutoThreshold(_)
+                | Self::AutoDisabled
+        )
+    }
+
+    fn active(self, prompt_tokens: usize) -> bool {
+        match self {
+            Self::Forced => true,
+            Self::AutoCalibration(enabled) => enabled,
+            Self::AutoThreshold(min_prompt_tokens) => prompt_tokens >= min_prompt_tokens,
+            Self::Off | Self::AutoUncalibrated | Self::AutoDisabled => false,
+        }
+    }
+
+    pub(crate) fn label(self) -> String {
+        match self {
+            Self::Off => "off".to_string(),
+            Self::Forced => "forced".to_string(),
+            Self::AutoUncalibrated => "auto-uncalibrated".to_string(),
+            Self::AutoCalibration(false) => "auto-calibration-control".to_string(),
+            Self::AutoCalibration(true) => "auto-calibration-candidate".to_string(),
+            Self::AutoThreshold(min_prompt_tokens) => {
+                format!("auto-threshold-{min_prompt_tokens}")
+            }
+            Self::AutoDisabled => "auto-disabled-by-measurement".to_string(),
+        }
+    }
+}
+
+fn portable_predicted_w1_requires_exact_resize(
+    predicted_active: bool,
+    exact_cold_slots: usize,
+    current_staging_slots: usize,
+) -> bool {
+    predicted_active && exact_cold_slots > current_staging_slots
+}
+
 pub struct PrefillEngine {
     pub device: Arc<CudaDevice>,
     pub kernels: PrefillKernels,
@@ -9087,6 +9145,10 @@ pub struct PrefillEngine {
     pub scratch: PrefillScratch,
     pub layer_weights: Vec<PrefillLayerWeights>,
     pub deepseek_v4_head: Option<DeepseekV4HeadPrefillDescriptor>,
+    /// Optional checkpoint-derived D-Spark target-feature capture. The
+    /// destination is owned by the decode store; prefill only writes exact
+    /// post-layer HC states for the configured HF layer-output ids.
+    pub dspark_target_capture: Option<DsparkTargetCaptureDescriptor>,
     pub moe_layers: Vec<Option<PrefillMoeLayerData>>,
     /// Optional explicit KRHQ cache registered for runtime diagnostics only.
     /// This is not consumed by prefill dispatch or model outputs.
@@ -9163,6 +9225,13 @@ pub struct PrefillEngine {
     pub(crate) deepseek_v4_prefill_gather_mode: DeepseekV4PrefillGatherMode,
     pub(crate) deepseek_v4_prefill_softmax_mode: DeepseekV4PrefillSoftmaxMode,
     pub(crate) deepseek_v4_prefill_predicted_w1_enabled: bool,
+    /// Explicit default-off policy for standard hidden-width MoE models.
+    /// Auto mode is calibrated after final HCS admission and makes the hot-path
+    /// decision from the newly computed suffix length. Full logical context
+    /// remains authoritative for memory and sequence-state accounting.
+    /// DeepSeek-V4 keeps its
+    /// separately qualified implicit default and env.
+    pub(crate) portable_prefill_predicted_w1_policy: PortablePredictedW1Policy,
     pub(crate) deepseek_v4_prefill_split_expert_dma_enabled: bool,
     pub(crate) deepseek_v4_prefill_index_score_mode: DeepseekV4PrefillIndexScoreMode,
     pub(crate) deepseek_v4_prefill_topk_mode: DeepseekV4PrefillTopkMode,
@@ -9313,13 +9382,13 @@ pub struct PrefillEngine {
     pub ptr_prefetch_pinned_count: usize,
     pub ptr_prefetch_cold_count: usize,
     pub ptr_prefetch_total_count: usize,
-    // DeepSeek prefill can speculatively stage only the prescan-predicted cold
+    // Prefill can speculatively stage only the prescan-predicted cold
     // W1 rows while attention runs. Exact post-route MoE remains authoritative:
     // this map is consulted only to reuse a matching slot, and every miss is
     // copied through the ordinary path before the W1-ready event is recorded.
-    pub deepseek_predicted_w1_layer: Option<usize>,
-    pub deepseek_predicted_w1_slots: Vec<usize>,
-    pub deepseek_predicted_w1_count: usize,
+    pub predicted_w1_layer: Option<usize>,
+    pub predicted_w1_slots: Vec<usize>,
+    pub predicted_w1_count: usize,
     // ScalarType for Marlin GEMM dispatch (matches weight quantization format)
     pub q_type: ScalarType,
     // BF16 copies of QK norm weights (converted from FP32 at engine creation)
@@ -9473,6 +9542,15 @@ pub struct PrefillEngine {
     pub prompt_hcs_prompt_tokens: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct DsparkTargetCaptureDescriptor {
+    pub layer_output_ids: Vec<usize>,
+    pub history_ptr: u64,
+    pub window: usize,
+    pub hc_mult: usize,
+    pub hidden_size: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ColdStagingFailure {
     pub prompt_tokens: usize,
@@ -9566,6 +9644,65 @@ struct ExpertHqqRuntimePrefillSingleBlockGpuDiagnosticOutput {
 }
 
 impl PrefillEngine {
+    pub(crate) fn portable_predicted_w1_policy_label(&self) -> String {
+        self.portable_prefill_predicted_w1_policy.label()
+    }
+
+    pub(crate) fn portable_predicted_w1_is_auto(&self) -> bool {
+        self.portable_prefill_predicted_w1_policy.is_auto()
+    }
+
+    pub(crate) fn set_portable_predicted_w1_calibration_override(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), String> {
+        if !matches!(
+            self.portable_prefill_predicted_w1_policy,
+            PortablePredictedW1Policy::AutoUncalibrated
+                | PortablePredictedW1Policy::AutoCalibration(_)
+        ) {
+            return Err(format!(
+                "portable predicted-W1 calibration override requires uncalibrated auto mode; current policy is {}",
+                self.portable_prefill_predicted_w1_policy.label(),
+            ));
+        }
+        self.portable_prefill_predicted_w1_policy =
+            PortablePredictedW1Policy::AutoCalibration(enabled);
+        Ok(())
+    }
+
+    pub(crate) fn finish_portable_predicted_w1_auto_calibration(
+        &mut self,
+        min_prompt_tokens: Option<usize>,
+    ) -> Result<String, String> {
+        if !matches!(
+            self.portable_prefill_predicted_w1_policy,
+            PortablePredictedW1Policy::AutoUncalibrated
+                | PortablePredictedW1Policy::AutoCalibration(_)
+        ) {
+            return Err(format!(
+                "portable predicted-W1 auto calibration cannot finish from policy {}",
+                self.portable_prefill_predicted_w1_policy.label(),
+            ));
+        }
+        self.portable_prefill_predicted_w1_policy = match min_prompt_tokens {
+            Some(0) => {
+                return Err(
+                    "portable predicted-W1 auto threshold must be a positive token count"
+                        .to_string(),
+                )
+            }
+            Some(tokens) => PortablePredictedW1Policy::AutoThreshold(tokens),
+            None => PortablePredictedW1Policy::AutoDisabled,
+        };
+        Ok(self.portable_prefill_predicted_w1_policy.label())
+    }
+
+    fn portable_predicted_w1_active(&self, computed_suffix_tokens: usize) -> bool {
+        self.portable_prefill_predicted_w1_policy
+            .active(computed_suffix_tokens)
+    }
+
     pub fn initialize_tileq_capture_from_env(&mut self) -> Result<(), String> {
         if self.tileq_capture.is_some() {
             return Err("TileQ calibration capture was initialized twice".to_string());
@@ -17922,10 +18059,10 @@ impl PrefillEngine {
         self.ptr_prefetch_total_count = 0;
     }
 
-    fn clear_deepseek_predicted_w1_state(&mut self) {
-        self.deepseek_predicted_w1_layer = None;
-        self.deepseek_predicted_w1_count = 0;
-        self.deepseek_predicted_w1_slots.fill(usize::MAX);
+    fn clear_predicted_w1_state(&mut self) {
+        self.predicted_w1_layer = None;
+        self.predicted_w1_count = 0;
+        self.predicted_w1_slots.fill(usize::MAX);
     }
 
     fn free_raw_ptr_table(ptrs: &mut [u64; 4]) {
@@ -18275,32 +18412,62 @@ impl PrefillEngine {
         Ok(())
     }
 
-    fn prefetch_deepseek_predicted_w1_for_layer(
+    fn prefetch_predicted_w1_for_layer(
         &mut self,
         layer_idx: usize,
         m: usize,
         chunk_start: usize,
+        portable_enabled_for_request: bool,
     ) -> Result<(), String> {
-        if !self.deepseek_v4_prefill_predicted_w1_enabled
-            || !self.deepseek_v4_prefill_split_expert_dma_enabled
-            || self.synthetic_repack.is_some()
-            || prefill_disable_ptr_table()
-            || self.d_expert_w1_ptrs.is_none()
-        {
+        let is_deepseek_v4_layer = self.layer_weights[layer_idx].layer_type == 4;
+        let portable_enabled = !is_deepseek_v4_layer && portable_enabled_for_request;
+        let enabled = if is_deepseek_v4_layer {
+            self.deepseek_v4_prefill_predicted_w1_enabled
+        } else {
+            portable_enabled
+        };
+        if !enabled {
             return Ok(());
         }
-        if self.deepseek_predicted_w1_layer.is_some() {
+        if !self.deepseek_v4_prefill_split_expert_dma_enabled {
             return Err(format!(
-                "DeepSeek predicted-W1 state was not consumed before layer {}",
+                "predicted-W1 layer {} requires split expert DMA",
                 layer_idx
             ));
         }
-        if self.layer_weights[layer_idx].layer_type != 4
-            || self.layer_weights[layer_idx].moe_gate_ptr == 0
-        {
+        if self.synthetic_repack.is_some() {
+            if portable_enabled {
+                return Err(
+                    "KRASIS_PREFILL_PREDICTED_W1 does not support synthetic expert repacking"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        if prefill_disable_ptr_table() || self.d_expert_w1_ptrs.is_none() {
+            if portable_enabled {
+                return Err(
+                    "KRASIS_PREFILL_PREDICTED_W1 requires the expert pointer-table path"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        if self.predicted_w1_layer.is_some() {
+            return Err(format!(
+                "predicted-W1 state was not consumed before layer {}",
+                layer_idx
+            ));
+        }
+        if self.layer_weights[layer_idx].moe_gate_ptr == 0 {
             return Ok(());
         }
         let Some(hcs_layer_idx) = self.layer_weights[layer_idx].moe_layer_idx else {
+            if portable_enabled {
+                return Err(format!(
+                    "KRASIS_PREFILL_PREDICTED_W1 routed layer {layer_idx} has no registered MoE storage"
+                ));
+            }
             return Ok(());
         };
         let prescan_layer_idx = self
@@ -18308,8 +18475,14 @@ impl PrefillEngine {
             .unwrap_or(hcs_layer_idx);
         let chunk_end = chunk_start
             .checked_add(m)
-            .ok_or_else(|| "DeepSeek predicted-W1 chunk end overflow".to_string())?;
+            .ok_or_else(|| "predicted-W1 chunk end overflow".to_string())?;
         if self.prescan_token_count < chunk_end {
+            if portable_enabled {
+                return Err(format!(
+                    "KRASIS_PREFILL_PREDICTED_W1 has incomplete prescan coverage at layer {layer_idx}: covered={} required={chunk_end}",
+                    self.prescan_token_count,
+                ));
+            }
             return Ok(());
         }
         let Some(predicted_active) = self
@@ -18318,20 +18491,32 @@ impl PrefillEngine {
             .and_then(|chunks| chunks.get(self.active_prefill_chunk_idx))
             .cloned()
         else {
+            if portable_enabled {
+                return Err(format!(
+                    "KRASIS_PREFILL_PREDICTED_W1 has no prescan route set for layer {layer_idx} chunk {}",
+                    self.active_prefill_chunk_idx,
+                ));
+            }
             return Ok(());
         };
         if predicted_active.is_empty() {
+            if portable_enabled {
+                return Err(format!(
+                    "KRASIS_PREFILL_PREDICTED_W1 produced an empty route set for routed layer {layer_idx} chunk {}",
+                    self.active_prefill_chunk_idx,
+                ));
+            }
             return Ok(());
         }
 
         let n_experts = self.layer_weights[layer_idx].moe_num_experts;
-        if self.deepseek_predicted_w1_slots.len() < n_experts {
-            self.deepseek_predicted_w1_slots
-                .resize(n_experts, usize::MAX);
+        if self.predicted_w1_slots.len() < n_experts {
+            self.predicted_w1_slots.resize(n_experts, usize::MAX);
         }
-        self.deepseek_predicted_w1_slots.fill(usize::MAX);
+        self.predicted_w1_slots.fill(usize::MAX);
 
         let mut predicted_cold = Vec::with_capacity(predicted_active.len());
+        let mut predicted_seen = vec![false; n_experts];
         for eid in predicted_active {
             if eid >= n_experts || self.expert_lookup(hcs_layer_idx, eid).is_some() {
                 continue;
@@ -18340,7 +18525,8 @@ impl PrefillEngine {
                 && prescan_layer_idx < self.pinned_expert_offsets.len()
                 && eid < self.pinned_expert_offsets[prescan_layer_idx].len()
                 && self.pinned_expert_offsets[prescan_layer_idx][eid].is_some();
-            if !pinned && !predicted_cold.contains(&eid) {
+            if !pinned && !predicted_seen[eid] {
+                predicted_seen[eid] = true;
                 predicted_cold.push(eid);
             }
         }
@@ -18348,34 +18534,56 @@ impl PrefillEngine {
             return Ok(());
         }
 
-        if (self.d_cold_staging.is_none() || self.max_cold_experts < predicted_cold.len())
-            && self
-                .ensure_cold_staging_capacity(predicted_cold.len(), m)
-                .is_err()
-        {
-            // The optimization is capacity-gated. Exact routing still owns the
-            // request and will size/fail through the normal measured path.
-            return Ok(());
+        if self.d_cold_staging.is_none() || self.max_cold_experts < predicted_cold.len() {
+            if let Err(error) = self.ensure_cold_staging_capacity(predicted_cold.len(), m) {
+                if portable_enabled {
+                    return Err(format!(
+                        "KRASIS_PREFILL_PREDICTED_W1 could not allocate measured staging for layer {layer_idx}: {error}"
+                    ));
+                }
+                // Preserve the established DeepSeek capacity gate. Exact
+                // routing remains authoritative for that separately accepted
+                // architecture-specific implementation.
+                return Ok(());
+            }
         }
         let cold_staging_base = self.d_cold_staging.as_ref().map_or(0, |s| *s.device_ptr());
         if cold_staging_base == 0 || self.max_cold_experts < predicted_cold.len() {
+            if portable_enabled {
+                return Err(format!(
+                    "KRASIS_PREFILL_PREDICTED_W1 staging contract failed at layer {layer_idx}: ptr=0x{cold_staging_base:x} capacity={} required={}",
+                    self.max_cold_experts,
+                    predicted_cold.len(),
+                ));
+            }
             return Ok(());
         }
 
         let copies = {
             let Some(moe_data) = self.moe_layers.get(hcs_layer_idx).and_then(|o| o.as_ref()) else {
+                if portable_enabled {
+                    return Err(format!(
+                        "KRASIS_PREFILL_PREDICTED_W1 routed layer {layer_idx} has no expert source data"
+                    ));
+                }
                 return Ok(());
             };
             let mut copies = Vec::with_capacity(predicted_cold.len());
             for &eid in &predicted_cold {
                 let Some(expert) = moe_data.experts.get(eid) else {
+                    if portable_enabled {
+                        return Err(format!(
+                            "KRASIS_PREFILL_PREDICTED_W1 predicted expert {eid} outside layer {layer_idx} source range {}",
+                            moe_data.experts.len(),
+                        ));
+                    }
                     continue;
                 };
                 if expert.w13_packed_bytes != self.w1_packed_per_expert
                     || expert.w13_scales_bytes != self.w1_scales_per_expert
                 {
                     return Err(format!(
-                        "DeepSeek predicted-W1 expert {} layer {} byte geometry differs from runtime layout: packed={}/{} scales={}/{}",
+                        "predicted-W1 expert {} layer {} byte geometry differs from runtime layout: packed={}/{} scales={}/{}",
                         eid,
                         layer_idx,
                         expert.w13_packed_bytes,
@@ -18395,6 +18603,12 @@ impl PrefillEngine {
             copies
         };
         if copies.is_empty() {
+            if portable_enabled {
+                return Err(format!(
+                    "KRASIS_PREFILL_PREDICTED_W1 produced no source copies for {} predicted cold experts at layer {layer_idx}",
+                    predicted_cold.len(),
+                ));
+            }
             return Ok(());
         }
 
@@ -18410,7 +18624,7 @@ impl PrefillEngine {
                 );
                 if err != cuda_sys::CUresult::CUDA_SUCCESS {
                     return Err(format!(
-                        "DeepSeek predicted-W1 packed copy failed at layer {} expert {}: {:?}",
+                        "predicted-W1 packed copy failed at layer {} expert {}: {:?}",
                         layer_idx, eid, err
                     ));
                 }
@@ -18422,19 +18636,21 @@ impl PrefillEngine {
                 );
                 if err != cuda_sys::CUresult::CUDA_SUCCESS {
                     return Err(format!(
-                        "DeepSeek predicted-W1 scale copy failed at layer {} expert {}: {:?}",
+                        "predicted-W1 scale copy failed at layer {} expert {}: {:?}",
                         layer_idx, eid, err
                     ));
                 }
             }
-            self.deepseek_predicted_w1_slots[eid] = slot;
+            self.predicted_w1_slots[eid] = slot;
         }
-        self.deepseek_predicted_w1_layer = Some(layer_idx);
-        self.deepseek_predicted_w1_count = copies.len();
+        self.predicted_w1_layer = Some(layer_idx);
+        self.predicted_w1_count = copies.len();
 
-        if std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1_DIAG").is_ok() {
+        if std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1_DIAG").is_ok()
+            || std::env::var("KRASIS_PREFILL_PREDICTED_W1_DIAG").is_ok()
+        {
             eprintln!(
-                "[DSV4-PREDICTED-W1] prefetched layer={} chunk={} tokens={} predicted_cold={} capacity={}",
+                "[PREFILL-PREDICTED-W1] prefetched layer={} chunk={} tokens={} predicted_cold={} capacity={}",
                 layer_idx,
                 self.active_prefill_chunk_idx,
                 m,
@@ -18841,10 +19057,8 @@ impl PrefillEngine {
             return Ok(());
         }
 
-        let prompt_tokens = prefill_chunk_guard_prompt_tokens(
-            self.active_prefill_prompt_tokens,
-            chunk_tokens,
-        )?;
+        let prompt_tokens =
+            prefill_chunk_guard_prompt_tokens(self.active_prefill_prompt_tokens, chunk_tokens)?;
 
         let (evicted, freed_mb, cache_fast_snapshot, num_experts_per_layer) = unsafe {
             let store =
@@ -22675,7 +22889,7 @@ impl PrefillEngine {
         self.scratch = allocate_scratch(&self.device, &self.config, 0)
             .map_err(|e| format!("alloc empty scratch: {e}"))?;
         self.release_reusable_ptr_tables();
-        self.clear_deepseek_predicted_w1_state();
+        self.clear_predicted_w1_state();
         self.d_cold_staging = None;
         self.d_shared_bf16_scratch1 = None;
         self.d_shared_bf16_scratch2 = None;
@@ -23489,7 +23703,7 @@ impl PrefillEngine {
         self.d_fla_final_state = None;
         self.d_fla_v_new = None;
         self.d_fla_o = None;
-        self.clear_deepseek_predicted_w1_state();
+        self.clear_predicted_w1_state();
         if !self.retain_prefill_kv_for_active {
             self.release_prefill_kv_temp();
         }
@@ -23638,6 +23852,12 @@ impl PrefillEngine {
         let total_prompt_tokens = sequence_start
             .checked_add(total_m)
             .ok_or_else(|| "prefill continuation position overflows".to_string())?;
+        // Memory and sequence-state accounting use the complete logical
+        // prompt. Predicted-W1 admission instead uses the suffix actually
+        // computed by this request: a large restored cache prefix does not
+        // create the route density or overlap window of a large prefill.
+        self.active_prefill_prompt_tokens = total_prompt_tokens;
+        let portable_predicted_w1_active = self.portable_predicted_w1_active(total_m);
         let h = self.config.hidden_size;
         let num_hidden_layers = self.config.num_hidden_layers;
         let liveness_timing = prefill_liveness_timing_enabled();
@@ -23883,7 +24103,8 @@ impl PrefillEngine {
             && self.config.n_routed_experts > 0
             && (pinning_enabled
                 || self.prefill_prescan_accuracy_enabled
-                || self.deepseek_v4_prefill_predicted_w1_enabled);
+                || self.deepseek_v4_prefill_predicted_w1_enabled
+                || portable_predicted_w1_active);
         if debug_prefill {
             let hcs_cached_experts = self.hcs_cached_expert_count();
             eprintln!(
@@ -23934,11 +24155,7 @@ impl PrefillEngine {
             // chunk. Later chunks need their own prediction: leaving them empty
             // disables speculative W1 staging exactly when multi-chunk prefills
             // have the most expert traffic to hide.
-            match self.gate_prescan_full_prompt(
-                token_ids,
-                sequence_start,
-                &chunk_plan,
-            ) {
+            match self.gate_prescan_full_prompt(token_ids, sequence_start, &chunk_plan) {
                 Ok(prescan_counts) => {
                     self.prescan_token_count = total_prompt_tokens;
                     let active_layers = prescan_counts.len();
@@ -24000,8 +24217,9 @@ impl PrefillEngine {
                 }
                 Err(e) => {
                     self.prescan_token_count = 0;
-                    if self.deepseek_v4_prefill_predicted_w1_enabled {
-                        return Err(format!("DeepSeek predicted-W1 pre-scan failed: {e}"));
+                    if self.deepseek_v4_prefill_predicted_w1_enabled || portable_predicted_w1_active
+                    {
+                        return Err(format!("predicted-W1 pre-scan failed: {e}"));
                     }
                     if stderr_debug_enabled() {
                         eprintln!("[PREFILL] Gate pre-scan failed (non-fatal): {}", e);
@@ -25608,13 +25826,28 @@ impl PrefillEngine {
                 }
 
                 if self.layer_weights[layer_idx].moe_gate_ptr != 0 {
-                    self.prefetch_dense_pointer_table_for_layer(
-                        layer_idx,
-                        chunk_idx,
-                        chunk_start,
-                        m,
-                    )?;
-                } else if prefill_moe_lookahead_prefetch_requested(&self.config) {
+                    if portable_predicted_w1_active {
+                        // Stage only the prescan-predicted W1 rows while this
+                        // layer's mixer runs. Exact routing remains
+                        // authoritative and fills every missed W1 plus all W2
+                        // rows before the relevant GEMM consumes them.
+                        self.prefetch_predicted_w1_for_layer(
+                            layer_idx,
+                            m,
+                            chunk_start,
+                            portable_predicted_w1_active,
+                        )?;
+                    } else {
+                        self.prefetch_dense_pointer_table_for_layer(
+                            layer_idx,
+                            chunk_idx,
+                            chunk_start,
+                            m,
+                        )?;
+                    }
+                } else if !portable_predicted_w1_active
+                    && prefill_moe_lookahead_prefetch_requested(&self.config)
+                {
                     if let Some(next_moe_layer) = self.next_moe_layer_after(layer_idx) {
                         if let Err(err) = self.prefetch_dense_pointer_table_for_layer(
                             next_moe_layer,
@@ -35883,6 +36116,141 @@ impl PrefillEngine {
         Ok(())
     }
 
+    pub fn set_dspark_target_capture(
+        &mut self,
+        capture: Option<DsparkTargetCaptureDescriptor>,
+    ) -> Result<(), String> {
+        if let Some(capture) = capture.as_ref() {
+            if capture.layer_output_ids.is_empty()
+                || capture.history_ptr == 0
+                || capture.window == 0
+                || capture.hc_mult == 0
+                || capture.hidden_size != self.config.hidden_size
+                || capture.hc_mult != self.config.deepseek_v4_hc_mult
+                || capture
+                    .layer_output_ids
+                    .iter()
+                    .any(|&output_id| output_id == 0 || output_id > self.layer_weights.len())
+            {
+                return Err(format!(
+                    "D-Spark prefill capture contract mismatch: output_ids={:?} ptr={:#x} window={} mult={}/{} hidden={}/{} layers={}",
+                    capture.layer_output_ids,
+                    capture.history_ptr,
+                    capture.window,
+                    capture.hc_mult,
+                    self.config.deepseek_v4_hc_mult,
+                    capture.hidden_size,
+                    self.config.hidden_size,
+                    self.layer_weights.len(),
+                ));
+            }
+            let mut unique = capture.layer_output_ids.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            if unique.len() != capture.layer_output_ids.len() {
+                return Err(format!(
+                    "D-Spark prefill capture output ids are not unique: {:?}",
+                    capture.layer_output_ids
+                ));
+            }
+        }
+        self.dspark_target_capture = capture;
+        Ok(())
+    }
+
+    fn capture_dspark_target_hc_state(
+        &self,
+        layer_idx: usize,
+        state_ptr: u64,
+        chunk_start: usize,
+        rows: usize,
+        hc_mult: usize,
+    ) -> Result<(), String> {
+        let Some(capture) = self.dspark_target_capture.as_ref() else {
+            return Ok(());
+        };
+        let output_id = layer_idx
+            .checked_add(1)
+            .ok_or_else(|| "D-Spark target layer output id overflow".to_string())?;
+        let Some(target_slot) = capture
+            .layer_output_ids
+            .iter()
+            .position(|&candidate| candidate == output_id)
+        else {
+            return Ok(());
+        };
+        if state_ptr == 0 || rows == 0 || hc_mult != capture.hc_mult {
+            return Err(format!(
+                "D-Spark target capture layer {} has invalid state contract ptr={:#x} rows={} mult={}/{}",
+                layer_idx, state_ptr, rows, hc_mult, capture.hc_mult
+            ));
+        }
+        let row_elems = capture
+            .hc_mult
+            .checked_mul(capture.hidden_size)
+            .ok_or_else(|| "D-Spark target capture row size overflow".to_string())?;
+        let row_bytes = row_elems
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "D-Spark target capture row byte size overflow".to_string())?;
+        let kept_rows = rows.min(capture.window);
+        let source_row = rows - kept_rows;
+        let absolute_start = chunk_start
+            .checked_add(source_row)
+            .ok_or_else(|| "D-Spark target capture absolute position overflow".to_string())?;
+        let ring_start = absolute_start % capture.window;
+        let first_rows = kept_rows.min(capture.window - ring_start);
+        let history_layer_elems = capture
+            .window
+            .checked_mul(row_elems)
+            .ok_or_else(|| "D-Spark target history layer size overflow".to_string())?;
+        let history_base = capture
+            .history_ptr
+            .checked_add(
+                target_slot
+                    .checked_mul(history_layer_elems)
+                    .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
+                    .ok_or_else(|| "D-Spark target history offset overflow".to_string())?
+                    as u64,
+            )
+            .ok_or_else(|| "D-Spark target history pointer overflow".to_string())?;
+        let source_base = state_ptr
+            .checked_add(
+                source_row
+                    .checked_mul(row_bytes)
+                    .ok_or_else(|| "D-Spark target capture source offset overflow".to_string())?
+                    as u64,
+            )
+            .ok_or_else(|| "D-Spark target capture source pointer overflow".to_string())?;
+        let copy_rows = |dst: u64, src: u64, count: usize| -> Result<(), String> {
+            if count == 0 {
+                return Ok(());
+            }
+            let bytes = count
+                .checked_mul(row_bytes)
+                .ok_or_else(|| "D-Spark target capture copy size overflow".to_string())?;
+            let result =
+                unsafe { cuda_sys::lib().cuMemcpyDtoDAsync_v2(dst, src, bytes, self.stream) };
+            if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "D-Spark target capture D2D failed layer={} output_id={} rows={} bytes={}: {:?}",
+                    layer_idx, output_id, count, bytes, result
+                ));
+            }
+            Ok(())
+        };
+        copy_rows(
+            history_base + (ring_start * row_bytes) as u64,
+            source_base,
+            first_rows,
+        )?;
+        copy_rows(
+            history_base,
+            source_base + (first_rows * row_bytes) as u64,
+            kept_rows - first_rows,
+        )?;
+        Ok(())
+    }
+
     fn forward_deepseek_v4_layer(
         &mut self,
         layer_idx: usize,
@@ -35946,7 +36314,7 @@ impl PrefillEngine {
             "deepseek_v4 attn_hc_prep_norm",
             attn_hc_timing,
         )?;
-        self.prefetch_deepseek_predicted_w1_for_layer(layer_idx, m, chunk_start)?;
+        self.prefetch_predicted_w1_for_layer(layer_idx, m, chunk_start, false)?;
         self.forward_deepseek_v4_attention(layer_idx, m, chunk_start)?;
         let attn_hc_post_timing = self.deepseek_v4_timing_start("deepseek_v4 attn_hc_post")?;
         self.launch_deepseek_v4_hc_post(
@@ -36009,6 +36377,7 @@ impl PrefillEngine {
         )?;
         let ffn_hc_post_timing = self.deepseek_v4_timing_start("deepseek_v4 ffn_hc_post")?;
         self.launch_deepseek_v4_hc_post(state, hidden, temp_state, ffn_post, ffn_comb, hc_mult, m)?;
+        self.capture_dspark_target_hc_state(layer_idx, state, chunk_start, m, hc_mult)?;
         self.deepseek_v4_timing_finish(
             DEEPSEEK_V4_PREFILL_TIMING_STAGE_FFN_HC_POST,
             "deepseek_v4 ffn_hc_post",
@@ -57250,7 +57619,7 @@ impl PrefillEngine {
         let pinning_layer_idx = self
             .moe_ordinal_for_model_layer(layer_idx)
             .unwrap_or(hcs_layer_idx);
-        let mut predicted_w1_for_layer = self.deepseek_predicted_w1_layer == Some(layer_idx);
+        let mut predicted_w1_for_layer = self.predicted_w1_layer == Some(layer_idx);
         let mut cold_slots_needed = 0usize;
         if self.d_expert_w1_ptrs.is_some() && !prefill_disable_ptr_table() {
             let has_moe_data = moe_layer_idx
@@ -57299,7 +57668,11 @@ impl PrefillEngine {
                     cold_slots_needed.saturating_mul(self.cold_expert_bytes) as f64 / (1024.0 * 1024.0),
                 );
             }
-            if predicted_w1_for_layer && cold_slots_needed > self.max_cold_experts {
+            if portable_predicted_w1_requires_exact_resize(
+                predicted_w1_for_layer,
+                cold_slots_needed,
+                self.max_cold_experts,
+            ) {
                 // A prescan can under-predict the exact route. Finish its
                 // speculative copies before the measured exact-route resize;
                 // the ordinary path then stages every required expert.
@@ -57312,7 +57685,8 @@ impl PrefillEngine {
                         ));
                     }
                 }
-                self.clear_deepseek_predicted_w1_state();
+                self.clear_predicted_w1_state();
+                predicted_w1_for_layer = false;
             }
             self.ensure_cold_staging_capacity(cold_slots_needed, m)?;
         }
@@ -57433,7 +57807,7 @@ impl PrefillEngine {
                 synthetic_slots == 0 && self.deepseek_v4_prefill_split_expert_dma_enabled;
             if predicted_w1_for_layer && !split_expert_dma {
                 return Err(format!(
-                    "DeepSeek predicted-W1 layer {} reached MoE without split expert DMA",
+                    "predicted-W1 layer {} reached MoE without split expert DMA",
                     layer_idx
                 ));
             }
@@ -57443,7 +57817,7 @@ impl PrefillEngine {
             if predicted_w1_for_layer {
                 for &eid in &active {
                     let slot = self
-                        .deepseek_predicted_w1_slots
+                        .predicted_w1_slots
                         .get(eid)
                         .copied()
                         .unwrap_or(usize::MAX);
@@ -57506,7 +57880,7 @@ impl PrefillEngine {
                 if let Some(md) = moe_data {
                     if predicted_w1_for_layer {
                         let predicted_slot = self
-                            .deepseek_predicted_w1_slots
+                            .predicted_w1_slots
                             .get(eid)
                             .copied()
                             .unwrap_or(usize::MAX);
@@ -57739,10 +58113,12 @@ impl PrefillEngine {
                 }
             }
             if predicted_w1_for_layer {
-                let predicted_count = self.deepseek_predicted_w1_count;
-                if std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1_DIAG").is_ok() {
+                let predicted_count = self.predicted_w1_count;
+                if std::env::var("KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1_DIAG").is_ok()
+                    || std::env::var("KRASIS_PREFILL_PREDICTED_W1_DIAG").is_ok()
+                {
                     eprintln!(
-                        "[DSV4-PREDICTED-W1] routed layer={} chunk={} tokens={} predicted_cold={} exact_cold={} hits={} misses={} extra={}",
+                        "[PREFILL-PREDICTED-W1] routed layer={} chunk={} tokens={} predicted_cold={} exact_cold={} hits={} misses={} extra={}",
                         layer_idx,
                         self.active_prefill_chunk_idx,
                         m,
@@ -57753,8 +58129,7 @@ impl PrefillEngine {
                         predicted_count.saturating_sub(predicted_w1_hits),
                     );
                 }
-                self.clear_deepseek_predicted_w1_state();
-                predicted_w1_for_layer = false;
+                self.clear_predicted_w1_state();
             }
             trace_hcs_count = hcs_count;
             trace_pinned_count = pinned_count;
@@ -69223,7 +69598,10 @@ impl PrefillEngine {
                 token_ids.len(),
             ));
         }
-        if chunk_plan.iter().any(|&chunk| chunk == 0 || chunk > self.scratch.max_tokens) {
+        if chunk_plan
+            .iter()
+            .any(|&chunk| chunk == 0 || chunk > self.scratch.max_tokens)
+        {
             return Err(format!(
                 "gate pre-scan chunk plan {:?} exceeds scratch capacity {} or contains an empty chunk",
                 chunk_plan,
@@ -69263,8 +69641,7 @@ impl PrefillEngine {
                     .iter()
                     .map(|layer| vec![0u32; layer.len()])
                     .collect();
-                prompt_active =
-                    vec![vec![Vec::new(); chunk_plan.len()]; chunk_counts.len()];
+                prompt_active = vec![vec![Vec::new(); chunk_plan.len()]; chunk_counts.len()];
             }
             if chunk_counts.len() != prompt_counts.len() {
                 return Err(format!(
@@ -72074,10 +72451,7 @@ fn build_prefill_chunk_plan(total_tokens: usize, max_chunk_tokens: usize) -> Vec
 /// oversized first chunk followed by a smaller tail increases cross-chunk
 /// score work even though both plans use the same number of passes. The number
 /// of chunks and the maximum remain entirely runtime-derived.
-fn build_balanced_prefill_chunk_plan(
-    total_tokens: usize,
-    max_chunk_tokens: usize,
-) -> Vec<usize> {
+fn build_balanced_prefill_chunk_plan(total_tokens: usize, max_chunk_tokens: usize) -> Vec<usize> {
     if total_tokens == 0 {
         return Vec::new();
     }
@@ -72193,12 +72567,9 @@ fn project_prefill_runtime_reserve_bytes(
         return measured_high_water_bytes;
     };
     if long_tokens <= short_tokens {
-        return short_bytes
-            .max(long_bytes)
-            .max(measured_high_water_bytes);
+        return short_bytes.max(long_bytes).max(measured_high_water_bytes);
     }
-    let t =
-        (tokens.saturating_sub(short_tokens) as f64) / (long_tokens - short_tokens) as f64;
+    let t = (tokens.saturating_sub(short_tokens) as f64) / (long_tokens - short_tokens) as f64;
     let reserve = short_bytes as f64 + t * (long_bytes as f64 - short_bytes as f64);
     let projected_bytes = reserve.max(0.0) as usize;
 
@@ -74226,15 +74597,42 @@ mod chunk_plan_tests {
     use super::{
         build_balanced_prefill_chunk_plan, build_balanced_prefill_chunk_plan_at_boundary,
         build_prefill_chunk_plan, build_prefill_chunk_plan_at_boundary,
-        prefill_chunk_guard_prompt_tokens, project_prefill_runtime_reserve_bytes,
-        shared_moe_inter_scratch_elements,
-        stage_exact_export_launch_scalars,
-        stage_exact_export_range,
+        portable_predicted_w1_requires_exact_resize, prefill_chunk_guard_prompt_tokens,
+        project_prefill_runtime_reserve_bytes, shared_moe_inter_scratch_elements,
+        stage_exact_export_launch_scalars, stage_exact_export_range, PortablePredictedW1Policy,
     };
 
     #[test]
     fn uses_single_chunk_when_prompt_fits() {
         assert_eq!(build_prefill_chunk_plan(5_000, 16_000), vec![5_000]);
+    }
+
+    #[test]
+    fn portable_predicted_w1_auto_threshold_uses_computed_suffix_length() {
+        let policy = PortablePredictedW1Policy::AutoThreshold(4_200);
+        let restored_prefix_tokens = 40_000;
+        let computed_suffix_tokens = 50;
+        assert!(!policy.active(computed_suffix_tokens));
+        assert!(policy.active(restored_prefix_tokens + computed_suffix_tokens));
+        assert!(!policy.active(4_199));
+        assert!(policy.active(4_200));
+        assert!(policy.active(40_000));
+    }
+
+    #[test]
+    fn portable_predicted_w1_uncalibrated_and_disabled_auto_are_fail_closed() {
+        assert!(!PortablePredictedW1Policy::AutoUncalibrated.active(40_000));
+        assert!(!PortablePredictedW1Policy::AutoDisabled.active(40_000));
+        assert!(!PortablePredictedW1Policy::Off.active(40_000));
+        assert!(PortablePredictedW1Policy::AutoCalibration(true).active(1));
+        assert!(!PortablePredictedW1Policy::AutoCalibration(false).active(40_000));
+    }
+
+    #[test]
+    fn portable_predicted_w1_cancels_only_when_exact_route_outgrows_staging() {
+        assert!(!portable_predicted_w1_requires_exact_resize(false, 9, 8));
+        assert!(!portable_predicted_w1_requires_exact_resize(true, 8, 8));
+        assert!(portable_predicted_w1_requires_exact_resize(true, 9, 8));
     }
 
     #[test]
@@ -74279,8 +74677,7 @@ mod chunk_plan_tests {
     #[test]
     fn balanced_plan_preserves_exact_session_boundary() {
         let plan =
-            build_balanced_prefill_chunk_plan_at_boundary(50_000, 16_640, Some(23_417))
-                .unwrap();
+            build_balanced_prefill_chunk_plan_at_boundary(50_000, 16_640, Some(23_417)).unwrap();
         assert_eq!(plan.iter().sum::<usize>(), 50_000);
         assert!(plan.iter().all(|&chunk| chunk <= 16_640));
         let ends: Vec<_> = plan
@@ -79234,16 +79631,11 @@ mod kernel_tests {
             plan_dsa_prefill_selection(503, 125, 2048, 125 * std::mem::size_of::<f32>(), 1, 4)
                 .expect("partial trailing compression group plan");
         assert_eq!(compressed_partial.chunk_rows, 503);
-        assert!(plan_dsa_prefill_selection(
-            504,
-            125,
-            2048,
-            125 * std::mem::size_of::<f32>(),
-            1,
-            4,
-        )
-        .unwrap_err()
-        .contains("exceed causal row capacity"));
+        assert!(
+            plan_dsa_prefill_selection(504, 125, 2048, 125 * std::mem::size_of::<f32>(), 1, 4,)
+                .unwrap_err()
+                .contains("exceed causal row capacity")
+        );
     }
 
     #[test]

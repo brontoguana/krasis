@@ -1,0 +1,1375 @@
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab
+Loaded config from tests/ornith10-397b-hqq6-k6v6-a6000-carryover.conf: {'model_path': '/home/main/.krasis/models/deepreinforce-ai/Ornith-1.0-397B', 'selected_gpus': 'GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 1500, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '127.0.0.1', 'port': 18321, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — Ornith-1.0-397B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab (config; CUDA_VISIBLE_DEVICES=GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k6v6[0m
+  [32mLayer groups: 2  |  KV cache: 1500 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=276 MB, free=48272 MB, total=48549 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=14952 MB, free=33596 MB, total=48549 MB
+  [0;32mHQQ attention artifacts validated (6160 MB cached), 33596 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 60 layers...
+    GPU Marlin cache loaded: 199.7 GB in 243s
+  [0;32mExpert weights loaded in 244s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=14952 MB, free=33596 MB, total=48549 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=14952 MB, free=33596 MB, total=48549 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=15983 MB, reserved=16116 MB, used=16456 MB, free=32092 MB, total=48549 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=15983 MB, reserved=16116 MB, used=16456 MB, free=32092 MB, total=48549 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x82c31680)[0m
+  [32mReleased redundant GPU execution source tensors (1,450 MB)[0m
+  [2mVRAM monitor started (startup measurement 1 ms; runtime 50 ms)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=64 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm80.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=64)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=64)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=64)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 2.9s[0m
+  [2mcuda:0 warmup:  peak 19,840 MB used / 48,549 MB total  (min free: 28,708 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 32,188 MB / 48,549 MB[0m
+  [32mCalibration prefill guard: 1,200 MB (runtime safety remains 600 MB)[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=10, expert_bits=4
+[ksplit-autotune] shape k=4096 n=2048 z=10 int8=false candidates [1:0.1612ms 2:0.1705ms 4:0.1836ms 8:0.2149ms] -> keeping formula ksplits=1 (0.1612 ms median; best 1 at 0.1612 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=0 shape k=4096 n=2048 z=1 int8=false candidates [1:0.0283ms 2:0.0287ms 3:0.0342ms 4:0.0274ms 8:0.0289ms] -> override ksplits=4 (0.0274 ms median vs formula 3 at 0.0342 ms, >5.0% margin)
+[shared-w2-autotune] layer=0 shape k=1024 n=4096 int8=false v1=0.0348ms candidates [2:0.0184ms 4:0.0202ms] -> K-split 2 at 0.0184ms (>5.0% margin)
+[ksplit-autotune] complete: 1 W13 override(s), 1 shared-W2 override(s) installed
+  [32mdecode: 32 tokens in 7.89s (4.1 tok/s)  VRAM: 32136 MB free now, 32136 MB min free during decode[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (32 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        242.92 ms/tok  (  4.1 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   8.83 ms  ( 3.6%)            [36m│[0m
+  [36m│[0m    Sync wait:   225.85 ms  (93.0%)            [36m│[0m
+  [36m│[0m      inter:     219.76 ms  final:  6.09 ms     [36m│[0m
+  [36m│[0m    Classify:      0.12 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Cold DMA:      5.53 ms  ( 2.3%)            [36m│[0m
+  [36m│[0m    Upload:        0.17 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        2.42 ms  ( 1.0%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 55.44 ms                  [36m│[0m
+  [36m│[0m    First route:   0.46 ms  ( 0.8%)        [36m│[0m
+  [36m│[0m    Middle segs:  51.77 ms  (93.4%)        [36m│[0m
+  [36m│[0m    Final seg:     3.21 ms  ( 5.8%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.46 ms/tok (0.46 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   38.50 ms/tok (0.88 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  13.27 ms/tok (0.88 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.21 ms/tok (3.21 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.46 ms/tok (0.46 ms/seg) [36m│[0m
+  [36m│[0m    LA route:  163.73 ms/tok (3.72 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  55.58 ms/tok (3.71 ms/seg) [36m│[0m
+  [36m│[0m    Final:       6.09 ms/tok (6.09 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   6.09 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    4.11 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #33   4.09 ms  graph33 experts L32 + route L33 LA    [36m│[0m
+  [36m│[0m    #11   3.93 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m    #45   3.93 ms  graph45 experts L44 + route L45 LA    [36m│[0m
+  [36m│[0m    #43   3.86 ms  graph43 experts L42 + route L43 GQA   [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   3.21 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #7    0.89 ms  graph7 experts L6 + route L7 GQA      [36m│[0m
+  [36m│[0m    #3    0.89 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m    #39   0.89 ms  graph39 experts L38 + route L39 GQA   [36m│[0m
+  [36m│[0m    #15   0.88 ms  graph15 experts L14 + route L15 GQA   [36m│[0m
+  [36m│[0m    #11   0.88 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 600.0 (2400 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  0.0 (0 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    3712.50 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     0/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 177.82 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    21.21 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  3.36 | hot 0.00 | graph 0.88  [36m│[0m
+  [36m│[0m         wait  4.11 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #33  H2D  3.34 | hot 0.00 | graph 0.88  [36m│[0m
+  [36m│[0m         wait  4.09 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #45  H2D  3.17 | hot 0.00 | graph 0.88  [36m│[0m
+  [36m│[0m         wait  3.93 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #11  H2D  3.17 | hot 0.00 | graph 0.88  [36m│[0m
+  [36m│[0m         wait  3.93 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #43  H2D  3.10 | hot 0.00 | graph 0.88  [36m│[0m
+  [36m│[0m         wait  3.86 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #52  H2D  3.10 | hot 0.00 | graph 0.87  [36m│[0m
+  [36m│[0m         wait  3.85 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mShort calibration: baseline=32,188 MB, prefill post-alloc=29,194 MB, prefill min=26,344 MB, decode min=32,136 MB, post-cleanup=32,136 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.8443 MB/token[0m
+  [32mAdaptive long calibration fail-closed entry check: 4,000 tokens require 5,234 MB, 32,188 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 28,860 tokens (model-estimated initial probe (projected 0.8443 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 28,860 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 8.54s (3.7 tok/s)  VRAM: 32134 MB free now, 32134 MB min free during decode[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (32 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        266.45 ms/tok  (  3.8 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   9.55 ms  ( 3.6%)            [36m│[0m
+  [36m│[0m    Sync wait:   250.74 ms  (94.1%)            [36m│[0m
+  [36m│[0m      inter:     244.62 ms  final:  6.12 ms     [36m│[0m
+  [36m│[0m    Classify:      0.12 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Cold DMA:      5.38 ms  ( 2.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.16 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.51 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 77.77 ms                  [36m│[0m
+  [36m│[0m    First route:   0.47 ms  ( 0.6%)        [36m│[0m
+  [36m│[0m    Middle segs:  74.08 ms  (95.3%)        [36m│[0m
+  [36m│[0m    Final seg:     3.22 ms  ( 4.1%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.47 ms/tok (0.47 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   39.13 ms/tok (0.89 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  34.96 ms/tok (2.33 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.22 ms/tok (3.22 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.46 ms/tok (0.46 ms/seg) [36m│[0m
+  [36m│[0m    LA route:  166.22 ms/tok (3.78 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  77.93 ms/tok (5.20 ms/seg) [36m│[0m
+  [36m│[0m    Final:       6.12 ms/tok (6.12 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   6.12 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #11   5.41 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m    #43   5.35 ms  graph43 experts L42 + route L43 GQA   [36m│[0m
+  [36m│[0m    #55   5.30 ms  graph55 experts L54 + route L55 GQA   [36m│[0m
+  [36m│[0m    #19   5.28 ms  graph19 experts L18 + route L19 GQA   [36m│[0m
+  [36m│[0m    #59   5.27 ms  graph59 experts L58 + route L59 GQA   [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   3.22 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #15   2.33 ms  graph15 experts L14 + route L15 GQA   [36m│[0m
+  [36m│[0m    #7    2.33 ms  graph7 experts L6 + route L7 GQA      [36m│[0m
+  [36m│[0m    #11   2.33 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m    #27   2.33 ms  graph27 experts L26 + route L27 GQA   [36m│[0m
+  [36m│[0m    #31   2.33 ms  graph31 experts L30 + route L31 GQA   [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 600.0 (2400 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  0.0 (0 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    3712.50 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     0/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 178.31 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    21.15 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #33  H2D  3.36 | hot 0.00 | graph 0.89  [36m│[0m
+  [36m│[0m         wait  4.16 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #1   H2D  3.31 | hot 0.00 | graph 0.89  [36m│[0m
+  [36m│[0m         wait  4.11 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #11  H2D  3.17 | hot 0.00 | graph 2.33  [36m│[0m
+  [36m│[0m         wait  5.41 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #45  H2D  3.16 | hot 0.00 | graph 0.89  [36m│[0m
+  [36m│[0m         wait  3.96 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #37  H2D  3.12 | hot 0.00 | graph 0.89  [36m│[0m
+  [36m│[0m         wait  3.93 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #43  H2D  3.11 | hot 0.00 | graph 2.33  [36m│[0m
+  [36m│[0m         wait  5.35 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mLong calibration: baseline=32,136 MB, prefill post-alloc=4,730 MB, prefill min=1,536 MB, decode min=32,134 MB, post-cleanup=32,134 MB[0m
+  [32mAdaptive long calibration fail-closed entry check: 39,920 tokens require 5,317 MB, 32,136 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 39,920 tokens (runtime-derived fail-closed probe (entry floor validated through 39920 tokens; projection declined: current low-water 1536 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 8.85s (3.6 tok/s)  VRAM: 32138 MB free now, 32138 MB min free during decode[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (32 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        276.09 ms/tok  (  3.6 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   9.88 ms  ( 3.6%)            [36m│[0m
+  [36m│[0m    Sync wait:   259.89 ms  (94.1%)            [36m│[0m
+  [36m│[0m      inter:     253.77 ms  final:  6.12 ms     [36m│[0m
+  [36m│[0m    Classify:      0.12 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Cold DMA:      5.53 ms  ( 2.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.17 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.50 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 86.92 ms                  [36m│[0m
+  [36m│[0m    First route:   0.47 ms  ( 0.5%)        [36m│[0m
+  [36m│[0m    Middle segs:  83.23 ms  (95.8%)        [36m│[0m
+  [36m│[0m    Final seg:     3.22 ms  ( 3.7%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.47 ms/tok (0.47 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   39.41 ms/tok (0.90 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  43.82 ms/tok (2.92 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.22 ms/tok (3.22 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.47 ms/tok (0.47 ms/seg) [36m│[0m
+  [36m│[0m    LA route:  166.45 ms/tok (3.78 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  86.86 ms/tok (5.79 ms/seg) [36m│[0m
+  [36m│[0m    Final:       6.12 ms/tok (6.12 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   6.12 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #11   6.00 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m    #43   5.95 ms  graph43 experts L42 + route L43 GQA   [36m│[0m
+  [36m│[0m    #55   5.88 ms  graph55 experts L54 + route L55 GQA   [36m│[0m
+  [36m│[0m    #19   5.88 ms  graph19 experts L18 + route L19 GQA   [36m│[0m
+  [36m│[0m    #59   5.85 ms  graph59 experts L58 + route L59 GQA   [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   3.22 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #15   2.92 ms  graph15 experts L14 + route L15 GQA   [36m│[0m
+  [36m│[0m    #11   2.92 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m    #23   2.92 ms  graph23 experts L22 + route L23 GQA   [36m│[0m
+  [36m│[0m    #7    2.92 ms  graph7 experts L6 + route L7 GQA      [36m│[0m
+  [36m│[0m    #39   2.92 ms  graph39 experts L38 + route L39 GQA   [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 600.0 (2400 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  0.0 (0 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    3712.50 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     0/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 178.46 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    21.13 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #33  H2D  3.38 | hot 0.00 | graph 0.90  [36m│[0m
+  [36m│[0m         wait  4.19 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #1   H2D  3.32 | hot 0.00 | graph 0.90  [36m│[0m
+  [36m│[0m         wait  4.12 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #11  H2D  3.17 | hot 0.00 | graph 2.92  [36m│[0m
+  [36m│[0m         wait  6.00 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #45  H2D  3.14 | hot 0.00 | graph 0.90  [36m│[0m
+  [36m│[0m         wait  3.94 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #43  H2D  3.12 | hot 0.00 | graph 2.92  [36m│[0m
+  [36m│[0m         wait  5.95 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m│[0m    #34  H2D  3.10 | hot 0.00 | graph 0.90  [36m│[0m
+  [36m│[0m         wait  3.90 ms |  59.9 MB | 9.69 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mLong calibration: baseline=32,134 MB, prefill post-alloc=4,424 MB, prefill min=1,210 MB, decode min=32,138 MB, post-cleanup=32,138 MB[0m
+  [32mScratch reservation: max=42,206 MB (at 50,000 tokens)[0m
+  [32mVRAM monitor runtime cadence restored: 1 ms -> 50 ms[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 32,138 MB[0m
+  [32mTransient deltas: short prefill=5,844 MB, long prefill=30,924 MB, short decode=52 MB, long decode=0 MB[0m
+  [32mGPU0 decode HCS budget: 31,486 MB[0m
+  [32mPrefill HCS budgets: short=25,694 MB, long=614 MB[0m
+  [32mWorst-case prefill scratch reservation: 42,206 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [2mNo approved heatmap artifact matches this model/router signature and validated runtime; falling back to quick startup heatmap generation[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+  [2mQuick heatmap prompt 1/6: 35 prefill tokens + 256 decode tokens[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (288 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        267.98 ms/tok  (  3.7 tok/s)    [36m│[0m
+  [36m│[0m  Graph replay hides per-component kernels.      [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 600.0/tok | HCS   0.0/tok | 3712.50 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 2400.0/tok | HCS cache 0 | hit/miss 0/153600 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [2mQuick heatmap prompt 1/6 done: 257 route tokens, 72.2s (elapsed 72.2s, eta 360.9s)[0m
+  [2mQuick heatmap prompt 2/6: 43 prefill tokens + 256 decode tokens[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (544 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        267.89 ms/tok  (  3.7 tok/s)    [36m│[0m
+  [36m│[0m  Graph replay hides per-component kernels.      [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 600.0/tok | HCS   0.0/tok | 3712.50 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 2400.0/tok | HCS cache 0 | hit/miss 0/307200 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [2mQuick heatmap prompt 2/6 done: 257 route tokens, 72.9s (elapsed 145.1s, eta 290.2s)[0m
+  [2mQuick heatmap prompt 3/6: 35 prefill tokens + 256 decode tokens[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (800 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        267.30 ms/tok  (  3.7 tok/s)    [36m│[0m
+  [36m│[0m  Graph replay hides per-component kernels.      [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 600.0/tok | HCS   0.0/tok | 3712.50 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 2400.0/tok | HCS cache 0 | hit/miss 0/460800 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [2mQuick heatmap prompt 3/6 done: 257 route tokens, 72.0s (elapsed 217.1s, eta 217.1s)[0m
+  [2mQuick heatmap prompt 4/6: 29 prefill tokens + 256 decode tokens[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (1056 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        267.28 ms/tok  (  3.7 tok/s)    [36m│[0m
+  [36m│[0m  Graph replay hides per-component kernels.      [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 600.0/tok | HCS   0.0/tok | 3712.50 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 2400.0/tok | HCS cache 0 | hit/miss 0/614400 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [2mQuick heatmap prompt 4/6 done: 257 route tokens, 72.1s (elapsed 289.2s, eta 144.6s)[0m
+  [2mQuick heatmap prompt 5/6: 41 prefill tokens + 256 decode tokens[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (1312 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        267.40 ms/tok  (  3.7 tok/s)    [36m│[0m
+  [36m│[0m  Graph replay hides per-component kernels.      [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 600.0/tok | HCS   0.0/tok | 3712.50 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 2400.0/tok | HCS cache 0 | hit/miss 0/768000 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [2mQuick heatmap prompt 5/6 done: 257 route tokens, 72.9s (elapsed 362.1s, eta 72.4s)[0m
+  [2mQuick heatmap prompt 6/6: 46 prefill tokens + 256 decode tokens[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (1568 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        267.77 ms/tok  (  3.7 tok/s)    [36m│[0m
+  [36m│[0m  Graph replay hides per-component kernels.      [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 600.0/tok | HCS   0.0/tok | 3712.50 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 2400.0/tok | HCS cache 0 | hit/miss 0/921600 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [2mQuick heatmap prompt 6/6 done: 257 route tokens, 73.5s (elapsed 435.6s, eta 0.0s)[0m
+  [32mHeatmap: 28,248 experts ranked from 28,248 entries[0m
+  [2mVRAM calibration: baseline 32138 MB | prefill 651.5 KB/tok, decode -1.4 KB/tok | HCS allowance prefill: short 25694 MB, long 614 MB | decode: short 31486 MB, long 31538 MB | idle floors prefill=6444 MB decode=652 MB | decode-resident HCS budget=31486 MB[0m
+  [2mGPU0 HCS: 30720 experts (28248 ranked + 2472 unranked), reclaimable: 31,486 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/30720 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 5040 experts in 1.70s (31185.0 MB, host_mode=source) | total: 5040/30720 (16.4%) coverage[0m
+  [2mLoaded in 1.7s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+VRAM pressure: evicted 30 soft HCS experts / 1 chunks; free=1074 MB after eviction (safety=600 MB, target=972 MB)
+  [33mVRAM pressure eviction at startup_ready: evicted 30 soft HCS experts, freed 185.6 MB, final free 1,074 MB[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mOrnith-1.0-397B[0m
+  [32mAddress:[0m  [1m127.0.0.1:18321[0m
+  [32mContext:[0m  117,024 tokens  |  KV cache: 1,500 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18321/v1[0m
+    Chat endpoint: http://127.0.0.1:18321/v1/chat/completions
+    Models:        http://127.0.0.1:18321/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mOrnith-1.0-397B-vision[0m
+                   [2mvision-capable; use this same model for text and images[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mOrnith-1.0-397B[0m
+  GPUs:     1x NVIDIA RTX A6000
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/5K/10K/20K/35K/39,920)[0m
+  Prefill sizing:  [33mruntime-calibrated prefill cap 39,920 tokens (long probe low-water 1,214 MB, safety 600 MB)[0m
+  Warmup prefill:  3 prompts, ~25,000 tokens each
+  Timed prefill:   6 prompts at 1K/5K/10K/20K/35K/39,920 tokens
+    [1] 1,000 tokens
+    [2] 5,000 tokens
+    [3] 10,000 tokens
+    [4] 20,000 tokens
+    [5] 35,000 tokens
+    [6] 39,920 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+  [32mdecode: 7 tokens in 0.97s (7.2 tok/s)  VRAM: 1074 MB free now, 1042 MB min free during decode[0m
+  [36mDynamic HCS: hit=61.21% tail=1200/600 protected=3810 promotions=1629 evictions=1629 request_promotions=1629/4200 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (7 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        137.19 ms/tok  (  7.3 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:  26.05 ms  (19.0%)            [36m│[0m
+  [36m│[0m    Sync wait:   107.79 ms  (78.6%)            [36m│[0m
+  [36m│[0m      inter:     103.77 ms  final:  4.01 ms     [36m│[0m
+  [36m│[0m    Classify:      0.12 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.40 ms  ( 1.8%)            [36m│[0m
+  [36m│[0m    Upload:        0.15 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.67 ms  ( 0.5%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 48.58 ms                  [36m│[0m
+  [36m│[0m    First route:   0.41 ms  ( 0.9%)        [36m│[0m
+  [36m│[0m    Middle segs:  45.33 ms  (93.3%)        [36m│[0m
+  [36m│[0m    Final seg:     2.84 ms  ( 5.8%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.41 ms/tok (0.41 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   34.39 ms/tok (0.78 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  10.94 ms/tok (0.73 ms/seg) [36m│[0m
+  [36m│[0m    Final:       2.84 ms/tok (2.84 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.41 ms/tok (0.41 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   77.76 ms/tok (1.77 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  25.61 ms/tok (1.71 ms/seg) [36m│[0m
+  [36m│[0m    Final:       4.01 ms/tok (4.01 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   4.01 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    3.65 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #7    2.75 ms  graph7 experts L6 + route L7 GQA      [36m│[0m
+  [36m│[0m    #9    2.74 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #10   2.72 ms  graph10 experts L9 + route L10 LA     [36m│[0m
+  [36m│[0m    #6    2.72 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   2.84 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #36   0.78 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #13   0.78 ms  graph13 experts L12 + route L13 LA    [36m│[0m
+  [36m│[0m    #50   0.78 ms  graph50 experts L49 + route L50 LA    [36m│[0m
+  [36m│[0m    #58   0.78 ms  graph58 experts L57 + route L58 LA    [36m│[0m
+  [36m│[0m    #1    0.78 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 232.7 (931 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  367.3 (5010 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    1439.92 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     316/284                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 60.33 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    20.66 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  2.88 | hot 0.00 | graph 0.78  [36m│[0m
+  [36m│[0m         wait  3.65 ms |  50.4 MB | 8.14 cold [36m│[0m
+  [36m│[0m    #7   H2D  2.09 | hot 0.00 | graph 0.73  [36m│[0m
+  [36m│[0m         wait  2.75 ms |  41.5 MB | 6.71 cold [36m│[0m
+  [36m│[0m    #9   H2D  2.03 | hot 0.00 | graph 0.78  [36m│[0m
+  [36m│[0m         wait  2.74 ms |  38.9 MB | 6.29 cold [36m│[0m
+  [36m│[0m    #6   H2D  2.03 | hot 0.00 | graph 0.78  [36m│[0m
+  [36m│[0m         wait  2.72 ms |  41.5 MB | 6.71 cold [36m│[0m
+  [36m│[0m    #11  H2D  1.97 | hot 0.00 | graph 0.73  [36m│[0m
+  [36m│[0m         wait  2.64 ms |  37.1 MB | 6.00 cold [36m│[0m
+  [36m│[0m    #10  H2D  1.96 | hot 0.00 | graph 0.78  [36m│[0m
+  [36m│[0m         wait  2.72 ms |  38.9 MB | 6.29 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mdecode: 7 tokens in 1.09s (6.4 tok/s)  VRAM: 1074 MB free now, 1042 MB min free during decode[0m
+  [36mDynamic HCS: hit=52.90% tail=1200/600 protected=3810 promotions=3607 evictions=3607 request_promotions=1978/4200 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (7 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        154.17 ms/tok  (  6.5 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:  24.88 ms  (16.1%)            [36m│[0m
+  [36m│[0m    Sync wait:   125.87 ms  (81.6%)            [36m│[0m
+  [36m│[0m      inter:     121.63 ms  final:  4.25 ms     [36m│[0m
+  [36m│[0m    Classify:      0.10 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.61 ms  ( 1.7%)            [36m│[0m
+  [36m│[0m    Upload:        0.15 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.55 ms  ( 0.4%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 48.59 ms                  [36m│[0m
+  [36m│[0m    First route:   0.41 ms  ( 0.8%)        [36m│[0m
+  [36m│[0m    Middle segs:  45.33 ms  (93.3%)        [36m│[0m
+  [36m│[0m    Final seg:     2.84 ms  ( 5.9%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.41 ms/tok (0.41 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   34.39 ms/tok (0.78 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  10.94 ms/tok (0.73 ms/seg) [36m│[0m
+  [36m│[0m    Final:       2.84 ms/tok (2.84 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.41 ms/tok (0.41 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   92.26 ms/tok (2.10 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  28.96 ms/tok (1.93 ms/seg) [36m│[0m
+  [36m│[0m    Final:       4.25 ms/tok (4.25 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   4.25 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    3.71 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #9    2.97 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #6    2.77 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m    #15   2.72 ms  graph15 experts L14 + route L15 GQA   [36m│[0m
+  [36m│[0m    #10   2.72 ms  graph10 experts L9 + route L10 LA     [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   2.84 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #42   0.78 ms  graph42 experts L41 + route L42 LA    [36m│[0m
+  [36m│[0m    #14   0.78 ms  graph14 experts L13 + route L14 LA    [36m│[0m
+  [36m│[0m    #22   0.78 ms  graph22 experts L21 + route L22 LA    [36m│[0m
+  [36m│[0m    #30   0.78 ms  graph30 experts L29 + route L30 LA    [36m│[0m
+  [36m│[0m    #26   0.78 ms  graph26 experts L25 + route L26 LA    [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 282.6 (1130 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  317.4 (5010 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    1748.41 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     663/537                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 77.71 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    20.57 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  2.93 | hot 0.00 | graph 0.78  [36m│[0m
+  [36m│[0m         wait  3.71 ms |  52.2 MB | 8.43 cold [36m│[0m
+  [36m│[0m    #9   H2D  2.20 | hot 0.00 | graph 0.78  [36m│[0m
+  [36m│[0m         wait  2.97 ms |  41.5 MB | 6.71 cold [36m│[0m
+  [36m│[0m    #15  H2D  2.00 | hot 0.00 | graph 0.73  [36m│[0m
+  [36m│[0m         wait  2.72 ms |  40.7 MB | 6.57 cold [36m│[0m
+  [36m│[0m    #6   H2D  1.99 | hot 0.00 | graph 0.78  [36m│[0m
+  [36m│[0m         wait  2.77 ms |  38.0 MB | 6.14 cold [36m│[0m
+  [36m│[0m    #10  H2D  1.94 | hot 0.00 | graph 0.78  [36m│[0m
+  [36m│[0m         wait  2.72 ms |  36.2 MB | 5.86 cold [36m│[0m
+  [36m│[0m    #14  H2D  1.94 | hot 0.00 | graph 0.78  [36m│[0m
+  [36m│[0m         wait  2.71 ms |  37.1 MB | 6.00 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  Warmup complete.
+  Prefill warmup (3 runs, ~25,000 tokens each)...
+VRAM pressure: evicted 30 soft HCS experts / 1 chunks; free=5164 MB after eviction (safety=600 MB, target=972 MB)
+    [1/3] 25,000 tokens
+VRAM pressure: evicted 30 soft HCS experts / 1 chunks; free=5166 MB after eviction (safety=600 MB, target=972 MB)
+    [2/3] 25,000 tokens
+VRAM pressure: evicted 30 soft HCS experts / 1 chunks; free=5166 MB after eviction (safety=600 MB, target=972 MB)
+    [3/3] 25,000 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+VRAM pressure: evicted 30 soft HCS experts / 1 chunks; free=1074 MB after eviction (safety=600 MB, target=972 MB)
+  [32mdecode: 49 tokens in 6.47s (7.6 tok/s)  VRAM: 1074 MB free now, 1074 MB min free during decode[0m
+  [36mDynamic HCS: hit=64.49% tail=1200/600 protected=3810 promotions=14046 evictions=14046 request_promotions=10439/29400 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (49 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        131.63 ms/tok  (  7.6 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   6.55 ms  ( 5.0%)            [36m│[0m
+  [36m│[0m    Sync wait:   122.22 ms  (92.9%)            [36m│[0m
+  [36m│[0m      inter:     118.21 ms  final:  4.02 ms     [36m│[0m
+  [36m│[0m    Classify:      0.09 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.15 ms  ( 1.6%)            [36m│[0m
+  [36m│[0m    Upload:        0.16 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.47 ms  ( 0.4%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 57.04 ms                  [36m│[0m
+  [36m│[0m    First route:   0.48 ms  ( 0.8%)        [36m│[0m
+  [36m│[0m    Middle segs:  53.30 ms  (93.4%)        [36m│[0m
+  [36m│[0m    Final seg:     3.26 ms  ( 5.7%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   40.22 ms/tok (0.91 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  13.07 ms/tok (0.87 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.26 ms/tok (3.26 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   89.31 ms/tok (2.03 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  28.42 ms/tok (1.89 ms/seg) [36m│[0m
+  [36m│[0m    Final:       4.02 ms/tok (4.02 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   4.02 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    3.98 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #9    3.37 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #10   3.33 ms  graph10 experts L9 + route L10 LA     [36m│[0m
+  [36m│[0m    #6    3.28 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m    #2    3.26 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   3.26 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    0.92 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #2    0.92 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #56   0.92 ms  graph56 experts L55 + route L56 LA    [36m│[0m
+  [36m│[0m    #58   0.92 ms  graph58 experts L57 + route L58 LA    [36m│[0m
+  [36m│[0m    #54   0.92 ms  graph54 experts L53 + route L54 LA    [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 213.0 (852 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  387.0 (5010 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    1318.19 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     1066/734                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 65.34 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    20.76 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  3.06 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.98 ms |  56.3 MB | 9.10 cold [36m│[0m
+  [36m│[0m    #9   H2D  2.45 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.37 ms |  47.2 MB | 7.63 cold [36m│[0m
+  [36m│[0m    #10  H2D  2.41 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.33 ms |  48.5 MB | 7.84 cold [36m│[0m
+  [36m│[0m    #6   H2D  2.36 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.28 ms |  47.6 MB | 7.69 cold [36m│[0m
+  [36m│[0m    #2   H2D  2.34 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.26 ms |  46.0 MB | 7.43 cold [36m│[0m
+  [36m│[0m    #8   H2D  2.32 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.23 ms |  46.7 MB | 7.55 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+    50 tokens done
+  [32mdecode: 99 tokens in 13.11s (7.6 tok/s)  VRAM: 1074 MB free now, 1042 MB min free during decode[0m
+  [36mDynamic HCS: hit=64.17% tail=1200/600 protected=3810 promotions=35327 evictions=35327 request_promotions=21281/59400 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (99 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        132.14 ms/tok  (  7.6 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   5.49 ms  ( 4.2%)            [36m│[0m
+  [36m│[0m    Sync wait:   123.75 ms  (93.6%)            [36m│[0m
+  [36m│[0m      inter:     119.55 ms  final:  4.19 ms     [36m│[0m
+  [36m│[0m    Classify:      0.09 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.18 ms  ( 1.7%)            [36m│[0m
+  [36m│[0m    Upload:        0.16 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.47 ms  ( 0.4%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 57.16 ms                  [36m│[0m
+  [36m│[0m    First route:   0.48 ms  ( 0.8%)        [36m│[0m
+  [36m│[0m    Middle segs:  53.39 ms  (93.4%)        [36m│[0m
+  [36m│[0m    Final seg:     3.29 ms  ( 5.8%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   40.19 ms/tok (0.91 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  13.20 ms/tok (0.88 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.29 ms/tok (3.29 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   90.19 ms/tok (2.05 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  28.88 ms/tok (1.93 ms/seg) [36m│[0m
+  [36m│[0m    Final:       4.19 ms/tok (4.19 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   4.19 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    4.10 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #2    3.56 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #6    3.45 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m    #9    3.44 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #5    3.38 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   3.29 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    0.92 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #2    0.92 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #4    0.92 ms  graph4 experts L3 + route L4 LA       [36m│[0m
+  [36m│[0m    #58   0.92 ms  graph58 experts L57 + route L58 LA    [36m│[0m
+  [36m│[0m    #56   0.92 ms  graph56 experts L55 + route L56 LA    [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 215.0 (860 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  385.0 (5010 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    1330.06 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     1450/950                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 66.74 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    20.69 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  3.18 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  4.10 ms |  57.8 MB | 9.33 cold [36m│[0m
+  [36m│[0m    #2   H2D  2.63 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.56 ms |  51.4 MB | 8.30 cold [36m│[0m
+  [36m│[0m    #6   H2D  2.53 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.45 ms |  49.9 MB | 8.07 cold [36m│[0m
+  [36m│[0m    #9   H2D  2.52 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  3.44 ms |  49.2 MB | 7.95 cold [36m│[0m
+  [36m│[0m    #5   H2D  2.46 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.38 ms |  51.2 MB | 8.28 cold [36m│[0m
+  [36m│[0m    #11  H2D  2.42 | hot 0.00 | graph 0.88  [36m│[0m
+  [36m│[0m         wait  3.30 ms |  45.1 MB | 7.28 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+    100 tokens done
+  [32mdecode: 249 tokens in 34.83s (7.1 tok/s)  VRAM: 1074 MB free now, 1042 MB min free during decode[0m
+  [36mDynamic HCS: hit=60.65% tail=1200/600 protected=3810 promotions=94115 evictions=94115 request_promotions=58788/149400 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (249 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        139.66 ms/tok  (  7.2 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   5.12 ms  ( 3.7%)            [36m│[0m
+  [36m│[0m    Sync wait:   131.40 ms  (94.1%)            [36m│[0m
+  [36m│[0m      inter:     127.02 ms  final:  4.38 ms     [36m│[0m
+  [36m│[0m    Classify:      0.10 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.40 ms  ( 1.7%)            [36m│[0m
+  [36m│[0m    Upload:        0.16 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.47 ms  ( 0.3%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 57.94 ms                  [36m│[0m
+  [36m│[0m    First route:   0.48 ms  ( 0.8%)        [36m│[0m
+  [36m│[0m    Middle segs:  54.15 ms  (93.4%)        [36m│[0m
+  [36m│[0m    Final seg:     3.31 ms  ( 5.7%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   40.53 ms/tok (0.92 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  13.62 ms/tok (0.91 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.31 ms/tok (3.31 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   95.30 ms/tok (2.17 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  31.24 ms/tok (2.08 ms/seg) [36m│[0m
+  [36m│[0m    Final:       4.38 ms/tok (4.38 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   4.38 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    4.10 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #6    3.54 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m    #2    3.52 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #9    3.43 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #7    3.41 ms  graph7 experts L6 + route L7 GQA      [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   3.31 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #2    0.93 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #1    0.93 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #4    0.93 ms  graph4 experts L3 + route L4 LA       [36m│[0m
+  [36m│[0m    #5    0.93 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m│[0m    #6    0.93 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 236.1 (944 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  363.9 (5010 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    1460.85 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     1838/1162                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 73.70 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    20.71 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  3.18 | hot 0.00 | graph 0.93  [36m│[0m
+  [36m│[0m         wait  4.10 ms |  57.9 MB | 9.36 cold [36m│[0m
+  [36m│[0m    #6   H2D  2.62 | hot 0.00 | graph 0.93  [36m│[0m
+  [36m│[0m         wait  3.54 ms |  51.9 MB | 8.39 cold [36m│[0m
+  [36m│[0m    #2   H2D  2.59 | hot 0.00 | graph 0.93  [36m│[0m
+  [36m│[0m         wait  3.52 ms |  50.7 MB | 8.19 cold [36m│[0m
+  [36m│[0m    #9   H2D  2.51 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.43 ms |  48.8 MB | 7.88 cold [36m│[0m
+  [36m│[0m    #7   H2D  2.50 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  3.41 ms |  50.2 MB | 8.11 cold [36m│[0m
+  [36m│[0m    #10  H2D  2.44 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.36 ms |  48.7 MB | 7.87 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+    250 tokens done
+  Warmup complete (197.5s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K/5K/10K/20K/35K/39,920 tokens, 6 runs[0m
+VRAM pressure: evicted 30 soft HCS experts / 1 chunks; free=1258 MB after eviction (safety=600 MB, target=972 MB)
+VRAM pressure: evicted 30 soft HCS experts / 1 chunks; free=2750 MB after eviction (safety=600 MB, target=972 MB)
+VRAM pressure: evicted 30 soft HCS experts / 1 chunks; free=4420 MB after eviction (safety=600 MB, target=972 MB)
+VRAM pressure: evicted 30 soft HCS experts / 1 chunks; free=6096 MB after eviction (safety=600 MB, target=972 MB)
+VRAM pressure: evicted 30 soft HCS experts / 1 chunks; free=6096 MB after eviction (safety=600 MB, target=972 MB)
+  Run 1: 111.2 tok/s (1,000 tokens in 8994.0ms)
+  Run 2: 339.0 tok/s (5,000 tokens in 14749.1ms)
+  Run 3: 488.5 tok/s (10,000 tokens in 20468.8ms)
+  Run 4: 601.8 tok/s (20,000 tokens in 33234.9ms)
+  Run 5: 577.8 tok/s (35,000 tokens in 60579.1ms)
+  Run 6: 595.5 tok/s (39,920 tokens in 67037.1ms)
+  [1mBest: 601.8 tok/s (20,000 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+VRAM pressure: evicted 30 soft HCS experts / 1 chunks; free=1074 MB after eviction (safety=600 MB, target=972 MB)
+  [32mdecode: 49 tokens in 6.28s (7.8 tok/s)  VRAM: 1074 MB free now, 1074 MB min free during decode[0m
+  [36mDynamic HCS: hit=65.61% tail=1200/600 protected=3810 promotions=104227 evictions=104227 request_promotions=10112/29400 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (49 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        127.79 ms/tok  (  7.8 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   6.49 ms  ( 5.1%)            [36m│[0m
+  [36m│[0m    Sync wait:   118.53 ms  (92.8%)            [36m│[0m
+  [36m│[0m      inter:     114.41 ms  final:  4.12 ms     [36m│[0m
+  [36m│[0m    Classify:      0.09 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.06 ms  ( 1.6%)            [36m│[0m
+  [36m│[0m    Upload:        0.16 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.46 ms  ( 0.4%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 56.32 ms                  [36m│[0m
+  [36m│[0m    First route:   0.47 ms  ( 0.8%)        [36m│[0m
+  [36m│[0m    Middle segs:  52.59 ms  (93.4%)        [36m│[0m
+  [36m│[0m    Final seg:     3.25 ms  ( 5.8%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.47 ms/tok (0.47 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   39.69 ms/tok (0.90 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  12.90 ms/tok (0.86 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.25 ms/tok (3.25 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.47 ms/tok (0.47 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   86.37 ms/tok (1.96 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  27.57 ms/tok (1.84 ms/seg) [36m│[0m
+  [36m│[0m    Final:       4.12 ms/tok (4.12 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   4.12 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    4.08 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #2    3.27 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #7    3.20 ms  graph7 experts L6 + route L7 GQA      [36m│[0m
+  [36m│[0m    #9    3.19 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #6    3.17 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   3.25 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    0.91 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #2    0.91 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #5    0.91 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m│[0m    #4    0.91 ms  graph4 experts L3 + route L4 LA       [36m│[0m
+  [36m│[0m    #6    0.91 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 206.4 (825 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  393.6 (5010 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    1276.90 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     2227/1373                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 62.41 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    21.01 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  3.16 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  4.08 ms |  57.5 MB | 9.29 cold [36m│[0m
+  [36m│[0m    #2   H2D  2.36 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  3.27 ms |  46.5 MB | 7.51 cold [36m│[0m
+  [36m│[0m    #7   H2D  2.33 | hot 0.00 | graph 0.86  [36m│[0m
+  [36m│[0m         wait  3.20 ms |  47.5 MB | 7.67 cold [36m│[0m
+  [36m│[0m    #9   H2D  2.28 | hot 0.00 | graph 0.90  [36m│[0m
+  [36m│[0m         wait  3.19 ms |  45.0 MB | 7.27 cold [36m│[0m
+  [36m│[0m    #6   H2D  2.26 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  3.17 ms |  45.6 MB | 7.37 cold [36m│[0m
+  [36m│[0m    #10  H2D  2.17 | hot 0.00 | graph 0.90  [36m│[0m
+  [36m│[0m         wait  3.08 ms |  44.1 MB | 7.12 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mdecode: 99 tokens in 12.96s (7.6 tok/s)  VRAM: 1074 MB free now, 1042 MB min free during decode[0m
+  [36mDynamic HCS: hit=64.19% tail=1200/600 protected=3810 promotions=125499 evictions=125499 request_promotions=21272/59400 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (99 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        130.65 ms/tok  (  7.7 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   5.44 ms  ( 4.2%)            [36m│[0m
+  [36m│[0m    Sync wait:   122.33 ms  (93.6%)            [36m│[0m
+  [36m│[0m      inter:     118.23 ms  final:  4.10 ms     [36m│[0m
+  [36m│[0m    Classify:      0.09 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.16 ms  ( 1.7%)            [36m│[0m
+  [36m│[0m    Upload:        0.16 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.47 ms  ( 0.4%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 57.00 ms                  [36m│[0m
+  [36m│[0m    First route:   0.48 ms  ( 0.8%)        [36m│[0m
+  [36m│[0m    Middle segs:  53.23 ms  (93.4%)        [36m│[0m
+  [36m│[0m    Final seg:     3.29 ms  ( 5.8%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   40.07 ms/tok (0.91 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  13.16 ms/tok (0.88 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.29 ms/tok (3.29 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   88.81 ms/tok (2.02 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  28.94 ms/tok (1.93 ms/seg) [36m│[0m
+  [36m│[0m    Final:       4.10 ms/tok (4.10 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   4.10 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    4.03 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #2    3.48 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #9    3.36 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #6    3.34 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m    #7    3.34 ms  graph7 experts L6 + route L7 GQA      [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   3.29 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #2    0.92 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #1    0.92 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #4    0.92 ms  graph4 experts L3 + route L4 LA       [36m│[0m
+  [36m│[0m    #5    0.91 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m│[0m    #6    0.91 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 214.9 (859 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  385.1 (5010 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    1329.50 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     2606/1594                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 65.52 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    21.06 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  3.11 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  4.03 ms |  57.7 MB | 9.32 cold [36m│[0m
+  [36m│[0m    #2   H2D  2.56 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.48 ms |  50.8 MB | 8.21 cold [36m│[0m
+  [36m│[0m    #7   H2D  2.46 | hot 0.00 | graph 0.88  [36m│[0m
+  [36m│[0m         wait  3.34 ms |  50.2 MB | 8.11 cold [36m│[0m
+  [36m│[0m    #9   H2D  2.45 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  3.36 ms |  47.8 MB | 7.72 cold [36m│[0m
+  [36m│[0m    #6   H2D  2.43 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  3.34 ms |  49.3 MB | 7.97 cold [36m│[0m
+  [36m│[0m    #11  H2D  2.33 | hot 0.00 | graph 0.88  [36m│[0m
+  [36m│[0m         wait  3.21 ms |  43.9 MB | 7.10 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mdecode: 249 tokens in 34.53s (7.2 tok/s)  VRAM: 1074 MB free now, 1042 MB min free during decode[0m
+  [36mDynamic HCS: hit=60.62% tail=1200/600 protected=3810 promotions=184336 evictions=184336 request_promotions=58837/149400 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (249 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        138.47 ms/tok  (  7.2 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   5.15 ms  ( 3.7%)            [36m│[0m
+  [36m│[0m    Sync wait:   130.11 ms  (94.0%)            [36m│[0m
+  [36m│[0m      inter:     125.59 ms  final:  4.52 ms     [36m│[0m
+  [36m│[0m    Classify:      0.12 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.44 ms  ( 1.8%)            [36m│[0m
+  [36m│[0m    Upload:        0.16 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.49 ms  ( 0.4%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 57.77 ms                  [36m│[0m
+  [36m│[0m    First route:   0.48 ms  ( 0.8%)        [36m│[0m
+  [36m│[0m    Middle segs:  53.98 ms  (93.4%)        [36m│[0m
+  [36m│[0m    Final seg:     3.31 ms  ( 5.7%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   40.41 ms/tok (0.92 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  13.57 ms/tok (0.90 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.31 ms/tok (3.31 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   94.27 ms/tok (2.14 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  30.84 ms/tok (2.06 ms/seg) [36m│[0m
+  [36m│[0m    Final:       4.52 ms/tok (4.52 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   4.52 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    4.07 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #2    3.64 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #6    3.41 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m    #9    3.34 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #8    3.30 ms  graph8 experts L7 + route L8 LA       [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   3.31 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #2    0.92 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #1    0.92 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #4    0.92 ms  graph4 experts L3 + route L4 LA       [36m│[0m
+  [36m│[0m    #58   0.92 ms  graph58 experts L57 + route L58 LA    [36m│[0m
+  [36m│[0m    #6    0.92 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 236.3 (945 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  363.7 (5010 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    1462.06 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     2986/1814                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 72.66 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    21.02 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  3.15 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  4.07 ms |  58.2 MB | 9.41 cold [36m│[0m
+  [36m│[0m    #2   H2D  2.72 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.64 ms |  53.5 MB | 8.64 cold [36m│[0m
+  [36m│[0m    #6   H2D  2.49 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.41 ms |  50.8 MB | 8.20 cold [36m│[0m
+  [36m│[0m    #9   H2D  2.43 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.34 ms |  47.7 MB | 7.70 cold [36m│[0m
+  [36m│[0m    #7   H2D  2.39 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  3.30 ms |  48.6 MB | 7.85 cold [36m│[0m
+  [36m│[0m    #8   H2D  2.38 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.30 ms |  49.0 MB | 7.91 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+   50 tokens: 7.80 tok/s (128.2ms/tok)
+  100 tokens: 7.64 tok/s (130.9ms/tok)
+  250 tokens: 7.21 tok/s (138.7ms/tok)
+  [1mBest: 7.80 tok/s[0m
+  HCS:  5010/30720 experts loaded (16.3%)
+  VRAM: 1042 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+  [32mprefill: 14 tokens in 2.76s (5.1 tok/s)  VRAM: 9592 MB free now, 1446 MB min free during prefill[0m
+VRAM pressure: evicted 30 soft HCS experts / 1 chunks; free=1036 MB after eviction (safety=600 MB, target=972 MB)
+  [32mdecode: 7 tokens in 0.93s (7.5 tok/s)  VRAM: 1036 MB free now, 1036 MB min free during decode[0m
+  [36mDynamic HCS: hit=63.83% tail=1200/600 protected=3780 promotions=185855 evictions=185855 request_promotions=1519/4200 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (7 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        131.49 ms/tok  (  7.6 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:  24.08 ms  (18.3%)            [36m│[0m
+  [36m│[0m    Sync wait:   104.68 ms  (79.6%)            [36m│[0m
+  [36m│[0m      inter:     100.72 ms  final:  3.95 ms     [36m│[0m
+  [36m│[0m    Classify:      0.09 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      1.97 ms  ( 1.5%)            [36m│[0m
+  [36m│[0m    Upload:        0.15 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.53 ms  ( 0.4%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 48.94 ms                  [36m│[0m
+  [36m│[0m    First route:   0.42 ms  ( 0.9%)        [36m│[0m
+  [36m│[0m    Middle segs:  45.67 ms  (93.3%)        [36m│[0m
+  [36m│[0m    Final seg:     2.85 ms  ( 5.8%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.42 ms/tok (0.42 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   34.66 ms/tok (0.79 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  11.01 ms/tok (0.73 ms/seg) [36m│[0m
+  [36m│[0m    Final:       2.85 ms/tok (2.85 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.41 ms/tok (0.41 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   76.23 ms/tok (1.73 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  24.08 ms/tok (1.61 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.95 ms/tok (3.95 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   3.95 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    3.33 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #6    2.87 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m    #12   2.80 ms  graph12 experts L11 + route L12 LA    [36m│[0m
+  [36m│[0m    #9    2.78 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #5    2.72 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   2.85 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    0.79 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #58   0.79 ms  graph58 experts L57 + route L58 LA    [36m│[0m
+  [36m│[0m    #2    0.79 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #57   0.79 ms  graph57 experts L56 + route L57 LA    [36m│[0m
+  [36m│[0m    #9    0.79 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 217.0 (868 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  383.0 (4980 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    1342.69 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     3327/2073                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 56.20 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    20.78 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  2.55 | hot 0.00 | graph 0.79  [36m│[0m
+  [36m│[0m         wait  3.33 ms |  46.8 MB | 7.57 cold [36m│[0m
+  [36m│[0m    #6   H2D  2.09 | hot 0.00 | graph 0.79  [36m│[0m
+  [36m│[0m         wait  2.87 ms |  41.5 MB | 6.71 cold [36m│[0m
+  [36m│[0m    #12  H2D  2.02 | hot 0.00 | graph 0.79  [36m│[0m
+  [36m│[0m         wait  2.80 ms |  37.1 MB | 6.00 cold [36m│[0m
+  [36m│[0m    #9   H2D  1.99 | hot 0.00 | graph 0.79  [36m│[0m
+  [36m│[0m         wait  2.78 ms |  38.9 MB | 6.29 cold [36m│[0m
+  [36m│[0m    #5   H2D  1.94 | hot 0.00 | graph 0.79  [36m│[0m
+  [36m│[0m         wait  2.72 ms |  39.8 MB | 6.43 cold [36m│[0m
+  [36m│[0m    #13  H2D  1.89 | hot 0.00 | graph 0.79  [36m│[0m
+  [36m│[0m         wait  2.67 ms |  37.1 MB | 6.00 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mprefill: 61 tokens in 4.53s (13.5 tok/s)  VRAM: 9778 MB free now, 5472 MB min free during prefill[0m
+  [32mdecode: 49 tokens in 6.48s (7.6 tok/s)  VRAM: 1036 MB free now, 1036 MB min free during decode[0m
+  [36mDynamic HCS: hit=63.56% tail=1200/600 protected=3780 promotions=196569 evictions=196569 request_promotions=10714/29400 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (49 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        132.01 ms/tok  (  7.6 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   6.80 ms  ( 5.1%)            [36m│[0m
+  [36m│[0m    Sync wait:   122.26 ms  (92.6%)            [36m│[0m
+  [36m│[0m      inter:     118.10 ms  final:  4.17 ms     [36m│[0m
+  [36m│[0m    Classify:      0.08 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.23 ms  ( 1.7%)            [36m│[0m
+  [36m│[0m    Upload:        0.16 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.47 ms  ( 0.4%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 56.21 ms                  [36m│[0m
+  [36m│[0m    First route:   0.47 ms  ( 0.8%)        [36m│[0m
+  [36m│[0m    Middle segs:  52.48 ms  (93.4%)        [36m│[0m
+  [36m│[0m    Final seg:     3.25 ms  ( 5.8%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.47 ms/tok (0.47 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   39.61 ms/tok (0.90 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  12.87 ms/tok (0.86 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.25 ms/tok (3.25 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.47 ms/tok (0.47 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   89.23 ms/tok (2.03 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  28.39 ms/tok (1.89 ms/seg) [36m│[0m
+  [36m│[0m    Final:       4.17 ms/tok (4.17 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   4.17 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    4.11 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #2    3.47 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #9    3.36 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #6    3.30 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m    #7    3.26 ms  graph7 experts L6 + route L7 GQA      [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   3.25 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #2    0.91 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #1    0.91 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #4    0.90 ms  graph4 experts L3 + route L4 LA       [36m│[0m
+  [36m│[0m    #5    0.90 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m│[0m    #6    0.90 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 218.7 (875 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  381.3 (4980 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    1352.92 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     3713/2287                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 66.29 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    20.97 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  3.20 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  4.11 ms |  58.0 MB | 9.37 cold [36m│[0m
+  [36m│[0m    #2   H2D  2.56 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  3.47 ms |  49.9 MB | 8.06 cold [36m│[0m
+  [36m│[0m    #9   H2D  2.46 | hot 0.00 | graph 0.90  [36m│[0m
+  [36m│[0m         wait  3.36 ms |  47.6 MB | 7.69 cold [36m│[0m
+  [36m│[0m    #6   H2D  2.40 | hot 0.00 | graph 0.90  [36m│[0m
+  [36m│[0m         wait  3.30 ms |  48.2 MB | 7.80 cold [36m│[0m
+  [36m│[0m    #7   H2D  2.39 | hot 0.00 | graph 0.86  [36m│[0m
+  [36m│[0m         wait  3.26 ms |  48.7 MB | 7.88 cold [36m│[0m
+  [36m│[0m    #11  H2D  2.36 | hot 0.00 | graph 0.86  [36m│[0m
+  [36m│[0m         wait  3.22 ms |  44.7 MB | 7.22 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mprefill: 66 tokens in 4.81s (13.7 tok/s)  VRAM: 9778 MB free now, 4198 MB min free during prefill[0m
+  [32mdecode: 99 tokens in 13.15s (7.5 tok/s)  VRAM: 1036 MB free now, 1036 MB min free during decode[0m
+  [36mDynamic HCS: hit=63.82% tail=1200/600 protected=3780 promotions=218057 evictions=218057 request_promotions=21488/59400 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (99 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        132.61 ms/tok  (  7.5 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   5.55 ms  ( 4.2%)            [36m│[0m
+  [36m│[0m    Sync wait:   124.12 ms  (93.6%)            [36m│[0m
+  [36m│[0m      inter:     119.96 ms  final:  4.15 ms     [36m│[0m
+  [36m│[0m    Classify:      0.08 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.23 ms  ( 1.7%)            [36m│[0m
+  [36m│[0m    Upload:        0.16 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.47 ms  ( 0.4%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 57.00 ms                  [36m│[0m
+  [36m│[0m    First route:   0.48 ms  ( 0.8%)        [36m│[0m
+  [36m│[0m    Middle segs:  53.23 ms  (93.4%)        [36m│[0m
+  [36m│[0m    Final seg:     3.29 ms  ( 5.8%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   40.07 ms/tok (0.91 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  13.16 ms/tok (0.88 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.29 ms/tok (3.29 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   90.14 ms/tok (2.05 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  29.35 ms/tok (1.96 ms/seg) [36m│[0m
+  [36m│[0m    Final:       4.15 ms/tok (4.15 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   4.15 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    4.07 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #2    3.52 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #6    3.41 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m    #9    3.40 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #7    3.40 ms  graph7 experts L6 + route L7 GQA      [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   3.29 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #2    0.92 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #1    0.92 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #4    0.92 ms  graph4 experts L3 + route L4 LA       [36m│[0m
+  [36m│[0m    #5    0.92 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m│[0m    #6    0.91 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 217.1 (868 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  382.9 (4980 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    1343.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     4088/2512                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 67.26 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    20.72 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  3.15 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  4.07 ms |  57.6 MB | 9.31 cold [36m│[0m
+  [36m│[0m    #2   H2D  2.60 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.52 ms |  50.7 MB | 8.19 cold [36m│[0m
+  [36m│[0m    #7   H2D  2.51 | hot 0.00 | graph 0.88  [36m│[0m
+  [36m│[0m         wait  3.40 ms |  50.5 MB | 8.16 cold [36m│[0m
+  [36m│[0m    #6   H2D  2.49 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  3.41 ms |  49.4 MB | 7.99 cold [36m│[0m
+  [36m│[0m    #9   H2D  2.48 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  3.40 ms |  47.8 MB | 7.72 cold [36m│[0m
+  [36m│[0m    #11  H2D  2.39 | hot 0.00 | graph 0.88  [36m│[0m
+  [36m│[0m         wait  3.27 ms |  44.3 MB | 7.16 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mprefill: 61 tokens in 4.66s (13.1 tok/s)  VRAM: 9776 MB free now, 5390 MB min free during prefill[0m
+  [32mdecode: 249 tokens in 34.38s (7.2 tok/s)  VRAM: 1034 MB free now, 1034 MB min free during decode[0m
+  [36mDynamic HCS: hit=61.06% tail=1200/600 protected=3780 promotions=276226 evictions=276226 request_promotions=58169/149400 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (249 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:        137.85 ms/tok  (  7.3 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   5.09 ms  ( 3.7%)            [36m│[0m
+  [36m│[0m    Sync wait:   129.65 ms  (94.0%)            [36m│[0m
+  [36m│[0m      inter:     125.21 ms  final:  4.44 ms     [36m│[0m
+  [36m│[0m    Classify:      0.09 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.40 ms  ( 1.7%)            [36m│[0m
+  [36m│[0m    Upload:        0.16 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.47 ms  ( 0.3%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 58.04 ms                  [36m│[0m
+  [36m│[0m    First route:   0.48 ms  ( 0.8%)        [36m│[0m
+  [36m│[0m    Middle segs:  54.24 ms  (93.5%)        [36m│[0m
+  [36m│[0m    Final seg:     3.31 ms  ( 5.7%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   40.60 ms/tok (0.92 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  13.64 ms/tok (0.91 ms/seg) [36m│[0m
+  [36m│[0m    Final:       3.31 ms/tok (3.31 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.48 ms/tok (0.48 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   94.10 ms/tok (2.14 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  30.62 ms/tok (2.04 ms/seg) [36m│[0m
+  [36m│[0m    Final:       4.44 ms/tok (4.44 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #60   4.44 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #1    4.08 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #2    3.62 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #9    3.39 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #6    3.37 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m│[0m    #8    3.32 ms  graph8 experts L7 + route L8 LA       [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #60   3.31 ms  graph60 experts L59 + final           [36m│[0m
+  [36m│[0m    #2    0.93 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #1    0.93 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #4    0.93 ms  graph4 experts L3 + route L4 LA       [36m│[0m
+  [36m│[0m    #58   0.93 ms  graph58 experts L57 + route L58 LA    [36m│[0m
+  [36m│[0m    #5    0.93 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m│[0m  Mandatory decode weight/state bytes:         [36m│[0m
+  [36m│[0m    Routed W13: 2595.2 MB W2: 1297.6 MB shared: 389.3 MB [36m│[0m
+  [36m│[0m    Router:  251.7 MB LA in/out: 3323.7/1321.2 MB [36m│[0m
+  [36m│[0m    LA state R+W: 377.5 MB GQA in/out: 935.9/ 440.4 MB LM:2034.2 MB [36m│[0m
+  [36m│[0m    V4 HQQ proj:    0.0 MB grouped O:    0.0 MB [36m│[0m
+  [36m│[0m    V4 compressor:   0.0 MB indexer:    0.0 MB HC:  0.0 MB [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA traffic:                              [36m│[0m
+  [36m│[0m    Cold experts/tok: 233.6 (934 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  366.4 (4980 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    1445.46 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     4464/2736                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 1584.0 KB                   [36m│[0m
+  [36m│[0m    Demand H2D active: 71.88 ms/tok                 [36m│[0m
+  [36m│[0m    Demand H2D BW:    21.01 GB/s (CUDA events)      [36m│[0m
+  [36m│[0m  Slowest demand H2D segments:                  [36m│[0m
+  [36m│[0m    #1   H2D  3.15 | hot 0.00 | graph 0.93  [36m│[0m
+  [36m│[0m         wait  4.08 ms |  57.8 MB | 9.33 cold [36m│[0m
+  [36m│[0m    #2   H2D  2.70 | hot 0.00 | graph 0.93  [36m│[0m
+  [36m│[0m         wait  3.62 ms |  52.5 MB | 8.48 cold [36m│[0m
+  [36m│[0m    #9   H2D  2.47 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.39 ms |  48.8 MB | 7.89 cold [36m│[0m
+  [36m│[0m    #6   H2D  2.45 | hot 0.00 | graph 0.93  [36m│[0m
+  [36m│[0m         wait  3.37 ms |  50.0 MB | 8.09 cold [36m│[0m
+  [36m│[0m    #8   H2D  2.40 | hot 0.00 | graph 0.92  [36m│[0m
+  [36m│[0m         wait  3.32 ms |  48.9 MB | 7.91 cold [36m│[0m
+  [36m│[0m    #7   H2D  2.39 | hot 0.00 | graph 0.91  [36m│[0m
+  [36m│[0m         wait  3.31 ms |  48.6 MB | 7.86 cold [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+   50 tokens: 12.23 tok/s (11.58s total)
+  100 tokens: 9.41 tok/s (18.60s total)
+  250 tokens: 7.83 tok/s (39.60s total)
+  [1mBest: 12.23 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m[32mBENCHMARK COMPLETE[0m
+  Model:                 [1mOrnith-1.0-397B[0m
+  Config:                INT4/4 HQQ6 KV=k6v6 1 GPU
+  Prefill (internal):    [32m[1m601.8 tok/s[0m  (best of 1K/5K/10K/20K/35K/39,920)
+  Decode (internal):     [32m[1m7.80 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m12.23 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          5010/30720 (16.3%)
+  Min free VRAM:         1042 MB
+  Log:     [2mlogs/dev-benchmark_20260821_002109/benchmark_report.log[0m
+

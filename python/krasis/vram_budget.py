@@ -34,6 +34,7 @@ import math
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from krasis.attention_backend import (
@@ -68,6 +69,13 @@ DEFAULT_CUDA_OVERHEAD_MB = 2000
 
 
 HQQ_ATTENTION_QUANTS = ("hqq4", "hqq46", "hqq46_auto", "hqq6", "hqq68_auto", "hqq8")
+
+# These are cache/kernel format contracts, not hardware measurements. They
+# mirror src/weights/mod.rs and src/gpu_decode.rs so the pre-load launcher
+# accounts for D-Spark without depending on a cache built on this host.
+MARLIN_CACHE_HEADER_BYTES = 64
+MARLIN_DEVICE_ALIGNMENT_BYTES = 512
+DSPARK_MODES = ("off", "resident", "shared")
 
 
 def _read_model_config(model_path: str) -> Dict[str, Any]:
@@ -397,6 +405,329 @@ def estimate_int4_expert_cache_bytes(
         * model_cfg.n_routed_experts
         * model_cfg.num_moe_layers
     )
+
+
+def _align_up(value: int, alignment: int) -> int:
+    if value < 0 or alignment <= 0:
+        raise ValueError(
+            f"alignment inputs must be positive, got value={value} alignment={alignment}"
+        )
+    return ((value + alignment - 1) // alignment) * alignment
+
+
+def _effective_marlin_group_size(
+    hidden_size: int,
+    intermediate_size: int,
+    requested_group_size: int,
+) -> int:
+    """Mirror the source-bound Marlin group selection in weights/mod.rs."""
+    if hidden_size <= 0 or intermediate_size <= 0 or requested_group_size <= 0:
+        raise ValueError(
+            "Marlin dimensions and requested group size must be positive: "
+            f"hidden={hidden_size} intermediate={intermediate_size} "
+            f"group={requested_group_size}"
+        )
+    group_size = requested_group_size
+    minimum_dimension = min(hidden_size, intermediate_size)
+    while group_size > 32 and minimum_dimension % group_size != 0:
+        group_size //= 2
+    return group_size
+
+
+def _marlin_int4_expert_bytes(
+    hidden_size: int,
+    intermediate_size: int,
+    group_size: int,
+    *,
+    gated: bool,
+    pad_routed_w2: bool,
+) -> int:
+    """Exact INT4 payload bytes for one Marlin expert.
+
+    Routed experts use the runtime's W2 padding contract. The combined shared
+    expert uses the unpadded layout written by expected_marlin_cache_size().
+    """
+    if hidden_size % 8 != 0 or intermediate_size % 8 != 0:
+        raise ValueError(
+            "Marlin INT4 expert dimensions must be divisible by 8: "
+            f"hidden={hidden_size} intermediate={intermediate_size}"
+        )
+    w13_width = intermediate_size * (2 if gated else 1)
+    w2_width = hidden_size
+    if (
+        pad_routed_w2
+        and hidden_size == intermediate_size
+        and hidden_size % 256 != 0
+    ):
+        # Kernel-format contract mirrored from marlin_w2_padded_n().
+        w2_width += 64
+    w13_packed = (hidden_size // 8) * w13_width * 4
+    w13_scales = (hidden_size // group_size) * w13_width * 2
+    w2_packed = (intermediate_size // 8) * w2_width * 4
+    w2_scales = math.ceil(intermediate_size / group_size) * w2_width * 2
+    return w13_packed + w13_scales + w2_packed + w2_scales
+
+
+def _dspark_required_tensor_storage(
+    stage_count: int,
+) -> Dict[str, int]:
+    """Return D-Spark dense tensor names and their runtime bytes per element."""
+    if stage_count <= 0:
+        raise ValueError("D-Spark requires at least one checkpoint stage")
+    required: Dict[str, int] = {}
+    for stage_idx in range(stage_count):
+        prefix = f"mtp.{stage_idx}"
+        for name in (
+            "attn_norm.weight",
+            "ffn_norm.weight",
+            "ffn.gate.weight",
+            "attn.q_norm.weight",
+            "attn.kv_norm.weight",
+            "attn.wq_a.weight",
+            "attn.wq_b.weight",
+            "attn.wkv.weight",
+            "attn.wo_a.weight",
+            "attn.wo_b.weight",
+        ):
+            required[f"{prefix}.{name}"] = 2
+        for name in (
+            "ffn.gate.bias",
+            "attn.attn_sink",
+            "hc_attn_fn",
+            "hc_attn_base",
+            "hc_attn_scale",
+            "hc_ffn_fn",
+            "hc_ffn_base",
+            "hc_ffn_scale",
+        ):
+            required[f"{prefix}.{name}"] = 4
+        if stage_idx == 0:
+            required[f"{prefix}.main_proj.weight"] = 2
+            required[f"{prefix}.main_norm.weight"] = 2
+        if stage_idx == stage_count - 1:
+            for name in (
+                "norm.weight",
+                "markov_head.markov_w1.weight",
+                "markov_head.markov_w2.weight",
+                "confidence_head.proj.weight",
+            ):
+                required[f"{prefix}.{name}"] = 2
+            for name in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
+                required[f"{prefix}.{name}"] = 4
+    return required
+
+
+def _safetensors_shapes_for_names(
+    model_path: str,
+    names: List[str],
+) -> Dict[str, tuple[int, ...]]:
+    """Read tensor shapes from safetensors metadata without loading payloads."""
+    from safetensors import safe_open
+
+    root = Path(model_path).resolve()
+    index_path = root / "model.safetensors.index.json"
+    weight_map: Dict[str, str]
+    if index_path.is_file():
+        with index_path.open(encoding="utf-8") as handle:
+            parsed = json.load(handle)
+        raw_weight_map = parsed.get("weight_map")
+        if not isinstance(raw_weight_map, dict) or not raw_weight_map:
+            raise ValueError("D-Spark safetensors index has no usable weight_map")
+        weight_map = {str(name): str(shard) for name, shard in raw_weight_map.items()}
+    else:
+        single = root / "model.safetensors"
+        if not single.is_file():
+            raise ValueError(
+                "D-Spark budget requires model.safetensors.index.json or model.safetensors"
+            )
+        weight_map = {name: single.name for name in names}
+
+    missing = [name for name in names if name not in weight_map]
+    if missing:
+        raise ValueError(
+            "D-Spark checkpoint tensor inventory is incomplete: " + ", ".join(missing)
+        )
+    by_shard: Dict[str, List[str]] = {}
+    for name in names:
+        by_shard.setdefault(weight_map[name], []).append(name)
+
+    shapes: Dict[str, tuple[int, ...]] = {}
+    for shard_name, shard_names in by_shard.items():
+        shard_path = (root / shard_name).resolve()
+        if root != shard_path and root not in shard_path.parents:
+            raise ValueError(
+                f"D-Spark safetensors shard escapes model directory: {shard_name!r}"
+            )
+        if not shard_path.is_file():
+            raise ValueError(f"D-Spark safetensors shard is missing: {shard_path}")
+        with safe_open(str(shard_path), framework="pt", device="cpu") as handle:
+            available = set(handle.keys())
+            for name in shard_names:
+                if name not in available:
+                    raise ValueError(
+                        f"D-Spark tensor {name!r} is absent from indexed shard {shard_name!r}"
+                    )
+                shape = tuple(int(value) for value in handle.get_slice(name).get_shape())
+                if not shape or any(value <= 0 for value in shape):
+                    raise ValueError(f"D-Spark tensor {name!r} has invalid shape {shape}")
+                shapes[name] = shape
+    return shapes
+
+
+def _dspark_dense_graph_bytes(model_path: str, stage_count: int) -> int:
+    storage = _dspark_required_tensor_storage(stage_count)
+    shapes = _safetensors_shapes_for_names(model_path, list(storage))
+    return sum(math.prod(shapes[name]) * bytes_per_element for name, bytes_per_element in storage.items())
+
+
+def _dspark_runtime_buffer_bytes(
+    cfg: Dict[str, Any],
+    model_cfg: ModelConfig,
+    kv_dtype: str,
+) -> int:
+    """Persistent D-Spark buffers and transactional snapshots from dimensions."""
+    targets = tuple(model_cfg.dspark_target_layer_ids or ())
+    stages = len(targets)
+    block_size = int(model_cfg.dspark_block_size)
+    markov_rank = int(model_cfg.dspark_markov_rank)
+    hidden = int(model_cfg.hidden_size)
+    vocab = int(cfg["vocab_size"])
+    head_dim = int(cfg["head_dim"])
+    index_dim = int(cfg["index_head_dim"])
+    sliding_window = int(cfg["sliding_window"])
+    hc_mult = int(cfg["hc_mult"])
+    topk = int(model_cfg.num_experts_per_tok)
+    n_experts = int(model_cfg.n_routed_experts)
+    if min(
+        stages,
+        block_size,
+        markov_rank,
+        hidden,
+        vocab,
+        head_dim,
+        index_dim,
+        sliding_window,
+        hc_mult,
+        topk,
+        n_experts,
+    ) <= 0:
+        raise ValueError("D-Spark runtime buffer geometry is incomplete")
+
+    target_batch = block_size + 1
+    snapshot_rows = target_batch + 1
+
+    # Three short auxiliary rings plus the draft/verification workspaces in
+    # setup_dspark_gpu_store() and finalize_dspark_graph().
+    total = stages * sliding_window * head_dim * 2
+    target_history = stages * sliding_window * hc_mult * hidden * 2
+    total += target_history
+    total += stages * hidden * 2  # main input
+    total += hidden * 2  # main hidden
+    total += block_size * hc_mult * hidden * 2  # query states
+    total += block_size * hidden * 2  # head hidden
+    total += markov_rank * 2 + vocab * 4
+    total += (hidden + markov_rank) * 2
+    total += 2 * target_batch * hc_mult * hidden * 2
+    total += target_batch * hc_mult * 4
+    total += target_batch * hc_mult * hc_mult * 4
+    total += (target_batch + 2) * 4
+
+    # allocate_batch_buffers(block_size + 1); DeepSeek-V4 has no LA or GQA
+    # projection buffers in this path.
+    total += target_batch * hidden * 2 * 3
+    total += target_batch * vocab * 4
+    total += target_batch * topk * 4 * 2
+    total += target_batch * n_experts * 4
+
+    ratios = [int(value) for value in cfg.get("compress_ratios", [])]
+    if len(ratios) < model_cfg.num_hidden_layers:
+        raise ValueError(
+            "DeepSeek-V4 compress_ratios must cover every target layer for D-Spark budgeting"
+        )
+    main_row_bytes, index_row_bytes = _deepseek_v4_cache_row_bytes(cfg, kv_dtype)
+    recurrent_state_bytes = 0
+    target_cache_backup_bytes = 0
+    for ratio in ratios[: model_cfg.num_hidden_layers]:
+        target_cache_backup_bytes += target_batch * main_row_bytes
+        if ratio <= 0:
+            continue
+        copies = 2 if ratio == 4 else 1
+        state_rows = copies * ratio
+        state_cols = copies * head_dim
+        recurrent_state_bytes += state_rows * state_cols * 4 * 2
+        target_cache_backup_bytes += target_batch * main_row_bytes
+        if ratio == 4:
+            index_state_cols = copies * index_dim
+            recurrent_state_bytes += state_rows * index_state_cols * 4 * 2
+            target_cache_backup_bytes += target_batch * index_row_bytes
+
+    total += recurrent_state_bytes * snapshot_rows
+    # Transactionally back up the touched target cache rows and each D-Spark
+    # target-history row. Source cache/state storage is already in the target budget.
+    total += target_cache_backup_bytes
+    total += stages * target_batch * hc_mult * hidden * 2
+    return total
+
+
+def _dspark_budget_components(
+    model_path: str,
+    cfg: Dict[str, Any],
+    model_cfg: ModelConfig,
+    group_size: int,
+    kv_dtype: str,
+    mode: str,
+) -> Dict[str, int | str]:
+    if mode not in DSPARK_MODES or mode == "off":
+        raise ValueError(f"D-Spark budget mode must be resident or shared, got {mode!r}")
+    targets = tuple(model_cfg.dspark_target_layer_ids or ())
+    if not model_cfg.is_deepseek_v4 or not targets:
+        raise ValueError("D-Spark budgeting requires checkpoint-owned DeepSeek-V4 metadata")
+    stages = len(targets)
+    effective_group = _effective_marlin_group_size(
+        model_cfg.hidden_size,
+        model_cfg.moe_intermediate_size,
+        group_size,
+    )
+    routed_hidden = model_cfg.moe_latent_size or model_cfg.hidden_size
+    routed_bytes = _marlin_int4_expert_bytes(
+        routed_hidden,
+        model_cfg.moe_intermediate_size,
+        effective_group,
+        gated=model_cfg.mlp_hidden_act != "relu2",
+        pad_routed_w2=True,
+    )
+    shared_bytes = 0
+    if model_cfg.n_shared_experts > 0:
+        shared_bytes = _marlin_int4_expert_bytes(
+            model_cfg.hidden_size,
+            model_cfg.effective_shared_expert_intermediate,
+            effective_group,
+            gated=model_cfg.mlp_hidden_act != "relu2",
+            pad_routed_w2=False,
+        )
+    routed_count = stages * model_cfg.n_routed_experts
+    routed_cache_bytes = routed_count * routed_bytes
+    shared_cache_bytes = stages * shared_bytes
+    resident_routed_bytes = (
+        routed_count * _align_up(routed_bytes, MARLIN_DEVICE_ALIGNMENT_BYTES)
+        if mode == "resident"
+        else 0
+    )
+    return {
+        "dense_bytes": _dspark_dense_graph_bytes(model_path, stages),
+        "runtime_bytes": _dspark_runtime_buffer_bytes(cfg, model_cfg, kv_dtype),
+        "shared_expert_bytes": stages
+        * _align_up(shared_bytes, MARLIN_DEVICE_ALIGNMENT_BYTES),
+        "resident_expert_bytes": resident_routed_bytes,
+        "host_cache_bytes": MARLIN_CACHE_HEADER_BYTES
+        + routed_cache_bytes
+        + shared_cache_bytes,
+        "hcs_cacheable_bytes": 0
+        if mode == "resident"
+        else routed_count * _align_up(routed_bytes, MARLIN_DEVICE_ALIGNMENT_BYTES),
+        "effective_group_size": effective_group,
+        "source": "checkpoint safetensors shapes + normalized dimensions + runtime buffer geometry",
+    }
 
 
 def estimate_int4_runtime_ram_bytes(
@@ -1042,6 +1373,7 @@ def compute_launcher_budget(
     kv_cache_mb: int = 1000,
     max_context_tokens: int = 0,
     prefill_chunk_size: int = 10000,
+    dspark_mode: str = "off",
 ) -> Dict[str, Any]:
     """Compute VRAM + RAM budget for the launcher TUI.
 
@@ -1076,6 +1408,18 @@ def compute_launcher_budget(
         total_ram_gb = _detect_total_ram_gb()
 
     num_ranks = len(pp_partition)
+    if dspark_mode not in DSPARK_MODES:
+        raise ValueError(
+            f"D-Spark mode must be one of {DSPARK_MODES}, got {dspark_mode!r}"
+        )
+    if dspark_mode != "off" and num_ranks != 1:
+        raise ValueError(
+            "D-Spark launcher budgeting requires exactly one pipeline rank"
+        )
+    if dspark_mode != "off" and gpu_expert_bits != 4:
+        raise ValueError(
+            f"D-Spark requires the INT4 production expert path, got INT{gpu_expert_bits}"
+        )
     total_layers = cfg["num_hidden_layers"]
     is_deepseek_v4 = str(cfg.get("model_type", "")).lower().replace("-", "_") == "deepseek_v4"
     is_mla = _is_mla(cfg)
@@ -1142,6 +1486,17 @@ def compute_launcher_budget(
             deepseek_v4_attention_total,
             deepseek_v4_attention_residual,
         ) = _deepseek_v4_attention_weight_bytes(cfg)
+
+    dspark = None
+    if dspark_mode != "off":
+        dspark = _dspark_budget_components(
+            model_path,
+            cfg,
+            model_cfg,
+            expert_group_size,
+            kv_dtype,
+            dspark_mode,
+        )
 
     # Expert buffer bytes per expert (GPU Marlin format)
     expert_buf_bytes = _expert_bytes_per_expert(
@@ -1320,6 +1675,14 @@ def compute_launcher_budget(
         recurrent_state_bytes = _persistent_recurrent_state_bytes(
             model_cfg, rank_start, rank_end
         )
+        dspark_dense_bytes = int(dspark["dense_bytes"]) if dspark is not None else 0
+        dspark_runtime_bytes = int(dspark["runtime_bytes"]) if dspark is not None else 0
+        dspark_shared_expert_bytes = (
+            int(dspark["shared_expert_bytes"]) if dspark is not None else 0
+        )
+        dspark_resident_expert_bytes = (
+            int(dspark["resident_expert_bytes"]) if dspark is not None else 0
+        )
         total_bytes = (
             rank_attn_bytes + rank_norm_bytes +
             base_embed_bytes + base_lmhead_bytes +
@@ -1329,6 +1692,10 @@ def compute_launcher_budget(
             recurrent_state_bytes +
             rust_prefill_workspace_bytes +
             prefill_workspace_bytes +
+            dspark_dense_bytes +
+            dspark_runtime_bytes +
+            dspark_shared_expert_bytes +
+            dspark_resident_expert_bytes +
             cuda_overhead * 1024 * 1024
         )
         free_bytes = gpu_vram_mb * 1024 * 1024 - total_bytes
@@ -1401,6 +1768,10 @@ def compute_launcher_budget(
             "prefill_scratch_mb": rust_prefill_workspace_bytes / MB,
             "prefill_workspace_mb": prefill_workspace_bytes / MB,
             "recurrent_state_mb": recurrent_state_bytes / MB,
+            "dspark_dense_mb": dspark_dense_bytes / MB,
+            "dspark_runtime_mb": dspark_runtime_bytes / MB,
+            "dspark_shared_expert_mb": dspark_shared_expert_bytes / MB,
+            "dspark_resident_experts_mb": dspark_resident_expert_bytes / MB,
             "total_mb": total_bytes / MB,
             "free_mb": free_bytes / MB,
             "kv_tokens": kv_tokens,
@@ -1422,7 +1793,11 @@ def compute_launcher_budget(
     # are loaded directly into VRAM and don't persist in system RAM. HQQ runtime
     # keeps prefill and decode host formats staged so VMM slots can be refreshed
     # without re-reading safetensors.
-    ram_gpu_experts_bytes = expert_buf_bytes * n_experts * total_moe_layers if n_experts > 0 else 0
+    target_expert_cache_bytes = (
+        expert_buf_bytes * n_experts * total_moe_layers if n_experts > 0 else 0
+    )
+    dspark_host_cache_bytes = int(dspark["host_cache_bytes"]) if dspark is not None else 0
+    ram_gpu_experts_bytes = target_expert_cache_bytes + dspark_host_cache_bytes
     hqq_host_staging_bytes = 0
     if hqq_layer_bytes is not None:
         hqq_host_staging_bytes = sum(hqq_layer_bytes.values()) * 2
@@ -1458,6 +1833,16 @@ def compute_launcher_budget(
         "ram_gpu_experts_mb": ram_gpu_experts_mb,
         "ram_hqq_host_staging_mb": ram_hqq_host_staging_mb,
         "ram_total_mb": ram_total_mb,
+        "ram_dspark_experts_mb": dspark_host_cache_bytes / MB,
+        "hcs_cacheable_experts_mb": (
+            target_expert_cache_bytes
+            + (int(dspark["hcs_cacheable_bytes"]) if dspark is not None else 0)
+        ) / MB,
+        "dspark_mode": dspark_mode,
+        "dspark_budget_source": dspark["source"] if dspark is not None else None,
+        "dspark_effective_group_size": (
+            int(dspark["effective_group_size"]) if dspark is not None else None
+        ),
         "peak_vram_mb": peak_vram_mb,
         "peak_system_ram_mb": ram_total_mb,
         "hqq_budget_source": hqq_budget_source,

@@ -162,9 +162,9 @@ class WeightLoader:
         """Fail closed on unknown V4 namespaces and inventory skipped MTP blocks.
 
         DeepSeek-V4 main-model tensors live at the checkpoint root while its
-        speculative D-Spark/MTP blocks live under ``mtp.*``. Krasis does not
-        execute speculative decoding, so the auxiliary namespace must remain
-        explicit and disjoint from the configured main-layer range.
+        speculative D-Spark/MTP blocks live under ``mtp.*``. The auxiliary
+        namespace must remain explicit and disjoint from the configured
+        main-layer range whether D-Spark is disabled or loaded later.
         """
         root_main = {
             "embed.weight",
@@ -241,8 +241,8 @@ class WeightLoader:
             "DeepSeek-V4 checkpoint namespace inventory: "
             f"{main_layer_count} layers.* main tensors across "
             f"{len(main_layer_ids)} layers; {auxiliary_count} mtp.* auxiliary "
-            f"tensors across blocks {sorted(auxiliary_block_ids)} explicitly "
-            f"skipped; {sum(name in root_main for name in self._weight_map)} "
+            f"tensors across blocks {sorted(auxiliary_block_ids)} inventoried; "
+            f"{sum(name in root_main for name in self._weight_map)} "
             "root main tensors; unexpected=0"
         )
         logger.info(inventory_message)
@@ -571,6 +571,125 @@ class WeightLoader:
             name: self._load_f32(name, device)
             for name in ("hc_head_fn", "hc_head_base", "hc_head_scale")
         }
+
+    def load_dspark_stage(
+        self, stage_idx: int, device: torch.device
+    ) -> Dict[str, object]:
+        """Load one checkpoint-owned D-Spark stage exactly into GPU tensors.
+
+        Routed/shared experts are loaded by the Rust source-bound Marlin
+        cache. This method owns only the small dense graph, router, norms,
+        hyper-connections, and final speculative heads used by Rust/CUDA.
+        """
+        targets = tuple(self.cfg.dspark_target_layer_ids or ())
+        if not self.cfg.is_deepseek_v4 or not targets:
+            raise ValueError("D-Spark stage loading requires a D-Spark DeepSeek-V4 config")
+        if not 0 <= stage_idx < len(targets):
+            raise ValueError(
+                f"D-Spark stage {stage_idx} outside [0, {len(targets)})"
+            )
+        prefix = f"mtp.{stage_idx}"
+        required = [
+            f"{prefix}.attn_norm.weight",
+            f"{prefix}.ffn_norm.weight",
+            f"{prefix}.ffn.gate.weight",
+            f"{prefix}.ffn.gate.bias",
+        ]
+        for suffix in (
+            "attn.attn_sink",
+            "attn.q_norm.weight",
+            "attn.kv_norm.weight",
+            "attn.wq_a.weight",
+            "attn.wq_b.weight",
+            "attn.wkv.weight",
+            "attn.wo_a.weight",
+            "attn.wo_b.weight",
+            "hc_attn_fn",
+            "hc_attn_base",
+            "hc_attn_scale",
+            "hc_ffn_fn",
+            "hc_ffn_base",
+            "hc_ffn_scale",
+        ):
+            required.append(f"{prefix}.{suffix}")
+        if stage_idx == 0:
+            required.extend(
+                (f"{prefix}.main_proj.weight", f"{prefix}.main_norm.weight")
+            )
+        if stage_idx == len(targets) - 1:
+            required.extend(
+                (
+                    f"{prefix}.norm.weight",
+                    f"{prefix}.hc_head_fn",
+                    f"{prefix}.hc_head_base",
+                    f"{prefix}.hc_head_scale",
+                    f"{prefix}.markov_head.markov_w1.weight",
+                    f"{prefix}.markov_head.markov_w2.weight",
+                    f"{prefix}.confidence_head.proj.weight",
+                )
+            )
+        missing = [name for name in required if name not in self._weight_map]
+        if missing:
+            raise KeyError(
+                f"D-Spark stage {stage_idx} is missing checkpoint tensors: "
+                + ", ".join(missing)
+            )
+
+        attention = {
+            "attn_sink": self._load_f32(f"{prefix}.attn.attn_sink", device),
+            "q_norm": self._load_bf16(f"{prefix}.attn.q_norm.weight", device),
+            "kv_norm": self._load_bf16(f"{prefix}.attn.kv_norm.weight", device),
+        }
+        for projection in ("wq_a", "wq_b", "wkv", "wo_a", "wo_b"):
+            attention[projection] = _timed_bf16_load(
+                self,
+                layer_idx=self.cfg.num_hidden_layers + stage_idx,
+                tensor_name=f"{prefix}.attn.{projection}.weight",
+                device=device,
+                step=f"dspark.{projection}",
+            )
+        hyper_connection = {
+            name: self._load_f32(f"{prefix}.{name}", device)
+            for name in (
+                "hc_attn_fn",
+                "hc_attn_base",
+                "hc_attn_scale",
+                "hc_ffn_fn",
+                "hc_ffn_base",
+                "hc_ffn_scale",
+            )
+        }
+        result: Dict[str, object] = {
+            "input_norm": self._load_bf16(f"{prefix}.attn_norm.weight", device),
+            "post_attn_norm": self._load_bf16(f"{prefix}.ffn_norm.weight", device),
+            "gate": self._load_bf16(f"{prefix}.ffn.gate.weight", device),
+            "gate_bias": self._load_f32(f"{prefix}.ffn.gate.bias", device),
+            "attention": attention,
+            "hyper_connection": hyper_connection,
+        }
+        if stage_idx == 0:
+            result["main_proj"] = self._load_bf16(
+                f"{prefix}.main_proj.weight", device
+            )
+            result["main_norm"] = self._load_bf16(
+                f"{prefix}.main_norm.weight", device
+            )
+        if stage_idx == len(targets) - 1:
+            result["final_norm"] = self._load_bf16(f"{prefix}.norm.weight", device)
+            result["head_hyper_connection"] = {
+                name: self._load_f32(f"{prefix}.{name}", device)
+                for name in ("hc_head_fn", "hc_head_base", "hc_head_scale")
+            }
+            result["markov_w1"] = self._load_bf16(
+                f"{prefix}.markov_head.markov_w1.weight", device
+            )
+            result["markov_w2"] = self._load_bf16(
+                f"{prefix}.markov_head.markov_w2.weight", device
+            )
+            result["confidence"] = self._load_bf16(
+                f"{prefix}.confidence_head.proj.weight", device
+            )
+        return result
 
     def _load_mla_attention(
         self, layer_idx: int, device: torch.device

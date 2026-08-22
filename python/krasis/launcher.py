@@ -627,6 +627,7 @@ def _unavailable_model_info(model_path: str, name: str, error: Exception) -> Dic
         "kv_dim": 0,
         "max_context": 0,
         "support_key": support_spec.key if support_spec else "",
+        "dspark_qualified": False,
         "validation_status": "unvalidated",
         "runnable": False,
         "compatibility_error": f"Model configuration is not runnable: {error}",
@@ -690,6 +691,13 @@ def _model_info_from_path(model_path: str, name: Optional[str] = None) -> Dict[s
             else cfg.max_position_embeddings
         ),
         "support_key": support_spec.key if support_spec else "",
+        "dspark_qualified": bool(
+            pinned_catalog_provenance
+            and cfg.is_deepseek_v4
+            and cfg.dspark_target_layer_ids
+            and cfg.dspark_block_size > 0
+            and cfg.dspark_markov_rank > 0
+        ),
         "validation_status": "validated" if pinned_catalog_provenance else "unvalidated",
         "runnable": not compatibility_error,
         "compatibility_error": compatibility_error,
@@ -798,6 +806,7 @@ CONFIG_KEYS = [
     "CFG_ADAPTIVE_COLD_MASS_PRUNING",
     "CFG_EXPERT_COMPRESSION", "CFG_EXPERT_COMPRESSION_SIDECAR", "CFG_EXPERT_COMPRESSION_PIPELINE",
     "CFG_STREAM_ATTENTION", "CFG_DRAFT_MODEL", "CFG_DRAFT_K", "CFG_DRAFT_CONTEXT",
+    "CFG_DSPARK_MODE",
     "CFG_TEMPERATURE",
     "CFG_FORCE_LOAD", "CFG_FORCE_REBUILD_CACHE", "CFG_FORCE_REBUILD_HQQ_CACHE",
     "CFG_BUILD_CACHE", "CFG_ENABLE_THINKING", "CFG_PREFIX_CACHE",
@@ -903,6 +912,7 @@ class LauncherConfig:
         self.draft_model: str = ""
         self.draft_k: int = 3
         self.draft_context: int = 512
+        self.dspark_mode: str = "off"
         self.temperature: float = 0.6
         self.force_load: bool = False
         self.force_rebuild_cache: bool = False
@@ -1164,6 +1174,14 @@ class LauncherConfig:
                 self.draft_context = int(saved["CFG_DRAFT_CONTEXT"])
             except (ValueError, TypeError):
                 pass
+        if "CFG_DSPARK_MODE" in saved and saved["CFG_DSPARK_MODE"]:
+            value = saved["CFG_DSPARK_MODE"].strip().lower()
+            if value not in ("off", "resident", "shared"):
+                raise ValueError(
+                    f"Unsupported saved CFG_DSPARK_MODE={value!r}. "
+                    "Use one of: off, resident, shared."
+                )
+            self.dspark_mode = value
         if "CFG_TEMPERATURE" in saved and saved["CFG_TEMPERATURE"]:
             try:
                 self.temperature = float(saved["CFG_TEMPERATURE"])
@@ -1236,6 +1254,7 @@ class LauncherConfig:
             "CFG_DRAFT_MODEL": self.draft_model,
             "CFG_DRAFT_K": str(self.draft_k),
             "CFG_DRAFT_CONTEXT": str(self.draft_context),
+            "CFG_DSPARK_MODE": self.dspark_mode,
             "CFG_TEMPERATURE": str(self.temperature),
             "CFG_FORCE_LOAD": "1" if self.force_load else "",
             "CFG_FORCE_REBUILD_CACHE": "1" if self.force_rebuild_cache else "",
@@ -1334,6 +1353,8 @@ OPTIONS = [
                  choices=[True, False], advanced=True),
     ConfigOption("HCS tail blocks", "dynamic_hcs_tail_blocks",
                  choices=[1, 2, 3, 4, 5], advanced=True),
+    ConfigOption("D-Spark", "dspark_mode",
+                 choices=["off", "resident", "shared"], advanced=True),
     ConfigOption("Rebuild Marlin cache", "force_rebuild_cache",
                  choices=[False, True], advanced=True),
     ConfigOption("Rebuild HQQ cache(s)", "force_rebuild_hqq_cache",
@@ -1417,6 +1438,8 @@ def _is_option_visible(
         return cfg is None or bool(cfg.dynamic_hcs)
     if opt.key == "adaptive_cold_mass_pruning":
         return model_info is None or bool(model_info.get("experts", 0))
+    if opt.key == "dspark_mode":
+        return bool(model_info and model_info.get("dspark_qualified", False))
     return True
 
 
@@ -2120,6 +2143,50 @@ class Launcher:
                 "The production launcher supports INT4 experts only; "
                 f"got GPU INT{self.cfg.gpu_expert_bits} / CPU INT{self.cfg.cpu_expert_bits}."
             )
+        if self.cfg.dspark_mode != "off" and not bool(
+            (self.model_info or {}).get("dspark_qualified", False)
+        ):
+            raise ValueError(
+                "D-Spark is launcher-qualified only for the pinned "
+                "DeepSeek-V4-Flash-0731 checkpoint; select D-Spark off for "
+                "unvalidated or incompatible checkpoints."
+            )
+        if self.cfg.dspark_mode != "off":
+            if (self.cfg.attention_quant, self.cfg.kv_dtype) != ("hqq6", "native"):
+                raise ValueError(
+                    "D-Spark is launcher-qualified only with the measured "
+                    "HQQ6 attention / Native cache profile."
+                )
+            if not self.cfg.hcs:
+                raise ValueError("D-Spark requires HCS to enforce measured expert residency.")
+            if not self.cfg.dynamic_hcs:
+                raise ValueError(
+                    "D-Spark is launcher-qualified only with measured dynamic HCS enabled."
+                )
+            if self.cfg.hcs_host_cache_mode != "source":
+                raise ValueError(
+                    "D-Spark is launcher-qualified only with the measured source HCS host cache."
+                )
+            if self.cfg.draft_model:
+                raise ValueError("D-Spark cannot be combined with another draft model.")
+            if self.cfg.adaptive_cold_mass_pruning != "off":
+                raise ValueError(
+                    "D-Spark cannot be combined with adaptive cold-mass pruning."
+                )
+            if self.cfg.expert_compression:
+                raise ValueError(
+                    "D-Spark has not been launcher-qualified with expert compression."
+                )
+            measured_quant_profile = (
+                self.cfg.shared_expert_quant,
+                self.cfg.dense_mlp_quant,
+                self.cfg.lm_head_quant,
+            )
+            if measured_quant_profile != ("int8", "int8", "int8"):
+                raise ValueError(
+                    "D-Spark is launcher-qualified only with the measured INT8 "
+                    "shared-expert, dense-MLP, and LM-head profile."
+                )
         if (
             spec is not None
             and spec.max_context_tokens
@@ -2132,6 +2199,11 @@ class Launcher:
 
     def _validate_model_topology(self) -> None:
         selected_count = len(self.cfg.selected_gpu_indices)
+        if self.cfg.dspark_mode != "off" and selected_count != 1:
+            raise ValueError(
+                "D-Spark is launcher-qualified on exactly one selected GPU; "
+                f"got {selected_count}."
+            )
         if selected_count <= 1:
             return
         spec = self._supported_model_spec()
@@ -2150,10 +2222,37 @@ class Launcher:
             "provenance-bound acceptance evidence; select one GPU."
         )
 
+    def _validate_dspark_preload_budget(self) -> None:
+        """Require a complete, fitting D-Spark budget before server exec."""
+        if self.cfg.dspark_mode == "off":
+            return
+        budget = self._compute_budget()
+        if budget is None:
+            detail = self.budget_error or "unknown budget error"
+            raise ValueError(f"D-Spark pre-load budget is unavailable: {detail}")
+        if budget.get("over_budget", False):
+            worst_rank = int(budget["worst_rank"])
+            rank = budget["ranks"][worst_rank]
+            raise ValueError(
+                "D-Spark permanent VRAM does not fit before model load: "
+                f"rank {worst_rank} requires {rank['total_mb']:.0f} MB, "
+                f"GPU capacity is {budget['gpu_vram_mb']:.0f} MB."
+            )
+        required_ram_mb = float(budget.get("ram_total_mb", 0.0))
+        available_ram_mb = float(budget.get("total_ram_gb", 0.0)) * 1024.0
+        if required_ram_mb > available_ram_mb:
+            raise ValueError(
+                "D-Spark host cache does not fit before model load: "
+                f"requires {required_ram_mb / 1024.0:.1f} GB, "
+                f"system capacity is {available_ram_mb / 1024.0:.1f} GB."
+            )
+        self.budget = budget
+
     def _ensure_interactive_attention_ready(self) -> bool:
         try:
             self._validate_model_capabilities()
             self._validate_model_topology()
+            self._validate_dspark_preload_budget()
             return True
         except ValueError:
             return False
@@ -2205,6 +2304,7 @@ class Launcher:
                 total_ram_gb=self.hw["total_ram_gb"],
                 kv_cache_mb=self.cfg.kv_cache_mb,
                 max_context_tokens=self.cfg.max_context_tokens,
+                dspark_mode=self.cfg.dspark_mode,
             )
         except Exception as exc:
             self.budget_error = str(exc)
@@ -2341,6 +2441,10 @@ class Launcher:
                 rank.get("lm_head_mb", 0) +
                 rank.get("prefill_scratch_mb", 0) +
                 rank.get("prefill_workspace_mb", 0) +
+                rank.get("dspark_dense_mb", 0) +
+                rank.get("dspark_runtime_mb", 0) +
+                rank.get("dspark_shared_expert_mb", 0) +
+                rank.get("dspark_resident_experts_mb", 0) +
                 rank.get("cuda_overhead_mb", 0)
             )
 
@@ -2364,7 +2468,9 @@ class Launcher:
             # HCS coverage: VRAM available for expert caching vs total expert cache
             permanent_mb = attention_mb + overhead_mb + kv_alloc
             free_for_hcs = max(0, int(gpu_vram - permanent_mb))
-            total_expert_cache = b.get("ram_gpu_experts_mb", 0)
+            total_expert_cache = b.get(
+                "hcs_cacheable_experts_mb", b.get("ram_gpu_experts_mb", 0)
+            )
             hcs_pct = (free_for_hcs / total_expert_cache * 100) if total_expert_cache > 0 else 0
 
             # Labels
@@ -2409,6 +2515,19 @@ class Launcher:
             ]
             for l_line, r_line in zip(left, right):
                 lines.append(f"  {_pad_col(l_line)}  {r_line}")
+
+            if b.get("dspark_mode", "off") != "off":
+                dspark_vram_mb = int(
+                    rank.get("dspark_dense_mb", 0)
+                    + rank.get("dspark_runtime_mb", 0)
+                    + rank.get("dspark_shared_expert_mb", 0)
+                    + rank.get("dspark_resident_experts_mb", 0)
+                )
+                lines.append(
+                    f"    {DIM}D-Spark {b['dspark_mode']}: "
+                    f"{dspark_vram_mb:,} MB permanent VRAM, "
+                    f"{b.get('ram_dspark_experts_mb', 0) / 1024:.1f} GB host cache{NC}"
+                )
 
             # Keep only actionable warnings below the tables. Peak usage is
             # already represented by their totals, and KV capacity is shown in
@@ -3176,6 +3295,8 @@ class Launcher:
         if dense_layers > 0:
             print(f"  Dense MLP quant: {self.cfg.dense_mlp_quant}")
         print(f"  LM head quant:   {self.cfg.lm_head_quant}")
+        if self.cfg.dspark_mode != "off":
+            print(f"  D-Spark:         {self.cfg.dspark_mode}")
         print(f"  VRAM safety:     {self.cfg.vram_safety_margin:,} MB")
         print(f"  HCS RAM saver:   {_ANSI_RE.sub('', _format_value(ConfigOption('', 'hcs_host_cache_mode'), self.cfg.hcs_host_cache_mode))}")
         cold_mass_display = _ANSI_RE.sub(
@@ -3206,7 +3327,11 @@ class Launcher:
                 rank.get("embedding_mb", 0) + rank.get("norms_gates_mb", 0) +
                 rank.get("shared_expert_mb", 0) + rank.get("dense_mlp_mb", 0) +
                 rank.get("lm_head_mb", 0) + rank.get("prefill_scratch_mb", 0) +
-                rank.get("prefill_workspace_mb", 0) + rank.get("cuda_overhead_mb", 0)
+                rank.get("prefill_workspace_mb", 0) +
+                rank.get("dspark_dense_mb", 0) + rank.get("dspark_runtime_mb", 0) +
+                rank.get("dspark_shared_expert_mb", 0) +
+                rank.get("dspark_resident_experts_mb", 0) +
+                rank.get("cuda_overhead_mb", 0)
             )
             kv_label = (
                 "k8v4" if self.cfg.kv_dtype == "k8v4"
@@ -3227,6 +3352,17 @@ class Launcher:
             )
             print(f"  Attention:   {attention_mb:>8,} MB  ({attn_label})")
             print(f"  Overhead:    {overhead_mb:>8,} MB")
+            if budget.get("dspark_mode", "off") != "off":
+                dspark_vram_mb = (
+                    rank.get("dspark_dense_mb", 0)
+                    + rank.get("dspark_runtime_mb", 0)
+                    + rank.get("dspark_shared_expert_mb", 0)
+                    + rank.get("dspark_resident_experts_mb", 0)
+                )
+                print(
+                    f"  D-Spark:     {dspark_vram_mb:>8,.0f} MB  "
+                    f"({budget['dspark_mode']}, included in overhead)"
+                )
             total_with_kv_mb = rank.get("total_with_kv_mb", rank["total_mb"])
             kv_alloc_mb = max(0, total_with_kv_mb - rank["total_mb"])
             kv_tokens = _allocated_kv_tokens(rank)
@@ -3239,7 +3375,9 @@ class Launcher:
             print(f"  Total: {total_with_kv_mb:>8,.0f} / {gpu_vram:,} MB (rank {wr})")
             permanent_mb = attention_mb + overhead_mb + min(self.cfg.kv_cache_mb, max(0, rank["free_mb"]))
             free_for_hcs = max(0, int(gpu_vram - permanent_mb))
-            total_expert_cache = budget.get("ram_gpu_experts_mb", 0)
+            total_expert_cache = budget.get(
+                "hcs_cacheable_experts_mb", budget.get("ram_gpu_experts_mb", 0)
+            )
             hcs_pct = (free_for_hcs / total_expert_cache * 100) if total_expert_cache > 0 else 0
             print(f"  HCS:   {free_for_hcs:>8,} MB  (~{hcs_pct:.0f}% coverage)")
             if rank["free_mb"] <= 0:
@@ -3450,6 +3588,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expert-compression-pipeline", default=None,
                         choices=["grouped", "streaming", "auto"],
                         help="Compressed expert copy/decode pipeline (default: grouped)")
+    parser.add_argument("--dspark-mode", default=None,
+                        choices=["off", "resident", "shared"],
+                        help="DeepSeek-V4 D-Spark expert residency: off, fully resident, or shared HCS")
     parser.add_argument("--prefix-cache", action=argparse.BooleanOptionalAction,
                         default=None,
                         help="Enable RAM-backed multi-conversation prefix-state caching")
@@ -3590,6 +3731,8 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         )
     if args.expert_compression_pipeline is not None:
         cfg.expert_compression_pipeline = args.expert_compression_pipeline
+    if args.dspark_mode is not None:
+        cfg.dspark_mode = args.dspark_mode
     if args.prefix_cache is not None:
         cfg.prefix_cache = bool(args.prefix_cache)
     if args.prefix_cache_ram_fraction is not None:
@@ -3949,6 +4092,12 @@ def main():
             launcher.cfg.pp_partition = launcher._compute_default_pp(
                 launcher.model_info["layers"]
             )
+
+        try:
+            launcher._validate_dspark_preload_budget()
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
 
         launcher.print_summary()
         launcher.launch_server(benchmark=args.benchmark,

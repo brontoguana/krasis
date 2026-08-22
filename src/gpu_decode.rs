@@ -63,6 +63,164 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn dependency_preserving_route_schedule(
+    route_chains: &[Vec<(usize, f32)>],
+) -> Result<Vec<(usize, Vec<(usize, f32)>)>, String> {
+    let total_routes = route_chains.iter().try_fold(0usize, |total, chain| {
+        total
+            .checked_add(chain.len())
+            .ok_or_else(|| "batch route count overflow".to_string())
+    })?;
+    let mut route_offsets = vec![0usize; route_chains.len()];
+    let mut scheduled_routes = Vec::new();
+    let mut scheduled_count = 0usize;
+    while scheduled_count < total_routes {
+        let leader = (0..route_chains.len())
+            .find(|&token| route_offsets[token] < route_chains[token].len())
+            .ok_or_else(|| {
+                format!("batch route scheduler stalled: {scheduled_count}/{total_routes}")
+            })?;
+        let eid = route_chains[leader][route_offsets[leader]].0;
+        let mut token_list = Vec::new();
+        for token in 0..route_chains.len() {
+            let offset = route_offsets[token];
+            if offset < route_chains[token].len() && route_chains[token][offset].0 == eid {
+                let (_, weight) = route_chains[token][offset];
+                token_list.push((token, weight));
+                route_offsets[token] += 1;
+                scheduled_count += 1;
+            }
+        }
+        scheduled_routes.push((eid, token_list));
+    }
+    Ok(scheduled_routes)
+}
+
+fn dspark_verification_batch_plan(
+    anchor_token: usize,
+    proposal_tokens: &[usize],
+    remaining_outputs: usize,
+    requested_rows: usize,
+) -> Result<(Vec<usize>, usize), String> {
+    if proposal_tokens.is_empty() {
+        return Err("D-Spark verification requires at least one proposal token".to_string());
+    }
+    if remaining_outputs == 0 {
+        return Err("D-Spark verification requires positive remaining output capacity".to_string());
+    }
+    if requested_rows == 0 {
+        return Err("D-Spark verification requires at least one target row".to_string());
+    }
+    let maximum_rows = proposal_tokens
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| "D-Spark verification row capacity overflow".to_string())?;
+    let target_rows = maximum_rows.min(remaining_outputs).min(requested_rows);
+    let mut batch_tokens = Vec::with_capacity(target_rows);
+    batch_tokens.push(anchor_token);
+    batch_tokens.extend(
+        proposal_tokens
+            .iter()
+            .take(target_rows.saturating_sub(1))
+            .copied(),
+    );
+    if batch_tokens.len() != target_rows {
+        return Err(format!(
+            "D-Spark verification plan produced {} inputs for {target_rows} target rows",
+            batch_tokens.len(),
+        ));
+    }
+    Ok((batch_tokens, target_rows.min(proposal_tokens.len())))
+}
+
+fn dspark_expected_emitted_tokens(
+    confidences: &[f32],
+    verification_rows: usize,
+) -> Result<f64, String> {
+    if confidences.is_empty() {
+        return Err("D-Spark width policy requires proposal confidences".to_string());
+    }
+    let maximum_rows = confidences
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| "D-Spark width-policy row capacity overflow".to_string())?;
+    if verification_rows == 0 || verification_rows > maximum_rows {
+        return Err(format!(
+            "D-Spark width policy received {verification_rows} rows; valid range is 1..={maximum_rows}"
+        ));
+    }
+    if confidences
+        .iter()
+        .any(|confidence| !confidence.is_finite() || !(0.0..=1.0).contains(confidence))
+    {
+        return Err("D-Spark width policy received an invalid confidence".to_string());
+    }
+
+    // The first target row always emits one token. Every later row is reached
+    // only when the complete preceding proposal prefix survives. The final row
+    // is the canonical gamma+1 bonus and therefore uses the same cumulative
+    // survival probability as the complete proposal block.
+    let mut expected = 1.0f64;
+    let mut survival = 1.0f64;
+    for &confidence in confidences.iter().take(verification_rows - 1) {
+        survival *= confidence as f64;
+        expected += survival;
+    }
+    Ok(expected)
+}
+
+fn dspark_trace_bf16_rows(
+    base_ptr: u64,
+    rows: usize,
+    stride_elems: usize,
+    row_elems: usize,
+    label: &str,
+) -> Result<Vec<String>, String> {
+    if base_ptr == 0 || rows == 0 || row_elems == 0 || stride_elems < row_elems {
+        return Err(format!(
+            "D-Spark {label} trace geometry is invalid: ptr=0x{base_ptr:x} rows={rows} stride={stride_elems} row={row_elems}"
+        ));
+    }
+    let total_elems = rows
+        .checked_mul(stride_elems)
+        .ok_or_else(|| format!("D-Spark {label} trace element count overflow"))?;
+    let total_bytes = total_elems
+        .checked_mul(std::mem::size_of::<u16>())
+        .ok_or_else(|| format!("D-Spark {label} trace byte count overflow"))?;
+    let sync_result = unsafe { cuda_sys::lib().cuStreamSynchronize(std::ptr::null_mut()) };
+    if sync_result != cuda_sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("D-Spark {label} trace sync: {sync_result:?}"));
+    }
+    let mut raw = vec![0u16; total_elems];
+    let result = unsafe {
+        cuda_sys::lib().cuMemcpyDtoH_v2(
+            raw.as_mut_ptr() as *mut std::ffi::c_void,
+            base_ptr,
+            total_bytes,
+        )
+    };
+    if result != cuda_sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("D-Spark {label} trace D2H: {result:?}"));
+    }
+    let mut hashes = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let start = row
+            .checked_mul(stride_elems)
+            .ok_or_else(|| format!("D-Spark {label} trace row offset overflow"))?;
+        let end = start
+            .checked_add(row_elems)
+            .ok_or_else(|| format!("D-Spark {label} trace row end overflow"))?;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                raw[start..end].as_ptr() as *const u8,
+                row_elems * std::mem::size_of::<u16>(),
+            )
+        };
+        hashes.push(format!("{:016x}", validation_fnv1a_u64(bytes)));
+    }
+    Ok(hashes)
+}
+
 fn route_prep_rmsnorm_threads(
     device: &CudaDevice,
     hidden_size: usize,
@@ -145,14 +303,20 @@ fn env_enabled_default(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-fn split_expert_launch_enabled(dsa_runtime_registered: bool, override_value: Option<&str>) -> bool {
-    override_value
-        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            _ => dsa_runtime_registered,
-        })
-        .unwrap_or(dsa_runtime_registered)
+fn split_expert_launch_enabled(
+    dsa_runtime_registered: bool,
+    override_value: Option<&str>,
+) -> Result<bool, String> {
+    match override_value {
+        None => Ok(dsa_runtime_registered),
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            other => Err(format!(
+                "invalid KRASIS_SPLIT_EXPERT_LAUNCH={other:?}; expected 0/1, false/true, no/yes, or off/on"
+            )),
+        },
+    }
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -301,6 +465,46 @@ fn env_f64_list(name: &str, default: &[f64]) -> Vec<f64> {
         }
         Err(_) => default.to_vec(),
     }
+}
+
+fn env_usize_list(name: &str) -> Vec<usize> {
+    let Ok(raw) = std::env::var(name) else {
+        return Vec::new();
+    };
+    let mut invalid = 0usize;
+    let mut parsed = Vec::new();
+    for part in raw.split(',') {
+        match part.trim().parse::<usize>() {
+            Ok(value) if value > 0 => parsed.push(value),
+            _ => invalid += 1,
+        }
+    }
+    parsed.sort_unstable();
+    parsed.dedup();
+    if invalid > 0 {
+        log::warn!(
+            "{} ignored {} invalid positive-integer entries; using {:?}",
+            name,
+            invalid,
+            parsed,
+        );
+    }
+    parsed
+}
+
+fn deferred_cold_dma_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled = env_enabled_default("KRASIS_DEFERRED_COLD_DMA", true);
+        if enabled {
+            log::info!(
+                "Deferred cold DMA enabled: build each layer's host-copy plan before submitting its ordinary H2D burst"
+            );
+        } else {
+            log::info!("Deferred cold DMA explicitly disabled");
+        }
+        enabled
+    })
 }
 
 fn dynamic_hcs_enabled() -> bool {
@@ -458,7 +662,49 @@ struct RouteLocalityStats {
     previous_by_layer: Vec<Vec<i32>>,
     heatmap_rank_by_layer: Vec<Vec<usize>>,
     policy_states: Vec<RouteLocalityCoverageState>,
+    global_lru_states: Vec<RouteLocalityGlobalLruState>,
     layer_stats: Vec<RouteLocalityLayerStats>,
+}
+
+#[derive(Clone)]
+struct RouteLocalityGlobalLruState {
+    capacity: usize,
+    hits: u64,
+    cache: Vec<u64>,
+}
+
+impl RouteLocalityGlobalLruState {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            hits: 0,
+            cache: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.hits = 0;
+        self.cache.clear();
+    }
+
+    fn record(&mut self, layer_idx: usize, selected: &[i32]) {
+        let keys: Vec<u64> = selected
+            .iter()
+            .copied()
+            .filter(|&expert_idx| expert_idx >= 0)
+            .map(|expert_idx| ((layer_idx as u64) << 32) | expert_idx as u32 as u64)
+            .collect();
+        self.hits += keys.iter().filter(|key| self.cache.contains(*key)).count() as u64;
+        for key in keys.into_iter().rev() {
+            if let Some(position) = self.cache.iter().position(|cached| *cached == key) {
+                self.cache.remove(position);
+            }
+            self.cache.insert(0, key);
+            if self.cache.len() > self.capacity {
+                self.cache.truncate(self.capacity);
+            }
+        }
+    }
 }
 
 impl RouteLocalityStats {
@@ -470,6 +716,7 @@ impl RouteLocalityStats {
         );
         let policy_count = coverage_pcts.len();
         let split_count = ROUTE_LOCALITY_ADAPTIVE_SPLITS.len();
+        let global_lru_capacities = env_usize_list("KRASIS_ROUTE_LOCALITY_TOTAL_CAPACITIES");
         let s = Self {
             enabled,
             coverage_pcts,
@@ -485,15 +732,23 @@ impl RouteLocalityStats {
             policy_states: (0..policy_count)
                 .map(|_| RouteLocalityCoverageState::new(split_count))
                 .collect(),
+            global_lru_states: global_lru_capacities
+                .into_iter()
+                .map(RouteLocalityGlobalLruState::new)
+                .collect(),
             layer_stats: Vec::new(),
         };
         if enabled {
             log::info!(
-                "Route locality diagnostic enabled: coverage_pcts={:?}, heatmap_pin_pct={:.1}, lfu_decay={:.3}, adaptive_splits={:?}",
+                "Route locality diagnostic enabled: coverage_pcts={:?}, heatmap_pin_pct={:.1}, lfu_decay={:.3}, adaptive_splits={:?}, global_lru_capacities={:?}",
                 s.coverage_pcts,
                 s.heatmap_pin_pct,
                 ROUTE_LOCALITY_LFU_DECAY,
                 ROUTE_LOCALITY_ADAPTIVE_SPLITS,
+                s.global_lru_states
+                    .iter()
+                    .map(|state| state.capacity)
+                    .collect::<Vec<_>>(),
             );
         }
         s
@@ -510,6 +765,9 @@ impl RouteLocalityStats {
         self.heatmap_rank_by_layer.clear();
         for state in self.policy_states.iter_mut() {
             state.reset_counts();
+        }
+        for state in self.global_lru_states.iter_mut() {
+            state.reset();
         }
         self.layer_stats.clear();
     }
@@ -745,6 +1003,16 @@ impl RouteLocalityStats {
         self.layer_stats[layer_idx].selected += selected.len() as u64;
 
         if let Some(hcs) = hcs {
+            if hcs.num_cached > 0
+                && !self
+                    .global_lru_states
+                    .iter()
+                    .any(|state| state.capacity == hcs.num_cached)
+            {
+                self.global_lru_states
+                    .push(RouteLocalityGlobalLruState::new(hcs.num_cached));
+                self.global_lru_states.sort_by_key(|state| state.capacity);
+            }
             self.actual_hcs_cached = hcs.num_cached;
             self.actual_hcs_possible = hcs
                 .cache_fast_num_layers
@@ -755,6 +1023,10 @@ impl RouteLocalityStats {
                     self.layer_stats[layer_idx].actual_hcs_hits += 1;
                 }
             }
+        }
+
+        for state in self.global_lru_states.iter_mut() {
+            state.record(layer_idx, &selected);
         }
 
         let prev = &self.previous_by_layer[layer_idx];
@@ -936,6 +1208,18 @@ impl RouteLocalityStats {
             "adaptive",
             self.policy_states.iter().map(|s| s.adaptive_hits).collect(),
         );
+        let global_lru_parts = self
+            .global_lru_states
+            .iter()
+            .map(|state| {
+                format!(
+                    "{}:{:.2}%",
+                    state.capacity,
+                    state.hits as f64 / selected * 100.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
 
         let actual_hcs_rate = self.actual_hcs_hits as f64 / selected;
         let actual_hcs_coverage = if self.actual_hcs_possible > 0 {
@@ -1051,10 +1335,14 @@ impl RouteLocalityStats {
             "  \x1b[36m│\x1b[0m  Adaptive: {} \x1b[36m│\x1b[0m",
             adaptive_parts.trim_start_matches("adaptive=")
         );
+        eprintln!(
+            "  \x1b[36m│\x1b[0m  Global LRU cold-start: [{}] \x1b[36m│\x1b[0m",
+            global_lru_parts
+        );
         eprintln!("  \x1b[36m└─────────────────────────────────────────────────┘\x1b[0m");
 
         log::info!(
-            "ROUTE LOCALITY SUMMARY generated={} routes={} routes_per_token={:.3} selected={} selected_per_token={:.3} last1_hits={} last1_hit_rate_pct={:.4} actual_hcs_hits={} actual_hcs_hit_rate_pct={:.4} actual_hcs_cached={} actual_hcs_possible={} actual_hcs_coverage_pct={:.4} actual_hcs_lift={:.4} heatmap_ranked_layers={} {} {} {} {} {} lru_legacy=[{}] top_layers=[{}]",
+            "ROUTE LOCALITY SUMMARY generated={} routes={} routes_per_token={:.3} selected={} selected_per_token={:.3} last1_hits={} last1_hit_rate_pct={:.4} actual_hcs_hits={} actual_hcs_hit_rate_pct={:.4} actual_hcs_cached={} actual_hcs_possible={} actual_hcs_coverage_pct={:.4} actual_hcs_lift={:.4} heatmap_ranked_layers={} {} {} {} {} {} global_lru_cold=[{}] lru_legacy=[{}] top_layers=[{}]",
             generated_tokens,
             self.route_events,
             routes_per_token,
@@ -1074,6 +1362,7 @@ impl RouteLocalityStats {
             heatmap_lru_parts,
             lfu_parts,
             adaptive_parts,
+            global_lru_parts,
             lru_policy_parts.join(", "),
             top_layers,
         );
@@ -3126,6 +3415,8 @@ const KERNEL_NAMES: &[&str] = &[
     "deepseek_v4_sqrtsoftplus_topk_parallel_selection",
     "deepseek_v4_swiglu_bf16",
     "deepseek_v4_hc_replicate_kernel",
+    "dspark_pack_target_features_kernel",
+    "dspark_capture_target_state_kernel",
     "deepseek_v4_hc_inv_rms_kernel",
     "deepseek_v4_hc_project_kernel",
     "deepseek_v4_hc_prepare_kernel",
@@ -8133,27 +8424,239 @@ pub(crate) mod dsa_registration_tests {
     use cudarc::driver::{DevicePtr, LaunchAsync, LaunchConfig};
 
     use super::{
-        claimed_peer_route_slots, create_decode_timing_event, dynamic_peer_shard, graph_w13_path,
+        claimed_peer_route_slots, create_decode_timing_event, dependency_preserving_route_schedule,
+        dspark_expected_emitted_tokens, dspark_residency_scan_required,
+        dspark_target_cache_restore_slots, dspark_target_cache_rows,
+        dspark_verification_batch_plan, dynamic_peer_shard, graph_w13_path,
         layer_split_sequence_state_contract, marlin_dispatch_for_bits,
-        measured_peer_route_admission,
-        occupancy_active_blocks_per_multiprocessor, peer_selector_check_message, plan_dsa_topk,
-        route_prep_rmsnorm_threads, split_expert_launch_enabled, validate_dsa_indexer_registration,
+        measured_peer_route_admission, occupancy_active_blocks_per_multiprocessor,
+        peer_selector_check_message, plan_dsa_topk, route_prep_rmsnorm_threads,
+        split_expert_launch_enabled, validate_dsa_indexer_registration,
         validate_dsa_owner_weight_contract, validate_dsa_runtime_registration,
-        validate_stream_probe_outcome, CudaEvent, CudaStream, DsaGraphScoreBackend,
-        DsaIndexerOwnerResource, DsaIndexerOwnerWeightIds, ExpertDataPtr, GpuDecodeStore,
-        GpuAttnConfig, GpuWeight, GraphW13Path, HqqStageAsyncCopyMode, PeerDemandEntry,
-        PeerDynamicTier, PeerRoutedExpert, PendingPeerDispatch, DSA_TOPK_RADIX_THREADS,
-        MODULE_NAME,
+        validate_dspark_residency_contract, validate_stream_probe_outcome, CudaEvent, CudaStream,
+        DsaGraphScoreBackend, DsaIndexerOwnerResource, DsaIndexerOwnerWeightIds,
+        DsparkResidencyMode, DsparkTargetCacheRowMapping, DsparkVerificationPolicy, ExpertDataPtr,
+        GpuAttnConfig, GpuDecodeStore, GpuWeight, GraphW13Path, HqqStageAsyncCopyMode,
+        PeerDemandEntry, PeerDynamicTier, PeerRoutedExpert, PendingPeerDispatch,
+        RouteLocalityGlobalLruState, DSA_TOPK_RADIX_THREADS, MODULE_NAME,
     };
 
     static DSA_CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn route_locality_global_lru_tracks_cross_layer_capacity() {
+        let mut state = RouteLocalityGlobalLruState::new(2);
+        state.record(0, &[1, 2]);
+        assert_eq!(state.hits, 0);
+        state.record(1, &[1]);
+        assert_eq!(state.hits, 0);
+        state.record(0, &[1, 2]);
+        assert_eq!(state.hits, 1);
+        state.record(1, &[1]);
+        assert_eq!(state.hits, 1);
+        assert_eq!(state.cache.len(), 2);
+    }
+
+    #[test]
+    fn dspark_dependency_preserving_batch_schedule_keeps_every_tokens_route_order() {
+        let chains = vec![
+            vec![(7, 0.7), (9, 0.2), (3, 0.1)],
+            vec![(9, 0.6), (7, 0.3), (3, 0.1)],
+            vec![(7, 0.8), (9, 0.2)],
+        ];
+        let schedule = dependency_preserving_route_schedule(&chains).unwrap();
+        let mut replay = vec![Vec::new(); chains.len()];
+        for (expert, tokens) in &schedule {
+            for &(token, weight) in tokens {
+                replay[token].push((*expert, weight));
+            }
+        }
+        assert_eq!(replay, chains);
+        assert!(schedule
+            .iter()
+            .any(|(expert, tokens)| *expert == 7 && tokens.len() == 2));
+        assert_eq!(
+            schedule
+                .iter()
+                .map(|(_, tokens)| tokens.len())
+                .sum::<usize>(),
+            8
+        );
+    }
+
+    #[test]
+    fn dspark_transaction_rows_cover_ring_wrap_and_compression_boundaries() {
+        assert_eq!(
+            dspark_target_cache_rows(DsparkTargetCacheRowMapping::Ring, 4, &[3, 4, 5, 7], "ring",)
+                .unwrap(),
+            vec![3, 0, 1],
+        );
+        assert_eq!(
+            dspark_target_cache_rows(
+                DsparkTargetCacheRowMapping::Compressed { ratio: 4 },
+                8,
+                &[2, 3, 4, 7, 8],
+                "compressed",
+            )
+            .unwrap(),
+            vec![0, 1],
+        );
+        assert!(dspark_target_cache_rows(
+            DsparkTargetCacheRowMapping::Compressed { ratio: 0 },
+            8,
+            &[0],
+            "invalid",
+        )
+        .is_err());
+        assert_eq!(
+            dspark_target_cache_restore_slots(
+                DsparkTargetCacheRowMapping::Ring,
+                8,
+                &[3, 4, 5, 6],
+                2,
+                "ring",
+            )
+            .unwrap(),
+            vec![(5, 2), (6, 3)],
+        );
+        assert_eq!(
+            dspark_target_cache_restore_slots(
+                DsparkTargetCacheRowMapping::Compressed { ratio: 4 },
+                8,
+                &[2, 3, 4, 7, 8],
+                3,
+                "compressed",
+            )
+            .unwrap(),
+            vec![(1, 1)],
+        );
+        assert!(dspark_target_cache_restore_slots(
+            DsparkTargetCacheRowMapping::Ring,
+            4,
+            &[3, 4, 5, 7],
+            2,
+            "aliased",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn dspark_resident_contract_fails_closed_while_shared_allows_partial_hcs() {
+        let total = (1usize..=4).sum::<usize>();
+        assert!(!dspark_residency_scan_required(
+            DsparkResidencyMode::Resident,
+            None,
+        ));
+        assert!(!dspark_residency_scan_required(
+            DsparkResidencyMode::Resident,
+            Some(0),
+        ));
+        assert!(dspark_residency_scan_required(
+            DsparkResidencyMode::Resident,
+            Some(total),
+        ));
+        assert!(!dspark_residency_scan_required(
+            DsparkResidencyMode::Shared,
+            Some(total),
+        ));
+        assert!(
+            validate_dspark_residency_contract(DsparkResidencyMode::Resident, total, total,)
+                .is_ok()
+        );
+        assert!(validate_dspark_residency_contract(
+            DsparkResidencyMode::Resident,
+            total - 1,
+            total,
+        )
+        .is_err());
+        assert!(validate_dspark_residency_contract(DsparkResidencyMode::Shared, 0, 768,).is_ok());
+        assert!(validate_dspark_residency_contract(DsparkResidencyMode::Shared, 1, 0,).is_err());
+    }
+
+    #[test]
+    fn dspark_verification_plan_adds_bonus_row_and_truncates_without_hardcoding_width() {
+        let proposals = vec![11, 12, 13];
+        let (full_inputs, full_compared) =
+            dspark_verification_batch_plan(10, &proposals, usize::MAX, usize::MAX).unwrap();
+        assert_eq!(full_inputs, vec![10, 11, 12, 13]);
+        assert_eq!(full_compared, proposals.len());
+        assert_eq!(full_inputs.len(), full_compared + 1);
+
+        let (truncated_inputs, truncated_compared) =
+            dspark_verification_batch_plan(10, &proposals, proposals.len(), usize::MAX).unwrap();
+        assert_eq!(truncated_inputs, vec![10, 11, 12]);
+        assert_eq!(truncated_compared, proposals.len());
+        assert_eq!(truncated_inputs.len(), truncated_compared);
+
+        let (single_input, single_compared) =
+            dspark_verification_batch_plan(10, &proposals, usize::MAX, 1).unwrap();
+        assert_eq!(single_input, vec![10]);
+        assert_eq!(single_compared, 1);
+        let (requested_two, requested_two_compared) =
+            dspark_verification_batch_plan(10, &proposals, usize::MAX, 2).unwrap();
+        assert_eq!(requested_two, vec![10, 11]);
+        assert_eq!(requested_two_compared, 2);
+        assert!(dspark_verification_batch_plan(10, &[], 1, 1).is_err());
+        assert!(dspark_verification_batch_plan(10, &proposals, 0, 1).is_err());
+        assert!(dspark_verification_batch_plan(10, &proposals, 1, 0).is_err());
+    }
+
+    #[test]
+    fn dspark_width_policy_uses_measured_service_curve_and_cumulative_confidence() {
+        let confidences = vec![0.9, 0.8, 0.5];
+        assert_eq!(
+            dspark_expected_emitted_tokens(&confidences, 1).unwrap(),
+            1.0
+        );
+        assert!((dspark_expected_emitted_tokens(&confidences, 2).unwrap() - 1.9).abs() < 1e-6);
+        assert!((dspark_expected_emitted_tokens(&confidences, 4).unwrap() - 2.98).abs() < 1e-6);
+
+        let mut policy = DsparkVerificationPolicy::new(confidences.len()).unwrap();
+        policy.start_calibration(64).unwrap();
+        for rows in 1..=confidences.len() + 1 {
+            assert_eq!(
+                policy.choose_rows(&confidences, usize::MAX, 64).unwrap(),
+                rows
+            );
+            policy.observe_confidences(&confidences).unwrap();
+            let verification_seconds = match rows {
+                1 | 2 => 0.02,
+                3 => 0.06,
+                _ => 0.10,
+            };
+            policy
+                .observe_round(rows, 0.01, verification_seconds)
+                .unwrap();
+        }
+        policy.finish_calibration(64).unwrap();
+        assert_eq!(policy.selected_counts, vec![0; confidences.len() + 1]);
+        // Two rows win: (10 + 20) ms / 1.9 expected tokens. One row is
+        // 30 ms/token and wider rows cost progressively more for this curve.
+        assert_eq!(policy.choose_rows(&confidences, usize::MAX, 64).unwrap(), 2);
+        assert_eq!(policy.selected_counts[1], 1);
+        assert_eq!(policy.choose_rows(&confidences, 1, 64).unwrap(), 1);
+        assert_eq!(policy.selected_counts[0], 1);
+        assert!(policy.choose_rows(&confidences, usize::MAX, 63).is_err());
+    }
+
+    #[test]
+    fn dspark_width_policy_fails_closed_on_incomplete_calibration() {
+        let confidences = vec![0.8, 0.7];
+        let mut policy = DsparkVerificationPolicy::new(confidences.len()).unwrap();
+        policy.start_calibration(32).unwrap();
+        assert_eq!(policy.choose_rows(&confidences, usize::MAX, 32).unwrap(), 1);
+        policy.observe_confidences(&confidences).unwrap();
+        policy.observe_round(1, 0.01, 0.02).unwrap();
+        assert!(policy.finish_calibration(32).is_err());
+    }
+
+    #[test]
     fn split_expert_launch_defaults_on_for_native_dsa_and_honors_overrides() {
-        assert!(split_expert_launch_enabled(true, None));
-        assert!(!split_expert_launch_enabled(false, None));
-        assert!(!split_expert_launch_enabled(true, Some("0")));
-        assert!(split_expert_launch_enabled(false, Some("yes")));
+        assert!(split_expert_launch_enabled(true, None).unwrap());
+        assert!(!split_expert_launch_enabled(false, None).unwrap());
+        assert!(!split_expert_launch_enabled(true, Some("0")).unwrap());
+        assert!(split_expert_launch_enabled(false, Some("yes")).unwrap());
+        assert!(split_expert_launch_enabled(false, Some("maybe")).is_err());
     }
 
     #[test]
@@ -14990,6 +15493,8 @@ struct CachedKernels {
     deepseek_v4_sqrtsoftplus_topk_parallel_selection: cudarc::driver::CudaFunction,
     deepseek_v4_swiglu_bf16: cudarc::driver::CudaFunction,
     deepseek_v4_hc_replicate: cudarc::driver::CudaFunction,
+    dspark_pack_target_features: cudarc::driver::CudaFunction,
+    dspark_capture_target_state: cudarc::driver::CudaFunction,
     deepseek_v4_hc_inv_rms: cudarc::driver::CudaFunction,
     deepseek_v4_hc_project: cudarc::driver::CudaFunction,
     deepseek_v4_hc_prepare: cudarc::driver::CudaFunction,
@@ -19395,6 +19900,23 @@ fn resolve_bool_env(name: &str, default: bool) -> Result<bool, String> {
     }
 }
 
+fn resolve_portable_predicted_w1_policy(
+) -> Result<crate::gpu_prefill::PortablePredictedW1Policy, String> {
+    use crate::gpu_prefill::PortablePredictedW1Policy;
+    match std::env::var("KRASIS_PREFILL_PREDICTED_W1") {
+        Err(std::env::VarError::NotPresent) => Ok(PortablePredictedW1Policy::Off),
+        Err(error) => Err(format!("read KRASIS_PREFILL_PREDICTED_W1: {error}")),
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(PortablePredictedW1Policy::Forced),
+            "0" | "false" | "no" | "off" => Ok(PortablePredictedW1Policy::Off),
+            "auto" => Ok(PortablePredictedW1Policy::AutoUncalibrated),
+            other => Err(format!(
+                "invalid KRASIS_PREFILL_PREDICTED_W1={other:?}; expected off, on, or auto"
+            )),
+        },
+    }
+}
+
 impl Default for HqqRuntimeSlotEntry {
     fn default() -> Self {
         Self {
@@ -19551,6 +20073,627 @@ impl DeepseekV4DecodePolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DsparkResidencyMode {
+    Resident,
+    Shared,
+}
+
+impl DsparkResidencyMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "resident" => Ok(Self::Resident),
+            "shared" => Ok(Self::Shared),
+            other => Err(format!(
+                "D-Spark residency mode must be resident or shared, got {other:?}"
+            )),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Resident => "resident",
+            Self::Shared => "shared",
+        }
+    }
+}
+
+struct DsparkRuntime {
+    mode: DsparkResidencyMode,
+    target_layer_ids: Vec<usize>,
+    block_size: usize,
+    noise_token_id: usize,
+    markov_rank: usize,
+    auxiliary_layer_start: usize,
+    stage_router_registered: Vec<bool>,
+    graph_registration: Option<DsparkGraphRegistration>,
+    buffers: Option<DsparkRuntimeBuffers>,
+    captured_prompt_len: usize,
+    proposal_rounds: u64,
+    proposed_tokens: u64,
+    verified_tokens: u64,
+    bonus_tokens: u64,
+    matched_tokens: u64,
+    rejected_tokens: u64,
+    verified_confidence_sum: f64,
+    matched_confidence_sum: f64,
+    rejected_confidence_sum: f64,
+    proposal_seconds: f64,
+    batch_verify_rounds: u64,
+    batch_transaction_rollbacks: u64,
+    batch_verify_seconds: f64,
+    proposal_timing_rounds: u64,
+    proposal_init_seconds: f64,
+    proposal_aux_kv_seconds: f64,
+    proposal_aux_query_seconds: f64,
+    proposal_head_seconds: f64,
+    proposal_markov_seconds: f64,
+    batch_save_seconds: f64,
+    batch_setup_seconds: f64,
+    batch_attention_route_seconds: f64,
+    batch_moe_seconds: f64,
+    batch_hc_commit_seconds: f64,
+    batch_head_seconds: f64,
+    batch_restore_seconds: f64,
+    context_commit_seconds: f64,
+    verification_policy: DsparkVerificationPolicy,
+    target_state_backups: Vec<DsparkTargetStateBackup>,
+    target_cache_row_backups: Vec<DsparkTargetCacheRowBackup>,
+    target_cache_backup_storage: Option<cudarc::driver::CudaSlice<u8>>,
+    expert_store: Arc<crate::weights::WeightStore>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DsparkWidthMeasurement {
+    rounds: u64,
+    proposal_seconds: f64,
+    verification_seconds: f64,
+}
+
+#[derive(Clone, Debug)]
+struct DsparkVerificationPolicy {
+    calibrating: bool,
+    calibrated: bool,
+    calibrated_hcs_capacity: Option<usize>,
+    widths: Vec<DsparkWidthMeasurement>,
+    confidence_sums: Vec<f64>,
+    confidence_rounds: u64,
+    selected_counts: Vec<u64>,
+}
+
+impl DsparkVerificationPolicy {
+    fn new(block_size: usize) -> Result<Self, String> {
+        let width_count = block_size
+            .checked_add(1)
+            .ok_or_else(|| "D-Spark width-policy capacity overflow".to_string())?;
+        if block_size == 0 {
+            return Err("D-Spark width policy requires a positive block size".to_string());
+        }
+        Ok(Self {
+            calibrating: false,
+            calibrated: false,
+            calibrated_hcs_capacity: None,
+            widths: vec![DsparkWidthMeasurement::default(); width_count],
+            confidence_sums: vec![0.0; block_size],
+            confidence_rounds: 0,
+            selected_counts: vec![0; width_count],
+        })
+    }
+
+    fn start_calibration(&mut self, hcs_capacity: usize) -> Result<(), String> {
+        if hcs_capacity == 0 {
+            return Err("D-Spark width calibration requires positive HCS capacity".to_string());
+        }
+        self.calibrating = true;
+        self.calibrated = false;
+        self.calibrated_hcs_capacity = Some(hcs_capacity);
+        self.widths.fill(DsparkWidthMeasurement::default());
+        self.confidence_sums.fill(0.0);
+        self.confidence_rounds = 0;
+        self.selected_counts.fill(0);
+        Ok(())
+    }
+
+    fn observe_confidences(&mut self, confidences: &[f32]) -> Result<(), String> {
+        if confidences.len() != self.confidence_sums.len() {
+            return Err(format!(
+                "D-Spark width-policy confidence length {}/{}",
+                confidences.len(),
+                self.confidence_sums.len(),
+            ));
+        }
+        if confidences
+            .iter()
+            .any(|confidence| !confidence.is_finite() || !(0.0..=1.0).contains(confidence))
+        {
+            return Err("D-Spark width policy received an invalid confidence".to_string());
+        }
+        for (sum, confidence) in self.confidence_sums.iter_mut().zip(confidences) {
+            *sum += *confidence as f64;
+        }
+        self.confidence_rounds = self.confidence_rounds.saturating_add(1);
+        Ok(())
+    }
+
+    fn validate_hcs_capacity(&self, current_hcs_capacity: usize) -> Result<(), String> {
+        if !self.calibrated {
+            return Ok(());
+        }
+        let calibrated_hcs_capacity = self
+            .calibrated_hcs_capacity
+            .ok_or_else(|| "D-Spark width policy lost its calibrated HCS capacity".to_string())?;
+        if current_hcs_capacity != calibrated_hcs_capacity {
+            return Err(format!(
+                "D-Spark measured verifier curve requires HCS capacity {calibrated_hcs_capacity}, current capacity is {current_hcs_capacity}; restart to recalibrate"
+            ));
+        }
+        Ok(())
+    }
+
+    fn choose_rows(
+        &mut self,
+        confidences: &[f32],
+        remaining_outputs: usize,
+        current_hcs_capacity: usize,
+    ) -> Result<usize, String> {
+        let maximum_rows = confidences
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| "D-Spark width-policy row capacity overflow".to_string())?
+            .min(remaining_outputs);
+        if maximum_rows == 0 || maximum_rows > self.widths.len() {
+            return Err(format!(
+                "D-Spark width policy cannot select from {maximum_rows} rows with {} measured widths",
+                self.widths.len(),
+            ));
+        }
+
+        let selected = if self.calibrating {
+            // Balance real observations across every legal width. This is driven
+            // by the checkpoint block size, not a model- or GPU-specific width.
+            (1..=maximum_rows)
+                .min_by_key(|rows| self.widths[*rows - 1].rounds)
+                .ok_or_else(|| "D-Spark calibration has no legal width".to_string())?
+        } else if self.calibrated {
+            self.validate_hcs_capacity(current_hcs_capacity)?;
+            let proposal_rounds: u64 = self.widths.iter().map(|entry| entry.rounds).sum();
+            let proposal_seconds: f64 =
+                self.widths.iter().map(|entry| entry.proposal_seconds).sum();
+            if proposal_rounds == 0 {
+                return Err(
+                    "D-Spark width policy lost its proposal service measurements".to_string(),
+                );
+            }
+            let mean_proposal_seconds = proposal_seconds / proposal_rounds as f64;
+            let mut best: Option<(usize, f64)> = None;
+            for rows in 1..=maximum_rows {
+                let measurement = &self.widths[rows - 1];
+                if measurement.rounds == 0 {
+                    return Err(format!(
+                        "D-Spark width policy has no service measurement for {rows} rows"
+                    ));
+                }
+                let mean_verification_seconds =
+                    measurement.verification_seconds / measurement.rounds as f64;
+                let expected_tokens = dspark_expected_emitted_tokens(confidences, rows)?;
+                let seconds_per_token =
+                    (mean_proposal_seconds + mean_verification_seconds) / expected_tokens;
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, best_seconds)| seconds_per_token < *best_seconds)
+                {
+                    best = Some((rows, seconds_per_token));
+                }
+            }
+            best.ok_or_else(|| "D-Spark width policy found no measured candidate".to_string())?
+                .0
+        } else {
+            // Bootstrap calibration and heatmap collection happen before the
+            // final HCS layout exists. Preserve the checkpoint's full gamma+1
+            // verifier there; production serving is gated on post-HCS calibration.
+            maximum_rows
+        };
+        self.selected_counts[selected - 1] = self.selected_counts[selected - 1].saturating_add(1);
+        Ok(selected)
+    }
+
+    fn observe_round(
+        &mut self,
+        rows: usize,
+        proposal_seconds: f64,
+        verification_seconds: f64,
+    ) -> Result<(), String> {
+        if !proposal_seconds.is_finite()
+            || proposal_seconds < 0.0
+            || !verification_seconds.is_finite()
+            || verification_seconds < 0.0
+        {
+            return Err("D-Spark width policy received an invalid service time".to_string());
+        }
+        if rows == 0 {
+            return Err("D-Spark width policy cannot record zero rows".to_string());
+        }
+        let width_count = self.widths.len();
+        let measurement = self.widths.get_mut(rows - 1).ok_or_else(|| {
+            format!(
+                "D-Spark width policy cannot record {rows} rows in a {}-width curve",
+                width_count,
+            )
+        })?;
+        if self.calibrating {
+            measurement.rounds = measurement.rounds.saturating_add(1);
+            measurement.proposal_seconds += proposal_seconds;
+            measurement.verification_seconds += verification_seconds;
+        }
+        Ok(())
+    }
+
+    fn finish_calibration(&mut self, hcs_capacity: usize) -> Result<(), String> {
+        if !self.calibrating {
+            return Err("D-Spark verification calibration is not active".to_string());
+        }
+        let missing: Vec<usize> = self
+            .widths
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| (entry.rounds == 0).then_some(index + 1))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "D-Spark verification calibration did not measure row widths {missing:?}"
+            ));
+        }
+        if self.confidence_rounds == 0 {
+            return Err("D-Spark verification calibration recorded no confidence data".to_string());
+        }
+        if hcs_capacity == 0 {
+            return Err("D-Spark width calibration finished with zero HCS capacity".to_string());
+        }
+        self.calibrating = false;
+        self.calibrated = true;
+        self.calibrated_hcs_capacity = Some(hcs_capacity);
+        // Calibration deliberately balances all widths. Serving telemetry must
+        // report only production decisions, not those forced startup samples.
+        self.selected_counts.fill(0);
+        Ok(())
+    }
+
+    fn status_json(&self) -> serde_json::Value {
+        let proposal_rounds: u64 = self.widths.iter().map(|entry| entry.rounds).sum();
+        let proposal_seconds: f64 = self.widths.iter().map(|entry| entry.proposal_seconds).sum();
+        let proposal_ms = if proposal_rounds > 0 {
+            proposal_seconds / proposal_rounds as f64 * 1000.0
+        } else {
+            0.0
+        };
+        let mean_confidences: Vec<f64> = if self.confidence_rounds > 0 {
+            self.confidence_sums
+                .iter()
+                .map(|sum| sum / self.confidence_rounds as f64)
+                .collect()
+        } else {
+            vec![0.0; self.confidence_sums.len()]
+        };
+        let widths: Vec<serde_json::Value> = self
+            .widths
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let verify_ms = if entry.rounds > 0 {
+                    entry.verification_seconds / entry.rounds as f64 * 1000.0
+                } else {
+                    0.0
+                };
+                let expected_tokens = if self.confidence_rounds > 0 {
+                    let mut expected = 1.0f64;
+                    let mut survival = 1.0f64;
+                    for confidence in mean_confidences.iter().take(index) {
+                        survival *= *confidence;
+                        expected += survival;
+                    }
+                    expected
+                } else {
+                    0.0
+                };
+                let predicted_tps = if entry.rounds > 0 && expected_tokens > 0.0 {
+                    expected_tokens / ((proposal_ms + verify_ms) / 1000.0)
+                } else {
+                    0.0
+                };
+                serde_json::json!({
+                    "rows": index + 1,
+                    "rounds": entry.rounds,
+                    "proposal_ms": if entry.rounds > 0 {
+                        entry.proposal_seconds / entry.rounds as f64 * 1000.0
+                    } else { 0.0 },
+                    "verification_ms": verify_ms,
+                    "expected_tokens": expected_tokens,
+                    "predicted_tps": predicted_tps,
+                    "selected_rounds": self.selected_counts[index],
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "calibrating": self.calibrating,
+            "calibrated": self.calibrated,
+            "hcs_capacity": self.calibrated_hcs_capacity,
+            "proposal_ms": proposal_ms,
+            "confidence_rounds": self.confidence_rounds,
+            "mean_confidences": mean_confidences,
+            "widths": widths,
+        })
+    }
+}
+
+struct DsparkTargetStateBackup {
+    layer_idx: usize,
+    label: String,
+    source_ptr: u64,
+    bytes: usize,
+    snapshot_rows: usize,
+    storage: cudarc::driver::CudaSlice<u8>,
+}
+
+#[derive(Clone, Copy)]
+enum DsparkTargetCacheRowMapping {
+    Ring,
+    Compressed { ratio: usize },
+}
+
+fn dspark_target_cache_rows(
+    mapping: DsparkTargetCacheRowMapping,
+    source_rows: usize,
+    positions: &[usize],
+    label: &str,
+) -> Result<Vec<usize>, String> {
+    if source_rows == 0 {
+        return Err(format!(
+            "D-Spark target cache-row backup {label} has zero source rows"
+        ));
+    }
+    let mut rows = Vec::with_capacity(positions.len());
+    for &position in positions {
+        let row = match mapping {
+            DsparkTargetCacheRowMapping::Ring => position % source_rows,
+            DsparkTargetCacheRowMapping::Compressed { ratio } => {
+                if ratio == 0 {
+                    return Err(format!(
+                        "D-Spark target cache-row backup {label} has a zero compression ratio"
+                    ));
+                }
+                let next = position.checked_add(1).ok_or_else(|| {
+                    format!("D-Spark target cache-row backup {label} position overflow")
+                })?;
+                if next % ratio != 0 {
+                    continue;
+                }
+                next / ratio - 1
+            }
+        };
+        if row >= source_rows {
+            return Err(format!(
+                "D-Spark target cache-row backup {label} row {row} exceeds {source_rows}"
+            ));
+        }
+        if !rows.contains(&row) {
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+fn dspark_target_cache_restore_slots(
+    mapping: DsparkTargetCacheRowMapping,
+    source_rows: usize,
+    positions: &[usize],
+    committed: usize,
+    label: &str,
+) -> Result<Vec<(usize, usize)>, String> {
+    if committed > positions.len() {
+        return Err(format!(
+            "D-Spark target cache-row restore {label} committed prefix {committed} exceeds {} positions",
+            positions.len(),
+        ));
+    }
+    let all_rows = dspark_target_cache_rows(mapping, source_rows, positions, label)?;
+    let prefix_rows =
+        dspark_target_cache_rows(mapping, source_rows, &positions[..committed], label)?;
+    let suffix_rows =
+        dspark_target_cache_rows(mapping, source_rows, &positions[committed..], label)?;
+    let mut restore = Vec::with_capacity(suffix_rows.len());
+    for row in suffix_rows {
+        if prefix_rows.contains(&row) {
+            return Err(format!(
+                "D-Spark target cache-row restore {label} aliases accepted-prefix row {row} with a rejected suffix"
+            ));
+        }
+        let slot = all_rows.iter().position(|&candidate| candidate == row).ok_or_else(|| {
+            format!(
+                "D-Spark target cache-row restore {label} row {row} was not saved by the original transaction"
+            )
+        })?;
+        restore.push((row, slot));
+    }
+    Ok(restore)
+}
+
+fn validate_dspark_residency_contract(
+    mode: DsparkResidencyMode,
+    resident: usize,
+    total: usize,
+) -> Result<(), String> {
+    if total == 0 {
+        return Err("D-Spark has no registered auxiliary experts".to_string());
+    }
+    if resident > total {
+        return Err(format!(
+            "D-Spark residency count is invalid: resident={resident} total={total}"
+        ));
+    }
+    if mode == DsparkResidencyMode::Resident && resident != total {
+        return Err(format!(
+            "D-Spark resident mode requires all auxiliary experts in HCS, got {resident}/{total}"
+        ));
+    }
+    Ok(())
+}
+
+fn dspark_residency_scan_required(
+    mode: DsparkResidencyMode,
+    hcs_expert_vram_bytes: Option<usize>,
+) -> bool {
+    mode == DsparkResidencyMode::Resident && hcs_expert_vram_bytes.is_some_and(|bytes| bytes > 0)
+}
+
+struct DsparkTargetCacheRowBackup {
+    label: String,
+    source_ptr: u64,
+    source_rows: usize,
+    row_bytes: usize,
+    mapping: DsparkTargetCacheRowMapping,
+    storage_offset: usize,
+    storage_rows: usize,
+}
+
+fn push_dspark_target_cache_backup_plane(
+    specs: &mut Vec<DsparkTargetCacheRowBackup>,
+    storage_bytes: &mut usize,
+    label: String,
+    source_ptr: u64,
+    source_rows: usize,
+    row_bytes: usize,
+    mapping: DsparkTargetCacheRowMapping,
+    storage_rows: usize,
+) -> Result<(), String> {
+    if source_ptr == 0 || source_rows == 0 || row_bytes == 0 || storage_rows == 0 {
+        return Err(format!(
+            "D-Spark target cache backup {label} has invalid geometry: ptr=0x{source_ptr:x} source_rows={source_rows} row_bytes={row_bytes} storage_rows={storage_rows}"
+        ));
+    }
+    let plane_storage_bytes = storage_rows
+        .checked_mul(row_bytes)
+        .ok_or_else(|| format!("D-Spark target cache backup {label} size overflow"))?;
+    let storage_offset = *storage_bytes;
+    *storage_bytes = storage_bytes
+        .checked_add(plane_storage_bytes)
+        .ok_or_else(|| "D-Spark target cache backup aggregate size overflow".to_string())?;
+    specs.push(DsparkTargetCacheRowBackup {
+        label,
+        source_ptr,
+        source_rows,
+        row_bytes,
+        mapping,
+        storage_offset,
+        storage_rows,
+    });
+    Ok(())
+}
+
+fn push_dspark_target_native_cache_backups(
+    specs: &mut Vec<DsparkTargetCacheRowBackup>,
+    storage_bytes: &mut usize,
+    prefix: &str,
+    cache: &DeepseekV4NativeCacheRegistration,
+    mapping: DsparkTargetCacheRowMapping,
+    storage_rows: usize,
+) -> Result<(), String> {
+    if cache.block_size == 0 {
+        return Err(format!(
+            "D-Spark target cache backup {prefix} has a zero block size"
+        ));
+    }
+    let codes_row_bytes = if cache.code_bits == 8 {
+        cache.quant_cols
+    } else if cache.code_bits == 4 {
+        cache.width.div_ceil(2)
+    } else {
+        return Err(format!(
+            "D-Spark target cache backup {prefix} has unsupported {}-bit codes",
+            cache.code_bits
+        ));
+    };
+    let scales_row_bytes = cache.quant_cols.div_ceil(cache.block_size);
+    push_dspark_target_cache_backup_plane(
+        specs,
+        storage_bytes,
+        format!("{prefix}.codes"),
+        cache.codes_ptr,
+        cache.rows,
+        codes_row_bytes,
+        mapping,
+        storage_rows,
+    )?;
+    push_dspark_target_cache_backup_plane(
+        specs,
+        storage_bytes,
+        format!("{prefix}.scale_exponents"),
+        cache.scale_exponents_ptr,
+        cache.rows,
+        scales_row_bytes,
+        mapping,
+        storage_rows,
+    )?;
+    if cache.tail_ptr != 0 {
+        let tail_row_bytes = cache
+            .width
+            .checked_sub(cache.quant_cols)
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+            .ok_or_else(|| format!("D-Spark target cache backup {prefix}.tail size overflow"))?;
+        push_dspark_target_cache_backup_plane(
+            specs,
+            storage_bytes,
+            format!("{prefix}.tail"),
+            cache.tail_ptr,
+            cache.rows,
+            tail_row_bytes,
+            mapping,
+            storage_rows,
+        )?;
+    }
+    Ok(())
+}
+
+struct DsparkProposal {
+    tokens: Vec<usize>,
+    confidences: Vec<f32>,
+}
+
+struct DsparkPlannedToken {
+    target_token: usize,
+    proposal: Option<(usize, f32, bool)>,
+    finish_reason: Option<&'static str>,
+    top_logprobs: Option<Vec<(u32, f32)>>,
+}
+
+struct DsparkRuntimeBuffers {
+    target_history: cudarc::driver::CudaSlice<u16>,
+    main_input: cudarc::driver::CudaSlice<u16>,
+    main_hidden: cudarc::driver::CudaSlice<u16>,
+    query_states: cudarc::driver::CudaSlice<u16>,
+    head_hidden: cudarc::driver::CudaSlice<u16>,
+    markov_embed: cudarc::driver::CudaSlice<u16>,
+    markov_bias: cudarc::driver::CudaSlice<f32>,
+    confidence_input: cudarc::driver::CudaSlice<u16>,
+    target_batch_hc_state: cudarc::driver::CudaSlice<u16>,
+    target_batch_hc_next: cudarc::driver::CudaSlice<u16>,
+    target_batch_hc_post: cudarc::driver::CudaSlice<f32>,
+    target_batch_hc_comb: cudarc::driver::CudaSlice<f32>,
+    target_batch_token_ids: cudarc::driver::CudaSlice<i32>,
+    position: cudarc::driver::CudaSlice<i32>,
+    selection_end: cudarc::driver::CudaSlice<i32>,
+}
+
+#[derive(Clone)]
+struct DsparkGraphRegistration {
+    main_proj_wid: usize,
+    main_norm_ptr: u64,
+    final_norm_ptr: u64,
+    head: DeepseekV4HeadRegistration,
+    markov_w1_wid: usize,
+    markov_w2_wid: usize,
+    confidence_wid: usize,
+}
+
 #[pyclass]
 pub struct GpuDecodeStore {
     device: Arc<CudaDevice>,
@@ -19591,8 +20734,16 @@ pub struct GpuDecodeStore {
     /// Max opt-in shared memory for GQA attention (bytes). Set during PTX load.
     gqa_max_smem_bytes: u32,
     last_decode_elapsed: f64,
+    /// Native wall time from the most recent successful Rust prefill. The
+    /// prompt length travels with the value so startup policy calibration
+    /// cannot accidentally consume a stale measurement from another probe.
+    last_rust_prefill_measurement: Option<(usize, f64, usize)>,
     /// Draft model for speculative decoding (None = disabled).
     draft: Option<crate::draft_model::DraftModel>,
+    /// Checkpoint-owned DeepSeek-V4 D-Spark runtime. This is deliberately
+    /// distinct from the generic Qwen-style draft model because D-Spark
+    /// consumes target hidden states and uses V4 hyper-connections/attention.
+    dspark: Option<DsparkRuntime>,
     /// Number of tokens to draft per speculative round.
     draft_k: usize,
     /// Context window for draft model warmup (last N tokens of prompt).
@@ -19728,7 +20879,7 @@ impl GpuDecodeStore {
     }
 
     pub fn speculative_decode_enabled_rust(&self) -> bool {
-        self.draft.is_some()
+        self.draft.is_some() || self.dspark.is_some()
     }
 
     /// Whether a synthetic mid-prefill split preserves this execution path's
@@ -19912,12 +21063,17 @@ impl GpuDecodeStore {
                 return Err(format!("synchronize active checkpoint restore: {sync:?}"));
             }
         }
-        let graph = self
-            .graph
-            .as_mut()
-            .ok_or_else(|| "GPU decode graph is not configured".to_string())?;
-        graph.kv_current_pos = logical_tokens;
-        graph.rope_position_delta = checkpoint.rope_position_delta;
+        {
+            let graph = self
+                .graph
+                .as_mut()
+                .ok_or_else(|| "GPU decode graph is not configured".to_string())?;
+            graph.kv_current_pos = logical_tokens;
+            graph.rope_position_delta = checkpoint.rope_position_delta;
+        }
+        if let Some(runtime) = self.dspark.as_mut() {
+            runtime.captured_prompt_len = logical_tokens;
+        }
         Ok(started.elapsed().as_secs_f64() * 1000.0)
     }
 
@@ -20569,12 +21725,17 @@ impl GpuDecodeStore {
             })
             .collect();
         let elapsed = self.restore_sequence_allocations_rust(allocations, blobs)?;
-        let graph = self
-            .graph
-            .as_mut()
-            .ok_or_else(|| "GPU decode graph is not configured".to_string())?;
-        graph.kv_current_pos = logical_tokens;
-        graph.rope_position_delta = rope_position_delta;
+        {
+            let graph = self
+                .graph
+                .as_mut()
+                .ok_or_else(|| "GPU decode graph is not configured".to_string())?;
+            graph.kv_current_pos = logical_tokens;
+            graph.rope_position_delta = rope_position_delta;
+        }
+        if let Some(runtime) = self.dspark.as_mut() {
+            runtime.captured_prompt_len = logical_tokens;
+        }
         Ok(elapsed)
     }
 
@@ -20765,6 +21926,7 @@ impl GpuDecodeStore {
         let attention_layout: Vec<_> = graph
             .layers
             .iter()
+            .take(graph.num_layers)
             .enumerate()
             .map(|(layer_idx, layer)| {
                 let hqq = layer
@@ -20807,7 +21969,7 @@ impl GpuDecodeStore {
                 layer_start: graph.decode_layer_start,
                 layer_end: graph.decode_layer_end,
             },
-            model_num_layers: graph.layers.len(),
+            model_num_layers: graph.num_layers,
             expert_quantization: format!(
                 "routed_bits={};shared_bits={};group_size={}",
                 graph.expert_bits, graph.shared_expert_bits, graph.group_size
@@ -20825,10 +21987,12 @@ impl GpuDecodeStore {
         graph: &GpuDecodeGraph,
         layer_range: Option<(usize, usize)>,
     ) -> Option<&'static str> {
-        let num_layers = graph.layers.len();
+        let num_layers = graph.num_layers.min(graph.layers.len());
         let (range_start, range_end) = layer_range.unwrap_or((0, num_layers));
         let range_end = range_end.min(num_layers);
-        let range_start = range_start.min(range_end);
+        if range_start > range_end {
+            return Some("CUDA graph target-layer range is invalid");
+        }
         let has_mamba2 = graph.layers[range_start..range_end]
             .iter()
             .any(|layer| matches!(layer.attn, GpuAttnConfig::Mamba2 { .. }));
@@ -24627,7 +25791,9 @@ impl GpuDecodeStore {
             v2_num_sms: 0,
             gqa_max_smem_bytes: gqa_smem_limit,
             last_decode_elapsed: 0.0,
+            last_rust_prefill_measurement: None,
             draft: None,
+            dspark: None,
             draft_k: 3,
             draft_context_window: 512,
             spec_jaccard_threshold: 0.15,
@@ -24986,6 +26152,38 @@ impl GpuDecodeStore {
                 }
             }
         }
+        if let Some(runtime) = self.dspark.as_ref() {
+            let buffers = runtime.buffers.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "D-Spark sequence-state inventory was finalized before its buffers",
+                )
+            })?;
+            required.push((
+                "dspark.target_history".to_string(),
+                *buffers.target_history.device_ptr(),
+            ));
+            for stage_idx in 0..runtime.stage_router_registered.len() {
+                let layer_idx = runtime
+                    .auxiliary_layer_start
+                    .checked_add(stage_idx)
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyOverflowError::new_err(
+                            "D-Spark auxiliary layer index overflow",
+                        )
+                    })?;
+                let raw_cache_ptr = graph
+                    .layers
+                    .get(layer_idx)
+                    .and_then(|layer| layer.deepseek_v4.as_ref())
+                    .map(|v4| v4.raw_cache_ptr)
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "D-Spark stage {stage_idx} raw ring is absent"
+                        ))
+                    })?;
+                required.push((format!("dspark.stage{stage_idx}.raw_ring"), raw_cache_ptr));
+            }
+        }
         for owner in &graph.dsa_indexer_owners {
             required.push((
                 format!("dsa.owner{}.key_cache", owner.owner_layer_idx),
@@ -25099,6 +26297,53 @@ impl GpuDecodeStore {
         Ok(total_bytes / (1024 * 1024))
     }
 
+    fn portable_prefill_predicted_w1_policy(&self) -> PyResult<String> {
+        let engine = self.prefill_engine_slot.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Prefill engine not allocated yet")
+        })?;
+        Ok(engine.portable_predicted_w1_policy_label())
+    }
+
+    fn last_rust_prefill_measurement(&self) -> PyResult<(usize, f64, usize)> {
+        self.last_rust_prefill_measurement.ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "no successful native Rust prefill measurement is available",
+            )
+        })
+    }
+
+    fn set_portable_prefill_predicted_w1_calibration_override(
+        &mut self,
+        enabled: bool,
+    ) -> PyResult<String> {
+        let engine = self.prefill_engine_slot.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Prefill engine not allocated yet")
+        })?;
+        if !engine.portable_predicted_w1_is_auto() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "portable predicted-W1 calibration requested for non-auto policy {}",
+                engine.portable_predicted_w1_policy_label(),
+            )));
+        }
+        engine
+            .set_portable_predicted_w1_calibration_override(enabled)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        Ok(engine.portable_predicted_w1_policy_label())
+    }
+
+    #[pyo3(signature = (min_prompt_tokens=None))]
+    fn finish_portable_prefill_predicted_w1_calibration(
+        &mut self,
+        min_prompt_tokens: Option<usize>,
+    ) -> PyResult<String> {
+        let engine = self.prefill_engine_slot.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Prefill engine not allocated yet")
+        })?;
+        engine
+            .finish_portable_predicted_w1_auto_calibration(min_prompt_tokens)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+
     /// Run Rust prefill directly from token IDs and prepare the decode store
     /// to continue generation from the returned first token.
     #[pyo3(signature = (token_ids, temperature=0.6, disable_pinning=false))]
@@ -25108,10 +26353,29 @@ impl GpuDecodeStore {
         temperature: f32,
         disable_pinning: bool,
     ) -> PyResult<(usize, usize, bool)> {
+        self.last_rust_prefill_measurement = None;
         let prompt_len = token_ids.len();
         let vram_calibration = self.vram_calibration;
         self.refresh_trace_config();
         let trace_cfg = self.active_trace_owned();
+        let dspark_target_capture = self.dspark.as_ref().and_then(|runtime| {
+            let buffers = runtime.buffers.as_ref()?;
+            let graph = self.graph.as_ref()?;
+            let window = graph
+                .layers
+                .get(runtime.auxiliary_layer_start)?
+                .deepseek_v4
+                .as_ref()?
+                .sliding_window;
+            let hc_mult = runtime.graph_registration.as_ref()?.head.mult;
+            Some(crate::gpu_prefill::DsparkTargetCaptureDescriptor {
+                layer_output_ids: runtime.target_layer_ids.clone(),
+                history_ptr: *buffers.target_history.device_ptr(),
+                window,
+                hc_mult,
+                hidden_size: graph.hidden_size,
+            })
+        });
         let (cache_fast_snapshot, ne) = {
             let (cache_fast, ne) = self.export_hcs_snapshot();
             (cache_fast.to_vec(), ne)
@@ -25134,12 +26398,15 @@ impl GpuDecodeStore {
         }
 
         let prefill_hcs_guard_store_addr = self as *mut Self as usize;
-        let (first_token, prompt_len, kv_overflow) = {
+        let (first_token, prompt_len, kv_overflow, prefill_time_ms, retry_attempts) = {
             let engine = self.prefill_engine_slot.as_mut().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(
                     "Rust prefill engine not allocated. Call allocate_prefill_engine() first.",
                 )
             })?;
+            engine
+                .set_dspark_target_capture(dspark_target_capture.clone())
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
             let kv_overflow = prompt_len > engine.kv_max_seq;
             let mut retry_cap: Option<usize> = None;
@@ -25285,12 +26552,17 @@ impl GpuDecodeStore {
                 prefill_result.first_token as usize,
                 prefill_result.prompt_len,
                 kv_overflow,
+                prefill_result.prefill_time_ms,
+                retry_attempt,
             )
         };
 
+        self.initialize_dspark_context_from_capture(prompt_len)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         self.set_kv_position_rust(prompt_len);
         self.prepare_runtime_for_decode_rust()
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        self.last_rust_prefill_measurement = Some((prompt_len, prefill_time_ms, retry_attempts));
 
         Ok((first_token, prompt_len, kv_overflow))
     }
@@ -25317,7 +26589,7 @@ impl GpuDecodeStore {
         let adaptive_cold_drop =
             AdaptiveColdDropRuntime::from_env(adaptive_cold_drop_shadow.enabled())
                 .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        if self.draft.is_some()
+        if (self.draft.is_some() || self.dspark.is_some())
             && (adaptive_cold_drop.enabled() || adaptive_cold_drop_shadow.enabled())
         {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -25363,7 +26635,7 @@ impl GpuDecodeStore {
             )));
         }
         let cpu_tail_workers = if cpu_tail_enabled {
-            if self.draft.is_some() {
+            if self.draft.is_some() || self.dspark.is_some() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "KRASIS_CPU_TAIL_RACE=1 is not supported with speculative decode",
                 ));
@@ -26239,6 +27511,8 @@ impl GpuDecodeStore {
                 )?,
                 deepseek_v4_swiglu_bf16: get("deepseek_v4_swiglu_bf16")?,
                 deepseek_v4_hc_replicate: get("deepseek_v4_hc_replicate_kernel")?,
+                dspark_pack_target_features: get("dspark_pack_target_features_kernel")?,
+                dspark_capture_target_state: get("dspark_capture_target_state_kernel")?,
                 deepseek_v4_hc_inv_rms: get("deepseek_v4_hc_inv_rms_kernel")?,
                 deepseek_v4_hc_project: get("deepseek_v4_hc_project_kernel")?,
                 deepseek_v4_hc_prepare: get("deepseek_v4_hc_prepare_kernel")?,
@@ -29927,6 +31201,102 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    /// Return the exact routed-expert shape of every registered MoE layer.
+    /// Python uses this setup-time contract instead of assuming the target
+    /// config describes auxiliary runtime layers such as D-Spark.
+    fn moe_route_shape(&self) -> PyResult<Vec<(usize, usize)>> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        Ok(graph
+            .moe_layers
+            .iter()
+            .enumerate()
+            .filter_map(|(layer_idx, moe)| moe.as_ref().map(|moe| (layer_idx, moe.num_experts)))
+            .collect())
+    }
+
+    /// Report and optionally enforce the D-Spark residency contract after a
+    /// measured HCS allocation. `resident` is truthful only when every
+    /// auxiliary expert is actually present; `shared` reports its measured
+    /// coverage without imposing a fixed split.
+    fn dspark_residency_status(&self) -> PyResult<String> {
+        let (mode, resident, total) = self
+            .dspark_residency_counts_internal()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        validate_dspark_residency_contract(mode, resident, total)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        Ok(serde_json::json!({
+            "mode": mode.label(),
+            "resident": resident,
+            "total": total,
+            "coverage": resident as f64 / total as f64,
+        })
+        .to_string())
+    }
+
+    /// Begin width calibration only after the final measured HCS pool exists.
+    /// The Rust hot path balances real rounds across every checkpoint-derived
+    /// legal width; Python only supplies held-out prompt traffic at startup.
+    fn dspark_verification_calibration_start(&mut self) -> PyResult<String> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        if graph
+            .hcs
+            .as_ref()
+            .is_none_or(|hcs| hcs.expert_vram_bytes == 0)
+        {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "D-Spark verification calibration requires the final measured HCS pool",
+            ));
+        }
+        self.validate_dspark_residency_internal()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let hcs_capacity = graph.hcs.as_ref().map_or(0, |hcs| hcs.num_cached);
+        let runtime = self
+            .dspark
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("D-Spark is not loaded"))?;
+        runtime
+            .verification_policy
+            .start_calibration(hcs_capacity)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        Ok(runtime.verification_policy.status_json().to_string())
+    }
+
+    /// Freeze the measured service curve. Normal Rust decode then chooses the
+    /// cheapest rows/token candidate from this curve and each live proposal's
+    /// confidence sequence. Missing measurements fail closed.
+    fn dspark_verification_calibration_finish(&mut self) -> PyResult<String> {
+        self.validate_dspark_residency_internal()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let hcs_capacity = self
+            .graph
+            .as_ref()
+            .and_then(|graph| graph.hcs.as_ref())
+            .map_or(0, |hcs| hcs.num_cached);
+        let runtime = self
+            .dspark
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("D-Spark is not loaded"))?;
+        runtime
+            .verification_policy
+            .finish_calibration(hcs_capacity)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        Ok(runtime.verification_policy.status_json().to_string())
+    }
+
+    fn dspark_verification_policy_status(&self) -> PyResult<String> {
+        let runtime = self
+            .dspark
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("D-Spark is not loaded"))?;
+        Ok(runtime.verification_policy.status_json().to_string())
+    }
+
     /// Start collecting activation heatmap data for HCS.
     fn hcs_start_collecting(&mut self) -> PyResult<()> {
         let graph = self
@@ -31275,6 +32645,10 @@ impl GpuDecodeStore {
         rope_rows: usize,
         logical_max_seq: usize,
     ) -> PyResult<()> {
+        let dspark_auxiliary = self.dspark.as_ref().is_some_and(|runtime| {
+            layer_idx >= runtime.auxiliary_layer_start
+                && layer_idx < runtime.auxiliary_layer_start + runtime.stage_router_registered.len()
+        });
         let graph = self
             .graph
             .as_mut()
@@ -31365,7 +32739,19 @@ impl GpuDecodeStore {
         } else {
             crate::session_cache::RUNTIME_KV_FORMAT_BF16
         };
-        if graph.layers.iter().any(|item| item.deepseek_v4.is_some()) {
+        if dspark_auxiliary {
+            if runtime_kv_format != crate::session_cache::RUNTIME_KV_FORMAT_BF16
+                || compress_ratio != 0
+            {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "D-Spark auxiliary layer {} requires an uncompressed BF16 ring cache",
+                    layer_idx
+                )));
+            }
+        } else if graph.layers[..graph.layers.len().min(graph.num_layers)]
+            .iter()
+            .any(|item| item.deepseek_v4.is_some())
+        {
             if graph.kv_format != runtime_kv_format {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "DeepSeek-V4 layer {} cache format differs from earlier layers",
@@ -35452,6 +36838,957 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    /// Load the checkpoint-owned DeepSeek-V4 D-Spark expert bank. Dense,
+    /// attention, hyper-connection, and head tensors are registered
+    /// separately from the setup-only Python loader; the per-token execution
+    /// path remains entirely Rust/CUDA.
+    #[pyo3(signature = (
+        model_dir, mode, target_layer_ids, block_size, noise_token_id,
+        markov_rank
+    ))]
+    fn load_dspark(
+        &mut self,
+        model_dir: &str,
+        mode: &str,
+        target_layer_ids: Vec<usize>,
+        block_size: usize,
+        noise_token_id: usize,
+        markov_rank: usize,
+    ) -> PyResult<String> {
+        if self.draft.is_some() || self.dspark.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "D-Spark cannot be combined with another draft runtime or loaded twice",
+            ));
+        }
+        let mode =
+            DsparkResidencyMode::parse(mode).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let (
+            target_layer_count,
+            hidden_size,
+            vocab_size,
+            group_size,
+            expert_bits,
+            adaptive_cold_drop,
+        ) = {
+            let graph = self.graph.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "D-Spark requires the configured DeepSeek-V4 target graph",
+                )
+            })?;
+            (
+                graph.num_layers,
+                graph.hidden_size,
+                graph.vocab_size,
+                graph.group_size,
+                graph.expert_bits,
+                graph.adaptive_cold_drop.enabled() || graph.adaptive_cold_drop_shadow.enabled(),
+            )
+        };
+        if adaptive_cold_drop {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "D-Spark is not supported with adaptive cold drop",
+            ));
+        }
+        if target_layer_ids.is_empty()
+            || block_size == 0
+            || markov_rank == 0
+            || noise_token_id >= vocab_size
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid D-Spark metadata: targets={target_layer_ids:?} block_size={block_size} noise_token_id={noise_token_id}/{vocab_size} markov_rank={markov_rank}"
+            )));
+        }
+        let mut unique_targets = target_layer_ids.clone();
+        unique_targets.sort_unstable();
+        unique_targets.dedup();
+        if unique_targets.len() != target_layer_ids.len()
+            || target_layer_ids.iter().any(|&layer_output_id| {
+                layer_output_id == 0 || layer_output_id > target_layer_count
+            })
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "D-Spark target layer-output ids must be unique and inside [1, {target_layer_count}]: {target_layer_ids:?}"
+            )));
+        }
+        if expert_bits != 4 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "D-Spark requires the INT4 production expert path, got INT{expert_bits}"
+            )));
+        }
+
+        let expert_store = crate::weights::WeightStore::load_dspark_from_hf(
+            std::path::Path::new(model_dir),
+            group_size,
+            expert_bits,
+            crate::weights::ExpertInt4CalibMode::Amax,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let stage_count = expert_store.config.num_moe_layers();
+        if stage_count != target_layer_ids.len()
+            || expert_store.config.hidden_size != hidden_size
+            || expert_store.config.n_routed_experts == 0
+            || expert_store.config.num_experts_per_tok == 0
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "D-Spark auxiliary expert contract mismatch: stages={stage_count}/{} hidden={}/{} experts={} topk={}",
+                target_layer_ids.len(),
+                expert_store.config.hidden_size,
+                hidden_size,
+                expert_store.config.n_routed_experts,
+                expert_store.config.num_experts_per_tok,
+            )));
+        }
+        let auxiliary_layer_start = target_layer_count;
+        let stage_router_registered = vec![false; stage_count];
+        let verification_policy = DsparkVerificationPolicy::new(block_size)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        self.dspark = Some(DsparkRuntime {
+            mode,
+            target_layer_ids,
+            block_size,
+            noise_token_id,
+            markov_rank,
+            auxiliary_layer_start,
+            stage_router_registered,
+            graph_registration: None,
+            buffers: None,
+            captured_prompt_len: 0,
+            proposal_rounds: 0,
+            proposed_tokens: 0,
+            verified_tokens: 0,
+            bonus_tokens: 0,
+            matched_tokens: 0,
+            rejected_tokens: 0,
+            verified_confidence_sum: 0.0,
+            matched_confidence_sum: 0.0,
+            rejected_confidence_sum: 0.0,
+            proposal_seconds: 0.0,
+            batch_verify_rounds: 0,
+            batch_transaction_rollbacks: 0,
+            batch_verify_seconds: 0.0,
+            proposal_timing_rounds: 0,
+            proposal_init_seconds: 0.0,
+            proposal_aux_kv_seconds: 0.0,
+            proposal_aux_query_seconds: 0.0,
+            proposal_head_seconds: 0.0,
+            proposal_markov_seconds: 0.0,
+            batch_save_seconds: 0.0,
+            batch_setup_seconds: 0.0,
+            batch_attention_route_seconds: 0.0,
+            batch_moe_seconds: 0.0,
+            batch_hc_commit_seconds: 0.0,
+            batch_head_seconds: 0.0,
+            batch_restore_seconds: 0.0,
+            context_commit_seconds: 0.0,
+            verification_policy,
+            target_state_backups: Vec::new(),
+            target_cache_row_backups: Vec::new(),
+            target_cache_backup_storage: None,
+            expert_store: Arc::new(expert_store),
+        });
+        self.allocate_batch_buffers(block_size.checked_add(1).ok_or_else(|| {
+            pyo3::exceptions::PyOverflowError::new_err(
+                "D-Spark verification batch capacity overflow",
+            )
+        })?)?;
+        let result = serde_json::json!({
+            "mode": mode.label(),
+            "stage_count": stage_count,
+            "auxiliary_layer_start": auxiliary_layer_start,
+            "block_size": block_size,
+            "noise_token_id": noise_token_id,
+            "markov_rank": markov_rank,
+        })
+        .to_string();
+        log::info!("D-Spark expert bank loaded: {result}");
+        Ok(result)
+    }
+
+    /// Register one D-Spark stage router and its source-bound expert bank at a
+    /// layer index immediately following the target graph. This expands only
+    /// MoE/HCS metadata; target decode remains bounded by `graph.num_layers`.
+    #[pyo3(signature = (stage_idx, gate_ptr, gate_rows, gate_cols, correction_bias_ptr, correction_bias_elems))]
+    fn register_dspark_moe_stage(
+        &mut self,
+        stage_idx: usize,
+        gate_ptr: usize,
+        gate_rows: usize,
+        gate_cols: usize,
+        correction_bias_ptr: usize,
+        correction_bias_elems: usize,
+    ) -> PyResult<usize> {
+        let (
+            auxiliary_layer_idx,
+            n_experts,
+            topk,
+            routed_scaling_factor,
+            gpu_experts,
+            shared_expert,
+            shared_bits,
+            backing_regions,
+        ) = {
+            let runtime = self.dspark.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Call load_dspark first")
+            })?;
+            if stage_idx >= runtime.stage_router_registered.len() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "D-Spark stage {stage_idx} outside [0, {})",
+                    runtime.stage_router_registered.len()
+                )));
+            }
+            if runtime.stage_router_registered[stage_idx] {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "D-Spark stage {stage_idx} router is already registered"
+                )));
+            }
+            let store = &runtime.expert_store;
+            let gpu_experts = store.experts_gpu.get(stage_idx).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "D-Spark stage {stage_idx} has no routed expert bank"
+                ))
+            })?;
+            let expert_ptrs = gpu_experts
+                .iter()
+                .map(|expert| {
+                    (
+                        expert.w13_packed.as_ptr() as usize,
+                        expert.w13_packed.len() * 4,
+                        expert.w13_scales.as_ptr() as usize,
+                        expert.w13_scales.len() * 2,
+                        expert.w2_packed.as_ptr() as usize,
+                        expert.w2_packed.len() * 4,
+                        expert.w2_scales.as_ptr() as usize,
+                        expert.w2_scales.len() * 2,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let (shared_expert, shared_bits) = store
+                .shared_experts_gpu
+                .get(stage_idx)
+                .map(|expert| {
+                    (
+                        Some((
+                            expert.w13_packed.as_ptr() as usize,
+                            expert.w13_packed.len() * 4,
+                            expert.w13_scales.as_ptr() as usize,
+                            expert.w13_scales.len() * 2,
+                            expert.w2_packed.as_ptr() as usize,
+                            expert.w2_packed.len() * 4,
+                            expert.w2_scales.as_ptr() as usize,
+                            expert.w2_scales.len() * 2,
+                        )),
+                        Some(expert.num_bits),
+                    )
+                })
+                .unwrap_or((None, None));
+            let backing = store.layer_backings_gpu.get(stage_idx).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "D-Spark stage {stage_idx} has no contiguous host backing"
+                ))
+            })?;
+            let backing_regions = [
+                (
+                    backing.w13_packed.as_ptr() as usize,
+                    backing.w13_packed.len(),
+                ),
+                (
+                    backing.w13_scales.as_ptr() as usize,
+                    backing.w13_scales.len(),
+                ),
+                (backing.w2_packed.as_ptr() as usize, backing.w2_packed.len()),
+                (backing.w2_scales.as_ptr() as usize, backing.w2_scales.len()),
+            ];
+            (
+                runtime.auxiliary_layer_start + stage_idx,
+                store.config.n_routed_experts,
+                store.config.num_experts_per_tok,
+                store.config.routed_scaling_factor,
+                expert_ptrs,
+                shared_expert,
+                shared_bits,
+                backing_regions,
+            )
+        };
+        let graph = self.graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("D-Spark target graph is absent")
+        })?;
+        if gate_ptr == 0
+            || correction_bias_ptr == 0
+            || gate_rows != n_experts
+            || gate_cols != graph.hidden_size
+            || correction_bias_elems != n_experts
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "D-Spark stage {stage_idx} router contract mismatch: gate_ptr={gate_ptr:#x} shape=[{gate_rows},{gate_cols}] expected=[{n_experts},{}] bias_ptr={correction_bias_ptr:#x} bias={correction_bias_elems}/{n_experts}",
+                graph.hidden_size,
+            )));
+        }
+        let gate_wid = graph.weights.len();
+        graph
+            .weights
+            .push(GpuWeight::new(gate_ptr as u64, gate_rows, gate_cols, 0));
+        let expected_total = graph.expert_buf_total_size;
+
+        self.register_moe_layer_data(
+            auxiliary_layer_idx,
+            gpu_experts,
+            shared_expert,
+            shared_bits,
+            n_experts,
+            topk,
+            2,
+            false,
+            routed_scaling_factor,
+            gate_wid,
+            0,
+            correction_bias_ptr,
+            None,
+        )?;
+        let graph = self.graph.as_mut().expect("validated above");
+        let moe = graph.moe_layers[auxiliary_layer_idx]
+            .as_mut()
+            .expect("D-Spark MoE registration just completed");
+        moe.deepseek_v4_activation = true;
+        moe.swiglu_limit = self
+            .dspark
+            .as_ref()
+            .expect("D-Spark runtime exists")
+            .expert_store
+            .config
+            .swiglu_limit;
+        moe.shared_swiglu_limit = moe.swiglu_limit;
+        for (expert_idx, expert) in moe.experts.iter_mut().enumerate() {
+            if let Some(backing) = self
+                .dspark
+                .as_ref()
+                .and_then(|runtime| runtime.expert_store.experts_gpu.get(stage_idx))
+                .and_then(|experts| experts.get(expert_idx))
+                .and_then(|expert| expert.contiguous_backing.as_ref())
+            {
+                expert.contiguous_ptr = backing.as_ptr() as usize;
+                expert.contiguous_bytes = backing.len();
+            }
+            let total = expert
+                .w13_packed_bytes
+                .checked_add(expert.w13_scales_bytes)
+                .and_then(|value| value.checked_add(expert.w2_packed_bytes))
+                .and_then(|value| value.checked_add(expert.w2_scales_bytes))
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "D-Spark expert payload size overflow",
+                    )
+                })?;
+            if total > expected_total {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "D-Spark expert payload {total} exceeds target-derived DMA slot {expected_total}"
+                )));
+            }
+        }
+        for (ptr, bytes) in backing_regions {
+            if bytes == 0 {
+                continue;
+            }
+            let result = unsafe {
+                cuda_sys::lib().cuMemHostRegister_v2(ptr as *mut std::ffi::c_void, bytes, 0)
+            };
+            if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "D-Spark stage {stage_idx} host registration failed for {bytes} bytes: {result:?}"
+                )));
+            }
+        }
+        self.dspark
+            .as_mut()
+            .expect("D-Spark runtime exists")
+            .stage_router_registered[stage_idx] = true;
+        log::info!(
+            "D-Spark stage {} registered as auxiliary MoE layer {} ({} experts, topk={})",
+            stage_idx,
+            auxiliary_layer_idx,
+            n_experts,
+            topk,
+        );
+        Ok(auxiliary_layer_idx)
+    }
+
+    /// Finish the checkpoint-owned dense D-Spark graph after all auxiliary
+    /// attention/HC/MoE stages have been registered. Every shape is derived
+    /// from the loaded target and checkpoint metadata; mismatches fail closed.
+    #[pyo3(signature = (
+        main_proj_wid, main_norm_ptr, main_norm_elems, final_norm_ptr,
+        final_norm_elems, head_fn_wid, head_base_ptr, head_base_elems,
+        head_scale_ptr, head_scale_elems, head_mult, head_eps,
+        markov_w1_wid, markov_w2_wid, confidence_wid
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_dspark_graph(
+        &mut self,
+        main_proj_wid: usize,
+        main_norm_ptr: usize,
+        main_norm_elems: usize,
+        final_norm_ptr: usize,
+        final_norm_elems: usize,
+        head_fn_wid: usize,
+        head_base_ptr: usize,
+        head_base_elems: usize,
+        head_scale_ptr: usize,
+        head_scale_elems: usize,
+        head_mult: usize,
+        head_eps: f32,
+        markov_w1_wid: usize,
+        markov_w2_wid: usize,
+        confidence_wid: usize,
+    ) -> PyResult<String> {
+        let runtime = self
+            .dspark
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call load_dspark first"))?;
+        if runtime.graph_registration.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "D-Spark dense graph is already registered",
+            ));
+        }
+        if runtime
+            .stage_router_registered
+            .iter()
+            .any(|&registered| !registered)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "D-Spark routers are incomplete: {:?}",
+                runtime.stage_router_registered
+            )));
+        }
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("D-Spark target graph is absent")
+        })?;
+        let hidden = graph.hidden_size;
+        let vocab = graph.vocab_size;
+        let stages = runtime.stage_router_registered.len();
+        for stage_idx in 0..stages {
+            let layer_idx = runtime.auxiliary_layer_start + stage_idx;
+            let layer = graph.layers.get(layer_idx).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "D-Spark stage {stage_idx} attention layer is absent"
+                ))
+            })?;
+            let v4 = layer.deepseek_v4.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "D-Spark stage {stage_idx} has no V4 attention registration"
+                ))
+            })?;
+            if v4.compress_ratio != 0
+                || v4.raw_native_cache.is_some()
+                || v4.hyper_connection.is_none()
+                || graph
+                    .moe_layers
+                    .get(layer_idx)
+                    .and_then(Option::as_ref)
+                    .is_none()
+            {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "D-Spark stage {stage_idx} registration is incomplete"
+                )));
+            }
+        }
+        let weight = |wid: usize, name: &str| -> PyResult<&GpuWeight> {
+            graph.weights.get(wid).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "D-Spark {name} has invalid weight id {wid}"
+                ))
+            })
+        };
+        let main_proj = weight(main_proj_wid, "main projection")?;
+        let head_fn = weight(head_fn_wid, "HC head projection")?;
+        let markov_w1 = weight(markov_w1_wid, "Markov W1")?;
+        let markov_w2 = weight(markov_w2_wid, "Markov W2")?;
+        let confidence = weight(confidence_wid, "confidence projection")?;
+        let expected_main_cols = hidden
+            .checked_mul(runtime.target_layer_ids.len())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "D-Spark main-projection input width overflow",
+                )
+            })?;
+        let head_input = head_mult.checked_mul(hidden).ok_or_else(|| {
+            pyo3::exceptions::PyOverflowError::new_err("D-Spark HC-head input width overflow")
+        })?;
+        if main_proj.dtype != 0
+            || (main_proj.rows, main_proj.cols) != (hidden, expected_main_cols)
+            || main_norm_ptr == 0
+            || main_norm_elems != hidden
+            || final_norm_ptr == 0
+            || final_norm_elems != hidden
+            || head_mult == 0
+            || !head_eps.is_finite()
+            || head_eps <= 0.0
+            || head_fn.dtype != 1
+            || (head_fn.rows, head_fn.cols) != (head_mult, head_input)
+            || head_base_ptr == 0
+            || head_base_elems != head_mult
+            || head_scale_ptr == 0
+            || head_scale_elems != 1
+            || markov_w1.dtype != 0
+            || (markov_w1.rows, markov_w1.cols) != (vocab, runtime.markov_rank)
+            || markov_w2.dtype != 0
+            || (markov_w2.rows, markov_w2.cols) != (vocab, runtime.markov_rank)
+            || confidence.dtype != 0
+            || (confidence.rows, confidence.cols) != (1, hidden + runtime.markov_rank)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "D-Spark dense/head contract mismatch: main=[{},{}]/[{},{}] head=[{},{}]/[{},{}] markov1=[{},{}] markov2=[{},{}] confidence=[{},{}]",
+                main_proj.rows,
+                main_proj.cols,
+                hidden,
+                expected_main_cols,
+                head_fn.rows,
+                head_fn.cols,
+                head_mult,
+                head_input,
+                markov_w1.rows,
+                markov_w1.cols,
+                markov_w2.rows,
+                markov_w2.cols,
+                confidence.rows,
+                confidence.cols,
+            )));
+        }
+        let mode = runtime.mode.label();
+        let auxiliary_layer_start = runtime.auxiliary_layer_start;
+        let block_size = runtime.block_size;
+        let sliding_window = graph.layers[auxiliary_layer_start]
+            .deepseek_v4
+            .as_ref()
+            .expect("validated")
+            .sliding_window;
+        let target_history_elems = runtime
+            .target_layer_ids
+            .len()
+            .checked_mul(sliding_window)
+            .and_then(|value| value.checked_mul(head_mult))
+            .and_then(|value| value.checked_mul(hidden))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "D-Spark target-history allocation size overflow",
+                )
+            })?;
+        let query_state_elems = block_size
+            .checked_mul(head_mult)
+            .and_then(|value| value.checked_mul(hidden))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "D-Spark query-state allocation size overflow",
+                )
+            })?;
+        let main_input_elems = runtime
+            .target_layer_ids
+            .len()
+            .checked_mul(hidden)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "D-Spark main-input allocation size overflow",
+                )
+            })?;
+        let confidence_elems = hidden.checked_add(runtime.markov_rank).ok_or_else(|| {
+            pyo3::exceptions::PyOverflowError::new_err(
+                "D-Spark confidence-input allocation size overflow",
+            )
+        })?;
+        let target_batch_size = block_size.checked_add(1).ok_or_else(|| {
+            pyo3::exceptions::PyOverflowError::new_err("D-Spark target batch size overflow")
+        })?;
+        let target_batch_state_elems = target_batch_size
+            .checked_mul(head_mult)
+            .and_then(|value| value.checked_mul(hidden))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "D-Spark target batch HC-state allocation size overflow",
+                )
+            })?;
+        let target_batch_post_elems =
+            target_batch_size.checked_mul(head_mult).ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "D-Spark target batch HC-post allocation size overflow",
+                )
+            })?;
+        let target_batch_comb_elems = target_batch_size
+            .checked_mul(head_mult)
+            .and_then(|value| value.checked_mul(head_mult))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "D-Spark target batch HC-combination allocation size overflow",
+                )
+            })?;
+        let alloc_u16 = |elements: usize, label: &str| {
+            self.device.alloc_zeros::<u16>(elements).map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "D-Spark {label} allocation ({elements} BF16): {error:?}"
+                ))
+            })
+        };
+        let alloc_f32 = |elements: usize, label: &str| {
+            self.device.alloc_zeros::<f32>(elements).map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "D-Spark {label} allocation ({elements} FP32): {error:?}"
+                ))
+            })
+        };
+        let alloc_i32 = |elements: usize, label: &str| {
+            self.device.alloc_zeros::<i32>(elements).map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "D-Spark {label} allocation ({elements} I32): {error:?}"
+                ))
+            })
+        };
+        let target_history = alloc_u16(target_history_elems, "target history")?;
+        let target_history_ptr = *target_history.device_ptr();
+        let target_history_bytes = target_history_elems
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "D-Spark target-history byte size overflow",
+                )
+            })?;
+        let target_history_stream_stride = hidden
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "D-Spark target-history stream stride overflow",
+                )
+            })?;
+        let target_history_row_stride = head_mult
+            .checked_mul(target_history_stream_stride)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "D-Spark target-history row stride overflow",
+                )
+            })?;
+        let target_history_layer_stride = sliding_window
+            .checked_mul(target_history_row_stride)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "D-Spark target-history layer stride overflow",
+                )
+            })?;
+        let buffers = DsparkRuntimeBuffers {
+            target_history,
+            main_input: alloc_u16(main_input_elems, "main input")?,
+            main_hidden: alloc_u16(hidden, "main hidden")?,
+            query_states: alloc_u16(query_state_elems, "query states")?,
+            head_hidden: alloc_u16(
+                block_size.checked_mul(hidden).ok_or_else(|| {
+                    pyo3::exceptions::PyOverflowError::new_err(
+                        "D-Spark head-hidden allocation size overflow",
+                    )
+                })?,
+                "head hidden",
+            )?,
+            markov_embed: alloc_u16(runtime.markov_rank, "Markov embedding")?,
+            markov_bias: alloc_f32(vocab, "Markov bias")?,
+            confidence_input: alloc_u16(confidence_elems, "confidence input")?,
+            target_batch_hc_state: alloc_u16(target_batch_state_elems, "target batch HC state")?,
+            target_batch_hc_next: alloc_u16(
+                target_batch_state_elems,
+                "target batch HC next state",
+            )?,
+            target_batch_hc_post: alloc_f32(
+                target_batch_post_elems,
+                "target batch HC post weights",
+            )?,
+            target_batch_hc_comb: alloc_f32(
+                target_batch_comb_elems,
+                "target batch HC combination weights",
+            )?,
+            target_batch_token_ids: alloc_i32(target_batch_size, "target batch token IDs")?,
+            position: alloc_i32(1, "position scalar")?,
+            selection_end: alloc_i32(1, "selection-end scalar")?,
+        };
+        let target_state_snapshot_rows = target_batch_size.checked_add(1).ok_or_else(|| {
+            pyo3::exceptions::PyOverflowError::new_err(
+                "D-Spark target-state snapshot row count overflow",
+            )
+        })?;
+        let mut backup_specs = Vec::<(usize, String, u64, usize)>::new();
+        let mut backup_pointers = std::collections::HashMap::<u64, usize>::new();
+        for layer_idx in 0..runtime.auxiliary_layer_start {
+            let Some(v4) = graph
+                .layers
+                .get(layer_idx)
+                .and_then(|layer| layer.deepseek_v4.as_ref())
+            else {
+                continue;
+            };
+            for (prefix, compressor) in v4
+                .compressor
+                .iter()
+                .map(|compressor| ("compressor", compressor))
+                .chain(
+                    v4.indexer
+                        .iter()
+                        .map(|indexer| ("indexer", &indexer.compressor)),
+                )
+            {
+                for (suffix, pointer, elements) in [
+                    ("kv", compressor.kv_state_ptr, compressor.kv_state_elems),
+                    (
+                        "score",
+                        compressor.score_state_ptr,
+                        compressor.score_state_elems,
+                    ),
+                ] {
+                    if pointer == 0 || elements == 0 {
+                        continue;
+                    }
+                    if let Some(&owner_layer_idx) = backup_pointers.get(&pointer) {
+                        if owner_layer_idx != layer_idx {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "D-Spark target recurrent state pointer 0x{pointer:x} is shared by layers {owner_layer_idx} and {layer_idx}"
+                            )));
+                        }
+                        continue;
+                    }
+                    backup_pointers.insert(pointer, layer_idx);
+                    let bytes = elements
+                        .checked_mul(std::mem::size_of::<f32>())
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyOverflowError::new_err(format!(
+                                "D-Spark target layer {layer_idx} {prefix} {suffix} state byte size overflow"
+                            ))
+                        })?;
+                    backup_specs.push((
+                        layer_idx,
+                        format!("layer{layer_idx}.{prefix}.{suffix}"),
+                        pointer,
+                        bytes,
+                    ));
+                }
+            }
+        }
+        let mut target_state_backups = Vec::with_capacity(backup_specs.len());
+        let mut target_state_backup_bytes = 0usize;
+        for (layer_idx, label, source_ptr, bytes) in backup_specs {
+            let storage_bytes = bytes
+                .checked_mul(target_state_snapshot_rows)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyOverflowError::new_err(format!(
+                        "D-Spark target state backup {label} snapshot allocation overflow"
+                    ))
+                })?;
+            target_state_backup_bytes = target_state_backup_bytes
+                .checked_add(storage_bytes)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyOverflowError::new_err(
+                        "D-Spark target state backup aggregate size overflow",
+                    )
+                })?;
+            let storage = self.device.alloc_zeros::<u8>(storage_bytes).map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "D-Spark target state backup {label} allocation ({storage_bytes} bytes): {error:?}"
+                ))
+            })?;
+            target_state_backups.push(DsparkTargetStateBackup {
+                layer_idx,
+                label,
+                source_ptr,
+                bytes,
+                snapshot_rows: target_state_snapshot_rows,
+                storage,
+            });
+        }
+        let mut target_cache_row_backups = Vec::new();
+        let mut target_cache_backup_bytes = 0usize;
+        for layer_idx in 0..runtime.auxiliary_layer_start {
+            let Some(v4) = graph
+                .layers
+                .get(layer_idx)
+                .and_then(|layer| layer.deepseek_v4.as_ref())
+            else {
+                continue;
+            };
+            let raw_mapping = DsparkTargetCacheRowMapping::Ring;
+            if let Some(cache) = v4.raw_native_cache.as_ref() {
+                push_dspark_target_native_cache_backups(
+                    &mut target_cache_row_backups,
+                    &mut target_cache_backup_bytes,
+                    &format!("layer{layer_idx}.raw"),
+                    cache,
+                    raw_mapping,
+                    target_batch_size,
+                )
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            } else {
+                let row_bytes = v4
+                    .head_dim
+                    .checked_mul(std::mem::size_of::<u16>())
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyOverflowError::new_err(format!(
+                            "D-Spark target layer {layer_idx} raw-cache row size overflow"
+                        ))
+                    })?;
+                push_dspark_target_cache_backup_plane(
+                    &mut target_cache_row_backups,
+                    &mut target_cache_backup_bytes,
+                    format!("layer{layer_idx}.raw.bf16"),
+                    v4.raw_cache_ptr,
+                    v4.sliding_window,
+                    row_bytes,
+                    raw_mapping,
+                    target_batch_size,
+                )
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            }
+            for (prefix, compressor, cache_width) in v4
+                .compressor
+                .iter()
+                .map(|compressor| ("compressed", compressor, v4.head_dim))
+                .chain(
+                    v4.indexer
+                        .iter()
+                        .map(|indexer| ("index", &indexer.compressor, indexer.index_head_dim)),
+                )
+            {
+                let mapping = DsparkTargetCacheRowMapping::Compressed {
+                    ratio: v4.compress_ratio,
+                };
+                if let Some(cache) = compressor.native_cache.as_ref() {
+                    push_dspark_target_native_cache_backups(
+                        &mut target_cache_row_backups,
+                        &mut target_cache_backup_bytes,
+                        &format!("layer{layer_idx}.{prefix}"),
+                        cache,
+                        mapping,
+                        target_batch_size,
+                    )
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                } else {
+                    let row_bytes = cache_width
+                        .checked_mul(std::mem::size_of::<u16>())
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyOverflowError::new_err(format!(
+                                "D-Spark target layer {layer_idx} {prefix} cache row size overflow"
+                            ))
+                        })?;
+                    push_dspark_target_cache_backup_plane(
+                        &mut target_cache_row_backups,
+                        &mut target_cache_backup_bytes,
+                        format!("layer{layer_idx}.{prefix}.bf16"),
+                        compressor.cache_ptr,
+                        compressor.cache_rows,
+                        row_bytes,
+                        mapping,
+                        target_batch_size,
+                    )
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                }
+            }
+        }
+        for history_idx in 0..runtime.target_layer_ids.len() {
+            let layer_offset = history_idx
+                .checked_mul(target_history_layer_stride)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyOverflowError::new_err(
+                        "D-Spark target-history backup layer offset overflow",
+                    )
+                })?;
+            let source_ptr = target_history_ptr
+                .checked_add(u64::try_from(layer_offset).map_err(|_| {
+                    pyo3::exceptions::PyOverflowError::new_err(
+                        "D-Spark target-history backup layer offset exceeds u64",
+                    )
+                })?)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyOverflowError::new_err(
+                        "D-Spark target-history backup pointer overflow",
+                    )
+                })?;
+            push_dspark_target_cache_backup_plane(
+                &mut target_cache_row_backups,
+                &mut target_cache_backup_bytes,
+                format!("dspark.target_history.{history_idx}"),
+                source_ptr,
+                sliding_window,
+                target_history_row_stride,
+                DsparkTargetCacheRowMapping::Ring,
+                target_batch_size,
+            )
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        }
+        let target_cache_backup_storage = if target_cache_backup_bytes == 0 {
+            None
+        } else {
+            Some(
+                self.device
+                    .alloc_zeros::<u8>(target_cache_backup_bytes)
+                    .map_err(|error| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "D-Spark target cache-row backup allocation ({target_cache_backup_bytes} bytes): {error:?}"
+                        ))
+                    })?,
+            )
+        };
+        self.sequence_state_registry
+            .register(crate::session_cache::SequenceStateAllocation {
+                name: "dspark.target_history".to_string(),
+                kind: "dspark_target_history".to_string(),
+                layer_idx: None,
+                device_ordinal: self.device.ordinal(),
+                ptr: target_history_ptr,
+                storage_bytes: target_history_bytes,
+                dtype: "bfloat16".to_string(),
+                element_size: std::mem::size_of::<u16>(),
+                shape: vec![
+                    runtime.target_layer_ids.len(),
+                    sliding_window,
+                    head_mult,
+                    hidden,
+                ],
+                strides_bytes: vec![
+                    target_history_layer_stride,
+                    target_history_row_stride,
+                    target_history_stream_stride,
+                    std::mem::size_of::<u16>(),
+                ],
+                growth: crate::session_cache::SequenceStateGrowth::Fixed,
+            })
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let runtime = self.dspark.as_mut().expect("validated above");
+        runtime.graph_registration = Some(DsparkGraphRegistration {
+            main_proj_wid,
+            main_norm_ptr: main_norm_ptr as u64,
+            final_norm_ptr: final_norm_ptr as u64,
+            head: DeepseekV4HeadRegistration {
+                fn_wid: head_fn_wid,
+                base_ptr: head_base_ptr as u64,
+                scale_ptr: head_scale_ptr as u64,
+                mult: head_mult,
+                eps: head_eps,
+            },
+            markov_w1_wid,
+            markov_w2_wid,
+            confidence_wid,
+        });
+        runtime.buffers = Some(buffers);
+        runtime.target_state_backups = target_state_backups;
+        runtime.target_cache_row_backups = target_cache_row_backups;
+        runtime.target_cache_backup_storage = target_cache_backup_storage;
+        log::info!(
+            "D-Spark transactional snapshots: recurrent={:.1} MB cache_rows={:.1} MB recurrent_rows={} cache_row_capacity={}",
+            target_state_backup_bytes as f64 / 1e6,
+            target_cache_backup_bytes as f64 / 1e6,
+            target_state_snapshot_rows,
+            target_batch_size,
+        );
+        let result = serde_json::json!({
+            "mode": mode,
+            "stages": stages,
+            "auxiliary_layer_start": auxiliary_layer_start,
+            "block_size": block_size,
+            "sliding_window": sliding_window,
+        })
+        .to_string();
+        log::info!("D-Spark dense graph registered: {result}");
+        Ok(result)
+    }
+
     /// Check if a draft model is loaded.
     #[getter]
     fn has_draft_model(&self) -> bool {
@@ -36040,17 +38377,15 @@ impl GpuDecodeStore {
                     .into(),
             );
         }
-        if let Some((layer_idx, contract)) = graph
-            .layers
-            .iter()
-            .enumerate()
-            .find_map(|(layer_idx, layer)| {
-                layer_split_sequence_state_contract(
-                    &layer.attn,
-                    layer.post_attn_norm_ptr,
-                )
-                .map(|contract| (layer_idx, contract))
-            })
+        if let Some((layer_idx, contract)) =
+            graph
+                .layers
+                .iter()
+                .enumerate()
+                .find_map(|(layer_idx, layer)| {
+                    layer_split_sequence_state_contract(&layer.attn, layer.post_attn_norm_ptr)
+                        .map(|contract| (layer_idx, contract))
+                })
         {
             return Some(format!(
                 "serial layer-split decode does not support the registered {contract} contract at layer {layer_idx}",
@@ -37836,6 +40171,48 @@ impl GpuDecodeStore {
 // ── Pure-Rust methods for GPU decode (no PyO3, used by Rust HTTP server) ──
 
 impl GpuDecodeStore {
+    fn dspark_residency_counts_internal(
+        &self,
+    ) -> Result<(DsparkResidencyMode, usize, usize), String> {
+        let graph = self.graph.as_ref().ok_or("Call configure first")?;
+        let runtime = self.dspark.as_ref().ok_or("D-Spark is not loaded")?;
+        let hcs = graph.hcs.as_ref().ok_or("HCS is not initialized")?;
+        let mut resident = 0usize;
+        let mut total = 0usize;
+        for stage_idx in 0..runtime.stage_router_registered.len() {
+            let layer_idx = runtime
+                .auxiliary_layer_start
+                .checked_add(stage_idx)
+                .ok_or("D-Spark auxiliary layer index overflow")?;
+            let moe = graph
+                .moe_layers
+                .get(layer_idx)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| format!("D-Spark auxiliary MoE layer {layer_idx} is absent"))?;
+            total = total
+                .checked_add(moe.num_experts)
+                .ok_or("D-Spark auxiliary expert count overflow")?;
+            let layer_resident = (0..moe.num_experts)
+                .filter(|&expert_idx| hcs.get_fast(layer_idx, expert_idx).is_some())
+                .count();
+            resident = resident
+                .checked_add(layer_resident)
+                .ok_or("D-Spark resident expert count overflow")?;
+        }
+        Ok((runtime.mode, resident, total))
+    }
+
+    fn validate_dspark_residency_internal(&self) -> Result<(), String> {
+        let runtime = self.dspark.as_ref().ok_or("D-Spark is not loaded")?;
+        let graph = self.graph.as_ref().ok_or("Call configure first")?;
+        let hcs_expert_vram_bytes = graph.hcs.as_ref().map(|hcs| hcs.expert_vram_bytes);
+        if !dspark_residency_scan_required(runtime.mode, hcs_expert_vram_bytes) {
+            return Ok(());
+        }
+        let (mode, resident, total) = self.dspark_residency_counts_internal()?;
+        validate_dspark_residency_contract(mode, resident, total)
+    }
+
     fn execute_dsa_owner_scores(
         &self,
         owner_layer_idx: usize,
@@ -38253,6 +40630,34 @@ impl GpuDecodeStore {
         mult: usize,
         label: &str,
     ) -> Result<(), String> {
+        let workspace = graph
+            .deepseek_v4_decode_workspace
+            .as_ref()
+            .ok_or("DeepSeek-V4 decode workspace is not finalized")?;
+        self.launch_deepseek_v4_hc_post_with_mix_for_graph(
+            graph,
+            output_state_ptr,
+            sublayer_ptr,
+            residual_state_ptr,
+            *workspace.d_hc_post.device_ptr(),
+            *workspace.d_hc_comb.device_ptr(),
+            mult,
+            label,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_deepseek_v4_hc_post_with_mix_for_graph(
+        &self,
+        graph: &GpuDecodeGraph,
+        output_state_ptr: u64,
+        sublayer_ptr: u64,
+        residual_state_ptr: u64,
+        post_ptr: u64,
+        combination_ptr: u64,
+        mult: usize,
+        label: &str,
+    ) -> Result<(), String> {
         use cudarc::driver::LaunchConfig;
         let workspace = graph
             .deepseek_v4_decode_workspace
@@ -38261,6 +40666,8 @@ impl GpuDecodeStore {
         if output_state_ptr == 0
             || sublayer_ptr == 0
             || residual_state_ptr == 0
+            || post_ptr == 0
+            || combination_ptr == 0
             || mult == 0
             || workspace.hc_mult != mult
         {
@@ -38296,8 +40703,8 @@ impl GpuDecodeStore {
                         output_state_ptr,
                         sublayer_ptr,
                         residual_state_ptr,
-                        *workspace.d_hc_post.device_ptr(),
-                        *workspace.d_hc_comb.device_ptr(),
+                        post_ptr,
+                        combination_ptr,
                         graph.hidden_size as i32,
                         mult as i32,
                     ),
@@ -38307,17 +40714,14 @@ impl GpuDecodeStore {
         Ok(())
     }
 
-    fn launch_deepseek_v4_hc_head_for_graph(
+    fn launch_deepseek_v4_hc_head_registration_for_graph(
         &self,
         graph: &GpuDecodeGraph,
+        head: &DeepseekV4HeadRegistration,
         state_ptr: u64,
         hidden_out_ptr: u64,
     ) -> Result<(), String> {
         use cudarc::driver::LaunchConfig;
-        let head = graph
-            .deepseek_v4_head
-            .as_ref()
-            .ok_or("DeepSeek-V4 final HC head is not registered")?;
         let workspace = graph
             .deepseek_v4_decode_workspace
             .as_ref()
@@ -38437,6 +40841,24 @@ impl GpuDecodeStore {
                 .map_err(|error| format!("DeepSeek-V4 final HC reduction: {:?}", error))?;
         }
         Ok(())
+    }
+
+    fn launch_deepseek_v4_hc_head_for_graph(
+        &self,
+        graph: &GpuDecodeGraph,
+        state_ptr: u64,
+        hidden_out_ptr: u64,
+    ) -> Result<(), String> {
+        let head = graph
+            .deepseek_v4_head
+            .as_ref()
+            .ok_or("DeepSeek-V4 final HC head is not registered")?;
+        self.launch_deepseek_v4_hc_head_registration_for_graph(
+            graph,
+            head,
+            state_ptr,
+            hidden_out_ptr,
+        )
     }
 
     fn deepseek_v4_hc_tiled_launch_config(
@@ -39192,6 +41614,7 @@ impl GpuDecodeStore {
         graph: &GpuDecodeGraph,
         layer_idx: usize,
         position_ptr: u64,
+        selection_end_ptr: Option<u64>,
         path_clock_base: Option<usize>,
     ) -> Result<(), String> {
         use cudarc::driver::LaunchConfig;
@@ -39290,8 +41713,13 @@ impl GpuDecodeStore {
         )?;
         mark_prefix(6, "deepseek-v4-q-a-norm-end")?;
 
-        let parallel_wkv = !self.deepseek_v4_parallel_wkv_stream.0.is_null();
-        let parallel_qb = self.deepseek_v4_parallel_qb;
+        // The accepted target path overlaps HQQ WKV/QB on its auxiliary
+        // stream. D-Spark stages carry checkpoint BF16 projections and must
+        // execute those weights on the primary stream instead of pretending
+        // an HQQ descriptor exists.
+        let parallel_wkv =
+            !self.deepseek_v4_parallel_wkv_stream.0.is_null() && v4.hqq_tensors.contains_key("wkv");
+        let parallel_qb = parallel_wkv && self.deepseek_v4_parallel_qb;
         let graph_stream = *self.device.cu_stream();
         if parallel_wkv {
             let desc = v4.hqq_tensors.get("wkv").ok_or_else(|| {
@@ -39590,6 +42018,7 @@ impl GpuDecodeStore {
                 label, selected, workspace.max_selected
             ));
         }
+        let window_end_ptr = selection_end_ptr.unwrap_or(position_ptr);
         unsafe {
             kernels
                 .deepseek_v4_window_indices
@@ -39602,7 +42031,7 @@ impl GpuDecodeStore {
                     },
                     (
                         *workspace.d_indices.device_ptr(),
-                        position_ptr,
+                        window_end_ptr,
                         1i32,
                         window as i32,
                         selected as i32,
@@ -39951,6 +42380,7 @@ impl GpuDecodeStore {
         graph: &GpuDecodeGraph,
         layer_idx: usize,
         position_ptr: u64,
+        selection_end_ptr: Option<u64>,
         path_clock_graph_idx: Option<usize>,
     ) -> Result<(), String> {
         let layer = graph
@@ -40022,6 +42452,7 @@ impl GpuDecodeStore {
             graph,
             layer_idx,
             position_ptr,
+            selection_end_ptr,
             path_clock_base,
         )?;
         self.launch_deepseek_v4_hc_post_for_graph(
@@ -41429,6 +43860,9 @@ impl GpuDecodeStore {
             graph.kv_current_pos = seq_len;
             log::info!("Rust prefill: set KV position to {}", seq_len);
         }
+        if let Some(runtime) = self.dspark.as_mut() {
+            runtime.captured_prompt_len = seq_len;
+        }
     }
 
     /// Take the pre-allocated prefill engine from the slot.
@@ -42360,8 +44794,28 @@ impl GpuDecodeStore {
         use crate::gpu_prefill::*;
 
         let graph = self.graph.as_ref().ok_or("GpuDecodeStore not configured")?;
-        let has_deepseek_v4 = graph.layers.iter().any(|layer| layer.deepseek_v4.is_some());
-        if has_deepseek_v4 && graph.layers.iter().any(|layer| layer.deepseek_v4.is_none()) {
+        let target_layers = graph.layers.get(..graph.num_layers).ok_or_else(|| {
+            format!(
+                "target layer count {} exceeds registered layer count {}",
+                graph.num_layers,
+                graph.layers.len()
+            )
+        })?;
+        let target_moe_layers = graph.moe_layers.get(..graph.num_layers).ok_or_else(|| {
+            format!(
+                "target layer count {} exceeds registered MoE metadata count {}",
+                graph.num_layers,
+                graph.moe_layers.len()
+            )
+        })?;
+        let has_deepseek_v4 = target_layers
+            .iter()
+            .any(|layer| layer.deepseek_v4.is_some());
+        if has_deepseek_v4
+            && target_layers
+                .iter()
+                .any(|layer| layer.deepseek_v4.is_none())
+        {
             return Err(
                 "DeepSeek-V4 prefill construction requires every transformer layer to carry a V4 descriptor"
                     .to_string(),
@@ -42419,7 +44873,7 @@ impl GpuDecodeStore {
         let cublas_handle = cudarc::cublas::result::create_handle()
             .map_err(|e| format!("Create cuBLAS handle: {:?}", e))?;
         // Build model config
-        let num_layers = graph.layers.len();
+        let num_layers = target_layers.len();
         let mut layer_types = vec![0u8; num_layers];
         let mut num_q_heads = 0usize;
         let mut num_kv_heads = 0usize;
@@ -42435,7 +44889,7 @@ impl GpuDecodeStore {
         let mut deepseek_v4_min_compress_ratio = 0usize;
 
         // Detect dimensions from first GQA layer
-        for l in &graph.layers {
+        for l in target_layers {
             if let Some(v4) = &l.deepseek_v4 {
                 max_gqa_q_dim = max_gqa_q_dim.max(v4.num_heads.saturating_mul(v4.head_dim));
                 max_gqa_kv_dim = max_gqa_kv_dim.max(v4.head_dim);
@@ -42483,7 +44937,7 @@ impl GpuDecodeStore {
         let mut la_cd = 0usize;
         let mut la_scale = 0.0f32;
 
-        for (i, l) in graph.layers.iter().enumerate() {
+        for (i, l) in target_layers.iter().enumerate() {
             if let Some(v4) = &l.deepseek_v4 {
                 layer_types[i] = 4;
                 let hc = v4.hyper_connection.as_ref().ok_or_else(|| {
@@ -42539,7 +44993,7 @@ impl GpuDecodeStore {
                     let is_zero_head_moe_placeholder = *num_heads == 0
                         && *nkv == 0
                         && *hd == 0
-                        && graph.moe_layers.get(i).and_then(|m| m.as_ref()).is_some();
+                        && target_moe_layers.get(i).and_then(|m| m.as_ref()).is_some();
                     if is_zero_head_moe_placeholder {
                         layer_types[i] = 2;
                     } else {
@@ -42659,7 +45113,7 @@ impl GpuDecodeStore {
         let mut routed_sf = 1.0f32;
         let mut moe_gated = true;
         let mut moe_activation = 0u8;
-        for ml in &graph.moe_layers {
+        for ml in target_moe_layers {
             if let Some(m) = ml {
                 n_routed = m.num_experts;
                 n_topk = m.topk;
@@ -42757,13 +45211,52 @@ impl GpuDecodeStore {
             crate::gpu_prefill::DeepseekV4PrefillSoftmaxMode::from_env(deepseek_hqq)?;
         let deepseek_v4_prefill_predicted_w1_enabled =
             crate::gpu_prefill::deepseek_v4_prefill_predicted_w1_enabled_from_env(deepseek_hqq)?;
+        let portable_prefill_predicted_w1_policy = resolve_portable_predicted_w1_policy()?;
         let deepseek_v4_prefill_split_expert_dma_enabled =
             resolve_bool_env("KRASIS_PREFILL_SPLIT_EXPERT_DMA", deepseek_hqq)?;
-        if deepseek_v4_prefill_predicted_w1_enabled && !deepseek_v4_prefill_split_expert_dma_enabled
+        if portable_prefill_predicted_w1_policy.requested() {
+            if config.deepseek_v4_hc_mult > 0 {
+                return Err(
+                    "KRASIS_PREFILL_PREDICTED_W1 is for standard hidden-width routed experts; DeepSeek-V4 must use KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1"
+                        .to_string(),
+                );
+            }
+            let mut compatible_routed_layers = 0usize;
+            for (layer_idx, moe) in target_moe_layers.iter().enumerate() {
+                let Some(moe) = moe.as_ref() else {
+                    continue;
+                };
+                compatible_routed_layers += 1;
+                let gemma4 = target_layers
+                    .get(layer_idx)
+                    .map(|layer| matches!(layer.mlp, GpuMlpConfig::Gemma4MoE { .. }))
+                    .unwrap_or(false);
+                if moe.moe_input_size != 0
+                    || moe.latent_down_wid.is_some()
+                    || moe.latent_up_wid.is_some()
+                    || gemma4
+                {
+                    return Err(format!(
+                        "KRASIS_PREFILL_PREDICTED_W1 requires standard hidden-width routed experts; layer {layer_idx} has moe_input_size={} latent_down={} latent_up={} gemma4={gemma4}",
+                        moe.moe_input_size,
+                        moe.latent_down_wid.is_some(),
+                        moe.latent_up_wid.is_some(),
+                    ));
+                }
+            }
+            if compatible_routed_layers == 0 {
+                return Err(
+                    "KRASIS_PREFILL_PREDICTED_W1 requires at least one routed-expert layer"
+                        .to_string(),
+                );
+            }
+        }
+        if (deepseek_v4_prefill_predicted_w1_enabled
+            || portable_prefill_predicted_w1_policy.requested())
+            && !deepseek_v4_prefill_split_expert_dma_enabled
         {
             return Err(
-                "KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1 requires KRASIS_PREFILL_SPLIT_EXPERT_DMA"
-                    .to_string(),
+                "predicted-W1 prefetch requires KRASIS_PREFILL_SPLIT_EXPERT_DMA".to_string(),
             );
         }
         let deepseek_v4_prefill_index_score_mode =
@@ -42822,6 +45315,12 @@ impl GpuDecodeStore {
                 deepseek_v4_prefill_hc_project_mode.label()
             );
         }
+        if portable_prefill_predicted_w1_policy.requested() {
+            eprintln!(
+                "Portable predicted-W1 prefetch: {} (standard hidden-width routed experts)",
+                portable_prefill_predicted_w1_policy.label(),
+            );
+        }
 
         // Scratch allocation is DYNAMIC per-prompt via prepare_for_prefill/release_scratch.
         // At init, allocate minimal 1-token scratch so HCS gets maximum VRAM.
@@ -42878,7 +45377,7 @@ impl GpuDecodeStore {
             }
         };
 
-        for (i, l) in graph.layers.iter().enumerate() {
+        for (i, l) in target_layers.iter().enumerate() {
             let mut lw = PrefillLayerWeights {
                 input_norm: l.input_norm_ptr,
                 post_attn_norm: l.post_attn_norm_ptr,
@@ -43609,7 +46108,7 @@ impl GpuDecodeStore {
                             GpuMlpConfig::Gemma4MoE { .. } => "Gemma4MoE",
                             GpuMlpConfig::None => "None",
                         },
-                        graph.moe_layers.len(),
+                        target_moe_layers.len(),
                         graph
                             .moe_layers
                             .get(i)
@@ -43649,7 +46148,7 @@ impl GpuDecodeStore {
                     lw.shared_swiglu_limit = 0.0;
                     lw.moe_deepseek_v4_activation = false;
                     lw.moe_layer_idx = Some(i);
-                    if let Some(Some(moe_data)) = graph.moe_layers.get(i) {
+                    if let Some(Some(moe_data)) = target_moe_layers.get(i) {
                         lw.moe_hash_table_ptr = moe_data.hash_table_ptr;
                         lw.moe_hash_vocab_size = moe_data.hash_vocab_size;
                         lw.moe_swiglu_limit = moe_data.swiglu_limit;
@@ -43686,7 +46185,7 @@ impl GpuDecodeStore {
                     dense_up_proj,
                     dense_down_proj,
                 } => {
-                    if let Some(Some(moe_data)) = graph.moe_layers.get(i) {
+                    if let Some(Some(moe_data)) = target_moe_layers.get(i) {
                         let gw = &graph.weights[moe_data.gate_wid];
                         lw.moe_gate_ptr = gw.ptr;
                         lw.moe_gate_rows = gw.rows;
@@ -43731,7 +46230,7 @@ impl GpuDecodeStore {
                 GpuMlpConfig::None => {
                     // MoE layers use GpuMlpConfig::None as placeholder — actual MoE data
                     // is in graph.moe_layers[i]. Bridge the gap here.
-                    if let Some(Some(moe_data)) = graph.moe_layers.get(i) {
+                    if let Some(Some(moe_data)) = target_moe_layers.get(i) {
                         let gw = &graph.weights[moe_data.gate_wid];
                         lw.moe_gate_ptr = gw.ptr;
                         lw.moe_gate_rows = gw.rows;
@@ -43814,7 +46313,7 @@ impl GpuDecodeStore {
                 }
             }
 
-            if let Some(Some(moe_data)) = graph.moe_layers.get(i) {
+            if let Some(Some(moe_data)) = target_moe_layers.get(i) {
                 lw.moe_input_size = moe_data.moe_input_size;
                 if let Some(wid) = moe_data.latent_down_wid {
                     lw.moe_latent_down = extract_marlin(wid);
@@ -43870,7 +46369,7 @@ impl GpuDecodeStore {
 
         // Build MoE expert data
         let mut moe_layers: Vec<Option<PrefillMoeLayerData>> = Vec::new();
-        for ml in &graph.moe_layers {
+        for ml in target_moe_layers {
             let prefill_layer = ml.as_ref().map(|m| {
                 let experts: Vec<ExpertWeightPtrs> = m
                     .experts
@@ -44272,8 +46771,7 @@ impl GpuDecodeStore {
             None
         };
         let deepseek_v4_max_seq = if has_deepseek_v4 {
-            graph
-                .layers
+            target_layers
                 .first()
                 .and_then(|layer| layer.deepseek_v4.as_ref())
                 .map(|v4| v4.logical_max_seq)
@@ -44282,8 +46780,7 @@ impl GpuDecodeStore {
             graph.kv_max_seq
         };
         let deepseek_v4_max_seq_by_layer = if has_deepseek_v4 {
-            graph
-                .layers
+            target_layers
                 .iter()
                 .map(|layer| {
                     layer
@@ -44304,6 +46801,7 @@ impl GpuDecodeStore {
             scratch,
             layer_weights,
             deepseek_v4_head,
+            dspark_target_capture: None,
             moe_layers,
             expert_hqq_cache: graph.expert_hqq_cache.clone(),
             embedding_ptr: graph.embedding_ptr,
@@ -44387,6 +46885,7 @@ impl GpuDecodeStore {
             deepseek_v4_prefill_gather_mode,
             deepseek_v4_prefill_softmax_mode,
             deepseek_v4_prefill_predicted_w1_enabled,
+            portable_prefill_predicted_w1_policy,
             deepseek_v4_prefill_split_expert_dma_enabled,
             deepseek_v4_prefill_index_score_mode,
             deepseek_v4_prefill_topk_mode,
@@ -44532,9 +47031,9 @@ impl GpuDecodeStore {
             ptr_prefetch_pinned_count: 0,
             ptr_prefetch_cold_count: 0,
             ptr_prefetch_total_count: 0,
-            deepseek_predicted_w1_layer: None,
-            deepseek_predicted_w1_slots: vec![usize::MAX; n_routed.max(1)],
-            deepseek_predicted_w1_count: 0,
+            predicted_w1_layer: None,
+            predicted_w1_slots: vec![usize::MAX; n_routed.max(1)],
+            predicted_w1_count: 0,
             q_type,
             qk_norm_bf16_bufs,
             hqq_bf16_weight_bufs: Vec::new(),
@@ -45563,7 +48062,7 @@ impl GpuDecodeStore {
 
         // For each LA layer, replay tokens in order
         let mut la_idx = 0usize;
-        for layer_idx in 0..graph.layers.len() {
+        for layer_idx in 0..graph.num_layers.min(graph.layers.len()) {
             let is_la = matches!(
                 &graph.layers[layer_idx].attn,
                 GpuAttnConfig::LinearAttention { .. }
@@ -46408,7 +48907,7 @@ impl GpuDecodeStore {
 
         // Distinct routed-expert shapes across MoE layers.
         let mut shapes: Vec<(usize, usize, usize)> = Vec::new();
-        for (layer_idx, moe) in graph.moe_layers.iter().enumerate() {
+        for (layer_idx, moe) in graph.moe_layers.iter().take(graph.num_layers).enumerate() {
             let Some(moe) = moe.as_ref() else { continue };
             if moe.experts.is_empty() {
                 continue;
@@ -46445,7 +48944,12 @@ impl GpuDecodeStore {
         // Stage one real expert into every staging buffer so each z-slot reads a
         // distinct VRAM region (same pattern as real decode with topk experts).
         let n_bufs = graph.d_graph_expert_bufs.len();
-        let first_moe = graph.moe_layers.iter().find_map(|m| m.as_ref()).unwrap();
+        let first_moe = graph
+            .moe_layers
+            .iter()
+            .take(graph.num_layers)
+            .find_map(|m| m.as_ref())
+            .unwrap();
         let expert = &first_moe.experts[0];
         let w13p_off = graph.expert_buf_w13p_offset as u64;
         let w13s_off = graph.expert_buf_w13s_offset as u64;
@@ -46716,7 +49220,7 @@ impl GpuDecodeStore {
         let mut shared_shapes: Vec<(usize, usize, bool, u64, u64, usize)> = Vec::new();
         if matches!(graph.shared_expert_bits, 4 | 8) {
             let shared_is_int8 = graph.shared_expert_bits == 8;
-            for (layer_idx, moe_opt) in graph.moe_layers.iter().enumerate() {
+            for (layer_idx, moe_opt) in graph.moe_layers.iter().take(graph.num_layers).enumerate() {
                 let Some(moe) = moe_opt.as_ref() else {
                     continue;
                 };
@@ -46949,7 +49453,9 @@ impl GpuDecodeStore {
             let mut w2_shapes: Vec<(usize, usize, bool, u64, u64, usize)> = Vec::new();
             if matches!(graph.shared_expert_bits, 4 | 8) {
                 let shared_is_int8 = graph.shared_expert_bits == 8;
-                for (layer_idx, moe_opt) in graph.moe_layers.iter().enumerate() {
+                for (layer_idx, moe_opt) in
+                    graph.moe_layers.iter().take(graph.num_layers).enumerate()
+                {
                     let Some(moe) = moe_opt.as_ref() else {
                         continue;
                     };
@@ -47270,7 +49776,7 @@ impl GpuDecodeStore {
         graph.captured_route_sync_classifies = 0;
 
         // Identify which layers have MoE data (within our range)
-        let num_layers = graph.layers.len();
+        let num_layers = graph.num_layers.min(graph.layers.len());
         let (range_start, range_end) = layer_range.unwrap_or((0, num_layers));
         let mut moe_indices: Vec<usize> = Vec::new();
         for i in range_start..range_end {
@@ -47301,7 +49807,7 @@ impl GpuDecodeStore {
         // and an explicit environment value preserves diagnostic A/B control.
         let split_override = std::env::var("KRASIS_SPLIT_EXPERT_LAUNCH").ok();
         let split_requested =
-            split_expert_launch_enabled(graph.dsa_runtime_registered, split_override.as_deref());
+            split_expert_launch_enabled(graph.dsa_runtime_registered, split_override.as_deref())?;
         graph.split_expert_launch = split_requested;
         if graph.gpu_route_sync {
             let Some(mapped) = graph.mapped_cold_buf.as_ref() else {
@@ -47320,6 +49826,7 @@ impl GpuDecodeStore {
             if let Some((layer_idx, _)) = graph
                 .moe_layers
                 .iter()
+                .take(num_layers)
                 .enumerate()
                 .filter_map(|(layer_idx, moe)| moe.as_ref().map(|moe| (layer_idx, moe)))
                 .find(|(_, moe)| {
@@ -49330,6 +51837,7 @@ impl GpuDecodeStore {
                         hc.mult,
                         &format!("DeepSeek-V4 layer {} FFN", layer_idx),
                     )?;
+                    self.capture_dspark_decode_target_state(graph, layer_idx, d_pos_ptr)?;
                 } else if gemma4_expert_layer {
                     let layer = &graph.layers[layer_idx];
                     let norm_cfg = LaunchConfig {
@@ -49641,6 +52149,7 @@ impl GpuDecodeStore {
                         graph,
                         layer_idx,
                         d_pos_ptr,
+                        None,
                         deepseek_v4_path_clock_graph_idx,
                     )?;
                     if mixed_segment_clock_active && layer_idx == range_end {
@@ -56732,6 +59241,26 @@ impl GpuDecodeStore {
                         let mut miss_count = 0usize;
                         let mut boundary_dma_bytes = 0u64;
                         let mut boundary_dma_calls = 0u64;
+                        // The ordinary path used to interleave H2D submissions
+                        // with expert cloning, validation, promotion planning,
+                        // and counter updates. A fast copy stream can drain
+                        // between those host operations. The compatible default
+                        // path builds the complete pointer plan first, then
+                        // submits the same copies as one tight, portable CUDA
+                        // burst. Incompatible execution modes retain their
+                        // established scheduler.
+                        let deferred_cold_dma = deferred_cold_dma_enabled()
+                            && !apfl_replay
+                            && graph.expert_compression.is_none()
+                            && graph.synthetic_repack.is_none()
+                            && graph.peer_experts.is_empty()
+                            && graph.cpu_tail_workers.is_empty();
+                        let mut deferred_h2d_copies: Vec<(u64, usize, usize)> =
+                            Vec::with_capacity(if deferred_cold_dma {
+                                cold_count.saturating_mul(4)
+                            } else {
+                                0
+                            });
 
                         if cold_count > graph_buf_base.len() {
                             return Err(format!(
@@ -56828,7 +59357,8 @@ impl GpuDecodeStore {
                                         .begin_copy_batch(copy_stream)?;
                                 }
                             }
-                            if graph.graph_internal_timing && miss_count == 0 {
+                            if graph.graph_internal_timing && miss_count == 0 && !deferred_cold_dma
+                            {
                                 graph
                                     .graph_timing_events
                                     .as_ref()
@@ -56855,58 +59385,88 @@ impl GpuDecodeStore {
                                 boundary_dma_bytes += expert.compressed_bytes as u64;
                                 boundary_dma_calls += copy_calls;
                             } else {
-                                unsafe {
-                                    if expert.contiguous_ptr != 0 {
-                                        // Contiguous DMA: single call for entire expert
-                                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                if expert.contiguous_ptr != 0 {
+                                    if deferred_cold_dma {
+                                        deferred_h2d_copies.push((
                                             base,
-                                            expert.contiguous_ptr as *const std::ffi::c_void,
+                                            expert.contiguous_ptr,
                                             expert.contiguous_bytes,
-                                            copy_stream,
-                                        );
-                                        graph.dma_bytes_total += expert.contiguous_bytes as u64;
-                                        graph.dma_call_count += 1;
-                                        boundary_dma_bytes += expert.contiguous_bytes as u64;
-                                        boundary_dma_calls += 1;
+                                        ));
                                     } else {
-                                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                            w13p,
-                                            expert.w13_packed_ptr as *const std::ffi::c_void,
-                                            expert.w13_packed_bytes,
-                                            copy_stream,
-                                        );
-                                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                            w13s,
-                                            expert.w13_scales_ptr as *const std::ffi::c_void,
-                                            expert.w13_scales_bytes,
-                                            copy_stream,
-                                        );
-                                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                            w2p,
-                                            expert.w2_packed_ptr as *const std::ffi::c_void,
-                                            expert.w2_packed_bytes,
-                                            copy_stream,
-                                        );
-                                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                            w2s,
-                                            expert.w2_scales_ptr as *const std::ffi::c_void,
-                                            expert.w2_scales_bytes,
-                                            copy_stream,
-                                        );
-                                        let dma_bytes = expert.w13_packed_bytes
-                                            + expert.w13_scales_bytes
-                                            + expert.w2_packed_bytes
-                                            + expert.w2_scales_bytes;
-                                        graph.dma_bytes_total += dma_bytes as u64;
-                                        graph.dma_call_count += 4;
-                                        boundary_dma_bytes += dma_bytes as u64;
-                                        boundary_dma_calls += 4;
+                                        // Contiguous DMA: single call for entire expert
+                                        unsafe {
+                                            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                                base,
+                                                expert.contiguous_ptr as *const std::ffi::c_void,
+                                                expert.contiguous_bytes,
+                                                copy_stream,
+                                            );
+                                        }
                                     }
+                                    graph.dma_bytes_total += expert.contiguous_bytes as u64;
+                                    graph.dma_call_count += 1;
+                                    boundary_dma_bytes += expert.contiguous_bytes as u64;
+                                    boundary_dma_calls += 1;
+                                } else {
+                                    let copies = [
+                                        (w13p, expert.w13_packed_ptr, expert.w13_packed_bytes),
+                                        (w13s, expert.w13_scales_ptr, expert.w13_scales_bytes),
+                                        (w2p, expert.w2_packed_ptr, expert.w2_packed_bytes),
+                                        (w2s, expert.w2_scales_ptr, expert.w2_scales_bytes),
+                                    ];
+                                    if deferred_cold_dma {
+                                        deferred_h2d_copies.extend(copies);
+                                    } else {
+                                        for &(destination, source, bytes) in &copies {
+                                            unsafe {
+                                                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                                    destination,
+                                                    source as *const std::ffi::c_void,
+                                                    bytes,
+                                                    copy_stream,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    let dma_bytes = expert.w13_packed_bytes
+                                        + expert.w13_scales_bytes
+                                        + expert.w2_packed_bytes
+                                        + expert.w2_scales_bytes;
+                                    graph.dma_bytes_total += dma_bytes as u64;
+                                    graph.dma_call_count += 4;
+                                    boundary_dma_bytes += dma_bytes as u64;
+                                    boundary_dma_calls += 4;
                                 }
                             }
 
                             synthetic_repack_ptrs.push([w13p, w13s, w2p, w2s]);
                             cold_bufs.push((w13p, w13s, w2p, w2s, batch_slot));
+                        }
+                        if !deferred_h2d_copies.is_empty() {
+                            if graph.graph_internal_timing {
+                                graph
+                                    .graph_timing_events
+                                    .as_ref()
+                                    .unwrap()
+                                    .demand_dma
+                                    .record_start(graph_idx, copy_stream)?;
+                            }
+                            for &(destination, source, bytes) in &deferred_h2d_copies {
+                                let result = unsafe {
+                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                        destination,
+                                        source as *const std::ffi::c_void,
+                                        bytes,
+                                        copy_stream,
+                                    )
+                                };
+                                if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                                    return Err(format!(
+                                        "deferred cold H2D layer={} dst=0x{:x} bytes={}: {:?}",
+                                        moe_layer_idx, destination, bytes, result,
+                                    ));
+                                }
+                            }
                         }
                         if cold_bufs.len() != cold_count {
                             return Err(format!(
@@ -57349,7 +59909,25 @@ impl GpuDecodeStore {
                         }
                         dynamic_promotion_event_pending = false;
                     }
-                    if graph.graph_internal_timing && !cold_experts.is_empty() {
+                    // The production host-visible route path normally submits
+                    // each expert immediately, then performs its pointer and
+                    // promotion bookkeeping before submitting the next one.
+                    // The compatible default path prepares the complete layer
+                    // first and submits the identical copies as one tight burst.
+                    let deferred_cold_dma = deferred_cold_dma_enabled()
+                        && !apfl_replay
+                        && graph.expert_compression.is_none()
+                        && graph.synthetic_repack.is_none()
+                        && graph.peer_experts.is_empty()
+                        && graph.cpu_tail_workers.is_empty();
+                    let mut deferred_h2d_copies: Vec<(u64, usize, usize)> =
+                        Vec::with_capacity(if deferred_cold_dma {
+                            cold_experts.len().saturating_mul(4)
+                        } else {
+                            0
+                        });
+                    if graph.graph_internal_timing && !cold_experts.is_empty() && !deferred_cold_dma
+                    {
                         graph
                             .graph_timing_events
                             .as_ref()
@@ -57677,54 +60255,56 @@ impl GpuDecodeStore {
                             graph.dma_call_count += copy_calls;
                             boundary_dma_bytes += expert.compressed_bytes as u64;
                             boundary_dma_calls += copy_calls;
-                        } else {
-                            unsafe {
-                                if expert.contiguous_ptr != 0 {
+                        } else if expert.contiguous_ptr != 0 {
+                            if deferred_cold_dma {
+                                deferred_h2d_copies.push((
+                                    base,
+                                    expert.contiguous_ptr,
+                                    expert.contiguous_bytes,
+                                ));
+                            } else {
+                                unsafe {
                                     cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                                         base,
                                         expert.contiguous_ptr as *const std::ffi::c_void,
                                         expert.contiguous_bytes,
                                         copy_stream,
                                     );
-                                    graph.dma_bytes_total += expert.contiguous_bytes as u64;
-                                    graph.dma_call_count += 1;
-                                    boundary_dma_bytes += expert.contiguous_bytes as u64;
-                                    boundary_dma_calls += 1;
-                                } else {
-                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                        w13p,
-                                        expert.w13_packed_ptr as *const std::ffi::c_void,
-                                        expert.w13_packed_bytes,
-                                        copy_stream,
-                                    );
-                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                        w13s,
-                                        expert.w13_scales_ptr as *const std::ffi::c_void,
-                                        expert.w13_scales_bytes,
-                                        copy_stream,
-                                    );
-                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                        w2p,
-                                        expert.w2_packed_ptr as *const std::ffi::c_void,
-                                        expert.w2_packed_bytes,
-                                        copy_stream,
-                                    );
-                                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                        w2s,
-                                        expert.w2_scales_ptr as *const std::ffi::c_void,
-                                        expert.w2_scales_bytes,
-                                        copy_stream,
-                                    );
-                                    let dma_bytes = expert.w13_packed_bytes
-                                        + expert.w13_scales_bytes
-                                        + expert.w2_packed_bytes
-                                        + expert.w2_scales_bytes;
-                                    graph.dma_bytes_total += dma_bytes as u64;
-                                    graph.dma_call_count += 4;
-                                    boundary_dma_bytes += dma_bytes as u64;
-                                    boundary_dma_calls += 4;
                                 }
                             }
+                            graph.dma_bytes_total += expert.contiguous_bytes as u64;
+                            graph.dma_call_count += 1;
+                            boundary_dma_bytes += expert.contiguous_bytes as u64;
+                            boundary_dma_calls += 1;
+                        } else {
+                            let copies = [
+                                (w13p, expert.w13_packed_ptr, expert.w13_packed_bytes),
+                                (w13s, expert.w13_scales_ptr, expert.w13_scales_bytes),
+                                (w2p, expert.w2_packed_ptr, expert.w2_packed_bytes),
+                                (w2s, expert.w2_scales_ptr, expert.w2_scales_bytes),
+                            ];
+                            if deferred_cold_dma {
+                                deferred_h2d_copies.extend(copies);
+                            } else {
+                                unsafe {
+                                    for &(destination, source, bytes) in &copies {
+                                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                            destination,
+                                            source as *const std::ffi::c_void,
+                                            bytes,
+                                            copy_stream,
+                                        );
+                                    }
+                                }
+                            }
+                            let dma_bytes = expert.w13_packed_bytes
+                                + expert.w13_scales_bytes
+                                + expert.w2_packed_bytes
+                                + expert.w2_scales_bytes;
+                            graph.dma_bytes_total += dma_bytes as u64;
+                            graph.dma_call_count += 4;
+                            boundary_dma_bytes += dma_bytes as u64;
+                            boundary_dma_calls += 4;
                         }
                         boundary_dma_experts += 1;
                         synthetic_repack_ptrs.push([w13p, w13s, w2p, w2s]);
@@ -57754,6 +60334,33 @@ impl GpuDecodeStore {
                                 w2p_bytes: expert.w2_packed_bytes,
                                 w2s_bytes: expert.w2_scales_bytes,
                             });
+                        }
+                    }
+
+                    if !deferred_h2d_copies.is_empty() {
+                        if graph.graph_internal_timing {
+                            graph
+                                .graph_timing_events
+                                .as_ref()
+                                .unwrap()
+                                .demand_dma
+                                .record_start(graph_idx, copy_stream)?;
+                        }
+                        for (destination, source, bytes) in deferred_h2d_copies.drain(..) {
+                            let result = unsafe {
+                                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                    destination,
+                                    source as *const std::ffi::c_void,
+                                    bytes,
+                                    copy_stream,
+                                )
+                            };
+                            if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(format!(
+                                    "deferred legacy cold H2D layer={} destination=0x{:x} bytes={}: {:?}",
+                                    moe_layer_idx, destination, bytes, result,
+                                ));
+                            }
                         }
                     }
 
@@ -58815,29 +61422,1077 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    fn dspark_timing_checkpoint(
+        &self,
+        started: Option<std::time::Instant>,
+        label: &str,
+    ) -> Result<f64, String> {
+        let Some(started) = started else {
+            return Ok(0.0);
+        };
+        self.device
+            .synchronize()
+            .map_err(|error| format!("D-Spark {label} timing sync: {error:?}"))?;
+        Ok(started.elapsed().as_secs_f64())
+    }
+
+    fn upload_dspark_i32(&self, destination: u64, value: usize, label: &str) -> Result<(), String> {
+        let value = i32::try_from(value)
+            .map_err(|_| format!("D-Spark {label} value {value} exceeds i32"))?;
+        let result = unsafe {
+            cuda_sys::lib().cuMemcpyHtoD_v2(
+                destination,
+                &value as *const i32 as *const std::ffi::c_void,
+                std::mem::size_of::<i32>(),
+            )
+        };
+        if result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("D-Spark {label} upload failed: {result:?}"));
+        }
+        Ok(())
+    }
+
+    fn store_dspark_context_kv_for_graph(
+        &self,
+        graph: &GpuDecodeGraph,
+        runtime: &DsparkRuntime,
+        stage_idx: usize,
+        hidden_ptr: u64,
+        absolute_position: usize,
+    ) -> Result<(), String> {
+        use cudarc::driver::LaunchConfig;
+        let registration = runtime
+            .graph_registration
+            .as_ref()
+            .ok_or("D-Spark dense graph is not finalized")?;
+        let buffers = runtime
+            .buffers
+            .as_ref()
+            .ok_or("D-Spark runtime buffers are not allocated")?;
+        let layer_idx = runtime
+            .auxiliary_layer_start
+            .checked_add(stage_idx)
+            .ok_or_else(|| "D-Spark auxiliary layer index overflow".to_string())?;
+        let v4 = graph
+            .layers
+            .get(layer_idx)
+            .and_then(|layer| layer.deepseek_v4.as_ref())
+            .ok_or_else(|| format!("D-Spark stage {stage_idx} attention is absent"))?;
+        if v4.compress_ratio != 0 || v4.raw_native_cache.is_some() || v4.raw_cache_ptr == 0 {
+            return Err(format!(
+                "D-Spark stage {stage_idx} context write requires an uncompressed BF16 ring"
+            ));
+        }
+        let workspace = graph
+            .deepseek_v4_decode_workspace
+            .as_ref()
+            .ok_or("DeepSeek-V4 decode workspace is not finalized")?;
+        let wkv = graph
+            .weights
+            .get(v4.wkv_wid)
+            .ok_or_else(|| format!("D-Spark stage {stage_idx} WKV is absent"))?;
+        self.upload_dspark_i32(
+            *buffers.position.device_ptr(),
+            absolute_position,
+            "context position",
+        )?;
+        self.deepseek_v4_projection_gemv_bf16(
+            v4,
+            "wkv",
+            wkv,
+            hidden_ptr,
+            *workspace.d_kv.device_ptr(),
+        )?;
+        self.launch_deepseek_v4_rmsnorm_rows_for_graph(
+            graph,
+            *workspace.d_kv.device_ptr(),
+            *workspace.d_kv.device_ptr(),
+            v4.kv_norm_ptr,
+            1,
+            v4.head_dim,
+            1.0,
+            &format!("D-Spark stage {stage_idx} context KV"),
+        )?;
+        self.launch_deepseek_v4_tail_rope_for_graph(
+            graph,
+            *workspace.d_kv.device_ptr(),
+            *buffers.position.device_ptr(),
+            v4.rope_cos_ptr,
+            v4.rope_sin_ptr,
+            1,
+            v4.head_dim,
+            v4.rope_dim,
+            v4.rope_rows,
+            false,
+            &format!("D-Spark stage {stage_idx} context KV"),
+        )?;
+        let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
+        let quant_cols = v4.head_dim - v4.rope_dim;
+        unsafe {
+            kernels
+                .deepseek_v4_fp8_qat_inplace
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (
+                            quant_cols.div_ceil(DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE) as u32,
+                            1,
+                            1,
+                        ),
+                        block_dim: (DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE as u32, 1, 1),
+                        shared_mem_bytes: (DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE * 4) as u32,
+                    },
+                    (
+                        *workspace.d_kv.device_ptr(),
+                        1i32,
+                        v4.head_dim as i32,
+                        quant_cols as i32,
+                        DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE as i32,
+                    ),
+                )
+                .map_err(|error| {
+                    format!("D-Spark stage {stage_idx} context KV FP8 QAT: {error:?}")
+                })?;
+            kernels
+                .deepseek_v4_store_raw_kv_decode
+                .clone()
+                .launch(
+                    LaunchConfig::for_num_elems(v4.head_dim as u32),
+                    (
+                        v4.raw_cache_ptr,
+                        *workspace.d_kv.device_ptr(),
+                        *buffers.position.device_ptr(),
+                        v4.head_dim as i32,
+                        v4.sliding_window as i32,
+                    ),
+                )
+                .map_err(|error| {
+                    format!("D-Spark stage {stage_idx} context raw-ring write: {error:?}")
+                })?;
+        }
+        let _ = registration;
+        Ok(())
+    }
+
+    fn initialize_dspark_context_position_with_graph(
+        &mut self,
+        graph: &mut GpuDecodeGraph,
+        runtime: &mut DsparkRuntime,
+        absolute_position: usize,
+    ) -> Result<(), String> {
+        use cudarc::driver::LaunchConfig;
+        let registration = runtime
+            .graph_registration
+            .as_ref()
+            .ok_or("D-Spark dense graph is not finalized")?;
+        let buffers = runtime
+            .buffers
+            .as_ref()
+            .ok_or("D-Spark runtime buffers are not allocated")?;
+        let first_v4 = graph
+            .layers
+            .get(runtime.auxiliary_layer_start)
+            .and_then(|layer| layer.deepseek_v4.as_ref())
+            .ok_or("D-Spark first attention stage is absent")?;
+        let window = first_v4.sliding_window;
+        let target_count = runtime.target_layer_ids.len();
+        let main_proj = graph
+            .weights
+            .get(registration.main_proj_wid)
+            .ok_or("D-Spark main projection is absent")?;
+        if (main_proj.rows, main_proj.cols) != (graph.hidden_size, target_count * graph.hidden_size)
+        {
+            return Err("D-Spark main projection geometry changed after registration".to_string());
+        }
+        let feature_elems = target_count
+            .checked_mul(graph.hidden_size)
+            .ok_or_else(|| "D-Spark feature count overflow".to_string())?;
+        let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
+        unsafe {
+            kernels
+                .dspark_pack_target_features
+                .clone()
+                .launch(
+                    LaunchConfig::for_num_elems(
+                        u32::try_from(feature_elems)
+                            .map_err(|_| "D-Spark feature grid exceeds u32".to_string())?,
+                    ),
+                    (
+                        *buffers.main_input.device_ptr(),
+                        *buffers.target_history.device_ptr(),
+                        (absolute_position % window) as i32,
+                        target_count as i32,
+                        window as i32,
+                        graph.hidden_size as i32,
+                        registration.head.mult as i32,
+                    ),
+                )
+                .map_err(|error| {
+                    format!(
+                        "D-Spark target feature packing at position {absolute_position}: {error:?}"
+                    )
+                })?;
+        }
+        self.gemv_bf16_internal(
+            main_proj,
+            *buffers.main_input.device_ptr(),
+            *buffers.main_hidden.device_ptr(),
+        )?;
+        self.launch_deepseek_v4_rmsnorm_for_graph(
+            graph,
+            *buffers.main_hidden.device_ptr(),
+            *buffers.main_hidden.device_ptr(),
+            registration.main_norm_ptr,
+            graph.hidden_size,
+            "D-Spark main target projection",
+        )?;
+        for stage_idx in 0..runtime.stage_router_registered.len() {
+            self.store_dspark_context_kv_for_graph(
+                graph,
+                runtime,
+                stage_idx,
+                *buffers.main_hidden.device_ptr(),
+                absolute_position,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn initialize_dspark_context_with_graph(
+        &mut self,
+        graph: &mut GpuDecodeGraph,
+        runtime: &mut DsparkRuntime,
+        prompt_len: usize,
+    ) -> Result<(), String> {
+        if prompt_len == 0 {
+            return Err("D-Spark context initialization requires a non-empty prompt".to_string());
+        }
+        let first_v4 = graph
+            .layers
+            .get(runtime.auxiliary_layer_start)
+            .and_then(|layer| layer.deepseek_v4.as_ref())
+            .ok_or("D-Spark first attention stage is absent")?;
+        let window = first_v4.sliding_window;
+        let context_start = prompt_len.saturating_sub(window);
+        for absolute_position in context_start..prompt_len {
+            self.initialize_dspark_context_position_with_graph(graph, runtime, absolute_position)?;
+        }
+        self.device
+            .synchronize()
+            .map_err(|error| format!("D-Spark context initialization sync: {error:?}"))?;
+        runtime.captured_prompt_len = prompt_len;
+        Ok(())
+    }
+
+    fn initialize_dspark_context_from_capture(&mut self, prompt_len: usize) -> Result<(), String> {
+        let Some(mut runtime) = self.dspark.take() else {
+            return Ok(());
+        };
+        let mut graph = self
+            .graph
+            .take()
+            .ok_or_else(|| "D-Spark context initialization requires a decode graph".to_string())?;
+        let result =
+            self.initialize_dspark_context_with_graph(&mut graph, &mut runtime, prompt_len);
+        self.graph = Some(graph);
+        self.dspark = Some(runtime);
+        result
+    }
+
+    pub fn prepare_dspark_context_after_prefill_rust(
+        &mut self,
+        prompt_len: usize,
+    ) -> Result<(), String> {
+        self.initialize_dspark_context_from_capture(prompt_len)
+    }
+
+    fn commit_dspark_target_context_position(&mut self, position: usize) -> Result<(), String> {
+        let Some(mut runtime) = self.dspark.take() else {
+            return Ok(());
+        };
+        let mut graph = self
+            .graph
+            .take()
+            .ok_or_else(|| "D-Spark context commit requires a decode graph".to_string())?;
+        let result = if runtime.captured_prompt_len != position {
+            Err(format!(
+                "D-Spark target context is not contiguous: captured={} commit_position={position}",
+                runtime.captured_prompt_len,
+            ))
+        } else {
+            self.initialize_dspark_context_position_with_graph(&mut graph, &mut runtime, position)
+                .and_then(|()| {
+                    runtime.captured_prompt_len = position
+                        .checked_add(1)
+                        .ok_or_else(|| "D-Spark captured context length overflow".to_string())?;
+                    Ok(())
+                })
+        };
+        self.graph = Some(graph);
+        self.dspark = Some(runtime);
+        result
+    }
+
+    fn generate_dspark_block_with_graph(
+        &mut self,
+        graph: &mut GpuDecodeGraph,
+        runtime: &mut DsparkRuntime,
+        anchor_token: usize,
+        anchor_position: usize,
+    ) -> Result<DsparkProposal, String> {
+        use cudarc::driver::LaunchConfig;
+        let timing = graph.timing_enabled;
+        let init_started = timing.then(std::time::Instant::now);
+        if runtime.captured_prompt_len != anchor_position {
+            return Err(format!(
+                "D-Spark proposal context is not current: captured={} anchor_position={anchor_position}",
+                runtime.captured_prompt_len,
+            ));
+        }
+        let registration = runtime
+            .graph_registration
+            .as_ref()
+            .cloned()
+            .ok_or("D-Spark dense graph is not finalized")?;
+        let block_size = runtime.block_size;
+        let block_last = anchor_position
+            .checked_add(block_size.saturating_sub(1))
+            .ok_or_else(|| "D-Spark proposal position overflow".to_string())?;
+        let hidden = graph.hidden_size;
+        let hc_mult = registration.head.mult;
+        let state_elems = hidden
+            .checked_mul(hc_mult)
+            .ok_or_else(|| "D-Spark query-state width overflow".to_string())?;
+        let state_bytes = state_elems
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "D-Spark query-state byte size overflow".to_string())?;
+        let hidden_bytes = hidden
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "D-Spark hidden byte size overflow".to_string())?;
+        let markov_bytes = runtime
+            .markov_rank
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "D-Spark Markov byte size overflow".to_string())?;
+        let post_bytes = hc_mult
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "D-Spark HC post byte size overflow".to_string())?;
+        let combination_elems = hc_mult
+            .checked_mul(hc_mult)
+            .ok_or_else(|| "D-Spark HC combination size overflow".to_string())?;
+        let combination_bytes = combination_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "D-Spark HC combination byte size overflow".to_string())?;
+        let required_query_state_elems = block_size
+            .checked_mul(state_elems)
+            .ok_or_else(|| "D-Spark query-state capacity overflow".to_string())?;
+        let required_head_hidden_elems = block_size
+            .checked_mul(hidden)
+            .ok_or_else(|| "D-Spark head-hidden capacity overflow".to_string())?;
+        let required_post_elems = block_size
+            .checked_mul(hc_mult)
+            .ok_or_else(|| "D-Spark HC post capacity overflow".to_string())?;
+        let required_combination_elems = block_size
+            .checked_mul(combination_elems)
+            .ok_or_else(|| "D-Spark HC combination capacity overflow".to_string())?;
+        let required_confidence_elems = hidden
+            .checked_add(runtime.markov_rank)
+            .ok_or_else(|| "D-Spark confidence-input capacity overflow".to_string())?;
+        let (
+            query_states_ptr,
+            head_hidden_ptr,
+            markov_embed_ptr,
+            markov_bias_ptr,
+            confidence_input_ptr,
+            scratch_hidden_ptr,
+            position_ptr,
+            selection_end_ptr,
+            batch_next_ptr,
+            batch_post_ptr,
+            batch_combination_ptr,
+        ) = {
+            let buffers = runtime
+                .buffers
+                .as_ref()
+                .ok_or("D-Spark runtime buffers are not allocated")?;
+            if buffers.query_states.len() < required_query_state_elems
+                || buffers.head_hidden.len() < required_head_hidden_elems
+                || buffers.markov_embed.len() < runtime.markov_rank
+                || buffers.markov_bias.len() < graph.vocab_size
+                || buffers.confidence_input.len() < required_confidence_elems
+                || buffers.target_batch_hc_next.len() < required_query_state_elems
+                || buffers.target_batch_hc_post.len() < required_post_elems
+                || buffers.target_batch_hc_comb.len() < required_combination_elems
+            {
+                return Err("D-Spark runtime buffer geometry is incomplete".to_string());
+            }
+            (
+                *buffers.query_states.device_ptr(),
+                *buffers.head_hidden.device_ptr(),
+                *buffers.markov_embed.device_ptr(),
+                *buffers.markov_bias.device_ptr(),
+                *buffers.confidence_input.device_ptr(),
+                *buffers.main_hidden.device_ptr(),
+                *buffers.position.device_ptr(),
+                *buffers.selection_end.device_ptr(),
+                *buffers.target_batch_hc_next.device_ptr(),
+                *buffers.target_batch_hc_post.device_ptr(),
+                *buffers.target_batch_hc_comb.device_ptr(),
+            )
+        };
+        if graph.batch_max < block_size {
+            return Err(format!(
+                "D-Spark proposal batch {} exceeds allocated capacity {}",
+                block_size, graph.batch_max,
+            ));
+        }
+        let d_batch_hidden_ptr = *graph
+            .d_batch_hidden
+            .as_ref()
+            .ok_or("D-Spark proposal batch hidden buffer is absent")?
+            .device_ptr();
+        let d_batch_moe_ptr = *graph
+            .d_batch_moe_out
+            .as_ref()
+            .ok_or("D-Spark proposal batch MoE buffer is absent")?
+            .device_ptr();
+        let d_batch_logits_ptr = *graph
+            .d_batch_logits
+            .as_ref()
+            .ok_or("D-Spark proposal batch logits buffer is absent")?
+            .device_ptr();
+        let workspace = graph
+            .deepseek_v4_decode_workspace
+            .as_ref()
+            .ok_or("DeepSeek-V4 decode workspace is not finalized")?;
+        if workspace.hc_mult != hc_mult {
+            return Err(format!(
+                "D-Spark proposal HC multiplier mismatch workspace={} head={hc_mult}",
+                workspace.hc_mult,
+            ));
+        }
+        let hc_state_ptr = *workspace.d_hc_state.device_ptr();
+        let hc_next_ptr = *workspace.d_hc_next.device_ptr();
+        let hc_post_ptr = *workspace.d_hc_post.device_ptr();
+        let hc_combination_ptr = *workspace.d_hc_comb.device_ptr();
+        let stream = *self.device.cu_stream();
+        let copy_d2d =
+            |destination: u64, source: u64, bytes: usize, label: &str| -> Result<(), String> {
+                let result = unsafe {
+                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(destination, source, bytes, stream)
+                };
+                if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("D-Spark {label} D2D failed: {result:?}"));
+                }
+                Ok(())
+            };
+        let device_row_ptr =
+            |base: u64, row: usize, stride: usize, label: &str| -> Result<u64, String> {
+                let offset = row
+                    .checked_mul(stride)
+                    .ok_or_else(|| format!("D-Spark {label} row offset overflow"))?;
+                let offset = u64::try_from(offset)
+                    .map_err(|_| format!("D-Spark {label} row offset exceeds u64"))?;
+                base.checked_add(offset)
+                    .ok_or_else(|| format!("D-Spark {label} row pointer overflow"))
+            };
+        self.upload_dspark_i32(selection_end_ptr, block_last, "selection end")?;
+
+        // Query layout is checkpoint-defined: anchor at slot zero followed by
+        // N-1 noise tokens. Each embedding is replicated across HC streams.
+        let embedding_lookup = graph
+            .kernels
+            .as_ref()
+            .ok_or("kernels not cached")?
+            .embedding_lookup
+            .clone();
+        for query_idx in 0..block_size {
+            let token = if query_idx == 0 {
+                anchor_token
+            } else {
+                runtime.noise_token_id
+            };
+            if token >= graph.vocab_size {
+                return Err(format!(
+                    "D-Spark query token {token} exceeds vocabulary {}",
+                    graph.vocab_size
+                ));
+            }
+            unsafe {
+                embedding_lookup
+                    .clone()
+                    .launch(
+                        LaunchConfig::for_num_elems(hidden as u32),
+                        (
+                            *graph.d_hidden.device_ptr(),
+                            graph.embedding_ptr,
+                            token as i32,
+                            hidden as i32,
+                            graph.embedding_scale,
+                        ),
+                    )
+                    .map_err(|error| {
+                        format!("D-Spark query embedding slot {query_idx}: {error:?}")
+                    })?;
+            }
+            self.launch_deepseek_v4_hc_replicate_for_graph(graph)?;
+            copy_d2d(
+                device_row_ptr(
+                    query_states_ptr,
+                    query_idx,
+                    state_bytes,
+                    "initial query state",
+                )?,
+                hc_state_ptr,
+                state_bytes,
+                "initial query state",
+            )?;
+        }
+        runtime.proposal_init_seconds +=
+            self.dspark_timing_checkpoint(init_started, "proposal initialization")?;
+
+        for stage_idx in 0..runtime.stage_router_registered.len() {
+            let layer_idx = runtime
+                .auxiliary_layer_start
+                .checked_add(stage_idx)
+                .ok_or_else(|| "D-Spark auxiliary layer index overflow".to_string())?;
+            let (hc, input_norm_ptr) = {
+                let layer = graph.layers.get(layer_idx).ok_or_else(|| {
+                    format!("D-Spark stage {stage_idx} layer {layer_idx} is absent")
+                })?;
+                let v4 = layer
+                    .deepseek_v4
+                    .as_ref()
+                    .ok_or_else(|| format!("D-Spark stage {stage_idx} attention is absent"))?;
+                if block_last >= v4.logical_max_seq || block_size > v4.sliding_window {
+                    return Err(format!(
+                        "D-Spark stage {stage_idx} proposal range ends at {block_last}, capacity={} window={}",
+                        v4.logical_max_seq, v4.sliding_window,
+                    ));
+                }
+                (
+                    v4.hyper_connection.as_ref().cloned().ok_or_else(|| {
+                        format!("D-Spark stage {stage_idx} hyper-connection is absent")
+                    })?,
+                    layer.input_norm_ptr,
+                )
+            };
+            if hc.mult != hc_mult {
+                return Err(format!(
+                    "D-Spark stage {stage_idx} HC multiplier {} differs from head {hc_mult}",
+                    hc.mult,
+                ));
+            }
+
+            // Store every block KV before any query attends, giving the stage
+            // its required non-causal intra-block visibility.
+            let kv_started = timing.then(std::time::Instant::now);
+            for query_idx in 0..block_size {
+                let query_state_ptr =
+                    device_row_ptr(query_states_ptr, query_idx, state_bytes, "KV-prepass state")?;
+                copy_d2d(
+                    hc_state_ptr,
+                    query_state_ptr,
+                    state_bytes,
+                    "KV-prepass state",
+                )?;
+                self.launch_deepseek_v4_hc_prepare_for_graph(
+                    graph,
+                    hc_state_ptr,
+                    *graph.d_hidden.device_ptr(),
+                    hc.attn_fn_wid,
+                    hc.attn_base_ptr,
+                    hc.attn_scale_ptr,
+                    hc.mult,
+                    hc.sinkhorn_iters,
+                    hc.eps,
+                    None,
+                    &format!("D-Spark stage {stage_idx} KV prepass"),
+                )?;
+                self.launch_deepseek_v4_rmsnorm_for_graph(
+                    graph,
+                    *graph.d_hidden.device_ptr(),
+                    *graph.d_hidden.device_ptr(),
+                    input_norm_ptr,
+                    hidden,
+                    &format!("D-Spark stage {stage_idx} KV prepass"),
+                )?;
+                self.store_dspark_context_kv_for_graph(
+                    graph,
+                    runtime,
+                    stage_idx,
+                    *graph.d_hidden.device_ptr(),
+                    anchor_position
+                        .checked_add(query_idx)
+                        .ok_or_else(|| "D-Spark KV-prepass position overflow".to_string())?,
+                )?;
+            }
+            runtime.proposal_aux_kv_seconds += self
+                .dspark_timing_checkpoint(kv_started, &format!("stage {stage_idx} KV prepass"))?;
+
+            let query_started = timing.then(std::time::Instant::now);
+            for query_idx in 0..block_size {
+                let query_position = anchor_position
+                    .checked_add(query_idx)
+                    .ok_or_else(|| "D-Spark query position overflow".to_string())?;
+                let query_state_ptr = device_row_ptr(
+                    query_states_ptr,
+                    query_idx,
+                    state_bytes,
+                    "stage input state",
+                )?;
+                copy_d2d(
+                    hc_state_ptr,
+                    query_state_ptr,
+                    state_bytes,
+                    "stage input state",
+                )?;
+                self.upload_dspark_i32(position_ptr, query_position, "query position")?;
+                self.run_deepseek_v4_routing_prefix_for_graph(
+                    graph,
+                    layer_idx,
+                    position_ptr,
+                    Some(selection_end_ptr),
+                    None,
+                )?;
+                copy_d2d(
+                    device_row_ptr(
+                        d_batch_hidden_ptr,
+                        query_idx,
+                        hidden_bytes,
+                        "proposal FFN input",
+                    )?,
+                    *graph.d_hidden.device_ptr(),
+                    hidden_bytes,
+                    "proposal FFN input",
+                )?;
+                copy_d2d(
+                    device_row_ptr(
+                        batch_next_ptr,
+                        query_idx,
+                        state_bytes,
+                        "proposal HC next state",
+                    )?,
+                    hc_next_ptr,
+                    state_bytes,
+                    "proposal HC next state",
+                )?;
+                copy_d2d(
+                    device_row_ptr(
+                        batch_post_ptr,
+                        query_idx,
+                        post_bytes,
+                        "proposal HC post weights",
+                    )?,
+                    hc_post_ptr,
+                    post_bytes,
+                    "proposal HC post weights",
+                )?;
+                copy_d2d(
+                    device_row_ptr(
+                        batch_combination_ptr,
+                        query_idx,
+                        combination_bytes,
+                        "proposal HC combination weights",
+                    )?,
+                    hc_combination_ptr,
+                    combination_bytes,
+                    "proposal HC combination weights",
+                )?;
+            }
+            let active_batch = self
+                .moe_forward_batched(graph, layer_idx, block_size, None)
+                .map_err(|error| format!("D-Spark stage {stage_idx} batched MoE: {error}"))?;
+            if active_batch != block_size {
+                return Err(format!(
+                    "D-Spark stage {stage_idx} batched MoE truncated to {active_batch}/{block_size}",
+                ));
+            }
+            for query_idx in 0..block_size {
+                let query_state_ptr =
+                    device_row_ptr(query_states_ptr, query_idx, state_bytes, "query state")?;
+                self.launch_deepseek_v4_hc_post_with_mix_for_graph(
+                    graph,
+                    query_state_ptr,
+                    device_row_ptr(
+                        d_batch_moe_ptr,
+                        query_idx,
+                        hidden_bytes,
+                        "proposal MoE output",
+                    )?,
+                    device_row_ptr(
+                        batch_next_ptr,
+                        query_idx,
+                        state_bytes,
+                        "proposal HC next state",
+                    )?,
+                    device_row_ptr(
+                        batch_post_ptr,
+                        query_idx,
+                        post_bytes,
+                        "proposal HC post weights",
+                    )?,
+                    device_row_ptr(
+                        batch_combination_ptr,
+                        query_idx,
+                        combination_bytes,
+                        "proposal HC combination weights",
+                    )?,
+                    hc.mult,
+                    &format!("D-Spark stage {stage_idx} query {query_idx} FFN"),
+                )?;
+            }
+            runtime.proposal_aux_query_seconds += self.dspark_timing_checkpoint(
+                query_started,
+                &format!("stage {stage_idx} query execution"),
+            )?;
+        }
+
+        let markov_w1 = graph
+            .weights
+            .get(registration.markov_w1_wid)
+            .ok_or("D-Spark Markov W1 is absent")?;
+        let markov_w2 = graph
+            .weights
+            .get(registration.markov_w2_wid)
+            .ok_or("D-Spark Markov W2 is absent")?;
+        let confidence = graph
+            .weights
+            .get(registration.confidence_wid)
+            .ok_or("D-Spark confidence projection is absent")?;
+        let lm_head = graph
+            .weights
+            .get(graph.lm_head_wid)
+            .ok_or("D-Spark shared LM head is absent")?;
+        let mut proposal = DsparkProposal {
+            tokens: Vec::with_capacity(block_size),
+            confidences: Vec::with_capacity(block_size),
+        };
+        let head_started = timing.then(std::time::Instant::now);
+        for query_idx in 0..block_size {
+            let query_state_ptr =
+                device_row_ptr(query_states_ptr, query_idx, state_bytes, "head input state")?;
+            let head_ptr = device_row_ptr(head_hidden_ptr, query_idx, hidden_bytes, "head hidden")?;
+            self.launch_deepseek_v4_hc_head_registration_for_graph(
+                graph,
+                &registration.head,
+                query_state_ptr,
+                head_ptr,
+            )?;
+        }
+        self.launch_deepseek_v4_rmsnorm_rows_for_graph(
+            graph,
+            d_batch_hidden_ptr,
+            head_hidden_ptr,
+            registration.final_norm_ptr,
+            block_size,
+            hidden,
+            1.0,
+            "D-Spark proposal final",
+        )?;
+        self.gemm_bf16_to_f32_batch(
+            lm_head,
+            d_batch_hidden_ptr,
+            d_batch_logits_ptr,
+            block_size,
+            hidden,
+            graph.vocab_size,
+        )?;
+        self.device
+            .synchronize()
+            .map_err(|error| format!("D-Spark base-logit batch sync: {error:?}"))?;
+        let total_base_logits = block_size
+            .checked_mul(graph.vocab_size)
+            .ok_or_else(|| "D-Spark base-logit batch size overflow".to_string())?;
+        if graph.h_batch_logits.len() < total_base_logits {
+            return Err(format!(
+                "D-Spark host batch-logit capacity {} is below {total_base_logits}",
+                graph.h_batch_logits.len(),
+            ));
+        }
+        let result = unsafe {
+            cuda_sys::lib().cuMemcpyDtoH_v2(
+                graph.h_batch_logits.as_mut_ptr() as *mut std::ffi::c_void,
+                d_batch_logits_ptr,
+                total_base_logits
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| "D-Spark base-logit batch byte size overflow".to_string())?,
+            )
+        };
+        if result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("D-Spark base-logit batch D2H failed: {result:?}"));
+        }
+        runtime.proposal_head_seconds +=
+            self.dspark_timing_checkpoint(head_started, "proposal base-head batch")?;
+        let mut previous_token = anchor_token;
+        for query_idx in 0..block_size {
+            let head_ptr = device_row_ptr(head_hidden_ptr, query_idx, hidden_bytes, "head hidden")?;
+            let markov_started = timing.then(std::time::Instant::now);
+            unsafe {
+                embedding_lookup
+                    .clone()
+                    .launch(
+                        LaunchConfig::for_num_elems(runtime.markov_rank as u32),
+                        (
+                            markov_embed_ptr,
+                            markov_w1.ptr,
+                            previous_token as i32,
+                            runtime.markov_rank as i32,
+                            1.0f32,
+                        ),
+                    )
+                    .map_err(|error| {
+                        format!("D-Spark Markov embedding query {query_idx}: {error:?}")
+                    })?;
+            }
+            self.gemv_bf16_to_f32_internal(markov_w2, markov_embed_ptr, markov_bias_ptr)?;
+            self.device
+                .synchronize()
+                .map_err(|error| format!("D-Spark Markov sync: {error:?}"))?;
+            let result = unsafe {
+                cuda_sys::lib().cuMemcpyDtoH_v2(
+                    graph.h_logits.as_mut_ptr() as *mut std::ffi::c_void,
+                    markov_bias_ptr,
+                    graph.vocab_size * std::mem::size_of::<f32>(),
+                )
+            };
+            if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("D-Spark Markov bias D2H failed: {result:?}"));
+            }
+            let base_start = query_idx
+                .checked_mul(graph.vocab_size)
+                .ok_or_else(|| "D-Spark base-logit row offset overflow".to_string())?;
+            let base_end = base_start
+                .checked_add(graph.vocab_size)
+                .ok_or_else(|| "D-Spark base-logit row end overflow".to_string())?;
+            let base_logits = &graph.h_batch_logits[base_start..base_end];
+            let mut sampled = None;
+            let mut sampled_value = f32::NEG_INFINITY;
+            for token in 0..graph.vocab_size {
+                let value = base_logits[token] + graph.h_logits[token];
+                if value.is_finite() && (sampled.is_none() || value > sampled_value) {
+                    sampled = Some(token);
+                    sampled_value = value;
+                }
+            }
+            let sampled = sampled.ok_or_else(|| {
+                format!("D-Spark query {query_idx} produced no finite corrected logit")
+            })?;
+
+            copy_d2d(
+                confidence_input_ptr,
+                head_ptr,
+                hidden_bytes,
+                "confidence hidden input",
+            )?;
+            copy_d2d(
+                confidence_input_ptr + hidden_bytes as u64,
+                markov_embed_ptr,
+                markov_bytes,
+                "confidence Markov input",
+            )?;
+            self.gemv_bf16_internal(confidence, confidence_input_ptr, scratch_hidden_ptr)?;
+            self.device
+                .synchronize()
+                .map_err(|error| format!("D-Spark confidence sync: {error:?}"))?;
+            let mut confidence_raw = 0u16;
+            let result = unsafe {
+                cuda_sys::lib().cuMemcpyDtoH_v2(
+                    &mut confidence_raw as *mut u16 as *mut std::ffi::c_void,
+                    scratch_hidden_ptr,
+                    std::mem::size_of::<u16>(),
+                )
+            };
+            if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("D-Spark confidence D2H failed: {result:?}"));
+            }
+            let confidence_logit = half::bf16::from_bits(confidence_raw).to_f32();
+            if !confidence_logit.is_finite() {
+                return Err(format!(
+                    "D-Spark query {query_idx} confidence logit is non-finite"
+                ));
+            }
+            let confidence_probability = 1.0f32 / (1.0f32 + (-confidence_logit).exp());
+            proposal.tokens.push(sampled);
+            proposal.confidences.push(confidence_probability);
+            previous_token = sampled;
+            runtime.proposal_markov_seconds += self.dspark_timing_checkpoint(
+                markov_started,
+                &format!("query {query_idx} Markov/confidence"),
+            )?;
+        }
+        if timing {
+            runtime.proposal_timing_rounds = runtime.proposal_timing_rounds.saturating_add(1);
+        }
+        Ok(proposal)
+    }
+
+    fn generate_dspark_block(
+        &mut self,
+        anchor_token: usize,
+        anchor_position: usize,
+    ) -> Result<DsparkProposal, String> {
+        self.validate_dspark_residency_internal()?;
+        let mut runtime = self
+            .dspark
+            .take()
+            .ok_or_else(|| "D-Spark runtime is not loaded".to_string())?;
+        let mut graph = self
+            .graph
+            .take()
+            .ok_or_else(|| "D-Spark proposal requires a decode graph".to_string())?;
+        let service_timing = graph.timing_enabled || runtime.verification_policy.calibrating;
+        let started = service_timing.then(std::time::Instant::now);
+        let result = self.generate_dspark_block_with_graph(
+            &mut graph,
+            &mut runtime,
+            anchor_token,
+            anchor_position,
+        );
+        if let Ok(proposal) = result.as_ref() {
+            runtime.proposal_rounds = runtime.proposal_rounds.saturating_add(1);
+            runtime.proposed_tokens = runtime
+                .proposed_tokens
+                .saturating_add(proposal.tokens.len() as u64);
+            if let Some(started) = started {
+                runtime.proposal_seconds += started.elapsed().as_secs_f64();
+            }
+        }
+        self.graph = Some(graph);
+        self.dspark = Some(runtime);
+        result
+    }
+
+    fn capture_dspark_decode_target_state(
+        &self,
+        graph: &GpuDecodeGraph,
+        layer_idx: usize,
+        position_ptr: u64,
+    ) -> Result<(), String> {
+        let Some(runtime) = self.dspark.as_ref() else {
+            return Ok(());
+        };
+        self.capture_dspark_decode_target_state_with_runtime(
+            graph,
+            runtime,
+            layer_idx,
+            position_ptr,
+        )
+    }
+
+    fn capture_dspark_decode_target_state_with_runtime(
+        &self,
+        graph: &GpuDecodeGraph,
+        runtime: &DsparkRuntime,
+        layer_idx: usize,
+        position_ptr: u64,
+    ) -> Result<(), String> {
+        use cudarc::driver::LaunchConfig;
+        let output_id = layer_idx
+            .checked_add(1)
+            .ok_or_else(|| "D-Spark target layer output id overflow".to_string())?;
+        let Some(target_slot) = runtime
+            .target_layer_ids
+            .iter()
+            .position(|&candidate| candidate == output_id)
+        else {
+            return Ok(());
+        };
+        let buffers = runtime
+            .buffers
+            .as_ref()
+            .ok_or("D-Spark runtime buffers are not allocated")?;
+        let v4 = graph
+            .layers
+            .get(runtime.auxiliary_layer_start)
+            .and_then(|layer| layer.deepseek_v4.as_ref())
+            .ok_or("D-Spark auxiliary attention registration is absent")?;
+        let hc_mult = runtime
+            .graph_registration
+            .as_ref()
+            .ok_or("D-Spark dense graph is not finalized")?
+            .head
+            .mult;
+        let workspace = graph
+            .deepseek_v4_decode_workspace
+            .as_ref()
+            .ok_or("DeepSeek-V4 decode workspace is not finalized")?;
+        let row_elems = hc_mult
+            .checked_mul(graph.hidden_size)
+            .ok_or_else(|| "D-Spark decode capture row size overflow".to_string())?;
+        if position_ptr == 0
+            || v4.sliding_window == 0
+            || workspace.hc_mult != hc_mult
+            || row_elems == 0
+        {
+            return Err(format!(
+                "D-Spark decode target capture contract mismatch layer={layer_idx} output_id={output_id} position_ptr=0x{position_ptr:x} window={} hidden={} runtime_hc={} workspace_hc={}",
+                v4.sliding_window,
+                graph.hidden_size,
+                hc_mult,
+                workspace.hc_mult,
+            ));
+        }
+        let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
+        let row_elems_u32 = u32::try_from(row_elems)
+            .map_err(|_| "D-Spark decode capture row exceeds u32".to_string())?;
+        let target_slot_i32 = i32::try_from(target_slot)
+            .map_err(|_| "D-Spark decode capture target slot exceeds i32".to_string())?;
+        let window_i32 = i32::try_from(v4.sliding_window)
+            .map_err(|_| "D-Spark decode capture window exceeds i32".to_string())?;
+        let hidden_i32 = i32::try_from(graph.hidden_size)
+            .map_err(|_| "D-Spark decode capture hidden width exceeds i32".to_string())?;
+        let hc_mult_i32 = i32::try_from(hc_mult)
+            .map_err(|_| "D-Spark decode capture HC multiplier exceeds i32".to_string())?;
+        unsafe {
+            kernels
+                .dspark_capture_target_state
+                .clone()
+                .launch(
+                    LaunchConfig::for_num_elems(row_elems_u32),
+                    (
+                        *buffers.target_history.device_ptr(),
+                        *workspace.d_hc_state.device_ptr(),
+                        position_ptr,
+                        target_slot_i32,
+                        window_i32,
+                        hidden_i32,
+                        hc_mult_i32,
+                    ),
+                )
+                .map_err(|error| {
+                    format!(
+                        "D-Spark decode target capture launch failed layer={layer_idx} output_id={output_id}: {error:?}"
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
     fn run_deepseek_v4_ungraphed_step(
         &mut self,
         graph: &mut GpuDecodeGraph,
         position_ptr: u64,
+        position: usize,
         step_start: std::time::Instant,
     ) -> Result<(), String> {
         let timing = graph.timing_enabled;
         let segment_end = if graph.segment_layer_end > 0 {
             graph.segment_layer_end
         } else {
-            graph.layers.len()
+            graph.num_layers
         };
         if graph.segment_skip_embedding
             || graph.segment_skip_final
             || graph.segment_layer_start != 0
-            || segment_end != graph.layers.len()
+            || segment_end != graph.num_layers
         {
             return Err(format!(
-                "DeepSeek-V4 ungraphed decode requires a complete local layer segment; got skip_embedding={} skip_final={} range=[{}, {}) layers={}",
+                "DeepSeek-V4 ungraphed decode requires a complete local target-layer segment; got skip_embedding={} skip_final={} range=[{}, {}) target_layers={} registered_layers={}",
                 graph.segment_skip_embedding,
                 graph.segment_skip_final,
                 graph.segment_layer_start,
                 segment_end,
+                graph.num_layers,
                 graph.layers.len(),
             ));
         }
@@ -58848,7 +62503,10 @@ impl GpuDecodeStore {
 
         let mut attn_seconds = 0.0f64;
         let mut moe_seconds = 0.0f64;
-        for layer_idx in 0..graph.layers.len() {
+        // Auxiliary D-Spark stages are registered after the target layers so
+        // they can use the same measured expert runtime. They must never leak
+        // into the accepted target-only forward pass.
+        for layer_idx in 0..graph.num_layers {
             let stage_start = if timing {
                 self.device
                     .synchronize()
@@ -58857,7 +62515,13 @@ impl GpuDecodeStore {
             } else {
                 None
             };
-            self.run_deepseek_v4_routing_prefix_for_graph(graph, layer_idx, position_ptr, None)?;
+            self.run_deepseek_v4_routing_prefix_for_graph(
+                graph,
+                layer_idx,
+                position_ptr,
+                None,
+                None,
+            )?;
             if let Some(start) = stage_start {
                 self.device
                     .synchronize()
@@ -58902,6 +62566,7 @@ impl GpuDecodeStore {
                 hc_mult,
                 &format!("DeepSeek-V4 layer {} FFN", layer_idx),
             )?;
+            self.capture_dspark_decode_target_state(graph, layer_idx, position_ptr)?;
             if let Some(start) = moe_start {
                 self.device
                     .synchronize()
@@ -59203,12 +62868,12 @@ impl GpuDecodeStore {
             let position_ptr = dsa_ungraphed_scalars
                 .map(|(position_ptr, _)| position_ptr)
                 .ok_or("DeepSeek-V4 decode did not receive graph-addressable scalars")?;
-            return self.run_deepseek_v4_ungraphed_step(graph, position_ptr, t0);
+            return self.run_deepseek_v4_ungraphed_step(graph, position_ptr, position, t0);
         }
 
         // first_residual: true only when embedding was done (layer 0 initializes residual stream)
         let mut first_residual = !seg_skip_emb && seg_start == 0;
-        let num_layers = graph.layers.len();
+        let num_layers = graph.num_layers.min(graph.layers.len());
         let mut gqa_cache_idx = seg_gqa_offset; // Start at offset for multi-GPU segments
 
         // Timing accumulators for this token
@@ -66035,6 +69700,15 @@ impl GpuDecodeStore {
         if batch_size == 0 {
             return Ok(0);
         }
+        if self.dspark.is_some()
+            && self
+                .graph
+                .as_ref()
+                .and_then(|graph| graph.deepseek_v4_decode_workspace.as_ref())
+                .is_some()
+        {
+            return self.gpu_decode_step_dspark_target_batched(tokens, positions);
+        }
         if batch_size == 1 {
             self.gpu_decode_step(tokens[0], positions[0])?;
             return Ok(1);
@@ -66049,6 +69723,701 @@ impl GpuDecodeStore {
 
         self.graph = Some(graph);
         result
+    }
+
+    fn gpu_decode_step_dspark_target_batched(
+        &mut self,
+        tokens: &[usize],
+        positions: &[usize],
+    ) -> Result<usize, String> {
+        let mut runtime = self
+            .dspark
+            .take()
+            .ok_or_else(|| "D-Spark runtime is not loaded".to_string())?;
+        let mut graph = self
+            .graph
+            .take()
+            .ok_or_else(|| "D-Spark target batch requires a decode graph".to_string())?;
+        let result = self.gpu_decode_step_dspark_target_batched_inner(
+            &mut graph,
+            &mut runtime,
+            tokens,
+            positions,
+        );
+        self.graph = Some(graph);
+        self.dspark = Some(runtime);
+        result
+    }
+
+    fn copy_dspark_target_state_snapshot_async(
+        &self,
+        runtime: &DsparkRuntime,
+        layer_idx: Option<usize>,
+        snapshot_row: usize,
+        restore: bool,
+    ) -> Result<(), String> {
+        let stream = *self.device.cu_stream();
+        for backup in &runtime.target_state_backups {
+            if layer_idx.is_some_and(|layer_idx| layer_idx != backup.layer_idx) {
+                continue;
+            }
+            if snapshot_row >= backup.snapshot_rows {
+                return Err(format!(
+                    "D-Spark target state snapshot row {snapshot_row} exceeds {} rows for {}",
+                    backup.snapshot_rows, backup.label,
+                ));
+            }
+            let storage_ptr = *backup.storage.device_ptr();
+            let storage_offset = snapshot_row.checked_mul(backup.bytes).ok_or_else(|| {
+                format!(
+                    "D-Spark target state snapshot offset overflow for {}",
+                    backup.label,
+                )
+            })?;
+            let snapshot_ptr = storage_ptr
+                .checked_add(u64::try_from(storage_offset).map_err(|_| {
+                    format!(
+                        "D-Spark target state snapshot offset exceeds u64 for {}",
+                        backup.label,
+                    )
+                })?)
+                .ok_or_else(|| {
+                    format!(
+                        "D-Spark target state snapshot pointer overflow for {}",
+                        backup.label,
+                    )
+                })?;
+            let (destination, source) = if restore {
+                (backup.source_ptr, snapshot_ptr)
+            } else {
+                (snapshot_ptr, backup.source_ptr)
+            };
+            let result = unsafe {
+                cuda_sys::lib().cuMemcpyDtoDAsync_v2(destination, source, backup.bytes, stream)
+            };
+            if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "D-Spark target state {} {} snapshot row {snapshot_row} failed: {result:?}",
+                    if restore { "restore" } else { "save" },
+                    backup.label,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_dspark_target_cache_backups_async(
+        &self,
+        runtime: &DsparkRuntime,
+        positions: &[usize],
+        committed: Option<usize>,
+        restore: bool,
+    ) -> Result<(), String> {
+        let stream = *self.device.cu_stream();
+        if !runtime.target_cache_row_backups.is_empty() {
+            let storage = runtime
+                .target_cache_backup_storage
+                .as_ref()
+                .ok_or_else(|| "D-Spark target cache-row backup storage is absent".to_string())?;
+            let storage_ptr = *storage.device_ptr();
+            for backup in &runtime.target_cache_row_backups {
+                let row_slots = if restore {
+                    let committed = committed.ok_or_else(|| {
+                        format!(
+                            "D-Spark target cache-row restore {} is missing the committed prefix",
+                            backup.label,
+                        )
+                    })?;
+                    dspark_target_cache_restore_slots(
+                        backup.mapping,
+                        backup.source_rows,
+                        positions,
+                        committed,
+                        &backup.label,
+                    )?
+                } else {
+                    dspark_target_cache_rows(
+                        backup.mapping,
+                        backup.source_rows,
+                        positions,
+                        &backup.label,
+                    )?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(slot, row)| (row, slot))
+                    .collect()
+                };
+                if row_slots
+                    .iter()
+                    .any(|&(_, slot)| slot >= backup.storage_rows)
+                {
+                    return Err(format!(
+                        "D-Spark target cache-row backup {} needs a slot outside its capacity {}",
+                        backup.label, backup.storage_rows,
+                    ));
+                }
+                for (row, slot) in row_slots {
+                    let source_offset = row.checked_mul(backup.row_bytes).ok_or_else(|| {
+                        format!(
+                            "D-Spark target cache-row backup {} source offset overflow",
+                            backup.label,
+                        )
+                    })?;
+                    let storage_offset = slot
+                        .checked_mul(backup.row_bytes)
+                        .and_then(|offset| offset.checked_add(backup.storage_offset))
+                        .ok_or_else(|| {
+                            format!(
+                                "D-Spark target cache-row backup {} storage offset overflow",
+                                backup.label,
+                            )
+                        })?;
+                    let source_ptr = backup
+                        .source_ptr
+                        .checked_add(u64::try_from(source_offset).map_err(|_| {
+                            format!(
+                                "D-Spark target cache-row backup {} source offset exceeds u64",
+                                backup.label,
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            format!(
+                                "D-Spark target cache-row backup {} source pointer overflow",
+                                backup.label,
+                            )
+                        })?;
+                    let backup_ptr = storage_ptr
+                        .checked_add(u64::try_from(storage_offset).map_err(|_| {
+                            format!(
+                                "D-Spark target cache-row backup {} storage offset exceeds u64",
+                                backup.label,
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            format!(
+                                "D-Spark target cache-row backup {} storage pointer overflow",
+                                backup.label,
+                            )
+                        })?;
+                    let (destination, source) = if restore {
+                        (source_ptr, backup_ptr)
+                    } else {
+                        (backup_ptr, source_ptr)
+                    };
+                    let result = unsafe {
+                        cuda_sys::lib().cuMemcpyDtoDAsync_v2(
+                            destination,
+                            source,
+                            backup.row_bytes,
+                            stream,
+                        )
+                    };
+                    if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "D-Spark target cache row {} {} failed: {result:?}",
+                            if restore { "restore" } else { "save" },
+                            backup.label,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn save_dspark_target_transaction(
+        &self,
+        runtime: &DsparkRuntime,
+        positions: &[usize],
+    ) -> Result<(), String> {
+        self.copy_dspark_target_state_snapshot_async(runtime, None, 0, false)?;
+        self.copy_dspark_target_cache_backups_async(runtime, positions, None, false)?;
+        self.device
+            .synchronize()
+            .map_err(|error| format!("D-Spark target transaction save sync: {error:?}"))
+    }
+
+    fn restore_dspark_target_transaction_prefix(
+        &self,
+        batch_positions: &[usize],
+        committed: usize,
+    ) -> Result<(), String> {
+        if committed > batch_positions.len() {
+            return Err(format!(
+                "D-Spark target transaction restore has invalid geometry: positions={} committed={committed}",
+                batch_positions.len(),
+            ));
+        }
+        let runtime = self
+            .dspark
+            .as_ref()
+            .ok_or("D-Spark runtime disappeared before target transaction restore")?;
+        self.copy_dspark_target_state_snapshot_async(runtime, None, committed, true)?;
+        self.copy_dspark_target_cache_backups_async(
+            runtime,
+            batch_positions,
+            Some(committed),
+            true,
+        )?;
+        self.device
+            .synchronize()
+            .map_err(|error| format!("D-Spark target transaction prefix restore sync: {error:?}"))
+    }
+
+    fn gpu_decode_step_dspark_target_batched_inner(
+        &mut self,
+        graph: &mut GpuDecodeGraph,
+        runtime: &mut DsparkRuntime,
+        tokens: &[usize],
+        positions: &[usize],
+    ) -> Result<usize, String> {
+        use cudarc::driver::LaunchConfig;
+
+        let batch_size = tokens.len();
+        let timing = graph.timing_enabled;
+        let setup_started = timing.then(std::time::Instant::now);
+        if batch_size == 0 || batch_size != positions.len() {
+            return Err(format!(
+                "D-Spark target batch tokens/positions mismatch: {} / {}",
+                batch_size,
+                positions.len(),
+            ));
+        }
+        let runtime_batch_max = runtime
+            .block_size
+            .checked_add(1)
+            .ok_or_else(|| "D-Spark target batch capacity overflow".to_string())?;
+        if batch_size > graph.batch_max || batch_size > runtime_batch_max {
+            return Err(format!(
+                "D-Spark target batch {} exceeds allocated capacities graph={} runtime={}",
+                batch_size, graph.batch_max, runtime_batch_max,
+            ));
+        }
+        let layer_trace_enabled = env_truthy("KRASIS_DSPARK_BATCH_LAYER_TRACE");
+        if positions
+            .windows(2)
+            .any(|window| window[0].checked_add(1) != Some(window[1]))
+        {
+            return Err(format!(
+                "D-Spark target batch positions are not contiguous: {positions:?}"
+            ));
+        }
+        if positions
+            .last()
+            .is_some_and(|&position| position >= graph.kv_max_seq)
+        {
+            return Err(format!(
+                "D-Spark target batch ends at position {}, capacity={}",
+                positions[batch_size - 1],
+                graph.kv_max_seq,
+            ));
+        }
+
+        let hidden = graph.hidden_size;
+        let hidden_bytes = hidden
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "D-Spark target hidden byte size overflow".to_string())?;
+        let head = graph
+            .deepseek_v4_head
+            .as_ref()
+            .cloned()
+            .ok_or("D-Spark target final HC head is absent")?;
+        let state_elems = head
+            .mult
+            .checked_mul(hidden)
+            .ok_or_else(|| "D-Spark target HC state size overflow".to_string())?;
+        let state_bytes = state_elems
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "D-Spark target HC state byte size overflow".to_string())?;
+        let post_bytes = head
+            .mult
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "D-Spark target HC post byte size overflow".to_string())?;
+        let combination_elems = head
+            .mult
+            .checked_mul(head.mult)
+            .ok_or_else(|| "D-Spark target HC combination size overflow".to_string())?;
+        let combination_bytes = combination_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "D-Spark target HC combination byte size overflow".to_string())?;
+        let d_batch_hidden_ptr = *graph
+            .d_batch_hidden
+            .as_ref()
+            .ok_or("D-Spark target batch hidden buffer is absent")?
+            .device_ptr();
+        let d_batch_moe_ptr = *graph
+            .d_batch_moe_out
+            .as_ref()
+            .ok_or("D-Spark target batch MoE buffer is absent")?
+            .device_ptr();
+        let d_batch_logits_ptr = *graph
+            .d_batch_logits
+            .as_ref()
+            .ok_or("D-Spark target batch logits buffer is absent")?
+            .device_ptr();
+        let batch_token_ids = tokens
+            .iter()
+            .map(|&token| {
+                if token >= graph.vocab_size {
+                    return Err(format!(
+                        "D-Spark target batch token {token} exceeds vocabulary {}",
+                        graph.vocab_size,
+                    ));
+                }
+                i32::try_from(token)
+                    .map_err(|_| format!("D-Spark target batch token {token} exceeds i32"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let batch_token_ids_ptr = {
+            let buffers = runtime
+                .buffers
+                .as_mut()
+                .ok_or("D-Spark runtime buffers are not allocated")?;
+            if buffers.target_batch_token_ids.len() < batch_size {
+                return Err("D-Spark target batch token-ID buffer is undersized".to_string());
+            }
+            let mut active_token_ids = buffers.target_batch_token_ids.slice_mut(..batch_size);
+            self.device
+                .htod_sync_copy_into(&batch_token_ids, &mut active_token_ids)
+                .map_err(|error| format!("D-Spark target batch token-ID upload: {error:?}"))?;
+            *buffers.target_batch_token_ids.device_ptr()
+        };
+        let (batch_state_ptr, batch_next_ptr, batch_post_ptr, batch_combination_ptr, position_ptr) = {
+            let buffers = runtime
+                .buffers
+                .as_ref()
+                .ok_or("D-Spark runtime buffers are not allocated")?;
+            let required_state = batch_size
+                .checked_mul(state_elems)
+                .ok_or_else(|| "D-Spark target batch state capacity overflow".to_string())?;
+            let required_post = batch_size
+                .checked_mul(head.mult)
+                .ok_or_else(|| "D-Spark target batch post capacity overflow".to_string())?;
+            let required_combination = batch_size
+                .checked_mul(combination_elems)
+                .ok_or_else(|| "D-Spark target batch combination capacity overflow".to_string())?;
+            if buffers.target_batch_hc_state.len() < required_state
+                || buffers.target_batch_hc_next.len() < required_state
+                || buffers.target_batch_hc_post.len() < required_post
+                || buffers.target_batch_hc_comb.len() < required_combination
+            {
+                return Err("D-Spark target batch HC buffers are undersized".to_string());
+            }
+            (
+                *buffers.target_batch_hc_state.device_ptr(),
+                *buffers.target_batch_hc_next.device_ptr(),
+                *buffers.target_batch_hc_post.device_ptr(),
+                *buffers.target_batch_hc_comb.device_ptr(),
+                *buffers.position.device_ptr(),
+            )
+        };
+        let workspace = graph
+            .deepseek_v4_decode_workspace
+            .as_ref()
+            .ok_or("DeepSeek-V4 decode workspace is not finalized")?;
+        if workspace.hc_mult != head.mult {
+            return Err(format!(
+                "D-Spark target HC multiplier mismatch workspace={} head={}",
+                workspace.hc_mult, head.mult,
+            ));
+        }
+        let workspace_state_ptr = *workspace.d_hc_state.device_ptr();
+        let workspace_next_ptr = *workspace.d_hc_next.device_ptr();
+        let workspace_post_ptr = *workspace.d_hc_post.device_ptr();
+        let workspace_combination_ptr = *workspace.d_hc_comb.device_ptr();
+        let stream = *self.device.cu_stream();
+        let copy_d2d =
+            |destination: u64, source: u64, bytes: usize, label: &str| -> Result<(), String> {
+                let result = unsafe {
+                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(destination, source, bytes, stream)
+                };
+                if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("D-Spark target batch {label} D2D: {result:?}"));
+                }
+                Ok(())
+            };
+        let device_row_ptr =
+            |base: u64, row: usize, stride: usize, label: &str| -> Result<u64, String> {
+                let offset = row
+                    .checked_mul(stride)
+                    .ok_or_else(|| format!("D-Spark target batch {label} offset overflow"))?;
+                let offset = u64::try_from(offset).map_err(|_| {
+                    format!("D-Spark target batch {label} offset exceeds u64: {offset}")
+                })?;
+                base.checked_add(offset)
+                    .ok_or_else(|| format!("D-Spark target batch {label} pointer overflow"))
+            };
+        let embedding_lookup = graph
+            .kernels
+            .as_ref()
+            .ok_or("kernels not cached")?
+            .embedding_lookup
+            .clone();
+
+        for (batch_idx, &token_i32) in batch_token_ids.iter().enumerate() {
+            let hidden_i32 = i32::try_from(hidden)
+                .map_err(|_| format!("D-Spark target hidden width {hidden} exceeds i32"))?;
+            unsafe {
+                embedding_lookup
+                    .clone()
+                    .launch(
+                        LaunchConfig::for_num_elems(
+                            u32::try_from(hidden).map_err(|_| {
+                                "D-Spark target hidden width exceeds u32".to_string()
+                            })?,
+                        ),
+                        (
+                            *graph.d_hidden.device_ptr(),
+                            graph.embedding_ptr,
+                            token_i32,
+                            hidden_i32,
+                            graph.embedding_scale,
+                        ),
+                    )
+                    .map_err(|error| {
+                        format!("D-Spark target batch embedding {batch_idx}: {error:?}")
+                    })?;
+            }
+            self.launch_deepseek_v4_hc_replicate_for_graph(graph)?;
+            copy_d2d(
+                device_row_ptr(batch_state_ptr, batch_idx, state_bytes, "initial HC state")?,
+                workspace_state_ptr,
+                state_bytes,
+                "initial HC state",
+            )?;
+        }
+        runtime.batch_setup_seconds +=
+            self.dspark_timing_checkpoint(setup_started, "target batch setup")?;
+
+        for layer_idx in 0..graph.num_layers {
+            let hc = graph.layers[layer_idx]
+                .deepseek_v4
+                .as_ref()
+                .and_then(|v4| v4.hyper_connection.as_ref())
+                .cloned()
+                .ok_or_else(|| format!("D-Spark target batch layer {layer_idx} HC is absent"))?;
+            if hc.mult != head.mult {
+                return Err(format!(
+                    "D-Spark target batch layer {layer_idx} HC multiplier {} differs from {}",
+                    hc.mult, head.mult,
+                ));
+            }
+            let attention_route_started = timing.then(std::time::Instant::now);
+            for (batch_idx, &position) in positions.iter().enumerate() {
+                copy_d2d(
+                    workspace_state_ptr,
+                    device_row_ptr(
+                        batch_state_ptr,
+                        batch_idx,
+                        state_bytes,
+                        "layer input HC state",
+                    )?,
+                    state_bytes,
+                    "layer input HC state",
+                )?;
+                self.upload_dspark_i32(position_ptr, position, "target batch position")?;
+                self.run_deepseek_v4_routing_prefix_for_graph(
+                    graph,
+                    layer_idx,
+                    position_ptr,
+                    None,
+                    None,
+                )?;
+                self.copy_dspark_target_state_snapshot_async(
+                    runtime,
+                    Some(layer_idx),
+                    batch_idx.checked_add(1).ok_or_else(|| {
+                        "D-Spark target recurrent snapshot row overflow".to_string()
+                    })?,
+                    false,
+                )?;
+                copy_d2d(
+                    device_row_ptr(
+                        d_batch_hidden_ptr,
+                        batch_idx,
+                        hidden_bytes,
+                        "FFN input hidden",
+                    )?,
+                    *graph.d_hidden.device_ptr(),
+                    hidden_bytes,
+                    "FFN input hidden",
+                )?;
+                copy_d2d(
+                    device_row_ptr(batch_next_ptr, batch_idx, state_bytes, "attention HC state")?,
+                    workspace_next_ptr,
+                    state_bytes,
+                    "attention HC state",
+                )?;
+                copy_d2d(
+                    device_row_ptr(batch_post_ptr, batch_idx, post_bytes, "FFN HC post weights")?,
+                    workspace_post_ptr,
+                    post_bytes,
+                    "FFN HC post weights",
+                )?;
+                copy_d2d(
+                    device_row_ptr(
+                        batch_combination_ptr,
+                        batch_idx,
+                        combination_bytes,
+                        "FFN HC combination weights",
+                    )?,
+                    workspace_combination_ptr,
+                    combination_bytes,
+                    "FFN HC combination weights",
+                )?;
+            }
+            runtime.batch_attention_route_seconds += self.dspark_timing_checkpoint(
+                attention_route_started,
+                &format!("target layer {layer_idx} attention/routing"),
+            )?;
+
+            let moe_started = timing.then(std::time::Instant::now);
+            let active_batch =
+                self.moe_forward_batched(graph, layer_idx, batch_size, Some(batch_token_ids_ptr))?;
+            if active_batch != batch_size {
+                return Err(format!(
+                    "D-Spark target batch was truncated at layer {layer_idx}: {active_batch}/{batch_size}"
+                ));
+            }
+            runtime.batch_moe_seconds += self.dspark_timing_checkpoint(
+                moe_started,
+                &format!("target layer {layer_idx} batched MoE"),
+            )?;
+            let hc_commit_started = timing.then(std::time::Instant::now);
+            for (batch_idx, &position) in positions.iter().enumerate() {
+                let state_ptr =
+                    device_row_ptr(batch_state_ptr, batch_idx, state_bytes, "HC state")?;
+                self.launch_deepseek_v4_hc_post_with_mix_for_graph(
+                    graph,
+                    state_ptr,
+                    device_row_ptr(d_batch_moe_ptr, batch_idx, hidden_bytes, "MoE output")?,
+                    device_row_ptr(batch_next_ptr, batch_idx, state_bytes, "attention HC state")?,
+                    device_row_ptr(batch_post_ptr, batch_idx, post_bytes, "FFN HC post weights")?,
+                    device_row_ptr(
+                        batch_combination_ptr,
+                        batch_idx,
+                        combination_bytes,
+                        "FFN HC combination weights",
+                    )?,
+                    head.mult,
+                    &format!("D-Spark target batch layer {layer_idx} token {batch_idx} FFN"),
+                )?;
+                copy_d2d(
+                    workspace_state_ptr,
+                    state_ptr,
+                    state_bytes,
+                    "captured HC state",
+                )?;
+                self.upload_dspark_i32(position_ptr, position, "target capture position")?;
+                self.capture_dspark_decode_target_state_with_runtime(
+                    graph,
+                    runtime,
+                    layer_idx,
+                    position_ptr,
+                )?;
+            }
+            runtime.batch_hc_commit_seconds += self.dspark_timing_checkpoint(
+                hc_commit_started,
+                &format!("target layer {layer_idx} HC/context capture"),
+            )?;
+            if layer_trace_enabled {
+                let ffn_input = dspark_trace_bf16_rows(
+                    d_batch_hidden_ptr,
+                    batch_size,
+                    hidden,
+                    hidden,
+                    "FFN input",
+                )?;
+                let attention_state = dspark_trace_bf16_rows(
+                    batch_next_ptr,
+                    batch_size,
+                    state_elems,
+                    state_elems,
+                    "attention state",
+                )?;
+                let moe_output = dspark_trace_bf16_rows(
+                    d_batch_moe_ptr,
+                    batch_size,
+                    hidden,
+                    hidden,
+                    "MoE output",
+                )?;
+                let layer_state = dspark_trace_bf16_rows(
+                    batch_state_ptr,
+                    batch_size,
+                    state_elems,
+                    state_elems,
+                    "layer state",
+                )?;
+                eprintln!(
+                    "D-SPARK BATCH LAYER TRACE batch_size={} positions={:?} layer={} ffn_input={:?} attention_state={:?} moe_output={:?} layer_state={:?}",
+                    batch_size,
+                    positions,
+                    layer_idx,
+                    ffn_input,
+                    attention_state,
+                    moe_output,
+                    layer_state,
+                );
+            }
+        }
+
+        let head_started = timing.then(std::time::Instant::now);
+        for batch_idx in 0..batch_size {
+            let hidden_ptr =
+                device_row_ptr(d_batch_hidden_ptr, batch_idx, hidden_bytes, "final hidden")?;
+            self.launch_deepseek_v4_hc_head_registration_for_graph(
+                graph,
+                &head,
+                device_row_ptr(batch_state_ptr, batch_idx, state_bytes, "final HC state")?,
+                hidden_ptr,
+            )?;
+            self.launch_deepseek_v4_rmsnorm_for_graph(
+                graph,
+                hidden_ptr,
+                hidden_ptr,
+                graph.final_norm_ptr,
+                hidden,
+                &format!("D-Spark target batch final {batch_idx}"),
+            )?;
+        }
+        let lm_head = graph
+            .weights
+            .get(graph.lm_head_wid)
+            .ok_or("D-Spark target LM head is absent")?;
+        self.gemm_bf16_to_f32_batch(
+            lm_head,
+            d_batch_hidden_ptr,
+            d_batch_logits_ptr,
+            batch_size,
+            hidden,
+            graph.vocab_size,
+        )?;
+        self.device
+            .synchronize()
+            .map_err(|error| format!("D-Spark target batch sync: {error:?}"))?;
+        let total_logits = batch_size
+            .checked_mul(graph.vocab_size)
+            .ok_or_else(|| "D-Spark target batch logits size overflow".to_string())?;
+        let result = unsafe {
+            cuda_sys::lib().cuMemcpyDtoH_v2(
+                graph.h_batch_logits.as_mut_ptr() as *mut std::ffi::c_void,
+                d_batch_logits_ptr,
+                total_logits
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| "D-Spark target batch logits byte size overflow".to_string())?,
+            )
+        };
+        if result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("D-Spark target batch logits D2H: {result:?}"));
+        }
+        apply_logit_softcap_in_place(
+            &mut graph.h_batch_logits[..total_logits],
+            graph.final_logit_softcap,
+        );
+        runtime.batch_head_seconds +=
+            self.dspark_timing_checkpoint(head_started, "target batch head")?;
+        Ok(batch_size)
     }
 
     fn gpu_decode_step_batched_inner(
@@ -66144,7 +70513,10 @@ impl GpuDecodeStore {
             }
         }
 
-        let num_layers = graph.layers.len();
+        // Batched verification is a target-model operation. Auxiliary D-Spark
+        // stages are registered after the checkpoint's target layers and run
+        // through their own proposal path.
+        let num_layers = graph.num_layers.min(graph.layers.len());
         let mut la_stack_idx = 0usize;
 
         // ── 2. Layer loop — batched GEMM for projections, per-token for attention ──
@@ -67757,7 +72129,7 @@ impl GpuDecodeStore {
             if has_moe {
                 // Batched MoE with fail-fast: route all tokens, check expert divergence,
                 // potentially truncate batch, then DMA expert union and compute.
-                batch_size = self.moe_forward_batched(graph, layer_idx, batch_size)?;
+                batch_size = self.moe_forward_batched(graph, layer_idx, batch_size, None)?;
 
                 // Copy moe_out[t] → hidden[t] for each token
                 for t in 0..batch_size {
@@ -67919,11 +72291,12 @@ impl GpuDecodeStore {
         graph: &mut GpuDecodeGraph,
         layer_idx: usize,
         batch_size: usize,
+        token_ids_ptr: Option<u64>,
     ) -> Result<usize, String> {
-        use std::collections::HashMap;
-
         let device = &self.device;
         let copy_stream = self.copy_stream.0;
+        let dspark_moe_detail = graph.timing_enabled && env_truthy("KRASIS_DSPARK_MOE_DETAIL");
+        let detail_route_started = dspark_moe_detail.then(std::time::Instant::now);
 
         let moe = graph
             .moe_layers
@@ -67937,12 +72310,6 @@ impl GpuDecodeStore {
         let topk = moe.topk;
         let ne = moe.num_experts;
         let sf = moe.scoring_func;
-        if sf == 2 {
-            return Err(
-                "DeepSeek-V4 does not support speculative/batched decode; use the single-token Rust decode path"
-                    .to_string(),
-            );
-        }
         let rsf = moe.routed_scaling_factor;
         let gate_wid = moe.gate_wid;
         let gate_bias_ptr = moe.gate_bias_ptr;
@@ -67956,6 +72323,7 @@ impl GpuDecodeStore {
         let expert_bits = graph.expert_bits;
         let is_bf16_expert = expert_bits == 16;
         let is_int8 = expert_bits == 8;
+        let activation_mode = if moe.deepseek_v4_activation { 2 } else { 0 };
 
         let w13_n = 2 * intermediate;
         let shared_w13_n = if moe.gated_experts {
@@ -68073,13 +72441,13 @@ impl GpuDecodeStore {
                 let parallel_topk_enabled = graph.parallel_topk_enabled_for_moe(moe);
                 let parallel_topk_selection_enabled =
                     graph.parallel_topk_selection_enabled_for_moe(moe);
-                if graph.parallel_topk_selection_enabled && sf != 0 {
+                if graph.parallel_topk_selection_enabled && !matches!(sf, 0 | 2) {
                     return Err(format!(
-                        "KRASIS_DECODE_PARALLEL_TOPK_SELECTION=1 requires softmax routing; layer {} uses scoring_func={}",
+                        "KRASIS_DECODE_PARALLEL_TOPK_SELECTION=1 requires softmax or learned sqrtsoftplus routing; layer {} uses scoring_func={}",
                         layer_idx, sf
                     ));
                 }
-                if parallel_topk_enabled && sf > 1 {
+                if parallel_topk_enabled && sf > 1 && sf != 2 {
                     return Err(format!(
                         "KRASIS_DECODE_PARALLEL_TOPK=1 supports softmax or sigmoid routing; layer {} uses scoring_func={}",
                         layer_idx, sf
@@ -68109,7 +72477,105 @@ impl GpuDecodeStore {
                     block_dim: topk_block_dim,
                     shared_mem_bytes: smem,
                 };
-                if sf == 1 {
+                if sf == 2 {
+                    let token_hash_route = moe.hash_table_ptr != 0;
+                    let router_kernel = if token_hash_route {
+                        k.deepseek_v4_sqrtsoftplus_topk.clone()
+                    } else {
+                        k.deepseek_v4_sqrtsoftplus_topk_parallel_selection.clone()
+                    };
+                    let router_smem = if token_hash_route {
+                        0
+                    } else {
+                        let bytes = ne
+                            .checked_mul(std::mem::size_of::<f32>())
+                            .and_then(|bytes| {
+                                bytes.checked_add(
+                                    topk_threads as usize
+                                        * (std::mem::size_of::<f32>()
+                                            + std::mem::size_of::<i32>()),
+                                )
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "DeepSeek-V4 batched router shared-memory size overflow at layer {layer_idx}"
+                                )
+                            })?;
+                        u32::try_from(bytes).map_err(|_| {
+                            format!(
+                                "DeepSeek-V4 batched router shared-memory size exceeds u32 at layer {layer_idx}: {bytes}"
+                            )
+                        })?
+                    };
+                    let route_token_ptr = if token_hash_route {
+                        let base = token_ids_ptr.ok_or_else(|| {
+                            format!(
+                                "DeepSeek-V4 token-hash batch layer {layer_idx} has no token-ID buffer"
+                            )
+                        })?;
+                        let offset = t
+                            .checked_mul(std::mem::size_of::<i32>())
+                            .ok_or_else(|| {
+                                format!(
+                                    "DeepSeek-V4 token-hash batch offset overflow at layer {layer_idx} token {t}"
+                                )
+                            })?;
+                        base.checked_add(u64::try_from(offset).map_err(|_| {
+                            format!(
+                                "DeepSeek-V4 token-hash batch offset exceeds u64 at layer {layer_idx} token {t}"
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            format!(
+                                "DeepSeek-V4 token-hash batch pointer overflow at layer {layer_idx} token {t}"
+                            )
+                        })?
+                    } else {
+                        0
+                    };
+                    let hash_vocab_size = if token_hash_route {
+                        i32::try_from(moe.hash_vocab_size).map_err(|_| {
+                            format!(
+                                "DeepSeek-V4 token-hash vocabulary exceeds i32 at layer {layer_idx}: {}",
+                                moe.hash_vocab_size,
+                            )
+                        })?
+                    } else {
+                        0
+                    };
+                    unsafe {
+                        router_kernel
+                            .launch(
+                                LaunchConfig {
+                                    grid_dim: (1, 1, 1),
+                                    block_dim: if token_hash_route {
+                                        (1, 1, 1)
+                                    } else {
+                                        (topk_threads, 1, 1)
+                                    },
+                                    shared_mem_bytes: router_smem,
+                                },
+                                (
+                                    logits_ptr,
+                                    e_score_corr_ptr,
+                                    moe.hash_table_ptr,
+                                    route_token_ptr,
+                                    tk_ids_ptr,
+                                    tk_wts_ptr,
+                                    ne as i32,
+                                    topk as i32,
+                                    1.0f32,
+                                    hash_vocab_size,
+                                ),
+                            )
+                            .map_err(|e| {
+                                format!(
+                                    "batch deepseek_v4_sqrtsoftplus_topk[{}][{}]: {:?}",
+                                    layer_idx, t, e
+                                )
+                            })?;
+                    }
+                } else if sf == 1 {
                     let bias_ptr = if gate_bias_ptr != 0 {
                         gate_bias_ptr
                     } else {
@@ -68200,7 +72666,7 @@ impl GpuDecodeStore {
                     }
                 }
             }
-            if sf == 1 && moe.norm_topk_prob {
+            if matches!(sf, 1 | 2) && moe.norm_topk_prob {
                 unsafe {
                     k.normalize_topk_weights
                         .clone()
@@ -68242,7 +72708,7 @@ impl GpuDecodeStore {
         // ── Step 1.5: Fail-fast expert divergence check (Jaccard similarity) ──
         // Compare each draft token's expert routing against token[0]'s routing.
         // If a draft token diverges, truncate the batch at that point.
-        let active_batch = if batch_size > 1 && self.spec_jaccard_threshold > 0.0 {
+        let active_batch = if sf != 2 && batch_size > 1 && self.spec_jaccard_threshold > 0.0 {
             // Build token[0]'s expert set
             let mut token0_experts = [false; 256]; // bitset (max 256 experts)
             let mut token0_count = 0usize;
@@ -68293,22 +72759,88 @@ impl GpuDecodeStore {
             batch_size
         };
 
-        // ── Step 2: Compute expert union across active tokens ──
-        // expert_tokens: expert_id → Vec<(token_idx, weight)>
-        let mut expert_tokens: HashMap<usize, Vec<(usize, f32)>> = HashMap::new();
+        // ── Step 2: Build the exact per-token expert order ──
+        //
+        // The scalar decode path accumulates every resident route first, in
+        // router top-k order, followed by every cold route in router top-k
+        // order.  `fused_silu_accum` rounds the accumulator to BF16 after each
+        // expert, so changing that order changes target logits.  A HashMap
+        // union used here previously made the order random and caused the
+        // D-Spark target batch shadow to diverge from scalar decode.
+        //
+        // Preserve each token's scalar dependency chain and coalesce only
+        // routes which are simultaneously at the head of their chains.  This
+        // shares an expert DMA whenever doing so is numerically legal.  Cyclic
+        // or conflicting route orders naturally execute the expert more than
+        // once rather than changing either token's arithmetic.
+        let mut route_chains: Vec<Vec<(usize, f32)>> = Vec::with_capacity(active_batch);
+        let mut logical_resident_routes = 0usize;
+        let mut logical_cold_routes = 0usize;
         for t in 0..active_batch {
+            let mut resident = Vec::with_capacity(topk);
+            let mut cold = Vec::with_capacity(topk);
             for j in 0..topk {
                 let eid = graph.h_batch_topk_ids[t * topk + j];
                 if eid < 0 {
                     continue;
                 }
                 let weight = graph.h_batch_topk_weights[t * topk + j];
-                expert_tokens
-                    .entry(eid as usize)
-                    .or_default()
-                    .push((t, weight));
+                let is_resident = if let Some(hcs) = graph.hcs.as_mut() {
+                    hcs.record_activation(layer_idx, eid as usize);
+                    hcs.dynamic_touch(layer_idx, eid as usize);
+                    hcs.get_fast(layer_idx, eid as usize).is_some()
+                } else {
+                    false
+                };
+                let route = (eid as usize, weight);
+                if is_resident {
+                    logical_resident_routes += 1;
+                    resident.push(route);
+                } else {
+                    logical_cold_routes += 1;
+                    cold.push(route);
+                }
             }
+            resident.extend(cold);
+            route_chains.push(resident);
         }
+        let scheduled_routes = dependency_preserving_route_schedule(&route_chains)
+            .map_err(|error| format!("{error} at layer {layer_idx}"))?;
+        graph.dma_hcs_experts = graph
+            .dma_hcs_experts
+            .saturating_add(logical_resident_routes as u64);
+        graph.dma_cold_experts = graph
+            .dma_cold_experts
+            .saturating_add(logical_cold_routes as u64);
+        let detail_route_seconds = detail_route_started
+            .map(|started| started.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        let detail_moe_started = dspark_moe_detail.then(std::time::Instant::now);
+        let detail_scheduled_route_instances = if dspark_moe_detail {
+            scheduled_routes
+                .iter()
+                .map(|(_, token_list)| token_list.len())
+                .sum::<usize>()
+        } else {
+            0
+        };
+        let detail_coalesced_steps = if dspark_moe_detail {
+            scheduled_routes
+                .iter()
+                .filter(|(_, token_list)| token_list.len() > 1)
+                .count()
+        } else {
+            0
+        };
+        let detail_coalesced_routes = if dspark_moe_detail {
+            scheduled_routes
+                .iter()
+                .filter(|(_, token_list)| token_list.len() > 1)
+                .map(|(_, token_list)| token_list.len())
+                .sum::<usize>()
+        } else {
+            0
+        };
 
         // ── Step 3: Zero batch moe_out accumulators ──
         for t in 0..active_batch {
@@ -68321,7 +72853,7 @@ impl GpuDecodeStore {
             }
         }
 
-        // ── Step 4: Expert loop — DMA each unique expert once, compute all tokens ──
+        // ── Step 4: Expert loop — coalesce only dependency-compatible routes ──
         let use_double_buf = graph.expert_buf_total_size > 0;
         let buf_base = [
             *graph.d_expert_buf[0].device_ptr(),
@@ -68338,8 +72870,13 @@ impl GpuDecodeStore {
         let buf_w2_scales = *graph.d_expert_buf_b1.device_ptr();
 
         let mut dma_expert_count = 0u32;
+        let mut detail_resident_steps = 0usize;
+        let mut detail_cold_steps = 0usize;
+        let mut detail_cold_dma_calls = 0u64;
+        let mut detail_cold_dma_bytes = 0u64;
 
-        for (&eid, token_list) in &expert_tokens {
+        for (eid, token_list) in &scheduled_routes {
+            let eid = *eid;
             let expert = &moe.experts[eid];
 
             // Check HCS first (fast flat lookup)
@@ -68351,8 +72888,14 @@ impl GpuDecodeStore {
 
             let (w13p, w13s, w2p, w2s) = if let Some(ptrs) = hcs_ptrs {
                 // HCS hit — no DMA needed
+                if dspark_moe_detail {
+                    detail_resident_steps += 1;
+                }
                 ptrs
             } else if use_double_buf {
+                if dspark_moe_detail {
+                    detail_cold_steps += 1;
+                }
                 // DMA to ping-pong buffer
                 let slot = (dma_expert_count % 2) as usize;
                 // The ping-pong buffers are shared across layers. The first use
@@ -68378,6 +72921,15 @@ impl GpuDecodeStore {
                             expert.contiguous_bytes,
                             copy_stream,
                         );
+                        graph.dma_bytes_total = graph
+                            .dma_bytes_total
+                            .saturating_add(expert.contiguous_bytes as u64);
+                        graph.dma_call_count = graph.dma_call_count.saturating_add(1);
+                        if dspark_moe_detail {
+                            detail_cold_dma_bytes = detail_cold_dma_bytes
+                                .saturating_add(expert.contiguous_bytes as u64);
+                            detail_cold_dma_calls = detail_cold_dma_calls.saturating_add(1);
+                        }
                     } else {
                         cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                             base + w13p_off as u64,
@@ -68403,6 +72955,19 @@ impl GpuDecodeStore {
                             expert.w2_scales_bytes,
                             copy_stream,
                         );
+                        let expert_bytes = expert
+                            .w13_packed_bytes
+                            .saturating_add(expert.w13_scales_bytes)
+                            .saturating_add(expert.w2_packed_bytes)
+                            .saturating_add(expert.w2_scales_bytes);
+                        graph.dma_bytes_total =
+                            graph.dma_bytes_total.saturating_add(expert_bytes as u64);
+                        graph.dma_call_count = graph.dma_call_count.saturating_add(4);
+                        if dspark_moe_detail {
+                            detail_cold_dma_bytes =
+                                detail_cold_dma_bytes.saturating_add(expert_bytes as u64);
+                            detail_cold_dma_calls = detail_cold_dma_calls.saturating_add(4);
+                        }
                     }
                     cuda_sys::lib().cuEventRecord(ev_dma[slot], copy_stream);
                     cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[slot], 0);
@@ -68419,6 +72984,9 @@ impl GpuDecodeStore {
                 )
             } else {
                 // Legacy single-buffer path
+                if dspark_moe_detail {
+                    detail_cold_steps += 1;
+                }
                 unsafe {
                     cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                         buf_w13_packed,
@@ -68434,6 +73002,18 @@ impl GpuDecodeStore {
                     );
                     cuda_sys::lib().cuEventRecord(ev_dma[0], copy_stream);
                     cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[0], 0);
+                }
+                let expert_bytes = expert
+                    .w13_packed_bytes
+                    .saturating_add(expert.w13_scales_bytes)
+                    .saturating_add(expert.w2_packed_bytes)
+                    .saturating_add(expert.w2_scales_bytes);
+                graph.dma_bytes_total = graph.dma_bytes_total.saturating_add(expert_bytes as u64);
+                graph.dma_call_count = graph.dma_call_count.saturating_add(4);
+                if dspark_moe_detail {
+                    detail_cold_dma_bytes =
+                        detail_cold_dma_bytes.saturating_add(expert_bytes as u64);
+                    detail_cold_dma_calls = detail_cold_dma_calls.saturating_add(4);
                 }
                 (buf_w13_packed, buf_w13_scales, buf_w2_packed, buf_w2_scales)
             };
@@ -68498,7 +73078,7 @@ impl GpuDecodeStore {
                     weight,
                     0u64,
                     moe.swiglu_limit,
-                    0,
+                    activation_mode,
                     k,
                     is_int8,
                 )
@@ -68660,7 +73240,7 @@ impl GpuDecodeStore {
                     shared_weight,
                     gate_weight_ptr,
                     moe.shared_swiglu_limit,
-                    0,
+                    activation_mode,
                     k,
                     shared_is_int8,
                 )
@@ -68682,6 +73262,37 @@ impl GpuDecodeStore {
                         .map_err(|e| format!("batch scale[{}][{}]: {:?}", layer_idx, t, e))?;
                 }
             }
+        }
+
+        if let Some(started) = detail_moe_started {
+            device
+                .synchronize()
+                .map_err(|error| format!("D-Spark MoE detail sync: {error:?}"))?;
+            let domain = if layer_idx < graph.num_layers {
+                "target"
+            } else {
+                "auxiliary"
+            };
+            log::info!(
+                "D-Spark MoE detail: domain={} layer={} batch={} logical_routes={} hcs_logical={} cold_logical={} scheduled_steps={} scheduled_route_instances={} coalesced_steps={} coalesced_routes={} resident_steps={} cold_steps={} cold_dma_steps={} cold_dma_calls={} cold_dma_bytes={} route_ms={:.3} moe_ms={:.3}",
+                domain,
+                layer_idx,
+                active_batch,
+                logical_resident_routes + logical_cold_routes,
+                logical_resident_routes,
+                logical_cold_routes,
+                scheduled_routes.len(),
+                detail_scheduled_route_instances,
+                detail_coalesced_steps,
+                detail_coalesced_routes,
+                detail_resident_steps,
+                detail_cold_steps,
+                detail_cold_steps,
+                detail_cold_dma_calls,
+                detail_cold_dma_bytes,
+                detail_route_seconds * 1000.0,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
         }
 
         Ok(active_batch)
@@ -70076,6 +74687,10 @@ impl GpuDecodeStore {
     /// Returns (loaded_count, reload_ms).
     pub fn hcs_reload_after_prefill(&mut self, actual_tokens: usize) -> (usize, f64) {
         let cal = self.vram_calibration;
+        let preserve_dspark_resident_order = self
+            .dspark
+            .as_ref()
+            .is_some_and(|runtime| runtime.mode == DsparkResidencyMode::Resident);
         let device_id = self.device.ordinal() as i32;
         let trace_cfg = self.active_trace_owned();
         let route_sync_device = self.device.clone();
@@ -70150,7 +74765,11 @@ impl GpuDecodeStore {
             }
         }
 
-        if prompt_hcs_reload_enabled() && !prompt_counts.is_empty() && target_chunks > 0 {
+        if !preserve_dspark_resident_order
+            && prompt_hcs_reload_enabled()
+            && !prompt_counts.is_empty()
+            && target_chunks > 0
+        {
             let retain_pct = prompt_hcs_reload_retain_pct();
             let retain_slots = (hcs.soft_num_slots.saturating_mul(retain_pct) + 99) / 100;
             let retain_chunks = if retain_slots == 0 {
@@ -70492,6 +75111,10 @@ impl GpuDecodeStore {
             return self.hcs_reload_after_prefill(actual_tokens);
         }
         let cal = self.vram_calibration;
+        let preserve_dspark_resident_order = self
+            .dspark
+            .as_ref()
+            .is_some_and(|runtime| runtime.mode == DsparkResidencyMode::Resident);
         let device_id = self.device.ordinal() as i32;
         let trace_cfg = self.active_trace_owned();
         let route_sync_device = self.device.clone();
@@ -70566,7 +75189,11 @@ impl GpuDecodeStore {
             }
         }
 
-        if prompt_hcs_reload_enabled() && !prompt_counts.is_empty() && target_chunks > 0 {
+        if !preserve_dspark_resident_order
+            && prompt_hcs_reload_enabled()
+            && !prompt_counts.is_empty()
+            && target_chunks > 0
+        {
             let retain_pct = prompt_hcs_reload_retain_pct();
             let retain_slots = (hcs.soft_num_slots.saturating_mul(retain_pct) + 99) / 100;
             let retain_chunks = if retain_slots == 0 {
@@ -71960,8 +76587,9 @@ impl GpuDecodeStore {
         };
 
         // ── Speculative decode state ──
+        let use_dspark = self.dspark.is_some();
         let use_speculative = self.draft.is_some();
-        if use_speculative
+        if (use_speculative || use_dspark)
             && self
                 .graph
                 .as_ref()
@@ -71983,6 +76611,35 @@ impl GpuDecodeStore {
         let mut spec_save_time: f64 = 0.0;
         let mut spec_failfast_count: u64 = 0;
         let mut spec_tokens_saved: u64 = 0;
+        if let Some(runtime) = self.dspark.as_mut() {
+            runtime.proposal_rounds = 0;
+            runtime.proposed_tokens = 0;
+            runtime.verified_tokens = 0;
+            runtime.bonus_tokens = 0;
+            runtime.matched_tokens = 0;
+            runtime.rejected_tokens = 0;
+            runtime.verified_confidence_sum = 0.0;
+            runtime.matched_confidence_sum = 0.0;
+            runtime.rejected_confidence_sum = 0.0;
+            runtime.proposal_seconds = 0.0;
+            runtime.batch_verify_rounds = 0;
+            runtime.batch_transaction_rollbacks = 0;
+            runtime.batch_verify_seconds = 0.0;
+            runtime.proposal_timing_rounds = 0;
+            runtime.proposal_init_seconds = 0.0;
+            runtime.proposal_aux_kv_seconds = 0.0;
+            runtime.proposal_aux_query_seconds = 0.0;
+            runtime.proposal_head_seconds = 0.0;
+            runtime.proposal_markov_seconds = 0.0;
+            runtime.batch_save_seconds = 0.0;
+            runtime.batch_setup_seconds = 0.0;
+            runtime.batch_attention_route_seconds = 0.0;
+            runtime.batch_moe_seconds = 0.0;
+            runtime.batch_hc_commit_seconds = 0.0;
+            runtime.batch_head_seconds = 0.0;
+            runtime.batch_restore_seconds = 0.0;
+            runtime.context_commit_seconds = 0.0;
+        }
 
         // Reset draft model KV cache for speculative decode
         if use_speculative && start_position > 0 {
@@ -72084,6 +76741,598 @@ impl GpuDecodeStore {
                         ),
                     );
                 }
+            }
+
+            if use_dspark {
+                let current_hcs_capacity = self
+                    .graph
+                    .as_ref()
+                    .and_then(|graph| graph.hcs.as_ref())
+                    .map_or(0, |hcs| hcs.num_cached);
+                if let Err(error) = self
+                    .dspark
+                    .as_ref()
+                    .ok_or_else(|| "D-Spark runtime disappeared before proposal".to_string())
+                    .and_then(|runtime| {
+                        runtime
+                            .verification_policy
+                            .validate_hcs_capacity(current_hcs_capacity)
+                    })
+                {
+                    let failure = format!("D-Spark verification-width policy is stale: {error}");
+                    log::error!("gpu_generate_stream: {}", failure);
+                    self.last_stream_failure = Some(failure);
+                    break;
+                }
+                let dspark_timing = self
+                    .graph
+                    .as_ref()
+                    .is_some_and(|graph| graph.timing_enabled);
+                let dspark_service_timing = dspark_timing
+                    || self
+                        .dspark
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.verification_policy.calibrating);
+                let dspark_round_started = dspark_service_timing.then(Instant::now);
+                let proposal = match self.generate_dspark_block(next_token, pos) {
+                    Ok(proposal) => proposal,
+                    Err(error) => {
+                        let failure = format!("D-Spark proposal failed: {error}");
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
+                        break;
+                    }
+                };
+                if proposal.tokens.is_empty()
+                    || proposal.tokens.len() != proposal.confidences.len()
+                    || proposal.confidences.iter().any(|confidence| {
+                        !confidence.is_finite() || !(0.0..=1.0).contains(confidence)
+                    })
+                {
+                    let failure = format!(
+                        "D-Spark returned an invalid proposal block: tokens={} confidences={}",
+                        proposal.tokens.len(),
+                        proposal.confidences.len(),
+                    );
+                    log::error!("gpu_generate_stream: {}", failure);
+                    self.last_stream_failure = Some(failure);
+                    break;
+                }
+                let proposal_seconds =
+                    dspark_round_started.map_or(0.0, |started| started.elapsed().as_secs_f64());
+                let requested_rows = match self
+                    .dspark
+                    .as_mut()
+                    .ok_or_else(|| "D-Spark runtime disappeared before width selection".to_string())
+                    .and_then(|runtime| {
+                        runtime
+                            .verification_policy
+                            .observe_confidences(&proposal.confidences)?;
+                        runtime.verification_policy.choose_rows(
+                            &proposal.confidences,
+                            max_tokens - step,
+                            current_hcs_capacity,
+                        )
+                    }) {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        let failure =
+                            format!("D-Spark verification-width selection failed: {error}");
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
+                        break;
+                    }
+                };
+
+                let (batch_tokens, compared_rows) = match dspark_verification_batch_plan(
+                    next_token,
+                    &proposal.tokens,
+                    max_tokens - step,
+                    requested_rows,
+                ) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        log::error!("gpu_generate_stream: {}", error);
+                        self.last_stream_failure = Some(error);
+                        break;
+                    }
+                };
+                let verify_count = batch_tokens.len();
+                let batch_positions = match (0..verify_count)
+                    .map(|offset| {
+                        pos.checked_add(offset).ok_or_else(|| {
+                            "D-Spark target transaction position overflow".to_string()
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(positions) => positions,
+                    Err(error) => {
+                        log::error!("gpu_generate_stream: {}", error);
+                        self.last_stream_failure = Some(error);
+                        break;
+                    }
+                };
+
+                let verify_started = dspark_service_timing.then(Instant::now);
+                let save_started = dspark_timing.then(Instant::now);
+                let save_result = self
+                    .dspark
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "D-Spark runtime disappeared before target transaction".to_string()
+                    })
+                    .and_then(|runtime| {
+                        self.save_dspark_target_transaction(runtime, &batch_positions)
+                    });
+                if let Err(error) = save_result {
+                    let failure = format!("D-Spark target transaction save failed: {error}");
+                    log::error!("gpu_generate_stream: {}", failure);
+                    self.last_stream_failure = Some(failure);
+                    break;
+                }
+                if dspark_timing {
+                    let save_seconds = match self
+                        .dspark_timing_checkpoint(save_started, "target transaction save")
+                    {
+                        Ok(seconds) => seconds,
+                        Err(error) => {
+                            log::error!("gpu_generate_stream: {}", error);
+                            self.last_stream_failure = Some(error);
+                            break;
+                        }
+                    };
+                    if let Some(runtime) = self.dspark.as_mut() {
+                        runtime.batch_save_seconds += save_seconds;
+                    }
+                }
+
+                let valid_positions = match self
+                    .gpu_decode_step_batched(&batch_tokens, &batch_positions)
+                {
+                    Ok(valid_positions) => valid_positions,
+                    Err(batch_error) => {
+                        let restore_error = self
+                            .restore_dspark_target_transaction_prefix(&batch_positions, 0)
+                            .err();
+                        let failure = match restore_error {
+                                Some(restore_error) => format!(
+                                    "D-Spark target batch failed ({batch_error}) and state restore failed ({restore_error})"
+                                ),
+                                None => {
+                                    format!("D-Spark target batch verification failed: {batch_error}")
+                                }
+                            };
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
+                        break;
+                    }
+                };
+                if valid_positions != verify_count {
+                    let restore_error = self
+                        .restore_dspark_target_transaction_prefix(&batch_positions, 0)
+                        .err();
+                    let failure = match restore_error {
+                        Some(restore_error) => format!(
+                            "D-Spark target batch returned {valid_positions} positions for {verify_count} inputs and state restore failed ({restore_error})"
+                        ),
+                        None => format!(
+                            "D-Spark target batch returned {valid_positions} positions for {verify_count} inputs"
+                        ),
+                    };
+                    log::error!("gpu_generate_stream: {}", failure);
+                    self.last_stream_failure = Some(failure);
+                    break;
+                }
+
+                let mut planned_seen = seen_tokens.clone();
+                let mut planned_think_end_seen = self.think_end_seen;
+                let mut planned_think_suppress_count = self.think_suppress_count;
+                let mut planned_tokens: Vec<DsparkPlannedToken> = Vec::with_capacity(verify_count);
+                let mut planning_failure = None;
+                for row_idx in 0..verify_count {
+                    let row_offset = match row_idx.checked_mul(vocab_size) {
+                        Some(offset) => offset,
+                        None => {
+                            planning_failure =
+                                Some("D-Spark target batch logit offset overflow".to_string());
+                            break;
+                        }
+                    };
+                    let generated_before = match generated.checked_add(row_idx) {
+                        Some(count) => count,
+                        None => {
+                            planning_failure =
+                                Some("D-Spark generated-token count overflow".to_string());
+                            break;
+                        }
+                    };
+                    let think_end_active =
+                        self.think_end_token_for_suppress.is_some() && !planned_think_end_seen;
+                    let think_within_budget = self.think_suppress_budget == 0
+                        || planned_think_suppress_count < self.think_suppress_budget;
+                    let sampled = {
+                        let graph = match self.graph.as_mut() {
+                            Some(graph) => graph,
+                            None => {
+                                planning_failure = Some(
+                                    "D-Spark target graph disappeared before sampling".to_string(),
+                                );
+                                break;
+                            }
+                        };
+                        let row_end = match row_offset.checked_add(vocab_size) {
+                            Some(end) if end <= graph.h_batch_logits.len() => end,
+                            _ => {
+                                planning_failure = Some(format!(
+                                    "D-Spark target batch row {row_idx} exceeds the host logit buffer"
+                                ));
+                                break;
+                            }
+                        };
+                        let row = &mut graph.h_batch_logits[row_offset..row_end];
+                        if presence_penalty != 0.0 {
+                            for &token in &planned_seen {
+                                if token < vocab_size {
+                                    row[token] -= presence_penalty;
+                                }
+                            }
+                        }
+                        for &token in &self.suppress_tokens {
+                            if token < vocab_size {
+                                row[token] = f32::NEG_INFINITY;
+                            }
+                        }
+                        if generated_before < self.min_new_tokens
+                            || (think_end_active && think_within_budget)
+                        {
+                            for &token in &self.stop_token_ids_for_suppress {
+                                if token < vocab_size {
+                                    row[token] = f32::NEG_INFINITY;
+                                }
+                            }
+                        }
+                        if !row.iter().any(|value| value.is_finite()) {
+                            planning_failure = Some(format!(
+                                "D-Spark target batch row {row_idx} has no finite logit"
+                            ));
+                            break;
+                        }
+                        let target_token = if think_end_active && !think_within_budget {
+                            self.think_end_token_for_suppress.ok_or_else(|| {
+                                "D-Spark thinking-budget state lost its end token".to_string()
+                            })
+                        } else {
+                            Ok(crate::decode::sample_from_logits_pub(
+                                row,
+                                vocab_size,
+                                temperature,
+                                top_k,
+                                top_p,
+                                &mut rng_next,
+                            ))
+                        };
+                        match target_token {
+                            Ok(target_token) => {
+                                let top_logprobs = if logprobs_top_n > 0 {
+                                    Some(crate::decode::extract_top_logprobs(
+                                        row,
+                                        vocab_size,
+                                        logprobs_top_n,
+                                    ))
+                                } else {
+                                    None
+                                };
+                                Some((target_token, top_logprobs))
+                            }
+                            Err(error) => {
+                                planning_failure = Some(error);
+                                None
+                            }
+                        }
+                    };
+                    let Some((target_token, top_logprobs)) = sampled else {
+                        break;
+                    };
+
+                    planned_seen.insert(target_token);
+                    if let Some(think_end_token) = self.think_end_token_for_suppress {
+                        if target_token == think_end_token {
+                            planned_think_end_seen = true;
+                        } else if !planned_think_end_seen {
+                            planned_think_suppress_count = match planned_think_suppress_count
+                                .checked_add(1)
+                            {
+                                Some(count) => count,
+                                None => {
+                                    planning_failure =
+                                        Some("D-Spark thinking-token count overflow".to_string());
+                                    break;
+                                }
+                            };
+                        }
+                    }
+                    let generated_after = generated_before + 1;
+                    let finish_reason = if stop_set.contains(&target_token)
+                        && generated_after >= self.min_new_tokens
+                    {
+                        Some("stop")
+                    } else if generated_after >= max_tokens {
+                        Some("length")
+                    } else {
+                        None
+                    };
+                    let proposal_row = if row_idx < compared_rows {
+                        let proposed = proposal.tokens[row_idx];
+                        let confidence = proposal.confidences[row_idx];
+                        Some((proposed, confidence, target_token == proposed))
+                    } else {
+                        None
+                    };
+                    let matched = proposal_row
+                        .as_ref()
+                        .map(|(_, _, matched)| *matched)
+                        .unwrap_or(true);
+                    planned_tokens.push(DsparkPlannedToken {
+                        target_token,
+                        proposal: proposal_row,
+                        finish_reason,
+                        top_logprobs,
+                    });
+                    if !matched || finish_reason.is_some() {
+                        break;
+                    }
+                }
+
+                if let Some(error) = planning_failure {
+                    let restore_error = self
+                        .restore_dspark_target_transaction_prefix(&batch_positions, 0)
+                        .err();
+                    let failure = match restore_error {
+                        Some(restore_error) => format!(
+                            "D-Spark target sampling failed ({error}) and state restore failed ({restore_error})"
+                        ),
+                        None => format!("D-Spark target sampling failed: {error}"),
+                    };
+                    log::error!("gpu_generate_stream: {}", failure);
+                    self.last_stream_failure = Some(failure);
+                    break;
+                }
+                if planned_tokens.is_empty() {
+                    let restore_error = self
+                        .restore_dspark_target_transaction_prefix(&batch_positions, 0)
+                        .err();
+                    let failure = match restore_error {
+                        Some(restore_error) => format!(
+                            "D-Spark target verifier produced no token and state restore failed ({restore_error})"
+                        ),
+                        None => "D-Spark target verifier produced no token".to_string(),
+                    };
+                    log::error!("gpu_generate_stream: {}", failure);
+                    self.last_stream_failure = Some(failure);
+                    break;
+                }
+
+                let planned_count = planned_tokens.len();
+                let mut rollback_operations = 0u64;
+                if planned_count < verify_count {
+                    let restore_started = dspark_timing.then(Instant::now);
+                    if let Err(error) = self
+                        .restore_dspark_target_transaction_prefix(&batch_positions, planned_count)
+                    {
+                        let failure =
+                            format!("D-Spark target rejected-prefix restore failed: {error}");
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
+                        break;
+                    }
+                    if dspark_timing {
+                        let restore_seconds = match self
+                            .dspark_timing_checkpoint(restore_started, "rejected-prefix restore")
+                        {
+                            Ok(seconds) => seconds,
+                            Err(error) => {
+                                log::error!("gpu_generate_stream: {}", error);
+                                self.last_stream_failure = Some(error);
+                                break;
+                            }
+                        };
+                        if let Some(runtime) = self.dspark.as_mut() {
+                            runtime.batch_restore_seconds += restore_seconds;
+                        }
+                    }
+                    rollback_operations = rollback_operations.saturating_add(1);
+                }
+                let mut verify_seconds =
+                    verify_started.map_or(0.0, |started| started.elapsed().as_secs_f64());
+
+                let mut actual_count = 0usize;
+                let mut stop_stream = false;
+                for planned in &planned_tokens {
+                    let token_step = step;
+                    let token_position = start_position + token_step;
+                    let trace_detail = if let Some((proposed, confidence, matched)) =
+                        planned.proposal
+                    {
+                        format!(
+                            "phase=dspark_transaction_verify proposed={} target={} matched={} confidence={:.6} transaction_row={} transaction_rows={}",
+                            proposed,
+                            planned.target_token,
+                            matched,
+                            confidence,
+                            actual_count,
+                            verify_count,
+                        )
+                    } else {
+                        format!(
+                            "phase=dspark_transaction_bonus target={} transaction_row={} transaction_rows={}",
+                            planned.target_token,
+                            actual_count,
+                            verify_count,
+                        )
+                    };
+                    trace_emit_mark(
+                        trace_config.as_ref(),
+                        token_step,
+                        token_position,
+                        next_token,
+                        None,
+                        "spec",
+                        &trace_detail,
+                    );
+                    self.notify_token_generated(planned.target_token);
+                    seen_tokens.insert(planned.target_token);
+                    generated += 1;
+                    step += 1;
+                    actual_count += 1;
+                    if let Some(graph) = self.graph.as_mut() {
+                        graph.validation_decode_steps =
+                            graph.validation_decode_steps.saturating_add(1);
+                    }
+                    next_token = planned.target_token;
+
+                    if let Some(runtime) = self.dspark.as_mut() {
+                        if let Some((_, confidence, matched)) = planned.proposal {
+                            runtime.verified_tokens = runtime.verified_tokens.saturating_add(1);
+                            runtime.verified_confidence_sum += confidence as f64;
+                            if matched {
+                                runtime.matched_tokens = runtime.matched_tokens.saturating_add(1);
+                                runtime.matched_confidence_sum += confidence as f64;
+                            } else {
+                                runtime.rejected_tokens = runtime.rejected_tokens.saturating_add(1);
+                                runtime.rejected_confidence_sum += confidence as f64;
+                            }
+                        } else {
+                            runtime.bonus_tokens = runtime.bonus_tokens.saturating_add(1);
+                        }
+                    }
+
+                    let mut text = detok.add(planned.target_token as u32);
+                    if planned.finish_reason.is_some() {
+                        text.push_str(&detok.flush());
+                    }
+                    let cont = on_token(
+                        planned.target_token,
+                        &text,
+                        planned.finish_reason,
+                        planned.top_logprobs.as_deref(),
+                    );
+                    if planned.finish_reason.is_some() || !cont {
+                        stop_stream = true;
+                        break;
+                    }
+                }
+
+                if actual_count < planned_count {
+                    let correction_started = dspark_service_timing.then(Instant::now);
+                    if let Err(error) = self
+                        .restore_dspark_target_transaction_prefix(&batch_positions, actual_count)
+                    {
+                        let failure = format!("D-Spark callback-prefix restore failed: {error}");
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
+                        break;
+                    }
+                    let correction_seconds = if dspark_timing {
+                        match self
+                            .dspark_timing_checkpoint(correction_started, "callback-prefix restore")
+                        {
+                            Ok(seconds) => seconds,
+                            Err(error) => {
+                                log::error!("gpu_generate_stream: {}", error);
+                                self.last_stream_failure = Some(error);
+                                break;
+                            }
+                        }
+                    } else {
+                        correction_started.map_or(0.0, |started| started.elapsed().as_secs_f64())
+                    };
+                    verify_seconds += correction_seconds;
+                    if dspark_timing {
+                        if let Some(runtime) = self.dspark.as_mut() {
+                            runtime.batch_restore_seconds += correction_seconds;
+                        }
+                    }
+                    rollback_operations = rollback_operations.saturating_add(1);
+                }
+
+                let context_commit_started = dspark_timing.then(Instant::now);
+                for &position in batch_positions.iter().take(actual_count) {
+                    if let Err(error) = self.commit_dspark_target_context_position(position) {
+                        let failure = format!("D-Spark target-context commit failed: {error}");
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
+                        stop_stream = true;
+                        break;
+                    }
+                }
+                if self.last_stream_failure.is_some() {
+                    break;
+                }
+                if dspark_timing {
+                    let context_commit_seconds = match self
+                        .dspark_timing_checkpoint(context_commit_started, "target-context commit")
+                    {
+                        Ok(seconds) => seconds,
+                        Err(error) => {
+                            log::error!("gpu_generate_stream: {}", error);
+                            self.last_stream_failure = Some(error);
+                            break;
+                        }
+                    };
+                    if let Some(runtime) = self.dspark.as_mut() {
+                        runtime.context_commit_seconds += context_commit_seconds;
+                    }
+                }
+                if let Some(runtime) = self.dspark.as_mut() {
+                    verify_seconds =
+                        verify_started.map_or(0.0, |started| started.elapsed().as_secs_f64());
+                    runtime.batch_verify_rounds = runtime.batch_verify_rounds.saturating_add(1);
+                    runtime.batch_transaction_rollbacks = runtime
+                        .batch_transaction_rollbacks
+                        .saturating_add(rollback_operations);
+                    if dspark_service_timing {
+                        runtime.batch_verify_seconds += verify_seconds;
+                    }
+                    if let Err(error) = runtime.verification_policy.observe_round(
+                        verify_count,
+                        proposal_seconds,
+                        verify_seconds,
+                    ) {
+                        let failure =
+                            format!("D-Spark verification-width measurement failed: {error}");
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
+                        break;
+                    }
+                }
+                sample_min_vram(&mut min_vram_free_bytes);
+
+                if profile_enabled && step.saturating_sub(profile_last_step) >= profile_interval {
+                    let now = Instant::now();
+                    let window_secs = (now - profile_last_time).as_secs_f64();
+                    let window_tokens = (step - profile_last_step) as f64;
+                    let graph = self.graph.as_ref().unwrap();
+                    let cold = graph.dma_cold_experts - profile_cold_total;
+                    let hcs = graph.dma_hcs_experts - profile_hcs_total;
+                    eprintln!(
+                        "  [profile] tok {}-{}: {:.1} tok/s ({:.1}ms/tok)  cold={:.0}/tok hcs={:.0}/tok",
+                        profile_last_step + 1,
+                        step,
+                        window_tokens / window_secs,
+                        window_secs * 1000.0 / window_tokens,
+                        cold as f64 / window_tokens,
+                        hcs as f64 / window_tokens,
+                    );
+                    profile_last_step = step;
+                    profile_last_time = now;
+                    profile_cold_total = graph.dma_cold_experts;
+                    profile_hcs_total = graph.dma_hcs_experts;
+                }
+                if stop_stream {
+                    break;
+                }
+                continue;
             }
 
             if use_speculative {
@@ -72984,6 +78233,168 @@ impl GpuDecodeStore {
             self.last_min_free_vram_mb = min_free_mb;
             eprintln!("  \x1b[32mdecode: {} tokens in {:.2}s ({:.1} tok/s)  VRAM: {} MB free now, {} MB min free during decode\x1b[0m",
                 generated, elapsed, tps, free_mb, min_free_mb);
+        }
+
+        let dspark_timing_enabled = self
+            .graph
+            .as_ref()
+            .is_some_and(|graph| graph.timing_enabled);
+        if let Some(runtime) = self.dspark.as_ref() {
+            let match_rate = if runtime.verified_tokens > 0 {
+                runtime.matched_tokens as f64 / runtime.verified_tokens as f64 * 100.0
+            } else {
+                0.0
+            };
+            let accepted_per_round = if runtime.proposal_rounds > 0 {
+                runtime.matched_tokens as f64 / runtime.proposal_rounds as f64
+            } else {
+                0.0
+            };
+            let emitted_per_round = if runtime.proposal_rounds > 0 {
+                runtime.verified_tokens.saturating_add(runtime.bonus_tokens) as f64
+                    / runtime.proposal_rounds as f64
+            } else {
+                0.0
+            };
+            let average_confidence = if runtime.verified_tokens > 0 {
+                runtime.verified_confidence_sum / runtime.verified_tokens as f64
+            } else {
+                0.0
+            };
+            let matched_confidence = if runtime.matched_tokens > 0 {
+                runtime.matched_confidence_sum / runtime.matched_tokens as f64
+            } else {
+                0.0
+            };
+            let rejected_confidence = if runtime.rejected_tokens > 0 {
+                runtime.rejected_confidence_sum / runtime.rejected_tokens as f64
+            } else {
+                0.0
+            };
+            eprintln!(
+                "D-SPARK SUMMARY mode={} rounds={} proposed={} verified={} bonus={} matched={} rejected={} verified_match_rate_pct={:.6} accepted_per_round={:.6} emitted_per_round={:.6} avg_confidence={:.6} matched_confidence={:.6} rejected_confidence={:.6} batch_verify_rounds={} batch_transaction_rollbacks={} verifier=transactional_batch service_timing={}",
+                runtime.mode.label(),
+                runtime.proposal_rounds,
+                runtime.proposed_tokens,
+                runtime.verified_tokens,
+                runtime.bonus_tokens,
+                runtime.matched_tokens,
+                runtime.rejected_tokens,
+                match_rate,
+                accepted_per_round,
+                emitted_per_round,
+                average_confidence,
+                matched_confidence,
+                rejected_confidence,
+                runtime.batch_verify_rounds,
+                runtime.batch_transaction_rollbacks,
+                if dspark_timing_enabled || runtime.verification_policy.calibrating {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+            );
+            eprintln!(
+                "D-SPARK WIDTH POLICY mode={} status={}",
+                runtime.mode.label(),
+                runtime.verification_policy.status_json(),
+            );
+            log::info!(
+                "D-SPARK WIDTH POLICY mode={} status={}",
+                runtime.mode.label(),
+                runtime.verification_policy.status_json(),
+            );
+            log::info!(
+                "D-SPARK SUMMARY mode={} rounds={} proposed={} verified={} bonus={} matched={} rejected={} verified_match_rate_pct={:.6} accepted_per_round={:.6} emitted_per_round={:.6} avg_confidence={:.6} matched_confidence={:.6} rejected_confidence={:.6} batch_verify_rounds={} batch_transaction_rollbacks={} verifier=transactional_batch service_timing={}",
+                runtime.mode.label(),
+                runtime.proposal_rounds,
+                runtime.proposed_tokens,
+                runtime.verified_tokens,
+                runtime.bonus_tokens,
+                runtime.matched_tokens,
+                runtime.rejected_tokens,
+                match_rate,
+                accepted_per_round,
+                emitted_per_round,
+                average_confidence,
+                matched_confidence,
+                rejected_confidence,
+                runtime.batch_verify_rounds,
+                runtime.batch_transaction_rollbacks,
+                if dspark_timing_enabled || runtime.verification_policy.calibrating {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+            );
+            if dspark_timing_enabled || runtime.verification_policy.calibrating {
+                let proposal_ms = if runtime.proposal_rounds > 0 {
+                    runtime.proposal_seconds / runtime.proposal_rounds as f64 * 1000.0
+                } else {
+                    0.0
+                };
+                let batch_verify_ms = if runtime.batch_verify_rounds > 0 {
+                    runtime.batch_verify_seconds / runtime.batch_verify_rounds as f64 * 1000.0
+                } else {
+                    0.0
+                };
+                eprintln!(
+                    "D-SPARK SERVICE TIMING mode={} avg_proposal_ms={:.6} avg_batch_verify_ms={:.6}",
+                    runtime.mode.label(),
+                    proposal_ms,
+                    batch_verify_ms,
+                );
+                log::info!(
+                    "D-SPARK SERVICE TIMING mode={} avg_proposal_ms={:.6} avg_batch_verify_ms={:.6}",
+                    runtime.mode.label(),
+                    proposal_ms,
+                    batch_verify_ms,
+                );
+            }
+            if dspark_timing_enabled {
+                let proposal_denominator = runtime.proposal_timing_rounds.max(1) as f64;
+                let verify_denominator = runtime.batch_verify_rounds.max(1) as f64;
+                let proposal_phase_ms = |seconds: f64| seconds / proposal_denominator * 1000.0;
+                let verify_phase_ms = |seconds: f64| seconds / verify_denominator * 1000.0;
+                eprintln!(
+                    "D-SPARK TIMING mode={} proposal_rounds={} proposal_init_ms={:.6} proposal_aux_kv_ms={:.6} proposal_aux_query_ms={:.6} proposal_head_ms={:.6} proposal_markov_confidence_ms={:.6} verify_rounds={} transaction_save_ms={:.6} target_setup_ms={:.6} target_attention_route_ms={:.6} target_moe_ms={:.6} target_hc_capture_ms={:.6} target_head_ms={:.6} transaction_restore_ms={:.6} context_commit_ms={:.6}",
+                    runtime.mode.label(),
+                    runtime.proposal_timing_rounds,
+                    proposal_phase_ms(runtime.proposal_init_seconds),
+                    proposal_phase_ms(runtime.proposal_aux_kv_seconds),
+                    proposal_phase_ms(runtime.proposal_aux_query_seconds),
+                    proposal_phase_ms(runtime.proposal_head_seconds),
+                    proposal_phase_ms(runtime.proposal_markov_seconds),
+                    runtime.batch_verify_rounds,
+                    verify_phase_ms(runtime.batch_save_seconds),
+                    verify_phase_ms(runtime.batch_setup_seconds),
+                    verify_phase_ms(runtime.batch_attention_route_seconds),
+                    verify_phase_ms(runtime.batch_moe_seconds),
+                    verify_phase_ms(runtime.batch_hc_commit_seconds),
+                    verify_phase_ms(runtime.batch_head_seconds),
+                    verify_phase_ms(runtime.batch_restore_seconds),
+                    verify_phase_ms(runtime.context_commit_seconds),
+                );
+                log::info!(
+                    "D-SPARK TIMING mode={} proposal_rounds={} proposal_init_ms={:.6} proposal_aux_kv_ms={:.6} proposal_aux_query_ms={:.6} proposal_head_ms={:.6} proposal_markov_confidence_ms={:.6} verify_rounds={} transaction_save_ms={:.6} target_setup_ms={:.6} target_attention_route_ms={:.6} target_moe_ms={:.6} target_hc_capture_ms={:.6} target_head_ms={:.6} transaction_restore_ms={:.6} context_commit_ms={:.6}",
+                    runtime.mode.label(),
+                    runtime.proposal_timing_rounds,
+                    proposal_phase_ms(runtime.proposal_init_seconds),
+                    proposal_phase_ms(runtime.proposal_aux_kv_seconds),
+                    proposal_phase_ms(runtime.proposal_aux_query_seconds),
+                    proposal_phase_ms(runtime.proposal_head_seconds),
+                    proposal_phase_ms(runtime.proposal_markov_seconds),
+                    runtime.batch_verify_rounds,
+                    verify_phase_ms(runtime.batch_save_seconds),
+                    verify_phase_ms(runtime.batch_setup_seconds),
+                    verify_phase_ms(runtime.batch_attention_route_seconds),
+                    verify_phase_ms(runtime.batch_moe_seconds),
+                    verify_phase_ms(runtime.batch_hc_commit_seconds),
+                    verify_phase_ms(runtime.batch_head_seconds),
+                    verify_phase_ms(runtime.batch_restore_seconds),
+                    verify_phase_ms(runtime.context_commit_seconds),
+                );
+            }
         }
 
         if let Some(graph) = self.graph.as_ref() {

@@ -10550,6 +10550,234 @@ class KrasisModel:
 
         return store
 
+    def setup_dspark_gpu_store(self, store, mode: str) -> dict:
+        """Load and register the checkpoint-owned D-Spark dense graph.
+
+        This is startup-only Python orchestration. All request-time draft and
+        verification execution remains in Rust/CUDA. D-Spark uses its own
+        short BF16 attention rings while the target retains its configured
+        Native sequence-state format.
+        """
+        if not self.cfg.is_deepseek_v4:
+            raise RuntimeError("D-Spark setup requires DeepSeek-V4")
+        targets = tuple(self.cfg.dspark_target_layer_ids or ())
+        if not targets:
+            raise RuntimeError("Checkpoint has no validated D-Spark target layers")
+        if mode not in ("resident", "shared"):
+            raise ValueError(f"Unsupported D-Spark mode {mode!r}")
+        if store is not getattr(self, "_gpu_decode_store", None):
+            raise RuntimeError("D-Spark must attach to the configured primary decode store")
+
+        device = torch.device(self.ranks[0].device)
+        loader = WeightLoader(self.cfg, self.quant_cfg)
+        stage_data = []
+        try:
+            for stage_idx in range(len(targets)):
+                stage_data.append(loader.load_dspark_stage(stage_idx, device))
+        finally:
+            loader.close()
+
+        keepalive = self._rust_decode_weights
+
+        def register(weight: torch.Tensor, label: str, dtype: int = 0) -> int:
+            if not isinstance(weight, torch.Tensor) or not weight.is_cuda:
+                raise RuntimeError(f"D-Spark tensor {label} is not GPU resident")
+            if not weight.is_contiguous():
+                weight = weight.contiguous()
+            keepalive.keep(f"dspark.{label}", weight)
+            return store.register_weight(
+                weight.data_ptr(), int(weight.shape[0]), int(weight.shape[1]), dtype
+            )
+
+        target_cache, target_offset = self._kv_cache_slot_for_layer(0)
+        target_v4_cache = target_cache.get_deepseek_v4_layer_caches(target_offset)
+        logical_max_seq = int(target_cache.max_context_tokens)
+        rope_cos_ptr, rope_sin_ptr, rope_rows, rope_cos, rope_sin = (
+            self._deepseek_v4_rope_table_ptrs(logical_max_seq, 0, device)
+        )
+        keepalive.keep("dspark.rope", rope_cos, rope_sin)
+
+        dspark_caches = []
+        main_proj_wid = None
+        main_norm = None
+        final_norm = None
+        head_hc = None
+        markov_w1_wid = None
+        markov_w2_wid = None
+        confidence_wid = None
+        for stage_idx, data in enumerate(stage_data):
+            layer_idx = self.cfg.num_hidden_layers + stage_idx
+            attention = data["attention"]
+            hc = data["hyper_connection"]
+            cache = torch.zeros(
+                (self.cfg.sliding_window, self.cfg.attention_head_dim),
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            dspark_caches.append(cache)
+            keepalive.keep(
+                f"dspark.stage{stage_idx}.vectors",
+                data["input_norm"],
+                data["post_attn_norm"],
+                data["gate_bias"],
+                attention["attn_sink"],
+                attention["q_norm"],
+                attention["kv_norm"],
+                hc["hc_attn_base"],
+                hc["hc_attn_scale"],
+                hc["hc_ffn_base"],
+                hc["hc_ffn_scale"],
+                cache,
+            )
+            wids = {
+                name: register(
+                    attention[name], f"stage{stage_idx}.attention.{name}"
+                )
+                for name in ("wq_a", "wq_b", "wkv", "wo_a", "wo_b")
+            }
+            store.register_deepseek_v4_layer(
+                layer_idx=layer_idx,
+                input_norm_ptr=data["input_norm"].data_ptr(),
+                input_norm_size=data["input_norm"].numel(),
+                post_attn_norm_ptr=data["post_attn_norm"].data_ptr(),
+                post_attn_norm_size=data["post_attn_norm"].numel(),
+                wq_a_wid=wids["wq_a"],
+                wq_b_wid=wids["wq_b"],
+                wkv_wid=wids["wkv"],
+                wo_a_wid=wids["wo_a"],
+                wo_b_wid=wids["wo_b"],
+                attn_sink_ptr=attention["attn_sink"].data_ptr(),
+                attn_sink_elems=attention["attn_sink"].numel(),
+                q_norm_ptr=attention["q_norm"].data_ptr(),
+                q_norm_elems=attention["q_norm"].numel(),
+                kv_norm_ptr=attention["kv_norm"].data_ptr(),
+                kv_norm_elems=attention["kv_norm"].numel(),
+                num_heads=self.cfg.num_attention_heads,
+                head_dim=self.cfg.attention_head_dim,
+                rope_dim=self.cfg.qk_rope_head_dim,
+                o_groups=self.cfg.o_groups,
+                sliding_window=self.cfg.sliding_window,
+                compress_ratio=0,
+                compress_rope_theta=self.cfg.compress_rope_theta,
+                raw_cache_ptr=cache.data_ptr(),
+                raw_cache_elems=cache.numel(),
+                cache_format="bf16",
+                raw_native_codes_ptr=0,
+                raw_native_codes_elems=0,
+                raw_native_scale_exponents_ptr=0,
+                raw_native_scale_exponents_elems=0,
+                raw_native_tail_ptr=0,
+                raw_native_tail_elems=0,
+                native_block_size=int(target_v4_cache["fp8_block_size"]),
+                rope_cos_ptr=rope_cos_ptr,
+                rope_sin_ptr=rope_sin_ptr,
+                rope_rows=rope_rows,
+                logical_max_seq=logical_max_seq,
+            )
+            store.register_sequence_state_allocation(
+                name=f"dspark.stage{stage_idx}.raw_ring",
+                kind="dspark_raw_ring",
+                layer_idx=layer_idx,
+                ptr=cache.data_ptr(),
+                storage_bytes=cache.numel() * cache.element_size(),
+                dtype="bfloat16",
+                element_size=cache.element_size(),
+                shape=list(cache.shape),
+                strides_bytes=[
+                    int(stride) * cache.element_size() for stride in cache.stride()
+                ],
+                growth_mode="fixed",
+            )
+            store.register_deepseek_v4_hyper_connection(
+                layer_idx=layer_idx,
+                attn_fn_wid=register(
+                    hc["hc_attn_fn"], f"stage{stage_idx}.hc_attn_fn", 1
+                ),
+                attn_base_ptr=hc["hc_attn_base"].data_ptr(),
+                attn_base_elems=hc["hc_attn_base"].numel(),
+                attn_scale_ptr=hc["hc_attn_scale"].data_ptr(),
+                attn_scale_elems=hc["hc_attn_scale"].numel(),
+                ffn_fn_wid=register(
+                    hc["hc_ffn_fn"], f"stage{stage_idx}.hc_ffn_fn", 1
+                ),
+                ffn_base_ptr=hc["hc_ffn_base"].data_ptr(),
+                ffn_base_elems=hc["hc_ffn_base"].numel(),
+                ffn_scale_ptr=hc["hc_ffn_scale"].data_ptr(),
+                ffn_scale_elems=hc["hc_ffn_scale"].numel(),
+                mult=self.cfg.hc_mult,
+                sinkhorn_iters=self.cfg.hc_sinkhorn_iters,
+                eps=self.cfg.hc_eps,
+            )
+            auxiliary_layer_idx = store.register_dspark_moe_stage(
+                stage_idx=stage_idx,
+                gate_ptr=data["gate"].data_ptr(),
+                gate_rows=int(data["gate"].shape[0]),
+                gate_cols=int(data["gate"].shape[1]),
+                correction_bias_ptr=data["gate_bias"].data_ptr(),
+                correction_bias_elems=data["gate_bias"].numel(),
+            )
+            if auxiliary_layer_idx != layer_idx:
+                raise RuntimeError(
+                    f"D-Spark stage {stage_idx} registered at {auxiliary_layer_idx}, "
+                    f"expected {layer_idx}"
+                )
+            keepalive.keep(f"dspark.stage{stage_idx}.router", data["gate"])
+
+            if stage_idx == 0:
+                main_proj_wid = register(data["main_proj"], "main_proj")
+                main_norm = data["main_norm"]
+                keepalive.keep("dspark.main_norm", main_norm)
+            if stage_idx == len(stage_data) - 1:
+                final_norm = data["final_norm"]
+                head_hc = data["head_hyper_connection"]
+                markov_w1_wid = register(data["markov_w1"], "markov_w1")
+                markov_w2_wid = register(data["markov_w2"], "markov_w2")
+                confidence_wid = register(data["confidence"], "confidence")
+                keepalive.keep(
+                    "dspark.final_vectors",
+                    final_norm,
+                    head_hc["hc_head_base"],
+                    head_hc["hc_head_scale"],
+                )
+
+        if any(
+            value is None
+            for value in (
+                main_proj_wid,
+                main_norm,
+                final_norm,
+                head_hc,
+                markov_w1_wid,
+                markov_w2_wid,
+                confidence_wid,
+            )
+        ):
+            raise RuntimeError("D-Spark checkpoint graph did not yield all required heads")
+        registration = store.finalize_dspark_graph(
+            main_proj_wid=main_proj_wid,
+            main_norm_ptr=main_norm.data_ptr(),
+            main_norm_elems=main_norm.numel(),
+            final_norm_ptr=final_norm.data_ptr(),
+            final_norm_elems=final_norm.numel(),
+            head_fn_wid=register(head_hc["hc_head_fn"], "hc_head_fn", 1),
+            head_base_ptr=head_hc["hc_head_base"].data_ptr(),
+            head_base_elems=head_hc["hc_head_base"].numel(),
+            head_scale_ptr=head_hc["hc_head_scale"].data_ptr(),
+            head_scale_elems=head_hc["hc_head_scale"].numel(),
+            head_mult=self.cfg.hc_mult,
+            head_eps=self.cfg.hc_eps,
+            markov_w1_wid=markov_w1_wid,
+            markov_w2_wid=markov_w2_wid,
+            confidence_wid=confidence_wid,
+        )
+        required_sequence_state = int(store.finalize_sequence_state_inventory())
+        if required_sequence_state <= 0:
+            raise RuntimeError("D-Spark sequence-state inventory is empty")
+        self._dspark_caches = dspark_caches
+        parsed = json.loads(registration)
+        logger.info("D-Spark GPU graph setup complete: %s", parsed)
+        return parsed
+
     def _register_mamba2_layer(self, store, layer_idx, layer, device):
         """Register a Mamba2 SSM layer with the Rust decode store."""
         inp_norm = layer.input_norm_weight

@@ -348,10 +348,7 @@ impl ModelConfig {
             .and_then(|v| v.as_f64())
             .unwrap_or(1.0) as f32;
 
-        let model_type = cfg
-            .get("model_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let model_type = cfg.get("model_type").and_then(|v| v.as_str()).unwrap_or("");
 
         // GPT-OSS and DeepSeek-V4 both publish swiglu_limit but use different
         // equations. Preserve that distinction explicitly through the runtime.
@@ -1667,6 +1664,59 @@ fn cache_path_marlin(
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarlinExpertNamespace {
+    Main,
+    Dspark,
+}
+
+impl MarlinExpertNamespace {
+    fn cache_path(
+        self,
+        model_dir: &Path,
+        group_size: usize,
+        gpu_bits: u8,
+        expert_int4_calib_mode: ExpertInt4CalibMode,
+    ) -> PathBuf {
+        match self {
+            Self::Main => {
+                cache_path_marlin(model_dir, group_size, gpu_bits, expert_int4_calib_mode)
+            }
+            Self::Dspark => {
+                let calib_suffix = if gpu_bits == 4 {
+                    format!("_cal{}", expert_int4_calib_mode.cache_token())
+                } else {
+                    String::new()
+                };
+                cache_dir_for_model(model_dir).join(format!(
+                    "dspark_experts_marlin_int{gpu_bits}_g{group_size}{calib_suffix}.bin"
+                ))
+            }
+        }
+    }
+
+    fn routed_prefix(self, layer_idx: usize, expert_idx: usize) -> String {
+        match self {
+            Self::Main => format!("layers.{layer_idx}.ffn.experts.{expert_idx}"),
+            Self::Dspark => format!("mtp.{layer_idx}.ffn.experts.{expert_idx}"),
+        }
+    }
+
+    fn shared_prefix(self, layer_idx: usize) -> String {
+        match self {
+            Self::Main => format!("layers.{layer_idx}.ffn.shared_experts"),
+            Self::Dspark => format!("mtp.{layer_idx}.ffn.shared_experts"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Dspark => "dspark",
+        }
+    }
+}
+
 #[derive(Debug)]
 struct MarlinCacheHeader {
     version: u32,
@@ -2695,8 +2745,7 @@ impl WeightStore {
             let tileq_path = std::env::var_os("KRASIS_TILEQ_CACHE")
                 .map(PathBuf::from)
                 .ok_or_else(|| {
-                    "GPU expert bits=3 requires an explicit KRASIS_TILEQ_CACHE artifact"
-                        .to_string()
+                    "GPU expert bits=3 requires an explicit KRASIS_TILEQ_CACHE artifact".to_string()
                 })?;
             let (tileq_cache, tileq_layer_backings, tileq_experts) = load_tileq_experts(
                 &tileq_path,
@@ -2732,9 +2781,7 @@ impl WeightStore {
                     num_moe_layers,
                 )?
                 .iter()
-                .map(|expert| {
-                    UnifiedExpertWeights::from_expert_weights_marlin(expert, shared_bits)
-                })
+                .map(|expert| UnifiedExpertWeights::from_expert_weights_marlin(expert, shared_bits))
                 .collect::<Vec<_>>()
             } else {
                 Vec::new()
@@ -2837,6 +2884,7 @@ impl WeightStore {
                 gpu_num_bits,
                 expert_int4_calib_mode,
                 expert_int4_calib_data.as_ref(),
+                MarlinExpertNamespace::Main,
             )?;
             effective_gs = built_gs;
 
@@ -3028,6 +3076,197 @@ impl WeightStore {
         );
 
         Ok(store)
+    }
+
+    /// Load the checkpoint-owned DeepSeek-V4 D-Spark expert bank into an
+    /// independent, source-bound Marlin cache. D-Spark stages are not target
+    /// transformer layers: their `mtp.*` namespace is discovered and
+    /// validated explicitly, then represented as a compact auxiliary MoE
+    /// configuration so the decode runtime can register them after the target
+    /// layer range in one unified HCS table.
+    pub fn load_dspark_from_hf(
+        model_dir: &Path,
+        group_size: usize,
+        gpu_bits: u8,
+        expert_int4_calib_mode: ExpertInt4CalibMode,
+    ) -> Result<Self, String> {
+        if gpu_bits != 4 {
+            return Err(format!(
+                "D-Spark production experts require INT4 Marlin, got INT{gpu_bits}"
+            ));
+        }
+        if expert_int4_calib_mode != ExpertInt4CalibMode::Amax {
+            return Err(
+                "D-Spark search-RMSE calibration requires a D-Spark-specific calibration artifact; no target-layer calibration is reused"
+                    .to_string(),
+            );
+        }
+
+        let config_path = model_dir.join("config.json");
+        let config_str = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("Failed to read config.json for D-Spark: {e}"))?;
+        let raw_json: serde_json::Value = serde_json::from_str(&config_str)
+            .map_err(|e| format!("Failed to parse config.json for D-Spark: {e}"))?;
+        let model_type = raw_json
+            .get("model_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if model_type != "deepseek_v4" {
+            return Err(format!(
+                "D-Spark auxiliary load requires model_type=deepseek_v4, got {model_type:?}"
+            ));
+        }
+
+        let index_path = model_dir.join("model.safetensors.index.json");
+        let index_str = std::fs::read_to_string(&index_path)
+            .map_err(|e| format!("Failed to read D-Spark safetensors index: {e}"))?;
+        let index: SafetensorsIndex = serde_json::from_str(&index_str)
+            .map_err(|e| format!("Failed to parse D-Spark safetensors index: {e}"))?;
+        let index_json: serde_json::Value = serde_json::from_str(&index_str)
+            .map_err(|e| format!("Failed to parse D-Spark index metadata: {e}"))?;
+        let mut config = ModelConfig::from_json_with_index(&raw_json, Some(&index_json))
+            .map_err(|e| format!("Failed to extract D-Spark MoE config: {e}"))?;
+
+        let mut discovered = std::collections::BTreeSet::new();
+        for tensor_name in index.weight_map.keys() {
+            if let Some(stage_idx) = tensor_name
+                .strip_prefix("mtp.")
+                .and_then(|rest| rest.split('.').next())
+                .and_then(|value| value.parse::<usize>().ok())
+            {
+                discovered.insert(stage_idx);
+            }
+        }
+        if discovered.is_empty() {
+            return Err("DeepSeek-V4 checkpoint has no mtp.* D-Spark stages".to_string());
+        }
+        let stage_count = discovered.len();
+        let expected_stages: Vec<usize> = (0..stage_count).collect();
+        let actual_stages: Vec<usize> = discovered.into_iter().collect();
+        if actual_stages != expected_stages {
+            return Err(format!(
+                "D-Spark stage indices must be contiguous from zero: found {actual_stages:?}"
+            ));
+        }
+        let target_count = raw_json
+            .get("dspark_target_layer_ids")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("DeepSeek-V4 checkpoint is missing dspark_target_layer_ids")?
+            .len();
+        if target_count != stage_count {
+            return Err(format!(
+                "D-Spark stage count {stage_count} does not match target hidden-state count {target_count}"
+            ));
+        }
+
+        for stage_idx in 0..stage_count {
+            for expert_idx in 0..config.n_routed_experts {
+                let prefix = MarlinExpertNamespace::Dspark.routed_prefix(stage_idx, expert_idx);
+                for projection in ["w1", "w3", "w2"] {
+                    for suffix in ["weight", "scale"] {
+                        let name = format!("{prefix}.{projection}.{suffix}");
+                        if !index.weight_map.contains_key(&name) {
+                            return Err(format!(
+                                "D-Spark expert inventory is incomplete: missing {name}"
+                            ));
+                        }
+                    }
+                }
+            }
+            let prefix = MarlinExpertNamespace::Dspark.shared_prefix(stage_idx);
+            for projection in ["w1", "w3", "w2"] {
+                for suffix in ["weight", "scale"] {
+                    let name = format!("{prefix}.{projection}.{suffix}");
+                    if !index.weight_map.contains_key(&name) {
+                        return Err(format!(
+                            "D-Spark shared-expert inventory is incomplete: missing {name}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        config.num_hidden_layers = stage_count;
+        config.first_k_dense_replace = 0;
+        config.moe_layer_indices = (0..stage_count).collect();
+        let effective_group_size = effective_marlin_group_size_for_dimensions(&config, group_size);
+        let cache_path = MarlinExpertNamespace::Dspark.cache_path(
+            model_dir,
+            effective_group_size,
+            gpu_bits,
+            expert_int4_calib_mode,
+        );
+        let hash_payload = format!(
+            "{config_str}\n{index_str}\nmarlin_namespace=dspark\nmarlin_expert_int4_calib_mode={}",
+            expert_int4_calib_mode.config_value(),
+        );
+        let config_hash = fnv1a(hash_payload.as_bytes());
+
+        if cache_path.exists() {
+            match Self::load_marlin_cache(
+                &cache_path,
+                &config,
+                effective_group_size,
+                stage_count,
+                config_hash,
+                expert_int4_calib_mode,
+                0,
+                stage_count,
+                gpu_bits,
+            ) {
+                Ok(store) => {
+                    log::info!(
+                        "Loaded D-Spark Marlin cache: {} stages x {} experts from {}",
+                        stage_count,
+                        config.n_routed_experts,
+                        cache_path.display(),
+                    );
+                    return Ok(store);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "D-Spark Marlin cache validation failed; rebuilding exact source-bound cache: {error}"
+                    );
+                    std::fs::remove_file(&cache_path).map_err(|remove_error| {
+                        format!(
+                            "Failed to remove invalid D-Spark cache {}: {remove_error}",
+                            cache_path.display()
+                        )
+                    })?;
+                }
+            }
+        }
+
+        let built_group_size = Self::build_marlin_cache_locked(
+            model_dir,
+            &config,
+            group_size,
+            stage_count,
+            &cache_path,
+            config_hash,
+            gpu_bits,
+            expert_int4_calib_mode,
+            None,
+            MarlinExpertNamespace::Dspark,
+        )?;
+        let built_path = MarlinExpertNamespace::Dspark.cache_path(
+            model_dir,
+            built_group_size,
+            gpu_bits,
+            expert_int4_calib_mode,
+        );
+        Self::load_marlin_cache(
+            &built_path,
+            &config,
+            built_group_size,
+            stage_count,
+            config_hash,
+            expert_int4_calib_mode,
+            0,
+            stage_count,
+            gpu_bits,
+        )
+        .map_err(|error| format!("Failed to load newly built D-Spark Marlin cache: {error}"))
     }
 
     /// Load from safetensors shards and quantize to INT4/INT8 (or load pre-quantized).
@@ -3610,9 +3849,9 @@ impl WeightStore {
                     &prefix,
                     &index.weight_map,
                     &shards,
-                    config.source_fp8_block_size.ok_or(
-                        "DeepSeek-V4 shared expert requires source FP8 block geometry",
-                    )?,
+                    config
+                        .source_fp8_block_size
+                        .ok_or("DeepSeek-V4 shared expert requires source FP8 block geometry")?,
                     group_size,
                     num_bits,
                     ExpertInt4CalibMode::Amax,
@@ -3724,9 +3963,7 @@ impl WeightStore {
                 let prefix = if deepseek_v4_fp4 {
                     format!("layers.{layer_idx}.ffn.experts.{eidx}")
                 } else {
-                    format!(
-                        "{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.experts.{eidx}"
-                    )
+                    format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.experts.{eidx}")
                 };
                 let (gate, up, down) = if deepseek_v4_fp4 {
                     load_deepseek_v4_fp4_expert(
@@ -3842,14 +4079,16 @@ impl WeightStore {
         gpu_bits: u8,
         expert_int4_calib_mode: ExpertInt4CalibMode,
         expert_int4_calib_data: Option<&ExpertInt4CalibData>,
+        source_namespace: MarlinExpertNamespace,
     ) -> Result<usize, String> {
         eprintln!(
             "  \x1b[1;33m▸ Building GPU INT{} Marlin cache: {} layers from safetensors\x1b[0m",
             gpu_bits, num_moe_layers,
         );
         log::info!(
-            "Streaming build MARLIN cache (INT{}): {} MoE layers from safetensors → {}",
+            "Streaming build MARLIN cache (INT{}, namespace={}): {} MoE layers from safetensors → {}",
             gpu_bits,
+            source_namespace.label(),
             num_moe_layers,
             cache_path.display(),
         );
@@ -3870,10 +4109,15 @@ impl WeightStore {
             .collect();
         let mut needed_shards: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (tensor_name, shard_name) in &index.weight_map {
-            if let Some(layer_num) = parse_layer_number(tensor_name) {
-                if moe_abs_layers.contains(&layer_num) {
-                    needed_shards.insert(shard_name.clone());
-                }
+            let layer_num = match source_namespace {
+                MarlinExpertNamespace::Main => parse_layer_number(tensor_name),
+                MarlinExpertNamespace::Dspark => tensor_name
+                    .strip_prefix("mtp.")
+                    .and_then(|rest| rest.split('.').next())
+                    .and_then(|value| value.parse::<usize>().ok()),
+            };
+            if layer_num.is_some_and(|layer_num| moe_abs_layers.contains(&layer_num)) {
+                needed_shards.insert(shard_name.clone());
             }
         }
         let mut shard_names: Vec<String> = needed_shards.into_iter().collect();
@@ -3903,10 +4147,15 @@ impl WeightStore {
 
         // Detect prefix and quantization format
         let layers_prefix = detect_expert_prefix(&index.weight_map)?;
-        let deepseek_v4_fp4 = is_deepseek_v4_fp4(&index.weight_map);
-        let mxfp4 = is_mxfp4(&index.weight_map);
-        let stacked = !mxfp4 && is_stacked_experts(&index.weight_map);
-        let separate_stacked = !mxfp4 && is_separate_stacked_experts(&index.weight_map);
+        let deepseek_v4_fp4 = source_namespace == MarlinExpertNamespace::Dspark
+            || is_deepseek_v4_fp4(&index.weight_map);
+        let mxfp4 = source_namespace == MarlinExpertNamespace::Main && is_mxfp4(&index.weight_map);
+        let stacked = source_namespace == MarlinExpertNamespace::Main
+            && !mxfp4
+            && is_stacked_experts(&index.weight_map);
+        let separate_stacked = source_namespace == MarlinExpertNamespace::Main
+            && !mxfp4
+            && is_separate_stacked_experts(&index.weight_map);
         let prequantized =
             !mxfp4 && !stacked && !separate_stacked && is_prequantized(&index.weight_map);
         let experts_gated = has_gate_proj_experts(&index.weight_map);
@@ -4076,7 +4325,7 @@ impl WeightStore {
                     .into_par_iter()
                     .map(|eidx| -> Result<ExpertWeights, String> {
                         let prefix = if deepseek_v4_fp4 {
-                            format!("layers.{layer_idx}.ffn.experts.{eidx}")
+                            source_namespace.routed_prefix(layer_idx, eidx)
                         } else {
                             format!(
                                 "{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.experts.{eidx}"
@@ -4290,8 +4539,11 @@ impl WeightStore {
             );
             for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
                 let layer_idx = config.moe_abs_layer(moe_idx);
-                let prefix =
-                    shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
+                let prefix = if source_namespace == MarlinExpertNamespace::Dspark {
+                    source_namespace.shared_prefix(layer_idx)
+                } else {
+                    shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name)
+                };
                 let shared_io_start = std::time::Instant::now();
                 let (gate, up, down) = if deepseek_v4_fp4 {
                     load_deepseek_v4_fp8_expert(
@@ -4421,6 +4673,7 @@ impl WeightStore {
         gpu_bits: u8,
         expert_int4_calib_mode: ExpertInt4CalibMode,
         expert_int4_calib_data: Option<&ExpertInt4CalibData>,
+        source_namespace: MarlinExpertNamespace,
     ) -> Result<usize, String> {
         use std::fs::OpenOptions;
 
@@ -4470,6 +4723,7 @@ impl WeightStore {
                     gpu_bits,
                     expert_int4_calib_mode,
                     expert_int4_calib_data,
+                    source_namespace,
                 );
 
                 log::info!("Releasing Marlin cache build lock: {}", lock_path.display());
@@ -4477,7 +4731,7 @@ impl WeightStore {
 
                 match result {
                     Ok(effective_gs) => {
-                        let expected_path = cache_path_marlin(
+                        let expected_path = source_namespace.cache_path(
                             model_dir,
                             effective_gs,
                             gpu_bits,
@@ -4520,6 +4774,7 @@ impl WeightStore {
                                 gpu_bits,
                                 expert_int4_calib_mode,
                                 expert_int4_calib_data,
+                                source_namespace,
                             );
                         }
                     }
@@ -4579,6 +4834,7 @@ impl WeightStore {
                                         gpu_bits,
                                         expert_int4_calib_mode,
                                         expert_int4_calib_data,
+                                        source_namespace,
                                     );
                                 }
                             }
@@ -4743,32 +4999,31 @@ impl WeightStore {
         let (w13pb, w13sb, w2pb, w2sb) = marlin_expert_byte_sizes(config, group_size, gpu_bits);
         let per_routed_expert = w13pb + w13sb + w2pb + w2sb;
         let per_routed_layer = config.n_routed_experts * per_routed_expert;
-        let routed_expert_sha256 = if std::env::var_os("KRASIS_EXPERT_COMPRESSION_SIDECAR")
-            .is_some()
-        {
-            let routed_expert_count = total_moe_layers
-                .checked_mul(config.n_routed_experts)
-                .ok_or_else(|| "routed expert identity count overflow".to_string())?;
-            let routed_payload_bytes = routed_expert_count
-                .checked_mul(per_routed_expert)
-                .ok_or_else(|| "routed expert identity byte count overflow".to_string())?;
-            let routed_end = CACHE_HEADER_SIZE
-                .checked_add(routed_payload_bytes)
-                .ok_or_else(|| "routed expert identity range overflow".to_string())?;
-            let start = std::time::Instant::now();
-            let digest = crate::expert_sidecar::routed_expert_sha256(
-                &mmap[CACHE_HEADER_SIZE..routed_end],
-                per_routed_expert,
-            )?;
-            log::info!(
-                "Expert compression source identity: {} routed experts hashed in {:.3}s",
-                routed_expert_count,
-                start.elapsed().as_secs_f64(),
-            );
-            Some(digest)
-        } else {
-            None
-        };
+        let routed_expert_sha256 =
+            if std::env::var_os("KRASIS_EXPERT_COMPRESSION_SIDECAR").is_some() {
+                let routed_expert_count = total_moe_layers
+                    .checked_mul(config.n_routed_experts)
+                    .ok_or_else(|| "routed expert identity count overflow".to_string())?;
+                let routed_payload_bytes = routed_expert_count
+                    .checked_mul(per_routed_expert)
+                    .ok_or_else(|| "routed expert identity byte count overflow".to_string())?;
+                let routed_end = CACHE_HEADER_SIZE
+                    .checked_add(routed_payload_bytes)
+                    .ok_or_else(|| "routed expert identity range overflow".to_string())?;
+                let start = std::time::Instant::now();
+                let digest = crate::expert_sidecar::routed_expert_sha256(
+                    &mmap[CACHE_HEADER_SIZE..routed_end],
+                    per_routed_expert,
+                )?;
+                log::info!(
+                    "Expert compression source identity: {} routed experts hashed in {:.3}s",
+                    routed_expert_count,
+                    start.elapsed().as_secs_f64(),
+                );
+                Some(digest)
+            } else {
+                None
+            };
 
         let mut offset = CACHE_HEADER_SIZE + start_moe_layer * per_routed_layer;
         let mut expected_loaded_end =
@@ -6042,6 +6297,7 @@ impl WeightStore {
                 gpu_num_bits,
                 expert_int4_calib_mode,
                 expert_int4_calib_data.as_ref(),
+                MarlinExpertNamespace::Main,
             )?;
             effective_gs = built_gs;
 
@@ -7240,14 +7496,9 @@ fn load_tileq_experts(
             .ok_or_else(|| format!("TileQ cache is missing model layer {abs_layer}"))?;
         let expected = [
             config.moe_intermediate_size * config.hidden_size * 2 * 3 / 8,
-            config.moe_intermediate_size
-                * (config.hidden_size / manifest.group_size)
-                * 2
-                * 2,
+            config.moe_intermediate_size * (config.hidden_size / manifest.group_size) * 2 * 2,
             config.hidden_size * config.moe_intermediate_size * 3 / 8,
-            config.hidden_size
-                * (config.moe_intermediate_size / manifest.group_size)
-                * 2,
+            config.hidden_size * (config.moe_intermediate_size / manifest.group_size) * 2,
         ];
         let actual = [
             layer.per_expert_w13_packed as usize,
@@ -7271,20 +7522,14 @@ fn load_tileq_experts(
         for expert_idx in 0..config.n_routed_experts {
             let w13p = unsafe {
                 Vec::from_raw_parts(
-                    backing
-                        .w13_packed
-                        .as_ptr()
-                        .add(expert_idx * actual[0]) as *mut u32,
+                    backing.w13_packed.as_ptr().add(expert_idx * actual[0]) as *mut u32,
                     actual[0] / 4,
                     actual[0] / 4,
                 )
             };
             let w13s = unsafe {
                 Vec::from_raw_parts(
-                    backing
-                        .w13_scales
-                        .as_ptr()
-                        .add(expert_idx * actual[1]) as *mut u16,
+                    backing.w13_scales.as_ptr().add(expert_idx * actual[1]) as *mut u16,
                     actual[1] / 2,
                     actual[1] / 2,
                 )
@@ -8438,7 +8683,11 @@ fn load_deepseek_v4_fp4_expert(
     };
 
     // Source W1 is gate, W3 is up, and W2 is down.
-    Ok((load("w1", "gate_proj")?, load("w3", "up_proj")?, load("w2", "down_proj")?))
+    Ok((
+        load("w1", "gate_proj")?,
+        load("w3", "up_proj")?,
+        load("w2", "down_proj")?,
+    ))
 }
 
 fn load_deepseek_v4_fp8_projection(
@@ -9872,28 +10121,17 @@ mod tests {
         // edge blocks so indexing cannot accidentally assume model dimensions.
         let weights = vec![0x38u8; 3 * 5];
         let scales = vec![127u8, 128u8, 129u8, 130u8];
-        let actual = dequantize_fp8e4m3_e8m0_blocks_to_bf16(
-            &weights, &scales, 3, 5, 2, 3,
-        )
-        .unwrap();
+        let actual = dequantize_fp8e4m3_e8m0_blocks_to_bf16(&weights, &scales, 3, 5, 2, 3).unwrap();
         let expected = [
-            1.0f32, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0, 4.0, 8.0,
-            8.0,
+            1.0f32, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0, 4.0, 8.0, 8.0,
         ];
         assert_eq!(actual.len(), expected.len());
         for (&got, &want) in actual.iter().zip(expected.iter()) {
             assert_eq!(bf16_to_f32(got), want);
         }
 
-        let error = dequantize_fp8e4m3_e8m0_blocks_to_bf16(
-            &weights,
-            &scales[..3],
-            3,
-            5,
-            2,
-            3,
-        )
-        .unwrap_err();
+        let error =
+            dequantize_fp8e4m3_e8m0_blocks_to_bf16(&weights, &scales[..3], 3, 5, 2, 3).unwrap_err();
         assert!(error.contains("expected 4"));
     }
 

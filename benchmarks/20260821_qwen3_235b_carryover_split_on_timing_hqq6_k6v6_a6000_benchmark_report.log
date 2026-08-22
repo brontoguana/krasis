@@ -1,0 +1,47 @@
+================================================================
+Krasis Benchmark — 2026-08-21 09:23:09
+================================================================
+Model:            Qwen3-235B-A22B
+Architecture:     qwen3_moe, 94 layers, 128 experts, top-8
+PP Partition:     [94] (1 GPUs)
+
+Hardware:
+  CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
+  RAM:            995 GB total, 137.1 GB used by process
+  GPU 0:           NVIDIA RTX A6000 (49140 MB), 3990 MB allocated
+
+Quantization:
+  GPU experts:    INT4 (Marlin)
+  CPU experts:    INT4
+  Attention:      HQQ6
+  Shared expert:  INT8
+  Dense MLP:      INT8
+  LM head:        INT8
+  KV cache:       k6v6
+
+Strategy:
+  Layer group size: 2 (layer_grouped(2))
+  Prefill threshold: 1
+  Mode:           gpu_decode (layer_grouped(2))
+
+Prefill (internal) — 4 runs at different lengths:
+  Run 1:  145.5 tok/s (1,000 tokens in 6874.7ms)
+  Run 2:  537.5 tok/s (5,000 tokens in 9302.5ms)
+  Run 3:  788.7 tok/s (10,000 tokens in 12679.1ms)
+  Run 4:  784.4 tok/s (14,857 tokens in 18940.9ms)
+  Best:   788.7 tok/s (10,000 tokens)
+
+Decode (internal) — 50/100/250 tokens, 3 separate prompts:
+   50 tokens: 7.42 tok/s (134.7ms/tok)
+  100 tokens: 7.53 tok/s (132.8ms/tok)
+  250 tokens: 7.38 tok/s (135.6ms/tok)
+  Best:    7.53 tok/s
+  HCS:     3560/12032 experts (29.6%)
+  Min free VRAM: 1092 MB
+
+Round trip (network) — 50/100/250 tokens via HTTP:
+   50 tokens: 13.58 tok/s (13.47s total)
+  100 tokens: 9.35 tok/s (20.41s total)
+  250 tokens: 7.95 tok/s (41.20s total)
+  Best:    13.58 tok/s
+================================================================

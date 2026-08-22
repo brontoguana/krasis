@@ -483,16 +483,17 @@ cleanup_gpu() {
     pids=$(pgrep -f 'python.*krasis\.' 2>/dev/null || true)
     if [[ -n "$pids" && -n "$selected_gpus" ]]; then
         local selected_uuids=""
-        local gpu_idx gpu_uuid
-        while IFS=',' read -r gpu_idx gpu_uuid; do
+        local gpu_idx gpu_uuid gpu_pci
+        while IFS=',' read -r gpu_idx gpu_uuid gpu_pci; do
             gpu_idx="${gpu_idx//[[:space:]]/}"
             gpu_uuid="${gpu_uuid//[[:space:]]/}"
+            gpu_pci="${gpu_pci//[[:space:]]/}"
             for sg in $(echo "$selected_gpus" | tr ',' ' '); do
-                if [[ "$gpu_idx" == "$sg" ]]; then
+                if [[ "$gpu_idx" == "$sg" || "$gpu_uuid" == "$sg" || "${gpu_pci,,}" == "${sg,,}" ]]; then
                     selected_uuids+="${gpu_uuid}"$'\n'
                 fi
             done
-        done < <(nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits 2>/dev/null || true)
+        done < <(nvidia-smi --query-gpu=index,uuid,pci.bus_id --format=csv,noheader,nounits 2>/dev/null || true)
 
         local selected_gpu_pids=""
         local app_pid app_uuid
@@ -569,12 +570,12 @@ cleanup_gpu() {
     local gpu_waited=0
     while [[ $gpu_waited -lt $gpu_timeout ]]; do
         local all_clear=true
-        while IFS=', ' read -r idx used gpu_mem_total; do
+        while IFS=', ' read -r idx gpu_uuid gpu_pci used gpu_mem_total; do
             # If selected_gpus is set, only check those GPUs
             if [[ -n "$selected_gpus" ]]; then
                 local check_this=false
                 for sg in $(echo "$selected_gpus" | tr ',' ' '); do
-                    [[ "$idx" == "$sg" ]] && check_this=true
+                    [[ "$idx" == "$sg" || "$gpu_uuid" == "$sg" || "${gpu_pci,,}" == "${sg,,}" ]] && check_this=true
                 done
                 $check_this || continue
             fi
@@ -583,7 +584,7 @@ cleanup_gpu() {
                 all_clear=false
                 break
             fi
-        done < <(nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null)
+        done < <(nvidia-smi --query-gpu=index,uuid,pci.bus_id,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null)
 
         if $all_clear; then
             if [[ -n "$selected_gpus" ]]; then
@@ -1725,6 +1726,14 @@ do_test_kernels() {
             filter="gpu_decode::dsa_registration_tests::n_peer_"
         elif [[ "$1" == "dsa_registration" ]]; then
             filter="dsa_registration_tests"
+        elif [[ "$1" == "dspark" ]]; then
+            filter="gpu_decode::dsa_registration_tests::dspark_"
+        elif [[ "$1" == "split_expert_launch" ]]; then
+            filter="gpu_decode::dsa_registration_tests::split_expert_launch_defaults_on_for_native_dsa_and_honors_overrides"
+        elif [[ "$1" == "pcie_batch" ]]; then
+            filter="pcie_batch::tests"
+        elif [[ "$1" == "route_locality_global_lru" ]]; then
+            filter="gpu_decode::dsa_registration_tests::route_locality_global_lru_tracks_cross_layer_capacity"
         elif [[ "$1" == "hqq4_warp_geometry" ]]; then
             filter="gpu_decode::dsa_registration_tests::hqq4_warp_geometry_is_bit_exact"
         elif [[ "$1" == "hqq4_group_cache" ]]; then
@@ -1818,6 +1827,31 @@ do_cpu_tail_calibrate() {
     if ! $has_output; then
         ok "JSON report: $output"
     fi
+}
+
+do_pcie_batch_probe() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev pcie-batch-probe --gpu N --component-bytes N,N,... --cold-experts N,N,... [--warmup N] [--samples N]"
+        echo "Standalone Rust probe: compares ordinary pinned H2D calls with CUDA's batched-copy API."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "pcie-batch-probe")
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    info "Running standalone Rust PCIe batch-copy probe"
+    info "Run dir: $run_dir"
+    (
+        cd "$SCRIPT_DIR"
+        PYO3_PYTHON="$PYTHON" \
+        LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --bin pcie-batch-probe -- "$@"
+    ) 2>&1 | tee "$run_dir/pcie_batch_probe.log"
+    ok "PCIe batch-copy probe complete: $run_dir/pcie_batch_probe.log"
 }
 
 do_expert_hqq_cache_generate() {
@@ -2493,6 +2527,7 @@ do_model_config_test() {
     verify_repo_imports
     KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_model_config.py"
     KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_deepseek_v4_hqq_contract.py"
+    KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_startup_calibration.py"
 }
 
 do_hqq_gpu_search_probe() {
@@ -3909,6 +3944,7 @@ case "$cmd" in
     expert-compression-build) do_expert_compression_build "$@" ;;
     test-kernels)   do_test_kernels "$@" ;;
     cpu-tail-calibrate) do_cpu_tail_calibrate "$@" ;;
+    pcie-batch-probe) do_pcie_batch_probe "$@" ;;
     validate)       do_validate "$@" ;;
     shell)          do_shell "$@" ;;
     python)         do_python "$@" ;;
@@ -3922,6 +3958,7 @@ case "$cmd" in
         echo "  build                          Rebuild Rust extension into this repo only"
         echo "  build-fla-windows-sources      Generate portable FLA CUDA sources for Windows CI"
         echo "  cpu-tail-calibrate <config>    Optimize/measure CPU-tail under live GPU DMA"
+        echo "  pcie-batch-probe <options>     Compare ordinary and batched pinned H2D copies"
         echo "  build-sidecars [--force]       Build Marlin/FlashAttention package sidecars"
         echo "  verify-sidecars                Verify sidecar manifest, hashes, and symbols"
         echo "  sidecar-key [--json]           Print sidecar bundle cache key"

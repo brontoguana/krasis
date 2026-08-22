@@ -5,6 +5,54 @@ from krasis import server
 
 
 class StartupCalibrationProbeTests(unittest.TestCase):
+    def test_portable_predicted_w1_probe_lengths_are_runtime_derived(self) -> None:
+        self.assertEqual(
+            server._portable_predicted_w1_probe_lengths(500, 39_920),
+            [500, 4_467, 39_920],
+        )
+
+    def test_portable_predicted_w1_threshold_starts_at_first_measured_win(self) -> None:
+        threshold, rows = server._select_portable_predicted_w1_threshold(
+            [
+                (500, [1.00, 1.01], [1.20, 1.21]),
+                (5_000, [10.0, 10.1], [8.0, 8.1]),
+                (40_000, [80.0, 80.5], [60.0, 61.0]),
+            ]
+        )
+
+        self.assertEqual([row["verdict"] for row in rows], ["loss", "win", "win"])
+        self.assertEqual(threshold, 5_000)
+
+    def test_portable_predicted_w1_disables_when_no_probe_robustly_wins(self) -> None:
+        threshold, rows = server._select_portable_predicted_w1_threshold(
+            [
+                (500, [1.00, 1.10], [1.05, 1.15]),
+                (5_000, [10.0, 10.1], [11.0, 11.1]),
+            ]
+        )
+
+        self.assertIsNone(threshold)
+        self.assertEqual([row["verdict"] for row in rows], ["inconclusive", "loss"])
+
+    def test_portable_predicted_w1_refuses_single_winning_extrapolation(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "only one robust winning probe"):
+            server._select_portable_predicted_w1_threshold(
+                [
+                    (500, [1.0, 1.1], [1.2, 1.3]),
+                    (5_000, [10.0, 10.1], [8.0, 8.1]),
+                ]
+            )
+
+    def test_portable_predicted_w1_refuses_non_monotonic_win_region(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "non-monotonic"):
+            server._select_portable_predicted_w1_threshold(
+                [
+                    (500, [1.0, 1.1], [0.8, 0.9]),
+                    (5_000, [10.0, 10.1], [11.0, 11.1]),
+                    (40_000, [80.0, 80.5], [60.0, 61.0]),
+                ]
+            )
+
     def test_long_calibration_falls_back_to_bounded_initial_probe_without_estimate(self) -> None:
         next_target, reason = server._next_startup_calibration_probe_target(
             short_tokens=500,

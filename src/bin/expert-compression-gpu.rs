@@ -226,16 +226,11 @@ mod probe {
             )
             .map_err(|_| "sidecar file length exceeds usize".to_string())?;
             let mut encoded_header = [0_u8; krasis::expert_sidecar::SIDECAR_HEADER_BYTES];
-            krasis::expert_sidecar::read_file_exact_at(
-                &sidecar_file,
-                &mut encoded_header,
-                0,
-            )
+            krasis::expert_sidecar::read_file_exact_at(&sidecar_file, &mut encoded_header, 0)
                 .map_err(|error| format!("failed to read sidecar header: {error}"))?;
             let sidecar_header =
                 krasis::expert_sidecar::parse_header_for_file(&encoded_header, sidecar_file_bytes)?;
-            let mapping_granularity =
-                krasis::expert_sidecar::system_mapping_granularity()?;
+            let mapping_granularity = krasis::expert_sidecar::system_mapping_granularity()?;
             let payload_prefix = sidecar_header.payload_offset % mapping_granularity;
             let transfer_bytes = layout.expert_bytes.min(
                 mmap.len()

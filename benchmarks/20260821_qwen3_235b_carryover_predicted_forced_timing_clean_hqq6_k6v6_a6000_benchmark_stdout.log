@@ -1,0 +1,245 @@
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab
+Loaded config from tests/q235-235b-hqq6-k6v6-a6000-carryover.conf: {'model_path': '/home/main/.krasis/models/Qwen3-235B-A22B', 'selected_gpus': 'GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 1500, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '127.0.0.1', 'port': 18323, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — Qwen3-235B-A22B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab (config; CUDA_VISIBLE_DEVICES=GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k6v6[0m
+  [32mLayer groups: 2  |  KV cache: 1500 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=276 MB, free=48272 MB, total=48549 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=2065 MB, reserved=2078 MB, used=2398 MB, free=46150 MB, total=48549 MB
+  [0;32mHQQ attention artifacts validated (7943 MB cached), 46150 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 94 layers...
+    GPU Marlin cache loaded: 117.1 GB in 77s
+  [0;32mExpert weights loaded in 77s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=2065 MB, reserved=2078 MB, used=2398 MB, free=46150 MB, total=48549 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=2065 MB, reserved=2078 MB, used=2398 MB, free=46150 MB, total=48549 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=3567 MB, reserved=3582 MB, used=3902 MB, free=44646 MB, total=48549 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=3567 MB, reserved=3582 MB, used=3902 MB, free=44646 MB, total=48549 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x45e0a1a0)[0m
+  [32mReleased redundant GPU execution source tensors (781 MB)[0m
+  [2mVRAM monitor started (startup measurement 1 ms; runtime 50 ms)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+Portable predicted-W1 prefetch: forced (standard hidden-width routed experts)
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm80.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 2.5s[0m
+  [2mcuda:0 warmup:  peak 16,998 MB used / 48,549 MB total  (min free: 31,550 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 34,256 MB / 48,549 MB[0m
+  [32mCalibration prefill guard: 1,200 MB (runtime safety remains 600 MB)[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1920ms 2:0.2077ms 4:0.2401ms 8:0.2818ms] -> keeping formula ksplits=1 (0.1920 ms median; best 1 at 0.1920 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 32 tokens in 13.36s (2.4 tok/s)  VRAM: 34232 MB free now, 34232 MB min free during decode[0m
+  [32mShort calibration: baseline=34,256 MB, prefill post-alloc=31,560 MB, prefill min=30,350 MB, decode min=34,232 MB, post-cleanup=34,232 MB[0m
+  [32mAdaptive long calibration: default target=14,857 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.5087 MB/token[0m
+  [32mAdaptive long calibration fail-closed entry check: 4,000 tokens require 2,696 MB, 34,256 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 14,857 tokens (model-estimated initial probe (projected 0.5087 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 14,857 prompt tokens + 32 decode tokens[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1950ms 2:0.2010ms 4:0.2426ms 8:0.2848ms] -> keeping formula ksplits=1 (0.1950 ms median; best 1 at 0.1950 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 32 tokens in 15.66s (2.0 tok/s)  VRAM: 34232 MB free now, 34232 MB min free during decode[0m
+  [32mLong calibration: baseline=34,232 MB, prefill post-alloc=24,216 MB, prefill min=23,006 MB, decode min=34,232 MB, post-cleanup=34,232 MB[0m
+  [32mScratch reservation: max=17,294 MB (at 40,960 tokens)[0m
+  [32mVRAM monitor runtime cadence restored: 1 ms -> 50 ms[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 34,232 MB[0m
+  [32mTransient deltas: short prefill=3,906 MB, long prefill=11,226 MB, short decode=24 MB, long decode=0 MB[0m
+  [32mGPU0 decode HCS budget: 33,608 MB[0m
+  [32mPrefill HCS budgets: short=29,726 MB, long=22,406 MB[0m
+  [32mWorst-case prefill scratch reservation: 17,294 MB at 40,960 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+  [2mUsing user-provided heatmap: 20260821_qwen3_235b_carryover_split_off_timing_hqq6_k6v6_a6000_heatmap.json[0m
+  [32mHeatmap metadata validated against current runtime and build params[0m
+  [32mHeatmap: 11,452 experts ranked from 11,452 entries[0m
+  [2mVRAM calibration: baseline 34232 MB | prefill 522.1 KB/tok, decode -1.7 KB/tok | HCS allowance prefill: short 29726 MB, long 22406 MB | decode: short 33608 MB, long 33632 MB | idle floors prefill=4506 MB decode=624 MB | decode-resident HCS budget=33608 MB[0m
+  [2mGPU0 HCS: 12032 experts (11452 ranked + 580 unranked), reclaimable: 33,608 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/12032 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 3580 experts in 1.72s (33226.9 MB, host_mode=source) | total: 3580/12032 (29.8%) coverage[0m
+  [2mLoaded in 1.8s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+VRAM pressure: evicted 20 soft HCS experts / 1 chunks; free=1124 MB after eviction (safety=600 MB, target=972 MB)
+  [33mVRAM pressure eviction at startup_ready: evicted 20 soft HCS experts, freed 185.6 MB, final free 1,124 MB[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mQwen3-235B-A22B[0m
+  [32mAddress:[0m  [1m127.0.0.1:18323[0m
+  [32mContext:[0m  18,672 tokens  |  KV cache: 1,500 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18323/v1[0m
+    Chat endpoint: http://127.0.0.1:18323/v1/chat/completions
+    Models:        http://127.0.0.1:18323/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mQwen3-235B-A22B[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mQwen3-235B-A22B[0m
+  GPUs:     1x NVIDIA RTX A6000
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/5K/10K/14,857)[0m
+  Prefill sizing:  [33mruntime-calibrated prefill cap 14,857 tokens (long probe low-water 23,006 MB, safety 600 MB)[0m
+  Warmup prefill:  3 prompts, ~14,857 tokens each
+  Timed prefill:   4 prompts at 1K/5K/10K/14,857 tokens
+    [1] 1,000 tokens
+    [2] 5,000 tokens
+    [3] 10,000 tokens
+    [4] 14,857 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1937ms 2:0.2214ms 4:0.2378ms 8:0.2867ms] -> keeping formula ksplits=1 (0.1937 ms median; best 1 at 0.1937 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 7 tokens in 1.00s (7.0 tok/s)  VRAM: 1124 MB free now, 1124 MB min free during decode[0m
+  [36mDynamic HCS: hit=77.77% tail=1504/752 protected=2056 promotions=1170 evictions=1170 request_promotions=1170/5264 budget_skips=0 no_slot=0 copy_failures=0[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1937ms 2:0.2172ms 4:0.2415ms 8:0.2848ms] -> keeping formula ksplits=1 (0.1937 ms median; best 1 at 0.1937 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 7 tokens in 1.49s (4.7 tok/s)  VRAM: 1124 MB free now, 1124 MB min free during decode[0m
+  [36mDynamic HCS: hit=58.47% tail=1504/752 protected=2056 promotions=3356 evictions=3356 request_promotions=2186/5264 budget_skips=0 no_slot=0 copy_failures=0[0m
+  Warmup complete.
+  Prefill warmup (3 runs, ~14,857 tokens each)...
+VRAM pressure: evicted 20 soft HCS experts / 1 chunks; free=2798 MB after eviction (safety=600 MB, target=972 MB)
+    [1/3] 14,857 tokens
+VRAM pressure: evicted 20 soft HCS experts / 1 chunks; free=2798 MB after eviction (safety=600 MB, target=972 MB)
+    [2/3] 14,857 tokens
+VRAM pressure: evicted 20 soft HCS experts / 1 chunks; free=2798 MB after eviction (safety=600 MB, target=972 MB)
+    [3/3] 14,857 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+VRAM pressure: evicted 20 soft HCS experts / 1 chunks; free=1124 MB after eviction (safety=600 MB, target=972 MB)
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1969ms 2:0.2260ms 4:0.2440ms 8:0.2892ms] -> keeping formula ksplits=1 (0.1969 ms median; best 1 at 0.1969 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 49 tokens in 5.98s (8.2 tok/s)  VRAM: 1124 MB free now, 1124 MB min free during decode[0m
+  [36mDynamic HCS: hit=81.72% tail=1504/752 protected=2056 promotions=10091 evictions=10091 request_promotions=6735/36848 budget_skips=0 no_slot=0 copy_failures=0[0m
+    50 tokens done
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1964ms 2:0.2203ms 4:0.2377ms 8:0.2892ms] -> keeping formula ksplits=1 (0.1964 ms median; best 1 at 0.1964 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 99 tokens in 12.86s (7.7 tok/s)  VRAM: 1124 MB free now, 1092 MB min free during decode[0m
+  [36mDynamic HCS: hit=79.12% tail=1504/752 protected=2056 promotions=25635 evictions=25635 request_promotions=15544/74448 budget_skips=0 no_slot=0 copy_failures=0[0m
+    100 tokens done
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1955ms 2:0.2053ms 4:0.2469ms 8:0.2905ms] -> keeping formula ksplits=1 (0.1955 ms median; best 1 at 0.1955 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 249 tokens in 35.65s (7.0 tok/s)  VRAM: 1124 MB free now, 1092 MB min free during decode[0m
+  [36mDynamic HCS: hit=75.86% tail=1504/752 protected=2056 promotions=70833 evictions=70833 request_promotions=45198/187248 budget_skips=0 no_slot=0 copy_failures=0[0m
+    250 tokens done
+  Warmup complete (132.0s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K/5K/10K/14,857 tokens, 4 runs[0m
+VRAM pressure: evicted 20 soft HCS experts / 1 chunks; free=1680 MB after eviction (safety=600 MB, target=972 MB)
+VRAM pressure: evicted 20 soft HCS experts / 1 chunks; free=2240 MB after eviction (safety=600 MB, target=972 MB)
+VRAM pressure: evicted 20 soft HCS experts / 1 chunks; free=2798 MB after eviction (safety=600 MB, target=972 MB)
+  Run 1: 170.6 tok/s (1,000 tokens in 5862.4ms)
+  Run 2: 669.7 tok/s (5,000 tokens in 7466.0ms)
+  Run 3: 811.3 tok/s (10,000 tokens in 12325.9ms)
+  Run 4: 797.1 tok/s (14,857 tokens in 18639.4ms)
+  [1mBest: 811.3 tok/s (10,000 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+VRAM pressure: evicted 20 soft HCS experts / 1 chunks; free=1124 MB after eviction (safety=600 MB, target=972 MB)
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1966ms 2:0.2200ms 4:0.2463ms 8:0.2893ms] -> keeping formula ksplits=1 (0.1966 ms median; best 1 at 0.1966 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 49 tokens in 6.47s (7.6 tok/s)  VRAM: 1124 MB free now, 1124 MB min free during decode[0m
+  [36mDynamic HCS: hit=78.85% tail=1504/752 protected=2056 promotions=78626 evictions=78626 request_promotions=7793/36848 budget_skips=0 no_slot=0 copy_failures=0[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1956ms 2:0.2026ms 4:0.2192ms 8:0.2928ms] -> keeping formula ksplits=1 (0.1956 ms median; best 1 at 0.1956 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 99 tokens in 12.86s (7.7 tok/s)  VRAM: 1124 MB free now, 1092 MB min free during decode[0m
+  [36mDynamic HCS: hit=79.27% tail=1504/752 protected=2056 promotions=94056 evictions=94056 request_promotions=15430/74448 budget_skips=0 no_slot=0 copy_failures=0[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1955ms 2:0.2230ms 4:0.2405ms 8:0.2872ms] -> keeping formula ksplits=1 (0.1955 ms median; best 1 at 0.1955 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 249 tokens in 32.93s (7.6 tok/s)  VRAM: 1124 MB free now, 1092 MB min free during decode[0m
+  [36mDynamic HCS: hit=78.93% tail=1504/752 protected=2056 promotions=133514 evictions=133514 request_promotions=39458/187248 budget_skips=0 no_slot=0 copy_failures=0[0m
+   50 tokens: 7.57 tok/s (132.1ms/tok)
+  100 tokens: 7.70 tok/s (129.9ms/tok)
+  250 tokens: 7.56 tok/s (132.3ms/tok)
+  [1mBest: 7.70 tok/s[0m
+  HCS:  3560/12032 experts loaded (29.6%)
+  VRAM: 1092 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+  [32mprefill: 14 tokens in 4.09s (3.4 tok/s)  VRAM: 8346 MB free now, 5364 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1967ms 2:0.2030ms 4:0.2456ms 8:0.2902ms] -> keeping formula ksplits=1 (0.1967 ms median; best 1 at 0.1967 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 7 tokens in 1.01s (6.9 tok/s)  VRAM: 1124 MB free now, 1092 MB min free during decode[0m
+  [36mDynamic HCS: hit=78.19% tail=1504/752 protected=2056 promotions=134662 evictions=134662 request_promotions=1148/5264 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 61 tokens in 5.13s (11.9 tok/s)  VRAM: 8344 MB free now, 3542 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1953ms 2:0.2125ms 4:0.2447ms 8:0.2872ms] -> keeping formula ksplits=1 (0.1953 ms median; best 1 at 0.1953 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 49 tokens in 6.50s (7.5 tok/s)  VRAM: 1090 MB free now, 1090 MB min free during decode[0m
+  [36mDynamic HCS: hit=78.46% tail=1504/752 protected=2056 promotions=142600 evictions=142600 request_promotions=7938/36848 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 66 tokens in 5.11s (12.9 tok/s)  VRAM: 8346 MB free now, 3322 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1956ms 2:0.2025ms 4:0.2191ms 8:0.2949ms] -> keeping formula ksplits=1 (0.1956 ms median; best 1 at 0.1956 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 99 tokens in 12.84s (7.7 tok/s)  VRAM: 1092 MB free now, 1092 MB min free during decode[0m
+  [36mDynamic HCS: hit=79.25% tail=1504/752 protected=2056 promotions=158050 evictions=158050 request_promotions=15450/74448 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 61 tokens in 5.06s (12.1 tok/s)  VRAM: 8344 MB free now, 2208 MB min free during prefill[0m
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=3072 z=8 int8=false candidates [1:0.1954ms 2:0.2254ms 4:0.2425ms 8:0.2874ms] -> keeping formula ksplits=1 (0.1954 ms median; best 1 at 0.1954 ms is within the 5.0% margin)
+[ksplit-autotune] complete: 0 W13 override(s), 0 shared-W2 override(s) installed
+  [32mdecode: 249 tokens in 33.40s (7.5 tok/s)  VRAM: 1090 MB free now, 1090 MB min free during decode[0m
+  [36mDynamic HCS: hit=78.42% tail=1504/752 protected=2056 promotions=198450 evictions=198450 request_promotions=40400/187248 budget_skips=0 no_slot=0 copy_failures=0[0m
+   50 tokens: 13.99 tok/s (12.08s total)
+  100 tokens: 9.89 tok/s (18.40s total)
+  250 tokens: 8.20 tok/s (38.91s total)
+  [1mBest: 13.99 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m[32mBENCHMARK COMPLETE[0m
+  Model:                 [1mQwen3-235B-A22B[0m
+  Config:                INT4/4 HQQ6 KV=k6v6 1 GPU
+  Prefill (internal):    [32m[1m811.3 tok/s[0m  (best of 1K/5K/10K/14,857)
+  Decode (internal):     [32m[1m7.70 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m13.99 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          3560/12032 (29.6%)
+  Min free VRAM:         1092 MB
+  Log:     [2mlogs/dev-benchmark_20260821_101655/benchmark_report.log[0m
+

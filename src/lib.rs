@@ -14,6 +14,7 @@ pub mod hqq;
 pub mod kernel;
 pub mod moe;
 pub mod numa;
+pub mod pcie_batch;
 pub mod server;
 pub mod session_cache;
 mod synthetic_repack;

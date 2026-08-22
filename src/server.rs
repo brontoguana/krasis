@@ -1167,6 +1167,7 @@ fn restore_store_after_rust_prefill(
     store: &mut GpuDecodeStore,
     prompt_len: usize,
 ) -> Result<(), String> {
+    store.prepare_dspark_context_after_prefill_rust(prompt_len)?;
     store.set_kv_position_rust(prompt_len);
     store.prepare_runtime_for_decode_rust()
 }

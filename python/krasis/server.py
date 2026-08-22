@@ -540,6 +540,18 @@ def _heatmap_route_signature_from_cfg(cfg, args) -> dict[str, Any]:
             "need_fp32_gate": bool(getattr(cfg, "need_fp32_gate", False)),
             "norm_bias_one": bool(getattr(cfg, "norm_bias_one", False)),
             "layer_types_sha256": _sha256_jsonable(explicit_layer_types),
+            "dspark": (
+                {
+                    "mode": str(args.dspark_mode),
+                    "block_size": int(getattr(cfg, "dspark_block_size", 0)),
+                    "target_layer_ids": list(
+                        getattr(cfg, "dspark_target_layer_ids", None) or ()
+                    ),
+                    "markov_rank": int(getattr(cfg, "dspark_markov_rank", 0)),
+                }
+                if str(args.dspark_mode) != "off"
+                else None
+            ),
         },
         "schema": {
             "format": APPROVED_HEATMAP_FORMAT,
@@ -576,6 +588,7 @@ def _runtime_heatmap_capture_config(args) -> dict[str, Any]:
         "lm_head_quant": args.lm_head_quant,
         "kv_dtype": args.kv_dtype,
         "layer_group_size": int(args.layer_group_size),
+        "dspark_mode": str(args.dspark_mode),
     }
     if int(args.max_context_tokens) > 0:
         config["max_context_tokens"] = int(args.max_context_tokens)
@@ -1165,6 +1178,237 @@ def _make_startup_calibration_prompts(model: KrasisModel, lengths: list[int]) ->
     return prompts
 
 
+def _portable_predicted_w1_probe_lengths(short_tokens: int, long_tokens: int) -> list[int]:
+    """Choose runtime-derived short/middle/long A/B probe lengths."""
+    if short_tokens <= 0 or long_tokens < short_tokens:
+        raise ValueError(
+            "portable predicted-W1 calibration requires positive ordered short/long lengths"
+        )
+    if short_tokens == long_tokens:
+        return [short_tokens]
+    geometric_middle = math.isqrt(short_tokens * long_tokens)
+    lengths = sorted({short_tokens, geometric_middle, long_tokens})
+    if len(lengths) < 3 and long_tokens - short_tokens > 1:
+        lengths = sorted({short_tokens, (short_tokens + long_tokens) // 2, long_tokens})
+    return lengths
+
+
+def _select_portable_predicted_w1_threshold(
+    measurements: list[tuple[int, list[float], list[float]]],
+) -> tuple[Optional[int], list[dict[str, Any]]]:
+    """Select a conservative measured crossover from replicated A/B timings.
+
+    A point is a robust win only when the slowest candidate repeat beats the
+    fastest control repeat. The inverse defines a robust loss. Overlapping
+    intervals remain inconclusive; they are never promoted into a speed claim.
+    """
+    rows: list[dict[str, Any]] = []
+    for prompt_tokens, control_samples, candidate_samples in sorted(measurements):
+        if prompt_tokens <= 0 or not control_samples or not candidate_samples:
+            raise ValueError("portable predicted-W1 calibration row is incomplete")
+        values = [*control_samples, *candidate_samples]
+        if any(not math.isfinite(value) or value <= 0.0 for value in values):
+            raise ValueError("portable predicted-W1 calibration contains invalid timing")
+        control_min = min(control_samples)
+        control_max = max(control_samples)
+        candidate_min = min(candidate_samples)
+        candidate_max = max(candidate_samples)
+        if candidate_max < control_min:
+            verdict = "win"
+        elif control_max < candidate_min:
+            verdict = "loss"
+        else:
+            verdict = "inconclusive"
+        rows.append(
+            {
+                "prompt_tokens": int(prompt_tokens),
+                "control_samples_s": list(control_samples),
+                "candidate_samples_s": list(candidate_samples),
+                "control_mean_s": sum(control_samples) / len(control_samples),
+                "candidate_mean_s": sum(candidate_samples) / len(candidate_samples),
+                "verdict": verdict,
+            }
+        )
+
+    robust_win_indices = [i for i, row in enumerate(rows) if row["verdict"] == "win"]
+    if not robust_win_indices:
+        return None, rows
+    first_win = robust_win_indices[0]
+    if any(row["verdict"] != "win" for row in rows[first_win:]):
+        raise RuntimeError(
+            "portable predicted-W1 timings are non-monotonic or inconclusive above a measured win"
+        )
+    if len(rows) > 1 and len(rows) - first_win < 2:
+        raise RuntimeError(
+            "portable predicted-W1 has only one robust winning probe; refusing to extrapolate"
+        )
+
+    first_win_row = rows[first_win]
+    if first_win == 0:
+        return int(first_win_row["prompt_tokens"]), rows
+
+    # Do not interpolate into an unmeasured interval. Even when adjacent
+    # probes are a robust loss and robust win, their crossover need not be
+    # linear in prompt length. Enable only at the first prompt length that was
+    # itself measured as a replicated robust win.
+    return int(first_win_row["prompt_tokens"]), rows
+
+
+def _calibrate_portable_predicted_w1(
+    model: KrasisModel,
+    gpu_store,
+    vram_monitor,
+    device_index: int,
+    safety_margin_mb: int,
+    short_tokens: int,
+    long_tokens: int,
+) -> dict[str, Any]:
+    """A/B portable predicted-W1 on the final measured HCS layout."""
+    import torch
+
+    policy = str(gpu_store.portable_prefill_predicted_w1_policy())
+    if policy != "auto-uncalibrated":
+        raise RuntimeError(
+            "portable predicted-W1 startup calibration requires auto-uncalibrated policy; "
+            f"got {policy}"
+        )
+    probe_lengths = _portable_predicted_w1_probe_lengths(short_tokens, long_tokens)
+    if len(probe_lengths) < 2:
+        raise RuntimeError(
+            "portable predicted-W1 auto calibration requires at least two distinct prompt lengths"
+        )
+    prompts = _make_startup_calibration_prompts(model, probe_lengths)
+    _status("Calibrating portable predicted-W1 on final HCS")
+    _detail(
+        "Canonical real-content, replicated order-balanced A/B at "
+        + ", ".join(f"{len(tokens):,}" for tokens in prompts)
+        + " prompt tokens"
+    )
+
+    while True:
+        resident_count_before = len(gpu_store.hcs_resident_pairs())
+        measurements: list[tuple[int, list[float], list[float]]] = []
+        for probe_index, tokens in enumerate(prompts, start=1):
+            samples: dict[bool, list[float]] = {False: [], True: []}
+            first_tokens: dict[bool, set[int]] = {False: set(), True: set()}
+            # Reverse the order on the second repeat so cache/order effects are
+            # represented symmetrically in each timing interval.
+            for repeat, order in enumerate(((False, True), (True, False)), start=1):
+                for candidate_enabled in order:
+                    mode = "candidate" if candidate_enabled else "control"
+                    gpu_store.set_portable_prefill_predicted_w1_calibration_override(
+                        candidate_enabled
+                    )
+                    model.server_cleanup()
+                    evicted, evict_ms = gpu_store.py_hcs_evict_for_prefill(len(tokens))
+                    torch.cuda.synchronize(device_index)
+                    vram_monitor.reset_min_free()
+                    first_token, prompt_len, kv_overflow = gpu_store.rust_prefill_tokens(
+                        tokens,
+                        temperature=0.0,
+                        disable_pinning=False,
+                    )
+                    torch.cuda.synchronize(device_index)
+                    measured_prompt_len, native_prefill_ms, retry_attempts = (
+                        gpu_store.last_rust_prefill_measurement()
+                    )
+                    if measured_prompt_len != prompt_len:
+                        raise RuntimeError(
+                            "portable predicted-W1 calibration received a stale native timing: "
+                            f"prefill_prompt={prompt_len} measured_prompt={measured_prompt_len}"
+                        )
+                    if retry_attempts != 0:
+                        raise RuntimeError(
+                            "portable predicted-W1 calibration encountered a measured "
+                            f"cold-staging retry at {prompt_len} tokens; refusing to time "
+                            "only the final retry attempt"
+                        )
+                    elapsed = float(native_prefill_ms) / 1000.0
+                    min_free_mb = int(vram_monitor.min_free_mb(device_index))
+                    if kv_overflow or prompt_len != len(tokens):
+                        raise RuntimeError(
+                            "portable predicted-W1 calibration prefill did not cover the exact probe: "
+                            f"requested={len(tokens)} returned={prompt_len} overflow={kv_overflow}"
+                        )
+                    _require_startup_vram_floor(
+                        f"Portable predicted-W1 {mode} probe",
+                        min_free_mb,
+                        safety_margin_mb,
+                    )
+                    reload_count, reload_ms = gpu_store.py_hcs_reload_after_prefill(prompt_len)
+                    model.server_cleanup()
+                    torch.cuda.synchronize(device_index)
+                    samples[candidate_enabled].append(elapsed)
+                    first_tokens[candidate_enabled].add(int(first_token))
+                    logger.info(
+                        "PORTABLE_PREDICTED_W1_CALIBRATION probe=%d/%d repeat=%d mode=%s "
+                        "prompt_tokens=%d elapsed_s=%.6f tps=%.3f first_token=%d "
+                        "evicted=%d evict_ms=%.6f reloaded=%d reload_ms=%.6f min_free_mb=%d",
+                        probe_index,
+                        len(prompts),
+                        repeat,
+                        mode,
+                        prompt_len,
+                        elapsed,
+                        prompt_len / elapsed,
+                        first_token,
+                        evicted,
+                        evict_ms,
+                        reload_count,
+                        reload_ms,
+                        min_free_mb,
+                    )
+            if len(first_tokens[False]) != 1 or first_tokens[False] != first_tokens[True]:
+                raise RuntimeError(
+                    "portable predicted-W1 calibration changed the first-token result at "
+                    f"{len(tokens)} tokens: control={sorted(first_tokens[False])} "
+                    f"candidate={sorted(first_tokens[True])}"
+                )
+            measurements.append((len(tokens), samples[False], samples[True]))
+
+        resident_count_after = len(gpu_store.hcs_resident_pairs())
+        if resident_count_after > resident_count_before:
+            raise RuntimeError(
+                "portable predicted-W1 calibration increased HCS capacity unexpectedly"
+            )
+        if resident_count_after < resident_count_before:
+            _warn(
+                "Portable predicted-W1 calibration triggered measured HCS eviction; "
+                "repeating on the settled residency layout"
+            )
+            logger.warning(
+                "PORTABLE_PREDICTED_W1_CALIBRATION repeat_after_hcs_settle before=%d after=%d",
+                resident_count_before,
+                resident_count_after,
+            )
+            continue
+        break
+
+    threshold, rows = _select_portable_predicted_w1_threshold(measurements)
+    final_policy = gpu_store.finish_portable_prefill_predicted_w1_calibration(threshold)
+    for row in rows:
+        _detail(
+            "Portable predicted-W1 "
+            f"{row['prompt_tokens']:,} tokens: control={row['control_mean_s']:.3f}s "
+            f"candidate={row['candidate_mean_s']:.3f}s verdict={row['verdict']}"
+        )
+    if threshold is None:
+        _warn("Portable predicted-W1 disabled: no robust measured winning region")
+    else:
+        _detail(f"Portable predicted-W1 measured crossover: {threshold:,} prompt tokens")
+    result = {
+        "policy": final_policy,
+        "threshold_tokens": threshold,
+        "resident_experts": resident_count_after,
+        "measurements": rows,
+    }
+    logger.info(
+        "PORTABLE_PREDICTED_W1_CALIBRATION result=%s",
+        json.dumps(result, sort_keys=True),
+    )
+    return result
+
+
 def _startup_calibration_long_floor_mb(safety_margin_mb: int) -> int:
     # Startup calibration runs before HCS is loaded, so there is nothing to evict
     # if a long prefill transient underestimates VRAM. Keep an extra measured
@@ -1419,9 +1663,16 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
     if gpu_store is None:
         raise RuntimeError("GPU decode store not configured — cannot build heatmap")
 
-    cfg = model.cfg
-    num_layers = cfg.num_hidden_layers
-    num_experts = cfg.n_routed_experts
+    route_shape = list(gpu_store.moe_route_shape())
+    if not route_shape:
+        raise RuntimeError("Heatmap collection found no registered MoE layers")
+    expert_widths = {int(experts) for _, experts in route_shape}
+    if len(expert_widths) != 1:
+        raise RuntimeError(
+            f"Heatmap collection requires one rectangular expert width, got {sorted(expert_widths)}"
+        )
+    num_layers = max(int(layer_idx) for layer_idx, _ in route_shape) + 1
+    num_experts = expert_widths.pop()
 
     heatmap_collection_started = False
     try:
@@ -1505,16 +1756,29 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
                     HEATMAP_DECODE_TOKENS,
                 )
                 decode_t0 = time.perf_counter()
-                generated = gpu_store.gpu_generate_batch(
-                    first_token=first_token,
-                    start_position=prompt_len,
-                    max_tokens=HEATMAP_DECODE_TOKENS,
-                    temperature=decode_params["temperature"],
-                    top_k=decode_params["top_k"],
-                    top_p=decode_params["top_p"],
-                    stop_ids=stop_ids,
-                    presence_penalty=decode_params["presence_penalty"],
-                )
+                if args.dspark_mode != "off":
+                    generated = gpu_store.gpu_generate_stream_probe(
+                        tokenizer_path=os.path.join(args.model_path, "tokenizer.json"),
+                        first_token=first_token,
+                        start_position=prompt_len,
+                        max_tokens=HEATMAP_DECODE_TOKENS,
+                        temperature=decode_params["temperature"],
+                        top_k=decode_params["top_k"],
+                        top_p=decode_params["top_p"],
+                        stop_ids=stop_ids,
+                        presence_penalty=decode_params["presence_penalty"],
+                    )
+                else:
+                    generated = gpu_store.gpu_generate_batch(
+                        first_token=first_token,
+                        start_position=prompt_len,
+                        max_tokens=HEATMAP_DECODE_TOKENS,
+                        temperature=decode_params["temperature"],
+                        top_k=decode_params["top_k"],
+                        top_p=decode_params["top_p"],
+                        stop_ids=stop_ids,
+                        presence_penalty=decode_params["presence_penalty"],
+                    )
                 decode_s = time.perf_counter() - decode_t0
                 generated_tokens = len(generated)
                 total_decode_tokens += 1 + len(generated)
@@ -1636,6 +1900,122 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
                 )
 
 
+def _calibrate_dspark_verification_widths(model: KrasisModel, args) -> dict[str, Any]:
+    """Measure the D-Spark verifier service curve on the final HCS layout.
+
+    The Rust hot path balances rounds across every legal checkpoint-derived
+    width. Python supplies only the same diverse held-out prompt corpus used by
+    HCS calibration; no Python code runs in the measured per-token path.
+    """
+    gpu_store = getattr(model, "_gpu_decode_store", None)
+    if gpu_store is None:
+        raise RuntimeError("D-Spark verification calibration requires the GPU decode store")
+    prompts = _load_heatmap_prompts()
+    _assert_heatmap_prompts_are_held_out(prompts)
+    metadata = _expected_heatmap_metadata(model, args, prompts)
+    decode_params = metadata["heatmap_build"]["decode_params"]
+    block_size = int(model.cfg.dspark_block_size)
+    if block_size <= 0:
+        raise RuntimeError(
+            f"D-Spark verification calibration has invalid block size {block_size}"
+        )
+    width_count = block_size + 1
+    # At most width_count outputs can be emitted by one verification round.
+    # The square therefore guarantees at least width_count real rounds per
+    # prompt without a prompt/model/GPU-specific token-count constant.
+    calibration_tokens = width_count * width_count
+    stop_ids = _default_stop_ids(model)
+    start_status = json.loads(gpu_store.dspark_verification_calibration_start())
+    logger.info(
+        "D-SPARK WIDTH CALIBRATION start mode=%s widths=%d prompts=%d outputs_per_prompt=%d status=%s",
+        args.dspark_mode,
+        width_count,
+        len(prompts),
+        calibration_tokens,
+        json.dumps(start_status, sort_keys=True),
+    )
+    _status("Calibrating D-Spark verification widths on final HCS")
+    _detail(
+        f"{width_count} legal widths × {len(prompts)} held-out prompts; "
+        f"{calibration_tokens} output tokens per prompt"
+    )
+    for prompt_index, prompt_text in enumerate(prompts, start=1):
+        prompt_started = time.perf_counter()
+        tokens = _chat_prompt_tokens(
+            model,
+            prompt_text,
+            enable_thinking=decode_params["enable_thinking"],
+        )
+        try:
+            first_token, prompt_len, kv_overflow = gpu_store.rust_prefill_tokens(
+                tokens,
+                temperature=decode_params["temperature"],
+                disable_pinning=True,
+            )
+            # This helper bypasses the Rust HTTP request orchestrator, so it
+            # must perform the same canonical post-prefill HCS reload before
+            # decode. In resident mode that restores every auxiliary expert;
+            # in shared mode it restores the measured joint target/aux pool.
+            reload_count, reload_ms = gpu_store.py_hcs_reload_after_prefill(
+                prompt_len
+            )
+            residency = json.loads(gpu_store.dspark_residency_status())
+            logger.info(
+                "D-SPARK WIDTH CALIBRATION reload prompt=%d/%d activated=%d "
+                "reload_ms=%.6f residency=%s",
+                prompt_index,
+                len(prompts),
+                reload_count,
+                reload_ms,
+                json.dumps(residency, sort_keys=True),
+            )
+            if kv_overflow:
+                raise RuntimeError(
+                    f"D-Spark width calibration prompt {prompt_index} overflowed KV capacity"
+                )
+            if first_token in stop_ids:
+                raise RuntimeError(
+                    f"D-Spark width calibration prompt {prompt_index} stopped before decode"
+                )
+            generated = gpu_store.gpu_generate_stream_probe(
+                tokenizer_path=os.path.join(args.model_path, "tokenizer.json"),
+                first_token=first_token,
+                start_position=prompt_len,
+                max_tokens=calibration_tokens,
+                temperature=decode_params["temperature"],
+                top_k=decode_params["top_k"],
+                top_p=decode_params["top_p"],
+                stop_ids=stop_ids,
+                presence_penalty=decode_params["presence_penalty"],
+            )
+            if not generated:
+                raise RuntimeError(
+                    f"D-Spark width calibration prompt {prompt_index} emitted no decode tokens"
+                )
+            logger.info(
+                "D-SPARK WIDTH CALIBRATION prompt=%d/%d prompt_tokens=%d generated_tokens=%d elapsed_s=%.6f",
+                prompt_index,
+                len(prompts),
+                prompt_len,
+                len(generated),
+                time.perf_counter() - prompt_started,
+            )
+        finally:
+            model.server_cleanup()
+    result = json.loads(gpu_store.dspark_verification_calibration_finish())
+    if not result.get("calibrated", False):
+        raise RuntimeError(
+            "D-Spark verification calibration finished without a calibrated policy"
+        )
+    logger.info(
+        "D-SPARK WIDTH CALIBRATION complete mode=%s result=%s",
+        args.dspark_mode,
+        json.dumps(result, sort_keys=True),
+    )
+    _detail(f"D-Spark measured width policy: {json.dumps(result, sort_keys=True)}")
+    return result
+
+
 def _approved_heatmap_checkpoint_path(save_path: str, prompts_processed: int) -> str:
     base = Path(save_path)
     suffix = base.suffix or ".json"
@@ -1723,8 +2103,15 @@ def _merge_heatmap_counts(
 
 def _full_heatmap_ranking(
     model: KrasisModel,
+    gpu_store,
     counts: dict[str, int],
 ) -> list[tuple[int, int]]:
+    route_shape = {
+        int(layer_idx): int(num_experts)
+        for layer_idx, num_experts in gpu_store.moe_route_shape()
+    }
+    if not route_shape:
+        raise RuntimeError("Heatmap ranking found no registered MoE layers")
     ranked: list[tuple[int, int, int]] = []
     seen: set[tuple[int, int]] = set()
     for key, count in counts.items():
@@ -1733,10 +2120,9 @@ def _full_heatmap_ranking(
         expert_idx = int(expert_text)
         if (
             layer_idx < 0
-            or layer_idx >= len(model.layers)
-            or not model.layers[layer_idx].is_moe
+            or layer_idx not in route_shape
             or expert_idx < 0
-            or expert_idx >= model.cfg.n_routed_experts
+            or expert_idx >= route_shape[layer_idx]
         ):
             raise RuntimeError(
                 f"Heatmap ranking contains an invalid model route {key!r}"
@@ -1748,10 +2134,8 @@ def _full_heatmap_ranking(
         ranked.append((int(count), layer_idx, expert_idx))
     ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
     full = [(layer_idx, expert_idx) for _, layer_idx, expert_idx in ranked]
-    for layer_idx, layer in enumerate(model.layers):
-        if not layer.is_moe:
-            continue
-        for expert_idx in range(model.cfg.n_routed_experts):
+    for layer_idx, num_experts in sorted(route_shape.items()):
+        for expert_idx in range(num_experts):
             route = (layer_idx, expert_idx)
             if route not in seen:
                 full.append(route)
@@ -1971,7 +2355,7 @@ def _build_approved_heatmap(
         )
         logger.info("APPROVED_HEATMAP residency_calibration %s", cal_msg)
         if bootstrap_counts:
-            ranking = _full_heatmap_ranking(model, bootstrap_counts)
+            ranking = _full_heatmap_ranking(model, gpu_store, bootstrap_counts)
             hcs_result = gpu_store.hcs_pool_init_tiered(
                 ranking,
                 hard_budget_mb=0,
@@ -2008,8 +2392,8 @@ def _build_approved_heatmap(
             )
         else:
             gpu_store.hcs_init_collection(
-                cfg.num_hidden_layers,
-                cfg.n_routed_experts,
+                max(int(layer_idx) for layer_idx, _ in gpu_store.moe_route_shape()) + 1,
+                max(int(num_experts) for _, num_experts in gpu_store.moe_route_shape()),
             )
             _detail("Initial HCS residency: none; only the first prompt will run cold")
         gpu_store.hcs_start_collecting()
@@ -2141,7 +2525,7 @@ def _build_approved_heatmap(
             refresh_result = ""
             if refresh_residency:
                 refresh_t0 = time.perf_counter()
-                ranking = _full_heatmap_ranking(model, base_counts)
+                ranking = _full_heatmap_ranking(model, gpu_store, base_counts)
                 gpu_store.hcs_reset()
                 refresh_result = gpu_store.hcs_pool_init_tiered(
                     ranking,
@@ -2382,6 +2766,7 @@ def main():
             "CFG_DRAFT_MODEL": "draft_model",
             "CFG_DRAFT_K": "draft_k",
             "CFG_DRAFT_CONTEXT": "draft_context",
+            "CFG_DSPARK_MODE": "dspark_mode",
             "CFG_TEMPERATURE": "temperature",
             "CFG_ENABLE_THINKING": "enable_thinking",
             "CFG_PREFIX_CACHE": "prefix_cache",
@@ -2658,6 +3043,15 @@ def main():
                         help="Number of tokens to draft per speculative round (default: 3)")
     parser.add_argument("--draft-context", type=int, default=512,
                         help="Context window for draft model warmup (default: 512)")
+    parser.add_argument(
+        "--dspark-mode",
+        default="off",
+        choices=("off", "resident", "shared"),
+        help=(
+            "DeepSeek-V4 checkpoint-native D-Spark mode: off, all draft experts "
+            "resident, or draft/target experts sharing measured HCS"
+        ),
+    )
     parser.add_argument("--benchmark", action="store_true",
                         help="Run standardized benchmark via HTTP (same path as production)")
     parser.add_argument("--benchmark-only", action="store_true",
@@ -3183,6 +3577,34 @@ def main():
             context_window=args.draft_context,
         )
         _detail(f"Draft model loaded (k={args.draft_k}, context={args.draft_context})")
+
+    if args.dspark_mode != "off":
+        if args.draft_model:
+            parser.error("--dspark-mode cannot be combined with --draft-model")
+        if not _model.cfg.is_deepseek_v4:
+            parser.error("--dspark-mode requires a DeepSeek-V4 checkpoint")
+        if not args.hcs:
+            parser.error("--dspark-mode requires HCS so its measured residency contract is enforced")
+        if len(_model.all_devices) != 1:
+            parser.error(
+                "--dspark-mode currently requires exactly one GPU; auxiliary-layer "
+                "multi-GPU state transfer has not been correctness-qualified"
+            )
+        expert_registration = gpu_store.load_dspark(
+            model_dir=_model.cfg.model_path,
+            mode=args.dspark_mode,
+            target_layer_ids=list(_model.cfg.dspark_target_layer_ids or ()),
+            block_size=int(_model.cfg.dspark_block_size),
+            noise_token_id=int(_model.cfg.dspark_noise_token_id),
+            markov_rank=int(_model.cfg.dspark_markov_rank),
+        )
+        graph_registration = _model.setup_dspark_gpu_store(
+            gpu_store, args.dspark_mode
+        )
+        _detail(
+            f"D-Spark loaded (mode={args.dspark_mode}, "
+            f"experts={expert_registration}, graph={graph_registration})"
+        )
 
     # ── Start VRAM monitor before warmup for visibility ──
     from krasis import VramMonitor
@@ -4173,7 +4595,14 @@ def main():
 
         # ── Device selection ──
         primary_dev = devices[0]
-        total_experts = cfg.n_routed_experts * cfg.num_moe_layers
+        runtime_moe_shape = {
+            int(layer_idx): int(num_experts)
+            for layer_idx, num_experts in gpu_store.moe_route_shape()
+        }
+        if not runtime_moe_shape:
+            raise RuntimeError("HCS setup found no registered MoE layers")
+        runtime_layer_end = max(runtime_moe_shape) + 1
+        total_experts = sum(runtime_moe_shape.values())
 
         heuristic_hcs_init = os.environ.get("KRASIS_HCS_HEURISTIC_INIT", "").strip().lower() in (
             "1", "true", "yes", "on"
@@ -4266,10 +4695,9 @@ def main():
             ranked_set = set(filtered)
             # Append all unranked experts from this layer range
             for i in range(layer_start, layer_end):
-                layer = _model.layers[i]
-                if not layer.is_moe:
+                n_experts = runtime_moe_shape.get(i)
+                if n_experts is None:
                     continue
-                n_experts = cfg.n_routed_experts
                 for e in range(n_experts):
                     if (i, e) not in ranked_set:
                         filtered.append((i, e))
@@ -4278,12 +4706,25 @@ def main():
         def _heuristic_ranking_for_layers(layer_start, layer_end):
             """Return a balanced deterministic per-layer ranking without heatmap collection."""
             filtered = []
-            for e in range(cfg.n_routed_experts):
+            max_experts = max(runtime_moe_shape.values())
+            for e in range(max_experts):
                 for i in range(layer_start, layer_end):
-                    layer = _model.layers[i]
-                    if layer.is_moe:
+                    if e < runtime_moe_shape.get(i, 0):
                         filtered.append((i, e))
             return filtered
+
+        def _apply_dspark_residency_order(base_ranking):
+            if args.dspark_mode != "resident":
+                return base_ranking
+            auxiliary_start = cfg.num_hidden_layers
+            auxiliary = [
+                (layer_idx, expert_idx)
+                for layer_idx, num_experts in sorted(runtime_moe_shape.items())
+                if layer_idx >= auxiliary_start
+                for expert_idx in range(num_experts)
+            ]
+            auxiliary_set = set(auxiliary)
+            return auxiliary + [route for route in base_ranking if route not in auxiliary_set]
 
         if args.expert_compression:
             _status("Calibrating production expert compression path")
@@ -4346,7 +4787,7 @@ def main():
                 f"Calibrating N-GPU peer-expert mode "
                 f"(1 primary + {num_gpus_available - 1} peers)"
             )
-            full_ranking = _full_ranking_for_layers(ranking, 0, len(_model.layers))
+            full_ranking = _full_ranking_for_layers(ranking, 0, runtime_layer_end)
             by_layer = {}
             for pair in full_ranking:
                 by_layer.setdefault(pair[0], []).append(pair)
@@ -4706,10 +5147,11 @@ def main():
             else:
                 # Single GPU: include all unranked experts too
                 gpu0_ranking = (
-                    _heuristic_ranking_for_layers(0, len(_model.layers))
+                    _heuristic_ranking_for_layers(0, runtime_layer_end)
                     if heuristic_hcs_init
-                    else _full_ranking_for_layers(ranking, 0, len(_model.layers))
+                    else _full_ranking_for_layers(ranking, 0, runtime_layer_end)
                 )
+                gpu0_ranking = _apply_dspark_residency_order(gpu0_ranking)
                 num_ranked = len(ranking)
                 _dim(f"GPU0 HCS: {len(gpu0_ranking)} experts "
                      f"({num_ranked} ranked + {len(gpu0_ranking) - num_ranked} unranked), "
@@ -4735,6 +5177,10 @@ def main():
                 soft_budget_mb=gpu0_soft,
                 safety_margin_mb=SAFETY_MARGIN_MB,
             )
+            if args.dspark_mode != "off":
+                dspark_residency = store.dspark_residency_status()
+                _detail(f"D-Spark HCS residency: {dspark_residency}")
+                logger.info("D-Spark HCS residency after startup: %s", dspark_residency)
             clamp_soft_mb_raw = os.environ.get("KRASIS_HCS_CLAMP_SOFT_MB", "").strip()
             if clamp_soft_mb_raw:
                 try:
@@ -4924,6 +5370,34 @@ def main():
 
     if args.hcs:
         _verify_hcs_vram_floor("startup_ready")
+
+    if args.dspark_mode != "off":
+        # Verification cost is dominated by the exact target/auxiliary HCS
+        # residency. Calibrate only after pressure has settled, and repeat if
+        # calibration itself reduced the measured soft-tier capacity. Normal
+        # prompt-aware reload may replace expert identities at constant capacity;
+        # the diverse calibration traffic deliberately samples that behavior.
+        while True:
+            resident_count_before = len(gpu_store.hcs_resident_pairs())
+            _calibrate_dspark_verification_widths(_model, args)
+            _verify_hcs_vram_floor("dspark_width_calibration")
+            resident_count_after = len(gpu_store.hcs_resident_pairs())
+            if resident_count_after == resident_count_before:
+                break
+            if resident_count_after > resident_count_before:
+                raise RuntimeError(
+                    "D-Spark width calibration increased HCS capacity unexpectedly; "
+                    "refusing to use a stale service curve"
+                )
+            _warn(
+                "D-Spark width calibration triggered measured HCS eviction; "
+                "repeating on the settled residency layout"
+            )
+            logger.warning(
+                "D-SPARK WIDTH CALIBRATION retry after HCS eviction before=%d after=%d",
+                resident_count_before,
+                resident_count_after,
+            )
 
     # Benchmark runs AFTER server starts (same HTTP path as production).
     # We set up the benchmark thread here; it launches after rust_server.run().
@@ -5260,6 +5734,21 @@ def main():
 
         vram_monitor.report_event("multi_gpu_setup_end")
         _status(f"Multi-GPU decode ready ({num_aux + 1} GPUs, splits={_multi_gpu_splits})")
+
+    portable_predicted_w1_policy = str(
+        gpu_store.portable_prefill_predicted_w1_policy()
+    )
+    if portable_predicted_w1_policy == "auto-uncalibrated":
+        _model._portable_predicted_w1_calibration = _calibrate_portable_predicted_w1(
+            _model,
+            gpu_store,
+            vram_monitor,
+            dev_idx,
+            SAFETY_MARGIN_MB,
+            short_tokens,
+            long_tokens,
+        )
+        _verify_hcs_vram_floor("portable_predicted_w1_calibration")
 
     # ── Final VRAM summary (all GPUs) ──
     if num_gpus_available > 1 and args.hcs and _multi_gpu_splits:

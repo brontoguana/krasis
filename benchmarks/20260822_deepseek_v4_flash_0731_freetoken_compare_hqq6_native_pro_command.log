@@ -1,0 +1,4 @@
+Working directory: /home/main/Documents/Claude/krasis
+Command: ./dev benchmark tests/deepseek-v4-flash-0731-hqq6-native-pro-lan-8012.conf
+Instrumentation: timing and trace disabled
+Purpose: timing-disabled Krasis control for the same-host FreeToken comparison

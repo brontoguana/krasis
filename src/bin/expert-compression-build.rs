@@ -1,11 +1,9 @@
 //! Build a versioned, expert-contiguous, bit-exact compression sidecar.
 
-use krasis::expert_codec::{
-    encode_expert, CodecHistogram, ComponentKind, ExpertComponent,
-};
+use krasis::expert_codec::{encode_expert, CodecHistogram, ComponentKind, ExpertComponent};
 use krasis::expert_sidecar::{
-    encode_header, routed_expert_sha256_from_digests, source_header_sha256,
-    ExpertSidecarHeader, SIDECAR_HEADER_BYTES,
+    encode_header, routed_expert_sha256_from_digests, source_header_sha256, ExpertSidecarHeader,
+    SIDECAR_HEADER_BYTES,
 };
 use memmap2::Mmap;
 use rayon::prelude::*;
@@ -90,7 +88,10 @@ fn run() -> BuildResult<()> {
     .map_err(|error| format!("failed to parse model config: {error}"))?;
     let cache_file = File::open(&cache_path)
         .map_err(|error| format!("failed to open {}: {error}", cache_path.display()))?;
-    let source_cache_bytes = cache_file.metadata().map_err(|error| error.to_string())?.len();
+    let source_cache_bytes = cache_file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .len();
     let cache = unsafe { Mmap::map(&cache_file) }.map_err(|error| error.to_string())?;
     let layout = read_layout(&cache, config.experts_gated)?;
     let expert_count = layout
@@ -187,8 +188,7 @@ fn run() -> BuildResult<()> {
             .map(|ordinal| {
                 let source = expert_bytes(&cache, &layout, ordinal);
                 let encoded = encode_expert(&components(source, &layout), &tables, lane_bytes)?;
-                if validation_ordinals.contains(&ordinal)
-                    && encoded.decode_cpu(&tables)? != source
+                if validation_ordinals.contains(&ordinal) && encoded.decode_cpu(&tables)? != source
                 {
                     return Err(format!("real expert {ordinal} failed CPU byte identity"));
                 }
@@ -269,10 +269,22 @@ fn components<'a>(source: &'a [u8], layout: &CacheLayout) -> [ExpertComponent<'a
     let w2_packed = w13_scales + layout.w13_scales;
     let w2_scales = w2_packed + layout.w2_packed;
     [
-        ExpertComponent { bytes: &source[..w13_scales], kind: ComponentKind::PackedNibbles },
-        ExpertComponent { bytes: &source[w13_scales..w2_packed], kind: ComponentKind::Bf16Scales },
-        ExpertComponent { bytes: &source[w2_packed..w2_scales], kind: ComponentKind::PackedNibbles },
-        ExpertComponent { bytes: &source[w2_scales..], kind: ComponentKind::Bf16Scales },
+        ExpertComponent {
+            bytes: &source[..w13_scales],
+            kind: ComponentKind::PackedNibbles,
+        },
+        ExpertComponent {
+            bytes: &source[w13_scales..w2_packed],
+            kind: ComponentKind::Bf16Scales,
+        },
+        ExpertComponent {
+            bytes: &source[w2_packed..w2_scales],
+            kind: ComponentKind::PackedNibbles,
+        },
+        ExpertComponent {
+            bytes: &source[w2_scales..],
+            kind: ComponentKind::Bf16Scales,
+        },
     ]
 }
 
@@ -287,7 +299,9 @@ fn read_layout(bytes: &[u8], gated: bool) -> BuildResult<CacheLayout> {
     }
     let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
     if version != MARLIN_CACHE_VERSION {
-        return Err(format!("Marlin cache version {version}, expected {MARLIN_CACHE_VERSION}"));
+        return Err(format!(
+            "Marlin cache version {version}, expected {MARLIN_CACHE_VERSION}"
+        ));
     }
     let hidden = read_header_usize(bytes, 8)?;
     let intermediate = read_header_usize(bytes, 16)?;
@@ -318,8 +332,10 @@ fn read_layout(bytes: &[u8], gated: bool) -> BuildResult<CacheLayout> {
 }
 
 fn read_header_usize(bytes: &[u8], offset: usize) -> BuildResult<usize> {
-    usize::try_from(u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()))
-        .map_err(|_| "cache dimension does not fit usize".to_string())
+    usize::try_from(u64::from_le_bytes(
+        bytes[offset..offset + 8].try_into().unwrap(),
+    ))
+    .map_err(|_| "cache dimension does not fit usize".to_string())
 }
 
 fn align_up(value: usize, alignment: usize) -> BuildResult<usize> {

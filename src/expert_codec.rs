@@ -905,8 +905,10 @@ mod tests {
         assert!(plan_expert_stream_chunks(&encoded.blob, 0)
             .unwrap_err()
             .contains("outside"));
-        assert!(plan_expert_stream_chunks(&encoded.blob, MAX_STREAM_CHUNKS + 1)
-            .unwrap_err()
-            .contains("outside"));
+        assert!(
+            plan_expert_stream_chunks(&encoded.blob, MAX_STREAM_CHUNKS + 1)
+                .unwrap_err()
+                .contains("outside")
+        );
     }
 }

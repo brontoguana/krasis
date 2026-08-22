@@ -1,0 +1,4 @@
+KRASIS_DEFERRED_COLD_DMA unset ./dev benchmark tests/deepseek-v4-flash-0731-hqq6-native-a6000.conf --timing
+
+Purpose: current-build control for the default-off deferred cold-DMA experiment.
+Timing instrumentation is enabled, so speed values are diagnostic only.

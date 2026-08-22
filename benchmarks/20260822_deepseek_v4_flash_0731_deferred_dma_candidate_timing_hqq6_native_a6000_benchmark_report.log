@@ -1,0 +1,49 @@
+================================================================
+Krasis Benchmark — 2026-08-22 12:05:13
+================================================================
+Model:            DeepSeek-V4-Flash-0731
+Architecture:     deepseek_v4, 43 layers, 256 experts, top-6
+PP Partition:     [43] (1 GPUs)
+
+Hardware:
+  CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
+  RAM:            995 GB total, 152.2 GB used by process
+  GPU 0:           NVIDIA RTX A6000 (49140 MB), 8300 MB allocated
+
+Quantization:
+  GPU experts:    INT4 (Marlin)
+  CPU experts:    INT4
+  Attention:      HQQ6
+  Shared expert:  INT8
+  Dense MLP:      INT8
+  LM head:        INT8
+  KV cache:       native
+
+Strategy:
+  Layer group size: 1 (layer_grouped(1))
+  Prefill threshold: 1
+  Mode:           gpu_decode (layer_grouped(1))
+
+Prefill (internal) — 6 runs at different lengths:
+  Run 1:  134.5 tok/s (1,000 tokens in 7433.3ms)
+  Run 2:  595.0 tok/s (5,000 tokens in 8404.0ms)
+  Run 3:  973.1 tok/s (10,000 tokens in 10276.2ms)
+  Run 4:  1,307.2 tok/s (20,000 tokens in 15300.0ms)
+  Run 5:  1,064.2 tok/s (35,000 tokens in 32887.6ms)
+  Run 6:  1,167.4 tok/s (39,920 tokens in 34194.7ms)
+  Best:   1,307.2 tok/s (20,000 tokens)
+
+Decode (internal) — 50/100/250 tokens, 3 separate prompts:
+   50 tokens: 13.63 tok/s (73.4ms/tok)
+  100 tokens: 13.76 tok/s (72.7ms/tok)
+  250 tokens: 13.47 tok/s (74.2ms/tok)
+  Best:    13.76 tok/s
+  HCS:     2775/11008 experts (25.2%)
+  Min free VRAM: 1042 MB
+
+Round trip (network) — 50/100/250 tokens via HTTP:
+   50 tokens: 24.11 tok/s (10.66s total)
+  100 tokens: 17.81 tok/s (14.22s total)
+  250 tokens: 14.54 tok/s (25.69s total)
+  Best:    24.11 tok/s
+================================================================

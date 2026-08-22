@@ -140,10 +140,7 @@ impl TileQCache {
         let payload_end = payload_offset
             .checked_add(payload_len)
             .ok_or_else(|| "TileQ payload range overflow".to_string())?;
-        if manifest_end > mmap.len()
-            || payload_offset < manifest_end
-            || payload_end != mmap.len()
-        {
+        if manifest_end > mmap.len() || payload_offset < manifest_end || payload_end != mmap.len() {
             return Err(format!(
                 "TileQ cache {} has invalid ranges: manifest_end={} payload={}..{} file={}",
                 path.display(),
@@ -331,7 +328,8 @@ fn validate_projection(
     }
     let tile_bytes = expert_count
         .checked_mul(4)
-        .ok_or_else(|| format!("TileQ {} tile length overflow", projection.name))? as u64;
+        .ok_or_else(|| format!("TileQ {} tile length overflow", projection.name))?
+        as u64;
     if projection.expert_tiles.len != tile_bytes {
         return Err(format!(
             "TileQ projection {} tile table is {} bytes, expected {}",
@@ -378,7 +376,11 @@ fn validate_projection(
         ("left", &projection.left_factors_bf16),
         ("right", &projection.right_factors_bf16),
     ] {
-        validate_range(range, payload_bytes, &format!("{} {label}", projection.name))?;
+        validate_range(
+            range,
+            payload_bytes,
+            &format!("{} {label}", projection.name),
+        )?;
     }
     if !projection.selected_scale_exponent.is_finite()
         || !projection.heldout_weighted_mse.is_finite()
@@ -455,12 +457,7 @@ fn validate_manifest(manifest: &TileQManifest, payload_bytes: u64) -> Result<(),
             manifest.rank,
             payload_bytes,
         )?;
-        validate_projection(
-            &layer.up,
-            layer.expert_count,
-            manifest.rank,
-            payload_bytes,
-        )?;
+        validate_projection(&layer.up, layer.expert_count, manifest.rank, payload_bytes)?;
         validate_projection(
             &layer.down,
             layer.expert_count,
@@ -496,7 +493,9 @@ pub fn pack_signed_int3_rows(values: &[i8], rows: usize, cols: usize) -> Result<
         for col in 0..cols {
             let value = values[row_base + col];
             if !(-4..=3).contains(&value) {
-                return Err(format!("INT3 value {value} at ({row},{col}) is outside -4..=3"));
+                return Err(format!(
+                    "INT3 value {value} at ({row},{col}) is outside -4..=3"
+                ));
             }
             let encoded = (value as i32 & 0x7) as u32;
             let bit = col * 3;
@@ -517,7 +516,9 @@ pub fn unpack_signed_int3_rows(
     cols: usize,
 ) -> Result<Vec<i8>, String> {
     if rows == 0 || cols == 0 || cols % 32 != 0 {
-        return Err(format!("invalid INT3 unpack geometry rows={rows} cols={cols}"));
+        return Err(format!(
+            "invalid INT3 unpack geometry rows={rows} cols={cols}"
+        ));
     }
     let words_per_row = cols * 3 / 32;
     if packed.len() != rows.saturating_mul(words_per_row) {
@@ -564,7 +565,10 @@ mod tests {
             .collect::<Vec<_>>();
         let packed = pack_signed_int3_rows(&values, rows, cols).unwrap();
         assert_eq!(packed.len() * 4, rows * cols * 3 / 8);
-        assert_eq!(unpack_signed_int3_rows(&packed, rows, cols).unwrap(), values);
+        assert_eq!(
+            unpack_signed_int3_rows(&packed, rows, cols).unwrap(),
+            values
+        );
     }
 
     #[test]

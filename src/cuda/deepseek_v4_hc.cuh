@@ -30,6 +30,60 @@ extern "C" __global__ void deepseek_v4_hc_replicate_kernel(
     state[linear] = hidden[linear % hidden_size];
 }
 
+// Collapse one ring position from each checkpoint-selected target HC state
+// into the concatenated mean-pooled feature consumed by D-Spark main_proj.
+// The target history layout is [target, window, hc_mult, hidden].
+extern "C" __global__ void dspark_pack_target_features_kernel(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ history,
+    int ring_position,
+    int target_count,
+    int window,
+    int hidden_size,
+    int hc_mult)
+{
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = (int64_t)target_count * hidden_size;
+    if (linear >= total || ring_position < 0 || ring_position >= window ||
+        target_count <= 0 || window <= 0 || hidden_size <= 0 || hc_mult <= 0) {
+        return;
+    }
+    int target = (int)(linear / hidden_size);
+    int hidden = (int)(linear % hidden_size);
+    int64_t base = (((int64_t)target * window + ring_position) * hc_mult)
+        * hidden_size + hidden;
+    float sum = 0.0f;
+    for (int stream = 0; stream < hc_mult; ++stream) {
+        sum += dsv4_hc_bf16_to_f32(history[base + (int64_t)stream * hidden_size]);
+    }
+    output[linear] = dsv4_hc_f32_to_bf16(sum / (float)hc_mult);
+}
+
+// Capture one checkpoint-selected target HC output into its sliding history
+// ring. The decode position is read through the graph-addressable scalar so
+// the same captured CUDA graph writes the correct row on every replay.
+extern "C" __global__ void dspark_capture_target_state_kernel(
+    __nv_bfloat16* __restrict__ history,
+    const __nv_bfloat16* __restrict__ state,
+    const int* __restrict__ position,
+    int target_slot,
+    int window,
+    int hidden_size,
+    int hc_mult)
+{
+    int64_t linear = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t row_size = (int64_t)hidden_size * hc_mult;
+    int absolute_position = *position;
+    if (linear >= row_size || absolute_position < 0 || target_slot < 0 ||
+        window <= 0 || hidden_size <= 0 || hc_mult <= 0) {
+        return;
+    }
+    int ring_position = absolute_position % window;
+    int64_t destination = (((int64_t)target_slot * window + ring_position)
+        * hc_mult * hidden_size) + linear;
+    history[destination] = state[linear];
+}
+
 // One block per token computes the inverse RMS of the complete [hc, hidden]
 // residual state. Keeping only this scalar avoids a second full-size state
 // buffer during prefill.

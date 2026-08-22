@@ -80,13 +80,12 @@ impl ExpertSidecar {
             "file length",
         )?;
         let mut encoded_header = [0_u8; SIDECAR_HEADER_BYTES];
-        read_file_exact_at(&file, &mut encoded_header, 0)
-            .map_err(|error| {
-                format!(
-                    "failed to read expert sidecar header {}: {error}",
-                    path.display()
-                )
-            })?;
+        read_file_exact_at(&file, &mut encoded_header, 0).map_err(|error| {
+            format!(
+                "failed to read expert sidecar header {}: {error}",
+                path.display()
+            )
+        })?;
         let header = parse_header_for_file(&encoded_header, file_bytes)?;
         if header.source_cache_bytes != source_cache_bytes {
             return Err(format!(
@@ -153,8 +152,7 @@ impl ExpertSidecar {
             );
         }
         let mapping_granularity = system_mapping_granularity()?;
-        let groups =
-            payload_mapping_groups(&offsets, max_mapping_bytes, mapping_granularity)?;
+        let groups = payload_mapping_groups(&offsets, max_mapping_bytes, mapping_granularity)?;
         let mut payload_mappings = Vec::with_capacity(groups.len());
         let mut blob_locations = Vec::with_capacity(header.expert_count);
         for group in groups {
@@ -269,13 +267,12 @@ pub fn private_payload_mapping(path: &Path, maximum_bytes: usize) -> CodecResult
         "file length",
     )?;
     let mut encoded_header = [0_u8; SIDECAR_HEADER_BYTES];
-    read_file_exact_at(&file, &mut encoded_header, 0)
-        .map_err(|error| {
-            format!(
-                "failed to read expert sidecar header {}: {error}",
-                path.display()
-            )
-        })?;
+    read_file_exact_at(&file, &mut encoded_header, 0).map_err(|error| {
+        format!(
+            "failed to read expert sidecar header {}: {error}",
+            path.display()
+        )
+    })?;
     let header = parse_header_for_file(&encoded_header, file_bytes)?;
     let mapping_granularity = system_mapping_granularity()?;
     let file_start = align_down(header.payload_offset, mapping_granularity);
@@ -386,11 +383,7 @@ pub fn read_file_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::i
 }
 
 #[cfg(windows)]
-pub fn read_file_exact_at(
-    file: &File,
-    buffer: &mut [u8],
-    offset: u64,
-) -> std::io::Result<()> {
+pub fn read_file_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
     let mut filled = 0usize;
     while filled < buffer.len() {
         let read = match WindowsFileExt::seek_read(
@@ -406,9 +399,9 @@ pub fn read_file_exact_at(
         if read == 0 {
             return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
         }
-        filled = filled.checked_add(read).ok_or_else(|| {
-            std::io::Error::other("positional file-read length overflow")
-        })?;
+        filled = filled
+            .checked_add(read)
+            .ok_or_else(|| std::io::Error::other("positional file-read length overflow"))?;
     }
     Ok(())
 }
