@@ -12,6 +12,7 @@ pub mod gpu_decode;
 pub mod gpu_prefill;
 pub mod hqq;
 pub mod kernel;
+pub mod manager;
 pub mod moe;
 pub mod numa;
 pub mod pcie_batch;
@@ -41,5 +42,6 @@ fn krasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hqq::hqq4_quantize_tensor_ptr, m)?)?;
     m.add_function(wrap_pyfunction!(hqq::hqq_search_cuda_tensor_ptr, m)?)?;
     m.add_function(wrap_pyfunction!(syscheck::system_check, m)?)?;
+    m.add_function(wrap_pyfunction!(manager::run_manager, m)?)?;
     Ok(())
 }

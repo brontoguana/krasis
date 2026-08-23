@@ -566,6 +566,7 @@ jobs:
       - name: Test Rust server response contracts
         run: |
           cargo test --release --lib server::tests
+          cargo test --release --lib manager::tests
 
       - name: Build native Windows launcher
         run: |
@@ -752,6 +753,17 @@ jobs:
           if ($shortcut.WindowStyle -ne 3) {
             throw "Krasis shortcut is not configured to start maximized."
           }
+          $managerShortcutPath = Join-Path $startMenuFolder "Krasis Manager.lnk"
+          if (-not (Test-Path $managerShortcutPath -PathType Leaf)) {
+            throw "Installed Krasis Manager Start Menu shortcut is missing: $managerShortcutPath"
+          }
+          $managerShortcut = $shortcutShell.CreateShortcut($managerShortcutPath)
+          if ($managerShortcut.TargetPath -ne $nativeLauncher) {
+            throw "Krasis Manager shortcut targets '$($managerShortcut.TargetPath)' instead of '$nativeLauncher'."
+          }
+          if ($managerShortcut.Arguments -ne "manager") {
+            throw "Krasis Manager shortcut arguments are '$($managerShortcut.Arguments)' instead of 'manager'."
+          }
           foreach ($retiredPath in @(
             (Join-Path $testRoot "bin\Krasis Update.exe"),
             (Join-Path $testRoot "bin\Krasis Prerelease.exe"),
@@ -829,6 +841,9 @@ jobs:
               -Name PendingFileRenameOperations `
               -ErrorAction SilentlyContinue).PendingFileRenameOperations
             throw "Uninstall retained the private runtime."
+          }
+          if (Test-Path $managerShortcutPath) {
+            throw "Uninstall retained the Krasis Manager Start Menu shortcut."
           }
           if (-not (Test-Path $outsideSentinel -PathType Leaf)) {
             throw "Uninstall traversed a runtime reparse point outside the install root."

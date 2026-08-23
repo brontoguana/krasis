@@ -161,10 +161,11 @@ Native Windows:
 [Download `KrasisSetup-1.0.16-win64.exe`](https://github.com/brontoguana/krasis/releases/download/v1.0.16/KrasisSetup-1.0.16-win64.exe).
 The installer creates a per-user install under
 `%LOCALAPPDATA%\Programs\Krasis`, installs and validates a release-pinned
-private Python/Krasis/PyTorch runtime, and adds `Krasis` to the Start Menu
-folder. It never uses or modifies a system Python. `Krasis` opens the native
-interactive launcher in a maximized, resizable console. Models and caches
-still live under
+private Python/Krasis/PyTorch runtime, and adds `Krasis` and `Krasis Manager`
+shortcuts to the Start Menu folder. It never uses or modifies a system Python.
+`Krasis` opens the native interactive launcher in a maximized, resizable
+console; `Krasis Manager` starts the localhost management dashboard. Models
+and caches still live under
 `%USERPROFILE%\.krasis`. The first install downloads the pinned CUDA PyTorch
 wheel and can take several minutes.
 
@@ -263,6 +264,39 @@ The launcher provides:
 - quantization, HQQ attention, KV cache, HCS, and VRAM safety settings
 - optional reverse SSH tunnel target
 - benchmark/run choices
+
+### Krasis Manager
+
+```bash
+krasis manager
+```
+
+Krasis Manager is a Rust control plane and dashboard bound strictly to
+`127.0.0.1:8090`. It discovers every NVIDIA GPU by stable UUID and shows the
+verified Krasis model, process, port, configuration, and VRAM use assigned to
+each GPU. Click a GPU to select an installed model, edit launcher-qualified
+HQQ, KV, memory, serving, multi-GPU, and SSH-forwarding settings, then validate
+or Apply them. Stop safely terminates only a process re-verified as a Krasis
+model server. Apply validates the complete proposal before stopping the
+current model.
+
+Apply and Stop are asynchronous. The page shows validation, shutdown, GPU
+release, launch, loading/calibration, ready, stopped, and failed progress with
+bounded startup logs. The same state is available from the versioned localhost
+JSON API. Thorough copyable `curl` and PowerShell instructions are included on
+the Manager page for local agents, including discovery, validation, Apply,
+progress polling, and Stop. Mutating requests require the owner-only token in
+`~/.krasis/manager/token`.
+
+On native Windows, open the dedicated **Krasis Manager** Start Menu shortcut or
+run:
+
+```powershell
+Krasis.exe manager
+```
+
+Use `krasis manager --help` to select a different localhost port or suppress
+automatic browser opening.
 
 ### Non-Interactive Launch
 

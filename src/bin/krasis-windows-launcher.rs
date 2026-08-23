@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -81,9 +82,22 @@ fn resolve_launch_paths(executable: &Path) -> Result<LaunchPaths, String> {
     })
 }
 
-fn launch_krasis(paths: &LaunchPaths) -> Result<ExitStatus, String> {
-    Command::new(&paths.python)
-        .args(["-I", "-m", "krasis.launcher"])
+fn validate_launch_arguments(arguments: &[OsString]) -> Result<(), String> {
+    if arguments.is_empty()
+        || arguments
+            .first()
+            .is_some_and(|argument| argument.eq_ignore_ascii_case("manager"))
+    {
+        return Ok(());
+    }
+    Err("Usage: Krasis.exe [manager [--port PORT] [--no-open]] [--probe]".to_string())
+}
+
+fn launch_krasis(paths: &LaunchPaths, arguments: &[OsString]) -> Result<ExitStatus, String> {
+    let mut command = Command::new(&paths.python);
+    command.args(["-I", "-m", "krasis.launcher"]);
+    command.args(arguments);
+    command
         .current_dir(&paths.install_root)
         .env_remove("PYTHONHOME")
         .env_remove("PYTHONPATH")
@@ -115,21 +129,20 @@ fn run() -> Result<i32, String> {
     validate_launcher_name(&executable)?;
     let paths = resolve_launch_paths(&executable)?;
 
-    let mut arguments = env::args_os();
-    let _program = arguments.next();
-    match arguments.next() {
-        None => {
-            let status = launch_krasis(&paths)?;
-            Ok(status.code().unwrap_or(1))
-        }
-        Some(argument) if argument == "--probe" && arguments.next().is_none() => {
+    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    match arguments.as_slice() {
+        [argument] if argument == "--probe" => {
             println!(
                 "KRASIS_WINDOWS_LAUNCHER_PROBE={}",
                 paths.runtime_root.display()
             );
             Ok(0)
         }
-        Some(_) => Err("Usage: Krasis.exe [--probe]".to_string()),
+        _ => {
+            validate_launch_arguments(&arguments)?;
+            let status = launch_krasis(&paths, &arguments)?;
+            Ok(status.code().unwrap_or(1))
+        }
     }
 }
 
@@ -149,7 +162,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_launch_paths, valid_release_name, validate_launcher_name};
+    use super::{
+        resolve_launch_paths, valid_release_name, validate_launch_arguments, validate_launcher_name,
+    };
+    use std::ffi::OsString;
     use std::fs;
     use std::path::Path;
 
@@ -203,5 +219,20 @@ mod tests {
         assert_eq!(paths.python, release.join("python.exe"));
 
         fs::remove_dir_all(paths.install_root).unwrap();
+    }
+
+    #[test]
+    fn accepts_only_interactive_or_manager_launch_arguments() {
+        assert!(validate_launch_arguments(&[]).is_ok());
+        assert!(validate_launch_arguments(&[OsString::from("manager")]).is_ok());
+        assert!(validate_launch_arguments(&[
+            OsString::from("manager"),
+            OsString::from("--port"),
+            OsString::from("8091"),
+            OsString::from("--no-open"),
+        ])
+        .is_ok());
+        assert!(validate_launch_arguments(&[OsString::from("kill")]).is_err());
+        assert!(validate_launch_arguments(&[OsString::from("--config")]).is_err());
     }
 }

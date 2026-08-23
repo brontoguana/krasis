@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Added the Rust Krasis Manager control plane, launched with `krasis manager`
+  (or `Krasis.exe manager` on native Windows). Its dashboard and versioned API
+  bind only to localhost, discover arbitrary NVIDIA GPU counts by stable UUID,
+  show verified Krasis ownership and normalized active configuration, expose
+  launcher-qualified installed-model settings, validate proposed assignments
+  before stopping anything, and provide asynchronous Apply/Stop operations
+  with machine-readable progress and bounded startup logs. Process identity,
+  GPU locks, port ownership, model paths, Host/Origin headers, and an
+  owner-only API token are fail-closed. The Windows installer now creates and
+  lifecycle-tests a dedicated Krasis Manager Start Menu shortcut.
+
 - Improved DeepSeek-V4-Flash-0731 full-GPU prefill on the RTX A6000 without
   changing its INT4/HQQ6/Native production profile. The runtime now prescans
   every real chunk, balances the architecture's runtime-derived multi-chunk

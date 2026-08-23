@@ -3472,6 +3472,7 @@ def parse_args() -> argparse.Namespace:
         epilog=(
             "subcommands (use before any flags):\n"
             "  krasis                  Launch interactive TUI configurator\n"
+            "  krasis manager          Open the localhost Krasis Manager\n"
             "  krasis chat [args]      Chat client (connect to running server)\n"
             "  krasis sanity           Run sanity test prompts against running server\n"
             "  krasis kill             Terminate all running krasis instances\n"
@@ -3491,6 +3492,7 @@ def parse_args() -> argparse.Namespace:
             "\n"
             "examples:\n"
             "  krasis                              # interactive TUI\n"
+            "  krasis manager                      # localhost GPU/model manager\n"
             "  krasis --config model.conf          # non-interactive with config file\n"
             "  krasis chat                         # chat with running server\n"
             "  krasis chat --file test.txt         # run prompts from file\n"
@@ -3502,6 +3504,8 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--validate-only", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--config", default=None,
                         help="Path to config file (CFG_KEY=\"value\" format). "
                              "Implies --non-interactive.")
@@ -3972,8 +3976,182 @@ def _reject_extra_subcommand_args(command: str) -> None:
     sys.exit(2)
 
 
+def _validate_manager_preload_budget(launcher: "Launcher") -> Dict[str, Any]:
+    """Fail before Manager Apply if computed permanent resources cannot fit."""
+    budget = launcher._compute_budget()
+    if budget is None:
+        detail = launcher.budget_error or "unknown budget error"
+        raise ValueError(f"Manager pre-load budget is unavailable: {detail}")
+    if budget.get("over_budget", False):
+        worst_rank = int(budget["worst_rank"])
+        rank = budget["ranks"][worst_rank]
+        raise ValueError(
+            "Manager configuration permanent VRAM does not fit before model load: "
+            f"rank {worst_rank} requires {rank['total_mb']:.0f} MB, "
+            f"GPU capacity is {budget['gpu_vram_mb']:.0f} MB."
+        )
+    required_ram_mb = float(budget.get("ram_total_mb", 0.0))
+    available_ram_mb = float(budget.get("total_ram_gb", 0.0)) * 1024.0
+    if required_ram_mb > available_ram_mb:
+        raise ValueError(
+            "Manager configuration host cache does not fit before model load: "
+            f"requires {required_ram_mb / 1024.0:.1f} GB, "
+            f"system capacity is {available_ram_mb / 1024.0:.1f} GB."
+        )
+    launcher.budget = budget
+    return budget
+
+
+def _manager_config_dict(launcher: "Launcher") -> Dict[str, Any]:
+    """Serialize launcher-resolved defaults into the Rust Manager API schema."""
+    cfg = launcher.cfg
+    gpu_uuids = [
+        str(gpu.get("uuid") or gpu["index"])
+        for gpu in launcher.selected_gpus
+    ]
+    return {
+        "model_path": cfg.model_path,
+        "gpu_uuids": gpu_uuids,
+        "host": cfg.host,
+        "port": cfg.port,
+        "attention_quant": cfg.attention_quant,
+        "hqq_cache_profile": cfg.hqq_cache_profile,
+        "hqq_group_size": cfg.hqq_group_size,
+        "hqq_auto_budget_pct": cfg.hqq_auto_budget_pct,
+        "hqq_sidecar_manifest": cfg.hqq_sidecar_manifest,
+        "kv_dtype": cfg.kv_dtype,
+        "kv_cache_mb": cfg.kv_cache_mb,
+        "max_context_tokens": cfg.max_context_tokens,
+        "vram_safety_margin_mb": cfg.vram_safety_margin,
+        "layer_group_size": cfg.layer_group_size,
+        "expert_group_size": cfg.expert_group_size,
+        "gpu_expert_int4_calib": cfg.gpu_expert_int4_calib,
+        "shared_expert_quant": cfg.shared_expert_quant,
+        "dense_mlp_quant": cfg.dense_mlp_quant,
+        "lm_head_quant": cfg.lm_head_quant,
+        "krasis_threads": cfg.krasis_threads,
+        "hcs": cfg.hcs,
+        "dynamic_hcs": cfg.dynamic_hcs,
+        "dynamic_hcs_tail_blocks": cfg.dynamic_hcs_tail_blocks,
+        "hcs_host_cache_mode": cfg.hcs_host_cache_mode,
+        "multi_gpu_mode": cfg.multi_gpu_mode,
+        "dynamic_peer": cfg.dynamic_peer,
+        "adaptive_cold_mass_pruning": cfg.adaptive_cold_mass_pruning,
+        "prefix_cache": cfg.prefix_cache,
+        "prefix_cache_ram_fraction": cfg.prefix_cache_ram_fraction,
+        "enable_thinking": cfg.enable_thinking,
+        "gpu_prefill_threshold": cfg.gpu_prefill_threshold,
+        "pp_partition": cfg.pp_partition,
+        "heatmap_path": cfg.heatmap_path,
+        "gguf_path": cfg.gguf_path,
+        "expert_compression": cfg.expert_compression,
+        "expert_compression_sidecar": cfg.expert_compression_sidecar,
+        "expert_compression_pipeline": cfg.expert_compression_pipeline,
+        "dspark_mode": cfg.dspark_mode,
+        "ssh_tunnel": cfg.ssh_tunnel,
+        "ssh_key_path": cfg.ssh_key_path,
+        "force_rebuild_cache": cfg.force_rebuild_cache,
+        "force_rebuild_hqq_cache": cfg.force_rebuild_hqq_cache,
+    }
+
+
+def _manager_schema_main(argv: List[str]) -> None:
+    """Resolve Manager choices/defaults through the normal launcher authority."""
+    schema_parser = argparse.ArgumentParser(add_help=False)
+    schema_parser.add_argument("--model-path", required=True)
+    schema_parser.add_argument("--selected-gpus", required=True)
+    schema_args = schema_parser.parse_args(argv)
+
+    old_argv = sys.argv
+    try:
+        sys.argv = [
+            old_argv[0],
+            "--model-path", schema_args.model_path,
+            "--selected-gpus", schema_args.selected_gpus,
+            "--non-interactive",
+        ]
+        args = parse_args()
+    finally:
+        sys.argv = old_argv
+
+    _check_gpu_deps()
+    launcher = Launcher(args)
+    launcher.cfg.model_path = os.path.abspath(os.path.expanduser(schema_args.model_path))
+    launcher.cfg.selected_gpu_specs = _split_gpu_specs(schema_args.selected_gpus)
+    launcher._resolve_selected_gpus()
+    if not launcher.selected_gpus:
+        raise ValueError("No requested GPU selector resolved uniquely")
+    launcher._read_model_info()
+    launcher._apply_model_recommended_defaults()
+    launcher._validate_model_capabilities()
+    launcher._validate_model_topology()
+    if launcher.model_info:
+        launcher.cfg.pp_partition = launcher._compute_default_pp(
+            launcher.model_info["layers"]
+        )
+    if launcher.hw["cpu_cores"] > 0:
+        launcher.cfg.krasis_threads = min(launcher.hw["cpu_cores"], 40)
+    launcher._validate_dspark_preload_budget()
+    budget = launcher._compute_budget()
+    if budget:
+        worst = budget["ranks"][budget["worst_rank"]]
+        budget_summary = (
+            f"Launcher budget: {worst.get('total_with_kv_mb', worst['total_mb']):,.0f} "
+            f"of {budget['gpu_vram_mb']:,.0f} MiB permanent/launch allocation on "
+            f"the limiting GPU; runtime calibration controls HCS residency."
+        )
+    elif launcher.budget_error:
+        budget_summary = f"Launcher budget unavailable: {launcher.budget_error}"
+    else:
+        budget_summary = "Launcher capability profile resolved."
+    payload = {
+        "model": launcher.model_info,
+        "config": _manager_config_dict(launcher),
+        "choices": {
+            "attention_quant": launcher._attention_choices(),
+            "kv_dtype": launcher._kv_choices(),
+            "multi_gpu_mode": launcher._multi_gpu_choices(),
+        },
+        "budget": budget,
+        "budget_summary": budget_summary,
+    }
+    print("KRASIS_MANAGER_SCHEMA=" + json.dumps(payload, separators=(",", ":")))
+
+
+def _manager_main(argv: List[str]) -> None:
+    manager_parser = argparse.ArgumentParser(
+        prog="krasis manager",
+        description="Start the Rust localhost Krasis Manager",
+    )
+    manager_parser.add_argument(
+        "--port", type=int, default=8090,
+        help="localhost manager port (default: 8090)",
+    )
+    manager_parser.add_argument(
+        "--no-open", action="store_true",
+        help="do not open the browser automatically",
+    )
+    manager_args = manager_parser.parse_args(argv)
+    if not 1 <= manager_args.port <= 65535:
+        manager_parser.error("--port must be between 1 and 65535")
+    from krasis.krasis import run_manager
+    run_manager(sys.executable, manager_args.port, not manager_args.no_open)
+
+
 def main():
     # Handle subcommands early — before argparse, no GPU detection needed
+    if len(sys.argv) > 1 and sys.argv[1] == "manager":
+        _manager_main(sys.argv[2:])
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "_manager-schema":
+        try:
+            _manager_schema_main(sys.argv[2:])
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        return
+
     if len(sys.argv) > 1 and sys.argv[1] == "chat":
         sys.argv = [sys.argv[0]] + sys.argv[2:]  # strip "chat" from argv
         from krasis.chat import main as chat_main
@@ -4099,7 +4277,16 @@ def main():
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
+        if args.validate_only:
+            try:
+                _validate_manager_preload_budget(launcher)
+            except ValueError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
         launcher.print_summary()
+        if args.validate_only:
+            print("Krasis launcher validation passed.")
+            return
         launcher.launch_server(benchmark=args.benchmark,
                                vram_report=getattr(args, 'vram_report', False))
     else:

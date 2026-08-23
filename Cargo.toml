@@ -1,6 +1,6 @@
 [package]
 name = "krasis"
-version = "1.0.21-rc.4"
+version = "1.0.21-rc.5"
 edition = "2021"
 description = "LLM runtime for large MoE models with GPU prefill, GPU decode, and measured VRAM management"
 license = "SSPL-1.0"
@@ -34,7 +34,7 @@ minijinja = "2"
 sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [build-dependencies]
 cc = "1"

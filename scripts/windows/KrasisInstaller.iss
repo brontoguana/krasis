@@ -28,6 +28,7 @@ Source: "{#SourceDir}\runtime-package.zip"; DestDir: "{tmp}"; DestName: "KrasisR
 
 [Icons]
 Name: "{autoprograms}\Krasis\Krasis"; Filename: "{app}\bin\Krasis.exe"; WorkingDir: "{app}"; Flags: runmaximized
+Name: "{autoprograms}\Krasis\Krasis Manager"; Filename: "{app}\bin\Krasis.exe"; Parameters: "manager"; WorkingDir: "{app}"
 
 [InstallDelete]
 Type: files; Name: "{app}\bin\Launch-Krasis.ps1"
