@@ -90,7 +90,7 @@ fn validate_launch_arguments(arguments: &[OsString]) -> Result<(), String> {
     {
         return Ok(());
     }
-    Err("Usage: Krasis.exe [manager [--port PORT] [--no-open]] [--probe]".to_string())
+    Err("Usage: Krasis.exe [manager [--port PORT] [--lan] [--no-open]] [--probe]".to_string())
 }
 
 fn launch_krasis(paths: &LaunchPaths, arguments: &[OsString]) -> Result<ExitStatus, String> {
@@ -229,6 +229,7 @@ mod tests {
             OsString::from("manager"),
             OsString::from("--port"),
             OsString::from("8091"),
+            OsString::from("--lan"),
             OsString::from("--no-open"),
         ])
         .is_ok());

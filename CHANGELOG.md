@@ -2,9 +2,21 @@
 
 ## Unreleased
 
+- Added explicit `krasis manager --lan` access while preserving localhost-only
+  behavior as the default. LAN mode binds IPv4 interfaces, validates the Host
+  against the connection's exact destination address and port, requires the
+  owner token for every API request, keeps the token out of remotely served
+  HTML, and enforces exact same-origin browser mutations. The dashboard and
+  embedded agent examples adapt to the address used to reach Manager. The
+  exact rc.6 local gate passed model/config `20/20 + 17/17`, launcher
+  `53/53 + 18/18 + 19/19`, native Windows launcher `4/4`, Manager
+  `10/10 + 5/5`, Rust server/reference `26 + 13 + 26 + 19`, Python server
+  `11 + 8 + 9`, the exact build/import gate, and a live non-mutating LAN test
+  on port 8080.
+
 - Added the Rust Krasis Manager control plane, launched with `krasis manager`
   (or `Krasis.exe manager` on native Windows). Its dashboard and versioned API
-  bind only to localhost, discover arbitrary NVIDIA GPU counts by stable UUID,
+  default to localhost, discover arbitrary NVIDIA GPU counts by stable UUID,
   show verified Krasis ownership and normalized active configuration, expose
   launcher-qualified installed-model settings, validate proposed assignments
   before stopping anything, and provide asynchronous Apply/Stop operations

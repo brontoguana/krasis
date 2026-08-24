@@ -1,4 +1,4 @@
-//! Localhost-only Krasis model manager.
+//! Krasis model manager with localhost-only default and explicit LAN access.
 //!
 //! The long-running control plane, HTTP/API surface, GPU/process discovery,
 //! lifecycle coordination, operation state, and browser UI are all Rust. The
@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -142,6 +142,7 @@ struct ManagerInner {
     nvidia_smi: PathBuf,
     token: String,
     port: u16,
+    lan: bool,
     mutable: Mutex<MutableState>,
 }
 
@@ -319,6 +320,8 @@ struct HttpRequest {
     target: String,
     headers: HashMap<String, String>,
     body: Vec<u8>,
+    local_addr: Option<SocketAddr>,
+    peer_addr: Option<SocketAddr>,
 }
 
 #[derive(Debug)]
@@ -363,18 +366,24 @@ impl ApiError {
 }
 
 #[pyfunction]
-#[pyo3(signature = (python_executable, port=DEFAULT_MANAGER_PORT, open_browser=true))]
+#[pyo3(signature = (python_executable, port=DEFAULT_MANAGER_PORT, open_browser=true, lan=false))]
 pub fn run_manager(
     py: Python<'_>,
     python_executable: String,
     port: u16,
     open_browser: bool,
+    lan: bool,
 ) -> PyResult<()> {
-    py.allow_threads(move || run_manager_inner(&python_executable, port, open_browser))
+    py.allow_threads(move || run_manager_inner(&python_executable, port, open_browser, lan))
         .map_err(PyRuntimeError::new_err)
 }
 
-fn run_manager_inner(python_executable: &str, port: u16, open_browser: bool) -> Result<(), String> {
+fn run_manager_inner(
+    python_executable: &str,
+    port: u16,
+    open_browser: bool,
+    lan: bool,
+) -> Result<(), String> {
     if port == 0 {
         return Err("manager port must be between 1 and 65535".to_string());
     }
@@ -387,8 +396,9 @@ fn run_manager_inner(python_executable: &str, port: u16, open_browser: bool) -> 
         .map_err(|error| format!("cannot create {}: {error}", models_dir.display()))?;
     let token = load_or_create_token(&manager_dir)?;
     let nvidia_smi = find_nvidia_smi()?;
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .map_err(|error| format!("cannot bind Krasis Manager to 127.0.0.1:{port}: {error}"))?;
+    let bind_host = if lan { "0.0.0.0" } else { "127.0.0.1" };
+    let listener = TcpListener::bind((bind_host, port))
+        .map_err(|error| format!("cannot bind Krasis Manager to {bind_host}:{port}: {error}"))?;
     listener
         .set_nonblocking(true)
         .map_err(|error| format!("cannot configure Manager listener: {error}"))?;
@@ -402,12 +412,20 @@ fn run_manager_inner(python_executable: &str, port: u16, open_browser: bool) -> 
             nvidia_smi,
             token,
             port,
+            lan,
             mutable: Mutex::new(MutableState::default()),
         }),
     };
 
     let url = format!("http://127.0.0.1:{port}/");
     println!("Krasis Manager is running at {url}");
+    if lan {
+        println!(
+            "LAN access enabled on 0.0.0.0:{port}; connect using this machine's LAN IPv4 address."
+        );
+        println!("Every LAN API request requires the owner token.");
+        println!("The host firewall must permit this port; Krasis does not change firewall rules.");
+    }
     println!(
         "Local API token: {}",
         state.inner.manager_dir.join("token").display()
@@ -582,6 +600,8 @@ fn handle_connection(mut stream: TcpStream, state: ManagerState) -> Result<(), S
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, ApiError> {
+    let local_addr = stream.local_addr().ok();
+    let peer_addr = stream.peer_addr().ok();
     let mut data = Vec::new();
     let mut buffer = [0u8; 8192];
     let header_end = loop {
@@ -664,6 +684,8 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, ApiError> {
         target,
         headers,
         body: data[header_end..header_end + content_length].to_vec(),
+        local_addr,
+        peer_addr,
     })
 }
 
@@ -677,16 +699,48 @@ fn route_request(
     request: &HttpRequest,
     state: &ManagerState,
 ) -> Result<(u16, &'static str, String), ApiError> {
-    validate_host(request, state.inner.port)?;
+    validate_host(request, state)?;
     let path = request.target.split('?').next().unwrap_or(&request.target);
     if request.method == "GET" && path == "/" {
+        let is_local_client = request
+            .peer_addr
+            .is_some_and(|address| address.ip().is_loopback());
+        let page_token = if state.inner.lan && !is_local_client {
+            ""
+        } else {
+            &state.inner.token
+        };
+        let request_host = request
+            .headers
+            .get("host")
+            .map(String::as_str)
+            .unwrap_or("");
         let html = include_str!("manager.html")
-            .replace("__KRASIS_MANAGER_TOKEN__", &state.inner.token)
-            .replace("__KRASIS_MANAGER_PORT__", &state.inner.port.to_string());
+            .replace("__KRASIS_MANAGER_TOKEN__", page_token)
+            .replace("__KRASIS_MANAGER_BASE__", &format!("http://{request_host}"))
+            .replace(
+                "__KRASIS_MANAGER_NETWORK_MODE__",
+                if state.inner.lan { "true" } else { "false" },
+            )
+            .replace(
+                "__KRASIS_MANAGER_NETWORK_LABEL__",
+                if state.inner.lan { "LAN enabled" } else { "localhost only" },
+            )
+            .replace(
+                "__KRASIS_MANAGER_NETWORK_DESCRIPTION__",
+                if state.inner.lan {
+                    "LAN mode requires the owner token for every API request and accepts only the exact destination interface address."
+                } else {
+                    "Manager binds only to 127.0.0.1 and rejects non-local Host and Origin values."
+                },
+            );
         return Ok((200, "text/html; charset=utf-8", html));
     }
     if request.method == "GET" && path == "/favicon.ico" {
         return Ok((204, "image/x-icon", String::new()));
+    }
+    if state.inner.lan && path.starts_with("/api/") {
+        validate_token(request, state)?;
     }
     if request.method == "GET" && path == "/api/v1/status" {
         let mutable = state.inner.mutable.lock().unwrap();
@@ -695,7 +749,9 @@ fn route_request(
             json!({
                 "manager": "krasis",
                 "api_version": 1,
-                "bind": format!("127.0.0.1:{}", state.inner.port),
+                "bind": format!("{}:{}", if state.inner.lan { "0.0.0.0" } else { "127.0.0.1" }, state.inner.port),
+                "network_mode": if state.inner.lan { "lan" } else { "localhost" },
+                "api_authentication": if state.inner.lan { "all" } else { "mutations" },
                 "models_dir": state.inner.models_dir,
                 "operations": mutable.operations.values().cloned().collect::<Vec<_>>(),
             }),
@@ -767,30 +823,68 @@ fn parse_json<T: for<'de> Deserialize<'de>>(body: &[u8]) -> Result<T, ApiError> 
         .map_err(|error| ApiError::bad_request(format!("invalid JSON: {error}")))
 }
 
-fn validate_host(request: &HttpRequest, port: u16) -> Result<(), ApiError> {
+fn validate_host(request: &HttpRequest, state: &ManagerState) -> Result<(), ApiError> {
     let host = request
         .headers
         .get("host")
         .ok_or_else(|| ApiError::bad_request("Host header is required"))?;
-    let allowed = [
-        format!("127.0.0.1:{port}"),
-        format!("localhost:{port}"),
-        format!("[::1]:{port}"),
-    ];
-    if !allowed
-        .iter()
-        .any(|candidate| host.eq_ignore_ascii_case(candidate))
-    {
+    if !state.inner.lan {
+        let allowed = [
+            format!("127.0.0.1:{}", state.inner.port),
+            format!("localhost:{}", state.inner.port),
+            format!("[::1]:{}", state.inner.port),
+        ];
+        if allowed
+            .iter()
+            .any(|candidate| host.eq_ignore_ascii_case(candidate))
+        {
+            return Ok(());
+        }
         return Err(ApiError {
             status: 403,
             code: "localhost_only",
             message: "Krasis Manager accepts only localhost Host headers".to_string(),
         });
     }
+
+    let (host_ip, host_port) = parse_ip_authority(host).ok_or_else(|| ApiError {
+        status: 403,
+        code: "invalid_lan_host",
+        message: "LAN Manager Host must be the exact destination IP address and port".to_string(),
+    })?;
+    let destination = request.local_addr.ok_or_else(|| {
+        ApiError::internal("cannot determine the Manager connection's destination address")
+    })?;
+    if host_port != state.inner.port || host_ip != destination.ip() {
+        return Err(ApiError {
+            status: 403,
+            code: "invalid_lan_host",
+            message: "LAN Manager Host does not match the destination interface and port"
+                .to_string(),
+        });
+    }
     Ok(())
 }
 
-fn validate_mutation_request(request: &HttpRequest, state: &ManagerState) -> Result<(), ApiError> {
+fn parse_ip_authority(authority: &str) -> Option<(IpAddr, u16)> {
+    if authority.starts_with('[') {
+        let close = authority.find(']')?;
+        let ip = authority.get(1..close)?.parse().ok()?;
+        let port = authority
+            .get(close + 1..)?
+            .strip_prefix(':')?
+            .parse()
+            .ok()?;
+        return Some((ip, port));
+    }
+    let (host, port) = authority.rsplit_once(':')?;
+    if host.is_empty() || host.contains(':') {
+        return None;
+    }
+    Some((host.parse().ok()?, port.parse().ok()?))
+}
+
+fn validate_token(request: &HttpRequest, state: &ManagerState) -> Result<(), ApiError> {
     let token = request
         .headers
         .get("x-krasis-manager-token")
@@ -806,19 +900,30 @@ fn validate_mutation_request(request: &HttpRequest, state: &ManagerState) -> Res
             message: "invalid Krasis Manager token".to_string(),
         });
     }
+    Ok(())
+}
+
+fn validate_mutation_request(request: &HttpRequest, state: &ManagerState) -> Result<(), ApiError> {
+    validate_token(request, state)?;
     if let Some(origin) = request.headers.get("origin") {
-        let allowed = [
-            format!("http://127.0.0.1:{}", state.inner.port),
-            format!("http://localhost:{}", state.inner.port),
-        ];
-        if !allowed
+        let origin_allowed = if state.inner.lan {
+            request
+                .headers
+                .get("host")
+                .is_some_and(|host| origin.eq_ignore_ascii_case(&format!("http://{host}")))
+        } else {
+            [
+                format!("http://127.0.0.1:{}", state.inner.port),
+                format!("http://localhost:{}", state.inner.port),
+            ]
             .iter()
             .any(|candidate| origin.eq_ignore_ascii_case(candidate))
-        {
+        };
+        if !origin_allowed {
             return Err(ApiError {
                 status: 403,
                 code: "invalid_origin",
-                message: "state changes are accepted only from the manager's localhost origin"
+                message: "state changes are accepted only from the Manager page's exact origin"
                     .to_string(),
             });
         }
@@ -2598,7 +2703,7 @@ fn health_ready(port: u16) -> bool {
 mod tests {
     use super::*;
 
-    fn test_state(port: u16) -> ManagerState {
+    fn test_state(port: u16, lan: bool) -> ManagerState {
         ManagerState {
             inner: Arc::new(ManagerInner {
                 python_executable: PathBuf::from("python"),
@@ -2607,6 +2712,7 @@ mod tests {
                 nvidia_smi: PathBuf::from("nvidia-smi"),
                 token: "test-owner-token".to_string(),
                 port,
+                lan,
                 mutable: Mutex::new(MutableState::default()),
             }),
         }
@@ -2708,22 +2814,27 @@ mod tests {
 
     #[test]
     fn page_uses_actual_port_and_mutations_are_fail_closed() {
-        let state = test_state(18123);
+        let state = test_state(18123, false);
         let get = HttpRequest {
             method: "GET".to_string(),
             target: "/".to_string(),
             headers: HashMap::from([("host".to_string(), "127.0.0.1:18123".to_string())]),
             body: Vec::new(),
+            local_addr: Some("127.0.0.1:18123".parse().unwrap()),
+            peer_addr: Some("127.0.0.1:42000".parse().unwrap()),
         };
         let (_, _, html) = route_request(&get, &state).unwrap();
         assert!(html.contains("http://127.0.0.1:18123"));
-        assert!(!html.contains("__KRASIS_MANAGER_PORT__"));
+        assert!(html.contains("test-owner-token"));
+        assert!(!html.contains("__KRASIS_MANAGER_BASE__"));
 
         let unauthenticated = HttpRequest {
             method: "POST".to_string(),
             target: "/api/v1/configs/validate".to_string(),
             headers: get.headers.clone(),
             body: b"{}".to_vec(),
+            local_addr: get.local_addr,
+            peer_addr: get.peer_addr,
         };
         assert_eq!(
             route_request(&unauthenticated, &state).unwrap_err().status,
@@ -2735,9 +2846,82 @@ mod tests {
             target: "/api/v1/status".to_string(),
             headers: HashMap::from([("host".to_string(), "manager.example:18123".to_string())]),
             body: Vec::new(),
+            local_addr: get.local_addr,
+            peer_addr: get.peer_addr,
         };
         assert_eq!(
             route_request(&foreign_host, &state).unwrap_err().status,
+            403
+        );
+    }
+
+    #[test]
+    fn lan_mode_requires_exact_destination_and_authenticates_every_api() {
+        let state = test_state(18080, true);
+        let request = HttpRequest {
+            method: "GET".to_string(),
+            target: "/api/v1/status".to_string(),
+            headers: HashMap::from([("host".to_string(), "192.168.1.181:18080".to_string())]),
+            body: Vec::new(),
+            local_addr: Some("192.168.1.181:18080".parse().unwrap()),
+            peer_addr: Some("192.168.1.50:42000".parse().unwrap()),
+        };
+        assert_eq!(route_request(&request, &state).unwrap_err().status, 401);
+
+        let mut authenticated = request;
+        authenticated.headers.insert(
+            "x-krasis-manager-token".to_string(),
+            "test-owner-token".to_string(),
+        );
+        let (_, _, status) = route_request(&authenticated, &state).unwrap();
+        assert!(status.contains("\"network_mode\": \"lan\""));
+        assert!(status.contains("\"api_authentication\": \"all\""));
+
+        authenticated
+            .headers
+            .insert("host".to_string(), "192.168.1.182:18080".to_string());
+        assert_eq!(
+            route_request(&authenticated, &state).unwrap_err().status,
+            403
+        );
+    }
+
+    #[test]
+    fn lan_page_omits_token_for_remote_peers_and_enforces_exact_origin() {
+        let state = test_state(18080, true);
+        let page = HttpRequest {
+            method: "GET".to_string(),
+            target: "/".to_string(),
+            headers: HashMap::from([("host".to_string(), "192.168.1.181:18080".to_string())]),
+            body: Vec::new(),
+            local_addr: Some("192.168.1.181:18080".parse().unwrap()),
+            peer_addr: Some("192.168.1.50:42000".parse().unwrap()),
+        };
+        let (_, _, html) = route_request(&page, &state).unwrap();
+        assert!(!html.contains("test-owner-token"));
+        assert!(html.contains("http://192.168.1.181:18080"));
+        assert!(html.contains("LAN enabled"));
+        assert!(!html.contains("__KRASIS_MANAGER_"));
+
+        let mut mutation = page;
+        mutation.method = "POST".to_string();
+        mutation.headers.insert(
+            "x-krasis-manager-token".to_string(),
+            "test-owner-token".to_string(),
+        );
+        mutation.headers.insert(
+            "origin".to_string(),
+            "http://192.168.1.181:18080".to_string(),
+        );
+        assert!(validate_mutation_request(&mutation, &state).is_ok());
+        mutation.headers.insert(
+            "origin".to_string(),
+            "http://192.168.1.182:18080".to_string(),
+        );
+        assert_eq!(
+            validate_mutation_request(&mutation, &state)
+                .unwrap_err()
+                .status,
             403
         );
     }

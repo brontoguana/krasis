@@ -3472,7 +3472,7 @@ def parse_args() -> argparse.Namespace:
         epilog=(
             "subcommands (use before any flags):\n"
             "  krasis                  Launch interactive TUI configurator\n"
-            "  krasis manager          Open the localhost Krasis Manager\n"
+            "  krasis manager          Open Krasis Manager (localhost by default)\n"
             "  krasis chat [args]      Chat client (connect to running server)\n"
             "  krasis sanity           Run sanity test prompts against running server\n"
             "  krasis kill             Terminate all running krasis instances\n"
@@ -3493,6 +3493,7 @@ def parse_args() -> argparse.Namespace:
             "examples:\n"
             "  krasis                              # interactive TUI\n"
             "  krasis manager                      # localhost GPU/model manager\n"
+            "  krasis manager --lan                # explicitly allow LAN access\n"
             "  krasis --config model.conf          # non-interactive with config file\n"
             "  krasis chat                         # chat with running server\n"
             "  krasis chat --file test.txt         # run prompts from file\n"
@@ -4121,11 +4122,15 @@ def _manager_schema_main(argv: List[str]) -> None:
 def _manager_main(argv: List[str]) -> None:
     manager_parser = argparse.ArgumentParser(
         prog="krasis manager",
-        description="Start the Rust localhost Krasis Manager",
+        description="Start the Rust Krasis Manager (localhost-only by default)",
     )
     manager_parser.add_argument(
         "--port", type=int, default=8090,
-        help="localhost manager port (default: 8090)",
+        help="manager port (default: 8090)",
+    )
+    manager_parser.add_argument(
+        "--lan", action="store_true",
+        help="bind all IPv4 interfaces and require the owner token for every API request",
     )
     manager_parser.add_argument(
         "--no-open", action="store_true",
@@ -4135,7 +4140,12 @@ def _manager_main(argv: List[str]) -> None:
     if not 1 <= manager_args.port <= 65535:
         manager_parser.error("--port must be between 1 and 65535")
     from krasis.krasis import run_manager
-    run_manager(sys.executable, manager_args.port, not manager_args.no_open)
+    run_manager(
+        sys.executable,
+        manager_args.port,
+        not manager_args.no_open,
+        manager_args.lan,
+    )
 
 
 def main():

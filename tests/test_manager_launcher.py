@@ -56,6 +56,11 @@ class ManagerLauncherTests(unittest.TestCase):
             launcher._manager_main(["--port", "0", "--no-open"])
         self.assertEqual(caught.exception.code, 2)
 
+    def test_manager_cli_propagates_explicit_lan_mode(self):
+        with mock.patch("krasis.krasis.run_manager") as run_manager:
+            launcher._manager_main(["--port", "8080", "--lan", "--no-open"])
+        run_manager.assert_called_once_with(sys.executable, 8080, False, True)
+
     def test_manager_preload_budget_rejects_vram_and_ram_overcommit(self):
         vram = SimpleNamespace(
             budget_error=None,

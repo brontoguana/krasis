@@ -271,7 +271,7 @@ The launcher provides:
 krasis manager
 ```
 
-Krasis Manager is a Rust control plane and dashboard bound strictly to
+Krasis Manager is a Rust control plane and dashboard bound by default to
 `127.0.0.1:8090`. It discovers every NVIDIA GPU by stable UUID and shows the
 verified Krasis model, process, port, configuration, and VRAM use assigned to
 each GPU. Click a GPU to select an installed model, edit launcher-qualified
@@ -282,9 +282,9 @@ current model.
 
 Apply and Stop are asynchronous. The page shows validation, shutdown, GPU
 release, launch, loading/calibration, ready, stopped, and failed progress with
-bounded startup logs. The same state is available from the versioned localhost
-JSON API. Thorough copyable `curl` and PowerShell instructions are included on
-the Manager page for local agents, including discovery, validation, Apply,
+bounded startup logs. The same state is available from the versioned JSON API.
+Thorough copyable `curl` and PowerShell instructions are included on
+the Manager page for agents, including discovery, validation, Apply,
 progress polling, and Stop. Mutating requests require the owner-only token in
 `~/.krasis/manager/token`.
 
@@ -295,8 +295,23 @@ run:
 Krasis.exe manager
 ```
 
-Use `krasis manager --help` to select a different localhost port or suppress
-automatic browser opening.
+Use `krasis manager --help` to select a different port or suppress automatic
+browser opening.
+
+To make Manager available on the local network, opt in explicitly:
+
+```bash
+krasis manager --lan --port 8080
+```
+
+LAN mode binds to `0.0.0.0`, accepts requests only when the Host address
+matches the exact destination interface and port, and requires the owner token
+for every API request. Open `http://<machine-lan-ip>:8080/` from another
+machine and enter the token stored at `~/.krasis/manager/token` (or
+`%USERPROFILE%\.krasis\manager\token` on Windows). Do not expose Manager to
+the public internet; it serves HTTP rather than TLS. The host firewall must
+permit the selected port on the private network; Krasis does not silently add
+or broaden firewall rules.
 
 ### Non-Interactive Launch
 
