@@ -13,6 +13,7 @@
 //! into the CUDA module at init time.
 
 use pyo3::prelude::*;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -61,6 +62,551 @@ fn env_truthy(name: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn dspark_service_timing_enabled(
+    decode_timing: bool,
+    width_calibration: bool,
+    service_timing_requested: bool,
+) -> bool {
+    decode_timing || width_calibration || service_timing_requested
+}
+
+fn deepseek_v4_prefill_overlap_default(deepseek_hqq: bool, dspark_loaded: bool) -> bool {
+    deepseek_hqq && !dspark_loaded
+}
+
+fn dspark_routed_expert_uses_gelu_tanh(activation_type: u8) -> bool {
+    activation_type == 2
+}
+
+fn dspark_resident_batch_eligible(
+    expert_bits: u8,
+    gated_experts: bool,
+    activation_type: u8,
+) -> bool {
+    gated_experts
+        && expert_bits != 3
+        && expert_bits != 16
+        && (activation_type == 0 || (activation_type == 2 && expert_bits == 4))
+}
+
+fn dspark_resident_w13_ksplits(
+    resident_gelu_batch: bool,
+    scalar_ksplits: usize,
+    batched_ksplits: usize,
+) -> usize {
+    if resident_gelu_batch {
+        scalar_ksplits
+    } else {
+        batched_ksplits
+    }
+}
+
+fn validate_moe_registration_contract(
+    expert_ptr_count: usize,
+    num_experts: usize,
+    topk: usize,
+    max_experts_per_tok: usize,
+) -> Result<(), String> {
+    if num_experts == 0 {
+        return Err("MoE registration requires at least one expert".to_string());
+    }
+    if expert_ptr_count != num_experts {
+        return Err(format!(
+            "MoE registration provided {expert_ptr_count} expert pointer records for {num_experts} experts"
+        ));
+    }
+    if topk == 0 {
+        return Err("MoE registration requires a positive top-k".to_string());
+    }
+    if topk > num_experts {
+        return Err(format!(
+            "MoE registration top-k {topk} exceeds expert count {num_experts}"
+        ));
+    }
+    if topk > max_experts_per_tok {
+        return Err(format!(
+            "MoE registration top-k {topk} exceeds configured route capacity {max_experts_per_tok}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dspark_resident_route_capacity(
+    resident_count: usize,
+    capacity: usize,
+    layer_idx: usize,
+    row: usize,
+) -> Result<(), String> {
+    if resident_count > capacity {
+        return Err(format!(
+            "D-Spark resident route count {resident_count} exceeds capacity {capacity} at layer {layer_idx} row {row}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dspark_routes(
+    route_ids: &[i32],
+    route_weights: &[f32],
+    batch_size: usize,
+    topk: usize,
+    num_experts: usize,
+) -> Result<(), String> {
+    let required = batch_size
+        .checked_mul(topk)
+        .ok_or_else(|| "D-Spark route-ID count overflow".to_string())?;
+    if route_ids.len() < required {
+        return Err(format!(
+            "D-Spark route-ID buffer has {} entries but {required} are required",
+            route_ids.len()
+        ));
+    }
+    if route_weights.len() < required {
+        return Err(format!(
+            "D-Spark route-weight buffer has {} entries but {required} are required",
+            route_weights.len()
+        ));
+    }
+    for (index, &eid) in route_ids.iter().take(required).enumerate() {
+        if eid < 0 || eid as usize >= num_experts {
+            return Err(format!(
+                "D-Spark route ID {eid} is outside [0, {num_experts}) at row {} slot {}",
+                index / topk,
+                index % topk,
+            ));
+        }
+        let weight = route_weights[index];
+        if !weight.is_finite() {
+            return Err(format!(
+                "D-Spark route weight {weight:?} is not finite at row {} slot {}",
+                index / topk,
+                index % topk,
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DsparkCanonicalRoute {
+    router_slot: usize,
+    graph_slot: usize,
+    expert_id: usize,
+    weight: f32,
+    resident: bool,
+}
+
+/// Reproduce the legacy CPU route-sync graph's arithmetic slot order.
+///
+/// The ordinary graph packs HCS-resident routes in router order, then appends
+/// demand-cold routes in router order.  `multi_expert_weighted_add_bf16`
+/// accumulates in this order, so this permutation is part of the numerical
+/// contract rather than a scheduling detail.
+fn dspark_canonical_route_plan(
+    route_ids: &[i32],
+    route_weights: &[f32],
+    resident: &[bool],
+    num_experts: usize,
+) -> Result<Vec<DsparkCanonicalRoute>, String> {
+    let topk = route_ids.len();
+    if topk == 0 || route_weights.len() != topk || resident.len() != topk {
+        return Err(format!(
+            "D-Spark canonical route geometry mismatch: ids={} weights={} resident={}",
+            route_ids.len(),
+            route_weights.len(),
+            resident.len(),
+        ));
+    }
+    if num_experts == 0 {
+        return Err("D-Spark canonical route plan has no registered experts".to_string());
+    }
+
+    let mut seen = vec![false; num_experts];
+    for (router_slot, (&expert_id, &weight)) in
+        route_ids.iter().zip(route_weights.iter()).enumerate()
+    {
+        if expert_id < 0 || expert_id as usize >= num_experts {
+            return Err(format!(
+                "D-Spark canonical route ID {expert_id} is outside [0, {num_experts}) at router slot {router_slot}"
+            ));
+        }
+        if !weight.is_finite() {
+            return Err(format!(
+                "D-Spark canonical route weight {weight:?} is not finite at router slot {router_slot}"
+            ));
+        }
+        let expert_id = expert_id as usize;
+        if std::mem::replace(&mut seen[expert_id], true) {
+            return Err(format!(
+                "D-Spark canonical route repeats expert {expert_id} at router slot {router_slot}"
+            ));
+        }
+    }
+
+    let mut plan = Vec::with_capacity(topk);
+    for want_resident in [true, false] {
+        for router_slot in 0..topk {
+            if resident[router_slot] != want_resident {
+                continue;
+            }
+            plan.push(DsparkCanonicalRoute {
+                router_slot,
+                graph_slot: plan.len(),
+                expert_id: route_ids[router_slot] as usize,
+                weight: route_weights[router_slot],
+                resident: want_resident,
+            });
+        }
+    }
+    if plan.len() != topk
+        || plan
+            .iter()
+            .enumerate()
+            .any(|(slot, route)| route.graph_slot != slot)
+    {
+        return Err("D-Spark canonical route plan is not a complete slot bijection".to_string());
+    }
+    Ok(plan)
+}
+
+/// Union demand-cold transfers without changing any row's graph reduction
+/// slot. Expert order here is first occurrence in row-major graph-slot order;
+/// it is a DMA schedule only, never an arithmetic schedule.
+fn dspark_canonical_cold_schedule(
+    plans: &[Vec<DsparkCanonicalRoute>],
+) -> Result<Vec<(usize, Vec<(usize, usize)>)>, String> {
+    let mut schedule: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
+    for (row, plan) in plans.iter().enumerate() {
+        for route in plan {
+            if route.resident || route.weight == 0.0 {
+                continue;
+            }
+            if route.graph_slot >= plan.len() {
+                return Err(format!(
+                    "D-Spark canonical cold route has graph slot {} outside row width {}",
+                    route.graph_slot,
+                    plan.len(),
+                ));
+            }
+            if let Some((_, consumers)) = schedule
+                .iter_mut()
+                .find(|(expert_id, _)| *expert_id == route.expert_id)
+            {
+                consumers.push((row, route.graph_slot));
+            } else {
+                schedule.push((route.expert_id, vec![(row, route.graph_slot)]));
+            }
+        }
+    }
+    Ok(schedule)
+}
+
+fn dspark_canonical_suffix_indices(
+    local_row: usize,
+    row_base: usize,
+    vocab_size: usize,
+) -> Result<(usize, usize), String> {
+    let output_row = row_base
+        .checked_add(local_row)
+        .ok_or_else(|| "D-Spark canonical suffix output row overflow".to_string())?;
+    let snapshot_row = output_row
+        .checked_add(1)
+        .ok_or_else(|| "D-Spark canonical suffix snapshot row overflow".to_string())?;
+    let logit_offset = output_row
+        .checked_mul(vocab_size)
+        .ok_or_else(|| "D-Spark canonical suffix logit offset overflow".to_string())?;
+    Ok((snapshot_row, logit_offset))
+}
+
+fn dspark_canonical_phase_capacity(batch_size: usize, topk: usize) -> Result<usize, String> {
+    batch_size
+        .checked_mul(
+            topk.checked_add(1)
+                .ok_or_else(|| "D-Spark canonical phase-count overflow".to_string())?,
+        )
+        .ok_or_else(|| "D-Spark canonical phase-count overflow".to_string())
+}
+
+fn validate_dspark_canonical_cold_source(
+    contiguous_ptr: usize,
+    contiguous_bytes: usize,
+    component_offsets: [usize; 4],
+    components: [(usize, usize); 4],
+    slot_bytes: usize,
+) -> Result<(), String> {
+    if slot_bytes == 0 {
+        return Err("D-Spark canonical cold slot has zero capacity".to_string());
+    }
+    if component_offsets[0] != 0
+        || component_offsets
+            .windows(2)
+            .any(|window| window[0] >= window[1])
+    {
+        return Err(format!(
+            "D-Spark canonical cold component offsets are not a strict zero-based layout: {component_offsets:?}"
+        ));
+    }
+    for (component, ((host_ptr, bytes), offset)) in
+        components.into_iter().zip(component_offsets).enumerate()
+    {
+        let end = offset.checked_add(bytes).ok_or_else(|| {
+            format!("D-Spark canonical cold component {component} range overflow")
+        })?;
+        let component_limit = component_offsets
+            .get(component + 1)
+            .copied()
+            .unwrap_or(slot_bytes);
+        if host_ptr == 0 || bytes == 0 || end > component_limit {
+            return Err(format!(
+                "D-Spark canonical cold component {component} is outside its region: ptr=0x{host_ptr:x} bytes={bytes} offset={offset} limit={component_limit}"
+            ));
+        }
+        if contiguous_ptr != 0 {
+            let expected_ptr = contiguous_ptr.checked_add(offset).ok_or_else(|| {
+                format!("D-Spark canonical contiguous component {component} pointer overflow")
+            })?;
+            if host_ptr != expected_ptr {
+                return Err(format!(
+                    "D-Spark canonical contiguous component {component} pointer mismatch: 0x{host_ptr:x}/0x{expected_ptr:x}"
+                ));
+            }
+        }
+    }
+    if contiguous_ptr == 0 {
+        if contiguous_bytes != 0 {
+            return Err(
+                "D-Spark canonical cold source has bytes without a contiguous pointer".to_string(),
+            );
+        }
+    } else if contiguous_bytes != slot_bytes {
+        return Err(format!(
+            "D-Spark canonical contiguous payload is {contiguous_bytes} bytes, expected exact slot size {slot_bytes}"
+        ));
+    }
+    Ok(())
+}
+
+fn stage_dspark_canonical_phase(
+    upload: &mut [u8],
+    max_experts_per_tok: usize,
+    dummy_ptrs: [u64; 4],
+    entries: &[(usize, [u64; 4], i32, f32)],
+) -> Result<(), String> {
+    let ptr_stride = max_experts_per_tok
+        .checked_mul(std::mem::size_of::<u64>())
+        .ok_or_else(|| "D-Spark canonical phase pointer-stride overflow".to_string())?;
+    let weight_stride = max_experts_per_tok
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "D-Spark canonical phase weight-stride overflow".to_string())?;
+    let expected = ptr_stride
+        .checked_mul(4)
+        .and_then(|bytes| bytes.checked_add(weight_stride.checked_mul(4)?))
+        .ok_or_else(|| "D-Spark canonical phase byte-size overflow".to_string())?;
+    if upload.len() != expected || max_experts_per_tok == 0 {
+        return Err(format!(
+            "D-Spark canonical phase buffer has {} bytes, expected {expected}",
+            upload.len(),
+        ));
+    }
+    if dummy_ptrs.iter().any(|&ptr| ptr == 0) {
+        return Err("D-Spark canonical phase dummy pointers are incomplete".to_string());
+    }
+    upload.fill(0);
+    for slot in 0..max_experts_per_tok {
+        for (component, &ptr) in dummy_ptrs.iter().enumerate() {
+            let offset = component * ptr_stride + slot * std::mem::size_of::<u64>();
+            upload[offset..offset + std::mem::size_of::<u64>()].copy_from_slice(&ptr.to_ne_bytes());
+        }
+    }
+    let mut seen = vec![false; max_experts_per_tok];
+    for &(slot, ptrs, expert_id, mask) in entries {
+        if slot >= max_experts_per_tok || std::mem::replace(&mut seen[slot], true) {
+            return Err(format!(
+                "D-Spark canonical phase has invalid or duplicate graph slot {slot}"
+            ));
+        }
+        if ptrs.iter().any(|&ptr| ptr == 0) || expert_id < 0 || !mask.is_finite() {
+            return Err(format!(
+                "D-Spark canonical phase slot {slot} has invalid pointers, expert ID, or mask"
+            ));
+        }
+        for (component, &ptr) in ptrs.iter().enumerate() {
+            let offset = component * ptr_stride + slot * std::mem::size_of::<u64>();
+            upload[offset..offset + std::mem::size_of::<u64>()].copy_from_slice(&ptr.to_ne_bytes());
+        }
+        let weight_offset = ptr_stride * 4 + slot * std::mem::size_of::<f32>();
+        upload[weight_offset..weight_offset + std::mem::size_of::<f32>()]
+            .copy_from_slice(&mask.to_ne_bytes());
+        let id_offset = ptr_stride * 4 + weight_stride * 3 + slot * std::mem::size_of::<i32>();
+        upload[id_offset..id_offset + std::mem::size_of::<i32>()]
+            .copy_from_slice(&expert_id.to_ne_bytes());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DsparkCanonicalSuffixFeatures {
+    gpu_route_sync: bool,
+    split_expert_launch: bool,
+    apfl: bool,
+    prefetch: bool,
+    dynamic_hcs: bool,
+    adaptive_cold_drop: bool,
+    peer_experts: bool,
+    cpu_tail: bool,
+    expert_compression: bool,
+    unsupported_routed_format: bool,
+    graph_clock_instrumentation: bool,
+}
+
+fn validate_dspark_canonical_suffix_features(
+    features: DsparkCanonicalSuffixFeatures,
+) -> Result<(), &'static str> {
+    for (active, reason) in [
+        (features.gpu_route_sync, "GPU route synchronization"),
+        (features.split_expert_launch, "split expert launch"),
+        (features.apfl, "APFL route staging"),
+        (features.prefetch, "expert prefetch"),
+        (features.dynamic_hcs, "dynamic HCS"),
+        (features.adaptive_cold_drop, "adaptive cold drop"),
+        (features.peer_experts, "peer expert serving"),
+        (features.cpu_tail, "CPU-tail expert serving"),
+        (features.expert_compression, "compressed expert serving"),
+        (
+            features.unsupported_routed_format,
+            "non-INT4 DeepSeek-V4 routed experts",
+        ),
+        (
+            features.graph_clock_instrumentation,
+            "graph kernel clock instrumentation",
+        ),
+    ] {
+        if active {
+            return Err(reason);
+        }
+    }
+    Ok(())
+}
+
+fn validate_dspark_canonical_graph_capture(
+    graphs_valid: bool,
+    graph_count: usize,
+    require_captured_graphs: bool,
+) -> Result<(), &'static str> {
+    if graphs_valid && graph_count == 0 {
+        return Err("target graph validity is set without captured graphs");
+    }
+    if require_captured_graphs && (!graphs_valid || graph_count == 0) {
+        return Err("requires already-captured target graphs");
+    }
+    Ok(())
+}
+
+fn require_cuda_success(operation: &str, result: cuda_sys::CUresult) -> Result<(), String> {
+    if result != cuda_sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("{operation}: {result:?}"));
+    }
+    Ok(())
+}
+
+fn checked_ungraphed_decode_scalars(
+    token_id: usize,
+    position: usize,
+) -> Result<(i32, i32, i32), String> {
+    let token_id_i32 = i32::try_from(token_id)
+        .map_err(|_| format!("decode token ID {} exceeds native i32 range", token_id))?;
+    let position_i32 = i32::try_from(position)
+        .map_err(|_| format!("DSA position {} exceeds native i32 range", position))?;
+    let sequence_length = position
+        .checked_add(1)
+        .ok_or_else(|| format!("DSA position {} sequence length overflow", position))?;
+    let sequence_length_i32 = i32::try_from(sequence_length).map_err(|_| {
+        format!(
+            "DSA sequence length {} exceeds native i32 range",
+            sequence_length
+        )
+    })?;
+    Ok((token_id_i32, position_i32, sequence_length_i32))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DsparkTargetRowExecution {
+    UngraphedThenCapture,
+    PerLayerGraphReplay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DsparkTargetReplayRow {
+    token: usize,
+    position: usize,
+    snapshot_row: usize,
+    execution: DsparkTargetRowExecution,
+}
+
+/// Plan target verification with the same arithmetic authority used by ordinary
+/// decoding. If request setup invalidated the reusable per-layer graphs, the
+/// first row follows the ordinary ungraphed warmup/capture boundary; every
+/// remaining row replays those graphs. Once captured, every row is a graph
+/// replay. The speculative proposal width never selects a different target
+/// kernel or reduction path.
+fn dspark_target_graph_replay_plan(
+    tokens: &[usize],
+    positions: &[usize],
+    graphs_valid: bool,
+) -> Result<Vec<DsparkTargetReplayRow>, String> {
+    if tokens.is_empty() || tokens.len() != positions.len() {
+        return Err(format!(
+            "D-Spark target graph-replay tokens/positions mismatch: {} / {}",
+            tokens.len(),
+            positions.len(),
+        ));
+    }
+    if positions
+        .windows(2)
+        .any(|window| window[0].checked_add(1) != Some(window[1]))
+    {
+        return Err(format!(
+            "D-Spark target graph-replay positions are not contiguous: {positions:?}"
+        ));
+    }
+    tokens
+        .iter()
+        .copied()
+        .zip(positions.iter().copied())
+        .enumerate()
+        .map(|(row, (token, position))| {
+            Ok(DsparkTargetReplayRow {
+                token,
+                position,
+                snapshot_row: row.checked_add(1).ok_or_else(|| {
+                    "D-Spark target graph-replay snapshot row overflow".to_string()
+                })?,
+                execution: if !graphs_valid && row == 0 {
+                    DsparkTargetRowExecution::UngraphedThenCapture
+                } else {
+                    DsparkTargetRowExecution::PerLayerGraphReplay
+                },
+            })
+        })
+        .collect()
+}
+
+fn dspark_forced_verification_rows() -> Result<Option<usize>, String> {
+    let Some(raw) = std::env::var_os("KRASIS_DSPARK_FORCE_VERIFY_ROWS") else {
+        return Ok(None);
+    };
+    let raw = raw
+        .into_string()
+        .map_err(|_| "KRASIS_DSPARK_FORCE_VERIFY_ROWS is not valid UTF-8".to_string())?;
+    let rows = raw.trim().parse::<usize>().map_err(|_| {
+        format!("KRASIS_DSPARK_FORCE_VERIFY_ROWS={raw:?} is invalid; expected a positive integer")
+    })?;
+    if rows == 0 {
+        return Err("KRASIS_DSPARK_FORCE_VERIFY_ROWS must be a positive integer".to_string());
+    }
+    Ok(Some(rows))
 }
 
 fn dependency_preserving_route_schedule(
@@ -214,6 +760,46 @@ fn dspark_trace_bf16_rows(
             std::slice::from_raw_parts(
                 raw[start..end].as_ptr() as *const u8,
                 row_elems * std::mem::size_of::<u16>(),
+            )
+        };
+        hashes.push(format!("{:016x}", validation_fnv1a_u64(bytes)));
+    }
+    Ok(hashes)
+}
+
+fn dspark_trace_f32_host_rows(
+    values: &[f32],
+    rows: usize,
+    stride_elems: usize,
+    row_elems: usize,
+    label: &str,
+) -> Result<Vec<String>, String> {
+    if rows == 0 || row_elems == 0 || stride_elems < row_elems {
+        return Err(format!(
+            "D-Spark {label} host trace geometry is invalid: rows={rows} stride={stride_elems} row={row_elems}"
+        ));
+    }
+    let required = rows
+        .checked_mul(stride_elems)
+        .ok_or_else(|| format!("D-Spark {label} host trace element count overflow"))?;
+    if values.len() < required {
+        return Err(format!(
+            "D-Spark {label} host trace has {} elements but needs {required}",
+            values.len()
+        ));
+    }
+    let mut hashes = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let start = row
+            .checked_mul(stride_elems)
+            .ok_or_else(|| format!("D-Spark {label} host trace row offset overflow"))?;
+        let end = start
+            .checked_add(row_elems)
+            .ok_or_else(|| format!("D-Spark {label} host trace row end overflow"))?;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                values[start..end].as_ptr() as *const u8,
+                row_elems * std::mem::size_of::<f32>(),
             )
         };
         hashes.push(format!("{:016x}", validation_fnv1a_u64(bytes)));
@@ -4938,6 +5524,11 @@ struct HcsState {
     /// Runtime pressure cap from measured below-safety evictions. Reload will
     /// not exceed this cap until the process is restarted/recalibrated.
     soft_pressure_cap_chunks: Option<usize>,
+    /// Last reload target before applying the measured pressure cap. Kept for
+    /// validation so a capped plan cannot masquerade as the computed plan.
+    last_reload_uncapped_target_chunks: Option<usize>,
+    /// Last reload target after applying the measured pressure cap.
+    last_reload_target_chunks: Option<usize>,
     /// Number of slots in the soft pool.
     soft_num_slots: usize,
     /// Bytes per soft slot (same as pool_slot_size).
@@ -5059,6 +5650,8 @@ impl HcsState {
             soft_total_chunks: 0,
             soft_chunks_loaded: 0,
             soft_pressure_cap_chunks: None,
+            last_reload_uncapped_target_chunks: None,
+            last_reload_target_chunks: None,
             soft_num_slots: 0,
             soft_slot_size: 0,
             soft_slot_to_expert: Vec::new(),
@@ -6194,18 +6787,62 @@ impl HcsState {
             .filter(|p| p[0] != 0 || p[1] != 0 || p[2] != 0 || p[3] != 0)
             .count();
 
+        let mut slot_seen: std::collections::HashSet<(usize, usize)> =
+            std::collections::HashSet::new();
+        let mut total_dupes = 0usize;
+        for slot_opt in &self.pool_slot_to_expert {
+            if let Some(coordinate) = slot_opt {
+                if !slot_seen.insert(*coordinate) {
+                    total_dupes += 1;
+                }
+            }
+        }
         let mut soft_seen: std::collections::HashSet<(usize, usize)> =
             std::collections::HashSet::new();
         let mut soft_dupes = 0usize;
         for slot_opt in &self.soft_slot_to_expert {
-            if let Some((l, e)) = slot_opt {
-                if !soft_seen.insert((*l, *e)) {
+            if let Some(coordinate) = slot_opt {
+                if !slot_seen.insert(*coordinate) {
+                    total_dupes += 1;
+                }
+                if !soft_seen.insert(*coordinate) {
                     soft_dupes += 1;
                 }
             }
         }
 
-        (cf_nonzero, self.cache.len(), 0, soft_dupes)
+        (cf_nonzero, self.cache.len(), total_dupes, soft_dupes)
+    }
+
+    fn validation_sorted_cache_fast_experts(&self) -> Vec<(usize, usize)> {
+        if self.num_experts_per_layer == 0 {
+            return Vec::new();
+        }
+        self.cache_fast
+            .iter()
+            .enumerate()
+            .filter_map(|(flat_index, pointers)| {
+                if pointers.iter().any(|&pointer| pointer != 0) {
+                    Some((
+                        flat_index / self.num_experts_per_layer,
+                        flat_index % self.num_experts_per_layer,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn validation_sorted_slot_union_experts(&self) -> Vec<(usize, usize)> {
+        let mut coordinates: Vec<(usize, usize)> = self
+            .pool_slot_to_expert
+            .iter()
+            .chain(self.soft_slot_to_expert.iter())
+            .filter_map(|entry| *entry)
+            .collect();
+        coordinates.sort_unstable();
+        coordinates
     }
 
     fn validation_sorted_resident_experts(&self) -> Vec<(usize, usize)> {
@@ -6247,6 +6884,205 @@ fn validation_hash_pairs(pairs: &[(usize, usize)]) -> String {
         buf.extend_from_slice(&(expert as u64).to_le_bytes());
     }
     format!("{:016x}", validation_fnv1a_u64(&buf))
+}
+
+fn validation_hash_dspark_slots(entries: &[(&'static str, usize, usize, usize)]) -> String {
+    let mut buf = Vec::with_capacity(entries.len() * 25);
+    for &(tier, slot, layer, expert) in entries {
+        let tier_tag = match tier {
+            "hard" => 0u8,
+            "soft" => 1u8,
+            _ => 0xffu8,
+        };
+        buf.push(tier_tag);
+        buf.extend_from_slice(&(slot as u64).to_le_bytes());
+        buf.extend_from_slice(&(layer as u64).to_le_bytes());
+        buf.extend_from_slice(&(expert as u64).to_le_bytes());
+    }
+    format!("{:016x}", validation_fnv1a_u64(&buf))
+}
+
+fn validation_sha256_hex(hasher: Sha256) -> String {
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn validation_hash_u64_vector_sha256(values: &[u64]) -> String {
+    let mut hasher = Sha256::new();
+    for &value in values {
+        hasher.update(value.to_le_bytes());
+    }
+    validation_sha256_hex(hasher)
+}
+
+fn validation_hcs_coordinate_sets_exact(
+    expected_count: usize,
+    resident_count: usize,
+    resident_sha256: &str,
+    cache_fast_count: usize,
+    cache_fast_sha256: &str,
+    slot_union_count: usize,
+    slot_union_sha256: &str,
+    slot_count: usize,
+    total_dupes: usize,
+    soft_dupes: usize,
+) -> bool {
+    expected_count == resident_count
+        && cache_fast_count == resident_count
+        && slot_union_count == resident_count
+        && slot_count == resident_count
+        && resident_sha256 == cache_fast_sha256
+        && resident_sha256 == slot_union_sha256
+        && total_dupes == 0
+        && soft_dupes == 0
+}
+
+fn validation_hcs_soft_layout_exact(
+    soft_num_cached: usize,
+    expected_loaded_slots: usize,
+    occupied_tail: usize,
+    soft_ranking_len: usize,
+    soft_num_slots: usize,
+    active_prefix_len: usize,
+    actual_loaded_order_len: usize,
+    active_prefix_sha256: &str,
+    actual_loaded_order_sha256: &str,
+) -> bool {
+    soft_num_cached > 0
+        && soft_num_cached == expected_loaded_slots
+        && occupied_tail == 0
+        && soft_ranking_len == soft_num_slots
+        && active_prefix_len == soft_num_cached
+        && actual_loaded_order_len == active_prefix_len
+        && active_prefix_sha256 == actual_loaded_order_sha256
+}
+
+fn validation_hcs_hard_layout_exact(
+    hard_num_cached: usize,
+    occupied_tail: usize,
+    planned_ranking_prefix: &[(usize, usize)],
+    physical_loaded_slots: &[(usize, usize)],
+) -> bool {
+    if planned_ranking_prefix.len() != hard_num_cached
+        || physical_loaded_slots.len() != hard_num_cached
+        || occupied_tail != 0
+    {
+        return false;
+    }
+    let mut planned = planned_ranking_prefix.to_vec();
+    let mut physical = physical_loaded_slots.to_vec();
+    planned.sort_unstable();
+    physical.sort_unstable();
+    planned == physical
+}
+
+fn validation_ranking_is_coordinate_permutation(
+    ranking: &[(usize, usize)],
+    layers: usize,
+    experts_per_layer: usize,
+) -> bool {
+    let Some(capacity) = layers.checked_mul(experts_per_layer) else {
+        return false;
+    };
+    if layers == 0 || experts_per_layer == 0 || ranking.len() != capacity {
+        return false;
+    }
+    let mut seen = HashSet::with_capacity(capacity);
+    ranking.iter().all(|&(layer, expert)| {
+        layer < layers && expert < experts_per_layer && seen.insert((layer, expert))
+    })
+}
+
+fn validation_hash_pairs_sha256(label: &[u8], pairs: &[(usize, usize)]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"krasis_hcs_ordered_pairs_v1\0");
+    hasher.update((label.len() as u64).to_le_bytes());
+    hasher.update(label);
+    hasher.update((pairs.len() as u64).to_le_bytes());
+    for &(layer, expert) in pairs {
+        hasher.update((layer as u64).to_le_bytes());
+        hasher.update((expert as u64).to_le_bytes());
+    }
+    validation_sha256_hex(hasher)
+}
+
+fn validation_hash_dspark_slots_sha256(entries: &[(&'static str, usize, usize, usize)]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"krasis_hcs_ordered_slots_v1\0");
+    hasher.update((entries.len() as u64).to_le_bytes());
+    for &(tier, slot, layer, expert) in entries {
+        let tier_tag = match tier {
+            "hard" => 0u8,
+            "soft" => 1u8,
+            _ => 0xffu8,
+        };
+        hasher.update([tier_tag]);
+        hasher.update((slot as u64).to_le_bytes());
+        hasher.update((layer as u64).to_le_bytes());
+        hasher.update((expert as u64).to_le_bytes());
+    }
+    validation_sha256_hex(hasher)
+}
+
+fn validation_hash_hcs_chunk_plan_sha256(
+    checkpoint_ranking: &[(usize, usize)],
+    hard_prefix: &[(usize, usize)],
+    soft_ranking: &[(usize, usize)],
+    active_prefix_len: usize,
+    soft_slots_per_chunk: usize,
+    soft_chunks_loaded: usize,
+    soft_total_chunks: usize,
+    soft_num_slots: usize,
+    soft_pressure_cap_chunks: Option<usize>,
+    reload_uncapped_target_chunks: Option<usize>,
+    reload_target_chunks: Option<usize>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"krasis_dspark_hcs_final_chunk_plan_v2\0");
+    for value in [
+        checkpoint_ranking.len(),
+        hard_prefix.len(),
+        soft_ranking.len(),
+        active_prefix_len,
+        soft_slots_per_chunk,
+        soft_chunks_loaded,
+        soft_total_chunks,
+        soft_num_slots,
+    ] {
+        hasher.update((value as u64).to_le_bytes());
+    }
+    match soft_pressure_cap_chunks {
+        Some(value) => {
+            hasher.update([1u8]);
+            hasher.update((value as u64).to_le_bytes());
+        }
+        None => hasher.update([0u8]),
+    }
+    for optional in [reload_uncapped_target_chunks, reload_target_chunks] {
+        match optional {
+            Some(value) => {
+                hasher.update([1u8]);
+                hasher.update((value as u64).to_le_bytes());
+            }
+            None => hasher.update([0u8]),
+        }
+    }
+    for &(layer, expert) in checkpoint_ranking {
+        hasher.update((layer as u64).to_le_bytes());
+        hasher.update((expert as u64).to_le_bytes());
+    }
+    for &(layer, expert) in hard_prefix {
+        hasher.update((layer as u64).to_le_bytes());
+        hasher.update((expert as u64).to_le_bytes());
+    }
+    for &(layer, expert) in soft_ranking {
+        hasher.update((layer as u64).to_le_bytes());
+        hasher.update((expert as u64).to_le_bytes());
+    }
+    validation_sha256_hex(hasher)
 }
 
 fn debug_hash_host_region_json(label: &str, ptr: usize, bytes: usize) -> serde_json::Value {
@@ -9380,24 +10216,469 @@ pub(crate) mod dsa_registration_tests {
     use cudarc::driver::{DevicePtr, LaunchAsync, LaunchConfig};
 
     use super::{
-        claimed_peer_route_slots, create_decode_timing_event, dependency_preserving_route_schedule,
-        dsa_expanded_topk_capacity, dsa_score_context_capacity, dspark_expected_emitted_tokens,
-        dspark_residency_scan_required, dspark_target_cache_restore_slots,
-        dspark_target_cache_rows, dspark_verification_batch_plan, dynamic_peer_shard,
-        graph_w13_path, layer_split_sequence_state_contract, marlin_dispatch_for_bits,
+        checked_ungraphed_decode_scalars, claimed_peer_route_slots, create_decode_timing_event,
+        deepseek_v4_prefill_overlap_default, dependency_preserving_route_schedule,
+        dsa_expanded_topk_capacity, dsa_score_context_capacity,
+        dspark_canonical_cold_schedule, dspark_canonical_phase_capacity,
+        dspark_canonical_route_plan, dspark_canonical_suffix_indices,
+        dspark_expected_emitted_tokens, dspark_residency_scan_required,
+        dspark_resident_batch_eligible, dspark_resident_w13_ksplits,
+        dspark_routed_expert_uses_gelu_tanh, dspark_scalar_lm_head_accounting_exact,
+        dspark_service_timing_enabled, dspark_target_cache_restore_slots, dspark_target_cache_rows,
+        dspark_target_graph_replay_plan, dspark_verification_batch_plan, dynamic_peer_shard,
+        graph_w13_path, invalidate_validation_decode_start_authority,
+        layer_split_sequence_state_contract, marlin_dispatch_for_bits,
         measured_peer_route_admission, occupancy_active_blocks_per_multiprocessor,
-        peer_selector_check_message, plan_dsa_topk, route_prep_rmsnorm_threads,
-        split_expert_launch_enabled, validate_dsa_indexer_registration,
+        peer_selector_check_message, plan_dsa_topk, preserve_checkpoint_hcs_order_for_dspark,
+        require_cuda_success, route_prep_rmsnorm_threads, split_expert_launch_enabled,
+        stage_dspark_canonical_phase, validate_dsa_indexer_registration,
         validate_dsa_owner_weight_contract, validate_dsa_runtime_registration,
-        validate_dspark_residency_contract, validate_stream_probe_outcome, CudaEvent, CudaStream,
-        DsaGraphScoreBackend, DsaIndexerOwnerResource, DsaIndexerOwnerWeightIds,
-        DsparkResidencyMode, DsparkTargetCacheRowMapping, DsparkVerificationPolicy, ExpertDataPtr,
-        GpuAttnConfig, GpuDecodeStore, GpuWeight, GraphW13Path, HqqStageAsyncCopyMode,
-        PeerDemandEntry, PeerDynamicTier, PeerRoutedExpert, PendingPeerDispatch,
-        RouteLocalityGlobalLruState, DSA_TOPK_RADIX_THREADS, MODULE_NAME,
+        validate_dspark_canonical_cold_source, validate_dspark_canonical_graph_capture,
+        validate_dspark_canonical_suffix_features, validate_dspark_residency_contract,
+        validate_dspark_resident_route_capacity, validate_dspark_routes,
+        validate_moe_registration_contract, validate_stream_probe_outcome,
+        validation_hash_dspark_slots, validation_hcs_coordinate_sets_exact,
+        validation_hcs_hard_layout_exact, validation_hcs_soft_layout_exact,
+        validation_ranking_is_coordinate_permutation, CudaEvent, CudaStream, DsaGraphScoreBackend,
+        DsaIndexerOwnerResource, DsaIndexerOwnerWeightIds, DsparkCanonicalSuffixFeatures,
+        DsparkResidencyMode, DsparkTargetCacheRowMapping, DsparkTargetRowExecution,
+        DsparkVerificationPolicy, ExpertDataPtr, GpuAttnConfig, GpuDecodeStore, GpuWeight,
+        GraphW13Path, HqqStageAsyncCopyMode, PeerDemandEntry, PeerDynamicTier, PeerRoutedExpert,
+        PendingPeerDispatch, RouteLocalityGlobalLruState, ValidationDsparkHcsAuthority,
+        DSA_TOPK_RADIX_THREADS, MODULE_NAME,
     };
 
     static DSA_CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn ungraphed_decode_scalars_keep_current_token_id() {
+        assert_eq!(
+            checked_ungraphed_decode_scalars(204, 11_000).unwrap(),
+            (204, 11_000, 11_001),
+        );
+        assert!(checked_ungraphed_decode_scalars(i32::MAX as usize + 1, 0).is_err());
+        assert!(checked_ungraphed_decode_scalars(0, i32::MAX as usize).is_err());
+    }
+
+    #[test]
+    fn dspark_target_rows_cross_capture_boundary_and_replay_after_rejection() {
+        let cold_start = dspark_target_graph_replay_plan(&[204, 201], &[11_000, 11_001], false)
+            .expect("cold-start target replay plan");
+        assert_eq!(cold_start.len(), 2);
+        assert_eq!(
+            cold_start[0].execution,
+            DsparkTargetRowExecution::UngraphedThenCapture,
+        );
+        assert_eq!(
+            cold_start[1].execution,
+            DsparkTargetRowExecution::PerLayerGraphReplay,
+        );
+        assert_eq!(cold_start[0].snapshot_row, 1);
+        assert_eq!(cold_start[1].snapshot_row, 2);
+
+        let warm_start = dspark_target_graph_replay_plan(&[204, 201], &[11_000, 11_001], true)
+            .expect("warm target replay plan");
+        assert!(warm_start
+            .iter()
+            .all(|row| row.execution == DsparkTargetRowExecution::PerLayerGraphReplay));
+        assert_eq!(warm_start[0].snapshot_row, 1);
+        assert_eq!(warm_start[1].snapshot_row, 2);
+
+        // If row 1 is rejected, recurrent state restores from snapshot row 1
+        // and the rejected cache position restores from transaction slot 1.
+        // The replacement input at that same position must stay on the graph
+        // authority captured after the accepted row 0.
+        assert_eq!(
+            dspark_target_cache_restore_slots(
+                DsparkTargetCacheRowMapping::Ring,
+                16_384,
+                &[11_000, 11_001],
+                1,
+                "row1 rejection",
+            )
+            .expect("rejected row cache restore"),
+            vec![(11_001, 1)],
+        );
+        let replacement = dspark_target_graph_replay_plan(&[777], &[11_001], true)
+            .expect("replacement target replay plan");
+        assert_eq!(replacement.len(), 1);
+        assert_eq!(replacement[0].snapshot_row, 1);
+        assert_eq!(
+            replacement[0].execution,
+            DsparkTargetRowExecution::PerLayerGraphReplay,
+        );
+        assert!(dspark_target_graph_replay_plan(&[], &[], true).is_err());
+        assert!(dspark_target_graph_replay_plan(&[1, 2], &[7, 9], true).is_err());
+    }
+
+    #[test]
+    fn dspark_moe_registration_rejects_inconsistent_route_geometry() {
+        assert!(validate_moe_registration_contract(256, 256, 6, 10).is_ok());
+        assert!(validate_moe_registration_contract(255, 256, 6, 10)
+            .unwrap_err()
+            .contains("255 expert pointer records for 256 experts"));
+        assert!(validate_moe_registration_contract(0, 0, 0, 10)
+            .unwrap_err()
+            .contains("at least one expert"));
+        assert!(validate_moe_registration_contract(6, 6, 0, 10)
+            .unwrap_err()
+            .contains("positive top-k"));
+        assert!(validate_moe_registration_contract(6, 6, 7, 10)
+            .unwrap_err()
+            .contains("exceeds expert count"));
+        assert!(validate_moe_registration_contract(256, 256, 11, 10)
+            .unwrap_err()
+            .contains("exceeds configured route capacity"));
+    }
+
+    #[test]
+    fn dspark_route_staging_rejects_oversized_or_invalid_routes() {
+        assert!(validate_dspark_resident_route_capacity(6, 10, 43, 2).is_ok());
+        assert!(validate_dspark_resident_route_capacity(11, 10, 43, 2)
+            .unwrap_err()
+            .contains("11 exceeds capacity 10"));
+
+        assert!(validate_dspark_routes(&[0, 255, 1, 3], &[0.5, 0.5, 0.5, 0.5], 2, 2, 256).is_ok());
+        assert!(validate_dspark_routes(&[-1, 1], &[0.5, 0.5], 1, 2, 256)
+            .unwrap_err()
+            .contains("route ID -1 is outside"));
+        assert!(validate_dspark_routes(&[0, 256], &[0.5, 0.5], 1, 2, 256)
+            .unwrap_err()
+            .contains("route ID 256 is outside"));
+        assert!(validate_dspark_routes(&[0], &[0.5, 0.5], 1, 2, 256)
+            .unwrap_err()
+            .contains("1 entries but 2 are required"));
+        assert!(validate_dspark_routes(&[0, 1], &[0.5], 1, 2, 256)
+            .unwrap_err()
+            .contains("route-weight buffer has 1 entries but 2 are required"));
+        assert!(validate_dspark_routes(&[0, 1], &[0.5, f32::NAN], 1, 2, 256)
+            .unwrap_err()
+            .contains("not finite"));
+    }
+
+    #[test]
+    fn dspark_canonical_route_plan_matches_cpu_graph_slot_order() {
+        let plan = dspark_canonical_route_plan(
+            &[7, 2, 9, 4, 1],
+            &[0.7, 0.2, 0.09, 0.009, 0.001],
+            &[false, true, false, true, true],
+            16,
+        )
+        .expect("canonical plan");
+        assert_eq!(
+            plan.iter()
+                .map(|route| (
+                    route.router_slot,
+                    route.graph_slot,
+                    route.expert_id,
+                    route.resident
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, 0, 2, true),
+                (3, 1, 4, true),
+                (4, 2, 1, true),
+                (0, 3, 7, false),
+                (2, 4, 9, false),
+            ],
+        );
+        assert_eq!(plan[0].weight.to_bits(), 0.2f32.to_bits());
+        assert_eq!(plan[4].weight.to_bits(), 0.09f32.to_bits());
+
+        assert!(
+            dspark_canonical_route_plan(&[1, 1], &[0.5, 0.5], &[true, false], 4)
+                .unwrap_err()
+                .contains("repeats expert")
+        );
+        assert!(dspark_canonical_route_plan(&[-1], &[1.0], &[false], 4).is_err());
+        assert!(dspark_canonical_route_plan(&[4], &[1.0], &[false], 4).is_err());
+        assert!(dspark_canonical_route_plan(&[1], &[f32::INFINITY], &[false], 4).is_err());
+        assert!(dspark_canonical_route_plan(&[1], &[], &[false], 4).is_err());
+        assert!(dspark_canonical_route_plan(&[], &[], &[], 4).is_err());
+    }
+
+    #[test]
+    fn dspark_canonical_route_plan_is_a_bit_exact_bijection_for_every_residency_mask() {
+        let ids = [11, 7, 23, 5];
+        let weights = [
+            f32::from_bits(0x3f01_2345),
+            f32::from_bits(0x3e87_6543),
+            -0.0,
+            f32::from_bits(0x3dca_f00d),
+        ];
+        for mask in 0u8..16 {
+            let resident = std::array::from_fn::<_, 4, _>(|slot| mask & (1 << slot) != 0);
+            let plan = dspark_canonical_route_plan(&ids, &weights, &resident, 32).unwrap();
+            let expected_router_slots = (0..4)
+                .filter(|&slot| resident[slot])
+                .chain((0..4).filter(|&slot| !resident[slot]))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                plan.iter()
+                    .map(|route| route.router_slot)
+                    .collect::<Vec<_>>(),
+                expected_router_slots,
+            );
+            let mut inverse = [usize::MAX; 4];
+            for route in &plan {
+                assert_eq!(route.expert_id, ids[route.router_slot] as usize);
+                assert_eq!(route.weight.to_bits(), weights[route.router_slot].to_bits());
+                assert_eq!(route.resident, resident[route.router_slot]);
+                inverse[route.router_slot] = route.graph_slot;
+            }
+            assert!(inverse.iter().all(|&graph_slot| graph_slot < 4));
+        }
+    }
+
+    #[test]
+    fn dspark_canonical_cold_union_preserves_every_graph_slot() {
+        let row0 =
+            dspark_canonical_route_plan(&[1, 2, 3], &[0.5, 0.25, 0.125], &[true, false, false], 8)
+                .unwrap();
+        let row1 =
+            dspark_canonical_route_plan(&[2, 4, 1], &[0.4, 0.3, 0.2], &[false, true, true], 8)
+                .unwrap();
+        assert_eq!(
+            dspark_canonical_cold_schedule(&[row0, row1]).unwrap(),
+            vec![(2, vec![(0, 1), (1, 2)]), (3, vec![(0, 2)])],
+        );
+
+        let all_resident =
+            dspark_canonical_route_plan(&[7, 6, 5], &[0.7, 0.2, 0.1], &[true, true, true], 8)
+                .unwrap();
+        assert!(dspark_canonical_cold_schedule(&[all_resident])
+            .unwrap()
+            .is_empty());
+
+        let zero_weight_cold = dspark_canonical_route_plan(&[3], &[-0.0], &[false], 8).unwrap();
+        assert!(dspark_canonical_cold_schedule(&[zero_weight_cold])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn dspark_canonical_phase_layout_is_complete_and_fail_closed() {
+        let max_ept = 4usize;
+        let ptr_stride = max_ept * std::mem::size_of::<u64>();
+        let scalar_stride = max_ept * std::mem::size_of::<f32>();
+        let mut upload = vec![0u8; ptr_stride * 4 + scalar_stride * 4];
+        let dummy = [11u64, 22, 33, 44];
+        let slot1 = [101u64, 102, 103, 104];
+        let slot3 = [301u64, 302, 303, 304];
+        stage_dspark_canonical_phase(
+            &mut upload,
+            max_ept,
+            dummy,
+            &[(1, slot1, 7, 1.0), (3, slot3, 9, 0.5)],
+        )
+        .unwrap();
+
+        let read_u64 =
+            |offset: usize| u64::from_ne_bytes(upload[offset..offset + 8].try_into().unwrap());
+        let read_f32 =
+            |offset: usize| f32::from_ne_bytes(upload[offset..offset + 4].try_into().unwrap());
+        let read_i32 =
+            |offset: usize| i32::from_ne_bytes(upload[offset..offset + 4].try_into().unwrap());
+        for component in 0..4 {
+            for slot in 0..max_ept {
+                let expected = match slot {
+                    1 => slot1[component],
+                    3 => slot3[component],
+                    _ => dummy[component],
+                };
+                assert_eq!(read_u64(component * ptr_stride + slot * 8), expected,);
+            }
+        }
+        assert_eq!(read_f32(ptr_stride * 4), 0.0);
+        assert_eq!(read_f32(ptr_stride * 4 + 4), 1.0);
+        assert_eq!(read_f32(ptr_stride * 4 + 8), 0.0);
+        assert_eq!(read_f32(ptr_stride * 4 + 12), 0.5);
+        let id_lane = ptr_stride * 4 + scalar_stride * 3;
+        assert_eq!(read_i32(id_lane), 0);
+        assert_eq!(read_i32(id_lane + 4), 7);
+        assert_eq!(read_i32(id_lane + 8), 0);
+        assert_eq!(read_i32(id_lane + 12), 9);
+
+        for entries in [
+            vec![(4, slot1, 1, 1.0)],
+            vec![(1, slot1, 1, 1.0), (1, slot3, 2, 1.0)],
+            vec![(1, [0, 2, 3, 4], 1, 1.0)],
+            vec![(1, slot1, -1, 1.0)],
+            vec![(1, slot1, 1, f32::NAN)],
+        ] {
+            assert!(stage_dspark_canonical_phase(&mut upload, max_ept, dummy, &entries,).is_err());
+        }
+        let short_len = upload.len() - 1;
+        assert!(
+            stage_dspark_canonical_phase(&mut upload[..short_len], max_ept, dummy, &[],).is_err()
+        );
+        assert!(stage_dspark_canonical_phase(&mut upload, max_ept, [0, 2, 3, 4], &[],).is_err());
+    }
+
+    #[test]
+    fn dspark_canonical_cold_source_binds_exact_contiguous_layout() {
+        let base = 0x1000usize;
+        let offsets = [0usize, 256, 512, 768];
+        let components = [
+            (base, 128usize),
+            (base + 256, 64),
+            (base + 512, 128),
+            (base + 768, 64),
+        ];
+        assert!(
+            validate_dspark_canonical_cold_source(base, 1024, offsets, components, 1024,).is_ok()
+        );
+        assert!(validate_dspark_canonical_cold_source(0, 0, offsets, components, 1024,).is_ok());
+
+        let mut wrong_pointer = components;
+        wrong_pointer[2].0 += 1;
+        assert!(
+            validate_dspark_canonical_cold_source(base, 1024, offsets, wrong_pointer, 1024,)
+                .is_err()
+        );
+        assert!(
+            validate_dspark_canonical_cold_source(base, 1023, offsets, components, 1024,).is_err()
+        );
+        assert!(validate_dspark_canonical_cold_source(0, 1, offsets, components, 1024,).is_err());
+        let mut too_large = components;
+        too_large[3].1 = 257;
+        assert!(
+            validate_dspark_canonical_cold_source(base, 1024, offsets, too_large, 1024,).is_err()
+        );
+        let mut overlaps_next = components;
+        overlaps_next[0].1 = 257;
+        assert!(
+            validate_dspark_canonical_cold_source(base, 1024, offsets, overlaps_next, 1024,)
+                .is_err()
+        );
+        assert!(validate_dspark_canonical_cold_source(
+            base,
+            1024,
+            [1, 256, 512, 768],
+            components,
+            1024,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn dspark_canonical_suffix_rows_preserve_row_zero_authority() {
+        assert_eq!(
+            dspark_canonical_suffix_indices(0, 1, 100_000).unwrap(),
+            (2, 100_000),
+        );
+        assert_eq!(
+            dspark_canonical_suffix_indices(3, 1, 100_000).unwrap(),
+            (5, 400_000),
+        );
+        assert!(dspark_canonical_suffix_indices(usize::MAX, 1, 1).is_err());
+        assert!(dspark_canonical_suffix_indices(0, usize::MAX, 1).is_err());
+        assert!(dspark_canonical_suffix_indices(1, 1, usize::MAX).is_err());
+        assert_eq!(dspark_canonical_phase_capacity(5, 10).unwrap(), 55);
+        assert!(dspark_canonical_phase_capacity(usize::MAX, 10).is_err());
+        assert!(dspark_canonical_phase_capacity(1, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn dspark_canonical_suffix_feature_gate_falls_back_on_unproven_modes() {
+        assert!(
+            validate_dspark_canonical_suffix_features(DsparkCanonicalSuffixFeatures::default())
+                .is_ok()
+        );
+        for features in [
+            DsparkCanonicalSuffixFeatures {
+                gpu_route_sync: true,
+                ..Default::default()
+            },
+            DsparkCanonicalSuffixFeatures {
+                split_expert_launch: true,
+                ..Default::default()
+            },
+            DsparkCanonicalSuffixFeatures {
+                apfl: true,
+                ..Default::default()
+            },
+            DsparkCanonicalSuffixFeatures {
+                dynamic_hcs: true,
+                ..Default::default()
+            },
+            DsparkCanonicalSuffixFeatures {
+                prefetch: true,
+                ..Default::default()
+            },
+            DsparkCanonicalSuffixFeatures {
+                adaptive_cold_drop: true,
+                ..Default::default()
+            },
+            DsparkCanonicalSuffixFeatures {
+                peer_experts: true,
+                ..Default::default()
+            },
+            DsparkCanonicalSuffixFeatures {
+                cpu_tail: true,
+                ..Default::default()
+            },
+            DsparkCanonicalSuffixFeatures {
+                expert_compression: true,
+                ..Default::default()
+            },
+            DsparkCanonicalSuffixFeatures {
+                unsupported_routed_format: true,
+                ..Default::default()
+            },
+            DsparkCanonicalSuffixFeatures {
+                graph_clock_instrumentation: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_dspark_canonical_suffix_features(features).is_err());
+        }
+    }
+
+    #[test]
+    fn dspark_canonical_cold_request_allows_row_zero_to_recapture_graphs() {
+        assert!(validate_dspark_canonical_graph_capture(false, 0, false).is_ok());
+        assert!(validate_dspark_canonical_graph_capture(false, 96, false).is_ok());
+        assert!(validate_dspark_canonical_graph_capture(false, 96, true).is_err());
+        assert!(validate_dspark_canonical_graph_capture(true, 96, true).is_ok());
+        assert!(validate_dspark_canonical_graph_capture(true, 0, false).is_err());
+        assert!(validate_dspark_canonical_graph_capture(true, 0, true).is_err());
+    }
+
+    #[test]
+    fn dspark_cuda_copy_errors_are_fail_closed() {
+        assert!(require_cuda_success("copy", cuda_sys::CUresult::CUDA_SUCCESS).is_ok());
+        assert!(
+            require_cuda_success("copy", cuda_sys::CUresult::CUDA_ERROR_NOT_READY)
+                .unwrap_err()
+                .contains("copy")
+        );
+    }
+
+    #[test]
+    fn dspark_routed_expert_dispatch_preserves_gelu_tanh() {
+        assert!(!dspark_routed_expert_uses_gelu_tanh(0));
+        assert!(!dspark_routed_expert_uses_gelu_tanh(1));
+        assert!(dspark_routed_expert_uses_gelu_tanh(2));
+    }
+
+    #[test]
+    fn dspark_resident_batch_contract_admits_exact_int4_gelu_only() {
+        assert!(dspark_resident_batch_eligible(4, true, 0));
+        assert!(dspark_resident_batch_eligible(8, true, 0));
+        assert!(dspark_resident_batch_eligible(4, true, 2));
+        assert!(!dspark_resident_batch_eligible(8, true, 2));
+        assert!(!dspark_resident_batch_eligible(3, true, 2));
+        assert!(!dspark_resident_batch_eligible(16, true, 2));
+        assert!(!dspark_resident_batch_eligible(4, false, 2));
+        assert!(!dspark_resident_batch_eligible(4, true, 1));
+    }
+
+    #[test]
+    fn dspark_resident_gelu_uses_scalar_w13_split_count() {
+        assert_eq!(dspark_resident_w13_ksplits(true, 3, 1), 3);
+        assert_eq!(dspark_resident_w13_ksplits(false, 3, 1), 1);
+    }
 
     #[test]
     fn route_locality_global_lru_tracks_cross_layer_capacity() {
@@ -9530,6 +10811,170 @@ pub(crate) mod dsa_registration_tests {
     }
 
     #[test]
+    fn dspark_checkpoint_hcs_order_policy_covers_resident_and_shared_modes() {
+        assert!(!preserve_checkpoint_hcs_order_for_dspark(None));
+        assert!(preserve_checkpoint_hcs_order_for_dspark(Some(
+            DsparkResidencyMode::Resident,
+        )));
+        assert!(preserve_checkpoint_hcs_order_for_dspark(Some(
+            DsparkResidencyMode::Shared,
+        )));
+    }
+
+    #[test]
+    fn decode_start_authority_invalidation_clears_prior_publishability() {
+        let mut counters = [9usize, 8, 7, 6, 5];
+        let mut resident_hash = "prior-resident-hash".to_string();
+        let mut resident = vec![(4usize, 11usize)];
+        let mut resident_file = "prior-resident-file".to_string();
+        let mut slots = vec![("soft", 3usize, 4usize, 11usize)];
+        let mut slots_file = "prior-slots-file".to_string();
+        let mut authority = ValidationDsparkHcsAuthority {
+            available: true,
+            route_counts_valid: true,
+            route_count_vector_sha256: "prior-route-hash".to_string(),
+            checkpoint_ranking_sha256: "prior-ranking-hash".to_string(),
+            hard_planned_prefix_sha256: "prior-hard-prefix".to_string(),
+            soft_active_prefix_sha256: "prior-active-prefix".to_string(),
+            reload_uncapped_target_chunks: Some(7),
+            reload_target_chunks: Some(6),
+            final_chunk_plan_sha256: "prior-plan-hash".to_string(),
+            resident_sha256: "prior-resident-sha".to_string(),
+            slot_order_sha256: "prior-slot-sha".to_string(),
+            ..ValidationDsparkHcsAuthority::default()
+        };
+
+        let [num_cached, soft_cached, hard_cached, dupes, soft_dupes] = &mut counters;
+        invalidate_validation_decode_start_authority(
+            [num_cached, soft_cached, hard_cached, dupes, soft_dupes],
+            &mut resident_hash,
+            &mut resident,
+            &mut resident_file,
+            &mut slots,
+            &mut slots_file,
+            &mut authority,
+        );
+
+        assert_eq!(counters, [0; 5]);
+        assert!(resident_hash.is_empty());
+        assert!(resident.is_empty());
+        assert!(resident_file.is_empty());
+        assert!(slots.is_empty());
+        assert!(slots_file.is_empty());
+        assert_eq!(authority, ValidationDsparkHcsAuthority::default());
+        assert!(!authority.available);
+    }
+
+    #[test]
+    fn dspark_scalar_lm_head_accounting_requires_exact_batch_and_row_totals() {
+        assert!(dspark_scalar_lm_head_accounting_exact(23, 23, 23));
+        assert!(!dspark_scalar_lm_head_accounting_exact(23, 22, 23));
+        assert!(!dspark_scalar_lm_head_accounting_exact(23, 23, 22));
+    }
+
+    #[test]
+    fn dspark_residency_slot_identity_binds_tier_slot_and_order() {
+        let original = vec![("hard", 0, 40, 7), ("soft", 3, 41, 9)];
+        let reordered = vec![("soft", 3, 41, 9), ("hard", 0, 40, 7)];
+        let changed_slot = vec![("hard", 1, 40, 7), ("soft", 3, 41, 9)];
+        assert_eq!(
+            validation_hash_dspark_slots(&original),
+            validation_hash_dspark_slots(&original),
+        );
+        assert_ne!(
+            validation_hash_dspark_slots(&original),
+            validation_hash_dspark_slots(&reordered),
+        );
+        assert_ne!(
+            validation_hash_dspark_slots(&original),
+            validation_hash_dspark_slots(&changed_slot),
+        );
+    }
+
+    #[test]
+    fn dspark_hcs_coordinate_authority_rejects_cache_set_or_duplicate_drift() {
+        assert!(validation_hcs_coordinate_sets_exact(
+            3, 3, "same", 3, "same", 3, "same", 3, 0, 0,
+        ));
+        assert!(!validation_hcs_coordinate_sets_exact(
+            3,
+            3,
+            "same",
+            3,
+            "different",
+            3,
+            "same",
+            3,
+            0,
+            0,
+        ));
+        assert!(!validation_hcs_coordinate_sets_exact(
+            3, 3, "same", 3, "same", 4, "same", 4, 1, 0,
+        ));
+    }
+
+    #[test]
+    fn dspark_hcs_soft_layout_rejects_order_gap_or_occupied_tail() {
+        assert!(validation_hcs_soft_layout_exact(
+            3, 3, 0, 4, 4, 3, 3, "same", "same",
+        ));
+        assert!(!validation_hcs_soft_layout_exact(
+            3, 3, 0, 4, 4, 3, 3, "planned", "loaded",
+        ));
+        assert!(!validation_hcs_soft_layout_exact(
+            3, 3, 1, 4, 4, 3, 3, "same", "same",
+        ));
+        assert!(!validation_hcs_soft_layout_exact(
+            3, 2, 0, 4, 4, 3, 3, "same", "same",
+        ));
+    }
+
+    #[test]
+    fn dspark_hcs_hard_layout_preserves_rank_order_while_accepting_physical_sorting() {
+        let ranked = vec![(2, 7), (0, 9), (1, 3)];
+        let physically_sorted = vec![(0, 9), (1, 3), (2, 7)];
+        assert!(validation_hcs_hard_layout_exact(
+            3,
+            0,
+            &ranked,
+            &physically_sorted,
+        ));
+        assert!(!validation_hcs_hard_layout_exact(
+            3,
+            0,
+            &ranked,
+            &[(0, 9), (1, 3), (2, 8)],
+        ));
+        assert!(!validation_hcs_hard_layout_exact(
+            3,
+            1,
+            &ranked,
+            &physically_sorted,
+        ));
+    }
+
+    #[test]
+    fn dspark_checkpoint_ranking_requires_the_exact_coordinate_permutation() {
+        let exact = vec![(0, 0), (0, 1), (1, 0), (1, 1)];
+        assert!(validation_ranking_is_coordinate_permutation(&exact, 2, 2));
+        assert!(!validation_ranking_is_coordinate_permutation(
+            &[(0, 0), (0, 1), (1, 0)],
+            2,
+            2,
+        ));
+        assert!(!validation_ranking_is_coordinate_permutation(
+            &[(0, 0), (0, 1), (1, 0), (1, 0)],
+            2,
+            2,
+        ));
+        assert!(!validation_ranking_is_coordinate_permutation(
+            &[(0, 0), (0, 1), (1, 0), (2, 0)],
+            2,
+            2,
+        ));
+    }
+
+    #[test]
     fn dspark_verification_plan_adds_bonus_row_and_truncates_without_hardcoding_width() {
         let proposals = vec![11, 12, 13];
         let (full_inputs, full_compared) =
@@ -9604,6 +11049,23 @@ pub(crate) mod dsa_registration_tests {
         policy.observe_confidences(&confidences).unwrap();
         policy.observe_round(1, 0.01, 0.02).unwrap();
         assert!(policy.finish_calibration(32).is_err());
+    }
+
+    #[test]
+    fn dspark_service_timing_is_independent_of_detailed_decode_timing() {
+        assert!(!dspark_service_timing_enabled(false, false, false));
+        assert!(dspark_service_timing_enabled(true, false, false));
+        assert!(dspark_service_timing_enabled(false, true, false));
+        assert!(dspark_service_timing_enabled(false, false, true));
+        assert!(dspark_service_timing_enabled(true, true, true));
+    }
+
+    #[test]
+    fn dspark_defaults_deepseek_v4_prefill_overlap_to_safe_mode() {
+        assert!(deepseek_v4_prefill_overlap_default(true, false));
+        assert!(!deepseek_v4_prefill_overlap_default(true, true));
+        assert!(!deepseek_v4_prefill_overlap_default(false, false));
+        assert!(!deepseek_v4_prefill_overlap_default(false, true));
     }
 
     #[test]
@@ -12499,6 +13961,12 @@ pub(crate) mod dsa_registration_tests {
         let n32 = device
             .get_func(MODULE_NAME, "fused_silu_w2_batched_n32")
             .expect("N32 INT4 W2 kernel");
+        let scalar_gelu = device
+            .get_func(MODULE_NAME, "gelu_tanh_mul")
+            .expect("scalar GELU(tanh) kernel");
+        let scalar_w2 = device
+            .get_func(MODULE_NAME, "marlin_gemv_int4")
+            .expect("scalar INT4 W2 kernel");
 
         for &(k, n, group_size) in &[
             (512usize, 96usize, 128usize),
@@ -12568,8 +14036,9 @@ pub(crate) mod dsa_registration_tests {
                         .collect::<Vec<_>>(),
                 )
                 .expect("W2 gate/up H2D");
+            let weight_values = vec![1.0f32, 0.0, 0.75];
             let weights = device
-                .htod_copy(vec![1.0f32, 0.0, 0.75])
+                .htod_copy(weight_values.clone())
                 .expect("W2 weights H2D");
             let inv_weight_host = if n % 64 == 0 {
                 let forward = crate::weights::marlin::generate_weight_perm_int4();
@@ -12590,7 +14059,8 @@ pub(crate) mod dsa_registration_tests {
 
             let launch = |kernel: &cudarc::driver::CudaFunction,
                           tile_width: usize,
-                          threads: u32|
+                          threads: u32,
+                          activation_mode: i32|
              -> Vec<u16> {
                 let mut output = device
                     .alloc_zeros::<u16>(topk * n)
@@ -12621,7 +14091,7 @@ pub(crate) mod dsa_registration_tests {
                                 n as i32,
                                 group_size as i32,
                                 7.0f32,
-                                2i32,
+                                activation_mode,
                                 &weights,
                             ),
                         )
@@ -12632,9 +14102,65 @@ pub(crate) mod dsa_registration_tests {
             };
 
             assert_eq!(
-                launch(&n16, 16, 256),
-                launch(&n32, 32, 512),
+                launch(&n16, 16, 256, 2),
+                launch(&n32, 32, 512, 2),
                 "N32 W2 changed fused SwiGLU/Marlin output for K={k} N={n} group={group_size}",
+            );
+
+            let fused_gelu = launch(&n16, 16, 256, 3);
+            let scalar_outputs = device
+                .alloc_zeros::<u16>(topk * n)
+                .expect("scalar GELU W2 output allocation");
+            let scalar_activation = device
+                .alloc_zeros::<u16>(k)
+                .expect("scalar GELU activation allocation");
+            for expert in 0..topk {
+                if weight_values[expert] == 0.0 {
+                    continue;
+                }
+                let gate_up_ptr =
+                    *gate_ups.device_ptr() + (expert * 2 * k * std::mem::size_of::<u16>()) as u64;
+                let activation_ptr = *scalar_activation.device_ptr();
+                let output_ptr =
+                    *scalar_outputs.device_ptr() + (expert * n * std::mem::size_of::<u16>()) as u64;
+                unsafe {
+                    scalar_gelu
+                        .clone()
+                        .launch(
+                            LaunchConfig::for_num_elems(k as u32),
+                            (activation_ptr, gate_up_ptr, k as i32),
+                        )
+                        .expect("scalar GELU launch");
+                    scalar_w2
+                        .clone()
+                        .launch(
+                            LaunchConfig {
+                                grid_dim: (n.div_ceil(16) as u32, 1, 1),
+                                block_dim: (256, 1, 1),
+                                shared_mem_bytes: (k * 2 + 1024 * 4 + 64 * 4) as u32,
+                            },
+                            (
+                                *packed_buffers[expert].device_ptr(),
+                                *scale_buffers[expert].device_ptr(),
+                                activation_ptr,
+                                output_ptr,
+                                &inv_weight_perm,
+                                &inv_scale_perm,
+                                k as i32,
+                                n as i32,
+                                group_size as i32,
+                            ),
+                        )
+                        .expect("scalar GELU W2 launch");
+                }
+            }
+            device.synchronize().expect("scalar GELU W2 sync");
+            assert_eq!(
+                device
+                    .dtoh_sync_copy(&scalar_outputs)
+                    .expect("scalar GELU W2 output D2H"),
+                fused_gelu,
+                "batched fused GELU W2 changed scalar GELU+Marlin output for K={k} N={n} group={group_size}",
             );
         }
     }
@@ -16974,6 +18500,76 @@ struct CachedKernels {
 
 // ── Main GPU decode graph ──────────────────────────────────────────────
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ValidationDsparkHcsAuthority {
+    available: bool,
+    route_counts_valid: bool,
+    route_prompt_tokens: usize,
+    route_count_layers: usize,
+    route_count_experts_per_layer: usize,
+    route_count_vector_len: usize,
+    route_count_vector_sha256: String,
+    route_count_sum: u64,
+    route_count_nonzero: usize,
+    route_count_per_layer_sums: Vec<u64>,
+    route_record_calls: u64,
+    route_record_calls_per_layer: Vec<u64>,
+    dspark_mode: String,
+    preserve_checkpoint_order: bool,
+    checkpoint_ranking_exact: bool,
+    checkpoint_ranking_len: usize,
+    checkpoint_ranking_sha256: String,
+    hard_planned_prefix_len: usize,
+    hard_planned_prefix_sha256: String,
+    soft_ranking_len: usize,
+    soft_ranking_sha256: String,
+    soft_heatmap_ranking_len: usize,
+    soft_heatmap_ranking_sha256: String,
+    soft_active_prefix_len: usize,
+    soft_active_prefix_sha256: String,
+    soft_actual_loaded_order_len: usize,
+    soft_actual_loaded_order_sha256: String,
+    soft_slots_per_chunk: usize,
+    soft_chunks_loaded: usize,
+    soft_total_chunks: usize,
+    soft_num_slots: usize,
+    soft_pressure_cap_chunks: Option<usize>,
+    reload_uncapped_target_chunks: Option<usize>,
+    reload_target_chunks: Option<usize>,
+    soft_expected_loaded_slots: usize,
+    soft_occupied_tail: usize,
+    final_chunk_plan_sha256: String,
+    hcs_coordinate_layers: usize,
+    hcs_coordinate_experts_per_layer: usize,
+    hcs_coordinate_capacity: usize,
+    cache_fast_count: usize,
+    cache_fast_sha256: String,
+    slot_union_count: usize,
+    slot_union_sha256: String,
+    resident_sha256: String,
+    slot_order_sha256: String,
+}
+
+fn invalidate_validation_decode_start_authority(
+    counters: [&mut usize; 5],
+    resident_hash: &mut String,
+    resident: &mut Vec<(usize, usize)>,
+    resident_file: &mut String,
+    slots: &mut Vec<(&'static str, usize, usize, usize)>,
+    slots_file: &mut String,
+    authority: &mut ValidationDsparkHcsAuthority,
+) {
+    for counter in counters {
+        *counter = 0;
+    }
+    resident_hash.clear();
+    resident.clear();
+    resident_file.clear();
+    slots.clear();
+    slots_file.clear();
+    *authority = ValidationDsparkHcsAuthority::default();
+}
+
 struct GpuDecodeGraph {
     hidden_size: usize,
     #[allow(dead_code)]
@@ -17548,6 +19144,7 @@ struct GpuDecodeGraph {
     validation_decode_start_hcs_file: String,
     validation_decode_start_slots: Vec<(&'static str, usize, usize, usize)>,
     validation_decode_start_slots_file: String,
+    validation_dspark_hcs_authority: ValidationDsparkHcsAuthority,
     validation_decode_cold_hist: std::collections::BTreeMap<(usize, usize), (u64, usize)>,
     validation_decode_cold_events: Vec<(usize, usize, usize)>,
     validation_decode_cold_file: String,
@@ -17641,17 +19238,37 @@ struct GpuDecodeGraph {
     prompt_hcs_count_layers: usize,
     prompt_hcs_count_experts_per_layer: usize,
     prompt_hcs_prompt_tokens: usize,
+    prompt_hcs_record_calls: u64,
+    prompt_hcs_record_calls_per_layer: Vec<u64>,
     prompt_hcs_shadow: PromptHcsShadowStats,
 
     // ── Speculative decode batch buffers (allocated when draft model loaded) ──
     /// Max batch size for speculative decode (draft_k + 1).
     batch_max: usize,
+    /// Page-locked per-row host staging tables for D-Spark resident launches.
+    /// Populated for every active row before the first asynchronous upload so
+    /// no row can overwrite bytes still being consumed by another row's DMA.
+    /// CUDA requires page-locked storage for a genuinely asynchronous H2D
+    /// transfer; using an ordinary Vec here made the driver's implicit staging
+    /// lifetime part of target correctness.
+    h_dspark_batch_upload: Option<SequenceStatePinnedBuffer>,
     /// [batch_max * hidden_size] BF16 — per-token hidden states during batch decode.
     d_batch_hidden: Option<cudarc::driver::CudaSlice<u16>>,
     /// [batch_max * hidden_size] BF16 — per-token residual states during batch decode.
     d_batch_residual: Option<cudarc::driver::CudaSlice<u16>>,
     /// [batch_max * hidden_size] BF16 — per-token MoE output accumulator.
     d_batch_moe_out: Option<cudarc::driver::CudaSlice<u16>>,
+    /// Canonical target-verifier expert outputs.  Row stride is
+    /// max_experts_per_tok * hidden_size; graph slots within a row retain the
+    /// ordinary graph's resident-prefix/cold-suffix order until the single
+    /// full-top-k weighted reduction.
+    d_dspark_canonical_expert_outs: Option<cudarc::driver::CudaSlice<u16>>,
+    /// Reordered ordinary-graph weights, [batch_max * max_experts_per_tok].
+    d_dspark_canonical_weights: Option<cudarc::driver::CudaSlice<f32>>,
+    /// Page-locked immutable phase tables.  A layer may enqueue one resident
+    /// phase plus one cold phase per route for every row before the next route
+    /// synchronization fences reuse.
+    h_dspark_canonical_phase_upload: Option<SequenceStatePinnedBuffer>,
     /// [batch_max * vocab_size] FP32 — per-token logits from LM head.
     d_batch_logits: Option<cudarc::driver::CudaSlice<f32>>,
     /// Host-side copy of batch logits.
@@ -21607,6 +23224,19 @@ enum DsparkResidencyMode {
     Shared,
 }
 
+fn preserve_checkpoint_hcs_order_for_dspark(mode: Option<DsparkResidencyMode>) -> bool {
+    mode.is_some()
+}
+
+fn dspark_scalar_lm_head_accounting_exact(
+    batch_verify_rows: u64,
+    target_scalar_lm_head_calls: u64,
+    target_scalar_lm_head_rows: u64,
+) -> bool {
+    batch_verify_rows == target_scalar_lm_head_calls
+        && batch_verify_rows == target_scalar_lm_head_rows
+}
+
 impl DsparkResidencyMode {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
@@ -21648,6 +23278,7 @@ struct DsparkRuntime {
     rejected_confidence_sum: f64,
     proposal_seconds: f64,
     batch_verify_rounds: u64,
+    batch_verify_rows: u64,
     batch_transaction_rollbacks: u64,
     batch_verify_seconds: f64,
     proposal_timing_rounds: u64,
@@ -21664,6 +23295,12 @@ struct DsparkRuntime {
     batch_head_seconds: f64,
     batch_restore_seconds: f64,
     context_commit_seconds: f64,
+    target_scalar_lm_head_calls: u64,
+    target_scalar_lm_head_rows: u64,
+    canonical_suffix_rounds: u64,
+    canonical_suffix_rows: u64,
+    canonical_sequential_fallback_rounds: u64,
+    canonical_sequential_fallback_rows: u64,
     verification_policy: DsparkVerificationPolicy,
     target_state_backups: Vec<DsparkTargetStateBackup>,
     target_cache_row_backups: Vec<DsparkTargetCacheRowBackup>,
@@ -29128,6 +30765,7 @@ impl GpuDecodeStore {
             validation_decode_start_hcs_file: String::new(),
             validation_decode_start_slots: Vec::new(),
             validation_decode_start_slots_file: String::new(),
+            validation_dspark_hcs_authority: ValidationDsparkHcsAuthority::default(),
             validation_decode_cold_hist: std::collections::BTreeMap::new(),
             validation_decode_cold_events: Vec::new(),
             validation_decode_cold_file: String::new(),
@@ -29203,11 +30841,17 @@ impl GpuDecodeStore {
             prompt_hcs_count_layers: 0,
             prompt_hcs_count_experts_per_layer: 0,
             prompt_hcs_prompt_tokens: 0,
+            prompt_hcs_record_calls: 0,
+            prompt_hcs_record_calls_per_layer: Vec::new(),
             prompt_hcs_shadow: PromptHcsShadowStats::disabled(),
             batch_max: 0,
+            h_dspark_batch_upload: None,
             d_batch_hidden: None,
             d_batch_residual: None,
             d_batch_moe_out: None,
+            d_dspark_canonical_expert_outs: None,
+            d_dspark_canonical_weights: None,
+            h_dspark_canonical_phase_upload: None,
             d_batch_logits: None,
             h_batch_logits: Vec::new(),
             h_batch_topk_ids: Vec::new(),
@@ -33117,18 +34761,9 @@ impl GpuDecodeStore {
     /// auxiliary expert is actually present; `shared` reports its measured
     /// coverage without imposing a fixed split.
     fn dspark_residency_status(&self) -> PyResult<String> {
-        let (mode, resident, total) = self
-            .dspark_residency_counts_internal()
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        validate_dspark_residency_contract(mode, resident, total)
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        Ok(serde_json::json!({
-            "mode": mode.label(),
-            "resident": resident,
-            "total": total,
-            "coverage": resident as f64 / total as f64,
-        })
-        .to_string())
+        self.dspark_residency_identity_internal()
+            .map(|status| status.to_string())
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
 
     /// Begin width calibration only after the final measured HCS pool exists.
@@ -39867,6 +41502,7 @@ impl GpuDecodeStore {
             rejected_confidence_sum: 0.0,
             proposal_seconds: 0.0,
             batch_verify_rounds: 0,
+            batch_verify_rows: 0,
             batch_transaction_rollbacks: 0,
             batch_verify_seconds: 0.0,
             proposal_timing_rounds: 0,
@@ -39883,6 +41519,12 @@ impl GpuDecodeStore {
             batch_head_seconds: 0.0,
             batch_restore_seconds: 0.0,
             context_commit_seconds: 0.0,
+            target_scalar_lm_head_calls: 0,
+            target_scalar_lm_head_rows: 0,
+            canonical_suffix_rounds: 0,
+            canonical_suffix_rows: 0,
+            canonical_sequential_fallback_rounds: 0,
+            canonical_sequential_fallback_rows: 0,
             verification_policy,
             target_state_backups: Vec::new(),
             target_cache_row_backups: Vec::new(),
@@ -41172,6 +42814,7 @@ impl GpuDecodeStore {
                     Some(*graph.d_hidden.device_ptr()),
                     Some(weights_ptr),
                     Some(count),
+                    None,
                     "peer calibration",
                 )
                 .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -43111,6 +44754,74 @@ impl GpuDecodeStore {
         Ok((runtime.mode, resident, total))
     }
 
+    fn dspark_residency_identity_internal(&self) -> Result<serde_json::Value, String> {
+        let graph = self.graph.as_ref().ok_or("Call configure first")?;
+        let runtime = self.dspark.as_ref().ok_or("D-Spark is not loaded")?;
+        let hcs = graph.hcs.as_ref().ok_or("HCS is not initialized")?;
+        let (mode, resident, total) = self.dspark_residency_counts_internal()?;
+        validate_dspark_residency_contract(mode, resident, total)?;
+
+        let auxiliary_layer_end = runtime
+            .auxiliary_layer_start
+            .checked_add(runtime.stage_router_registered.len())
+            .ok_or("D-Spark auxiliary layer range overflow")?;
+        let in_auxiliary_range = |layer_idx: usize| {
+            layer_idx >= runtime.auxiliary_layer_start && layer_idx < auxiliary_layer_end
+        };
+
+        let resident_set: Vec<(usize, usize)> = hcs
+            .validation_sorted_resident_experts()
+            .into_iter()
+            .filter(|(layer_idx, _)| in_auxiliary_range(*layer_idx))
+            .collect();
+        let resident_slots: Vec<(&'static str, usize, usize, usize)> = hcs
+            .validation_slot_entries()
+            .into_iter()
+            .filter(|(_, _, layer_idx, expert_idx)| {
+                in_auxiliary_range(*layer_idx) && hcs.cache.contains_key(&(*layer_idx, *expert_idx))
+            })
+            .collect();
+        if resident_set.len() != resident || resident_slots.len() != resident {
+            return Err(format!(
+                "D-Spark residency identity inventory mismatch: counted={resident} set={} slots={}",
+                resident_set.len(),
+                resident_slots.len(),
+            ));
+        }
+
+        let hard_resident = resident_slots
+            .iter()
+            .filter(|(tier, _, _, _)| *tier == "hard")
+            .count();
+        let soft_resident = resident_slots
+            .iter()
+            .filter(|(tier, _, _, _)| *tier == "soft")
+            .count();
+        let stage_resident_counts: Vec<usize> = (runtime.auxiliary_layer_start
+            ..auxiliary_layer_end)
+            .map(|layer_idx| {
+                resident_set
+                    .iter()
+                    .filter(|(resident_layer, _)| *resident_layer == layer_idx)
+                    .count()
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "mode": mode.label(),
+            "resident": resident,
+            "total": total,
+            "coverage": resident as f64 / total as f64,
+            "auxiliary_layer_start": runtime.auxiliary_layer_start,
+            "auxiliary_layer_count": runtime.stage_router_registered.len(),
+            "stage_resident_counts": stage_resident_counts,
+            "hard_resident": hard_resident,
+            "soft_resident": soft_resident,
+            "resident_set_hash_fnv1a64": validation_hash_pairs(&resident_set),
+            "resident_slot_order_hash_fnv1a64": validation_hash_dspark_slots(&resident_slots),
+        }))
+    }
+
     fn validate_dspark_residency_internal(&self) -> Result<(), String> {
         let runtime = self.dspark.as_ref().ok_or("D-Spark is not loaded")?;
         let graph = self.graph.as_ref().ok_or("Call configure first")?;
@@ -43159,20 +44870,9 @@ impl GpuDecodeStore {
         let d_seq_len = graph
             .d_graph_seq_len
             .as_ref()
-            .ok_or("Ungraphed decode requires the graph sequence-length buffer")?;
-        let token_id_i32 = i32::try_from(token_id)
-            .map_err(|_| format!("Decode token ID {} exceeds native i32 range", token_id))?;
-        let position_i32 = i32::try_from(position)
-            .map_err(|_| format!("DSA position {} exceeds native i32 range", position))?;
-        let sequence_length = position
-            .checked_add(1)
-            .ok_or_else(|| format!("DSA position {} sequence length overflow", position))?;
-        let sequence_length_i32 = i32::try_from(sequence_length).map_err(|_| {
-            format!(
-                "DSA sequence length {} exceeds native i32 range",
-                sequence_length
-            )
-        })?;
+            .ok_or("DSA ungraphed execution requires the graph sequence-length buffer")?;
+        let (token_id_i32, position_i32, sequence_length_i32) =
+            checked_ungraphed_decode_scalars(token_id, position)?;
         let stream = *self.device.cu_stream();
         unsafe {
             let token_result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
@@ -48702,6 +50402,8 @@ impl GpuDecodeStore {
         // optimizations even when their attention mixer differs (DeepSeek DSA
         // versus GLM KDA/DSA). Keep DSA-specific modes keyed to deepseek_hqq.
         let mhc_hqq = config.deepseek_v4_hc_mult > 0 && !self.hqq_runtime_slots.is_empty();
+        let deepseek_v4_prefill_overlap_default =
+            deepseek_v4_prefill_overlap_default(deepseek_hqq, self.dspark.is_some());
         let deepseek_v4_prefill_sparse_score_mode = DeepseekV4PrefillSparseScoreMode::from_env()?;
         let deepseek_v4_prefill_sparse_output_mode =
             crate::gpu_prefill::DeepseekV4PrefillSparseOutputMode::from_env()?;
@@ -48712,10 +50414,18 @@ impl GpuDecodeStore {
         let deepseek_v4_prefill_softmax_mode =
             crate::gpu_prefill::DeepseekV4PrefillSoftmaxMode::from_env(deepseek_hqq)?;
         let deepseek_v4_prefill_predicted_w1_enabled =
-            crate::gpu_prefill::deepseek_v4_prefill_predicted_w1_enabled_from_env(deepseek_hqq)?;
+            crate::gpu_prefill::deepseek_v4_prefill_predicted_w1_enabled_from_env(
+                deepseek_v4_prefill_overlap_default,
+            )?;
         let portable_prefill_predicted_w1_policy = resolve_portable_predicted_w1_policy()?;
-        let deepseek_v4_prefill_split_expert_dma_enabled =
-            resolve_bool_env("KRASIS_PREFILL_SPLIT_EXPERT_DMA", mhc_hqq)?;
+        let deepseek_v4_prefill_split_expert_dma_enabled = resolve_bool_env(
+            "KRASIS_PREFILL_SPLIT_EXPERT_DMA",
+            if deepseek_hqq {
+                deepseek_v4_prefill_overlap_default
+            } else {
+                mhc_hqq
+            },
+        )?;
         if portable_prefill_predicted_w1_policy.requested() {
             if config.deepseek_v4_hc_mult > 0 {
                 return Err(
@@ -50913,6 +52623,15 @@ impl GpuDecodeStore {
             prompt_hcs_num_moe_layers: 0,
             prompt_hcs_num_experts_per_layer: 0,
             prompt_hcs_prompt_tokens: 0,
+            prompt_hcs_record_calls: 0,
+            prompt_hcs_record_calls_per_layer: Vec::new(),
+            prompt_hcs_chunk_plan: Vec::new(),
+            prompt_hcs_max_chunk_tokens: 0,
+            prompt_hcs_sequence_start: 0,
+            prompt_hcs_reset_sequence_state: false,
+            prompt_hcs_capture_suffix_boundary: None,
+            prompt_hcs_logical_prompt_tokens: 0,
+            prompt_hcs_computed_suffix_tokens: 0,
         };
         engine.initialize_tileq_capture_from_env()?;
         Ok(engine)
@@ -51170,17 +52889,33 @@ impl GpuDecodeStore {
     }
 
     fn validation_capture_decode_start(&mut self, prompt_len: usize) {
+        let dspark_loaded = self.dspark.is_some();
+        let dspark_mode = self
+            .dspark
+            .as_ref()
+            .map(|runtime| runtime.mode.label().to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let preserve_checkpoint_order = preserve_checkpoint_hcs_order_for_dspark(
+            self.dspark.as_ref().map(|runtime| runtime.mode),
+        );
         let Some(graph) = self.graph.as_mut() else {
             return;
         };
-        graph.validation_decode_start_num_cached = 0;
-        graph.validation_decode_start_soft_num_cached = 0;
-        graph.validation_decode_start_hard_num_cached = 0;
-        graph.validation_decode_start_dupes = 0;
-        graph.validation_decode_start_soft_dupes = 0;
-        graph.validation_decode_start_hash.clear();
-        graph.validation_decode_start_resident.clear();
-        graph.validation_decode_start_slots.clear();
+        invalidate_validation_decode_start_authority(
+            [
+                &mut graph.validation_decode_start_num_cached,
+                &mut graph.validation_decode_start_soft_num_cached,
+                &mut graph.validation_decode_start_hard_num_cached,
+                &mut graph.validation_decode_start_dupes,
+                &mut graph.validation_decode_start_soft_dupes,
+            ],
+            &mut graph.validation_decode_start_hash,
+            &mut graph.validation_decode_start_resident,
+            &mut graph.validation_decode_start_hcs_file,
+            &mut graph.validation_decode_start_slots,
+            &mut graph.validation_decode_start_slots_file,
+            &mut graph.validation_dspark_hcs_authority,
+        );
         graph.validation_decode_cold_hist.clear();
         graph.validation_decode_cold_events.clear();
 
@@ -51193,6 +52928,9 @@ impl GpuDecodeStore {
 
         if let Some(hcs) = graph.hcs.as_ref() {
             let resident = hcs.validation_sorted_resident_experts();
+            let cache_fast = hcs.validation_sorted_cache_fast_experts();
+            let slot_union = hcs.validation_sorted_slot_union_experts();
+            let slots = hcs.validation_slot_entries();
             let (_, _, dupes, soft_dupes) = hcs.validation_counts();
             graph.validation_decode_start_num_cached = hcs.num_cached;
             graph.validation_decode_start_soft_num_cached = hcs.soft_num_cached;
@@ -51201,9 +52939,353 @@ impl GpuDecodeStore {
             graph.validation_decode_start_dupes = dupes;
             graph.validation_decode_start_soft_dupes = soft_dupes;
             graph.validation_decode_start_hash = validation_hash_pairs(&resident);
-            graph.validation_decode_start_resident = resident;
-            graph.validation_decode_start_slots = hcs.validation_slot_entries();
+            graph.validation_decode_start_resident = resident.clone();
+            graph.validation_decode_start_slots = slots.clone();
+
+            let route_count_layers = graph.prompt_hcs_count_layers;
+            let route_count_experts_per_layer = graph.prompt_hcs_count_experts_per_layer;
+            let expected_route_count_len = route_count_layers
+                .checked_mul(route_count_experts_per_layer)
+                .unwrap_or(usize::MAX);
+            let mut route_counts_valid = route_count_layers > 0
+                && route_count_experts_per_layer > 0
+                && expected_route_count_len == graph.prompt_hcs_counts.len()
+                && graph.prompt_hcs_prompt_tokens == prompt_len
+                && graph.prompt_hcs_record_calls > 0
+                && graph.prompt_hcs_record_calls_per_layer.len() == route_count_layers;
+            let mut route_count_per_layer_sums = Vec::with_capacity(route_count_layers);
+            let mut route_count_sum = 0u64;
+            if expected_route_count_len == graph.prompt_hcs_counts.len()
+                && route_count_experts_per_layer > 0
+            {
+                for layer_counts in graph
+                    .prompt_hcs_counts
+                    .chunks_exact(route_count_experts_per_layer)
+                {
+                    let mut layer_sum = 0u64;
+                    for &count in layer_counts {
+                        match layer_sum.checked_add(count) {
+                            Some(sum) => layer_sum = sum,
+                            None => route_counts_valid = false,
+                        }
+                    }
+                    match route_count_sum.checked_add(layer_sum) {
+                        Some(sum) => route_count_sum = sum,
+                        None => route_counts_valid = false,
+                    }
+                    if layer_sum == 0 {
+                        route_counts_valid = false;
+                    }
+                    route_count_per_layer_sums.push(layer_sum);
+                }
+            } else {
+                route_counts_valid = false;
+            }
+            let record_call_sum = graph
+                .prompt_hcs_record_calls_per_layer
+                .iter()
+                .try_fold(0u64, |sum, &calls| sum.checked_add(calls));
+            if record_call_sum != Some(graph.prompt_hcs_record_calls)
+                || graph
+                    .prompt_hcs_record_calls_per_layer
+                    .iter()
+                    .any(|&calls| calls == 0)
+            {
+                route_counts_valid = false;
+            }
+
+            let active_prefix_len = hcs.soft_num_cached.min(hcs.soft_ranking.len());
+            if active_prefix_len != hcs.soft_num_cached {
+                route_counts_valid = false;
+            }
+            let active_prefix = &hcs.soft_ranking[..active_prefix_len];
+            let hard_num_cached = graph.validation_decode_start_hard_num_cached;
+            let hard_planned_prefix: Vec<(usize, usize)> = hcs
+                .heatmap_ranking
+                .iter()
+                .take(hard_num_cached)
+                .copied()
+                .collect();
+            let physical_hard_loaded: Vec<(usize, usize)> = hcs
+                .pool_slot_to_expert
+                .iter()
+                .take(hard_num_cached)
+                .filter_map(|entry| *entry)
+                .collect();
+            let hard_occupied_tail = hcs
+                .pool_slot_to_expert
+                .iter()
+                .skip(hard_num_cached)
+                .filter(|entry| entry.is_some())
+                .count();
+            let actual_loaded_order: Vec<(usize, usize)> = hcs
+                .soft_slot_to_expert
+                .iter()
+                .take(active_prefix_len)
+                .filter_map(|entry| *entry)
+                .collect();
+            let soft_expected_loaded_slots = hcs
+                .soft_chunks_loaded
+                .saturating_mul(hcs.soft_slots_per_chunk)
+                .min(hcs.soft_num_slots);
+            let soft_occupied_tail = hcs
+                .soft_slot_to_expert
+                .iter()
+                .take(hcs.soft_num_slots)
+                .skip(active_prefix_len)
+                .filter(|entry| entry.is_some())
+                .count();
+            let hcs_coordinate_experts_per_layer = hcs.num_experts_per_layer;
+            let hcs_coordinate_capacity = hcs.cache_fast.len();
+            let hcs_coordinate_layers = if hcs_coordinate_experts_per_layer > 0
+                && hcs_coordinate_capacity % hcs_coordinate_experts_per_layer == 0
+            {
+                hcs_coordinate_capacity / hcs_coordinate_experts_per_layer
+            } else {
+                0
+            };
+            let resident_sha256 = validation_hash_pairs_sha256(b"resident_set", &resident);
+            let cache_fast_sha256 = validation_hash_pairs_sha256(b"resident_set", &cache_fast);
+            let slot_union_sha256 = validation_hash_pairs_sha256(b"resident_set", &slot_union);
+            let slot_order_sha256 = validation_hash_dspark_slots_sha256(&slots);
+            let route_count_vector_sha256 =
+                validation_hash_u64_vector_sha256(&graph.prompt_hcs_counts);
+            let checkpoint_ranking_sha256 =
+                validation_hash_pairs_sha256(b"checkpoint_heatmap_ranking", &hcs.heatmap_ranking);
+            let hard_planned_prefix_sha256 =
+                validation_hash_pairs_sha256(b"hard_planned_prefix", &hard_planned_prefix);
+            let soft_ranking_sha256 =
+                validation_hash_pairs_sha256(b"soft_ranking", &hcs.soft_ranking);
+            let soft_heatmap_ranking_sha256 =
+                validation_hash_pairs_sha256(b"soft_ranking", &hcs.soft_heatmap_ranking);
+            let soft_active_prefix_sha256 =
+                validation_hash_pairs_sha256(b"soft_active_prefix", active_prefix);
+            let soft_actual_loaded_order_sha256 =
+                validation_hash_pairs_sha256(b"soft_active_prefix", &actual_loaded_order);
+            let final_chunk_plan_sha256 = validation_hash_hcs_chunk_plan_sha256(
+                &hcs.heatmap_ranking,
+                &hard_planned_prefix,
+                &hcs.soft_ranking,
+                active_prefix_len,
+                hcs.soft_slots_per_chunk,
+                hcs.soft_chunks_loaded,
+                hcs.soft_total_chunks,
+                hcs.soft_num_slots,
+                hcs.soft_pressure_cap_chunks,
+                hcs.last_reload_uncapped_target_chunks,
+                hcs.last_reload_target_chunks,
+            );
+            let coordinate_sets_exact = validation_hcs_coordinate_sets_exact(
+                hcs.num_cached,
+                resident.len(),
+                &resident_sha256,
+                cache_fast.len(),
+                &cache_fast_sha256,
+                slot_union.len(),
+                &slot_union_sha256,
+                slots.len(),
+                dupes,
+                soft_dupes,
+            );
+            let soft_layout_exact = validation_hcs_soft_layout_exact(
+                hcs.soft_num_cached,
+                soft_expected_loaded_slots,
+                soft_occupied_tail,
+                hcs.soft_ranking.len(),
+                hcs.soft_num_slots,
+                active_prefix_len,
+                actual_loaded_order.len(),
+                &soft_active_prefix_sha256,
+                &soft_actual_loaded_order_sha256,
+            );
+            let checkpoint_ranking_is_permutation = validation_ranking_is_coordinate_permutation(
+                &hcs.heatmap_ranking,
+                hcs_coordinate_layers,
+                hcs_coordinate_experts_per_layer,
+            );
+            let mut planned_tier_prefix = Vec::with_capacity(
+                hard_planned_prefix
+                    .len()
+                    .saturating_add(hcs.soft_ranking.len()),
+            );
+            planned_tier_prefix.extend_from_slice(&hard_planned_prefix);
+            planned_tier_prefix.extend_from_slice(&hcs.soft_ranking);
+            let checkpoint_tier_prefix_exact = hcs.heatmap_ranking.get(..planned_tier_prefix.len())
+                == Some(planned_tier_prefix.as_slice());
+            let checkpoint_ranking_exact =
+                checkpoint_ranking_is_permutation && checkpoint_tier_prefix_exact;
+            let hard_layout_exact = validation_hcs_hard_layout_exact(
+                hard_num_cached,
+                hard_occupied_tail,
+                &hard_planned_prefix,
+                &physical_hard_loaded,
+            );
+            let reload_plan_exact = matches!(
+                (
+                    hcs.last_reload_uncapped_target_chunks,
+                    hcs.last_reload_target_chunks,
+                ),
+                (Some(uncapped), Some(target))
+                    if target <= uncapped && target == hcs.soft_chunks_loaded
+            );
+            let authority_available = dspark_loaded
+                && route_counts_valid
+                && preserve_checkpoint_order
+                && checkpoint_ranking_exact
+                && hard_layout_exact
+                && reload_plan_exact
+                && hcs_coordinate_layers > 0
+                && coordinate_sets_exact
+                && soft_layout_exact
+                && hcs.soft_ranking.len() == hcs.soft_heatmap_ranking.len()
+                && soft_ranking_sha256 == soft_heatmap_ranking_sha256
+                && hcs.soft_chunks_loaded <= hcs.soft_total_chunks;
+            graph.validation_dspark_hcs_authority = ValidationDsparkHcsAuthority {
+                available: authority_available,
+                route_counts_valid,
+                route_prompt_tokens: graph.prompt_hcs_prompt_tokens,
+                route_count_layers,
+                route_count_experts_per_layer,
+                route_count_vector_len: graph.prompt_hcs_counts.len(),
+                route_count_vector_sha256,
+                route_count_sum,
+                route_count_nonzero: graph
+                    .prompt_hcs_counts
+                    .iter()
+                    .filter(|&&count| count > 0)
+                    .count(),
+                route_count_per_layer_sums,
+                route_record_calls: graph.prompt_hcs_record_calls,
+                route_record_calls_per_layer: graph.prompt_hcs_record_calls_per_layer.clone(),
+                dspark_mode,
+                preserve_checkpoint_order,
+                checkpoint_ranking_exact,
+                checkpoint_ranking_len: hcs.heatmap_ranking.len(),
+                checkpoint_ranking_sha256,
+                hard_planned_prefix_len: hard_planned_prefix.len(),
+                hard_planned_prefix_sha256,
+                soft_ranking_len: hcs.soft_ranking.len(),
+                soft_ranking_sha256,
+                soft_heatmap_ranking_len: hcs.soft_heatmap_ranking.len(),
+                soft_heatmap_ranking_sha256,
+                soft_active_prefix_len: active_prefix_len,
+                soft_active_prefix_sha256,
+                soft_actual_loaded_order_len: actual_loaded_order.len(),
+                soft_actual_loaded_order_sha256,
+                soft_slots_per_chunk: hcs.soft_slots_per_chunk,
+                soft_chunks_loaded: hcs.soft_chunks_loaded,
+                soft_total_chunks: hcs.soft_total_chunks,
+                soft_num_slots: hcs.soft_num_slots,
+                soft_pressure_cap_chunks: hcs.soft_pressure_cap_chunks,
+                reload_uncapped_target_chunks: hcs.last_reload_uncapped_target_chunks,
+                reload_target_chunks: hcs.last_reload_target_chunks,
+                soft_expected_loaded_slots,
+                soft_occupied_tail,
+                final_chunk_plan_sha256,
+                hcs_coordinate_layers,
+                hcs_coordinate_experts_per_layer,
+                hcs_coordinate_capacity,
+                cache_fast_count: cache_fast.len(),
+                cache_fast_sha256,
+                slot_union_count: slot_union.len(),
+                slot_union_sha256,
+                resident_sha256,
+                slot_order_sha256,
+            };
         }
+    }
+
+    pub fn dspark_decode_start_hcs_identity_json(&self, prompt_len: usize) -> String {
+        let payload = if let Some(graph) = self.graph.as_ref() {
+            let authority = &graph.validation_dspark_hcs_authority;
+            let coordinate_space = serde_json::json!({
+                "schema": "krasis_hcs_coordinate_space_v1",
+                "layers": authority.hcs_coordinate_layers,
+                "experts_per_layer": authority.hcs_coordinate_experts_per_layer,
+                "capacity": authority.hcs_coordinate_capacity,
+            });
+            let route_counts = serde_json::json!({
+                "schema": "krasis_prompt_hcs_route_counts_v1",
+                "valid": authority.route_counts_valid,
+                "prompt_tokens": authority.route_prompt_tokens,
+                "layers": authority.route_count_layers,
+                "experts_per_layer": authority.route_count_experts_per_layer,
+                "vector_len": authority.route_count_vector_len,
+                "vector_sha256": authority.route_count_vector_sha256,
+                "count_sum": authority.route_count_sum,
+                "nonzero_count": authority.route_count_nonzero,
+                "per_layer_sums": authority.route_count_per_layer_sums,
+                "record_calls": authority.route_record_calls,
+                "record_calls_per_layer": authority.route_record_calls_per_layer,
+            });
+            let final_plan = serde_json::json!({
+                "schema": "krasis_dspark_hcs_final_plan_v2",
+                "mode": authority.dspark_mode.as_str(),
+                "preserve_checkpoint_order": authority.preserve_checkpoint_order,
+                "prompt_blend_applied": false,
+                "effective_order_source": "checkpoint_heatmap_ranking",
+                "checkpoint_ranking_exact": authority.checkpoint_ranking_exact,
+                "checkpoint_ranking_len": authority.checkpoint_ranking_len,
+                "checkpoint_ranking_sha256": authority.checkpoint_ranking_sha256,
+                "hard_planned_prefix_len": authority.hard_planned_prefix_len,
+                "hard_planned_prefix_sha256": authority.hard_planned_prefix_sha256,
+                "soft_ranking_len": authority.soft_ranking_len,
+                "soft_ranking_sha256": authority.soft_ranking_sha256,
+                "soft_heatmap_ranking_len": authority.soft_heatmap_ranking_len,
+                "soft_heatmap_ranking_sha256": authority.soft_heatmap_ranking_sha256,
+                "active_prefix_len": authority.soft_active_prefix_len,
+                "active_prefix_sha256": authority.soft_active_prefix_sha256,
+                "actual_loaded_order_len": authority.soft_actual_loaded_order_len,
+                "actual_loaded_order_sha256": authority.soft_actual_loaded_order_sha256,
+                "soft_slots_per_chunk": authority.soft_slots_per_chunk,
+                "soft_chunks_loaded": authority.soft_chunks_loaded,
+                "soft_total_chunks": authority.soft_total_chunks,
+                "soft_num_slots": authority.soft_num_slots,
+                "soft_pressure_cap_chunks": authority.soft_pressure_cap_chunks,
+                "reload_uncapped_target_chunks": authority.reload_uncapped_target_chunks,
+                "reload_target_chunks": authority.reload_target_chunks,
+                "soft_expected_loaded_slots": authority.soft_expected_loaded_slots,
+                "soft_occupied_tail": authority.soft_occupied_tail,
+                "final_chunk_plan_sha256": authority.final_chunk_plan_sha256,
+            });
+            let mut identity = serde_json::json!({
+                "schema": "krasis_dspark_decode_start_hcs_identity_v3",
+                "available": authority.available,
+                "prompt_len": prompt_len,
+                "num_cached": graph.validation_decode_start_num_cached,
+                "soft_num_cached": graph.validation_decode_start_soft_num_cached,
+                "hard_num_cached": graph.validation_decode_start_hard_num_cached,
+                "dupes": graph.validation_decode_start_dupes,
+                "soft_dupes": graph.validation_decode_start_soft_dupes,
+                "resident_count": graph.validation_decode_start_resident.len(),
+                "resident_hash_fnv1a64": graph.validation_decode_start_hash,
+                "resident_sha256": authority.resident_sha256,
+                "cache_fast_count": authority.cache_fast_count,
+                "cache_fast_sha256": authority.cache_fast_sha256,
+                "slot_union_count": authority.slot_union_count,
+                "slot_union_sha256": authority.slot_union_sha256,
+                "slot_count": graph.validation_decode_start_slots.len(),
+                "slot_order_hash_fnv1a64": validation_hash_dspark_slots(
+                    &graph.validation_decode_start_slots,
+                ),
+                "slot_order_sha256": authority.slot_order_sha256,
+            });
+            let identity_object = identity
+                .as_object_mut()
+                .expect("D-Spark HCS identity is a JSON object");
+            identity_object.insert("hcs_coordinate_space".to_string(), coordinate_space);
+            identity_object.insert("route_counts".to_string(), route_counts);
+            identity_object.insert("final_plan".to_string(), final_plan);
+            identity
+        } else {
+            serde_json::json!({
+                "schema": "krasis_dspark_decode_start_hcs_identity_v3",
+                "prompt_len": prompt_len,
+                "available": false,
+                "reason": "graph_not_configured",
+            })
+        };
+        payload.to_string()
     }
 
     pub fn config_validation_snapshot_json(
@@ -51494,8 +53576,99 @@ impl GpuDecodeStore {
             .map(|m| m.topk)
             .max()
             .unwrap_or(16);
+        let canonical_enabled = self.dspark.is_some();
+        let (d_dspark_canonical_expert_outs, d_dspark_canonical_weights) = if canonical_enabled {
+            if max_topk == 0 || max_topk > graph.max_experts_per_tok {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "D-Spark canonical top-k {max_topk} exceeds registered capacity {}",
+                    graph.max_experts_per_tok,
+                )));
+            }
+            let canonical_expert_elems = batch_max
+                .checked_mul(graph.max_experts_per_tok)
+                .and_then(|rows| rows.checked_mul(hs))
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "D-Spark canonical expert-output allocation overflow",
+                    )
+                })?;
+            let canonical_weight_elems = batch_max
+                .checked_mul(graph.max_experts_per_tok)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "D-Spark canonical weight allocation overflow",
+                    )
+                })?;
+            let expert_outputs = self
+                .device
+                .alloc_zeros::<u16>(canonical_expert_elems)
+                .map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "D-Spark canonical expert outputs: {error:?}"
+                    ))
+                })?;
+            let weights = self
+                .device
+                .alloc_zeros::<f32>(canonical_weight_elems)
+                .map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "D-Spark canonical weights: {error:?}"
+                    ))
+                })?;
+            let canonical_expert_bytes = canonical_expert_elems
+                .checked_mul(std::mem::size_of::<u16>())
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "D-Spark canonical expert-output byte count overflow",
+                    )
+                })?;
+            let canonical_weight_bytes = canonical_weight_elems
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "D-Spark canonical weight byte count overflow",
+                    )
+                })?;
+            vram_total = vram_total
+                .checked_add(canonical_expert_bytes)
+                .and_then(|bytes| bytes.checked_add(canonical_weight_bytes))
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "D-Spark canonical VRAM accounting overflow",
+                    )
+                })?;
+            (Some(expert_outputs), Some(weights))
+        } else {
+            (None, None)
+        };
         let h_bt_ids = vec![0i32; batch_max * max_topk];
         let h_bt_wts = vec![0.0f32; batch_max * max_topk];
+        let dspark_upload_bytes = batch_max
+            .checked_mul(graph.batch_upload_total_bytes)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "D-Spark resident host staging size overflow",
+                )
+            })?;
+        let h_dspark_batch_upload = SequenceStatePinnedBuffer::new(dspark_upload_bytes)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let h_dspark_canonical_phase_upload = if canonical_enabled {
+            let canonical_phase_count = dspark_canonical_phase_capacity(batch_max, max_topk)
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            let canonical_phase_bytes = canonical_phase_count
+                .checked_mul(graph.batch_upload_total_bytes)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "D-Spark canonical phase staging allocation overflow",
+                    )
+                })?;
+            Some(
+                SequenceStatePinnedBuffer::new(canonical_phase_bytes)
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
+            )
+        } else {
+            None
+        };
 
         // GPU topk routing buffers (for batched MoE routing without per-token sync)
         let d_bt_ids = self
@@ -51692,9 +53865,13 @@ impl GpuDecodeStore {
         );
 
         graph.batch_max = batch_max;
+        graph.h_dspark_batch_upload = Some(h_dspark_batch_upload);
         graph.d_batch_hidden = Some(bh);
         graph.d_batch_residual = Some(br);
         graph.d_batch_moe_out = Some(bmo);
+        graph.d_dspark_canonical_expert_outs = d_dspark_canonical_expert_outs;
+        graph.d_dspark_canonical_weights = d_dspark_canonical_weights;
+        graph.h_dspark_canonical_phase_upload = h_dspark_canonical_phase_upload;
         graph.d_batch_logits = Some(bl);
         graph.h_batch_logits = h_bl;
         graph.h_batch_topk_ids = h_bt_ids;
@@ -55621,6 +57798,7 @@ impl GpuDecodeStore {
                         Some(expert_input_ptr),
                         Some(d_wts),
                         Some(topk),
+                        None,
                         "graph TileQ",
                     )?;
                 } else if graph_w13_path == GraphW13Path::DirectBf16 {
@@ -61924,6 +64102,7 @@ impl GpuDecodeStore {
         expert_input_override: Option<u64>,
         expert_weights_override: Option<u64>,
         expert_count_override: Option<usize>,
+        expert_output_override: Option<u64>,
         label: &str,
     ) -> Result<(), String> {
         use cudarc::driver::LaunchConfig;
@@ -62007,6 +64186,8 @@ impl GpuDecodeStore {
                 .ok_or_else(|| "split expert launch without d_wts_hot".to_string())?
                 .device_ptr()
         };
+        let expert_output_ptr =
+            expert_output_override.unwrap_or_else(|| *graph.d_batch_expert_outs.device_ptr());
 
         if graph.expert_bits == 3 {
             let factors = moe
@@ -62167,7 +64348,7 @@ impl GpuDecodeStore {
                 d_w2s,
                 *graph.d_batch_gate_ups.device_ptr(),
                 2 * intermediate,
-                *graph.d_batch_expert_outs.device_ptr(),
+                expert_output_ptr,
                 expert_hs,
                 0,
                 0,
@@ -62310,7 +64491,7 @@ impl GpuDecodeStore {
                             d_w2p,
                             d_w2s,
                             *graph.d_batch_gate_ups.device_ptr(),
-                            *graph.d_batch_expert_outs.device_ptr(),
+                            expert_output_ptr,
                             inv_wp,
                             inv_sp,
                             intermediate as i32,
@@ -62339,7 +64520,7 @@ impl GpuDecodeStore {
                             d_w2p,
                             d_w2s,
                             *graph.d_batch_gate_ups.device_ptr(),
-                            *graph.d_batch_expert_outs.device_ptr(),
+                            expert_output_ptr,
                             inv_wp,
                             inv_sp,
                             intermediate as i32,
@@ -62364,7 +64545,257 @@ impl GpuDecodeStore {
         graph: &GpuDecodeGraph,
         layer_idx: usize,
     ) -> Result<(), String> {
-        Self::launch_batched_expert_stack(graph, layer_idx, None, None, None, "split hot")
+        Self::launch_batched_expert_stack(graph, layer_idx, None, None, None, None, "split hot")
+    }
+
+    /// Apply the ordinary graph's post-routed arithmetic to one canonical
+    /// suffix row.  Routed output has already been produced by the one full
+    /// top-k reduction.  Keep scaling, shared gating, shared W13 K-splits, and
+    /// shared W2 autotune in the same order as `run_segment_kernels`.
+    fn launch_dspark_canonical_moe_tail(
+        &self,
+        graph: &GpuDecodeGraph,
+        layer_idx: usize,
+        expert_input_ptr: u64,
+        routed_accum_ptr: u64,
+    ) -> Result<(), String> {
+        use cudarc::driver::LaunchConfig;
+
+        let moe = graph
+            .moe_layers
+            .get(layer_idx)
+            .and_then(|moe| moe.as_ref())
+            .ok_or_else(|| format!("canonical suffix has no MoE layer {layer_idx}"))?;
+        if !moe.gated_experts
+            || moe.activation_type != 0
+            || !moe.deepseek_v4_activation
+            || moe.moe_input_size != 0
+            || moe.latent_down_wid.is_some()
+            || moe.latent_up_wid.is_some()
+        {
+            return Err(format!(
+                "canonical suffix layer {layer_idx} left the standard DeepSeek-V4 contract"
+            ));
+        }
+        let kernels = graph
+            .kernels
+            .as_ref()
+            .ok_or_else(|| "canonical suffix kernels are not cached".to_string())?;
+        let hidden = graph.hidden_size;
+        let intermediate = graph.shared_expert_intermediate_size;
+        let routed_scale = moe.routed_scaling_factor;
+        let shared_ptrs = graph
+            .shared_expert_vram
+            .get(layer_idx)
+            .and_then(|shared| shared.as_ref())
+            .map(|shared| {
+                (
+                    shared.w13_packed_ptr(),
+                    shared.w13_scales_ptr(),
+                    shared.w2_packed_ptr(),
+                    shared.w2_scales_ptr(),
+                )
+            });
+
+        if shared_ptrs.is_some() && routed_scale != 1.0 {
+            unsafe {
+                kernels
+                    .scale_bf16
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (((hidden + 255) / 256) as u32, 1, 1),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            routed_accum_ptr,
+                            routed_accum_ptr,
+                            routed_scale,
+                            hidden as i32,
+                        ),
+                    )
+                    .map_err(|error| {
+                        format!("canonical routed pre-shared scale layer {layer_idx}: {error:?}")
+                    })?;
+            }
+        }
+
+        if let Some((w13p, w13s, w2p, w2s)) = shared_ptrs {
+            let (shared_inv_weight_perm, shared_is_int8) = marlin_dispatch_for_bits(
+                graph.shared_expert_bits,
+                *graph.d_inv_weight_perm.device_ptr(),
+                *graph.d_inv_weight_perm_int8.device_ptr(),
+            )
+            .map_err(|error| format!("canonical shared layer {layer_idx}: {error}"))?;
+            let inv_scale_perm = *graph.d_inv_scale_perm.device_ptr();
+            let shared_gate_ptr = if let Some(shared_gate_wid) = moe.shared_gate_wid {
+                let shared_gate = graph.weights.get(shared_gate_wid).ok_or_else(|| {
+                    format!("canonical shared gate weight {shared_gate_wid} is absent")
+                })?;
+                let alpha = 1.0f32;
+                let beta = 0.0f32;
+                unsafe {
+                    cublas_result::gemm_ex(
+                        *self.blas.handle(),
+                        cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                        cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                        shared_gate.rows as i32,
+                        1,
+                        shared_gate.cols as i32,
+                        &alpha as *const f32 as *const std::ffi::c_void,
+                        shared_gate.ptr as *const std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                        shared_gate.cols as i32,
+                        expert_input_ptr as *const std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                        hidden as i32,
+                        &beta as *const f32 as *const std::ffi::c_void,
+                        *graph.d_fp32_scratch.device_ptr() as *mut std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_32F,
+                        shared_gate.rows as i32,
+                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                        cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                    )
+                    .map_err(|error| {
+                        format!("canonical shared gate layer {layer_idx}: {error:?}")
+                    })?;
+                }
+                *graph.d_fp32_scratch.device_ptr()
+            } else {
+                0
+            };
+
+            let shared_w13_n = 2usize
+                .checked_mul(intermediate)
+                .ok_or_else(|| "canonical shared W13 width overflow".to_string())?;
+            let w13_ksplits =
+                select_w13_ksplits_for_weights(graph, hidden, shared_w13_n, 1, shared_is_int8);
+            let partial_ptr = *graph.d_v2_partial.device_ptr();
+            if w13_ksplits > 1 {
+                self.launch_marlin_gemv_v2(
+                    w13p,
+                    w13s,
+                    expert_input_ptr,
+                    partial_ptr,
+                    shared_inv_weight_perm,
+                    inv_scale_perm,
+                    hidden,
+                    shared_w13_n,
+                    graph.group_size,
+                    w13_ksplits,
+                    kernels,
+                    shared_is_int8,
+                )
+                .map_err(|error| format!("canonical shared W13 layer {layer_idx}: {error:?}"))?;
+                self.launch_reduce_ksplits_bf16(
+                    *graph.d_expert_gate_up.device_ptr(),
+                    partial_ptr,
+                    shared_w13_n,
+                    w13_ksplits,
+                    kernels,
+                )
+                .map_err(|error| {
+                    format!("canonical shared W13 reduce layer {layer_idx}: {error:?}")
+                })?;
+            } else {
+                self.launch_marlin_gemv_raw(
+                    w13p,
+                    w13s,
+                    expert_input_ptr,
+                    *graph.d_expert_gate_up.device_ptr(),
+                    shared_inv_weight_perm,
+                    inv_scale_perm,
+                    hidden,
+                    shared_w13_n,
+                    graph.group_size,
+                    shared_is_int8,
+                )
+                .map_err(|error| {
+                    format!("canonical shared W13 raw layer {layer_idx}: {error:?}")
+                })?;
+            }
+
+            if let Some(&w2_ksplits) =
+                graph
+                    .shared_w2_ksplit_autotune
+                    .get(&(intermediate, hidden, shared_is_int8))
+            {
+                self.launch_fused_silu_accum_v2(
+                    w2p,
+                    w2s,
+                    *graph.d_expert_gate_up.device_ptr(),
+                    partial_ptr,
+                    shared_inv_weight_perm,
+                    inv_scale_perm,
+                    intermediate,
+                    hidden,
+                    graph.group_size,
+                    w2_ksplits,
+                    moe.shared_swiglu_limit,
+                    2,
+                    kernels,
+                    shared_is_int8,
+                )
+                .map_err(|error| format!("canonical shared W2 layer {layer_idx}: {error:?}"))?;
+                self.launch_reduce_ksplits_sigmoid_accum(
+                    routed_accum_ptr,
+                    partial_ptr,
+                    hidden,
+                    w2_ksplits,
+                    1.0,
+                    shared_gate_ptr,
+                    kernels,
+                )
+                .map_err(|error| {
+                    format!("canonical shared W2 reduce layer {layer_idx}: {error:?}")
+                })?;
+            } else {
+                self.launch_fused_silu_accum(
+                    w2p,
+                    w2s,
+                    *graph.d_expert_gate_up.device_ptr(),
+                    routed_accum_ptr,
+                    shared_inv_weight_perm,
+                    inv_scale_perm,
+                    intermediate,
+                    hidden,
+                    graph.group_size,
+                    1.0,
+                    shared_gate_ptr,
+                    moe.shared_swiglu_limit,
+                    2,
+                    kernels,
+                    shared_is_int8,
+                )
+                .map_err(|error| {
+                    format!("canonical shared W2 fused layer {layer_idx}: {error:?}")
+                })?;
+            }
+        } else if routed_scale != 1.0 {
+            unsafe {
+                kernels
+                    .scale_bf16
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (((hidden + 255) / 256) as u32, 1, 1),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            routed_accum_ptr,
+                            routed_accum_ptr,
+                            routed_scale,
+                            hidden as i32,
+                        ),
+                    )
+                    .map_err(|error| {
+                        format!("canonical routed scale layer {layer_idx}: {error:?}")
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     fn disable_peer_dynamic(&mut self, reason: String) {
@@ -63223,6 +65654,7 @@ impl GpuDecodeStore {
             Some(*graph.d_hidden.device_ptr()),
             Some(weights_ptr),
             Some(routes.len()),
+            None,
             "peer expert",
         )?;
         let kernels = graph
@@ -66962,7 +69394,7 @@ impl GpuDecodeStore {
                 )?;
             }
             let active_batch = self
-                .moe_forward_batched(graph, layer_idx, block_size, None)
+                .moe_forward_batched(graph, layer_idx, block_size, None, false)
                 .map_err(|error| format!("D-Spark stage {stage_idx} batched MoE: {error}"))?;
             if active_batch != block_size {
                 return Err(format!(
@@ -67192,6 +69624,7 @@ impl GpuDecodeStore {
         &mut self,
         anchor_token: usize,
         anchor_position: usize,
+        service_timing_requested: bool,
     ) -> Result<DsparkProposal, String> {
         self.validate_dspark_residency_internal()?;
         let mut runtime = self
@@ -67202,7 +69635,11 @@ impl GpuDecodeStore {
             .graph
             .take()
             .ok_or_else(|| "D-Spark proposal requires a decode graph".to_string())?;
-        let service_timing = graph.timing_enabled || runtime.verification_policy.calibrating;
+        let service_timing = dspark_service_timing_enabled(
+            graph.timing_enabled,
+            runtime.verification_policy.calibrating,
+            service_timing_requested,
+        );
         let started = service_timing.then(std::time::Instant::now);
         let result = self.generate_dspark_block_with_graph(
             &mut graph,
@@ -67361,6 +69798,11 @@ impl GpuDecodeStore {
         if position_ptr == 0 {
             return Err("DeepSeek-V4 ungraphed decode has no device position scalar".to_string());
         }
+        let scalar_layer_trace_enabled = self
+            .dspark
+            .as_ref()
+            .is_some_and(|runtime| runtime.verification_policy.calibrated)
+            && env_truthy("KRASIS_DSPARK_SCALAR_LAYER_TRACE");
         self.launch_deepseek_v4_hc_replicate_for_graph(graph)?;
 
         let mut attn_seconds = 0.0f64;
@@ -67384,6 +69826,47 @@ impl GpuDecodeStore {
                 None,
                 None,
             )?;
+            let scalar_ffn_input = if scalar_layer_trace_enabled {
+                Some(
+                    dspark_trace_bf16_rows(
+                        *graph.d_hidden.device_ptr(),
+                        1,
+                        graph.hidden_size,
+                        graph.hidden_size,
+                        "scalar FFN input",
+                    )?[0]
+                        .clone(),
+                )
+            } else {
+                None
+            };
+            let scalar_attention_state = if scalar_layer_trace_enabled {
+                let next_ptr = graph
+                    .deepseek_v4_decode_workspace
+                    .as_ref()
+                    .map(|workspace| *workspace.d_hc_next.device_ptr())
+                    .ok_or("DeepSeek-V4 decode workspace is not finalized")?;
+                let hc_mult = graph.layers[layer_idx]
+                    .deepseek_v4
+                    .as_ref()
+                    .and_then(|v4| v4.hyper_connection.as_ref())
+                    .map(|hc| hc.mult)
+                    .ok_or_else(|| {
+                        format!("DeepSeek-V4 layer {} hyper-connection is absent", layer_idx)
+                    })?;
+                Some(
+                    dspark_trace_bf16_rows(
+                        next_ptr,
+                        1,
+                        hc_mult * graph.hidden_size,
+                        hc_mult * graph.hidden_size,
+                        "scalar attention state",
+                    )?[0]
+                        .clone(),
+                )
+            } else {
+                None
+            };
             if let Some(start) = stage_start {
                 self.device
                     .synchronize()
@@ -67429,6 +69912,33 @@ impl GpuDecodeStore {
                 &format!("DeepSeek-V4 layer {} FFN", layer_idx),
             )?;
             self.capture_dspark_decode_target_state(graph, layer_idx, position_ptr)?;
+            if scalar_layer_trace_enabled {
+                let moe_output = dspark_trace_bf16_rows(
+                    *graph.d_moe_out.device_ptr(),
+                    1,
+                    graph.hidden_size,
+                    graph.hidden_size,
+                    "scalar MoE output",
+                )?[0]
+                    .clone();
+                let layer_state = dspark_trace_bf16_rows(
+                    state_ptr,
+                    1,
+                    hc_mult * graph.hidden_size,
+                    hc_mult * graph.hidden_size,
+                    "scalar layer state",
+                )?[0]
+                    .clone();
+                eprintln!(
+                    "D-SPARK SCALAR LAYER TRACE position={} layer={} ffn_input={} attention_state={} moe_output={} layer_state={}",
+                    position,
+                    layer_idx,
+                    scalar_ffn_input.as_deref().unwrap_or("missing"),
+                    scalar_attention_state.as_deref().unwrap_or("missing"),
+                    moe_output,
+                    layer_state,
+                );
+            }
             if let Some(start) = moe_start {
                 self.device
                     .synchronize()
@@ -67488,6 +69998,28 @@ impl GpuDecodeStore {
             }
         }
         apply_logit_softcap_in_place(&mut graph.h_logits, graph.final_logit_softcap);
+        if scalar_layer_trace_enabled {
+            let final_hidden = dspark_trace_bf16_rows(
+                *graph.d_hidden.device_ptr(),
+                1,
+                graph.hidden_size,
+                graph.hidden_size,
+                "scalar final hidden",
+            )?[0]
+                .clone();
+            let final_logits = dspark_trace_f32_host_rows(
+                &graph.h_logits,
+                1,
+                graph.vocab_size,
+                graph.vocab_size,
+                "scalar final logits",
+            )?[0]
+                .clone();
+            eprintln!(
+                "D-SPARK SCALAR HEAD TRACE position={} final_hidden={} final_logits={}",
+                position, final_hidden, final_logits,
+            );
+        }
         if timing {
             let total_seconds = step_start.elapsed().as_secs_f64();
             graph.t_attn += attn_seconds;
@@ -74889,11 +77421,192 @@ impl GpuDecodeStore {
         result
     }
 
+    fn dspark_canonical_suffix_support(&self, require_captured_graphs: bool) -> Result<(), String> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| "D-Spark canonical suffix requires a decode graph".to_string())?;
+        let hcs = graph
+            .hcs
+            .as_ref()
+            .ok_or_else(|| "D-Spark canonical suffix requires HCS residency".to_string())?;
+        validate_dspark_canonical_graph_capture(
+            graph.per_layer_graphs_valid,
+            graph.per_layer_graphs.len(),
+            require_captured_graphs,
+        )
+        .map_err(|reason| format!("D-Spark canonical suffix {reason}"))?;
+        let features = DsparkCanonicalSuffixFeatures {
+            gpu_route_sync: graph.gpu_route_sync
+                || graph.gpu_route_sync_hot_nosync
+                || graph.gpu_route_sync_hot_full_graph
+                || graph.mapped_reads_active,
+            split_expert_launch: graph.split_expert_launch,
+            apfl: graph.apfl.as_ref().is_some_and(|apfl| apfl.enabled),
+            prefetch: graph.prefetch_depth > 0,
+            // A completed prompt-conditioned reload is part of ordinary
+            // production authority, not a suffix-time mutation.  Reject only
+            // a pending reload (or a mode which can alter residency while the
+            // suffix is running); the pointer snapshot below binds whichever
+            // prompt-specific layout became authoritative before decode.
+            dynamic_hcs: hcs.dynamic_enabled
+                || hcs.soft_reload_pending
+                || graph.prompt_hcs_shadow.enabled,
+            adaptive_cold_drop: graph.adaptive_cold_drop.enabled()
+                || graph.adaptive_cold_drop_shadow.enabled()
+                || graph.hcs_cold_swap.enabled,
+            peer_experts: !graph.peer_experts.is_empty(),
+            cpu_tail: !graph.cpu_tail_workers.is_empty(),
+            expert_compression: graph.expert_compression.is_some()
+                || graph.synthetic_repack.is_some(),
+            unsupported_routed_format: graph.expert_bits != 4,
+            graph_clock_instrumentation: graph.graph_moe_route_clock_enabled
+                || graph.graph_moe_w2_clock_enabled
+                || graph.graph_moe_w2_preload_clock_enabled,
+        };
+        validate_dspark_canonical_suffix_features(features)
+            .map_err(|reason| format!("D-Spark canonical suffix does not support {reason}"))?;
+
+        if graph.decode_layer_start != 0
+            || graph.decode_layer_end != graph.num_layers
+            || graph.dsa_runtime_registered
+        {
+            return Err(
+                "D-Spark canonical suffix requires one full-primary DeepSeek-V4 graph".to_string(),
+            );
+        }
+        if graph.pre_events.is_none()
+            || graph.d_dspark_canonical_expert_outs.is_none()
+            || graph.d_dspark_canonical_weights.is_none()
+            || graph.h_dspark_canonical_phase_upload.is_none()
+        {
+            return Err("D-Spark canonical suffix buffers/events are incomplete".to_string());
+        }
+        if graph.moe_input_override_ptr != 0 || graph.moe_router_override_ptr != 0 {
+            return Err(
+                "D-Spark canonical suffix does not support routed input overrides".to_string(),
+            );
+        }
+
+        for layer_idx in 0..graph.num_layers {
+            let layer = graph
+                .layers
+                .get(layer_idx)
+                .ok_or_else(|| format!("D-Spark canonical suffix layer {layer_idx} is absent"))?;
+            if layer.deepseek_v4.is_none() || matches!(layer.mlp, GpuMlpConfig::Gemma4MoE { .. }) {
+                return Err(format!(
+                    "D-Spark canonical suffix layer {layer_idx} is not standard DeepSeek-V4"
+                ));
+            }
+            let moe = graph
+                .moe_layers
+                .get(layer_idx)
+                .and_then(|moe| moe.as_ref())
+                .ok_or_else(|| {
+                    format!("D-Spark canonical suffix layer {layer_idx} has no routed experts")
+                })?;
+            if !moe.gated_experts
+                || moe.activation_type != 0
+                || !moe.deepseek_v4_activation
+                || moe.moe_input_size != 0
+                || moe.latent_down_wid.is_some()
+                || moe.latent_up_wid.is_some()
+                || moe.tileq.is_some()
+                || moe.scoring_func != 2
+                || moe.topk == 0
+                || moe.topk > graph.max_experts_per_tok
+            {
+                return Err(format!(
+                    "D-Spark canonical suffix layer {layer_idx} has unsupported routed geometry"
+                ));
+            }
+            let shared_vram = graph
+                .shared_expert_vram
+                .get(layer_idx)
+                .and_then(|shared| shared.as_ref())
+                .is_some();
+            if shared_vram != moe.shared.is_some() {
+                return Err(format!(
+                    "D-Spark canonical suffix layer {layer_idx} shared-expert registration/residency mismatch"
+                ));
+            }
+            if shared_vram && !matches!(graph.shared_expert_bits, 4 | 8) {
+                return Err(format!(
+                    "D-Spark canonical suffix layer {layer_idx} has unsupported shared-expert bit width {}",
+                    graph.shared_expert_bits,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn gpu_decode_step_dspark_target_batched(
         &mut self,
         tokens: &[usize],
         positions: &[usize],
     ) -> Result<usize, String> {
+        if tokens.len() <= 1 {
+            return self.gpu_decode_step_dspark_target_graph_replay(tokens, positions);
+        }
+        let graphs_valid = self
+            .graph
+            .as_ref()
+            .is_some_and(|graph| graph.per_layer_graphs_valid);
+        dspark_target_graph_replay_plan(tokens, positions, graphs_valid)?;
+        // A prompt-conditioned HCS reload invalidates the captured target
+        // graphs.  That is an ordinary cold-request state: preflight every
+        // static capability now, then let authoritative row zero recapture
+        // the graphs before the suffix requires them.
+        if let Err(reason) = self.dspark_canonical_suffix_support(false) {
+            log::debug!(
+                "D-Spark canonical suffix unavailable; using sequential target authority: {}",
+                reason,
+            );
+            let rows = self.gpu_decode_step_dspark_target_graph_replay(tokens, positions)?;
+            let runtime = self.dspark.as_mut().ok_or_else(|| {
+                "D-Spark runtime disappeared after sequential fallback".to_string()
+            })?;
+            runtime.canonical_sequential_fallback_rounds = runtime
+                .canonical_sequential_fallback_rounds
+                .saturating_add(1);
+            runtime.canonical_sequential_fallback_rows = runtime
+                .canonical_sequential_fallback_rows
+                .saturating_add(rows as u64);
+            return Ok(rows);
+        }
+
+        // Row zero remains byte-for-byte on the ordinary decoder authority.
+        // On a cold request this also captures the graphs whose arithmetic the
+        // canonical suffix must reproduce.
+        self.gpu_decode_step_dspark_target_graph_replay(&tokens[..1], &positions[..1])?;
+        if let Err(reason) = self.dspark_canonical_suffix_support(true) {
+            log::debug!(
+                "D-Spark canonical suffix changed after row zero; replaying the suffix on target authority: {}",
+                reason,
+            );
+            let suffix_rows = self.gpu_decode_step_dspark_target_graph_replay_at_row_base(
+                &tokens[1..],
+                &positions[1..],
+                1,
+            )?;
+            if suffix_rows != tokens.len() - 1 {
+                return Err(format!(
+                    "D-Spark sequential suffix returned {suffix_rows} rows for {} inputs",
+                    tokens.len() - 1,
+                ));
+            }
+            let runtime = self.dspark.as_mut().ok_or_else(|| {
+                "D-Spark runtime disappeared after sequential suffix fallback".to_string()
+            })?;
+            runtime.canonical_sequential_fallback_rounds = runtime
+                .canonical_sequential_fallback_rounds
+                .saturating_add(1);
+            runtime.canonical_sequential_fallback_rows = runtime
+                .canonical_sequential_fallback_rows
+                .saturating_add(suffix_rows as u64);
+            return Ok(tokens.len());
+        }
+
         let mut runtime = self
             .dspark
             .take()
@@ -74901,16 +77614,232 @@ impl GpuDecodeStore {
         let mut graph = self
             .graph
             .take()
-            .ok_or_else(|| "D-Spark target batch requires a decode graph".to_string())?;
-        let result = self.gpu_decode_step_dspark_target_batched_inner(
+            .ok_or_else(|| "D-Spark canonical suffix requires a decode graph".to_string())?;
+        let suffix_result = self.gpu_decode_step_dspark_target_batched_inner(
             &mut graph,
             &mut runtime,
-            tokens,
-            positions,
+            &tokens[1..],
+            &positions[1..],
+            1,
+            1,
         );
         self.graph = Some(graph);
         self.dspark = Some(runtime);
-        result
+        let suffix_rows = suffix_result?;
+        if suffix_rows != tokens.len() - 1 {
+            return Err(format!(
+                "D-Spark canonical suffix returned {suffix_rows} rows for {} inputs",
+                tokens.len() - 1,
+            ));
+        }
+        let runtime = self
+            .dspark
+            .as_mut()
+            .ok_or_else(|| "D-Spark runtime disappeared after canonical suffix".to_string())?;
+        runtime.canonical_suffix_rounds = runtime.canonical_suffix_rounds.saturating_add(1);
+        runtime.canonical_suffix_rows = runtime
+            .canonical_suffix_rows
+            .saturating_add(suffix_rows as u64);
+        Ok(tokens.len())
+    }
+
+    /// Verify D-Spark proposals with the ordinary target decoder itself.
+    ///
+    /// The proposal path may batch and reorder auxiliary work, but target
+    /// authority must not depend on proposal width or HCS residency. Replaying
+    /// the already-captured per-layer graphs for every target row preserves the
+    /// exact production expert materialization and full top-k reduction. The
+    /// existing transaction snapshots retain the accepted prefix and restore a
+    /// rejected suffix exactly as before.
+    fn gpu_decode_step_dspark_target_graph_replay(
+        &mut self,
+        tokens: &[usize],
+        positions: &[usize],
+    ) -> Result<usize, String> {
+        self.gpu_decode_step_dspark_target_graph_replay_at_row_base(tokens, positions, 0)
+    }
+
+    /// Replay an ordinary-target slice into a pre-existing verification
+    /// transaction. `row_base` is both the first host-logit row and the row
+    /// whose post-token recurrent snapshot is `row_base + 1`. This lets a
+    /// failed canonical capability recheck preserve an already-completed row
+    /// zero instead of overwriting its evidence or recurrent snapshot.
+    fn gpu_decode_step_dspark_target_graph_replay_at_row_base(
+        &mut self,
+        tokens: &[usize],
+        positions: &[usize],
+        row_base: usize,
+    ) -> Result<usize, String> {
+        for name in [
+            "KRASIS_DSPARK_SCALAR_FULL_TARGET_DIAGNOSTIC",
+            "KRASIS_DSPARK_SCALAR_EQUIVALENT_TARGET_MOE_DIAGNOSTIC",
+            "KRASIS_DSPARK_SCALAR_SEQUENTIAL_MOE_DIAGNOSTIC",
+        ] {
+            if env_truthy(name) {
+                return Err(format!(
+                    "{name}=1 cannot substitute target arithmetic in the canonical D-Spark verifier"
+                ));
+            }
+        }
+
+        let (graphs_valid, batch_max, vocab_size, kv_max_seq) = {
+            let graph = self
+                .graph
+                .as_ref()
+                .ok_or_else(|| "D-Spark target verification requires a decode graph".to_string())?;
+            if graph.deepseek_v4_decode_workspace.is_none() {
+                return Err(
+                    "D-Spark target verification requires the DeepSeek-V4 decode workspace"
+                        .to_string(),
+                );
+            }
+            (
+                graph.per_layer_graphs_valid,
+                graph.batch_max,
+                graph.vocab_size,
+                graph.kv_max_seq,
+            )
+        };
+        let runtime_batch_max = self
+            .dspark
+            .as_ref()
+            .ok_or_else(|| "D-Spark runtime is not loaded".to_string())?
+            .block_size
+            .checked_add(1)
+            .ok_or_else(|| "D-Spark target graph-replay capacity overflow".to_string())?;
+
+        let replay_rows = dspark_target_graph_replay_plan(tokens, positions, graphs_valid)?;
+        let output_row_end = row_base
+            .checked_add(replay_rows.len())
+            .ok_or_else(|| "D-Spark target graph-replay row range overflow".to_string())?;
+        if output_row_end > batch_max || output_row_end > runtime_batch_max {
+            return Err(format!(
+                "D-Spark target graph-replay rows {row_base}..{output_row_end} exceed allocated capacities graph={batch_max} runtime={runtime_batch_max}",
+            ));
+        }
+        if self
+            .dspark
+            .as_ref()
+            .expect("validated above")
+            .target_state_backups
+            .iter()
+            .any(|backup| output_row_end >= backup.snapshot_rows)
+        {
+            return Err(
+                "D-Spark target graph-replay recurrent snapshot capacity is incomplete".to_string(),
+            );
+        }
+        let total_logits = output_row_end
+            .checked_mul(vocab_size)
+            .ok_or_else(|| "D-Spark target graph-replay logit size overflow".to_string())?;
+        {
+            let graph = self.graph.as_ref().expect("validated above");
+            if graph.h_logits.len() < vocab_size || graph.h_batch_logits.len() < total_logits {
+                return Err(format!(
+                    "D-Spark target graph-replay logit capacity is incomplete: scalar={} batch={} required_scalar={vocab_size} required_batch={total_logits}",
+                    graph.h_logits.len(),
+                    graph.h_batch_logits.len(),
+                ));
+            }
+        }
+
+        for replay_row in &replay_rows {
+            let local_output_row = replay_row.snapshot_row - 1;
+            let output_row = row_base
+                .checked_add(local_output_row)
+                .ok_or_else(|| "D-Spark target graph-replay output row overflow".to_string())?;
+            let snapshot_row = output_row
+                .checked_add(1)
+                .ok_or_else(|| "D-Spark target graph-replay snapshot row overflow".to_string())?;
+            if replay_row.token >= vocab_size {
+                return Err(format!(
+                    "D-Spark target graph-replay token {} exceeds vocabulary {vocab_size}",
+                    replay_row.token,
+                ));
+            }
+            if replay_row.position >= kv_max_seq {
+                return Err(format!(
+                    "D-Spark target graph-replay position {} exceeds KV capacity {kv_max_seq}",
+                    replay_row.position,
+                ));
+            }
+
+            match replay_row.execution {
+                DsparkTargetRowExecution::UngraphedThenCapture => {
+                    if self.cuda_graphs_disabled() {
+                        return Err(
+                            "D-Spark canonical target verification requires per-layer CUDA graphs"
+                                .to_string(),
+                        );
+                    }
+                    self.gpu_decode_step(replay_row.token, replay_row.position)
+                        .map_err(|error| {
+                            format!(
+                                "D-Spark target row {} ungraphed warmup failed: {error}",
+                                output_row,
+                            )
+                        })?;
+                    self.capture_per_layer_graphs(replay_row.position, None, true, true, 0)
+                        .map_err(|error| {
+                            format!(
+                                "D-Spark target row {} graph capture failed: {error}",
+                                output_row,
+                            )
+                        })?;
+                    let captured = self.graph.as_ref().is_some_and(|graph| {
+                        graph.per_layer_graphs_valid && !graph.per_layer_graphs.is_empty()
+                    });
+                    if !captured {
+                        return Err(
+                            "D-Spark target warmup returned without valid per-layer graphs"
+                                .to_string(),
+                        );
+                    }
+                }
+                DsparkTargetRowExecution::PerLayerGraphReplay => {
+                    self.replay_per_layer_graphs(replay_row.token, replay_row.position, true)
+                        .map_err(|error| {
+                            format!(
+                                "D-Spark target row {} graph replay failed: {error}",
+                                output_row,
+                            )
+                        })?;
+                }
+            }
+
+            let row_offset = output_row
+                .checked_mul(vocab_size)
+                .ok_or_else(|| "D-Spark target graph-replay row offset overflow".to_string())?;
+            let row_end = row_offset
+                .checked_add(vocab_size)
+                .ok_or_else(|| "D-Spark target graph-replay row end overflow".to_string())?;
+            {
+                let graph = self.graph.as_mut().expect("validated above");
+                let scalar_logits = &graph.h_logits[..vocab_size];
+                graph.h_batch_logits[row_offset..row_end].copy_from_slice(scalar_logits);
+            }
+
+            {
+                let runtime = self.dspark.as_ref().expect("validated above");
+                self.copy_dspark_target_state_snapshot_async(runtime, None, snapshot_row, false)?;
+            }
+            self.device.synchronize().map_err(|error| {
+                format!(
+                    "D-Spark target row {} snapshot sync failed: {error:?}",
+                    output_row,
+                )
+            })?;
+        }
+
+        let runtime = self.dspark.as_mut().expect("validated above");
+        runtime.target_scalar_lm_head_calls = runtime
+            .target_scalar_lm_head_calls
+            .saturating_add(replay_rows.len() as u64);
+        runtime.target_scalar_lm_head_rows = runtime
+            .target_scalar_lm_head_rows
+            .saturating_add(replay_rows.len() as u64);
+
+        Ok(replay_rows.len())
     }
 
     fn copy_dspark_target_state_snapshot_async(
@@ -75134,6 +78063,8 @@ impl GpuDecodeStore {
         runtime: &mut DsparkRuntime,
         tokens: &[usize],
         positions: &[usize],
+        snapshot_row_base: usize,
+        host_logit_row_base: usize,
     ) -> Result<usize, String> {
         use cudarc::driver::LaunchConfig;
 
@@ -75147,6 +78078,34 @@ impl GpuDecodeStore {
                 positions.len(),
             ));
         }
+        if snapshot_row_base != host_logit_row_base {
+            return Err(format!(
+                "D-Spark canonical suffix row bases differ: snapshot={snapshot_row_base} logits={host_logit_row_base}"
+            ));
+        }
+        let (last_snapshot_row, last_logit_offset) =
+            dspark_canonical_suffix_indices(batch_size - 1, host_logit_row_base, graph.vocab_size)?;
+        let host_logit_start = host_logit_row_base
+            .checked_mul(graph.vocab_size)
+            .ok_or_else(|| "D-Spark canonical suffix host-logit start overflow".to_string())?;
+        let host_logit_end = last_logit_offset
+            .checked_add(graph.vocab_size)
+            .ok_or_else(|| "D-Spark canonical suffix host-logit end overflow".to_string())?;
+        if graph.h_batch_logits.len() < host_logit_end {
+            return Err(format!(
+                "D-Spark canonical suffix host-logit capacity {} is smaller than {host_logit_end}",
+                graph.h_batch_logits.len(),
+            ));
+        }
+        if runtime
+            .target_state_backups
+            .iter()
+            .any(|backup| last_snapshot_row >= backup.snapshot_rows)
+        {
+            return Err(format!(
+                "D-Spark canonical suffix snapshot row {last_snapshot_row} exceeds recurrent backup capacity"
+            ));
+        }
         let runtime_batch_max = runtime
             .block_size
             .checked_add(1)
@@ -75157,7 +78116,8 @@ impl GpuDecodeStore {
                 batch_size, graph.batch_max, runtime_batch_max,
             ));
         }
-        let layer_trace_enabled = env_truthy("KRASIS_DSPARK_BATCH_LAYER_TRACE");
+        let layer_trace_enabled =
+            runtime.verification_policy.calibrated && env_truthy("KRASIS_DSPARK_BATCH_LAYER_TRACE");
         if positions
             .windows(2)
             .any(|window| window[0].checked_add(1) != Some(window[1]))
@@ -75390,9 +78350,7 @@ impl GpuDecodeStore {
                 self.copy_dspark_target_state_snapshot_async(
                     runtime,
                     Some(layer_idx),
-                    batch_idx.checked_add(1).ok_or_else(|| {
-                        "D-Spark target recurrent snapshot row overflow".to_string()
-                    })?,
+                    dspark_canonical_suffix_indices(batch_idx, snapshot_row_base, 1)?.0,
                     false,
                 )?;
                 copy_d2d(
@@ -75436,8 +78394,13 @@ impl GpuDecodeStore {
             )?;
 
             let moe_started = timing.then(std::time::Instant::now);
-            let active_batch =
-                self.moe_forward_batched(graph, layer_idx, batch_size, Some(batch_token_ids_ptr))?;
+            let active_batch = self.moe_forward_batched(
+                graph,
+                layer_idx,
+                batch_size,
+                Some(batch_token_ids_ptr),
+                true,
+            )?;
             if active_batch != batch_size {
                 return Err(format!(
                     "D-Spark target batch was truncated at layer {layer_idx}: {active_batch}/{batch_size}"
@@ -75514,8 +78477,10 @@ impl GpuDecodeStore {
                     "layer state",
                 )?;
                 eprintln!(
-                    "D-SPARK BATCH LAYER TRACE batch_size={} positions={:?} layer={} ffn_input={:?} attention_state={:?} moe_output={:?} layer_state={:?}",
+                    "D-SPARK BATCH LAYER TRACE round={} batch_size={} tokens={:?} positions={:?} layer={} ffn_input={:?} attention_state={:?} moe_output={:?} layer_state={:?}",
+                    runtime.batch_verify_rounds,
                     batch_size,
+                    tokens,
                     positions,
                     layer_idx,
                     ffn_input,
@@ -75549,14 +78514,33 @@ impl GpuDecodeStore {
             .weights
             .get(graph.lm_head_wid)
             .ok_or("D-Spark target LM head is absent")?;
-        self.gemm_bf16_to_f32_batch(
-            lm_head,
-            d_batch_hidden_ptr,
-            d_batch_logits_ptr,
-            batch_size,
-            hidden,
-            graph.vocab_size,
-        )?;
+        let logit_row_bytes = graph
+            .vocab_size
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "D-Spark target logit row byte size overflow".to_string())?;
+        // The target verifier decides which tokens become visible output, so it
+        // must use the same N=1 LM-head arithmetic as ordinary decode.  cuBLAS
+        // selects a different reduction geometry for an N>1 GEMM; even with
+        // bit-identical hidden rows that can perturb near-tied logits and change
+        // a greedy token.  Keep proposal-head batching as a performance detail,
+        // but evaluate every verifier row through the scalar target contract.
+        for batch_idx in 0..batch_size {
+            self.gemv_bf16_to_f32_internal(
+                lm_head,
+                device_row_ptr(
+                    d_batch_hidden_ptr,
+                    batch_idx,
+                    hidden_bytes,
+                    "LM-head hidden",
+                )?,
+                device_row_ptr(
+                    d_batch_logits_ptr,
+                    batch_idx,
+                    logit_row_bytes,
+                    "LM-head logits",
+                )?,
+            )?;
+        }
         self.device
             .synchronize()
             .map_err(|error| format!("D-Spark target batch sync: {error:?}"))?;
@@ -75565,7 +78549,7 @@ impl GpuDecodeStore {
             .ok_or_else(|| "D-Spark target batch logits size overflow".to_string())?;
         let result = unsafe {
             cuda_sys::lib().cuMemcpyDtoH_v2(
-                graph.h_batch_logits.as_mut_ptr() as *mut std::ffi::c_void,
+                graph.h_batch_logits.as_mut_ptr().add(host_logit_start) as *mut std::ffi::c_void,
                 d_batch_logits_ptr,
                 total_logits
                     .checked_mul(std::mem::size_of::<f32>())
@@ -75576,11 +78560,42 @@ impl GpuDecodeStore {
             return Err(format!("D-Spark target batch logits D2H: {result:?}"));
         }
         apply_logit_softcap_in_place(
-            &mut graph.h_batch_logits[..total_logits],
+            &mut graph.h_batch_logits[host_logit_start..host_logit_end],
             graph.final_logit_softcap,
         );
+        if layer_trace_enabled {
+            let final_hidden = dspark_trace_bf16_rows(
+                d_batch_hidden_ptr,
+                batch_size,
+                hidden,
+                hidden,
+                "final hidden",
+            )?;
+            let final_logits = dspark_trace_f32_host_rows(
+                &graph.h_batch_logits[host_logit_start..host_logit_end],
+                batch_size,
+                graph.vocab_size,
+                graph.vocab_size,
+                "final logits",
+            )?;
+            eprintln!(
+                "D-SPARK BATCH HEAD TRACE round={} batch_size={} tokens={:?} positions={:?} final_hidden={:?} final_logits={:?}",
+                runtime.batch_verify_rounds,
+                batch_size,
+                tokens,
+                positions,
+                final_hidden,
+                final_logits,
+            );
+        }
         runtime.batch_head_seconds +=
             self.dspark_timing_checkpoint(head_started, "target batch head")?;
+        runtime.target_scalar_lm_head_calls = runtime
+            .target_scalar_lm_head_calls
+            .saturating_add(batch_size as u64);
+        runtime.target_scalar_lm_head_rows = runtime
+            .target_scalar_lm_head_rows
+            .saturating_add(batch_size as u64);
         Ok(batch_size)
     }
 
@@ -77318,7 +80333,7 @@ impl GpuDecodeStore {
             if has_moe {
                 // Batched MoE with fail-fast: route all tokens, check expert divergence,
                 // potentially truncate batch, then DMA expert union and compute.
-                batch_size = self.moe_forward_batched(graph, layer_idx, batch_size, None)?;
+                batch_size = self.moe_forward_batched(graph, layer_idx, batch_size, None, false)?;
 
                 // Copy moe_out[t] → hidden[t] for each token
                 for t in 0..batch_size {
@@ -77462,6 +80477,579 @@ impl GpuDecodeStore {
         Ok(batch_size)
     }
 
+    /// Materialize every suffix-row routed expert in the ordinary graph's
+    /// resident-then-cold slot order, then run exactly one full-top-k FP32
+    /// weighted reduction for each row. Demand-cold expert bytes are loaded
+    /// once per unique expert and reused by every consuming row; arithmetic is
+    /// never coalesced or reordered across graph slots.
+    fn moe_forward_batched_canonical_after_routing(
+        &self,
+        graph: &mut GpuDecodeGraph,
+        layer_idx: usize,
+        batch_size: usize,
+    ) -> Result<usize, String> {
+        let result =
+            self.moe_forward_batched_canonical_after_routing_inner(graph, layer_idx, batch_size);
+        if let Err(error) = result {
+            // Once the first H2D is queued, returning with work in flight can
+            // let a later rollback or layer overwrite a ping-pong slot. Drain
+            // both streams before publishing the failure.
+            let compute_sync = self.device.synchronize();
+            let copy_sync = unsafe { cuda_sys::lib().cuStreamSynchronize(self.copy_stream.0) };
+            return Err(format!(
+                "{error}; canonical suffix failure drain compute={compute_sync:?} copy={copy_sync:?}"
+            ));
+        }
+        result
+    }
+
+    fn moe_forward_batched_canonical_after_routing_inner(
+        &self,
+        graph: &mut GpuDecodeGraph,
+        layer_idx: usize,
+        batch_size: usize,
+    ) -> Result<usize, String> {
+        use cudarc::driver::LaunchConfig;
+
+        if batch_size == 0 {
+            return Err("D-Spark canonical MoE received an empty suffix batch".to_string());
+        }
+        let (topk, num_experts) = graph
+            .moe_layers
+            .get(layer_idx)
+            .and_then(|moe| moe.as_ref())
+            .map(|moe| (moe.topk, moe.num_experts))
+            .ok_or_else(|| format!("D-Spark canonical MoE layer {layer_idx} is absent"))?;
+        let hidden = graph.hidden_size;
+        let max_ept = graph.max_experts_per_tok;
+        if topk == 0 || topk > max_ept || batch_size > graph.batch_max {
+            return Err(format!(
+                "D-Spark canonical MoE geometry is invalid at layer {layer_idx}: batch={batch_size}/{} topk={topk}/{max_ept}",
+                graph.batch_max,
+            ));
+        }
+        let required_routes = batch_size
+            .checked_mul(topk)
+            .ok_or_else(|| "D-Spark canonical route geometry overflow".to_string())?;
+        if graph.h_batch_topk_ids.len() < required_routes
+            || graph.h_batch_topk_weights.len() < required_routes
+        {
+            return Err(format!(
+                "D-Spark canonical route buffers are undersized: ids={} weights={} required={required_routes}",
+                graph.h_batch_topk_ids.len(),
+                graph.h_batch_topk_weights.len(),
+            ));
+        }
+
+        // Freeze residency and pointer authority before queueing any work.
+        // Dynamic HCS and reload are rejected by the outer capability gate, so
+        // every pointer must remain byte-identical until this layer completes.
+        let mut plans = Vec::with_capacity(batch_size);
+        let mut resident_ptrs = Vec::with_capacity(batch_size);
+        let mut logical_resident = 0usize;
+        let mut logical_cold = 0usize;
+        for row in 0..batch_size {
+            let route_start = row * topk;
+            let ids = &graph.h_batch_topk_ids[route_start..route_start + topk];
+            let weights = &graph.h_batch_topk_weights[route_start..route_start + topk];
+            let mut row_resident = Vec::with_capacity(topk);
+            let mut row_ptrs = Vec::with_capacity(topk);
+            {
+                let hcs = graph.hcs.as_mut().ok_or_else(|| {
+                    "D-Spark canonical MoE lost HCS residency authority".to_string()
+                })?;
+                for &expert_id in ids {
+                    let expert_id = usize::try_from(expert_id).map_err(|_| {
+                        format!(
+                            "D-Spark canonical route has negative expert ID at layer {layer_idx} row {row}"
+                        )
+                    })?;
+                    hcs.record_activation(layer_idx, expert_id);
+                    hcs.dynamic_touch(layer_idx, expert_id);
+                    let ptrs = hcs
+                        .get_fast(layer_idx, expert_id)
+                        .map(|(w13p, w13s, w2p, w2s)| [w13p, w13s, w2p, w2s]);
+                    row_resident.push(ptrs.is_some());
+                    row_ptrs.push(ptrs);
+                }
+            }
+            let plan = dspark_canonical_route_plan(ids, weights, &row_resident, num_experts)
+                .map_err(|error| format!("{error} at layer {layer_idx} row {row}"))?;
+            logical_resident = logical_resident
+                .checked_add(plan.iter().filter(|route| route.resident).count())
+                .ok_or_else(|| "D-Spark canonical resident counter overflow".to_string())?;
+            logical_cold = logical_cold
+                .checked_add(plan.iter().filter(|route| !route.resident).count())
+                .ok_or_else(|| "D-Spark canonical cold counter overflow".to_string())?;
+            plans.push(plan);
+            resident_ptrs.push(row_ptrs);
+        }
+        let cold_schedule = dspark_canonical_cold_schedule(&plans)?;
+        if env_truthy("KRASIS_DSPARK_BATCH_LAYER_TRACE") {
+            let canonical_rows = plans
+                .iter()
+                .map(|plan| {
+                    plan.iter()
+                        .map(|route| {
+                            (
+                                route.router_slot,
+                                route.graph_slot,
+                                route.expert_id,
+                                route.resident,
+                                format!("{:08x}", route.weight.to_bits()),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            eprintln!(
+                "D-SPARK CANONICAL MOE TRACE layer={} batch_size={} routes={:?} cold_union={:?}",
+                layer_idx, batch_size, canonical_rows, cold_schedule,
+            );
+        }
+
+        let canonical_weight_count = batch_size
+            .checked_mul(max_ept)
+            .ok_or_else(|| "D-Spark canonical weight geometry overflow".to_string())?;
+        let canonical_output_count = canonical_weight_count
+            .checked_mul(hidden)
+            .ok_or_else(|| "D-Spark canonical output geometry overflow".to_string())?;
+        let d_canonical_weights = graph
+            .d_dspark_canonical_weights
+            .as_ref()
+            .ok_or_else(|| "D-Spark canonical weight buffer is absent".to_string())?;
+        let d_canonical_outputs = graph
+            .d_dspark_canonical_expert_outs
+            .as_ref()
+            .ok_or_else(|| "D-Spark canonical expert-output buffer is absent".to_string())?;
+        if d_canonical_weights.len() < canonical_weight_count
+            || d_canonical_outputs.len() < canonical_output_count
+        {
+            return Err(format!(
+                "D-Spark canonical device buffers are undersized: weights={}/{} outputs={}/{}",
+                d_canonical_weights.len(),
+                canonical_weight_count,
+                d_canonical_outputs.len(),
+                canonical_output_count,
+            ));
+        }
+        let d_canonical_weights_ptr = *d_canonical_weights.device_ptr();
+        let d_canonical_outputs_ptr = *d_canonical_outputs.device_ptr();
+        let d_batch_hidden_ptr = *graph
+            .d_batch_hidden
+            .as_ref()
+            .ok_or_else(|| "D-Spark canonical hidden buffer is absent".to_string())?
+            .device_ptr();
+        let d_batch_moe_ptr = *graph
+            .d_batch_moe_out
+            .as_ref()
+            .ok_or_else(|| "D-Spark canonical MoE output buffer is absent".to_string())?
+            .device_ptr();
+        let output_row_stride = max_ept
+            .checked_mul(hidden)
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+            .ok_or_else(|| "D-Spark canonical output row stride overflow".to_string())?;
+        let hidden_bytes = hidden
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "D-Spark canonical hidden byte count overflow".to_string())?;
+
+        let mut canonical_weights = vec![0.0f32; canonical_weight_count];
+        for (row, plan) in plans.iter().enumerate() {
+            for route in plan {
+                canonical_weights[row * max_ept + route.graph_slot] = route.weight;
+            }
+        }
+
+        // Validate every cold source range and exact ping-pong geometry before
+        // any asynchronous operation can mutate device state.
+        let pingpong_bases = [
+            *graph.d_expert_buf[0].device_ptr(),
+            *graph.d_expert_buf[1].device_ptr(),
+        ];
+        if graph.expert_buf_total_size == 0
+            || graph.d_expert_buf[0].len() < graph.expert_buf_total_size
+            || graph.d_expert_buf[1].len() < graph.expert_buf_total_size
+        {
+            return Err("D-Spark canonical cold ping-pong buffers are incomplete".to_string());
+        }
+        let component_offsets = [
+            graph.expert_buf_w13p_offset,
+            graph.expert_buf_w13s_offset,
+            graph.expert_buf_w2p_offset,
+            graph.expert_buf_w2s_offset,
+        ];
+        for &(expert_id, _) in &cold_schedule {
+            let expert = graph
+                .moe_layers
+                .get(layer_idx)
+                .and_then(|moe| moe.as_ref())
+                .and_then(|moe| moe.experts.get(expert_id))
+                .ok_or_else(|| {
+                    format!("D-Spark canonical cold expert L{layer_idx}E{expert_id} is absent")
+                })?;
+            let components = [
+                (expert.w13_packed_ptr, expert.w13_packed_bytes),
+                (expert.w13_scales_ptr, expert.w13_scales_bytes),
+                (expert.w2_packed_ptr, expert.w2_packed_bytes),
+                (expert.w2_scales_ptr, expert.w2_scales_bytes),
+            ];
+            validate_dspark_canonical_cold_source(
+                expert.contiguous_ptr,
+                expert.contiguous_bytes,
+                component_offsets,
+                components,
+                graph.expert_buf_total_size,
+            )
+            .map_err(|error| {
+                format!("{error} at D-Spark canonical cold L{layer_idx}E{expert_id}")
+            })?;
+        }
+
+        let upload_bytes = graph.batch_upload_total_bytes;
+        let expected_upload_bytes = max_ept
+            .checked_mul(std::mem::size_of::<u64>())
+            .and_then(|bytes| bytes.checked_mul(4))
+            .and_then(|bytes| {
+                max_ept
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .and_then(|tail| tail.checked_mul(4))
+                    .and_then(|tail| bytes.checked_add(tail))
+            })
+            .ok_or_else(|| "D-Spark canonical upload geometry overflow".to_string())?;
+        if upload_bytes != expected_upload_bytes {
+            return Err(format!(
+                "D-Spark canonical upload layout changed: runtime={upload_bytes} expected={expected_upload_bytes}"
+            ));
+        }
+        let phase_capacity = dspark_canonical_phase_capacity(batch_size, topk)?;
+        let (phase_host_ptr, phase_host_bytes) = graph
+            .h_dspark_canonical_phase_upload
+            .as_ref()
+            .map(|buffer| (buffer.ptr, buffer.bytes))
+            .ok_or_else(|| "D-Spark canonical phase staging is absent".to_string())?;
+        let required_phase_bytes = phase_capacity
+            .checked_mul(upload_bytes)
+            .ok_or_else(|| "D-Spark canonical phase byte count overflow".to_string())?;
+        if phase_host_bytes < required_phase_bytes {
+            return Err(format!(
+                "D-Spark canonical phase staging is undersized: {phase_host_bytes}/{required_phase_bytes}"
+            ));
+        }
+        let mut phase_cursor = 0usize;
+        let mut resident_phases = vec![None; batch_size];
+        let mut cold_phases: Vec<Vec<usize>> = Vec::with_capacity(cold_schedule.len());
+
+        for (row, plan) in plans.iter().enumerate() {
+            let mut entries = Vec::new();
+            for route in plan {
+                if !route.resident || route.weight == 0.0 {
+                    continue;
+                }
+                let ptrs = resident_ptrs[row][route.router_slot].ok_or_else(|| {
+                    format!(
+                        "D-Spark canonical resident L{layer_idx}E{} lost pointers during staging",
+                        route.expert_id,
+                    )
+                })?;
+                entries.push((route.graph_slot, ptrs, route.expert_id as i32, 1.0));
+            }
+            if entries.is_empty() {
+                continue;
+            }
+            if phase_cursor >= phase_capacity {
+                return Err("D-Spark canonical resident phase capacity exhausted".to_string());
+            }
+            let offset = phase_cursor
+                .checked_mul(upload_bytes)
+                .ok_or_else(|| "D-Spark canonical phase offset overflow".to_string())?;
+            let upload =
+                unsafe { std::slice::from_raw_parts_mut(phase_host_ptr.add(offset), upload_bytes) };
+            stage_dspark_canonical_phase(upload, max_ept, entries[0].1, &entries)?;
+            resident_phases[row] = Some(phase_cursor);
+            phase_cursor += 1;
+        }
+        for (cold_index, &(_, ref consumers)) in cold_schedule.iter().enumerate() {
+            let slot = cold_index % 2;
+            let base = pingpong_bases[slot];
+            let ptrs = [
+                base + component_offsets[0] as u64,
+                base + component_offsets[1] as u64,
+                base + component_offsets[2] as u64,
+                base + component_offsets[3] as u64,
+            ];
+            let expert_id = cold_schedule[cold_index].0;
+            let mut consumer_phases = Vec::with_capacity(consumers.len());
+            for &(row, graph_slot) in consumers {
+                if phase_cursor >= phase_capacity {
+                    return Err("D-Spark canonical cold phase capacity exhausted".to_string());
+                }
+                let offset = phase_cursor
+                    .checked_mul(upload_bytes)
+                    .ok_or_else(|| "D-Spark canonical cold phase offset overflow".to_string())?;
+                let upload = unsafe {
+                    std::slice::from_raw_parts_mut(phase_host_ptr.add(offset), upload_bytes)
+                };
+                stage_dspark_canonical_phase(
+                    upload,
+                    max_ept,
+                    ptrs,
+                    &[(graph_slot, ptrs, expert_id as i32, 1.0)],
+                )?;
+                consumer_phases.push(phase_cursor);
+                phase_cursor += 1;
+                if row >= batch_size {
+                    return Err("D-Spark canonical cold consumer row is invalid".to_string());
+                }
+            }
+            cold_phases.push(consumer_phases);
+        }
+
+        // Residency is immutable for this milestone. Re-read every resident
+        // pointer immediately before the first upload so a future HCS feature
+        // cannot silently invalidate the captured phase tables.
+        for (row, plan) in plans.iter().enumerate() {
+            for route in plan.iter().filter(|route| route.resident) {
+                let current = graph
+                    .hcs
+                    .as_ref()
+                    .and_then(|hcs| hcs.get_fast(layer_idx, route.expert_id))
+                    .map(|(w13p, w13s, w2p, w2s)| [w13p, w13s, w2p, w2s]);
+                if current != resident_ptrs[row][route.router_slot] {
+                    return Err(format!(
+                        "D-Spark canonical resident pointer changed at L{layer_idx} row {row} expert {}",
+                        route.expert_id,
+                    ));
+                }
+            }
+        }
+
+        let weight_bytes = canonical_weight_count
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "D-Spark canonical weight upload size overflow".to_string())?;
+        let weight_upload = unsafe {
+            cuda_sys::lib().cuMemcpyHtoD_v2(
+                d_canonical_weights_ptr,
+                canonical_weights.as_ptr() as *const std::ffi::c_void,
+                weight_bytes,
+            )
+        };
+        require_cuda_success("D-Spark canonical final weights H2D", weight_upload)?;
+
+        let compute_stream = *self.device.cu_stream();
+        let copy_stream = self.copy_stream.0;
+        let events = graph
+            .pre_events
+            .as_ref()
+            .ok_or_else(|| "D-Spark canonical events are absent".to_string())?;
+        let dma_events = [events[0].0, events[1].0];
+        let compute_events = [events[2].0, events[3].0];
+        let d_upload = *graph.d_batch_upload.device_ptr();
+        let mask_ptr = d_upload
+            .checked_add(
+                u64::try_from(max_ept * std::mem::size_of::<u64>() * 4)
+                    .map_err(|_| "D-Spark canonical mask offset exceeds u64".to_string())?,
+            )
+            .ok_or_else(|| "D-Spark canonical mask pointer overflow".to_string())?;
+        let mut filled = vec![false; batch_size * topk];
+
+        for (row, phase) in resident_phases.into_iter().enumerate() {
+            let Some(phase) = phase else { continue };
+            let phase_offset = phase
+                .checked_mul(upload_bytes)
+                .ok_or_else(|| "D-Spark canonical resident phase offset overflow".to_string())?;
+            let copy = unsafe {
+                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    d_upload,
+                    phase_host_ptr.add(phase_offset) as *const std::ffi::c_void,
+                    upload_bytes,
+                    compute_stream,
+                )
+            };
+            require_cuda_success("D-Spark canonical resident phase H2D", copy)?;
+            let input_ptr = d_batch_hidden_ptr
+                .checked_add((row * hidden_bytes) as u64)
+                .ok_or_else(|| "D-Spark canonical resident input pointer overflow".to_string())?;
+            let output_ptr = d_canonical_outputs_ptr
+                .checked_add((row * output_row_stride) as u64)
+                .ok_or_else(|| "D-Spark canonical resident output pointer overflow".to_string())?;
+            Self::launch_batched_expert_stack(
+                graph,
+                layer_idx,
+                Some(input_ptr),
+                Some(mask_ptr),
+                Some(topk),
+                Some(output_ptr),
+                "canonical resident",
+            )?;
+            for route in plans[row]
+                .iter()
+                .filter(|route| route.resident && route.weight != 0.0)
+            {
+                filled[row * topk + route.graph_slot] = true;
+            }
+        }
+
+        for (cold_index, &(expert_id, ref consumers)) in cold_schedule.iter().enumerate() {
+            let slot = cold_index % 2;
+            require_cuda_success("D-Spark canonical cold wait for prior compute", unsafe {
+                cuda_sys::lib().cuStreamWaitEvent(copy_stream, compute_events[slot], 0)
+            })?;
+            let expert = graph
+                .moe_layers
+                .get(layer_idx)
+                .and_then(|moe| moe.as_ref())
+                .and_then(|moe| moe.experts.get(expert_id))
+                .ok_or_else(|| {
+                    format!("D-Spark canonical cold L{layer_idx}E{expert_id} vanished")
+                })?;
+            let base = pingpong_bases[slot];
+            let mut dma_bytes = 0usize;
+            let mut dma_calls = 0u64;
+            if expert.contiguous_ptr != 0 {
+                require_cuda_success("D-Spark canonical contiguous cold H2D", unsafe {
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        base,
+                        expert.contiguous_ptr as *const std::ffi::c_void,
+                        expert.contiguous_bytes,
+                        copy_stream,
+                    )
+                })?;
+                dma_bytes = expert.contiguous_bytes;
+                dma_calls = 1;
+            } else {
+                for ((host_ptr, bytes), offset) in [
+                    (expert.w13_packed_ptr, expert.w13_packed_bytes),
+                    (expert.w13_scales_ptr, expert.w13_scales_bytes),
+                    (expert.w2_packed_ptr, expert.w2_packed_bytes),
+                    (expert.w2_scales_ptr, expert.w2_scales_bytes),
+                ]
+                .into_iter()
+                .zip(component_offsets)
+                {
+                    require_cuda_success("D-Spark canonical component cold H2D", unsafe {
+                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            base + offset as u64,
+                            host_ptr as *const std::ffi::c_void,
+                            bytes,
+                            copy_stream,
+                        )
+                    })?;
+                    dma_bytes = dma_bytes
+                        .checked_add(bytes)
+                        .ok_or_else(|| "D-Spark canonical DMA byte count overflow".to_string())?;
+                    dma_calls += 1;
+                }
+            }
+            require_cuda_success("D-Spark canonical cold DMA event", unsafe {
+                cuda_sys::lib().cuEventRecord(dma_events[slot], copy_stream)
+            })?;
+            require_cuda_success("D-Spark canonical compute wait for cold DMA", unsafe {
+                cuda_sys::lib().cuStreamWaitEvent(compute_stream, dma_events[slot], 0)
+            })?;
+
+            for (consumer_index, &(row, graph_slot)) in consumers.iter().enumerate() {
+                let phase = cold_phases[cold_index][consumer_index];
+                let phase_offset = phase
+                    .checked_mul(upload_bytes)
+                    .ok_or_else(|| "D-Spark canonical cold phase offset overflow".to_string())?;
+                require_cuda_success("D-Spark canonical cold phase H2D", unsafe {
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        d_upload,
+                        phase_host_ptr.add(phase_offset) as *const std::ffi::c_void,
+                        upload_bytes,
+                        compute_stream,
+                    )
+                })?;
+                let input_ptr = d_batch_hidden_ptr
+                    .checked_add((row * hidden_bytes) as u64)
+                    .ok_or_else(|| "D-Spark canonical cold input pointer overflow".to_string())?;
+                let output_ptr = d_canonical_outputs_ptr
+                    .checked_add((row * output_row_stride) as u64)
+                    .ok_or_else(|| "D-Spark canonical cold output pointer overflow".to_string())?;
+                Self::launch_batched_expert_stack(
+                    graph,
+                    layer_idx,
+                    Some(input_ptr),
+                    Some(mask_ptr),
+                    Some(topk),
+                    Some(output_ptr),
+                    "canonical cold",
+                )?;
+                filled[row * topk + graph_slot] = true;
+            }
+            require_cuda_success("D-Spark canonical cold compute event", unsafe {
+                cuda_sys::lib().cuEventRecord(compute_events[slot], compute_stream)
+            })?;
+            graph.dma_bytes_total = graph.dma_bytes_total.saturating_add(dma_bytes as u64);
+            graph.dma_call_count = graph.dma_call_count.saturating_add(dma_calls);
+        }
+
+        for (row, plan) in plans.iter().enumerate() {
+            for route in plan.iter().filter(|route| route.weight != 0.0) {
+                if !filled[row * topk + route.graph_slot] {
+                    return Err(format!(
+                        "D-Spark canonical route was not materialized at L{layer_idx} row {row} graph slot {} expert {}",
+                        route.graph_slot,
+                        route.expert_id,
+                    ));
+                }
+            }
+        }
+
+        let kernels = graph
+            .kernels
+            .as_ref()
+            .ok_or_else(|| "D-Spark canonical kernels are absent".to_string())?;
+        for row in 0..batch_size {
+            let row_output_ptr = d_canonical_outputs_ptr
+                .checked_add((row * output_row_stride) as u64)
+                .ok_or_else(|| "D-Spark canonical reduction input pointer overflow".to_string())?;
+            let row_weight_ptr = d_canonical_weights_ptr
+                .checked_add((row * max_ept * std::mem::size_of::<f32>()) as u64)
+                .ok_or_else(|| "D-Spark canonical reduction weight pointer overflow".to_string())?;
+            let row_accum_ptr = d_batch_moe_ptr
+                .checked_add((row * hidden_bytes) as u64)
+                .ok_or_else(|| "D-Spark canonical reduction output pointer overflow".to_string())?;
+            unsafe {
+                kernels
+                    .multi_expert_weighted_add_bf16
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (((hidden + 255) / 256) as u32, 1, 1),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            row_accum_ptr,
+                            row_output_ptr,
+                            row_weight_ptr,
+                            hidden as i32,
+                            topk as i32,
+                            1i32,
+                        ),
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "D-Spark canonical full reduction L{layer_idx} row {row}: {error:?}"
+                        )
+                    })?;
+            }
+            self.launch_dspark_canonical_moe_tail(
+                graph,
+                layer_idx,
+                d_batch_hidden_ptr + (row * hidden_bytes) as u64,
+                row_accum_ptr,
+            )?;
+        }
+
+        graph.dma_hcs_experts = graph
+            .dma_hcs_experts
+            .saturating_add(logical_resident as u64);
+        graph.dma_cold_experts = graph.dma_cold_experts.saturating_add(logical_cold as u64);
+        Ok(batch_size)
+    }
+
     /// Batched MoE forward: route all batch tokens through one MoE layer.
     /// Takes expert union, DMAs each unique expert once, computes all tokens.
     ///
@@ -77475,10 +81063,12 @@ impl GpuDecodeStore {
         layer_idx: usize,
         batch_size: usize,
         token_ids_ptr: Option<u64>,
+        canonical_target: bool,
     ) -> Result<usize, String> {
         let device = &self.device;
         let copy_stream = self.copy_stream.0;
         let dspark_moe_detail = graph.timing_enabled && env_truthy("KRASIS_DSPARK_MOE_DETAIL");
+        let dspark_route_trace = layer_idx == 0 && env_truthy("KRASIS_DSPARK_BATCH_LAYER_TRACE");
         let detail_route_started = dspark_moe_detail.then(std::time::Instant::now);
 
         let moe = graph
@@ -77506,7 +81096,7 @@ impl GpuDecodeStore {
         let expert_bits = graph.expert_bits;
         let is_bf16_expert = expert_bits == 16;
         let is_int8 = expert_bits == 8;
-        let activation_mode = if moe.deepseek_v4_activation { 2 } else { 0 };
+        let swiglu_mode = if moe.deepseek_v4_activation { 2 } else { 0 };
 
         let w13_n = 2 * intermediate;
         let shared_w13_n = if moe.gated_experts {
@@ -77525,6 +81115,21 @@ impl GpuDecodeStore {
             1
         };
         let use_v2_w13 = w13_ksplits > 1;
+        // Scalar decode sizes resident-expert K-splitting from the layer's
+        // full router width, even when only a subset of routes is resident.
+        // The target batch must use that same split count for bitwise parity.
+        let w13_ksplits_batched = if w13_max_ksplits > 1 {
+            let w13_n_tiles = (w13_n + 15) / 16;
+            let effective = w13_n_tiles * topk.max(1);
+            let target = graph.num_sms * 4;
+            if effective >= target {
+                1
+            } else {
+                ((target + effective - 1) / effective).clamp(1, w13_max_ksplits.min(8))
+            }
+        } else {
+            1
+        };
         let partial_ptr = *graph.d_v2_partial.device_ptr();
 
         let k = graph
@@ -77849,7 +81454,7 @@ impl GpuDecodeStore {
                     }
                 }
             }
-            if matches!(sf, 1 | 2) && moe.norm_topk_prob {
+            if sf == 1 && moe.norm_topk_prob {
                 unsafe {
                     k.normalize_topk_weights
                         .clone()
@@ -77875,23 +81480,38 @@ impl GpuDecodeStore {
         device
             .synchronize()
             .map_err(|e| format!("batch route sync: {:?}", e))?;
-        unsafe {
+        let route_id_copy = unsafe {
             cuda_sys::lib().cuMemcpyDtoH_v2(
                 graph.h_batch_topk_ids.as_mut_ptr() as *mut std::ffi::c_void,
                 d_btk_ids_ptr,
                 batch_size * topk * 4,
-            );
+            )
+        };
+        require_cuda_success("D-Spark batch route IDs D2H", route_id_copy)?;
+        let route_weight_copy = unsafe {
             cuda_sys::lib().cuMemcpyDtoH_v2(
                 graph.h_batch_topk_weights.as_mut_ptr() as *mut std::ffi::c_void,
                 d_btk_wts_ptr,
                 batch_size * topk * 4,
-            );
-        }
+            )
+        };
+        require_cuda_success("D-Spark batch route weights D2H", route_weight_copy)?;
+        validate_dspark_routes(
+            &graph.h_batch_topk_ids,
+            &graph.h_batch_topk_weights,
+            batch_size,
+            topk,
+            moe.num_experts,
+        )?;
 
         // ── Step 1.5: Fail-fast expert divergence check (Jaccard similarity) ──
         // Compare each draft token's expert routing against token[0]'s routing.
         // If a draft token diverges, truncate the batch at that point.
-        let active_batch = if sf != 2 && batch_size > 1 && self.spec_jaccard_threshold > 0.0 {
+        let active_batch = if !canonical_target
+            && sf != 2
+            && batch_size > 1
+            && self.spec_jaccard_threshold > 0.0
+        {
             // Build token[0]'s expert set
             let mut token0_experts = [false; 256]; // bitset (max 256 experts)
             let mut token0_count = 0usize;
@@ -77942,6 +81562,19 @@ impl GpuDecodeStore {
             batch_size
         };
 
+        if canonical_target {
+            if active_batch != batch_size {
+                return Err(format!(
+                    "D-Spark canonical target routing truncated the batch at layer {layer_idx}: {active_batch}/{batch_size}"
+                ));
+            }
+            return self.moe_forward_batched_canonical_after_routing(
+                graph,
+                layer_idx,
+                active_batch,
+            );
+        }
+
         // ── Step 2: Build the exact per-token expert order ──
         //
         // The scalar decode path accumulates every resident route first, in
@@ -77956,7 +81589,12 @@ impl GpuDecodeStore {
         // shares an expert DMA whenever doing so is numerically legal.  Cyclic
         // or conflicting route orders naturally execute the expert more than
         // once rather than changing either token's arithmetic.
+        let resident_batch_eligible =
+            dspark_resident_batch_eligible(expert_bits, moe.gated_experts, moe.activation_type);
+        let resident_gelu_batch = resident_batch_eligible && moe.activation_type == 2;
+        let mut resident_route_batches: Vec<Vec<(usize, f32)>> = Vec::with_capacity(active_batch);
         let mut route_chains: Vec<Vec<(usize, f32)>> = Vec::with_capacity(active_batch);
+        let mut all_route_chains: Vec<Vec<(usize, f32)>> = Vec::with_capacity(active_batch);
         let mut logical_resident_routes = 0usize;
         let mut logical_cold_routes = 0usize;
         for t in 0..active_batch {
@@ -77984,11 +81622,71 @@ impl GpuDecodeStore {
                     cold.push(route);
                 }
             }
-            resident.extend(cold);
-            route_chains.push(resident);
+            let mut all_routes = resident.clone();
+            all_routes.extend(cold.iter().copied());
+            all_route_chains.push(all_routes);
+
+            // Scalar decode computes two or more resident INT4/INT8 SwiGLU
+            // experts into individual BF16 outputs, accumulates them in FP32,
+            // and rounds once.  Keep those routes out of the sequential chain
+            // so the target batch can reproduce that arithmetic below.  The
+            // scalar one-resident fallback deliberately remains sequential.
+            if resident_batch_eligible && resident.len() >= 2 {
+                resident_route_batches.push(resident);
+                route_chains.push(cold);
+            } else {
+                resident.extend(cold);
+                resident_route_batches.push(Vec::new());
+                route_chains.push(resident);
+            }
+        }
+        for (row, resident_routes) in resident_route_batches.iter().enumerate() {
+            validate_dspark_resident_route_capacity(
+                resident_routes.len(),
+                graph.max_experts_per_tok,
+                layer_idx,
+                row,
+            )?;
         }
         let scheduled_routes = dependency_preserving_route_schedule(&route_chains)
             .map_err(|error| format!("{error} at layer {layer_idx}"))?;
+        if dspark_route_trace {
+            let route_ids = all_route_chains
+                .iter()
+                .map(|chain| chain.iter().map(|(eid, _)| *eid).collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            let route_weight_bits = all_route_chains
+                .iter()
+                .map(|chain| {
+                    chain
+                        .iter()
+                        .map(|(_, weight)| format!("{:08x}", weight.to_bits()))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let resident = all_route_chains
+                .iter()
+                .map(|chain| {
+                    chain
+                        .iter()
+                        .map(|(eid, _)| {
+                            graph
+                                .hcs
+                                .as_ref()
+                                .is_some_and(|hcs| hcs.get_fast(layer_idx, *eid).is_some())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let schedule = scheduled_routes
+                .iter()
+                .map(|(eid, rows)| (*eid, rows.iter().map(|(row, _)| *row).collect::<Vec<_>>()))
+                .collect::<Vec<_>>();
+            eprintln!(
+                "D-SPARK BATCH MOE TRACE layer={} route_ids={:?} route_weight_bits={:?} resident={:?} schedule={:?}",
+                layer_idx, route_ids, route_weight_bits, resident, schedule,
+            );
+        }
         graph.dma_hcs_experts = graph
             .dma_hcs_experts
             .saturating_add(logical_resident_routes as u64);
@@ -78057,6 +81755,277 @@ impl GpuDecodeStore {
         let mut detail_cold_steps = 0usize;
         let mut detail_cold_dma_calls = 0u64;
         let mut detail_cold_dma_bytes = 0u64;
+
+        // Reproduce scalar decode's resident-expert arithmetic for every
+        // speculative row.  In particular, resident W2 outputs are first
+        // rounded individually to BF16, then the weighted sum is accumulated
+        // in FP32 and rounded once into the row accumulator.  Sending these
+        // routes through fused_silu_accum one at a time introduces an extra
+        // BF16 rounding after every expert and changes target probabilities.
+        let max_ept = graph.max_experts_per_tok;
+        let ptr_stride = max_ept * std::mem::size_of::<u64>();
+        let upload_bytes = graph.batch_upload_total_bytes;
+        let required_upload_bytes = active_batch
+            .checked_mul(upload_bytes)
+            .ok_or_else(|| "D-Spark resident staging size overflow".to_string())?;
+        let (host_upload_ptr, host_upload_bytes) = graph
+            .h_dspark_batch_upload
+            .as_ref()
+            .map(|buffer| (buffer.ptr, buffer.bytes))
+            .ok_or_else(|| "D-Spark resident host staging is not allocated".to_string())?;
+        if host_upload_bytes < required_upload_bytes {
+            return Err(format!(
+                "D-Spark resident staging capacity {} is smaller than required {}",
+                host_upload_bytes, required_upload_bytes
+            ));
+        }
+
+        // Materialize every row before queueing the first asynchronous copy.
+        // The next layer's route synchronization fences these buffers before
+        // they are reused, so each DMA observes an immutable host table.
+        for (t, resident_routes) in resident_route_batches.iter().enumerate() {
+            if resident_routes.is_empty() {
+                continue;
+            }
+            let row_start = t * upload_bytes;
+            let upload = unsafe {
+                std::slice::from_raw_parts_mut(host_upload_ptr.add(row_start), upload_bytes)
+            };
+            upload.fill(0);
+            for (slot, &(eid, weight)) in resident_routes.iter().enumerate() {
+                let (w13p, w13s, w2p, w2s) = graph
+                    .hcs
+                    .as_ref()
+                    .and_then(|hcs| hcs.get_fast(layer_idx, eid))
+                    .ok_or_else(|| {
+                        format!(
+                            "D-Spark resident route L{}E{} disappeared before row {} staging",
+                            layer_idx, eid, t
+                        )
+                    })?;
+                for (component, value) in [w13p, w13s, w2p, w2s].into_iter().enumerate() {
+                    let offset = component * ptr_stride + slot * std::mem::size_of::<u64>();
+                    upload[offset..offset + std::mem::size_of::<u64>()]
+                        .copy_from_slice(&value.to_ne_bytes());
+                }
+                let weight_offset = ptr_stride * 4 + slot * std::mem::size_of::<f32>();
+                upload[weight_offset..weight_offset + std::mem::size_of::<f32>()]
+                    .copy_from_slice(&weight.to_ne_bytes());
+                let id_offset = ptr_stride * 4
+                    + max_ept * std::mem::size_of::<f32>() * 3
+                    + slot * std::mem::size_of::<i32>();
+                upload[id_offset..id_offset + std::mem::size_of::<i32>()]
+                    .copy_from_slice(&(eid as i32).to_ne_bytes());
+            }
+        }
+
+        for (t, resident_routes) in resident_route_batches.iter().enumerate() {
+            if resident_routes.is_empty() {
+                continue;
+            }
+            let resident_count = resident_routes.len();
+
+            let row_start = t * upload_bytes;
+            unsafe {
+                let upload = host_upload_ptr.add(row_start);
+                let result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    *graph.d_batch_upload.device_ptr(),
+                    upload as *const std::ffi::c_void,
+                    upload_bytes,
+                    default_stream,
+                );
+                if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "D-Spark resident table upload failed at layer {} row {}: {:?}",
+                        layer_idx, t, result
+                    ));
+                }
+            }
+
+            let d_upload_base = *graph.d_batch_upload.device_ptr();
+            let d_w13p = d_upload_base;
+            let d_w13s = d_upload_base + ptr_stride as u64;
+            let d_w2p = d_upload_base + (ptr_stride * 2) as u64;
+            let d_w2s = d_upload_base + (ptr_stride * 3) as u64;
+            let d_wts = d_upload_base + (ptr_stride * 4) as u64;
+            let hidden_ptr = d_bh_ptr + (t * hs * std::mem::size_of::<u16>()) as u64;
+            let accum_ptr = d_bmo_ptr + (t * hs * std::mem::size_of::<u16>()) as u64;
+
+            // Use the same accepted DeepSeek-V4 INT4 kernel policy as scalar
+            // decode.  The first exact D-Spark verifier hard-coded the older
+            // n16 kernels while establishing parity, leaving the measured n32
+            // target optimization disabled only on speculative rows.
+            //
+            // GELU target decode is deliberately sequential in the scalar
+            // path. Preserve its exact n16 K-split arithmetic while grouping
+            // independent resident experts into one launch; n32 is an
+            // equivalent equation but not a bitwise-equivalent reduction.
+            let resident_w13_ksplits =
+                dspark_resident_w13_ksplits(resident_gelu_batch, w13_ksplits, w13_ksplits_batched);
+            let w13_n32 =
+                !resident_gelu_batch && !is_int8 && graph.deepseek_v4_decode_policy.int4_w13_n32;
+            let w13_tile_width = if w13_n32 { 32 } else { 16 };
+            let w13_threads = if w13_n32 { 512 } else { 256 };
+            let w13_n_tiles = w13_n.div_ceil(w13_tile_width);
+            let w13_smem = (hs * 2 + 1024 * 4 + 64 * 4 + 16 * w13_tile_width * 4) as u32;
+            let w13_kernel = if is_int8 {
+                k.marlin_gemv_int8_v2_batched.clone()
+            } else if w13_n32 {
+                k.marlin_gemv_int4_v2_batched_n32.clone()
+            } else {
+                k.marlin_gemv_int4_v2_batched.clone()
+            };
+            unsafe {
+                w13_kernel
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (
+                                w13_n_tiles as u32,
+                                resident_w13_ksplits as u32,
+                                resident_count as u32,
+                            ),
+                            block_dim: (w13_threads as u32, 1, 1),
+                            shared_mem_bytes: w13_smem,
+                        },
+                        (
+                            d_w13p,
+                            d_w13s,
+                            hidden_ptr,
+                            *graph.d_batch_partials.device_ptr(),
+                            inv_wp,
+                            inv_sp,
+                            hs as i32,
+                            w13_n as i32,
+                            gs as i32,
+                            resident_w13_ksplits as i32,
+                            d_wts,
+                        ),
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "D-Spark resident W13 layer={} row={}: {:?}",
+                            layer_idx, t, error
+                        )
+                    })?;
+                k.reduce_ksplits_bf16_batched
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (((w13_n + 255) / 256) as u32, 1, resident_count as u32),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            *graph.d_batch_gate_ups.device_ptr(),
+                            *graph.d_batch_partials.device_ptr(),
+                            w13_n as i32,
+                            resident_w13_ksplits as i32,
+                            d_wts,
+                        ),
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "D-Spark resident W13 reduction layer={} row={}: {:?}",
+                            layer_idx, t, error
+                        )
+                    })?;
+            }
+
+            let w2_n32 =
+                !resident_gelu_batch && !is_int8 && graph.deepseek_v4_decode_policy.int4_w2_n32;
+            let w2_tile_width = if w2_n32 { 32 } else { 16 };
+            let w2_threads = if w2_n32 { 512 } else { 256 };
+            let w2_n_tiles = hs.div_ceil(w2_tile_width);
+            let w2_smem = if w2_n32 {
+                (intermediate * 2 + 1024 * 4 + 64 * 4 + 16 * 32 * 4) as u32
+            } else {
+                (intermediate * 2 + 1024 * 4 + 64 * 4) as u32
+            };
+            let w2_kernel = if is_int8 {
+                k.fused_silu_w2_int8_batched.clone()
+            } else if w2_n32 {
+                k.fused_silu_w2_batched_n32.clone()
+            } else {
+                k.fused_silu_w2_batched.clone()
+            };
+            unsafe {
+                w2_kernel
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (w2_n_tiles as u32, 1, resident_count as u32),
+                            block_dim: (w2_threads as u32, 1, 1),
+                            shared_mem_bytes: w2_smem,
+                        },
+                        (
+                            d_w2p,
+                            d_w2s,
+                            *graph.d_batch_gate_ups.device_ptr(),
+                            *graph.d_batch_expert_outs.device_ptr(),
+                            inv_wp,
+                            inv_sp,
+                            intermediate as i32,
+                            hs as i32,
+                            gs as i32,
+                            moe.swiglu_limit,
+                            if resident_gelu_batch {
+                                3i32
+                            } else {
+                                swiglu_mode
+                            },
+                            d_wts,
+                        ),
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "D-Spark resident W2 layer={} row={}: {:?}",
+                            layer_idx, t, error
+                        )
+                    })?;
+                if resident_gelu_batch {
+                    // Scalar GELU decode rounds the BF16 accumulator after
+                    // every expert. Compute the independent expert GEMVs in
+                    // parallel above, then replay only these tiny additions in
+                    // router order to retain exact target probabilities.
+                    for (slot, &(_, weight)) in resident_routes.iter().enumerate() {
+                        let expert_out_ptr = *graph.d_batch_expert_outs.device_ptr()
+                            + (slot * hs * std::mem::size_of::<u16>()) as u64;
+                        k.weighted_add_bf16
+                            .clone()
+                            .launch(
+                                LaunchConfig::for_num_elems(hs as u32),
+                                (accum_ptr, expert_out_ptr, weight, hs as i32),
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "D-Spark resident GELU add layer={} row={} slot={}: {:?}",
+                                    layer_idx, t, slot, error
+                                )
+                            })?;
+                    }
+                } else {
+                    k.multi_expert_weighted_add_bf16
+                        .clone()
+                        .launch(
+                            LaunchConfig::for_num_elems(hs as u32),
+                            (
+                                accum_ptr,
+                                *graph.d_batch_expert_outs.device_ptr(),
+                                d_wts,
+                                hs as i32,
+                                resident_count as i32,
+                                1i32,
+                            ),
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "D-Spark resident weighted reduction layer={} row={}: {:?}",
+                                layer_idx, t, error
+                            )
+                        })?;
+                }
+            }
+            detail_resident_steps = detail_resident_steps.saturating_add(resident_count);
+        }
 
         for (eid, token_list) in &scheduled_routes {
             let eid = *eid;
@@ -78247,25 +82216,48 @@ impl GpuDecodeStore {
                     .map_err(|e| format!("{}", e))?;
                 }
 
-                // Fused silu + w2 + weighted accumulate
-                self.launch_fused_silu_accum(
-                    w2p,
-                    w2s,
-                    *graph.d_expert_gate_up.device_ptr(),
-                    accum_ptr,
-                    inv_wp,
-                    inv_sp,
-                    intermediate,
-                    hs,
-                    gs,
-                    weight,
-                    0u64,
-                    moe.swiglu_limit,
-                    activation_mode,
-                    k,
-                    is_int8,
-                )
-                .map_err(|e| format!("{}", e))?;
+                // Match the scalar target path's routed-expert activation.
+                // Explicit activation type 2 selects GELU-tanh. DeepSeek-V4
+                // instead reports type 0 plus `deepseek_v4_activation`, which
+                // follows the fused clamped-SwiGLU path below.
+                if dspark_routed_expert_uses_gelu_tanh(moe.activation_type) {
+                    self.launch_gelu_tanh_w2_accum(
+                        w2p,
+                        w2s,
+                        *graph.d_expert_gate_up.device_ptr(),
+                        accum_ptr,
+                        *graph.d_expert_out.device_ptr(),
+                        *graph.d_expert_scratch.device_ptr(),
+                        inv_wp,
+                        inv_sp,
+                        intermediate,
+                        hs,
+                        gs,
+                        weight,
+                        k,
+                        is_int8,
+                    )
+                    .map_err(|e| format!("{}", e))?;
+                } else {
+                    self.launch_fused_silu_accum(
+                        w2p,
+                        w2s,
+                        *graph.d_expert_gate_up.device_ptr(),
+                        accum_ptr,
+                        inv_wp,
+                        inv_sp,
+                        intermediate,
+                        hs,
+                        gs,
+                        weight,
+                        0u64,
+                        moe.swiglu_limit,
+                        swiglu_mode,
+                        k,
+                        is_int8,
+                    )
+                    .map_err(|e| format!("{}", e))?;
+                }
             }
 
             // Signal compute done for ping-pong
@@ -78423,7 +82415,7 @@ impl GpuDecodeStore {
                     shared_weight,
                     gate_weight_ptr,
                     moe.shared_swiglu_limit,
-                    activation_mode,
+                    swiglu_mode,
                     k,
                     shared_is_int8,
                 )
@@ -80318,10 +84310,9 @@ impl GpuDecodeStore {
                 cal.required_idle_free_mb(actual_tokens) as usize,
             )
         });
-        let preserve_dspark_resident_order = self
-            .dspark
-            .as_ref()
-            .is_some_and(|runtime| runtime.mode == DsparkResidencyMode::Resident);
+        let dspark_mode = self.dspark.as_ref().map(|runtime| runtime.mode);
+        let preserve_dspark_checkpoint_order =
+            preserve_checkpoint_hcs_order_for_dspark(dspark_mode);
         let device_id = self.device.ordinal() as i32;
         let trace_cfg = self.active_trace_owned();
         let route_sync_device = self.device.clone();
@@ -80338,6 +84329,8 @@ impl GpuDecodeStore {
             Some(h) => h,
             None => return (0, 0.0),
         };
+        hcs.last_reload_uncapped_target_chunks = None;
+        hcs.last_reload_target_chunks = None;
 
         if hcs.soft_ranking.is_empty() {
             return (0, 0.0);
@@ -80372,6 +84365,8 @@ impl GpuDecodeStore {
         };
         let uncapped_target_chunks = target_chunks;
         target_chunks = hcs.pressure_capped_target_chunks(target_chunks);
+        hcs.last_reload_uncapped_target_chunks = Some(uncapped_target_chunks);
+        hcs.last_reload_target_chunks = Some(target_chunks);
         if target_chunks < uncapped_target_chunks {
             log::info!(
                 "HCS soft reload: pressure cap limits reload to {}/{} chunks (computed target={} chunks)",
@@ -80396,7 +84391,22 @@ impl GpuDecodeStore {
             }
         }
 
-        if !preserve_dspark_resident_order
+        if preserve_dspark_checkpoint_order
+            && prompt_hcs_reload_enabled()
+            && !prompt_counts.is_empty()
+            && target_chunks > 0
+            && prompt_hcs_log_enabled()
+        {
+            eprintln!(
+                "[PROMPT-HCS] reload preserve checkpoint order dspark_mode={} prompt_tokens={} target_chunks={} loaded_chunks={}",
+                dspark_mode.expect("D-Spark preservation requires a residency mode").label(),
+                prompt_tokens,
+                target_chunks,
+                hcs.soft_chunks_loaded,
+            );
+        }
+
+        if !preserve_dspark_checkpoint_order
             && prompt_hcs_reload_enabled()
             && !prompt_counts.is_empty()
             && target_chunks > 0
@@ -80672,6 +84682,8 @@ impl GpuDecodeStore {
         graph.prompt_hcs_count_layers = count_layers;
         graph.prompt_hcs_count_experts_per_layer = count_experts_per_layer;
         graph.prompt_hcs_prompt_tokens = prompt_tokens;
+        graph.prompt_hcs_record_calls = 0;
+        graph.prompt_hcs_record_calls_per_layer.clear();
         if prompt_hcs_log_enabled() {
             eprintln!(
                 "[PROMPT-HCS] counts installed prompt_tokens={} count_layers={} count_experts={}",
@@ -80686,12 +84698,25 @@ impl GpuDecodeStore {
         );
     }
 
+    pub fn install_prompt_hcs_route_call_authority(
+        &mut self,
+        record_calls: u64,
+        record_calls_per_layer: Vec<u64>,
+    ) {
+        if let Some(graph) = self.graph.as_mut() {
+            graph.prompt_hcs_record_calls = record_calls;
+            graph.prompt_hcs_record_calls_per_layer = record_calls_per_layer;
+        }
+    }
+
     pub fn clear_prompt_hcs_counts(&mut self) {
         if let Some(graph) = self.graph.as_mut() {
             graph.prompt_hcs_counts.clear();
             graph.prompt_hcs_count_layers = 0;
             graph.prompt_hcs_count_experts_per_layer = 0;
             graph.prompt_hcs_prompt_tokens = 0;
+            graph.prompt_hcs_record_calls = 0;
+            graph.prompt_hcs_record_calls_per_layer.clear();
         }
     }
 
@@ -80747,10 +84772,9 @@ impl GpuDecodeStore {
                 cal.required_idle_free_mb(actual_tokens) as usize,
             )
         });
-        let preserve_dspark_resident_order = self
-            .dspark
-            .as_ref()
-            .is_some_and(|runtime| runtime.mode == DsparkResidencyMode::Resident);
+        let dspark_mode = self.dspark.as_ref().map(|runtime| runtime.mode);
+        let preserve_dspark_checkpoint_order =
+            preserve_checkpoint_hcs_order_for_dspark(dspark_mode);
         let device_id = self.device.ordinal() as i32;
         let trace_cfg = self.active_trace_owned();
         let route_sync_device = self.device.clone();
@@ -80767,6 +84791,8 @@ impl GpuDecodeStore {
             Some(h) => h,
             None => return (0, 0.0),
         };
+        hcs.last_reload_uncapped_target_chunks = None;
+        hcs.last_reload_target_chunks = None;
 
         if hcs.soft_ranking.is_empty() || hcs.soft_reload_pending {
             return (0, 0.0);
@@ -80801,6 +84827,8 @@ impl GpuDecodeStore {
         };
         let uncapped_target_chunks = target_chunks;
         target_chunks = hcs.pressure_capped_target_chunks(target_chunks);
+        hcs.last_reload_uncapped_target_chunks = Some(uncapped_target_chunks);
+        hcs.last_reload_target_chunks = Some(target_chunks);
         if target_chunks < uncapped_target_chunks {
             log::info!(
                 "HCS soft async reload: pressure cap limits reload to {}/{} chunks (computed target={} chunks)",
@@ -80825,7 +84853,22 @@ impl GpuDecodeStore {
             }
         }
 
-        if !preserve_dspark_resident_order
+        if preserve_dspark_checkpoint_order
+            && prompt_hcs_reload_enabled()
+            && !prompt_counts.is_empty()
+            && target_chunks > 0
+            && prompt_hcs_log_enabled()
+        {
+            eprintln!(
+                "[PROMPT-HCS] reload preserve checkpoint order dspark_mode={} prompt_tokens={} target_chunks={} loaded_chunks={}",
+                dspark_mode.expect("D-Spark preservation requires a residency mode").label(),
+                prompt_tokens,
+                target_chunks,
+                hcs.soft_chunks_loaded,
+            );
+        }
+
+        if !preserve_dspark_checkpoint_order
             && prompt_hcs_reload_enabled()
             && !prompt_counts.is_empty()
             && target_chunks > 0
@@ -81712,6 +85755,26 @@ impl GpuDecodeStore {
         };
         let debug_hcs_transition_trace = self.debug_hcs_transition_trace_once;
         self.debug_hcs_transition_trace_once = false;
+        // Clear request-scoped identity before any operation that can fail.
+        // Otherwise an early return could leave the previous request's HCS
+        // authority available for a caller to relabel as the current request.
+        if let Some(graph) = self.graph.as_mut() {
+            invalidate_validation_decode_start_authority(
+                [
+                    &mut graph.validation_decode_start_num_cached,
+                    &mut graph.validation_decode_start_soft_num_cached,
+                    &mut graph.validation_decode_start_hard_num_cached,
+                    &mut graph.validation_decode_start_dupes,
+                    &mut graph.validation_decode_start_soft_dupes,
+                ],
+                &mut graph.validation_decode_start_hash,
+                &mut graph.validation_decode_start_resident,
+                &mut graph.validation_decode_start_hcs_file,
+                &mut graph.validation_decode_start_slots,
+                &mut graph.validation_decode_start_slots_file,
+                &mut graph.validation_dspark_hcs_authority,
+            );
+        }
         let (trace_request_seq, trace_request_label) =
             self.begin_trace_request("decode", trace_request_label);
         trace_emit_mark(
@@ -81976,16 +86039,21 @@ impl GpuDecodeStore {
             g.cpu_tail_claim_to_worker_start_s_by_depth = [0.0; 8];
             g.cpu_tail_kernel_compute_s_by_depth = [0.0; 8];
             g.cpu_tail_compute_to_result_visible_s_by_depth = [0.0; 8];
-            g.validation_decode_start_num_cached = 0;
-            g.validation_decode_start_soft_num_cached = 0;
-            g.validation_decode_start_hard_num_cached = 0;
-            g.validation_decode_start_dupes = 0;
-            g.validation_decode_start_soft_dupes = 0;
-            g.validation_decode_start_hash.clear();
-            g.validation_decode_start_resident.clear();
-            g.validation_decode_start_hcs_file.clear();
-            g.validation_decode_start_slots.clear();
-            g.validation_decode_start_slots_file.clear();
+            invalidate_validation_decode_start_authority(
+                [
+                    &mut g.validation_decode_start_num_cached,
+                    &mut g.validation_decode_start_soft_num_cached,
+                    &mut g.validation_decode_start_hard_num_cached,
+                    &mut g.validation_decode_start_dupes,
+                    &mut g.validation_decode_start_soft_dupes,
+                ],
+                &mut g.validation_decode_start_hash,
+                &mut g.validation_decode_start_resident,
+                &mut g.validation_decode_start_hcs_file,
+                &mut g.validation_decode_start_slots,
+                &mut g.validation_decode_start_slots_file,
+                &mut g.validation_dspark_hcs_authority,
+            );
             g.validation_decode_cold_hist.clear();
             g.validation_decode_cold_events.clear();
             g.validation_decode_cold_file.clear();
@@ -82257,7 +86325,19 @@ impl GpuDecodeStore {
         };
 
         // ── Speculative decode state ──
-        let use_dspark = self.dspark.is_some();
+        let dspark_calibrated = self
+            .dspark
+            .as_ref()
+            .is_some_and(|runtime| runtime.verification_policy.calibrated);
+        let dspark_service_timing_requested = env_truthy("KRASIS_DSPARK_SERVICE_TIMING");
+        let target_only_diagnostic =
+            dspark_calibrated && env_truthy("KRASIS_DSPARK_TARGET_ONLY_DIAGNOSTIC");
+        let use_dspark = self.dspark.is_some() && !target_only_diagnostic;
+        if target_only_diagnostic {
+            log::warn!(
+                "D-Spark target-only diagnostic is active after width calibration; proposals are bypassed for this request"
+            );
+        }
         let use_speculative = self.draft.is_some();
         if (use_speculative || use_dspark)
             && self
@@ -82293,6 +86373,7 @@ impl GpuDecodeStore {
             runtime.rejected_confidence_sum = 0.0;
             runtime.proposal_seconds = 0.0;
             runtime.batch_verify_rounds = 0;
+            runtime.batch_verify_rows = 0;
             runtime.batch_transaction_rollbacks = 0;
             runtime.batch_verify_seconds = 0.0;
             runtime.proposal_timing_rounds = 0;
@@ -82309,6 +86390,12 @@ impl GpuDecodeStore {
             runtime.batch_head_seconds = 0.0;
             runtime.batch_restore_seconds = 0.0;
             runtime.context_commit_seconds = 0.0;
+            runtime.target_scalar_lm_head_calls = 0;
+            runtime.target_scalar_lm_head_rows = 0;
+            runtime.canonical_suffix_rounds = 0;
+            runtime.canonical_suffix_rows = 0;
+            runtime.canonical_sequential_fallback_rounds = 0;
+            runtime.canonical_sequential_fallback_rows = 0;
         }
 
         // Reset draft model KV cache for speculative decode
@@ -82438,13 +86525,19 @@ impl GpuDecodeStore {
                     .graph
                     .as_ref()
                     .is_some_and(|graph| graph.timing_enabled);
-                let dspark_service_timing = dspark_timing
-                    || self
-                        .dspark
+                let dspark_service_timing = dspark_service_timing_enabled(
+                    dspark_timing,
+                    self.dspark
                         .as_ref()
-                        .is_some_and(|runtime| runtime.verification_policy.calibrating);
+                        .is_some_and(|runtime| runtime.verification_policy.calibrating),
+                    dspark_service_timing_requested,
+                );
                 let dspark_round_started = dspark_service_timing.then(Instant::now);
-                let proposal = match self.generate_dspark_block(next_token, pos) {
+                let proposal = match self.generate_dspark_block(
+                    next_token,
+                    pos,
+                    dspark_service_timing_requested,
+                ) {
                     Ok(proposal) => proposal,
                     Err(error) => {
                         let failure = format!("D-Spark proposal failed: {error}");
@@ -82470,7 +86563,7 @@ impl GpuDecodeStore {
                 }
                 let proposal_seconds =
                     dspark_round_started.map_or(0.0, |started| started.elapsed().as_secs_f64());
-                let requested_rows = match self
+                let policy_rows = match self
                     .dspark
                     .as_mut()
                     .ok_or_else(|| "D-Spark runtime disappeared before width selection".to_string())
@@ -82488,6 +86581,33 @@ impl GpuDecodeStore {
                     Err(error) => {
                         let failure =
                             format!("D-Spark verification-width selection failed: {error}");
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
+                        break;
+                    }
+                };
+                let forced_rows = if dspark_calibrated {
+                    dspark_forced_verification_rows()
+                } else {
+                    Ok(None)
+                };
+                let requested_rows = match forced_rows {
+                    Ok(Some(rows)) if rows <= proposal.tokens.len().saturating_add(1) => {
+                        rows.min(max_tokens - step)
+                    }
+                    Ok(Some(rows)) => {
+                        let failure = format!(
+                            "D-Spark forced verification width {rows} exceeds proposal capacity {}",
+                            proposal.tokens.len().saturating_add(1),
+                        );
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
+                        break;
+                    }
+                    Ok(None) => policy_rows,
+                    Err(error) => {
+                        let failure =
+                            format!("D-Spark forced verification-width selection failed: {error}");
                         log::error!("gpu_generate_stream: {}", failure);
                         self.last_stream_failure = Some(failure);
                         break;
@@ -82958,6 +87078,9 @@ impl GpuDecodeStore {
                     verify_seconds =
                         verify_started.map_or(0.0, |started| started.elapsed().as_secs_f64());
                     runtime.batch_verify_rounds = runtime.batch_verify_rounds.saturating_add(1);
+                    runtime.batch_verify_rows = runtime
+                        .batch_verify_rows
+                        .saturating_add(verify_count as u64);
                     runtime.batch_transaction_rollbacks = runtime
                         .batch_transaction_rollbacks
                         .saturating_add(rollback_operations);
@@ -83876,6 +87999,37 @@ impl GpuDecodeStore {
             }
         }
 
+        // D-Spark context commits and auxiliary transfers use several explicit
+        // CU_STREAM_NON_BLOCKING streams. CudaDevice::synchronize() only drains
+        // cudarc's device stream, so it is not a request boundary for those
+        // streams. The next request's fresh prefill resets allocations shared
+        // with decode; do not return until every stream in this CUDA context is
+        // idle. Fail closed through the existing stream-failure surface.
+        if self.dspark.is_some() {
+            let boundary_started = std::time::Instant::now();
+            let boundary_result = self
+                .device
+                .bind_to_thread()
+                .map_err(|error| format!("bind CUDA context: {error:?}"))
+                .and_then(|_| {
+                    require_cuda_success("cuCtxSynchronize", unsafe {
+                        cuda_sys::lib().cuCtxSynchronize()
+                    })
+                });
+            if let Err(error) = boundary_result {
+                let failure = format!(
+                    "D-Spark decode/request boundary context synchronization failed: {error}"
+                );
+                log::error!("gpu_generate_stream: {}", failure);
+                self.last_stream_failure = Some(failure);
+            } else {
+                log::info!(
+                    "D-SPARK REQUEST BOUNDARY CONTEXT SYNC elapsed_ms={:.6}",
+                    boundary_started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+        }
+
         let elapsed = decode_start.elapsed().as_secs_f64();
         if let Some(graph) = self.graph.as_mut() {
             check_peer_mode_prediction(graph, generated, elapsed);
@@ -83909,6 +88063,13 @@ impl GpuDecodeStore {
             .graph
             .as_ref()
             .is_some_and(|graph| graph.timing_enabled);
+        let dspark_service_timing_active = self.dspark.as_ref().is_some_and(|runtime| {
+            dspark_service_timing_enabled(
+                dspark_timing_enabled,
+                runtime.verification_policy.calibrating,
+                dspark_service_timing_requested,
+            )
+        });
         if let Some(runtime) = self.dspark.as_ref() {
             let match_rate = if runtime.verified_tokens > 0 {
                 runtime.matched_tokens as f64 / runtime.verified_tokens as f64 * 100.0
@@ -83941,8 +88102,17 @@ impl GpuDecodeStore {
             } else {
                 0.0
             };
+            let target_lm_head_accounting = if dspark_scalar_lm_head_accounting_exact(
+                runtime.batch_verify_rows,
+                runtime.target_scalar_lm_head_calls,
+                runtime.target_scalar_lm_head_rows,
+            ) {
+                "exact"
+            } else {
+                "mismatch"
+            };
             eprintln!(
-                "D-SPARK SUMMARY mode={} rounds={} proposed={} verified={} bonus={} matched={} rejected={} verified_match_rate_pct={:.6} accepted_per_round={:.6} emitted_per_round={:.6} avg_confidence={:.6} matched_confidence={:.6} rejected_confidence={:.6} batch_verify_rounds={} batch_transaction_rollbacks={} verifier=transactional_batch service_timing={}",
+                "D-SPARK SUMMARY mode={} rounds={} proposed={} verified={} bonus={} matched={} rejected={} verified_match_rate_pct={:.6} accepted_per_round={:.6} emitted_per_round={:.6} avg_confidence={:.6} matched_confidence={:.6} rejected_confidence={:.6} batch_verify_rounds={} batch_verify_rows={} batch_transaction_rollbacks={} verifier=transactional_batch target_lm_head_contract=n1_per_row target_scalar_lm_head_calls={} target_scalar_lm_head_rows={} target_lm_head_accounting={} service_timing={}",
                 runtime.mode.label(),
                 runtime.proposal_rounds,
                 runtime.proposed_tokens,
@@ -83957,8 +88127,12 @@ impl GpuDecodeStore {
                 matched_confidence,
                 rejected_confidence,
                 runtime.batch_verify_rounds,
+                runtime.batch_verify_rows,
                 runtime.batch_transaction_rollbacks,
-                if dspark_timing_enabled || runtime.verification_policy.calibrating {
+                runtime.target_scalar_lm_head_calls,
+                runtime.target_scalar_lm_head_rows,
+                target_lm_head_accounting,
+                if dspark_service_timing_active {
                     "enabled"
                 } else {
                     "disabled"
@@ -83975,7 +88149,7 @@ impl GpuDecodeStore {
                 runtime.verification_policy.status_json(),
             );
             log::info!(
-                "D-SPARK SUMMARY mode={} rounds={} proposed={} verified={} bonus={} matched={} rejected={} verified_match_rate_pct={:.6} accepted_per_round={:.6} emitted_per_round={:.6} avg_confidence={:.6} matched_confidence={:.6} rejected_confidence={:.6} batch_verify_rounds={} batch_transaction_rollbacks={} verifier=transactional_batch service_timing={}",
+                "D-SPARK SUMMARY mode={} rounds={} proposed={} verified={} bonus={} matched={} rejected={} verified_match_rate_pct={:.6} accepted_per_round={:.6} emitted_per_round={:.6} avg_confidence={:.6} matched_confidence={:.6} rejected_confidence={:.6} batch_verify_rounds={} batch_verify_rows={} batch_transaction_rollbacks={} verifier=transactional_batch target_lm_head_contract=n1_per_row target_scalar_lm_head_calls={} target_scalar_lm_head_rows={} target_lm_head_accounting={} service_timing={}",
                 runtime.mode.label(),
                 runtime.proposal_rounds,
                 runtime.proposed_tokens,
@@ -83990,14 +88164,34 @@ impl GpuDecodeStore {
                 matched_confidence,
                 rejected_confidence,
                 runtime.batch_verify_rounds,
+                runtime.batch_verify_rows,
                 runtime.batch_transaction_rollbacks,
-                if dspark_timing_enabled || runtime.verification_policy.calibrating {
+                runtime.target_scalar_lm_head_calls,
+                runtime.target_scalar_lm_head_rows,
+                target_lm_head_accounting,
+                if dspark_service_timing_active {
                     "enabled"
                 } else {
                     "disabled"
                 },
             );
-            if dspark_timing_enabled || runtime.verification_policy.calibrating {
+            eprintln!(
+                "D-SPARK CANONICAL SUFFIX SUMMARY mode={} canonical_rounds={} canonical_rows={} sequential_fallback_rounds={} sequential_fallback_rows={}",
+                runtime.mode.label(),
+                runtime.canonical_suffix_rounds,
+                runtime.canonical_suffix_rows,
+                runtime.canonical_sequential_fallback_rounds,
+                runtime.canonical_sequential_fallback_rows,
+            );
+            log::info!(
+                "D-SPARK CANONICAL SUFFIX SUMMARY mode={} canonical_rounds={} canonical_rows={} sequential_fallback_rounds={} sequential_fallback_rows={}",
+                runtime.mode.label(),
+                runtime.canonical_suffix_rounds,
+                runtime.canonical_suffix_rows,
+                runtime.canonical_sequential_fallback_rounds,
+                runtime.canonical_sequential_fallback_rows,
+            );
+            if dspark_service_timing_active {
                 let proposal_ms = if runtime.proposal_rounds > 0 {
                     runtime.proposal_seconds / runtime.proposal_rounds as f64 * 1000.0
                 } else {
@@ -86732,6 +90926,14 @@ impl GpuDecodeStore {
             .as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
 
+        validate_moe_registration_contract(
+            expert_ptrs.len(),
+            num_experts,
+            topk,
+            graph.max_experts_per_tok,
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
         // Ensure moe_layers is big enough
         while graph.moe_layers.len() <= layer_idx {
             graph.moe_layers.push(None);
@@ -88744,6 +92946,9 @@ impl GpuDecodeStore {
         let copy_stream = self.copy_stream.0;
         let prefetch_stream = self.prefetch_stream.0;
         let timing = graph.timing_enabled;
+        let scalar_route_trace = layer_idx == 0 && env_truthy("KRASIS_DSPARK_SCALAR_LAYER_TRACE");
+        let scalar_sequential_moe_diagnostic =
+            env_truthy("KRASIS_DSPARK_SCALAR_SEQUENTIAL_MOE_DIAGNOSTIC");
 
         let hs = graph.hidden_size;
         let intermediate = graph.moe_intermediate_size;
@@ -90049,6 +94254,26 @@ impl GpuDecodeStore {
             }
         }
 
+        if scalar_route_trace {
+            let effective_weight_bits = graph.h_topk_weights[..topk]
+                .iter()
+                .map(|weight| format!("{:08x}", weight.to_bits()))
+                .collect::<Vec<_>>();
+            eprintln!(
+                "D-SPARK SCALAR MOE TRACE layer={} raw_ids={:?} effective_ids={:?} effective_weight_bits={:?} hcs_ids={:?} apfl_ids={:?} cold_ids={:?} hcs_batch_count={} dma_count={} force_sequential={}",
+                layer_idx,
+                pre_hcs_swap_topk_ids,
+                &graph.h_topk_ids[..topk],
+                effective_weight_bits,
+                hcs_hit_ids,
+                apfl_hit_ids,
+                dma_ids,
+                hcs_batch_count,
+                dma_count,
+                scalar_sequential_moe_diagnostic,
+            );
+        }
+
         if hcs_equiv_trace_active {
             let topk_ids_json: Vec<serde_json::Value> = graph.h_topk_ids[..topk]
                 .iter()
@@ -90239,7 +94464,12 @@ impl GpuDecodeStore {
 
         // ── Phase 2: Batched HCS expert compute (4 launches instead of 3*N) ──
         // Runs on default_stream while pre-queued cold DMAs proceed on copy_stream.
-        if !is_bf16_expert && !is_tileq && hcs_batch_count >= 2 && act_type != 2 {
+        if !scalar_sequential_moe_diagnostic
+            && !is_bf16_expert
+            && !is_tileq
+            && hcs_batch_count >= 2
+            && act_type != 2
+        {
             let t_w13 = Instant::now();
 
             // Pack all pointer arrays + weights into contiguous host buffer, then single H2D
