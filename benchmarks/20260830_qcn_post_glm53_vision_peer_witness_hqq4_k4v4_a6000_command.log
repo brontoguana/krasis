@@ -1,0 +1,5 @@
+KRASIS_VRAM_LEDGER=1 ./dev speed-test
+
+tmux session: qcn_post_glm53_vision_peer_witness_speed_guard_20260830
+run directory: logs/dev-benchmark_20260830_041004
+exit: 0

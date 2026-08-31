@@ -919,6 +919,7 @@ enum ModelRequest {
     Chat { stream: TcpStream, body: String },
     SessionCacheStats { stream: TcpStream },
     PrefillLogits { stream: TcpStream, body: String },
+    TeacherForcedDecodeLogits { stream: TcpStream, body: String },
     ReferenceTest { stream: TcpStream, body: String },
     SequenceStateInventory { stream: TcpStream, body: String },
     SequenceStateTransferMeasurement { stream: TcpStream, body: String },
@@ -1052,6 +1053,9 @@ fn handle_model_request(request: ModelRequest, state: &mut ServerState) {
         ModelRequest::PrefillLogits { mut stream, body } => {
             handle_prefill_logits(&mut stream, &body, state)
         }
+        ModelRequest::TeacherForcedDecodeLogits { mut stream, body } => {
+            handle_teacher_forced_decode_logits(&mut stream, &body, state)
+        }
         ModelRequest::ReferenceTest { mut stream, body } => {
             handle_reference_test(&mut stream, &body, state)
         }
@@ -1069,6 +1073,7 @@ fn reject_model_request(request: ModelRequest, message: &str) {
         ModelRequest::Chat { stream, .. }
         | ModelRequest::SessionCacheStats { stream }
         | ModelRequest::PrefillLogits { stream, .. }
+        | ModelRequest::TeacherForcedDecodeLogits { stream, .. }
         | ModelRequest::ReferenceTest { stream, .. }
         | ModelRequest::SequenceStateInventory { stream, .. }
         | ModelRequest::SequenceStateTransferMeasurement { stream, .. } => stream,
@@ -1374,6 +1379,26 @@ fn handle_front_connection(
                 }) {
                     log::error!(
                         "Model worker is not available for /v1/internal/prefill_logits: {}",
+                        error
+                    );
+                }
+            } else {
+                let _ = send_json(
+                    &mut tcp_stream,
+                    404,
+                    r#"{"error":"Test endpoints not enabled. Start server with --test-endpoints"}"#,
+                );
+            }
+        }
+
+        ("POST", "/v1/internal/teacher_forced_decode_logits") => {
+            if test_endpoints {
+                if let Err(error) = scheduler.enqueue(ModelRequest::TeacherForcedDecodeLogits {
+                    stream: tcp_stream,
+                    body: request.body,
+                }) {
+                    log::error!(
+                        "Model worker is not available for /v1/internal/teacher_forced_decode_logits: {}",
                         error
                     );
                 }
@@ -5271,6 +5296,287 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
     let response = format!(r#"{{"positions":[{}]}}"#, pos_json.join(","));
     crate::vram_monitor::report_event("prefill_logits_response");
     let _ = send_json(stream, 200, &response);
+}
+
+/// Test-only exact-checkpoint diagnostic: process an existing prompt one token
+/// at a time through the Rust/CUDA decode path and report logits after each
+/// token.  This is deliberately separate from production generation and from
+/// batch prefill so the two execution strategies can be compared directly.
+fn handle_teacher_forced_decode_logits(
+    stream: &mut TcpStream,
+    body: &str,
+    state: &mut ServerState,
+) {
+    invalidate_active_sequence(state, "teacher_forced_decode_logits_request");
+    let req: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = send_json(
+                stream,
+                400,
+                &format!(
+                    r#"{{"error":"Invalid JSON: {}"}}"#,
+                    json_escape(&error.to_string())
+                ),
+            );
+            return;
+        }
+    };
+    let token_ids: Vec<u32> = match req.get("input_token_ids") {
+        Some(serde_json::Value::Array(values)) => {
+            let mut parsed = Vec::with_capacity(values.len());
+            for value in values {
+                match value.as_u64().and_then(|token| u32::try_from(token).ok()) {
+                    Some(token) => parsed.push(token),
+                    None => {
+                        let _ = send_json(
+                            stream,
+                            400,
+                            r#"{"error":"input_token_ids must contain only u32 token IDs"}"#,
+                        );
+                        return;
+                    }
+                }
+            }
+            parsed
+        }
+        _ => {
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"Missing or invalid input_token_ids array"}"#,
+            );
+            return;
+        }
+    };
+    if token_ids.is_empty() || token_ids.len() > state.max_context_tokens {
+        let _ = send_json(
+            stream,
+            400,
+            &format!(
+                r#"{{"error":"input_token_ids length must be in 1..={}"}}"#,
+                state.max_context_tokens
+            ),
+        );
+        return;
+    }
+    let top_k = req
+        .get("top_k")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(10);
+    if !(1..=100).contains(&top_k) {
+        let _ = send_json(stream, 400, r#"{"error":"top_k must be in 1..=100"}"#);
+        return;
+    }
+    let debug_decode_early_trace = req
+        .get("debug_decode_early_trace")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let debug_decode_early_detail_dims: Vec<usize> = match req.get("debug_decode_early_detail_dims")
+    {
+        Some(serde_json::Value::Array(values)) => {
+            let mut dims = Vec::with_capacity(values.len());
+            for value in values {
+                let Some(dim) = value.as_u64().and_then(|dim| usize::try_from(dim).ok()) else {
+                    let _ = send_json(
+                        stream,
+                        400,
+                        r#"{"error":"debug_decode_early_detail_dims must contain only unsigned integer dimensions"}"#,
+                    );
+                    return;
+                };
+                dims.push(dim);
+            }
+            dims
+        }
+        Some(_) => {
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"debug_decode_early_detail_dims must be an array of unsigned integer dimensions"}"#,
+            );
+            return;
+        }
+        None => Vec::new(),
+    };
+
+    crate::vram_monitor::begin_request_context(&format!(
+        "route=/v1/internal/teacher_forced_decode_logits tokens={}",
+        token_ids.len(),
+    ));
+    let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+    let _vram_context_guard = VramRequestContextGuard {
+        safety_margin_mb: store.hcs_safety_margin_mb() as u64,
+    };
+
+    let reset_bytes = match store.reset_sequence_state_for_diagnostic_rust() {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = send_json(
+                stream,
+                500,
+                &format!(
+                    r#"{{"error":"Teacher-forced state reset failed: {}"}}"#,
+                    json_escape(&error)
+                ),
+            );
+            return;
+        }
+    };
+    if let Err(error) = store.prepare_runtime_for_decode_rust() {
+        let _ = send_json(
+            stream,
+            500,
+            &format!(
+                r#"{{"error":"Teacher-forced decode preparation failed: {}"}}"#,
+                json_escape(&error)
+            ),
+        );
+        return;
+    }
+    if debug_decode_early_trace {
+        if let Err(error) = store.begin_debug_decode_early_trace_rust(
+            token_ids.len() as u64,
+            debug_decode_early_detail_dims,
+        ) {
+            let cleanup_error = store.reset_sequence_state_for_diagnostic_rust().err();
+            let _ = send_json(
+                stream,
+                500,
+                &format!(
+                    r#"{{"error":"Teacher-forced trace setup failed: {}","cleanup_error":{}}}"#,
+                    json_escape(&error),
+                    cleanup_error
+                        .map(|value| format!(r#""{}""#, json_escape(&value)))
+                        .unwrap_or_else(|| "null".to_string()),
+                ),
+            );
+            return;
+        }
+    }
+
+    let mut positions = Vec::with_capacity(token_ids.len());
+    for (position, &token_id) in token_ids.iter().enumerate() {
+        if let Err(error) = store.gpu_decode_step(token_id as usize, position) {
+            let cleanup_error = store.reset_sequence_state_for_diagnostic_rust().err();
+            let _ = send_json(
+                stream,
+                500,
+                &format!(
+                    r#"{{"error":"Teacher-forced decode failed at position {}: {}","cleanup_error":{}}}"#,
+                    position,
+                    json_escape(&error),
+                    cleanup_error
+                        .map(|value| format!(r#""{}""#, json_escape(&value)))
+                        .unwrap_or_else(|| "null".to_string()),
+                ),
+            );
+            return;
+        }
+        let logits = match store.logits_snapshot_rust() {
+            Ok(logits) => logits,
+            Err(error) => {
+                let cleanup_error = store.reset_sequence_state_for_diagnostic_rust().err();
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(
+                        r#"{{"error":"Teacher-forced logits unavailable at position {}: {}","cleanup_error":{}}}"#,
+                        position,
+                        json_escape(&error),
+                        cleanup_error
+                            .map(|value| format!(r#""{}""#, json_escape(&value)))
+                            .unwrap_or_else(|| "null".to_string()),
+                    ),
+                );
+                return;
+            }
+        };
+        let top = crate::decode::extract_top_logprobs(&logits, logits.len(), top_k)
+            .into_iter()
+            .map(
+                |(token_id, logprob)| serde_json::json!({"token_id": token_id, "logprob": logprob}),
+            )
+            .collect::<Vec<_>>();
+        positions.push(serde_json::json!({
+            "position": position,
+            "input_token_id": token_id,
+            "top_k": top,
+        }));
+        if let Err(error) = store.complete_diagnostic_decode_step_rust() {
+            let trace_cleanup_error = if debug_decode_early_trace {
+                store.take_debug_decode_early_trace_rust().err()
+            } else {
+                None
+            };
+            let state_cleanup_error = store.reset_sequence_state_for_diagnostic_rust().err();
+            let _ = send_json(
+                stream,
+                500,
+                &format!(
+                    r#"{{"error":"Teacher-forced trace step advance failed at position {}: {}","trace_cleanup_error":{},"state_cleanup_error":{}}}"#,
+                    position,
+                    json_escape(&error),
+                    trace_cleanup_error
+                        .map(|value| format!(r#""{}""#, json_escape(&value)))
+                        .unwrap_or_else(|| "null".to_string()),
+                    state_cleanup_error
+                        .map(|value| format!(r#""{}""#, json_escape(&value)))
+                        .unwrap_or_else(|| "null".to_string()),
+                ),
+            );
+            return;
+        }
+    }
+
+    let debug_decode_early_entries = if debug_decode_early_trace {
+        match store.take_debug_decode_early_trace_rust() {
+            Ok(entries) => Some(entries),
+            Err(error) => {
+                let cleanup_error = store.reset_sequence_state_for_diagnostic_rust().err();
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(
+                        r#"{{"error":"Teacher-forced trace collection failed: {}","cleanup_error":{}}}"#,
+                        json_escape(&error),
+                        cleanup_error
+                            .map(|value| format!(r#""{}""#, json_escape(&value)))
+                            .unwrap_or_else(|| "null".to_string()),
+                    ),
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let cleanup_error = store.reset_sequence_state_for_diagnostic_rust().err();
+    let response = serde_json::json!({
+        "positions": positions,
+        "reset_bytes": reset_bytes,
+        "cleanup_error": cleanup_error,
+        "debug_decode_early_trace": debug_decode_early_entries.map(|entries| serde_json::json!({
+            "entry_count": entries.len(),
+            "entries": entries,
+        })),
+    });
+    match serde_json::to_string(&response) {
+        Ok(body) => {
+            let _ = send_json(stream, 200, &body);
+        }
+        Err(error) => {
+            let _ = send_json(
+                stream,
+                500,
+                &format!(
+                    r#"{{"error":"Serialize response: {}"}}"#,
+                    json_escape(&error.to_string())
+                ),
+            );
+        }
+    }
 }
 
 /// Handle /v1/internal/reference_test endpoint.

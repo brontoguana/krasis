@@ -1,0 +1,25 @@
+Purpose: corrected-source single-RTX-PRO prefill-stage attribution diagnostic. Timing and VRAM instrumentation were enabled; this is not speed-regression evidence.
+
+Command:
+  KRASIS_PREFILL_TIMING=1 KRASIS_STARTUP_DIAG=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 KRASIS_VRAM_LEDGER=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+
+tmux session:
+  glm53_corrected_prefill_profile_20260830
+
+Run directory:
+  /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260830_101934
+
+Result:
+  exit 0
+  39,920-token sync-isolated named-stage wall: 26,350.6 ms.
+  DSA: 14,428.3 ms (54.75%).
+  FFN: 8,017.2 ms (30.42%), including DMA 3,917.5 ms, W1+activation 2,656.5 ms, W2 1,012.3 ms.
+  KDA recurrence: 1,142.2 ms (4.33%).
+  KDA QKV: 1,070.9 ms (4.06%).
+  Calibration free-VRAM floors at 500/4K/8K/16K/32K/39,920 tokens: 1227/1151/1219/1201/1179/1193 MiB.
+  No below-margin event, CUDA error, or OOM.
+
+Hashes:
+  stdout 1620975c1b89e916b126c08856affe7e9f007f2d7f2b686803a5f74dbec0ff58
+  runtime 2790a897a7ef05c82f3fc3b7a629db34b3ddc83bf1872f6a823a1f6b909d3ba6
+  outer 7c0c1e47f86b2671fff5e980d6fe100397b5c9d6fc0746a016188f2c57fc5046

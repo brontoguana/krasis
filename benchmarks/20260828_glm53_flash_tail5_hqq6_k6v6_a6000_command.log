@@ -1,0 +1,5 @@
+KRASIS_DYNAMIC_HCS_TAIL_BLOCKS=5 ./dev benchmark tests/glm53-flash-hqq6-k6v6-a6000.conf --heatmap-path /home/main/.krasis/cache/GLM-5.3-Flash--4ab65dd91f64191f2206f16e896d5af056833466fe12dfbf29baa89ce76c6c1f/auto_heatmap.json
+
+Timing and instrumentation disabled. Run in tmux session glm53_opt_tail5_speed.
+Exit status: 0
+Exact heatmap SHA-256: b3ddaba583c9ddba48c65190dc5c124a68ea126921bd8bc9db4f97e213d8753e

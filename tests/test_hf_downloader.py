@@ -173,6 +173,7 @@ class HFDownloaderTests(unittest.TestCase):
                 "Qwen/Qwen3-235B-A22B",
                 "google/gemma-4-26b-a4b-it",
                 "zai-org/GLM-5.2",
+                "zai-org/GLM-5.3-Flash",
             ],
         )
         self.assertEqual(len({m.key for m in models}), len(models))
@@ -197,6 +198,11 @@ class HFDownloaderTests(unittest.TestCase):
         self.assertEqual(glm52.max_context_tokens, 4096)
         self.assertEqual(glm52.attention_modes, ("hqq4",))
         self.assertEqual(glm52.kv_modes, ("k4v4",))
+        self.assertEqual(glm52.vision_modes, ())
+
+        glm53 = next(model for model in models if model.key == "glm53-flash")
+        self.assertEqual(glm53.vision_modes, ("bf16",))
+        self.assertEqual(glm53.default_vision_quant, "bf16")
 
     def test_supported_model_profiles_are_measured_and_defaults_match_configs(self):
         from krasis.launcher import _load_config
@@ -242,6 +248,7 @@ class HFDownloaderTests(unittest.TestCase):
                 ("bf16", "k6v6"),
             ),
             "glm52": (("hqq4", "k4v4"),),
+            "glm53-flash": (("hqq6", "k6v6"),),
         }
         repo_root = os.path.dirname(os.path.dirname(__file__))
         self.assertEqual(set(expected_profiles), {model.key for model in supported_models()})

@@ -272,8 +272,9 @@ class WeightLoader:
     def _read_and_dequant(self, name: str) -> torch.Tensor:
         """Read a tensor, dequanting FP8 to BF16 if needed.
 
-        FP8 models (e.g. Mistral 4) store weights as float8_e4m3fn with a
-        companion weight_scale_inv tensor.  Dequant: bf16 = fp8.to(bf16) * scale_inv.
+        FP8 models store weights with a companion scale tensor. Scalar scales
+        are applied directly; block scales are expanded using the checkpoint's
+        declared block geometry. Unknown or missing scale contracts fail closed.
         Non-FP8 tensors are returned as-is converted to BF16.
         """
         w = self._read_tensor(name)
@@ -289,34 +290,41 @@ class WeightLoader:
                     raise KeyError(
                         f"DeepSeek-V4 FP8 tensor {name} has no block scale {scale_name}"
                     )
-                scale = self._read_tensor(scale_name)
-                if w.ndim != 2 or scale.ndim != 2:
-                    raise ValueError(
-                        f"DeepSeek-V4 FP8 dequant requires rank-2 weight/scale; "
-                        f"got {name} {tuple(w.shape)} and {scale_name} {tuple(scale.shape)}"
+            else:
+                scale_name = f"{name}_scale_inv"
+                if scale_name not in self._weight_map:
+                    raise KeyError(
+                        f"FP8 tensor {name} has no required scale {scale_name}"
                     )
-                block_rows = (w.shape[0] + 127) // 128
-                block_cols = (w.shape[1] + 127) // 128
-                if tuple(scale.shape) != (block_rows, block_cols):
-                    raise ValueError(
-                        f"DeepSeek-V4 FP8 scale {scale_name} shape {tuple(scale.shape)} "
-                        f"!= expected {(block_rows, block_cols)} for {tuple(w.shape)}"
-                    )
-                scale_f32 = scale.float()
-                expanded = scale_f32.repeat_interleave(128, 0)
-                expanded = expanded.repeat_interleave(128, 1)
-                expanded = expanded[: w.shape[0], : w.shape[1]]
-                return (w.float() * expanded).to(torch.bfloat16)
-            # Look for companion scale_inv tensor
-            scale_name = f"{name}_scale_inv"
-            if scale_name not in self._weight_map:
-                # Try without .weight suffix: "foo.weight" → "foo.weight_scale_inv"
-                # already handled above since name includes ".weight"
-                logger.warning("FP8 tensor %s has no scale_inv — raw conversion only", name)
-                return w.to(torch.bfloat16)
-            scale_inv = self._read_tensor(scale_name).float()
-            w = w.to(torch.float32) * scale_inv
-            return w.to(torch.bfloat16)
+
+            scale = self._read_tensor(scale_name).float()
+            if scale.numel() == 1:
+                return (w.float() * scale.reshape(())).to(torch.bfloat16)
+            if w.ndim != 2 or scale.ndim != 2:
+                raise ValueError(
+                    f"FP8 block dequant requires rank-2 weight/scale; got "
+                    f"{name} {tuple(w.shape)} and {scale_name} {tuple(scale.shape)}"
+                )
+            block_size = self.cfg.source_fp8_block_size
+            if block_size is None:
+                raise ValueError(
+                    f"FP8 block scale {scale_name} is present but the checkpoint "
+                    "does not declare quantization_config.weight_block_size"
+                )
+            block_rows, block_cols = block_size
+            expected_shape = (
+                (w.shape[0] + block_rows - 1) // block_rows,
+                (w.shape[1] + block_cols - 1) // block_cols,
+            )
+            if tuple(scale.shape) != expected_shape:
+                raise ValueError(
+                    f"FP8 scale {scale_name} shape {tuple(scale.shape)} != expected "
+                    f"{expected_shape} for {tuple(w.shape)} and blocks {block_size}"
+                )
+            expanded = scale.repeat_interleave(block_rows, 0)
+            expanded = expanded.repeat_interleave(block_cols, 1)
+            expanded = expanded[: w.shape[0], : w.shape[1]]
+            return (w.float() * expanded).to(torch.bfloat16)
         return w.to(torch.bfloat16)
 
     def _load_and_quantize(
@@ -342,6 +350,16 @@ class WeightLoader:
         if w.dtype != torch.float32:
             raise ValueError(f"Expected FP32 tensor {name}, got {w.dtype}")
         return w.to(device)
+
+    def _load_numeric_f32(self, name: str, device: torch.device) -> torch.Tensor:
+        """Load a numeric checkpoint tensor and materialize FP32 on the target.
+
+        This is used for operations whose published reference explicitly casts
+        learned BF16 parameters to FP32 before applying them, such as GLM-5.3
+        mHC projections. It is distinct from `_load_f32`, which verifies that
+        the source tensor itself is stored as FP32.
+        """
+        return self._read_and_dequant(name).float().to(device)
 
     def _load_i64(self, name: str, device: torch.device) -> torch.Tensor:
         """Load an integer lookup table without changing its values."""
@@ -785,7 +803,7 @@ class WeightLoader:
         layer_idx: int,
         device: torch.device,
     ) -> Dict[str, torch.Tensor]:
-        """Load the five checkpoint tensors owned by one full DSA indexer."""
+        """Load the complete checkpoint tensor set owned by one DSA indexer."""
         if not self.cfg.is_dsa_indexer_owner_layer(layer_idx):
             owner_idx = self.cfg.dsa_indexer_owner_layer(layer_idx)
             raise ValueError(
@@ -803,6 +821,17 @@ class WeightLoader:
             "k_norm_weight": f"{prefix}.k_norm.weight",
             "k_norm_bias": f"{prefix}.k_norm.bias",
         }
+        if self.cfg.index_kpool_compress:
+            tensor_names.update(
+                {
+                    "index_kpool_compress_ape": (
+                        f"{prefix}.index_kpool_compress_ape"
+                    ),
+                    "index_kpool_compress_gate": (
+                        f"{prefix}.index_kpool_compress_gate"
+                    ),
+                }
+            )
         missing = [
             tensor_name
             for tensor_name in tensor_names.values()
@@ -1152,6 +1181,64 @@ class WeightLoader:
 
         return weights
 
+    def load_kimi_delta_attention_weights(
+        self, layer_idx: int, device: torch.device
+    ) -> Dict[str, torch.Tensor]:
+        """Load one GLM-5.3 Kimi Delta Attention tensor set."""
+        if not self.cfg.is_kimi_delta_attention_layer(layer_idx):
+            raise ValueError(
+                f"KDA weights requested for non-KDA layer {layer_idx}"
+            )
+        prefix = f"{self.cfg.layer_tensor_prefix(layer_idx)}.self_attn"
+        projection_names = (
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "f_a_proj",
+            "f_b_proj",
+            "b_proj",
+            "g_a_proj",
+            "g_b_proj",
+        )
+        result = {
+            name: _timed_bf16_load(
+                self,
+                layer_idx=layer_idx,
+                tensor_name=f"{prefix}.{name}.weight",
+                device=device,
+                step=f"kimi_delta_attention.{name}",
+            )
+            for name in projection_names
+        }
+        for name in ("q_conv1d", "k_conv1d", "v_conv1d"):
+            result[name] = self._load_bf16(f"{prefix}.{name}.weight", device)
+        result["A_log"] = self._load_numeric_f32(f"{prefix}.A_log", device)
+        result["dt_bias"] = self._load_numeric_f32(f"{prefix}.dt_bias", device)
+        result["o_norm"] = self._load_numeric_f32(
+            f"{prefix}.o_norm.weight", device
+        )
+        return result
+
+    def load_glm5_next_hyper_connection(
+        self, layer_idx: int, device: torch.device
+    ) -> Dict[str, torch.Tensor]:
+        """Load GLM-5.3 mHC parameters in their FP32 execution format."""
+        if not self.cfg.is_glm5_next:
+            raise ValueError("GLM-5.3 mHC requested for another architecture")
+        prefix = self.cfg.layer_tensor_prefix(layer_idx)
+        return {
+            name: self._load_numeric_f32(f"{prefix}.{name}", device)
+            for name in (
+                "hc_attn_fn",
+                "hc_attn_base",
+                "hc_attn_scale",
+                "hc_ffn_fn",
+                "hc_ffn_base",
+                "hc_ffn_scale",
+            )
+        }
+
     def load_mamba2_weights(
         self, layer_idx: int, device: torch.device,
     ) -> Dict[str, torch.Tensor]:
@@ -1289,6 +1376,10 @@ class WeightLoader:
             result["hyper_connection"] = self.load_deepseek_v4_hyper_connection(
                 layer_idx, device
             )
+        elif self.cfg.is_glm5_next:
+            result["hyper_connection"] = self.load_glm5_next_hyper_connection(
+                layer_idx, device
+            )
         norms_elapsed = time.perf_counter() - start
         _emit_real_model_timing(
             {
@@ -1304,7 +1395,14 @@ class WeightLoader:
         # so linear attention always loads to the primary GPU device.
         attention_started = time.perf_counter()
         if is_linear:
-            result["linear_attention"] = self.load_linear_attention_weights(layer_idx, device)
+            if self.cfg.is_kimi_delta_attention_layer(layer_idx):
+                result["kimi_delta_attention"] = (
+                    self.load_kimi_delta_attention_weights(layer_idx, device)
+                )
+            else:
+                result["linear_attention"] = self.load_linear_attention_weights(
+                    layer_idx, device
+                )
         else:
             result["attention"] = self.load_attention_weights(
                 layer_idx, device, proj_device=attn_device)

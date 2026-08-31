@@ -10,6 +10,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -18,6 +19,7 @@ from krasis.kv_cache import MLA_CKV_KERNEL_MIN_DIM, PagedKVCache
 from krasis.layer import (
     NativeDeepseekV4Weights,
     NativeDsaIndexerWeights,
+    NativeKimiDeltaAttentionWeights,
     NativeMLAWeights,
     TransformerLayer,
 )
@@ -87,6 +89,7 @@ def _deepseek_v4_config() -> dict:
     return {
         "model_type": "deepseek_v4",
         "architectures": ["DeepseekV4ForCausalLM"],
+        "quantization_config": {"weight_block_size": [128, 128]},
         "hidden_size": 4096,
         "intermediate_size": None,
         "moe_intermediate_size": 2048,
@@ -127,6 +130,36 @@ def _deepseek_v4_config() -> dict:
 
 
 class ModelConfigContractTests(unittest.TestCase):
+    def test_qwen3_next_preserves_distinct_linear_key_value_geometry(self) -> None:
+        raw = {
+            "model_type": "qwen3_next",
+            "architectures": ["Qwen3NextForCausalLM"],
+            "hidden_size": 2048,
+            "intermediate_size": 5120,
+            "moe_intermediate_size": 512,
+            "num_hidden_layers": 4,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 2,
+            "vocab_size": 151936,
+            "full_attention_interval": 4,
+            "linear_conv_kernel_dim": 4,
+            "linear_key_head_dim": 96,
+            "linear_num_key_heads": 16,
+            "linear_value_head_dim": 128,
+            "linear_num_value_heads": 32,
+            "n_routed_experts": 512,
+            "num_experts_per_tok": 10,
+            "n_shared_experts": 1,
+            "first_k_dense_replace": 0,
+        }
+        cfg = ModelConfig.from_model_path(_write_config(self, raw))
+
+        self.assertEqual(cfg.linear_attention_family, "gated_deltanet")
+        self.assertEqual(cfg.linear_num_key_heads, 16)
+        self.assertEqual(cfg.linear_num_value_heads, 32)
+        self.assertEqual(cfg.linear_key_head_dim, 96)
+        self.assertEqual(cfg.linear_value_head_dim, 128)
+
     def test_native_sequence_state_rejects_non_deepseek_architectures(self) -> None:
         model_path = _write_config(self, _glm_dsa_config())
         with self.assertRaisesRegex(
@@ -718,6 +751,14 @@ class ModelConfigContractTests(unittest.TestCase):
         self.assertEqual(attention.w_vc.shape, (2, 2, MLA_CKV_KERNEL_MIN_DIM))
         self.assertTrue(torch.all(attention.w_kc[..., :4] == 1))
         self.assertTrue(torch.all(attention.w_kc[..., 4:] == 0))
+        cos, sin = attention._get_rope_cos_sin(4)
+        self.assertEqual(tuple(cos.shape), (4, 1))
+        self.assertEqual(tuple(sin.shape), (4, 1))
+        self.assertTrue(torch.all(cos[0] == 1))
+        self.assertTrue(torch.all(sin[0] == 0))
+        cached_cos, cached_sin = attention._get_rope_cos_sin(2)
+        self.assertIs(cached_cos, cos)
+        self.assertIs(cached_sin, sin)
         with self.assertRaisesRegex(
             RuntimeError,
             r"native Rust/CUDA runtime",
@@ -759,6 +800,64 @@ class ModelConfigContractTests(unittest.TestCase):
                 torch.device("cpu"),
             )
 
+    def test_native_mla_k6_cache_uses_format_derived_row_width(self) -> None:
+        cfg = SimpleNamespace(
+            is_deepseek_v4=False,
+            is_mla=True,
+            is_gqa=False,
+            attention_type="mla",
+            kv_lora_rank=512,
+            qk_rope_head_dim=0,
+            max_position_embeddings=4096,
+        )
+        cache = PagedKVCache(
+            cfg,
+            num_layers=1,
+            layer_indices=[0],
+            device=torch.device("cpu"),
+            max_pages=2,
+            page_size=16,
+            kv_format="k6v6",
+        )
+        self.assertEqual(cache.kv_format, 7)
+        self.assertEqual(cache.mla_block_bytes, 14)
+        self.assertEqual(cache.ckv_dim, MLA_CKV_KERNEL_MIN_DIM)
+        self.assertEqual(cache.ckv_row_bytes, 32 * 14)
+        self.assertEqual(cache.kpe_row_bytes, 0)
+        self.assertEqual(tuple(cache.ckv_cache.shape), (1, 2, 16, 32 * 14))
+        self.assertEqual(tuple(cache.kpe_cache.shape), (1, 2, 16, 0))
+        self.assertEqual(cache._bytes_per_page(), 16 * 32 * 14)
+
+    def test_native_mla_zero_rope_contract_builds_empty_tables(self) -> None:
+        attention = NativeMLAWeights.__new__(NativeMLAWeights)
+        attention.qk_rope_dim = 0
+        attention.device = torch.device("cpu")
+        attention.rope_theta = 10000.0
+        attention.cfg = SimpleNamespace(rope_scaling=None)
+        attention._rope_cos_sin = None
+
+        cos, sin = attention._get_rope_cos_sin(7)
+        self.assertEqual(tuple(cos.shape), (7, 0))
+        self.assertEqual(tuple(sin.shape), (7, 0))
+        self.assertEqual(cos.dtype, torch.bfloat16)
+        self.assertIs(cos, sin)
+
+    def test_native_kda_reset_clears_fixed_address_state(self) -> None:
+        attention = NativeKimiDeltaAttentionWeights.__new__(
+            NativeKimiDeltaAttentionWeights
+        )
+        attention._hqq_conv_state = torch.ones((3, 8, 3), dtype=torch.float32)
+        attention._hqq_recur_state = torch.ones((2, 4, 4), dtype=torch.float32)
+
+        conv_ptr = attention._hqq_conv_state.data_ptr()
+        recur_ptr = attention._hqq_recur_state.data_ptr()
+        attention.reset_state()
+
+        self.assertEqual(attention._hqq_conv_state.data_ptr(), conv_ptr)
+        self.assertEqual(attention._hqq_recur_state.data_ptr(), recur_ptr)
+        self.assertEqual(torch.count_nonzero(attention._hqq_conv_state).item(), 0)
+        self.assertEqual(torch.count_nonzero(attention._hqq_recur_state).item(), 0)
+
     def test_mla_k4_budget_uses_padded_physical_cache_width(self) -> None:
         raw = _glm_dsa_config()
         raw["kv_lora_rank"] = 256
@@ -768,6 +867,18 @@ class ModelConfigContractTests(unittest.TestCase):
         )
         self.assertEqual(
             _kv_bytes_per_token_per_layer(raw, "k4v4"),
+            expected,
+        )
+
+    def test_mla_k6_budget_uses_padded_physical_cache_width(self) -> None:
+        raw = _glm_dsa_config()
+        raw["kv_lora_rank"] = 256
+        expected = (
+            (MLA_CKV_KERNEL_MIN_DIM // 16) * 14
+            + (raw["qk_rope_head_dim"] // 16) * 14
+        )
+        self.assertEqual(
+            _kv_bytes_per_token_per_layer(raw, "k6v6"),
             expected,
         )
 

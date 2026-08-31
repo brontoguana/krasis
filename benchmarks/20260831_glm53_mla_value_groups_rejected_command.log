@@ -1,0 +1,12 @@
+Date: 2026-08-31
+Host GPU: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+Purpose: Timing-disabled end-to-end acceptance test of geometry-derived sparse-MLA value grouping; rejected because whole decode regressed.
+
+Command:
+env -u KRASIS_DECODE_MLA_SPARSE_THREADS -u KRASIS_DECODE_MLA_PATH_CLOCKS -u KRASIS_DECODE_LA_GRAPH_CLOCKS -u KRASIS_DECODE_V4_PATH_CLOCKS -u KRASIS_DECODE_MOE_ROUTE_CLOCKS ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+
+Run directory:
+logs/dev-benchmark_20260831_062447
+
+Exit:
+0

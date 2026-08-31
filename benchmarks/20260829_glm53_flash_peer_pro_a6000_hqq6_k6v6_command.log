@@ -1,0 +1,6 @@
+KRASIS_VRAM_LEDGER=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-peer-pro-a6000.conf
+
+Run directory: logs/dev-benchmark_20260829_203322
+Timing instrumentation: disabled
+Primary GPU: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+Peer GPU: NVIDIA RTX A6000

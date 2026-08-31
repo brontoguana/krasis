@@ -286,6 +286,7 @@ from krasis.config import (
     configure_adaptive_cold_mass_pruning,
     marlin_cache_basename,
 )
+from krasis.checkpoint_identity import route_checkpoint_identity
 from krasis.model import KrasisModel, log_ram_ledger
 
 logger = logging.getLogger("krasis.server")
@@ -419,13 +420,6 @@ def _env_disabled(name: str) -> bool:
     return raw.strip().lower() in ("0", "false", "no", "off")
 
 
-def _nemotron_default_optimizations_enabled(model: KrasisModel) -> bool:
-    return (
-        getattr(getattr(model, "cfg", None), "model_type", None) == "nemotron_h"
-        and not _env_disabled("KRASIS_NEMOTRON_DEFAULT_OPTIMIZATIONS")
-    )
-
-
 def _sha256_file(path: str) -> Optional[str]:
     if not os.path.isfile(path):
         return None
@@ -523,6 +517,7 @@ def _heatmap_route_signature_from_cfg(cfg, args) -> dict[str, Any]:
     explicit_layer_types = [] if layer_types is None else list(layer_types)
     return {
         "model": {
+            "checkpoint_identity": route_checkpoint_identity(args.model_path),
             "model_name": os.path.basename(os.path.abspath(args.model_path)),
             "model_type": cfg.model_type,
             "num_hidden_layers": cfg.num_hidden_layers,
@@ -1544,16 +1539,20 @@ def _next_startup_calibration_probe_target(
     if fail_closed_probe_tokens is not None:
         raw_candidate = min(raw_candidate, fail_closed_probe_tokens)
     if len(observed_prefill_mins) < 2:
+        # The model-derived projection is an admission estimate, not a measured
+        # memory curve. Do not let it skip the bounded interior probe: the
+        # conservative runtime envelope needs real interior points to avoid
+        # assigning long-prompt demand to every shorter request.
         projected, reason = _project_startup_calibration_probe_target(
             current_tokens=current_tokens,
             current_min_free_mb=current_min_free_mb,
             short_tokens=short_tokens,
-            default_long_tokens=default_long_tokens,
+            default_long_tokens=min(default_long_tokens, raw_candidate),
             target_floor_mb=target_floor_mb,
             mb_per_token=estimated_prefill_mb_per_token,
         )
         if projected is not None:
-            return projected, f"model-estimated initial probe ({reason})"
+            return projected, f"bounded model-estimated initial probe ({reason})"
         if fail_closed_probe and raw_candidate > current_tokens:
             return raw_candidate, (
                 "runtime-derived fail-closed probe "
@@ -2101,6 +2100,24 @@ def _merge_heatmap_counts(
     return merged_events
 
 
+def _runtime_heatmap_count_tuples(
+    counts: dict[str, Any], source: str
+) -> list[tuple[int, int, int]]:
+    runtime_counts: list[tuple[int, int, int]] = []
+    for key, count in _approved_heatmap_counts(counts, source).items():
+        layer_text, expert_text = key.split(",", 1)
+        try:
+            layer_idx = int(layer_text)
+            expert_idx = int(expert_text)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Heatmap contains a non-integer route key {key!r}: {source}"
+            ) from exc
+        runtime_counts.append((layer_idx, expert_idx, int(count)))
+    runtime_counts.sort(key=lambda item: (item[0], item[1]))
+    return runtime_counts
+
+
 def _full_heatmap_ranking(
     model: KrasisModel,
     gpu_store,
@@ -2352,6 +2369,7 @@ def _build_approved_heatmap(
             calibration["safety_margin_mb"],
             calibration["short_prefill_post_alloc_free_mb"],
             calibration["long_prefill_post_alloc_free_mb"],
+            calibration["measured_vram_demand_points"],
         )
         logger.info("APPROVED_HEATMAP residency_calibration %s", cal_msg)
         if bootstrap_counts:
@@ -2361,6 +2379,9 @@ def _build_approved_heatmap(
                 hard_budget_mb=0,
                 soft_budget_mb=calibration["decode_hcs_budget_mb"],
                 safety_margin_mb=calibration["safety_margin_mb"],
+                measured_counts=_runtime_heatmap_count_tuples(
+                    bootstrap_counts, bootstrap_path
+                ),
             )
             evicted, freed_mb, free_mb = gpu_store.py_hcs_drain_vram_pressure(
                 "approved_heatmap_bootstrap",
@@ -2532,6 +2553,9 @@ def _build_approved_heatmap(
                     hard_budget_mb=0,
                     soft_budget_mb=calibration["decode_hcs_budget_mb"],
                     safety_margin_mb=calibration["safety_margin_mb"],
+                    measured_counts=_runtime_heatmap_count_tuples(
+                        base_counts, f"approved heatmap refresh {i}"
+                    ),
                 )
                 evicted, freed_mb, refresh_free_mb = (
                     gpu_store.py_hcs_drain_vram_pressure(
@@ -2988,8 +3012,15 @@ def main():
                              "source only when system RAM is tight")
     parser.add_argument("--dynamic-hcs", action=argparse.BooleanOptionalAction, default=True,
                         help="Enable dynamic HCS heatmap-prefix + recency-tail cache (default: on)")
-    parser.add_argument("--dynamic-hcs-tail-blocks", type=int, default=2, choices=range(1, 6),
-                        help="Advanced: recency tail size in activated-expert blocks (1-5, default: 2)")
+    parser.add_argument(
+        "--dynamic-hcs-tail-blocks",
+        default="auto",
+        choices=("auto", "1", "2", "3", "4", "5"),
+        help=(
+            "Advanced: measured recency-tail policy (auto, the default), or an "
+            "explicit activated-expert block count (1-5)"
+        ),
+    )
     parser.add_argument(
         "--dynamic-peer",
         action=argparse.BooleanOptionalAction,
@@ -3083,12 +3114,9 @@ def main():
     args = parser.parse_args(remaining_argv)
     if not math.isfinite(args.prefix_cache_ram_fraction) or not 0.0 < args.prefix_cache_ram_fraction <= 1.0:
         parser.error("--prefix-cache-ram-fraction must be finite and in (0, 1]")
-    try:
-        args.dynamic_hcs_tail_blocks = int(args.dynamic_hcs_tail_blocks)
-    except (TypeError, ValueError):
-        parser.error("--dynamic-hcs-tail-blocks must be an integer in 1..5")
-    if args.dynamic_hcs_tail_blocks < 1 or args.dynamic_hcs_tail_blocks > 5:
-        parser.error("--dynamic-hcs-tail-blocks must be in 1..5")
+    args.dynamic_hcs_tail_blocks = str(args.dynamic_hcs_tail_blocks).strip().lower()
+    if args.dynamic_hcs_tail_blocks not in ("auto", "1", "2", "3", "4", "5"):
+        parser.error("--dynamic-hcs-tail-blocks must be auto or an integer in 1..5")
     args.approved_heatmap_mode = str(args.approved_heatmap_mode or "auto").strip().lower()
     if args.approved_heatmap_mode not in APPROVED_HEATMAP_MODE_CHOICES:
         parser.error(
@@ -3722,22 +3750,8 @@ def main():
         _detail(f"Rust prefill warmed with {warmup_len:,} tokens before HCS budgeting")
     except Exception as e:
         _abort_if_cuda_context_poisoned("Rust prefill warmup", e)
-        if (
-            _env_flag("KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5")
-            or _env_flag("KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5_ORACLE")
-            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN")
-            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_ORACLE")
-            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_OUTPUT_SUBLOOP_TIMING")
-            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_COEFF_TILE")
-            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_CANDIDATE_TIMING")
-            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_RECURRENT_SUBLOOP_TIMING")
-            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_STATE_PARALLEL_RECURRENT")
-            or _env_flag("KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED")
-            or _nemotron_default_optimizations_enabled(_model)
-        ):
-            raise
-        logger.warning("Rust prefill warmup failed, continuing without it: %s", e)
-        _warn(f"Rust prefill warmup failed: {e}")
+        logger.error("Rust prefill warmup failed: %s", e)
+        raise
     warmup_elapsed = time.time() - t_warmup
     _detail(f"Warmup complete in {warmup_elapsed:.1f}s")
     vram_monitor.report_event("warmup_end")
@@ -3948,6 +3962,13 @@ def main():
     short_tokens, short_baseline_free, short_prefill_post_alloc, short_prefill_min, short_decode_min = _measure_vram_probe(
         "Short calibration", short_prompt
     )
+    measured_vram_probes = [(
+        short_tokens,
+        short_baseline_free,
+        short_prefill_post_alloc,
+        short_prefill_min,
+        short_decode_min,
+    )]
 
     adaptive_floor_mb = _startup_calibration_long_floor_mb(SAFETY_MARGIN_MB)
     estimated_prefill_mb_per_token = _startup_calibration_estimated_prefill_mb_per_token(
@@ -3969,6 +3990,13 @@ def main():
         long_tokens, long_baseline_free, long_prefill_post_alloc, long_prefill_min, long_decode_min = _measure_vram_probe(
             "Long calibration", long_prompt
         )
+        measured_vram_probes.append((
+            long_tokens,
+            long_baseline_free,
+            long_prefill_post_alloc,
+            long_prefill_min,
+            long_decode_min,
+        ))
     else:
         _detail(
             f"Adaptive long calibration: default target={long_target:,} tokens, "
@@ -4047,6 +4075,13 @@ def main():
                 "Long calibration", long_prompt
             )
             observed_prefill_mins.append((long_tokens, long_prefill_min))
+            measured_vram_probes.append((
+                long_tokens,
+                long_baseline_free,
+                long_prefill_post_alloc,
+                long_prefill_min,
+                long_decode_min,
+            ))
 
             if long_tokens <= previous_long_tokens:
                 _detail(
@@ -4111,13 +4146,59 @@ def main():
     decode_short_free = max(0, post_calibration_free_mb - short_decode_delta)
     decode_long_free = max(0, post_calibration_free_mb - long_decode_delta)
 
+    measured_vram_demand_points = [
+        (
+            int(tokens),
+            max(0, int(baseline_free) - int(prefill_min)),
+            max(0, int(prefill_post_alloc) - int(prefill_min)),
+            max(0, int(baseline_free) - int(decode_min)),
+        )
+        for (
+            tokens,
+            baseline_free,
+            prefill_post_alloc,
+            prefill_min,
+            decode_min,
+        ) in measured_vram_probes
+    ]
+    logger.info(
+        "VRAM calibration measured demand points: %s",
+        measured_vram_demand_points,
+    )
+
     # GPU0 HCS is fully reclaimable. Prefill and decode are separate runtime
-    # stages: the decode-resident HCS pool is sized from measured decode VRAM,
-    # while the prefill path evicts soft HCS back to the measured prefill floor
-    # before allocating scratch for each request.
-    decode_hcs_budget = max(0, decode_short_free - SAFETY_MARGIN_MB)
-    prefill_short_hcs_budget = max(0, prefill_short_free - SAFETY_MARGIN_MB)
-    prefill_long_hcs_budget = max(0, prefill_long_free - SAFETY_MARGIN_MB)
+    # stages: size decode residency and report prefill allowances from the same
+    # monotonic envelope Rust enforces, not from raw endpoint values that can
+    # discard a measured interior high-water.
+    effective_prefill_transient_mb = 0
+    effective_decode_transient_mb = 0
+    for _, prefill_transient_mb, _, decode_transient_mb in measured_vram_demand_points:
+        effective_prefill_transient_mb = max(
+            effective_prefill_transient_mb,
+            prefill_transient_mb,
+        )
+        effective_decode_transient_mb = max(
+            effective_decode_transient_mb,
+            decode_transient_mb,
+        )
+    decode_hcs_budget = max(
+        0,
+        post_calibration_free_mb
+        - effective_decode_transient_mb
+        - SAFETY_MARGIN_MB,
+    )
+    prefill_short_hcs_budget = max(
+        0,
+        post_calibration_free_mb
+        - measured_vram_demand_points[0][1]
+        - SAFETY_MARGIN_MB,
+    )
+    prefill_long_hcs_budget = max(
+        0,
+        post_calibration_free_mb
+        - effective_prefill_transient_mb
+        - SAFETY_MARGIN_MB,
+    )
 
     vram_monitor.report_event("calibration_end")
     previous_poll_interval_ms = int(vram_monitor.set_poll_interval_ms(_vram_poll_ms))
@@ -4183,6 +4264,7 @@ def main():
             "short_prefill_post_alloc_free_mb": int(short_prefill_post_alloc),
             "long_prefill_post_alloc_free_mb": int(long_prefill_post_alloc),
             "decode_hcs_budget_mb": int(decode_hcs_budget),
+            "measured_vram_demand_points": measured_vram_demand_points,
         }
         _build_approved_heatmap(
             _model,
@@ -4623,6 +4705,7 @@ def main():
                 )
             _warn("Experimental HCS heuristic init enabled: skipping global heatmap build")
             ranking = []
+            measured_hcs_counts = None
         else:
             # ── Load approved heatmap or build quick startup heatmap ──
             # Approved heatmaps are route-prior artifacts: they must match the
@@ -4677,6 +4760,9 @@ def main():
             heatmap_metadata = raw_heatmap.pop("_metadata", {})
             sorted_ranking = sorted(raw_heatmap.items(), key=lambda x: x[1], reverse=True)
             ranking = [(int(k.split(",")[0]), int(k.split(",")[1])) for k, _ in sorted_ranking]
+            measured_hcs_counts = _runtime_heatmap_count_tuples(
+                raw_heatmap, heatmap_path
+            )
             _detail(f"Heatmap: {len(ranking):,} experts ranked from {len(raw_heatmap):,} entries")
             if heatmap_timing_enabled and heatmap_to_ready_start_s is not None:
                 logger.info(
@@ -5100,6 +5186,7 @@ def main():
                 SAFETY_MARGIN_MB,
                 short_prefill_post_alloc,
                 long_prefill_post_alloc,
+                measured_vram_demand_points,
             )
             _dim(cal_msg)
             _model._benchmark_prefill_calibration = {
@@ -5113,6 +5200,7 @@ def main():
                 "safety_margin_mb": int(SAFETY_MARGIN_MB),
                 "short_prefill_post_alloc_free_mb": int(short_prefill_post_alloc),
                 "long_prefill_post_alloc_free_mb": int(long_prefill_post_alloc),
+                "measured_vram_demand_points": measured_vram_demand_points,
             }
 
             # ── Set decode segment on primary store (for accurate HCS% reporting) ──
@@ -5176,6 +5264,7 @@ def main():
                 hard_budget_mb=gpu0_hard,
                 soft_budget_mb=gpu0_soft,
                 safety_margin_mb=SAFETY_MARGIN_MB,
+                measured_counts=measured_hcs_counts,
             )
             if args.dspark_mode != "off":
                 dspark_residency = store.dspark_residency_status()

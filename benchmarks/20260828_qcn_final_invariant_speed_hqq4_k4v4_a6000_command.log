@@ -1,0 +1,12 @@
+Date: 2026-08-28
+Working directory: /home/main/Documents/Claude/krasis
+tmux session: qcn_final_invariant_speed
+Command: ./dev speed-test
+Run directory: logs/dev-benchmark_20260828_071054
+Timing/trace instrumentation: disabled
+Exit status: 0
+
+SHA-256:
+benchmark_report  7fccdc934b12ba59ce11da9520ceac79d07329b3399056c67c7d405c9c7fdff9
+benchmark_stdout a8f68c3c41ed317c8897d257ed977f7129e2370ff5de425e160fa16cd74d2123
+runtime          daa25068f1a307a5f8c9b532290d7c6087e802fee1a1dfe34a80d71ece1fd1e2

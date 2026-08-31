@@ -126,6 +126,8 @@ class SupportedHFModel:
     runtime_profiles: tuple[tuple[str, str], ...]
     multi_gpu_modes: tuple[str, ...] = ("auto",)
     multi_gpu_qualified: bool = False
+    vision_modes: tuple[str, ...] = ()
+    default_vision_quant: str = ""
     max_context_tokens: int = 0
 
     @property
@@ -347,6 +349,27 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         runtime_profiles=(("hqq4", "k4v4"),),
         multi_gpu_modes=("auto", "peer"),
         multi_gpu_qualified=True,
+        max_context_tokens=4096,
+    ),
+    SupportedHFModel(
+        key="glm53-flash",
+        display_name="GLM-5.3-Flash",
+        repo_id="zai-org/GLM-5.3-Flash",
+        local_dir_name="GLM-5.3-Flash",
+        revision="3f1971b7b5f7a528c9c4ef6212c8785298a8c24a",
+        recommended_config="tests/glm53-flash-hqq6-k6v6-a6000.conf",
+        notes=(
+            "Validated HQQ6/k6v6/INT4 profile through 4K context; GLM vision "
+            "uses the accuracy-qualified BF16 tower, and measured multi-GPU "
+            "execution supports primary-plus-peer expert serving."
+        ),
+        default_attention="hqq6",
+        default_kv="k6v6",
+        runtime_profiles=(("hqq6", "k6v6"),),
+        multi_gpu_modes=("auto", "peer"),
+        multi_gpu_qualified=True,
+        vision_modes=("bf16",),
+        default_vision_quant="bf16",
         max_context_tokens=4096,
     ),
 )

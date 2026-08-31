@@ -1,0 +1,34 @@
+Date: 2026-08-31
+Status: accepted attribution; timing enabled, stopped after sustained decode panels
+GPU: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+Config: tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+Command: KRASIS_DECODE_LA_GRAPH_CLOCKS=1 KRASIS_DECODE_V4_PATH_CLOCKS=1 KRASIS_DECODE_MOE_ROUTE_CLOCKS=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing
+Tmux: glm53_current_graph_buckets_diag_20260831
+Run directory: logs/dev-benchmark_20260831_005518
+
+Purpose:
+- Split the exact current default decode graph into KDA, routed expert, routing, graph residual, and demand-H2D components before selecting another optimization.
+- Timing was enabled, so throughput values are diagnostic only.
+
+Sustained 49/99/249-token panels:
+- Total: 40.13 / 43.20 / 44.77 ms/token.
+- Graph CUDA-event segment total: 18.25 / 18.72 / 19.37 ms/token.
+- KDA total: 6.04 / 6.01 / 6.01 ms/token.
+- Routed MoE expert marked time: 2.07 / 2.20 / 2.25 ms/token.
+- Route-segment residual: 5.16 / 5.41 / 5.56 ms/token.
+- Demand H2D active: 17.02 / 20.31 / 21.53 ms/token.
+- KDA QKV: 2.03 / 2.03 / 2.03; recurrence: 1.81 / 1.81 / 1.80 ms/token.
+- Route logits/top-k/scale-class on the 249 row: 0.15 / 0.70 / 0.09 ms/token.
+
+Decision:
+- Promotion bookkeeping, N32 routed-expert GEMV, and PCIe copy-call overhead are not the next fixed target.
+- The only unaccounted fixed graph bucket large enough to matter is the 5.16--5.56 ms/token route-segment residual. Map its exact captured launches before editing.
+- The run was stopped with ./dev kill before redundant formal prefill rows. Both GPUs returned idle at 11/15 MiB; no model process remained.
+
+Safety:
+- Calibration low-water at 500/4K/8K/16K/32K/39920 tokens: 1223/1115/1203/1189/1227/1219 MiB.
+- No CUDA error, OOM, budget skip, no-slot event, or copy failure.
+
+SHA256:
+- stdout e0c59c11f77be1dc7ade5e62f3ea57a40705c63d6457a4931d2fae58567816c6
+- outer 4133ff47a0d2298b94938acf62c8025419dfde99c43f66cafb6aa09effd1347d

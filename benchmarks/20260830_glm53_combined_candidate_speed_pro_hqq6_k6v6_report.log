@@ -1,0 +1,49 @@
+================================================================
+Krasis Benchmark — 2026-08-30 11:39:43
+================================================================
+Model:            GLM-5.3-Flash
+Architecture:     glm5_next_text, 45 layers, 288 experts, top-8, 11 GQA + 34 linear
+PP Partition:     [45] (1 GPUs)
+
+Hardware:
+  CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
+  RAM:            995 GB total, 162.4 GB used by process
+  GPU 0 (physical 1): NVIDIA RTX PRO 6000 Blackwell Workstation Edition (97887 MB), 5883 MB allocated
+
+Quantization:
+  GPU experts:    INT4 (Marlin)
+  CPU experts:    INT4
+  Attention:      HQQ6
+  Shared expert:  INT8
+  Dense MLP:      INT8
+  LM head:        INT8
+  KV cache:       k6v6
+
+Strategy:
+  Layer group size: 1 (layer_grouped(1))
+  Prefill threshold: 1
+  Mode:           gpu_decode (layer_grouped(1))
+
+Prefill (internal) — 6 runs at different lengths:
+  Run 1:  120.1 tok/s (1,000 tokens in 8329.3ms)
+  Run 2:  519.7 tok/s (5,000 tokens in 9621.5ms)
+  Run 3:  842.1 tok/s (10,000 tokens in 11875.0ms)
+  Run 4:  1,218.6 tok/s (20,000 tokens in 16412.9ms)
+  Run 5:  1,449.5 tok/s (35,000 tokens in 24146.4ms)
+  Run 6:  1,483.7 tok/s (39,920 tokens in 26905.2ms)
+  Best:   1,483.7 tok/s (39,920 tokens)
+
+Decode (internal) — 50/100/250 tokens, 3 separate prompts:
+   50 tokens: 22.29 tok/s (44.9ms/tok)
+  100 tokens: 23.72 tok/s (42.2ms/tok)
+  250 tokens: 22.49 tok/s (44.5ms/tok)
+  Best:    23.72 tok/s
+  HCS:     6540/12096 experts (54.1%)
+  Min free VRAM: 1279 MB
+
+Round trip (network) — 50/100/250 tokens via HTTP:
+   50 tokens: 34.43 tok/s (10.65s total)
+  100 tokens: 29.45 tok/s (12.70s total)
+  250 tokens: 24.53 tok/s (19.45s total)
+  Best:    34.43 tok/s
+================================================================

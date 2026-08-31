@@ -514,9 +514,16 @@ fn close_initial_think_block_if_disabled(
     enable_thinking: bool,
 ) -> String {
     if add_generation_prompt && !enable_thinking {
-        const OPEN_THINK_SUFFIX: &str = "<|im_start|>assistant\n<think>\n";
-        if rendered.ends_with(OPEN_THINK_SUFFIX) {
+        const QWEN_OPEN_THINK_SUFFIX: &str = "<|im_start|>assistant\n<think>\n";
+        if rendered.ends_with(QWEN_OPEN_THINK_SUFFIX) {
             rendered.push_str("\n</think>\n\n");
+        } else if rendered.ends_with("<think>") {
+            // Some checkpoint templates unconditionally emit a bare opening
+            // marker in their generation prompt and expose no
+            // `enable_thinking` branch.  Close only that exact terminal marker
+            // so disabled mode remains template-driven rather than
+            // model-name-driven.
+            rendered.push_str("</think>");
         }
     }
     rendered
@@ -1033,6 +1040,25 @@ mod tests {
             .apply(r#"[{"role":"user","content":"value"}]"#, false, false)
             .unwrap();
         assert_eq!(rendered, "start\n    value\nend");
+    }
+
+    #[test]
+    fn supports_hugging_face_loop_controls() {
+        let config = write_tokenizer_config(concat!(
+            "{% for message in messages %}",
+            "{{ message.content }}",
+            "{% if message.content == 'stop' %}{% break %}{% endif %}",
+            "{% endfor %}",
+        ));
+        let engine = ChatTemplateEngine::from_config(&config).unwrap();
+        let rendered = engine
+            .apply(
+                r#"[{"role":"user","content":"first"},{"role":"user","content":"stop"},{"role":"user","content":"ignored"}]"#,
+                false,
+                false,
+            )
+            .unwrap();
+        assert_eq!(rendered, "firststop");
     }
 
     #[test]

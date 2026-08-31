@@ -1,0 +1,8 @@
+Purpose: Exact timing-disabled no-override GLM-5.3 speed control after enabling the capability-derived native DSA gathered prefill path by default.
+Timing/instrumentation: Disabled.
+Config: tests/glm53-flash-hqq6-k6v6-a6000.conf
+Heatmap: Reused exact-parameter six-prompt artifact to keep the following dynamic-tail A/B identical; SHA-256 b3ddaba583c9ddba48c65190dc5c124a68ea126921bd8bc9db4f97e213d8753e.
+Command:
+./dev benchmark tests/glm53-flash-hqq6-k6v6-a6000.conf --heatmap-path /home/main/.krasis/cache/GLM-5.3-Flash--4ab65dd91f64191f2206f16e896d5af056833466fe12dfbf29baa89ce76c6c1f/auto_heatmap.json
+Raw outer log: krasis-internal/glm53_opt_default_speed_exact_20260828.log
+Run directory: logs/dev-benchmark_20260828_023508

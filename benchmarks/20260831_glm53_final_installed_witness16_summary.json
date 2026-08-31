@@ -1,0 +1,429 @@
+{
+  "model": "GLM-5.3-Flash",
+  "config": "tests/glm53-flash-hqq6-k6v6-pro.conf",
+  "reference_path": "/home/main/Documents/Claude/krasis-internal/reference-outputs/output/GLM-5.3-Flash/llama_witness_glm53_long_prefix_16_tokens.json",
+  "overall": "PASS",
+  "prompt_results": [
+    {
+      "conv_idx": 0,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "# Feature: GLM-5.3-Flash\n\n## Goal\n\nRun the immutable official GLM-5.3-Flash checkpoint with Krasis's normal\nfull-GPU prefill and Rust/CUDA hybrid decode path, without weakening existing\nmodel support, calibration, correctness, or launcher capability gates.\n\n## Pinned source\n\n- Repository: `zai-org/GLM-5.3-Flash`\n- Revision: `3f1971b7b5f7a528c9c4ef6212c8785298a8c24a`\n- License: MIT\n\nThe source contains 62 safetensors shards. The immutable checkpoint identity\nmust be computed by the unified checkpoint identity system after download.\n\n## Measured architecture contract\n\n- 45 main text layers plus a separate MTP block\n- 34 Kimi Delta Attention layers and 11 DSA layers\n- 3 dense MLP layers followed by 42 sparse MoE layers\n- 288 routed experts, top-8, one shared expert\n- 4-way mHC at both attention and MLP residual sites\n- DSA uses 4-token learned k-pool compression, expands selected pools to raw\n  indices, and retains the visible incomplete tail\n- Source dense, attention, and expert tensors use checkpoint-declared 128x128\n  FP8 block scales; no source-format guess or raw-FP8 fallback is permitted\n\n## Implementation boundary\n\n1. Parse and validate the model's explicit schedules and dimensions.\n2. Load block-scaled FP8 tensors in both Python setup and Rust weight paths.\n3. Implement KDA prefill/decode and persistent recurrent/conv state in\n   Rust/CUDA, not Python.\n4. Reuse generalized mHC math while preserving DeepSeek-V4's learned final\n   head and GLM-5.3's unweighted final stream mean.\n5. Extend DSA with the measured k-pool indexer contract without changing\n   GLM-5.2 IndexShare semantics.\n6. Add HQQ attention cache descriptors for KDA and DSA; production validation\n   remains INT4 experts and measured HQQ attention only.\n7. Expose only witness-validated text capability initially. Vision remains\n   unsupported until it receives its own correctness and launcher gate.\n\n## Acceptance\n\n- Complete immutable download and checkpoint inventory verification.\n- Synthetic config, source-dequant, CUDA recurrence, k-pool, mHC, and\n  cross-model regression tests pass.\n- Llama witness agrees at defined trace/logit/token checkpoints. HF output is\n  not accepted as the correctness source.\n- Real launcher-started A6000 service completes calibration, respects the\n  runtime-measured 600 MiB margin, serves a real request, and has no budget,\n  slot, copy, CUDA, or OOM errors.\n- Speed is measured only after timing/trace instrumentation is disabled.\n\n## Current state\n\nText mode is operational and the measurement-led prefill/decode campaign is\ncomplete on the RTX A6000 and RTX PRO 6000. The immutable 62-shard checkpoint\nand its checkpoint-qualified 157.5 GB Marlin/HQQ cache are complete. The exact\nfinal timing-disabled RTX PRO benchmark reached 1,420.5 tok/s prefill at\n39,920 tokens and 23.87 tok/s best internal decode. Startup measured every\n500/4K/8K/16K/32K/39,920 VRAM probe, decode held 1,279 MiB free, and all HCS,\nCUDA, and OOM failure counters remained zero.\n\nThe exact final server built a fresh identity-matched six-prompt heatmap and\npassed `./dev network 18254 --large` `18/18`. Canonical real-content prompts\nwere coherent at 2,044/8,585/23,072 tokens; 61,891 tokens correctly rejected\nabove the test profile's 50,000-token cap; all five sequential memory turns\npassed. The service was stopped normally after the gate and both local GPUs\nare idle.\n\nThe final launcher contract recognizes only the pinned checkpoint revision and\noffers HQQ6 attention, k6v6 KV, INT4 experts, one GPU, and the qualified 4,096\ntoken context. Vision and multi-GPU execution remain unsupported and fail\nclosed. A combined GLM-5.3 llama-witness profile is not yet available, so this\nis operational text acceptance rather than the feature's final witness/release\ncorrectness gate.\n\n## Initial decode performance profile\n\nThe initial accepted timing-disabled real-content result was 6.34 tok/s. This\nwas the first correctness-qualified baseline, before targeted optimization.\nOne timing-enabled diagnostic was used only for attribution.\n\nEach token selects 42 sparse layers x top-8 experts = 336 routed experts. The\nloaded Marlin cache measured 12.375 MiB per expert including scales, giving an\nexact selected routed-expert footprint of 4,158 MiB/token (4,032 MiB for the\nraw INT4 matrices). At 249 measured decode steps, Dynamic HCS hit 61.52% and\nreduced physical expert DMA to 1,599.90 MiB/token. That transfer consumed\n77.57 ms/token at 21.54 GB/s; graph events consumed another 48.57 ms/token,\nfor 135.70 ms/token total under timing instrumentation.\n\nOn the same A6000, accepted DeepSeek-V4 evidence measured 3,192.75 MiB/token\nselected, 781.51 MiB/token physical DMA, 35.70 ms H2D, and 34.93 ms graph\nevents. GLM-5.3 therefore selects 30.2% more packed expert data, physically\nmoves 2.05x as much after HCS, and spends 39.0% more time in graph work. These\nmeasurements explain the initial speed without assigning an unmeasured cause.\nThese measurements drove the first optimization pass below.\n\n## First optimization pass\n\nThe original timing-disabled A6000 standard baseline was `67.6/86.2 tok/s`\nprefill at 1K/3,196 tokens and `7.32/7.79/7.57 tok/s` decode at 50/100/250.\nInstrumentation showed that KDA recurrence was only 2.15 ms/token, while Q/K/V\nprojection was 10.45 ms, post-HCS expert transfer dominated the MoE path, and\nthe long prefill left substantial work outside KDA recurrence. This ruled out\na recurrence-only rewrite.\n\nThe prefill root cause was an existing native-DSA gathered-attention capability\ngate that also required `deepseek_v4_hc_mult == 0`. GLM-5.3 has valid registered\nnative DSA and mHC simultaneously, so it was incorrectly excluded. Capability\nis now derived from the registered native-DSA descriptor and absence of the\nseparate DeepSeek-V4 descriptor; it contains no model name, GPU identity, or\nfixed geometry. A CUDA parity test passed. Timing-disabled A6000 prefill then\nreached as much as `84.2/169.2 tok/s`; the exact final cleaned run reproduced\n`79.5/162.5`, bounding ordinary run variance.\n\nThe decode root cause was a global evictable-slot suffix paired with layer-local\nvictim selection. At high RTX PRO residency this produced 34 no-slot events\ndespite 6,600 total residents. The runtime now preserves the same calibrated\ntail count but allocates it across all runtime-discovered active layers and\ndeterministically redistributes unused quota from short layers. It changes no\nVRAM budget, resident count, model constant, or GPU constant. The paired A6000\nrun improved decode from `6.94/7.61/7.29` to `7.36/8.18/7.76 tok/s`\n(`+6.0/+7.5/+6.4%`). The RTX PRO result was `20.74/22.26/21.61 tok/s`, with\nall prior no-slot events eliminated. Both cards kept zero budget skips and copy\nfailures and stayed above the 600 MiB margin.\n\nFinal review made this policy fail closed: every loaded slot must occur exactly\nonce in the runtime layer map, capacity and target counts must agree, and the\ntail must cover every active layer. The previous silent global-suffix fallback\nwas removed. The focused invariant suite passed `4/4`; the exact reviewed\ntiming-disabled repeats measured `79.1/162.1` prefill and\n`6.83/7.67/7.29` decode on A6000, and `106.0/265.8` prefill and\n`20.50/22.26/21.61` decode on RTX PRO, with zero budget, slot, copy, CUDA, or\nOOM failures.\n\nSame-host DeepSeek-V4 controls measured 101.5/167.9 tok/s at 1K prefill on\nA6000/PRO and `12.96/13.51/12.94` / `37.20/38.17/36.63 tok/s` decode. GLM\ntherefore reached 83.0%/63.9% of 1K prefill and 56.8-60.5%/55.8-59.0% of\ndecode. The requested half-speed target is met on both cards; three-quarter\ndecode is not yet met.\n\nTwo tempting shortcuts were rejected from measured evidence. A fixed five-\nblock HCS tail helped A6000 but was not portable; the layer-balanced runtime\npolicy slightly exceeded it without changing tail size. Parallel Q/K/V CUDA\nstreams regressed A6000 decode by `4.1/3.1/3.0%` and prefill by `4.3/3.1%`, so\nthat entire candidate branch was removed. Global LRU improved only the long\nshadow while regressing short requests, and every prompt-static blend was\nworse; neither became a fallback or default.\n\nThe mandatory cross-model gate found and fixed one parser regression before\nhandoff: GLM's unified nested KDA head geometry had accidentally been applied\nto Qwen3-Next. Family-specific parsing now preserves QCN's checkpoint-declared\n16 key / 32 value heads and independent dimensions. The exact timing-disabled\n`./dev speed-test` passed with best 2,598.6 tok/s prefill, 55.18 tok/s decode,\n24,576/24,576 HCS residents, 4,204 MiB free, and zero failures.\n\nThe post-review exact repeat also passed: best prefill was 2,595.1 tok/s and\nbest internal decode was 54.40 tok/s, with the same complete HCS residency,\n4,204 MiB floor, and clean failure counters.\n\n## RTX PRO full long-context benchmark\n\nA separate test-only 50,000-token profile was qualified without changing the\naccepted 4K service profile. Runtime calibration stepped through 4K, 8K, 16K,\n32K, and 39,920 tokens rather than assuming the checkpoint limit was safe. The\n39,920-token probe held 1,199 MiB free against the unchanged 600 MiB runtime\nmargin, and the complete timing-disabled standard benchmark passed.\n\nInternal prefill scaled from `114.8 tok/s` at 1K to `565.2 tok/s` at 35K and\nremained flat at `564.6 tok/s` at 39,920. Internal decode was\n`21.59/21.94/21.39 tok/s` at 50/100/250 target tokens. The fresh exact-runtime\nheatmap retained 6,560/12,096 HCS experts; decode minimum free VRAM was\n1,285 MiB. Every HCS failure counter remained zero and no CUDA error or OOM\noccurred. The later exact-source operational gate additionally qualified real\ncanonical content through 23,072 tokens, but it does not replace long-context\nllama-witness parity.\n\nThe subsequent campaign closed the measured prefill and decode frontier at the\nrequested 5% whole-model threshold. Further work would require a new measured\nbottleneck or a materially different algorithm rather than another known\nisolated candidate. Vision, multi-GPU, long-context llama-witness parity, and\nthe combined llama-witness profile remain explicitly unqualified.\n\n## RTX PRO long-prefill bottleneck profile\n\nThe 35K/39,920 plateau was profiled separately from speed evidence, using CUDA\nevents and synchronization only for attribution. At 39,920 tokens, the named\nstages closed to within 4.3 ms of a 68,756.7 ms total. KDA recurrence consumed\n28,589.1 ms (41.6%), DSA attention 20,942.6 ms (30.5%), FFN 10,066.3 ms\n(14.6%, including 6,069.4 ms of expert staging/DMA), and the two mHC prep/norm\nstages 3,595.5 ms (5.2%). KDA convolution and QKV projection consumed another\n4,369.7 ms. This makes the current recurrent KDA prefill implementation the\nfirst measured target; expert staging is not the primary long-prompt limit.\n\nThe official KDA inference design uses chunkwise prompt processing, while the\ncurrent Krasis kernel launches only one block per head and iterates prompt\ntokens inside that block. The portable implementation target is therefore a\nnative CUDA chunkwise KDA path with token-parallel chunk preparation and a\nhead-parallel state recurrence. It must support Ampere, derive geometry and\nscratch from the loaded descriptor, and select tuning from measurement rather\nthan a model/GPU constant. The recurrent implementation remains useful as a\ntest oracle; unsupported production geometry must fail closed rather than\nsilently fall back.\n\nA timing-disabled A/B of the existing bounded BF16-materialized HQQ projection\npath improved the same 39,920-token calibration from approximately 562.6 to\n591.6 tok/s (+4.9%) and held 1,207 MiB minimum free VRAM. It is a secondary\ncandidate after correctness validation, not a substitute for KDA/DSA work.\nNext priorities are: chunkwise KDA; isolated DSA substage/materialization work;\nthe existing TF32 mHC projection A/B; only then FFN DMA/computation overlap.\n\n## Second optimisation campaign and stopping decision\n\n",
+      "trace_input_row": {
+        "case_key": "0:0",
+        "conv_idx": 0,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 3115,
+        "positions": [
+          3115
+        ],
+        "input_tokens_count": 3116,
+        "prompt_prefix": "# Feature: GLM-5.3-Flash\n\n## Goal\n\nRun the immutable official GLM-5.3-Flash checkpoint with Krasis's normal\nfull-GPU pre"
+      },
+      "verdict": "WARN",
+      "metrics": {
+        "first_match": true,
+        "match_run": 3,
+        "ref_tokens_count": 16,
+        "our_tokens_count": 16,
+        "containment_rate": 0.8125,
+        "containment_hits": 13,
+        "containment_total": 16,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 10056,
+          "our_first_token": 10056,
+          "first_token_match": true,
+          "ref_top_ids": [
+            10056,
+            785,
+            154842,
+            1654,
+            258,
+            9061,
+            40,
+            1986,
+            100696,
+            7039
+          ],
+          "our_top_ids": [
+            10056,
+            785,
+            1654,
+            5501,
+            2,
+            154842,
+            40,
+            22405,
+            70942,
+            1986
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 10056,
+              "logprob": -0.04811923315849498
+            },
+            {
+              "rank": 2,
+              "token_id": 785,
+              "logprob": -3.2755495767864247
+            },
+            {
+              "rank": 3,
+              "token_id": 154842,
+              "logprob": -6.197378800419237
+            },
+            {
+              "rank": 4,
+              "token_id": 1654,
+              "logprob": -6.564671204594042
+            },
+            {
+              "rank": 5,
+              "token_id": 258,
+              "logprob": -7.146143601444628
+            },
+            {
+              "rank": 6,
+              "token_id": 9061,
+              "logprob": -7.658157990482714
+            },
+            {
+              "rank": 7,
+              "token_id": 40,
+              "logprob": -7.971909211185839
+            },
+            {
+              "rank": 8,
+              "token_id": 1986,
+              "logprob": -8.267713234928515
+            },
+            {
+              "rank": 9,
+              "token_id": 100696,
+              "logprob": -8.417456315067675
+            },
+            {
+              "rank": 10,
+              "token_id": 7039,
+              "logprob": -8.80953948309746
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 10056,
+              "logprob": -0.126545
+            },
+            {
+              "rank": 2,
+              "token_id": 785,
+              "logprob": -2.512184
+            },
+            {
+              "rank": 3,
+              "token_id": 1654,
+              "logprob": -3.590204
+            },
+            {
+              "rank": 4,
+              "token_id": 5501,
+              "logprob": -6.777951
+            },
+            {
+              "rank": 5,
+              "token_id": 2,
+              "logprob": -6.922362
+            },
+            {
+              "rank": 6,
+              "token_id": 154842,
+              "logprob": -7.311598
+            },
+            {
+              "rank": 7,
+              "token_id": 40,
+              "logprob": -7.512826
+            },
+            {
+              "rank": 8,
+              "token_id": 22405,
+              "logprob": -7.66995
+            },
+            {
+              "rank": 9,
+              "token_id": 70942,
+              "logprob": -7.674303
+            },
+            {
+              "rank": 10,
+              "token_id": 1986,
+              "logprob": -8.036141
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 6,
+          "top_overlap_ids": [
+            10056,
+            785,
+            154842,
+            1654,
+            40,
+            1986
+          ],
+          "ref_top1_top2_logprob_margin": 3.2274303436279297,
+          "our_top1_top2_logprob_margin": 2.385639,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.04811923315849498,
+          "selected_our_logprob": -0.126545,
+          "selected_logprob_delta": 0.07842576684150501,
+          "common_logprob_deltas": [
+            {
+              "token_id": 10056,
+              "ref_logprob": -0.04811923315849498,
+              "our_logprob": -0.126545,
+              "abs_delta": 0.07842576684150501
+            },
+            {
+              "token_id": 785,
+              "ref_logprob": -3.2755495767864247,
+              "our_logprob": -2.512184,
+              "abs_delta": 0.7633655767864247
+            },
+            {
+              "token_id": 154842,
+              "ref_logprob": -6.197378800419237,
+              "our_logprob": -7.311598,
+              "abs_delta": 1.1142191995807629
+            },
+            {
+              "token_id": 1654,
+              "ref_logprob": -6.564671204594042,
+              "our_logprob": -3.590204,
+              "abs_delta": 2.974467204594042
+            },
+            {
+              "token_id": 40,
+              "ref_logprob": -7.971909211185839,
+              "our_logprob": -7.512826,
+              "abs_delta": 0.45908321118583917
+            },
+            {
+              "token_id": 1986,
+              "ref_logprob": -8.267713234928515,
+              "our_logprob": -8.036141,
+              "abs_delta": 0.23157223492851386
+            }
+          ],
+          "mean_common_logprob_delta": 0.9368555323195147,
+          "max_common_logprob_delta": 2.974467204594042
+        },
+        "divergence_pos": 3,
+        "divergence_info": {
+          "position": 3,
+          "ref_token": 1349,
+          "our_token": 4715,
+          "ref_in_our_topk": true,
+          "ref_rank_in_our_topk": 4,
+          "ref_logprob": -1.2330708215045405,
+          "our_logprob": -1.189117
+        },
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 10056,
+            "our_token": 10056,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.04811923315849498,
+            "our_logprob": -0.126545
+          },
+          {
+            "pos": 1,
+            "ref_token": 752,
+            "our_token": 752,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.00011112829419346326,
+            "our_logprob": -0.000648
+          },
+          {
+            "pos": 2,
+            "ref_token": 15504,
+            "our_token": 15504,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.40495643164402395,
+            "our_logprob": -0.20116
+          },
+          {
+            "pos": 3,
+            "ref_token": 1349,
+            "our_token": 4715,
+            "match": false,
+            "in_topk": true,
+            "ref_rank": 4,
+            "ref_logprob": -1.2330708215045405,
+            "our_logprob": -1.189117
+          },
+          {
+            "pos": 4,
+            "ref_token": 419,
+            "our_token": 419,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.09837792400567125,
+            "our_logprob": -0.600927
+          },
+          {
+            "pos": 5,
+            "ref_token": 2197,
+            "our_token": 2197,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.5967822926960231,
+            "our_logprob": -0.372127
+          },
+          {
+            "pos": 6,
+            "ref_token": 13,
+            "our_token": 13,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.0029697646382693677,
+            "our_logprob": -0.010256
+          },
+          {
+            "pos": 7,
+            "ref_token": 1084,
+            "our_token": 1084,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.10757093591847067,
+            "our_logprob": -0.423663
+          },
+          {
+            "pos": 8,
+            "ref_token": 594,
+            "our_token": 594,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.007607371205793356,
+            "our_logprob": -0.003765
+          },
+          {
+            "pos": 9,
+            "ref_token": 264,
+            "our_token": 264,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.004456793225653399,
+            "our_logprob": -0.006712
+          },
+          {
+            "pos": 10,
+            "ref_token": 4565,
+            "our_token": 4565,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.007070946171705117,
+            "our_logprob": -0.031845
+          },
+          {
+            "pos": 11,
+            "ref_token": 25051,
+            "our_token": 25051,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.3944604995124834,
+            "our_logprob": -0.606045
+          },
+          {
+            "pos": 12,
+            "ref_token": 369,
+            "our_token": 32371,
+            "match": false,
+            "in_topk": true,
+            "ref_rank": 5,
+            "ref_logprob": -0.6877368956920762,
+            "our_logprob": -0.958275
+          },
+          {
+            "pos": 13,
+            "ref_token": 330,
+            "our_token": 2197,
+            "match": false,
+            "in_topk": false,
+            "ref_rank": null,
+            "ref_logprob": -0.1972169021873178,
+            "our_logprob": -0.644044
+          },
+          {
+            "pos": 14,
+            "ref_token": 3825,
+            "our_token": 369,
+            "match": false,
+            "in_topk": false,
+            "ref_rank": null,
+            "ref_logprob": -8.264529085977301e-06,
+            "our_logprob": -0.003905
+          },
+          {
+            "pos": 15,
+            "ref_token": 44,
+            "our_token": 330,
+            "match": false,
+            "in_topk": false,
+            "ref_rank": null,
+            "ref_logprob": -1.6628279411179392e-06,
+            "our_logprob": -0.192462
+          }
+        ],
+        "ref_text": "Let me carefully read this document. It's a feature specification for \"GLM",
+        "our_text": "Let me carefully parse this document. It's a feature specification/status document for \""
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 9717.6,
+        "decode_ms": 921.3,
+        "total_ms": 14205.4,
+        "prompt_tokens": 3116,
+        "vram_low_water": [
+          {
+            "device": 0,
+            "min_free_mb": 675
+          }
+        ],
+        "safety_margin_mb": 600
+      },
+      "debug": null
+    }
+  ]
+}

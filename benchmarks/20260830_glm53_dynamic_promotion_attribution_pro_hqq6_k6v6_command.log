@@ -1,0 +1,8 @@
+Date: 2026-08-30
+Hardware: NVIDIA RTX PRO 6000 Blackwell Workstation Edition (97,887 MB)
+Working directory: /home/main/Documents/Claude/krasis
+Command: ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing
+Environment: no KRASIS_* overrides present
+Run directory: logs/dev-benchmark_20260830_232953
+Exit: 0
+Purpose: timing-only Dynamic-HCS promotion CPU/D2D/mirror attribution; not speed acceptance

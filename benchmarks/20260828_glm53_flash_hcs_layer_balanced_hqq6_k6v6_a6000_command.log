@@ -1,0 +1,10 @@
+Purpose: timing-disabled standard validation of layer-balanced Dynamic HCS tails on RTX A6000
+Command: ./dev benchmark tests/glm53-flash-hqq6-k6v6-a6000.conf
+Tmux: glm53_hcs_a6000_validation
+Run directory: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260828_041303
+Heatmap: /home/main/.krasis/cache/GLM-5.3-Flash--4ab65dd91f64191f2206f16e896d5af056833466fe12dfbf29baa89ce76c6c1f/auto_heatmap.json
+Heatmap SHA-256: 92f6ad10b1eb301ba6012c955003997e413017e28e3c65cbf8e606b88bbce9b2
+Wheel SHA-256: 05521d1cc656a680978ddebcf4301a1eec99d01dccaee363a7e2bde774888a59
+Extension SHA-256: 793fa23201e8b4f7b0e6fd2e61f2cd3cff8bc161e82d0ca8024818dcbb0281db
+Instrumentation/component timing: disabled
+Exit: 0

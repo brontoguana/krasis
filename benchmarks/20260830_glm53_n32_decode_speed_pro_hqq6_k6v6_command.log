@@ -1,0 +1,43 @@
+Date: 2026-08-30
+Purpose: timing-disabled single-RTX-PRO GLM-5.3 speed A/B for the bit-exact INT4 N32 W13 and W2 decode kernels.
+
+Command (run through tmux session glm53_n32_decode_speed_20260830):
+  KRASIS_DECODE_INT4_W13_N32=1 KRASIS_DECODE_INT4_W2_N32=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+
+Run directory:
+  logs/dev-benchmark_20260830_105426
+
+Exit:
+  0
+
+Instrumentation:
+  Timing, trace, startup diagnostics and VRAM-ledger instrumentation were unset.
+
+Hardware:
+  One NVIDIA RTX PRO 6000 Blackwell Workstation Edition (physical GPU 1). The RTX A6000 remained unused.
+
+Internal prefill (1K/5K/10K/20K/35K/39,920):
+  122.1 / 527.6 / 833.7 / 1195.7 / 1385.3 / 1419.3 tok/s
+
+Internal decode (50/100/250 outputs):
+  23.08 / 24.13 / 23.89 tok/s
+
+Matched correctness-qualified control decode:
+  21.84 / 23.14 / 22.66 tok/s
+
+Matched gains:
+  +5.68% / +4.28% / +5.43%
+
+Route normalization:
+  Formal HCS hit rates were 87.73 / 88.71 / 88.34%, exactly equal to the corrected control profile. The candidate therefore improves the same routed workload rather than benefiting from a hotter route sequence.
+
+Safety/counters:
+  HCS 6540/12096; minimum decode free VRAM 1279 MiB. Runtime calibration measured 500/4K/8K/16K/32K/39,920-token low-water values 1227/1115/1237/1203/1187/1199 MiB. Dynamic HCS reported budget_skips=0, no_slot=0 and copy_failures=0. No CUDA error, OOM or below-600-MiB warning occurred.
+
+Heatmap:
+  The command built and used its own exact-runtime six-prompt non-benchmark heatmap. auto_heatmap.json SHA-256: f3689fc8df67c9bb7056642767e48e91c527f6d093e50a93889cadc177270ca9.
+
+Artifact SHA-256:
+  report  2f6214b21ac466d176e7ecf6e65dc8044b2601d7eec0d6c0ffeea8e8246e4f20
+  stdout  4648cb02344421a904666c8140eb63777b11e08a760a0855be2a3133d8e95b69
+  runtime ba952b298d393f2c00d846bd51c8e068efcfce8813cfa88015c7b351d8b1a600

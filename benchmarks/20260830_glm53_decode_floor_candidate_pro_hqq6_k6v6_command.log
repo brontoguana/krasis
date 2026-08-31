@@ -1,0 +1,23 @@
+Purpose: timing-disabled A/B of the calibration-derived decode HCS floor on one RTX PRO 6000. Rejected for speed; retained as safety and non-monotonic-HCS evidence.
+
+Working directory: /home/main/Documents/Claude/krasis
+Tmux session: glm53_decode_floor_speed_benchmark_20260830
+Run directory: logs/dev-benchmark_20260830_222758
+
+env \
+  -u KRASIS_TRACE \
+  -u KRASIS_PREFILL_TIMING \
+  -u KRASIS_STARTUP_DIAG \
+  -u KRASIS_STARTUP_EXIT_AFTER_CALIBRATION \
+  -u KRASIS_HQQ_MLA_STAGE_TIMING \
+  -u KRASIS_HQQ_MLA_STAGE_TIMING_MIN_TOKENS \
+  -u KRASIS_VRAM_LEDGER \
+  -u KRASIS_DSA_MLA_GATHER_MODE \
+  -u KRASIS_DSA_MLA_GATHERED_COMPUTE_MODE \
+  -u KRASIS_CPU_TAIL_RACE \
+  -u KRASIS_CPU_TAIL_TRANSPOSED \
+  -u KRASIS_CPU_TAIL_WORKERS \
+  -u KRASIS_CPU_TAIL_CALIBRATION_JSON \
+  ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+
+Result: exit 0, safe minimum 781 MiB, but internal decode regressed and the candidate is rejected pending diagnosis of non-monotonic dynamic HCS behavior.

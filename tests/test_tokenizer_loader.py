@@ -4,11 +4,21 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from krasis.tokenizer import _load_hf_tokenizer, load_hf_tokenizer
+from krasis.tokenizer import Tokenizer, _load_hf_tokenizer, load_hf_tokenizer
 from tests.reference_contract import load_tokenizer_with_compat
 
 
 class TokenizerLoaderTests(unittest.TestCase):
+    def test_unconditional_terminal_think_marker_closes_when_disabled(self):
+        self.assertEqual(
+            Tokenizer._close_initial_think_block("<|assistant|><think>"),
+            "<|assistant|><think></think>",
+        )
+        self.assertEqual(
+            Tokenizer._close_initial_think_block("<|assistant|><think>reasoning"),
+            "<|assistant|><think>reasoning",
+        )
+
     def test_ordinary_checkpoint_uses_auto_tokenizer(self):
         sentinel = object()
         with patch("krasis.tokenizer.AutoTokenizer.from_pretrained", return_value=sentinel) as load:

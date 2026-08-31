@@ -1,0 +1,11 @@
+Date: 2026-08-31 Europe/London
+GPU: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+Config: tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+Command: KRASIS_DECODE_MLA_SPARSE_THREADS=1024 KRASIS_DECODE_MLA_PATH_CLOCKS=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing
+tmux: glm53_mla_sparse_1024_diag_20260831
+run directory: logs/dev-benchmark_20260831_023232
+termination: intentionally stopped with ./dev kill after the complete 500/4K/8K/16K/32K/39,920 calibration curve and before redundant heatmap/formal rows; wrapper exit 137
+purpose: timing-only 1024-thread sparse-MLA launch-geometry attribution; not speed evidence
+stdout sha256: e936ed5f713888c63418a11a92ec901f045a7497e96e68b0f8c39d6f3fbd0317
+runtime sha256: 7568d55db16e281e1ceddbd88d58bddaba97b44eb65fc9c5a74538631d485c3f
+outer sha256: 5253c5ff72e0a0b4928fcd921354d733ede701c85cb833a658af050445bc55e8

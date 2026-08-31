@@ -1,6 +1,6 @@
 [package]
 name = "krasis"
-version = "1.0.21-rc.6"
+version = "1.0.21-rc.7"
 edition = "2021"
 description = "LLM runtime for large MoE models with GPU prefill, GPU decode, and measured VRAM management"
 license = "SSPL-1.0"
@@ -30,7 +30,7 @@ serde_json = "1"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 rand = "0.8"
 cudarc = { version = "0.12", features = ["driver", "cublas", "f16", "cuda-12060"], optional = true }
-minijinja = "2"
+minijinja = { version = "2", features = ["loop_controls"] }
 sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]

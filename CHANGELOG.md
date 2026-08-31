@@ -2,6 +2,254 @@
 
 ## Unreleased
 
+- Fixed the registered DSA owner-pipeline CUDA test fixture to declare its
+  configured non-MoE layer explicitly before constructing the prefill engine.
+  The production constructor remains fail-closed on incomplete layer metadata.
+  The normal parallel `dsa_registration` gate now passes all `46/46` tests;
+  the prior four secondary failures were mutex-poison cascades from the single
+  incomplete fixture, not additional CUDA arithmetic failures.
+
+- Added a pre-capture CUDA-event selector for registered sparse MLA/DSA decode
+  attention. It discovers the loaded runtime geometries, derives legal
+  256/512/1024-thread candidates from the device limit, rejects zero-occupancy
+  launches visibly, and measures real selected-index/cache data before graph
+  capture. The RTX PRO 6000 selected 1024 threads and the timing-disabled
+  GLM-5.3 runs reached `1509.0 tok/s` long prefill and `25.20 tok/s` best
+  decode while reproducing the frozen llama-witness bound exactly. The final
+  installed-source repeat reproduced `1506.6/25.20 tok/s`. Explicit diagnostic
+  overrides remain strict and malformed values fail closed.
+  A final installed-source witness rerun then reproduced first token `1/1`,
+  `11/16` exact token identities, `13/16` witness-token top-ten containment,
+  and selected-token logprob delta `0.07842576684150501`, with 675 MiB request
+  low-water against the 600 MiB margin.
+- Rejected a follow-up sparse-MLA value-group reduction after complete testing.
+  It improved the saturated sparse-attention stage by 24.0% (`6.67` to
+  `5.07 ms/token`) and passed the frozen witness, but its changed accumulation
+  order produced a weaker exact-runtime heatmap: best end-to-end decode fell
+  from `25.14` to `23.60 tok/s`. The grouped arithmetic was removed; the
+  accepted runtime thread selector and established arithmetic remain.
+- The final installed-source QCN cross-model guard passed with all 24,576
+  experts resident: internal prefill
+  `1334.1/2365.7/2544.1/2563.4/2508.8/2474.0 tok/s` and decode
+  `61.88/62.30/61.37 tok/s`, improving the prior decode guard while retaining
+  a 4,204 MiB floor and zero HCS/CUDA/OOM failures.
+
+- Added an opt-in exact-arithmetic structured schedule for native gathered MLA
+  preparation. It assigns one warp per selected KV/query vector and initializes
+  validity once per selection while retaining the established K4/K6
+  dequantization helpers and pedantic FP32 GEMMs. The K6 bitwise CUDA oracle
+  passed, and a live 39,920-token GLM-5.3 profile reduced gather time by 38.0%
+  and the complete gathered-attention stage by 13.8%. K4 then passed the same
+  bitwise gate. A runtime CUDA-event selector now measures both schedules on
+  the loaded format and exact workspace geometry and caches the faster one.
+  Its installed build, live-selection, and frozen sequence-witness gates
+  passed; the timing-disabled source-default run preserved the witness bound
+  and reached `1498.9 tok/s` long prefill before the later sparse-MLA selector
+  advanced the accepted frontier further.
+  Output-only TF32 remains diagnostic-only after it improved the isolated GEMM
+  but failed GLM-5.3's frozen sequence-accuracy bound.
+
+- Fixed prefill timing visibility for registered sparse-indexer architectures
+  such as GLM-5.3: query, score, base-sort, and merge counters are now printed
+  whenever recorded rather than being hidden behind the DeepSeek-V4 top-level
+  summary. The timing-disabled execution path and production kernels are
+  unchanged. Live 39,920-token attribution measured 10,922.1 ms of DSA event
+  time, of which only 1,358.2 ms was owner selection, directing further work to
+  the post-selection MLA stages. The opt-in HQQ diagnostic now also splits
+  gathered sparse attention into gather, score GEMM, softmax, and output GEMM
+  while reporting its runtime-derived tile geometry; timing-disabled execution
+  remains untouched. Strict opt-in diagnostic modes can independently test
+  TF32 tensor-core score and output GEMMs; the shipped default remains
+  pedantic FP32 and invalid modes fail visibly.
+
+- Fixed the CPU-tail scheduler rejecting routed experts with a positive
+  runtime SwiGLU clamp even though both of its Rust execution formats already
+  implement and receive that exact clamp contract. Alternate input widths,
+  ungated experts, non-SiLU activations, and Gemma4 preparation remain
+  fail-closed. A production-shaped executor equality test now covers the
+  positive-clamp path. The gate initially exposed a two-element, one-BF16-unit
+  mismatch caused by different floating-point association in the persistent
+  worker; aligning it with the established CPU operation order restored exact
+  `1/1` equality without widening tolerance. Calibrated workers now also
+  validate artifact schema and runtime geometry, require an explicit measured
+  enable recommendation, and skip queue depths where their calibration
+  recorded zero wins. The threshold is derived per worker from the artifact;
+  uncalibrated execution is unchanged. Admission skips are reported directly.
+
+- Fixed adaptive approved-heatmap collection invalidating its own measured
+  dynamic-HCS tail evidence. Per-interval activation counters and the validated
+  cumulative counts used for entropy sizing now have separate runtime-sized
+  storage, so beginning the next collection interval cannot zero the residency
+  contract before prefill eviction/reload. The fail-closed missing-route-mass
+  invariant remains unchanged; the focused dynamic-tail suite passed `10/10`.
+
+- Improved portable sparse-index prefill selection and INT4 decode kernel
+  geometry. Runtimes with a registered positive sparse-index descriptor now
+  default to the bit-exact radix-linear top-k implementation, whether the
+  descriptor is carried by DeepSeek-V4 attention or the separate native DSA
+  registration used by GLM-5.3; explicit selector overrides are unchanged.
+  INT4 routed decode now measures N16 versus N32 with CUDA events over actual
+  loaded expert weights for every live batch geometry and fails closed if an
+  automatic geometry was not measured. No model/GPU identity or measured
+  constant is encoded. On one RTX PRO 6000, the isolated radix A/B reached
+  1,444.4 tok/s at 39,920 tokens (+1.79%), while runtime N32 improved matched
+  50/100/250-token decode from `21.84/23.14/22.66` to
+  `22.91/24.16/23.60 tok/s` (+4.90%/+4.41%/+4.15%). The combined packaged
+  defaults preserved the established GLM-5.3 llama-witness bound: exact first
+  token, 11/16 exact continuation identities, and witness-token top-ten
+  containment at 13/16 positions.
+
+- Fixed GLM-5.3 native DSA prefill output handoff. The shared MLA/GQA path
+  writes its output projection to the attention scratch buffer, while GLM's
+  mHC post stage consumes the hidden buffer; DSA layers had therefore passed
+  their normalized input into mHC and discarded the computed attention output.
+  The GLM caller now materializes the runtime-sized BF16 result at that exact
+  boundary. KDA already writes directly to the hidden buffer and is unchanged.
+
+- Added the qualified GLM-5.3 image path and its launcher/Manager capability
+  contract. The native processor and vision tower are loaded lazily for image
+  requests; the server advertises image support only with the measured BF16
+  vision mode. Paired native-resolution tests rejected INT4 after two OCR
+  failures and accepted BF16 after exact `Krasis MoE Server` and
+  `Qwen3.5-35B-A3B` checks. The accepted requests used about 8K image/prompt
+  tokens, held 703 MiB minimum free VRAM during prefill, and reported no HCS,
+  CUDA, or OOM failure. Unsupported video and unqualified vision modes fail
+  explicitly. Capability discovery and execution require the checkpoint's
+  complete processor metadata; missing normalization or incompatible patch
+  geometry fails closed instead of using model-specific defaults.
+- Qualified GLM-5.3 peer-expert multi-GPU decode on an RTX PRO 6000 primary
+  plus RTX A6000 peer. The launcher now exposes only `auto` and `peer` for this
+  checkpoint; incompatible serial layer split is rejected from the registered
+  model graph before auxiliary loading. The real service passed the 18-case
+  network gate after the DSA handoff repair. Corrected timing-disabled decode
+  improved from matched single-GPU `21.84/23.14/22.66` to
+  `25.56/28.33/27.40 tok/s` (+17.0%/+22.4%/+20.9%). The peer held 607 MiB
+  free against the unchanged 600 MiB margin; the benchmark had zero misses or
+  unavailable fallbacks, while the live gate recorded one visible bounded
+  overlap fallback among 13,613 requests and completed it on the primary.
+- Extended the built llama-witness workflow for pinned GLM-5-next revisions and
+  repaired GGUF preflight disk accounting. Conversion now uses the converter's
+  measured dry-run output size plus the largest runtime-derived materialized
+  tensor instead of assuming the source checkpoint size predicts BF16 output.
+  No fixed model expansion ratio or accuracy fallback was added. Against an
+  exact detached llama.cpp GLM-5-next revision and a 641.6 GB BF16 GGUF,
+  corrected single-GPU Krasis matched the authoritative first token on five
+  frozen prompts. A 16-token continuation matched 11/16 token identities and
+  kept the witness token in Krasis's top ten on 13/16 positions; this is a
+  bounded INT4/HQQ6 accuracy result, not a claim of BF16 logit or sequence
+  identity.
+
+- Finalized the measurement-led GLM-5.3 prefill/decode optimization build and
+  repaired a VRAM-calibration integrity issue exposed by the acceptance run.
+  Startup now retains every measured prompt-length probe, builds a monotonic
+  demand envelope, and uses the next measured upper bound inside each interval;
+  it no longer discards interior high-water points or linearly underestimates
+  route-dependent short-prompt cold staging. No fixed reserve, model/GPU
+  exception, or fallback was added. A QCN guard then proved that conservative
+  upper bounds require real interior samples: model-derived admission can no
+  longer skip the existing bounded 4K/8K/16K/32K probes. The accepted fixed
+  `./dev speed-test` restored QCN to
+  `1,329.5/2,359.4/2,533.5/2,553.4/2,499.8/2,463.5 tok/s` prefill and
+  `54.40/54.26/53.51 tok/s` decode with all experts resident. The final
+  exact-source timing-disabled RTX PRO benchmark reached `1,420.5 tok/s`
+  prefill at 39,920 tokens and `23.87 tok/s` best internal decode, with all
+  500/4K/8K/16K/32K/39,920 probes measured, 1,199 MiB at the longest probe,
+  1,279 MiB during decode, no below-600 MiB warning, and zero HCS/CUDA/OOM
+  failures. The same exact source passed the full long-context and multi-turn
+  network gate `18/18`, including coherent 2,044/8,585/23,072-token canonical
+  prompts and truthful rejection above the 50,000-token cap. Final source
+  review also made the HQQ6 decode-autotune margin fail closed: an absent
+  setting retains the declared 5% policy, while malformed, negative, NaN, or
+  infinite explicit values now error instead of silently using a default.
+
+- Completed the second, measurement-led GLM-5.3-Flash optimisation campaign on
+  the RTX PRO 6000. Native chunk-parallel KDA recurrence, token-parallel KDA
+  convolution, TF32 mHC projection, bounded BF16 HQQ prefill materialization,
+  and split expert DMA raised the timing-disabled long-context frontier from
+  `565.2` to `1,431.9 tok/s` at 39,920 tokens; the full accepted curve was
+  `144.9/533.2/861.9/1,222.7/1,423.6/1,431.9 tok/s`. Decode now measures every
+  HQQ6 projection shape and selects scalar or quartet CUDA execution only when
+  the measured improvement exceeds 5%, while Dynamic HCS derives its evictable
+  tail from exact per-layer heatmap counts. The accepted decode rows were
+  `26.43/19.97/21.09 tok/s`, about 9.1% faster in aggregate than the fixed-tail
+  control at matched workload. Expert compression passed its bit-exact
+  component gate but regressed whole-model decode by 16.8% in streaming mode
+  and 23.7% in grouped mode, so it remains disabled. A route-dependent prefill
+  staging failure found during that work was fixed using post-release live CUDA
+  memory measurement and the configured safety margin, with no fixed slot or
+  reclaimed-byte estimate. The post-campaign fixed QCN speed gate passed at
+  `53.93/54.00/53.50 tok/s` decode with all 24,576 experts resident and zero
+  HCS, CUDA, or OOM failures.
+
+- Qualified GLM-5.3-Flash's full long-context speed curve on the RTX PRO 6000
+  with a separate test-only 50K profile and unchanged runtime-calibrated VRAM
+  policy. Timing-disabled internal prefill reached
+  `114.8/280.5/446.2/532.9/565.2/564.6 tok/s` at
+  1K/5K/10K/20K/35K/39,920 tokens; internal decode reached
+  `21.59/21.94/21.39 tok/s`. The 39,920-token calibration probe held 1,199 MiB
+  free against the 600 MiB margin, decode held 1,285 MiB, and all HCS/CUDA/OOM
+  failure counters remained clean. Existing accepted profiles and protected
+  test configs were unchanged.
+
+- Optimized GLM-5.3-Flash prefill and decode from measured A6000/RTX PRO
+  evidence. Registered native DSA now selects the existing gathered attention
+  path even when the architecture also has mHC, raising timing-disabled A6000
+  prefill from `67.6/86.2` to as much as `84.2/169.2 tok/s` at 1K/3,196
+  tokens. Dynamic HCS now distributes its unchanged runtime-derived evictable
+  tail across active layers instead of one global suffix, eliminating 34
+  measured RTX PRO no-slot events and improving paired A6000 decode by
+  `6.0/7.5/6.4%` at 50/100/250 tokens. The accepted RTX PRO result was
+  `107.3/266.0 tok/s` prefill and `20.74/22.26/21.61 tok/s` decode; all
+  budget, slot, copy, CUDA, and OOM counters remained clean. A Q/K/V stream-
+  overlap candidate regressed decode and was removed completely. Final review
+  also removed the layer allocator's silent global-tail fallback: the runtime
+  now validates exact unique slot-to-layer coverage and fails explicitly on
+  corrupt internal state. The focused invariant gate passed `4/4`; final
+  timing-disabled A6000, RTX PRO, and QCN benchmarks remained clean.
+
+- Fixed GLM's nested KDA configuration parsing so it cannot collapse other
+  linear-attention families' independent key/value geometry. Qwen3-Coder-Next
+  now retains its checkpoint-declared 16 key and 32 value heads and loads the
+  correct H=32 FLA sidecar kernels. The exact timing-disabled `./dev
+  speed-test` passed at best `2,598.6 tok/s` prefill and `55.18 tok/s`
+  internal decode with 24,576/24,576 HCS experts and zero failures.
+
+- Added native text-mode support for the pinned `zai-org/GLM-5.3-Flash`
+  checkpoint. Krasis now executes its 34 Kimi Delta Attention and 11 sparse
+  DSA layers, four-way mHC state transitions, compressed k-pool indexer,
+  mixed dense/MoE FFNs, checkpoint-declared FP8 block scales, HQQ6 attention,
+  and k6v6 compact KV cache through the Rust/CUDA prefill and decode paths.
+  The launcher exposes only the measured single-GPU, 4K, INT4-expert profile;
+  vision and multi-GPU execution fail closed until separately qualified. A
+  timing-disabled RTX A6000 launch completed measured VRAM calibration, built
+  a fresh six-prompt heatmap, admitted 2,730/12,096 HCS experts, and passed two
+  consecutive `9/9` HTTP suites plus the canonical `18/18` large/multi-turn
+  suite with zero budget, slot, or copy failures. After the optimization pass,
+  one fresh `18/18` suite measured the 2,044-token real-content row at 133.5
+  tok/s internal prefill and 6.65 tok/s internal decode; the exact final
+  invariant-checked repeat also passed `18/18` at 126.2/6.31 tok/s, bounding
+  normal route/history variation without substituting network timing for the
+  standard benchmark.
+
+- Replaced basename-only model cache identity with an immutable checkpoint
+  identity shared by Python and Rust. Pinned Hugging Face checkpoints use every
+  required safetensors shard's verified LFS SHA-256 and byte count; other local
+  checkpoints are fully content-hashed with a persisted stat-validated index.
+  Cache namespaces additionally bind the checkpoint configuration and shard
+  index, so same-named checkpoints and in-place weight/config replacements no
+  longer share expert or attention caches. Existing legacy cache directories
+  remain untouched for older installations, while new builds fail closed and
+  create checkpoint-qualified caches.
+
+- Migrated the approved online heatmap catalog to checkpoint-bound routing
+  identity without discarding backward compatibility. All 47 original entries
+  and files remain unchanged for older Krasis releases, and 47 new artifacts
+  contain the exact immutable checkpoint identity recovered from pinned source
+  revisions. The new artifacts preserve the original routing counts exactly;
+  their HQQ-specific and measured KV-compatibility policies are unchanged.
+  Offline verification checks both generations' byte hashes, route hashes, and
+  one-to-one count equality.
+
 - Added explicit `krasis manager --lan` access while preserving localhost-only
   behavior as the default. LAN mode binds IPv4 interfaces, validates the Host
   against the connection's exact destination address and port, requires the
@@ -12171,3 +12419,15 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
 - Fresh `krasis.log` started for each run
 - New `--note` parameter writes a run description header at the top of each log
 - `logs/` directory gitignored (except `.gitkeep`)
+### 2026-08-30 — Runtime-selected structured GLM DSA gather
+
+- Replaced the flat element-indexed default for gathered GLM MLA preparation with a runtime CUDA-event selector between the established flat schedule and a warp-structured schedule. Decisions are keyed by loaded KV format and exact tile/head/selection/query/cache geometry, including independent partial-tile row counts, and cached per prefill engine so formal execution adds no timing barriers.
+- K4 and K6 generated-cache gates require bitwise equality of gathered KV, query, and sentinel-score buffers. The frozen GLM-5.3 llama-witness retained the accepted result exactly: first token match, 13/16 witness-token top-ten containment, and selected-logprob delta 0.07842576684150501.
+- On the RTX PRO 6000, all measured geometries selected structured. Timing-disabled internal prefill improved to `119.3/525.2/833.8/1227.5/1452.0/1498.9 tok/s`; the 39,920-token row is 5.63% faster than the correctness-qualified 1,419.0 tok/s baseline.
+### 2026-08-30 — Calibration-derived decode HCS floor
+
+- Tested removing additive expert-chunk headroom from calibrated HCS startup,
+  reload, and pressure targets. The timing-disabled GLM-5.3 run remained safe
+  but regressed decode and changed the deterministic hot/cold execution path;
+  the candidate was rejected and reverted. The established runtime-derived
+  chunk guards remain unchanged.

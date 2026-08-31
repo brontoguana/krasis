@@ -160,8 +160,60 @@ fn optional_bool_env(name: &str) -> Result<Option<bool>, String> {
     }
 }
 
+fn glm53_kda_recurrent_oracle_enabled() -> Result<bool, String> {
+    static ENABLED: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
+    ENABLED
+        .get_or_init(|| {
+            Ok(optional_bool_env("KRASIS_GLM53_KDA_RECURRENT_ORACLE")?.unwrap_or(false))
+        })
+        .clone()
+}
+
+fn glm53_kda_legacy_recurrent_oracle_enabled() -> Result<bool, String> {
+    static ENABLED: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
+    ENABLED
+        .get_or_init(|| {
+            Ok(optional_bool_env("KRASIS_GLM53_KDA_LEGACY_RECURRENT_ORACLE")?
+                .unwrap_or(false))
+        })
+        .clone()
+}
+
+fn glm53_kda_serial_conv_oracle_enabled() -> Result<bool, String> {
+    static ENABLED: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
+    ENABLED
+        .get_or_init(|| {
+            Ok(optional_bool_env("KRASIS_GLM53_KDA_SERIAL_CONV_ORACLE")?.unwrap_or(false))
+        })
+        .clone()
+}
+
+fn kimi_delta_rmsnorm_gate_block_threads(head_dim: usize) -> Result<usize, String> {
+    if head_dim == 0 {
+        return Err("KDA gated RMSNorm head dimension is zero".to_string());
+    }
+    head_dim.checked_next_power_of_two().map(|threads| threads.max(32)).ok_or_else(|| {
+        format!(
+            "KDA gated RMSNorm thread geometry overflow for head dimension {}",
+            head_dim
+        )
+    })
+}
+
 fn dsa_prefill_candidate_enabled(default_enabled: bool, override_value: Option<bool>) -> bool {
     override_value.unwrap_or(default_enabled)
+}
+
+fn native_dsa_gathered_capability(
+    dsa_prefill_registered: bool,
+    deepseek_v4_registered: bool,
+) -> bool {
+    // Native DSA layers and DeepSeek-V4 both register selection metadata, but
+    // DeepSeek-V4 owns a separate sparse-attention execution descriptor.  The
+    // gathered native-MLA implementation is valid only for the former.  mHC
+    // is deliberately not part of this capability: GLM-5.3 combines native
+    // DSA with mHC while retaining the same registered native MLA contract.
+    dsa_prefill_registered && !deepseek_v4_registered
 }
 
 fn dsa_mla_gathered_default_enabled(
@@ -283,6 +335,172 @@ fn dsa_mla_gathered_wvc_enabled(gathered_attention_enabled: bool) -> Result<bool
         .unwrap_or(gathered_attention_enabled))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DsaMlaGatheredComputeMode {
+    Pedantic,
+    Tf32Score,
+    Tf32Output,
+    Tf32Both,
+}
+
+fn parse_dsa_mla_gathered_compute_mode(
+    value: Option<&str>,
+) -> Result<DsaMlaGatheredComputeMode, String> {
+    match value.map(str::trim) {
+        None | Some("") | Some("pedantic") => Ok(DsaMlaGatheredComputeMode::Pedantic),
+        Some("tf32_score") => Ok(DsaMlaGatheredComputeMode::Tf32Score),
+        Some("tf32_output") => Ok(DsaMlaGatheredComputeMode::Tf32Output),
+        Some("tf32_both") => Ok(DsaMlaGatheredComputeMode::Tf32Both),
+        Some(other) => Err(format!(
+            "invalid KRASIS_DSA_MLA_GATHERED_COMPUTE_MODE={other:?}; expected pedantic, tf32_score, tf32_output, or tf32_both"
+        )),
+    }
+}
+
+fn dsa_mla_gathered_compute_mode() -> Result<DsaMlaGatheredComputeMode, String> {
+    static MODE: std::sync::OnceLock<Result<DsaMlaGatheredComputeMode, String>> =
+        std::sync::OnceLock::new();
+    MODE.get_or_init(|| {
+        let value = std::env::var("KRASIS_DSA_MLA_GATHERED_COMPUTE_MODE").ok();
+        parse_dsa_mla_gathered_compute_mode(value.as_deref())
+    })
+    .clone()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DsaMlaGatherMode {
+    Auto,
+    Flat,
+    Structured,
+}
+
+fn parse_dsa_mla_gather_mode(value: Option<&str>) -> Result<DsaMlaGatherMode, String> {
+    match value.map(str::trim) {
+        None | Some("") | Some("auto") => Ok(DsaMlaGatherMode::Auto),
+        Some("flat") => Ok(DsaMlaGatherMode::Flat),
+        Some("structured") => Ok(DsaMlaGatherMode::Structured),
+        Some(other) => Err(format!(
+            "invalid KRASIS_DSA_MLA_GATHER_MODE={other:?}; expected auto, flat, or structured"
+        )),
+    }
+}
+
+fn dsa_mla_gather_mode() -> Result<DsaMlaGatherMode, String> {
+    static MODE: std::sync::OnceLock<Result<DsaMlaGatherMode, String>> =
+        std::sync::OnceLock::new();
+    MODE.get_or_init(|| {
+        let value = std::env::var("KRASIS_DSA_MLA_GATHER_MODE").ok();
+        parse_dsa_mla_gather_mode(value.as_deref())
+    })
+    .clone()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct DsaMlaGatherAutotuneKey {
+    kv_format: u32,
+    tile_rows: usize,
+    num_heads: usize,
+    selected_per_row: usize,
+    packed_q_dim: usize,
+    nope_dim: usize,
+    rope_dim: usize,
+    ckv_cache_dim: usize,
+    combined_dim: usize,
+}
+
+struct DsaMlaGatherAutotuneEvents {
+    start: cuda_sys::CUevent,
+    stop: cuda_sys::CUevent,
+}
+
+impl DsaMlaGatherAutotuneEvents {
+    fn new() -> Result<Self, String> {
+        let lib = unsafe { cuda_sys::lib() };
+        let mut start = std::ptr::null_mut();
+        let start_result = unsafe { lib.cuEventCreate(&mut start, 0) };
+        if start_result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "DSA MLA gather autotune start-event creation failed: {start_result:?}"
+            ));
+        }
+        let mut stop = std::ptr::null_mut();
+        let stop_result = unsafe { lib.cuEventCreate(&mut stop, 0) };
+        if stop_result != cuda_sys::CUresult::CUDA_SUCCESS {
+            unsafe {
+                let _ = lib.cuEventDestroy_v2(start);
+            }
+            return Err(format!(
+                "DSA MLA gather autotune stop-event creation failed: {stop_result:?}"
+            ));
+        }
+        Ok(Self { start, stop })
+    }
+}
+
+impl Drop for DsaMlaGatherAutotuneEvents {
+    fn drop(&mut self) {
+        let lib = unsafe { cuda_sys::lib() };
+        unsafe {
+            if !self.start.is_null() {
+                let _ = lib.cuEventDestroy_v2(self.start);
+            }
+            if !self.stop.is_null() {
+                let _ = lib.cuEventDestroy_v2(self.stop);
+            }
+        }
+    }
+}
+
+fn time_dsa_mla_gather_candidate<F>(
+    stream: cuda_sys::CUstream,
+    mut launch_candidate: F,
+) -> Result<f32, String>
+where
+    F: FnMut() -> Result<(), String>,
+{
+    const SAMPLE_COUNT: usize = 3;
+    let lib = unsafe { cuda_sys::lib() };
+    launch_candidate()?;
+    let warmup_sync = unsafe { lib.cuStreamSynchronize(stream) };
+    if warmup_sync != cuda_sys::CUresult::CUDA_SUCCESS {
+        return Err(format!(
+            "DSA MLA gather autotune warmup synchronization failed: {warmup_sync:?}"
+        ));
+    }
+    let events = DsaMlaGatherAutotuneEvents::new()?;
+    let mut samples = [0.0f32; SAMPLE_COUNT];
+    for sample in &mut samples {
+        let start_result = unsafe { lib.cuEventRecord(events.start, stream) };
+        if start_result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "DSA MLA gather autotune start-event record failed: {start_result:?}"
+            ));
+        }
+        launch_candidate()?;
+        let stop_result = unsafe { lib.cuEventRecord(events.stop, stream) };
+        if stop_result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "DSA MLA gather autotune stop-event record failed: {stop_result:?}"
+            ));
+        }
+        let sync_result = unsafe { lib.cuEventSynchronize(events.stop) };
+        if sync_result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "DSA MLA gather autotune stop-event synchronization failed: {sync_result:?}"
+            ));
+        }
+        let elapsed_result =
+            unsafe { lib.cuEventElapsedTime(sample as *mut f32, events.start, events.stop) };
+        if elapsed_result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "DSA MLA gather autotune elapsed-time query failed: {elapsed_result:?}"
+            ));
+        }
+    }
+    samples.sort_by(f32::total_cmp);
+    Ok(samples[SAMPLE_COUNT / 2])
+}
+
 const HQQ_MLA_TIMING_Q_A_NORM: usize = 0;
 const HQQ_MLA_TIMING_OWNER_SELECT: usize = 1;
 const HQQ_MLA_TIMING_Q_B: usize = 2;
@@ -321,6 +539,38 @@ const MAMBA2_PREFILL_TIMING_LABELS: [&str; MAMBA2_PREFILL_TIMING_STAGES] = [
     "ssd_scan",
     "gated_rmsnorm",
     "out_proj",
+];
+
+const GLM5_PREFILL_TIMING_STAGE_HC_REPLICATE: usize = 0;
+const GLM5_PREFILL_TIMING_STAGE_ATTN_HC_PREP_NORM: usize = 1;
+const GLM5_PREFILL_TIMING_STAGE_KDA_QKV_PROJ: usize = 2;
+const GLM5_PREFILL_TIMING_STAGE_KDA_CONV: usize = 3;
+const GLM5_PREFILL_TIMING_STAGE_KDA_FORGET_BETA_PROJ: usize = 4;
+const GLM5_PREFILL_TIMING_STAGE_KDA_RECURRENT: usize = 5;
+const GLM5_PREFILL_TIMING_STAGE_KDA_OUTPUT_GATE_PROJ: usize = 6;
+const GLM5_PREFILL_TIMING_STAGE_KDA_RMS_GATE: usize = 7;
+const GLM5_PREFILL_TIMING_STAGE_KDA_O_PROJ: usize = 8;
+const GLM5_PREFILL_TIMING_STAGE_ATTN_HC_POST: usize = 9;
+const GLM5_PREFILL_TIMING_STAGE_FFN_HC_PREP_NORM: usize = 10;
+const GLM5_PREFILL_TIMING_STAGE_FFN: usize = 11;
+const GLM5_PREFILL_TIMING_STAGE_FFN_HC_POST: usize = 12;
+const GLM5_PREFILL_TIMING_STAGE_DSA_ATTENTION: usize = 13;
+const GLM5_PREFILL_TIMING_STAGES: usize = 14;
+const GLM5_PREFILL_TIMING_LABELS: [&str; GLM5_PREFILL_TIMING_STAGES] = [
+    "hc_replicate",
+    "attn_hc_prep_norm",
+    "kda_qkv_proj",
+    "kda_conv",
+    "kda_forget_beta_proj",
+    "kda_recurrent",
+    "kda_output_gate_proj",
+    "kda_rms_gate",
+    "kda_o_proj",
+    "attn_hc_post",
+    "ffn_hc_prep_norm",
+    "ffn",
+    "ffn_hc_post",
+    "dsa_attention",
 ];
 
 const DEEPSEEK_V4_PREFILL_TIMING_STAGE_HC_REPLICATE: usize = 0;
@@ -5570,6 +5820,27 @@ const PDT_LAYER_MLA_MOE_SORTED_IDS_FULL: u64 = 178;
 const PDT_LAYER_MLA_MOE_EXPERT_BLOCK_IDS_FULL: u64 = 179;
 const PDT_LAYER_MLA_MOE_W1_PTR_TABLE_FULL: u64 = 180;
 const PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL: u64 = 181;
+const PDT_LAYER_GLM5_HC_INPUT_STATE_LAST: u64 = 182;
+const PDT_LAYER_GLM5_ATTN_PREPARED_HIDDEN_LAST: u64 = 183;
+const PDT_LAYER_GLM5_ATTN_NORM_HIDDEN_LAST: u64 = 184;
+const PDT_LAYER_GLM5_ATTN_SUBLAYER_LAST: u64 = 185;
+const PDT_LAYER_GLM5_POST_ATTN_STATE_LAST: u64 = 186;
+const PDT_LAYER_GLM5_FFN_PREPARED_HIDDEN_LAST: u64 = 187;
+const PDT_LAYER_GLM5_FFN_NORM_HIDDEN_LAST: u64 = 188;
+const PDT_LAYER_GLM5_FFN_SUBLAYER_LAST: u64 = 189;
+const PDT_LAYER_GLM5_OUTPUT_STATE_LAST: u64 = 190;
+const PDT_LAYER_GLM5_KDA_Q_PROJ_LAST: u64 = 191;
+const PDT_LAYER_GLM5_KDA_K_PROJ_LAST: u64 = 192;
+const PDT_LAYER_GLM5_KDA_V_PROJ_LAST: u64 = 193;
+const PDT_LAYER_GLM5_KDA_Q_CONV_LAST: u64 = 194;
+const PDT_LAYER_GLM5_KDA_K_CONV_LAST: u64 = 195;
+const PDT_LAYER_GLM5_KDA_V_CONV_LAST: u64 = 196;
+const PDT_LAYER_GLM5_KDA_FORGET_GATE_LAST: u64 = 197;
+const PDT_LAYER_GLM5_KDA_BETA_LAST: u64 = 198;
+const PDT_LAYER_GLM5_KDA_RECURRENT_LAST: u64 = 199;
+const PDT_LAYER_GLM5_KDA_OUTPUT_GATE_LAST: u64 = 200;
+const PDT_LAYER_GLM5_KDA_RMS_GATE_LAST: u64 = 201;
+const PDT_LAYER_GLM5_KDA_O_PROJ_LAST: u64 = 202;
 const PDT_LAYER_MAMBA2_SSD_OUTPUT_VALUE_DETAIL: u64 = 112;
 const PDT_LAYER_MAMBA2_SSD_OUTPUT_COMPONENT_DETAIL: u64 = 113;
 const PDT_LAYER_MAMBA2_SSD_OUTPUT_SOURCE_DETAIL: u64 = 114;
@@ -5824,6 +6095,31 @@ fn prefill_device_trace_stage_label(stage_id: u64) -> &'static str {
         PDT_LAYER_MLA_MOE_EXPERT_BLOCK_IDS_FULL => "layer_mla_moe_expert_block_ids_full",
         PDT_LAYER_MLA_MOE_W1_PTR_TABLE_FULL => "layer_mla_moe_w1_ptr_table_full",
         PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL => "layer_mla_moe_w1_scale_ptr_table_full",
+        PDT_LAYER_GLM5_HC_INPUT_STATE_LAST => "layer_glm5_hc_input_state_last",
+        PDT_LAYER_GLM5_ATTN_PREPARED_HIDDEN_LAST => {
+            "layer_glm5_attn_prepared_hidden_last"
+        }
+        PDT_LAYER_GLM5_ATTN_NORM_HIDDEN_LAST => "layer_glm5_attn_norm_hidden_last",
+        PDT_LAYER_GLM5_ATTN_SUBLAYER_LAST => "layer_glm5_attn_sublayer_last",
+        PDT_LAYER_GLM5_POST_ATTN_STATE_LAST => "layer_glm5_post_attn_state_last",
+        PDT_LAYER_GLM5_FFN_PREPARED_HIDDEN_LAST => {
+            "layer_glm5_ffn_prepared_hidden_last"
+        }
+        PDT_LAYER_GLM5_FFN_NORM_HIDDEN_LAST => "layer_glm5_ffn_norm_hidden_last",
+        PDT_LAYER_GLM5_FFN_SUBLAYER_LAST => "layer_glm5_ffn_sublayer_last",
+        PDT_LAYER_GLM5_OUTPUT_STATE_LAST => "layer_glm5_output_state_last",
+        PDT_LAYER_GLM5_KDA_Q_PROJ_LAST => "layer_glm5_kda_q_proj_last",
+        PDT_LAYER_GLM5_KDA_K_PROJ_LAST => "layer_glm5_kda_k_proj_last",
+        PDT_LAYER_GLM5_KDA_V_PROJ_LAST => "layer_glm5_kda_v_proj_last",
+        PDT_LAYER_GLM5_KDA_Q_CONV_LAST => "layer_glm5_kda_q_conv_last",
+        PDT_LAYER_GLM5_KDA_K_CONV_LAST => "layer_glm5_kda_k_conv_last",
+        PDT_LAYER_GLM5_KDA_V_CONV_LAST => "layer_glm5_kda_v_conv_last",
+        PDT_LAYER_GLM5_KDA_FORGET_GATE_LAST => "layer_glm5_kda_forget_gate_last",
+        PDT_LAYER_GLM5_KDA_BETA_LAST => "layer_glm5_kda_beta_last",
+        PDT_LAYER_GLM5_KDA_RECURRENT_LAST => "layer_glm5_kda_recurrent_last",
+        PDT_LAYER_GLM5_KDA_OUTPUT_GATE_LAST => "layer_glm5_kda_output_gate_last",
+        PDT_LAYER_GLM5_KDA_RMS_GATE_LAST => "layer_glm5_kda_rms_gate_last",
+        PDT_LAYER_GLM5_KDA_O_PROJ_LAST => "layer_glm5_kda_o_proj_last",
         PDT_LAYER_MAMBA2_SSD_OUTPUT_VALUE_DETAIL => "layer_mamba2_ssd_output_value_detail",
         PDT_LAYER_MAMBA2_SSD_OUTPUT_COMPONENT_DETAIL => "layer_mamba2_ssd_output_component_detail",
         PDT_LAYER_MAMBA2_SSD_OUTPUT_SOURCE_DETAIL => "layer_mamba2_ssd_output_source_detail",
@@ -5928,6 +6224,30 @@ const PREFILL_KERNELS_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/prefil
 #[derive(Clone, Copy)]
 struct RawCuFunc(cuda_sys::CUfunction);
 
+fn native_mla_kernel_for_format(
+    kv_format: u32,
+    k4: RawCuFunc,
+    k6: RawCuFunc,
+) -> Result<RawCuFunc, String> {
+    match kv_format {
+        9 => Ok(k4),
+        7 => Ok(k6),
+        other => Err(format!(
+            "native MLA requires k4v4 (9) or k6v6 (7); got kv_format={other}"
+        )),
+    }
+}
+
+fn native_mla_block_bytes(kv_format: u32) -> Result<usize, String> {
+    match kv_format {
+        9 => Ok(10),
+        7 => Ok(14),
+        other => Err(format!(
+            "native MLA requires k4v4 (9) or k6v6 (7); got kv_format={other}"
+        )),
+    }
+}
+
 /// Extract raw CUfunction from cudarc's CudaFunction.
 fn extract_cu_func(func: &CudaFunction) -> RawCuFunc {
     unsafe {
@@ -6010,6 +6330,8 @@ pub struct PrefillKernels {
     mla_rmsnorm_prefix_bf16_fp32w: RawCuFunc,
     dsa_prefill_layernorm_rope_key_write: RawCuFunc,
     dsa_prefill_rope_query_bf16: RawCuFunc,
+    dsa_prefill_kpool_build: RawCuFunc,
+    dsa_prefill_kpool_expand: RawCuFunc,
     dsa_prefill_fused_scores: RawCuFunc,
     dsa_prefill_accumulate_gemm_scores: RawCuFunc,
     dsa_prefill_topk_sort_rows: RawCuFunc,
@@ -6018,13 +6340,21 @@ pub struct PrefillKernels {
     dsa_prefill_topk_linear_merge_rows: RawCuFunc,
     mla_pack_qkv_rope_bf16: RawCuFunc,
     mla_cache_append_k4: RawCuFunc,
+    mla_cache_append_k6: RawCuFunc,
     mla_prefill_absorb_wkc: RawCuFunc,
     mla_prefill_sparse_attention_k4: RawCuFunc,
+    mla_prefill_sparse_attention_k6: RawCuFunc,
     mla_prefill_sparse_attention_k4_score_reuse: RawCuFunc,
+    mla_prefill_sparse_attention_k6_score_reuse: RawCuFunc,
     mla_prefill_sparse_scores_k4_grouped_exact: RawCuFunc,
+    mla_prefill_sparse_scores_k6_grouped_exact: RawCuFunc,
     mla_prefill_sparse_softmax_exact: RawCuFunc,
     mla_prefill_sparse_output_k4_grouped_exact: RawCuFunc,
+    mla_prefill_sparse_output_k6_grouped_exact: RawCuFunc,
     mla_prefill_gather_query_k4_f32: RawCuFunc,
+    mla_prefill_gather_query_k6_f32: RawCuFunc,
+    mla_prefill_gather_query_k4_f32_structured: RawCuFunc,
+    mla_prefill_gather_query_k6_f32_structured: RawCuFunc,
     mla_prefill_softmax_weights_warp_f32: RawCuFunc,
     mla_prefill_pack_attention_head_major_bf16: RawCuFunc,
     mla_prefill_scatter_wvc_head_major_bf16: RawCuFunc,
@@ -6046,6 +6376,13 @@ pub struct PrefillKernels {
     deepseek_v4_hc_reduce: RawCuFunc,
     deepseek_v4_hc_post: RawCuFunc,
     deepseek_v4_hc_head_prepare: RawCuFunc,
+    kimi_delta_recurrent_scan_bf16: RawCuFunc,
+    kimi_delta_recurrent_scan_tiled_bf16: RawCuFunc,
+    kimi_delta_chunk_prepare_bf16: RawCuFunc,
+    kimi_delta_conv_silu_bf16: RawCuFunc,
+    kimi_delta_conv_silu_parallel_bf16: RawCuFunc,
+    kimi_delta_conv_state_update_bf16: RawCuFunc,
+    kimi_delta_rmsnorm_gate_bf16: RawCuFunc,
     deepseek_v4_tail_rope_bf16: RawCuFunc,
     deepseek_v4_sparse_scores: RawCuFunc,
     deepseek_v4_sparse_scores_query_cached: RawCuFunc,
@@ -6426,6 +6763,15 @@ pub struct FlaKernels {
     pub state_recurrence_bv64_enabled: bool,
     // 6. chunk_fwd_kernel_o(q, k, v, h, g, o, scale, T, grid_x, grid_y, stream)
     pub output: FlaOutputFn,
+    // GLM-5.3 KDA chunkwise forward chain. These symbols are required when
+    // the checkpoint exposes KDA descriptors; no runtime Python or fallback
+    // implementation participates in the selected path.
+    pub kda_gate_cumsum: FlaKdaGateCumsumFn,
+    pub kda_intra: FlaKdaIntraFn,
+    pub kda_inter_solve: FlaKdaInterSolveFn,
+    pub kda_wy_repr: FlaKdaWyReprFn,
+    pub kda_state_recurrence: FlaStateRecurrenceFn,
+    pub kda_output: FlaKdaOutputFn,
 }
 
 // FLA kernel function pointer types (matching extern "C" signatures in fla_vendor.cu).
@@ -6511,6 +6857,89 @@ type FlaOutputFn = unsafe extern "C" fn(
     /*g*/ u64,
     /*g_gamma*/ u64,
     /*o*/ u64,
+    /*cu_seqlens*/ u64,
+    /*chunk_indices*/ u64,
+    /*scale*/ f32,
+    /*T*/ i32,
+    /*grid_x*/ u32,
+    /*grid_y*/ u32,
+    /*grid_z*/ u32,
+    /*stream*/ *mut std::ffi::c_void,
+) -> u32;
+type FlaKdaGateCumsumFn = unsafe extern "C" fn(
+    /*s*/ u64,
+    /*A_log*/ u64,
+    /*dt_bias*/ u64,
+    /*o*/ u64,
+    /*scale*/ f32,
+    /*cu_seqlens*/ u64,
+    /*chunk_indices*/ u64,
+    /*lower_bound*/ f32,
+    /*T*/ i32,
+    /*grid_x*/ u32,
+    /*grid_y*/ u32,
+    /*grid_z*/ u32,
+    /*stream*/ *mut std::ffi::c_void,
+) -> u32;
+type FlaKdaIntraFn = unsafe extern "C" fn(
+    /*q*/ u64,
+    /*k*/ u64,
+    /*g*/ u64,
+    /*beta*/ u64,
+    /*Aqk*/ u64,
+    /*Akk*/ u64,
+    /*scale*/ f32,
+    /*cu_seqlens*/ u64,
+    /*chunk_indices*/ u64,
+    /*T*/ i32,
+    /*grid_x*/ u32,
+    /*grid_y*/ u32,
+    /*grid_z*/ u32,
+    /*stream*/ *mut std::ffi::c_void,
+) -> u32;
+type FlaKdaInterSolveFn = unsafe extern "C" fn(
+    /*q*/ u64,
+    /*k*/ u64,
+    /*g*/ u64,
+    /*beta*/ u64,
+    /*Aqk*/ u64,
+    /*Akkd*/ u64,
+    /*Akk*/ u64,
+    /*scale*/ f32,
+    /*cu_seqlens*/ u64,
+    /*chunk_indices*/ u64,
+    /*T*/ i32,
+    /*grid_x*/ u32,
+    /*grid_y*/ u32,
+    /*grid_z*/ u32,
+    /*stream*/ *mut std::ffi::c_void,
+) -> u32;
+type FlaKdaWyReprFn = unsafe extern "C" fn(
+    /*q*/ u64,
+    /*k*/ u64,
+    /*qg*/ u64,
+    /*kg*/ u64,
+    /*v*/ u64,
+    /*beta*/ u64,
+    /*w*/ u64,
+    /*u*/ u64,
+    /*A*/ u64,
+    /*gk*/ u64,
+    /*cu_seqlens*/ u64,
+    /*chunk_indices*/ u64,
+    /*T*/ i32,
+    /*grid_x*/ u32,
+    /*grid_y*/ u32,
+    /*grid_z*/ u32,
+    /*stream*/ *mut std::ffi::c_void,
+) -> u32;
+type FlaKdaOutputFn = unsafe extern "C" fn(
+    /*q*/ u64,
+    /*v*/ u64,
+    /*g*/ u64,
+    /*h*/ u64,
+    /*o*/ u64,
+    /*A*/ u64,
     /*cu_seqlens*/ u64,
     /*chunk_indices*/ u64,
     /*scale*/ f32,
@@ -6673,6 +7102,7 @@ pub struct Bf16Weight {
     pub k: usize, // input dim
 }
 
+#[derive(Debug, Clone)]
 pub enum DeepseekV4ProjectionPrefillDescriptor {
     Bf16(Bf16Weight),
     Hqq {
@@ -6764,15 +7194,15 @@ pub struct HqqGqaPrefillDescriptor {
 }
 
 #[derive(Debug, Clone)]
-pub struct HqqMlaPrefillDescriptor {
-    pub backend: String,
-    pub format_version: usize,
-    pub nbits: u8,
-    pub q_a_proj: Option<HqqTensorExecDescriptor>,
-    pub q_b_proj: Option<HqqTensorExecDescriptor>,
-    pub q_proj: Option<HqqTensorExecDescriptor>,
-    pub kv_a_proj_with_mqa: HqqTensorExecDescriptor,
-    pub o_proj: HqqTensorExecDescriptor,
+pub struct MlaPrefillDescriptor {
+    pub hqq_backend: Option<String>,
+    pub hqq_format_version: Option<usize>,
+    pub hqq_nbits: Option<u8>,
+    pub q_a_proj: Option<DeepseekV4ProjectionPrefillDescriptor>,
+    pub q_b_proj: Option<DeepseekV4ProjectionPrefillDescriptor>,
+    pub q_proj: Option<DeepseekV4ProjectionPrefillDescriptor>,
+    pub kv_a_proj_with_mqa: DeepseekV4ProjectionPrefillDescriptor,
+    pub o_proj: DeepseekV4ProjectionPrefillDescriptor,
     pub num_heads: usize,
     pub kv_lora_rank: usize,
     pub ckv_cache_dim: usize,
@@ -6802,6 +7232,11 @@ pub struct DsaPrefillOwnerDescriptor {
     pub index_head_dim: usize,
     pub qk_rope_head_dim: usize,
     pub layer_norm_eps: f32,
+    pub kpool_gate: Option<Bf16Weight>,
+    pub kpool_ape_ptr: u64,
+    pub gate_cache_ptr: u64,
+    pub pool_key_cache_ptr: u64,
+    pub index_kpool: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6813,6 +7248,34 @@ pub struct DsaPrefillLayerDescriptor {
     pub index_n_heads: usize,
     pub qk_rope_head_dim: usize,
     pub q_lora_rank: usize,
+    pub index_kpool: usize,
+    pub index_kpool_compress: bool,
+    pub index_kpool_always_select_tail: bool,
+}
+
+impl DsaPrefillLayerDescriptor {
+    fn workspace_selection_geometry(&self) -> Result<(usize, usize, usize), String> {
+        if !self.index_kpool_compress {
+            return Ok((self.index_topk, self.index_topk, 1));
+        }
+        if self.index_kpool == 0 || self.index_topk % self.index_kpool != 0 {
+            return Err(format!(
+                "compressed DSA IndexShare requires positive pool size dividing topk, got topk={} pool={}",
+                self.index_topk, self.index_kpool
+            ));
+        }
+        if !self.index_kpool_always_select_tail {
+            return Err(
+                "compressed DSA IndexShare requires visible-tail selection".to_string(),
+            );
+        }
+        let score_topk = self.index_topk / self.index_kpool;
+        let output_topk = self
+            .index_topk
+            .checked_add(self.index_kpool - 1)
+            .ok_or_else(|| "compressed DSA output topk overflow".to_string())?;
+        Ok((score_topk, output_topk, self.index_kpool))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6838,10 +7301,51 @@ struct DsaPrefillSelectionPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DsaPrefillWorkspaceGeometry {
     index_topk: usize,
+    output_topk: usize,
+    context_divisor: usize,
     index_n_heads: usize,
     index_head_dim: usize,
     mla_num_heads: usize,
     mla_ckv_cache_dim: usize,
+}
+
+fn dsa_score_context_rows(logical_context_rows: usize, context_divisor: usize) -> usize {
+    logical_context_rows / context_divisor.max(1)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Glm5FfnKind {
+    RoutedMoe,
+    Dense,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Glm5AttentionOutputLocation {
+    Hidden,
+    AttentionScratch,
+}
+
+fn glm5_attention_output_location(
+    layer_type: u8,
+) -> Result<Glm5AttentionOutputLocation, String> {
+    match layer_type {
+        // KDA's output projection writes directly to scratch.d_hidden.
+        5 => Ok(Glm5AttentionOutputLocation::Hidden),
+        // Native MLA/DSA follows the shared GQA contract and leaves the output
+        // projection in scratch.d_attn_out.  GLM's mHC handoff consumes
+        // scratch.d_hidden, so the caller must materialize that boundary.
+        0 => Ok(Glm5AttentionOutputLocation::AttentionScratch),
+        kind => Err(format!("unsupported attention type {}", kind)),
+    }
+}
+
+fn glm5_ffn_kind(has_routed_moe: bool, has_complete_dense: bool) -> Result<Glm5FfnKind, String> {
+    match (has_routed_moe, has_complete_dense) {
+        (true, false) => Ok(Glm5FfnKind::RoutedMoe),
+        (false, true) => Ok(Glm5FfnKind::Dense),
+        (true, true) => Err("both routed MoE and dense FFN descriptors are present".to_string()),
+        (false, false) => Err("neither a routed MoE nor a complete dense FFN is present".to_string()),
+    }
 }
 
 fn plan_dsa_prefill_selection(
@@ -7063,9 +7567,12 @@ pub(crate) struct DsaPrefillRequestWorkspace {
     index_n_heads: usize,
     index_head_dim: usize,
     configured_topk: usize,
+    output_topk: usize,
+    context_divisor: usize,
     d_rope_queries: GpuBuf<u16>,
     d_selection_workspace: GpuBuf<u8>,
     d_selected_indices: GpuBuf<i32>,
+    d_pool_selected_indices: Option<GpuBuf<i32>>,
     mla_num_heads: usize,
     mla_ckv_cache_dim: usize,
     d_mla_q_absorbed: GpuBuf<f32>,
@@ -7091,6 +7598,8 @@ impl DsaPrefillRequestWorkspace {
         chunk_rows: usize,
         context_end: usize,
         configured_topk: usize,
+        output_topk: usize,
+        context_divisor: usize,
         index_n_heads: usize,
         index_head_dim: usize,
         mla_num_heads: usize,
@@ -7101,6 +7610,12 @@ impl DsaPrefillRequestWorkspace {
             return Err(format!(
                 "DSA prefill workspace requires positive query geometry, got heads={} head_dim={}",
                 index_n_heads, index_head_dim
+            ));
+        }
+        if output_topk < configured_topk || context_divisor == 0 {
+            return Err(format!(
+                "DSA prefill workspace has invalid selection geometry score_topk={} output_topk={} divisor={}",
+                configured_topk, output_topk, context_divisor
             ));
         }
         if (mla_num_heads == 0) != (mla_ckv_cache_dim == 0) {
@@ -7115,7 +7630,7 @@ impl DsaPrefillRequestWorkspace {
             configured_topk,
             workspace_capacity_bytes,
             1,
-            1,
+            context_divisor,
         )?;
         let query_elements = chunk_rows
             .checked_mul(index_n_heads)
@@ -7133,12 +7648,27 @@ impl DsaPrefillRequestWorkspace {
             index_n_heads,
             index_head_dim,
             configured_topk,
+            output_topk,
+            context_divisor,
             d_rope_queries: GpuBuf::alloc_zeroed(query_elements)
                 .map_err(|error| format!("alloc DSA prefill RoPE queries: {error}"))?,
             d_selection_workspace: GpuBuf::alloc_zeroed(workspace_capacity_bytes)
                 .map_err(|error| format!("alloc DSA prefill selection workspace: {error}"))?,
-            d_selected_indices: GpuBuf::alloc_zeroed(plan.selection_elements)
-                .map_err(|error| format!("alloc DSA prefill selected indices: {error}"))?,
+            d_selected_indices: GpuBuf::alloc_zeroed(
+                chunk_rows
+                    .checked_mul(output_topk)
+                    .ok_or_else(|| "DSA prefill raw selected-index size overflow".to_string())?,
+            )
+            .map_err(|error| format!("alloc DSA prefill selected indices: {error}"))?,
+            d_pool_selected_indices: if context_divisor > 1 {
+                Some(
+                    GpuBuf::alloc_zeroed(plan.selection_elements).map_err(|error| {
+                        format!("alloc DSA prefill pooled selected indices: {error}")
+                    })?,
+                )
+            } else {
+                None
+            },
             mla_num_heads,
             mla_ckv_cache_dim,
             d_mla_q_absorbed: GpuBuf::alloc_zeroed(mla_elements)
@@ -7202,13 +7732,28 @@ impl DsaPrefillRequestWorkspace {
                 self.active_context_end.get(),
             ));
         }
-        if registration.index_topk != self.configured_topk
+        let (score_topk, output_topk, context_divisor) =
+            registration.workspace_selection_geometry()?;
+        if score_topk != self.configured_topk
+            || output_topk != self.output_topk
+            || context_divisor != self.context_divisor
             || registration.index_n_heads != self.index_n_heads
             || registration.index_head_dim != self.index_head_dim
         {
             return Err(format!(
-                "DSA prefill layer {} IndexShare geometry differs from active owner {}",
-                layer_idx, active_owner
+                "DSA prefill layer {} IndexShare geometry differs from active owner {}: registration score/output/divisor={}/{}/{} heads={} head_dim={}, workspace={}/{}/{} heads={} head_dim={}",
+                layer_idx,
+                active_owner,
+                score_topk,
+                output_topk,
+                context_divisor,
+                registration.index_n_heads,
+                registration.index_head_dim,
+                self.configured_topk,
+                self.output_topk,
+                self.context_divisor,
+                self.index_n_heads,
+                self.index_head_dim,
             ));
         }
         Ok(DsaPrefillSelectedIndexView {
@@ -7379,10 +7924,10 @@ fn launch_dsa_prefill_gemm_scores(
             buffers.score_temp_capacity, output_score_elements
         ));
     }
-    let causal_bands_enabled = causal_compress_ratio > 0 || causal_band_rows > 0;
-    if causal_bands_enabled && (causal_compress_ratio == 0 || causal_band_rows == 0) {
+    let causal_bands_enabled = causal_band_rows > 0;
+    if causal_bands_enabled && causal_compress_ratio == 0 {
         return Err(format!(
-            "DSA prefill causal GEMM requires positive compression ratio and band rows, got ratio={} band_rows={}",
+            "DSA prefill causal GEMM requires a positive compression ratio when banding is enabled, got ratio={} band_rows={}",
             causal_compress_ratio, causal_band_rows
         ));
     }
@@ -7655,6 +8200,9 @@ fn launch_dsa_prefill_gemm_scores(
                 })?;
                 let mut e11 = if head_start == 0 { 1i32 } else { 0i32 };
                 let mut e12 = i32::from(temporary_is_bf16);
+                let mut e13 = i32::try_from(causal_compress_ratio.max(1)).map_err(|_| {
+                    "DSA prefill GEMM causal compression ratio exceeds i32".to_string()
+                })?;
                 unsafe {
                     launch(
                         kernels.accumulate_gemm_scores,
@@ -7676,6 +8224,7 @@ fn launch_dsa_prefill_gemm_scores(
                             &mut e10 as *mut _ as *mut _,
                             &mut e11 as *mut _ as *mut _,
                             &mut e12 as *mut _ as *mut _,
+                            &mut e13 as *mut _ as *mut _,
                         ],
                     )?;
                 }
@@ -7752,14 +8301,17 @@ fn launch_dsa_prefill_selection_rows(
         ("key_cache", key_cache_ptr),
         ("head_weights", head_weights_ptr),
         ("positions", positions_ptr),
-        ("rope_cos", rope_cos_ptr),
-        ("rope_sin", rope_sin_ptr),
         ("scores", buffers.scores_ptr),
         ("selected", buffers.selected_ptr),
     ] {
         if ptr == 0 {
             return Err(format!("DSA prefill selection {name} pointer is null"));
         }
+    }
+    if qk_rope_head_dim > 0 && (rope_cos_ptr == 0 || rope_sin_ptr == 0) {
+        return Err(
+            "DSA prefill selection RoPE tables are null for a positional indexer".to_string(),
+        );
     }
 
     let plan = crate::gpu_decode::plan_dsa_topk(context_end, configured_topk)?;
@@ -7902,6 +8454,8 @@ fn launch_dsa_prefill_selection_rows(
             let mut s7 = index_n_heads_i32;
             let mut s8 = index_head_dim_i32;
             let mut s9 = score_scale;
+            let mut s10 = i32::try_from(causal_compress_ratio.max(1))
+                .map_err(|_| "DSA causal compression ratio exceeds i32")?;
             unsafe {
                 launch(
                     kernels.fused_scores,
@@ -7924,6 +8478,7 @@ fn launch_dsa_prefill_selection_rows(
                         &mut s7 as *mut _ as *mut _,
                         &mut s8 as *mut _ as *mut _,
                         &mut s9 as *mut _ as *mut _,
+                        &mut s10 as *mut _ as *mut _,
                     ],
                 )?;
             }
@@ -7961,11 +8516,7 @@ fn launch_dsa_prefill_selection_rows(
                 score_scale,
                 index_score_mode.temporary_is_bf16(),
                 causal_position_start,
-                if causal_band_rows == 0 {
-                    0
-                } else {
-                    causal_compress_ratio
-                },
+                causal_compress_ratio.max(1),
                 causal_band_rows,
                 buffers,
             )?;
@@ -8041,6 +8592,8 @@ fn launch_dsa_prefill_selection_rows(
     let mut t8 = candidate_stride_i32;
     let mut t9 = initial_runs_i32;
     let mut t10 = sort_width_i32;
+    let mut t11 = i32::try_from(causal_compress_ratio.max(1))
+        .map_err(|_| "DSA causal compression ratio exceeds i32".to_string())?;
     let base_sort_timing = dsa_prefill_selection_timing_start(
         timing_events,
         stream,
@@ -8069,6 +8622,7 @@ fn launch_dsa_prefill_selection_rows(
                 &mut t8 as *mut _ as *mut _,
                 &mut t9 as *mut _ as *mut _,
                 &mut t10 as *mut _ as *mut _,
+                &mut t11 as *mut _ as *mut _,
             ],
         )?;
     }
@@ -8184,6 +8738,13 @@ fn launch_dsa_prefill_selection_chunk(
         return Err(format!(
             "DSA prefill selection request rows/context {}/{} exceed workspace maxima {}/{}",
             chunk_rows, context_end, workspace.max_chunk_rows, workspace.max_context_end
+        ));
+    }
+    if causal_compress_ratio.max(1) != workspace.context_divisor {
+        return Err(format!(
+            "DSA prefill selection compression ratio {} differs from workspace divisor {}",
+            causal_compress_ratio.max(1),
+            workspace.context_divisor,
         ));
     }
     let plan = plan_dsa_prefill_selection(
@@ -8327,7 +8888,13 @@ fn launch_dsa_prefill_selection_chunk(
                 .map_err(|_| "DSA prefill position tile offset exceeds u64".to_string())?,
             )
             .ok_or_else(|| "DSA prefill position tile pointer overflow".to_string())?;
-        let selected_tile = (*workspace.d_selected_indices.device_ptr())
+        let selected_base_ptr = workspace
+            .d_pool_selected_indices
+            .as_ref()
+            .map_or(*workspace.d_selected_indices.device_ptr(), |buffer| {
+                *buffer.device_ptr()
+            });
+        let selected_tile = selected_base_ptr
             .checked_add(
                 u64::try_from(
                     row_start
@@ -8506,6 +9073,52 @@ pub struct DeepseekV4HeadPrefillDescriptor {
     pub eps: f32,
 }
 
+pub struct KimiDeltaPrefillDescriptor {
+    pub q_proj: DeepseekV4ProjectionPrefillDescriptor,
+    pub k_proj: DeepseekV4ProjectionPrefillDescriptor,
+    pub v_proj: DeepseekV4ProjectionPrefillDescriptor,
+    pub o_proj: DeepseekV4ProjectionPrefillDescriptor,
+    pub f_a_proj: DeepseekV4ProjectionPrefillDescriptor,
+    pub f_b_proj: DeepseekV4ProjectionPrefillDescriptor,
+    pub b_proj: DeepseekV4ProjectionPrefillDescriptor,
+    pub g_a_proj: DeepseekV4ProjectionPrefillDescriptor,
+    pub g_b_proj: DeepseekV4ProjectionPrefillDescriptor,
+    pub conv_weight_ptr: u64,
+    pub a_log_ptr: u64,
+    pub dt_bias_ptr: u64,
+    pub norm_weight_ptr: u64,
+    pub conv_state_ptr: u64,
+    pub recur_state_ptr: u64,
+    pub num_heads: usize,
+    pub head_dim: usize,
+    pub kernel_dim: usize,
+    pub gate_lower_bound: f32,
+}
+
+fn kimi_delta_state_elements_from_geometry(
+    num_heads: usize,
+    head_dim: usize,
+    kernel_dim: usize,
+) -> Result<(usize, usize), String> {
+    if num_heads == 0 || head_dim == 0 || kernel_dim < 2 {
+        return Err(format!(
+            "invalid KDA state geometry heads={} head_dim={} kernel_dim={}",
+            num_heads, head_dim, kernel_dim
+        ));
+    }
+    let width = num_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "KDA state width overflows usize".to_string())?;
+    let conv_state_elements = 3usize
+        .checked_mul(width)
+        .and_then(|value| value.checked_mul(kernel_dim - 1))
+        .ok_or_else(|| "KDA convolution state size overflows usize".to_string())?;
+    let recurrent_state_elements = width
+        .checked_mul(head_dim)
+        .ok_or_else(|| "KDA recurrent state size overflows usize".to_string())?;
+    Ok((conv_state_elements, recurrent_state_elements))
+}
+
 /// DeepSeek-V4's shipped activation-QAT contract fixes E4M3 blocks at 64
 /// values. This is an architecture format constant, not a measured tuning.
 const DEEPSEEK_V4_FP8_QAT_BLOCK_SIZE: usize = 64;
@@ -8616,11 +9229,13 @@ pub struct PrefillLayerWeights {
     pub router_input_scale: u64,
     pub router_per_expert_scale: u64,
     pub hqq_gqa: Option<HqqGqaPrefillDescriptor>,
-    pub hqq_mla: Option<HqqMlaPrefillDescriptor>,
+    pub mla_prefill: Option<MlaPrefillDescriptor>,
     pub dsa_prefill: Option<DsaPrefillLayerDescriptor>,
     pub dsa_prefill_owner: Option<DsaPrefillOwnerDescriptor>,
     pub hqq_linear_attention: Option<HqqLinearAttentionPrefillDescriptor>,
     pub deepseek_v4: Option<DeepseekV4PrefillDescriptor>,
+    pub kimi_delta: Option<KimiDeltaPrefillDescriptor>,
+    pub hyper_connection: Option<DeepseekV4HyperConnectionPrefillDescriptor>,
     pub hqq_prefill_sidecars: Vec<HqqPrefillSidecarDescriptor>,
 }
 
@@ -8688,6 +9303,11 @@ pub struct PrefillScratch {
     pub d_token_ids: GpuBuf<i32>,
     pub d_positions: GpuBuf<i32>,
     pub d_deepseek_v4_hc_state: Option<GpuBuf<u16>>,
+    /// Second GLM mHC state bank. Unlike DeepSeek-V4's MoE-only path, GLM's
+    /// dense FFNs legitimately consume the general-purpose BF16 scratch banks,
+    /// so their live post-attention residual state cannot alias `d_scratch1`.
+    /// Allocation is derived from the checkpoint's KDA+mHC geometry.
+    pub d_glm5_hc_temp_state: Option<GpuBuf<u16>>,
     /// FP32 HC gates/mixing terms that must remain live while attention or MoE
     /// consumes the general-purpose FP32 scratch buffer.
     pub d_deepseek_v4_hc_workspace: Option<GpuBuf<f32>>,
@@ -9145,6 +9765,7 @@ pub struct PrefillEngine {
     pub scratch: PrefillScratch,
     pub layer_weights: Vec<PrefillLayerWeights>,
     pub deepseek_v4_head: Option<DeepseekV4HeadPrefillDescriptor>,
+    pub glm5_hc_mean_mult: Option<usize>,
     /// Optional checkpoint-derived D-Spark target-feature capture. The
     /// destination is owned by the decode store; prefill only writes exact
     /// post-layer HC states for the configured HF layer-output ids.
@@ -9333,7 +9954,10 @@ pub struct PrefillEngine {
     pub last_prepare_post_alloc_free_mb: usize,
     pub measured_scratch_alloc_overhead_bytes: usize,
     pub measured_prefill_runtime_overhead_bytes: usize,
-    pub prefill_runtime_reserve_calibration: Option<(usize, usize, usize, usize)>,
+    /// Monotonic startup-measured `(prompt_tokens, post-scratch reserve bytes)`
+    /// curve. Every calibration probe is retained so an interior high-water is
+    /// not lost by fitting only the endpoints.
+    pub prefill_runtime_reserve_calibration: Option<Vec<(usize, usize)>>,
     // Pre-scan routing data: per-layer list of predicted active expert IDs per chunk
     pub prescan_active_experts: Vec<Vec<Vec<usize>>>, // [moe_layer_idx][chunk_idx] -> Vec<expert_id>
     pub prescan_token_count: usize,
@@ -9368,6 +9992,8 @@ pub struct PrefillEngine {
     pub active_prefill_chunk_idx: usize,
     pub active_prefill_chunk_start: usize,
     pub(crate) dsa_prefill_workspace: Option<DsaPrefillRequestWorkspace>,
+    pub(crate) dsa_mla_gather_autotune:
+        RefCell<std::collections::HashMap<DsaMlaGatherAutotuneKey, DsaMlaGatherMode>>,
     pub(crate) prefill_prescan_accuracy_enabled: bool,
     pub(crate) prefill_prescan_accuracy_stats: Vec<PrefillPrescanAccuracyLayerStats>,
     // Dense pointer-table prefetch for current-layer MoE.
@@ -9448,6 +10074,10 @@ pub struct PrefillEngine {
     pub t_mamba2_stage_event: [Cell<f64>; MAMBA2_PREFILL_TIMING_STAGES],
     pub t_mamba2_stage_sync: [Cell<f64>; MAMBA2_PREFILL_TIMING_STAGES],
     pub mamba2_stage_calls: [Cell<u64>; MAMBA2_PREFILL_TIMING_STAGES],
+    pub t_glm5_stage_wall: [Cell<f64>; GLM5_PREFILL_TIMING_STAGES],
+    pub t_glm5_stage_event: [Cell<f64>; GLM5_PREFILL_TIMING_STAGES],
+    pub t_glm5_stage_sync: [Cell<f64>; GLM5_PREFILL_TIMING_STAGES],
+    pub glm5_stage_calls: [Cell<u64>; GLM5_PREFILL_TIMING_STAGES],
     pub t_deepseek_v4_stage_wall: [Cell<f64>; DEEPSEEK_V4_PREFILL_TIMING_STAGES],
     pub t_deepseek_v4_stage_event: [Cell<f64>; DEEPSEEK_V4_PREFILL_TIMING_STAGES],
     pub t_deepseek_v4_stage_sync: [Cell<f64>; DEEPSEEK_V4_PREFILL_TIMING_STAGES],
@@ -9528,6 +10158,18 @@ pub struct PrefillEngine {
     pub d_fla_final_state: Option<CudaSlice<f32>>, // [B, H, K, V] FP32 final state
     pub d_fla_v_new: Option<CudaSlice<u16>>,    // [B, T, H, V] BF16 corrected values
     pub d_fla_o: Option<CudaSlice<u16>>,        // [B, T, H, V] BF16 output
+    // Forward-only GLM-5.3 KDA chunk intermediates. Allocated from exact
+    // runtime geometry only when the explicit chunkwise path is selected.
+    pub d_kda_g: Option<CudaSlice<f32>>,     // [T, H, K] cumulative log2 gate
+    pub d_kda_aqk: Option<CudaSlice<u16>>,   // [T, H, 64]
+    pub d_kda_akkd: Option<CudaSlice<f32>>,  // [T, H, 16]
+    pub d_kda_akk: Option<CudaSlice<u16>>,   // [T, H, 64]
+    pub d_kda_w: Option<CudaSlice<u16>>,     // [T, H, K]
+    pub d_kda_u: Option<CudaSlice<u16>>,     // [T, H, V]
+    pub d_kda_kg: Option<CudaSlice<u16>>,    // [T, H, K]
+    pub d_kda_h: Option<CudaSlice<u16>>,     // [NT, H, K, V]
+    pub d_kda_final_state: Option<CudaSlice<f32>>, // [H, K, V]
+    pub d_kda_v_new: Option<CudaSlice<u16>>, // [T, H, V]
     /// Runtime-configured VRAM reserve for dynamic prefill scratch sizing.
     pub safety_margin_mb: usize,
     /// Temporary pointer back to the decode store for chunk-boundary HCS guardrails.
@@ -10906,23 +11548,18 @@ impl PrefillEngine {
 
     pub fn set_prefill_runtime_reserve_calibration(
         &mut self,
-        short_tokens: usize,
-        long_tokens: usize,
-        short_reserve_mb: usize,
-        long_reserve_mb: usize,
+        measured_points_mb: &[(usize, usize)],
     ) {
-        let short_reserve_bytes = short_reserve_mb.saturating_mul(1024 * 1024);
-        let long_reserve_bytes = long_reserve_mb.saturating_mul(1024 * 1024);
-        self.prefill_runtime_reserve_calibration = Some((
-            short_tokens,
-            long_tokens,
-            short_reserve_bytes,
-            long_reserve_bytes,
-        ));
-        self.measured_prefill_runtime_overhead_bytes = self
-            .measured_prefill_runtime_overhead_bytes
-            .max(short_reserve_bytes)
-            .max(long_reserve_bytes);
+        let measured_points = measured_points_mb
+            .iter()
+            .map(|&(tokens, reserve_mb)| (tokens, reserve_mb.saturating_mul(1024 * 1024)))
+            .collect::<Vec<_>>();
+        if let Some(max_reserve_bytes) = measured_points.iter().map(|point| point.1).max() {
+            self.measured_prefill_runtime_overhead_bytes = self
+                .measured_prefill_runtime_overhead_bytes
+                .max(max_reserve_bytes);
+        }
+        self.prefill_runtime_reserve_calibration = Some(measured_points);
     }
 
     pub fn set_reference_debug_trace_enabled(&mut self, enabled: bool) {
@@ -14349,6 +14986,15 @@ impl PrefillEngine {
             }
         }
 
+        fn apply_optional_deepseek_projection_patch(
+            projection: &mut Option<DeepseekV4ProjectionPrefillDescriptor>,
+            patch: &HqqPrefillPointerPatch,
+        ) -> bool {
+            projection
+                .as_mut()
+                .is_some_and(|projection| apply_deepseek_projection_patch(projection, patch))
+        }
+
         for patch in patches {
             let Some(layer) = self.layer_weights.get_mut(patch.layer_idx) else {
                 return Err(format!(
@@ -14383,24 +15029,37 @@ impl PrefillEngine {
                     _ => {}
                 }
             }
-            if let Some(hqq) = layer.hqq_mla.as_mut() {
+            if let Some(mla) = layer.mla_prefill.as_mut() {
                 match patch.tensor_name.as_str() {
                     "q_a_proj" => {
-                        applied |= apply_optional_tensor_patch(&mut hqq.q_a_proj, patch);
+                        applied |= apply_optional_deepseek_projection_patch(
+                            &mut mla.q_a_proj,
+                            patch,
+                        );
                     }
                     "q_b_proj" => {
-                        applied |= apply_optional_tensor_patch(&mut hqq.q_b_proj, patch);
+                        applied |= apply_optional_deepseek_projection_patch(
+                            &mut mla.q_b_proj,
+                            patch,
+                        );
                     }
                     "q_proj" => {
-                        applied |= apply_optional_tensor_patch(&mut hqq.q_proj, patch);
+                        applied |= apply_optional_deepseek_projection_patch(
+                            &mut mla.q_proj,
+                            patch,
+                        );
                     }
                     "kv_a_proj_with_mqa" => {
-                        apply_tensor_patch(&mut hqq.kv_a_proj_with_mqa, patch);
-                        applied = true;
+                        applied |= apply_deepseek_projection_patch(
+                            &mut mla.kv_a_proj_with_mqa,
+                            patch,
+                        );
                     }
                     "o_proj" => {
-                        apply_tensor_patch(&mut hqq.o_proj, patch);
-                        applied = true;
+                        applied |= apply_deepseek_projection_patch(
+                            &mut mla.o_proj,
+                            patch,
+                        );
                     }
                     _ => {}
                 }
@@ -14421,6 +15080,28 @@ impl PrefillEngine {
                     }
                     _ => {}
                 }
+            }
+            if let Some(kda) = layer.kimi_delta.as_mut() {
+                applied |= match patch.tensor_name.as_str() {
+                    "q_proj" => apply_deepseek_projection_patch(&mut kda.q_proj, patch),
+                    "k_proj" => apply_deepseek_projection_patch(&mut kda.k_proj, patch),
+                    "v_proj" => apply_deepseek_projection_patch(&mut kda.v_proj, patch),
+                    "o_proj" => apply_deepseek_projection_patch(&mut kda.o_proj, patch),
+                    "f_a_proj" => {
+                        apply_deepseek_projection_patch(&mut kda.f_a_proj, patch)
+                    }
+                    "f_b_proj" => {
+                        apply_deepseek_projection_patch(&mut kda.f_b_proj, patch)
+                    }
+                    "b_proj" => apply_deepseek_projection_patch(&mut kda.b_proj, patch),
+                    "g_a_proj" => {
+                        apply_deepseek_projection_patch(&mut kda.g_a_proj, patch)
+                    }
+                    "g_b_proj" => {
+                        apply_deepseek_projection_patch(&mut kda.g_b_proj, patch)
+                    }
+                    _ => false,
+                };
             }
             if let Some(v4) = layer.deepseek_v4.as_mut() {
                 applied |= match patch.tensor_name.as_str() {
@@ -17427,7 +18108,7 @@ impl PrefillEngine {
 
     fn measured_post_scratch_runtime_reserve_bytes(&self, tokens: usize) -> usize {
         project_prefill_runtime_reserve_bytes(
-            self.prefill_runtime_reserve_calibration,
+            self.prefill_runtime_reserve_calibration.as_deref(),
             self.measured_prefill_runtime_overhead_bytes,
             tokens,
         )
@@ -17639,6 +18320,42 @@ impl PrefillEngine {
         self.t_mamba2_stage_sync[stage_idx]
             .set(self.t_mamba2_stage_sync[stage_idx].get() + sync_ms);
         self.mamba2_stage_calls[stage_idx].set(self.mamba2_stage_calls[stage_idx].get() + 1);
+    }
+
+    fn glm5_timing_start(&self, label: &str) -> Result<Option<(Instant, bool)>, String> {
+        if !self.gqa_timing_enabled.get() {
+            return Ok(None);
+        }
+        let event_active = self.gqa_timing_event_start(label)?;
+        Ok(Some((Instant::now(), event_active)))
+    }
+
+    fn glm5_timing_finish(
+        &self,
+        stage_idx: usize,
+        label: &str,
+        started: Option<(Instant, bool)>,
+    ) -> Result<(), String> {
+        let Some((t0, event_active)) = started else {
+            return Ok(());
+        };
+        self.gqa_timing_event_stop(event_active, label)?;
+        let sync_ms = self.stream_sync_timed()?;
+        let event_ms = self
+            .gqa_timing_event_elapsed_ms(event_active, label)?
+            .unwrap_or(0.0);
+        if stage_idx < GLM5_PREFILL_TIMING_STAGES {
+            self.t_glm5_stage_wall[stage_idx].set(
+                self.t_glm5_stage_wall[stage_idx].get()
+                    + t0.elapsed().as_secs_f64() * 1000.0,
+            );
+            self.t_glm5_stage_event[stage_idx]
+                .set(self.t_glm5_stage_event[stage_idx].get() + event_ms);
+            self.t_glm5_stage_sync[stage_idx]
+                .set(self.t_glm5_stage_sync[stage_idx].get() + sync_ms);
+            self.glm5_stage_calls[stage_idx].set(self.glm5_stage_calls[stage_idx].get() + 1);
+        }
+        Ok(())
     }
 
     fn deepseek_v4_timing_start(&self, label: &str) -> Result<Option<(Instant, bool)>, String> {
@@ -18251,6 +18968,193 @@ impl PrefillEngine {
         Ok(())
     }
 
+    fn verify_cold_staging_layer(
+        &self,
+        layer_idx: usize,
+        moe_layer_idx: Option<usize>,
+        active: &[usize],
+        cold_staging_base: u64,
+        pointer_tables: [u64; 4],
+        n_experts: usize,
+    ) -> Result<(), String> {
+        if std::env::var_os("KRASIS_PREFILL_VERIFY_COLD_STAGING").is_none() {
+            return Ok(());
+        }
+        if self.synthetic_repack.is_some() {
+            return Err(
+                "KRASIS_PREFILL_VERIFY_COLD_STAGING does not support synthetic repack"
+                    .to_string(),
+            );
+        }
+        if n_experts > self.h_expert_w1_ptrs.len()
+            || n_experts > self.h_expert_w1s_ptrs.len()
+            || n_experts > self.h_expert_w2_ptrs.len()
+            || n_experts > self.h_expert_w2s_ptrs.len()
+        {
+            return Err(format!(
+                "cold staging verification pointer-table length mismatch: layer={} experts={} host_lengths={}/{}/{}/{}",
+                layer_idx,
+                n_experts,
+                self.h_expert_w1_ptrs.len(),
+                self.h_expert_w1s_ptrs.len(),
+                self.h_expert_w2_ptrs.len(),
+                self.h_expert_w2s_ptrs.len(),
+            ));
+        }
+
+        let copy_sync = unsafe { cuda_sys::lib().cuStreamSynchronize(self.copy_stream) };
+        if copy_sync != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "cold staging verification copy-stream sync failed at layer {}: {:?}",
+                layer_idx, copy_sync
+            ));
+        }
+        self.stream_sync()?;
+
+        let host_tables: [(&str, &[u64]); 4] = [
+            ("w13_packed", &self.h_expert_w1_ptrs[..n_experts]),
+            ("w13_scales", &self.h_expert_w1s_ptrs[..n_experts]),
+            ("w2_packed", &self.h_expert_w2_ptrs[..n_experts]),
+            ("w2_scales", &self.h_expert_w2s_ptrs[..n_experts]),
+        ];
+        for ((label, host), device_ptr) in host_tables.iter().zip(pointer_tables) {
+            let device = download_device_u64(device_ptr, n_experts)?;
+            if let Some(index) = device.iter().zip(host.iter()).position(|(a, b)| a != b) {
+                return Err(format!(
+                    "cold staging verification pointer mismatch: layer={} table={} expert={} host={:#x} device={:#x}",
+                    layer_idx, label, index, host[index], device[index]
+                ));
+            }
+        }
+
+        let staging_bytes = self
+            .max_cold_experts
+            .checked_mul(self.cold_expert_bytes)
+            .ok_or_else(|| "cold staging verification size overflow".to_string())?;
+        let staging_end = cold_staging_base
+            .checked_add(staging_bytes as u64)
+            .ok_or_else(|| "cold staging verification address overflow".to_string())?;
+        let moe_idx = moe_layer_idx.ok_or_else(|| {
+            format!(
+                "cold staging verification missing MoE index for routed layer {}",
+                layer_idx
+            )
+        })?;
+        let moe_data = self
+            .moe_layers
+            .get(moe_idx)
+            .and_then(|entry| entry.as_ref())
+            .ok_or_else(|| {
+                format!(
+                    "cold staging verification missing host weights: layer={} moe_layer={}",
+                    layer_idx, moe_idx
+                )
+            })?;
+
+        let mut verified_experts = 0usize;
+        let mut verified_bytes = 0usize;
+        for &expert_id in active {
+            let w1 = self.h_expert_w1_ptrs[expert_id];
+            if w1 < cold_staging_base || w1 >= staging_end {
+                continue;
+            }
+            let slot_offset = w1 - cold_staging_base;
+            if self.cold_expert_bytes == 0
+                || slot_offset % self.cold_expert_bytes as u64 != 0
+            {
+                return Err(format!(
+                    "cold staging verification misaligned slot: layer={} expert={} pointer={:#x} base={:#x} expert_bytes={}",
+                    layer_idx, expert_id, w1, cold_staging_base, self.cold_expert_bytes
+                ));
+            }
+            let expected_w1s = w1 + self.w1_packed_per_expert as u64;
+            let expected_w2 = expected_w1s + self.w1_scales_per_expert as u64;
+            let expected_w2s = expected_w2 + self.w2_packed_per_expert as u64;
+            let expected_end = expected_w2s + self.w2_scales_per_expert as u64;
+            if self.h_expert_w1s_ptrs[expert_id] != expected_w1s
+                || self.h_expert_w2_ptrs[expert_id] != expected_w2
+                || self.h_expert_w2s_ptrs[expert_id] != expected_w2s
+                || expected_end > staging_end
+            {
+                return Err(format!(
+                    "cold staging verification layout mismatch: layer={} expert={} w1={:#x} w1s={:#x}/{:#x} w2={:#x}/{:#x} w2s={:#x}/{:#x} end={:#x} staging_end={:#x}",
+                    layer_idx,
+                    expert_id,
+                    w1,
+                    self.h_expert_w1s_ptrs[expert_id],
+                    expected_w1s,
+                    self.h_expert_w2_ptrs[expert_id],
+                    expected_w2,
+                    self.h_expert_w2s_ptrs[expert_id],
+                    expected_w2s,
+                    expected_end,
+                    staging_end,
+                ));
+            }
+
+            let expert = moe_data.experts.get(expert_id).ok_or_else(|| {
+                format!(
+                    "cold staging verification host expert out of range: layer={} expert={} host_experts={}",
+                    layer_idx,
+                    expert_id,
+                    moe_data.experts.len()
+                )
+            })?;
+            let segments = [
+                (
+                    "w13_packed",
+                    w1,
+                    expert.w13_packed_ptr,
+                    expert.w13_packed_bytes,
+                ),
+                (
+                    "w13_scales",
+                    expected_w1s,
+                    expert.w13_scales_ptr,
+                    expert.w13_scales_bytes,
+                ),
+                (
+                    "w2_packed",
+                    expected_w2,
+                    expert.w2_packed_ptr,
+                    expert.w2_packed_bytes,
+                ),
+                (
+                    "w2_scales",
+                    expected_w2s,
+                    expert.w2_scales_ptr,
+                    expert.w2_scales_bytes,
+                ),
+            ];
+            for (label, device_ptr, host_ptr, bytes) in segments {
+                let device = download_device_u8(device_ptr, bytes)?;
+                let host = unsafe { std::slice::from_raw_parts(host_ptr as *const u8, bytes) };
+                if let Some(offset) = device.iter().zip(host.iter()).position(|(a, b)| a != b) {
+                    return Err(format!(
+                        "cold staging verification byte mismatch: layer={} expert={} segment={} offset={} host={} device={} bytes={}",
+                        layer_idx,
+                        expert_id,
+                        label,
+                        offset,
+                        host[offset],
+                        device[offset],
+                        bytes,
+                    ));
+                }
+                verified_bytes = verified_bytes.saturating_add(bytes);
+            }
+            verified_experts += 1;
+        }
+        eprintln!(
+            "[PREFILL-COLD-VERIFY] layer={} active={} staged_experts={} verified_bytes={} pointer_tables=exact",
+            layer_idx,
+            active.len(),
+            verified_experts,
+            verified_bytes,
+        );
+        Ok(())
+    }
+
     fn ensure_cold_staging_capacity(
         &mut self,
         slots: usize,
@@ -18268,38 +19172,73 @@ impl PrefillEngine {
 
         let safety_mb = self.safety_margin_mb.max(PREFILL_SAFETY_MARGIN_MB);
         let safety_bytes = safety_mb.saturating_mul(1024 * 1024);
-        let mut free_before: usize = 0;
-        let mut total_before: usize = 0;
-        unsafe {
-            cuda_sys::lib().cuMemGetInfo_v2(&mut free_before, &mut total_before);
+
+        // A grow cannot reuse the old allocation in place. Synchronize every
+        // stream that may still reference it, release it, and ask CUDA for the
+        // real free-memory state before deciding whether the requested route
+        // fits. Adding the old buffer's nominal bytes to cuMemGetInfo is not an
+        // allocator measurement: allocation granularity made that estimate a
+        // few MiB optimistic at the long-prefill safety boundary.
+        let mut free_before_release: usize = 0;
+        let mut total_before_release: usize = 0;
+        let info_err = unsafe {
+            cuda_sys::lib().cuMemGetInfo_v2(&mut free_before_release, &mut total_before_release)
+        };
+        if info_err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "query VRAM before releasing cold staging: {:?}",
+                info_err
+            ));
         }
-        let releasable_cold_bytes = if self.d_cold_staging.is_some() {
-            self.max_cold_experts.saturating_mul(self.cold_expert_bytes)
+        let released_cold_slots = self.max_cold_experts;
+        let released_cold_bytes = if self.d_cold_staging.is_some() {
+            released_cold_slots.saturating_mul(self.cold_expert_bytes)
         } else {
             0
         };
-        let effective_free_before = free_before.saturating_add(releasable_cold_bytes);
+        let sync_err = unsafe { cuda_sys::lib().cuCtxSynchronize() };
+        if sync_err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "synchronize before releasing cold staging: {:?}",
+                sync_err
+            ));
+        }
+        self.d_cold_staging = None;
+        self.max_cold_experts = 0;
+
+        let mut free_after_release: usize = 0;
+        let mut total_after_release: usize = 0;
+        let info_err = unsafe {
+            cuda_sys::lib().cuMemGetInfo_v2(&mut free_after_release, &mut total_after_release)
+        };
+        if info_err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "query VRAM after releasing cold staging: {:?}",
+                info_err
+            ));
+        }
         let max_safe_slots =
-            effective_free_before.saturating_sub(safety_bytes) / self.cold_expert_bytes;
+            free_after_release.saturating_sub(safety_bytes) / self.cold_expert_bytes;
         if slots > max_safe_slots {
             self.last_cold_staging_failure = Some(ColdStagingFailure {
                 prompt_tokens: self.active_prefill_prompt_tokens,
                 chunk_tokens,
                 requested_slots: slots,
                 max_safe_slots,
-                free_before_mb: effective_free_before / (1024 * 1024),
+                free_before_mb: free_after_release / (1024 * 1024),
                 safety_mb,
             });
             if vram_ledger_enabled() {
                 vram_ledger_log!(
-                    "VRAM LEDGER prefill_cold_staging_capacity_block slots={} max_safe_slots={} cold_expert_mb={:.3} free_before_mb={} releasable_cold_mb={} effective_free_before_mb={} total_mb={} safety_mb={} chunk_tokens={} scratch_tokens={} prompt_tokens={}",
+                    "VRAM LEDGER prefill_cold_staging_capacity_block slots={} max_safe_slots={} cold_expert_mb={:.3} free_before_release_mb={} released_cold_slots={} released_cold_mb={} free_after_release_mb={} total_mb={} safety_mb={} chunk_tokens={} scratch_tokens={} prompt_tokens={}",
                     slots,
                     max_safe_slots,
                     self.cold_expert_bytes as f64 / (1024.0 * 1024.0),
-                    free_before / (1024 * 1024),
-                    releasable_cold_bytes / (1024 * 1024),
-                    effective_free_before / (1024 * 1024),
-                    total_before / (1024 * 1024),
+                    free_before_release / (1024 * 1024),
+                    released_cold_slots,
+                    released_cold_bytes / (1024 * 1024),
+                    free_after_release / (1024 * 1024),
+                    total_after_release / (1024 * 1024),
                     safety_mb,
                     chunk_tokens,
                     self.scratch.max_tokens,
@@ -18308,12 +19247,13 @@ impl PrefillEngine {
             }
             if prefill_debug_enabled() || stderr_debug_enabled() {
                 eprintln!(
-                    "[PREFILL-DEBUG] cold staging capacity block: slots={} max_safe_slots={} free_before_mb={} releasable_cold_mb={} effective_free_before_mb={} safety_mb={} chunk_tokens={} scratch_tokens={} prompt_tokens={}",
+                    "[PREFILL-DEBUG] cold staging capacity block: slots={} max_safe_slots={} free_before_release_mb={} released_cold_slots={} released_cold_mb={} free_after_release_mb={} safety_mb={} chunk_tokens={} scratch_tokens={} prompt_tokens={}",
                     slots,
                     max_safe_slots,
-                    free_before / (1024 * 1024),
-                    releasable_cold_bytes / (1024 * 1024),
-                    effective_free_before / (1024 * 1024),
+                    free_before_release / (1024 * 1024),
+                    released_cold_slots,
+                    released_cold_bytes / (1024 * 1024),
+                    free_after_release / (1024 * 1024),
                     safety_mb,
                     chunk_tokens,
                     self.scratch.max_tokens,
@@ -18324,18 +19264,12 @@ impl PrefillEngine {
                 "prefill cold staging route demand exceeds measured VRAM: requested_slots={} max_safe_slots={} free_before={} MB safety={} MB chunk_tokens={} scratch_tokens={}",
                 slots,
                 max_safe_slots,
-                free_before / (1024 * 1024),
+                free_after_release / (1024 * 1024),
                 safety_mb,
                 chunk_tokens,
                 self.scratch.max_tokens,
             ));
         }
-
-        // forward_moe_fused already synchronized the main stream before reading
-        // expert counts. Freeing the previous buffer here is therefore ordered
-        // after its last use and avoids old+new allocation overlap.
-        self.d_cold_staging = None;
-        self.max_cold_experts = 0;
 
         let total_cold = slots.saturating_mul(self.cold_expert_bytes);
         let buf = match GpuBuf::<u8>::alloc_uninit(total_cold) {
@@ -18346,7 +19280,7 @@ impl PrefillEngine {
                     chunk_tokens,
                     requested_slots: slots,
                     max_safe_slots,
-                    free_before_mb: effective_free_before / (1024 * 1024),
+                    free_before_mb: free_after_release / (1024 * 1024),
                     safety_mb,
                 });
                 return Err(format!("alloc cold_staging slots={slots}: {e}"));
@@ -18380,7 +19314,7 @@ impl PrefillEngine {
                 chunk_tokens,
                 requested_slots: slots,
                 max_safe_slots,
-                free_before_mb: effective_free_before / (1024 * 1024),
+                free_before_mb: free_after_release / (1024 * 1024),
                 safety_mb,
             });
             self.d_cold_staging = None;
@@ -18419,9 +19353,12 @@ impl PrefillEngine {
         chunk_start: usize,
         portable_enabled_for_request: bool,
     ) -> Result<(), String> {
-        let is_deepseek_v4_layer = self.layer_weights[layer_idx].layer_type == 4;
-        let portable_enabled = !is_deepseek_v4_layer && portable_enabled_for_request;
-        let enabled = if is_deepseek_v4_layer {
+        // Predicted-W1 is qualified only for the DeepSeek-V4 attention/MoE
+        // contract. GLM uses the same latent expert width, but its gate
+        // prescan did not produce usable prediction hits in measured A/B runs.
+        let latent_width_layer = self.layer_weights[layer_idx].layer_type == 4;
+        let portable_enabled = !latent_width_layer && portable_enabled_for_request;
+        let enabled = if latent_width_layer {
             self.deepseek_v4_prefill_predicted_w1_enabled
         } else {
             portable_enabled
@@ -22452,9 +23389,24 @@ impl PrefillEngine {
             position.rope_position_delta,
             &state_blobs,
         )?;
+        if std::env::var_os("KRASIS_SESSION_BOUNDARY_INTEGRITY_DIAG").is_some() {
+            self.verify_sequence_boundary_bytes(
+                token_count,
+                &state_blobs,
+                "after_ram_restore",
+            )?;
+        }
         let (active_device_checkpoint_bytes, active_device_checkpoint_ms) =
             if self.prefill_kv_active {
-                store.capture_pending_active_sequence_checkpoint_rust(token_count)?
+                let capture = store.capture_pending_active_sequence_checkpoint_rust(token_count)?;
+                if std::env::var_os("KRASIS_SESSION_BOUNDARY_INTEGRITY_DIAG").is_some() {
+                    self.verify_sequence_boundary_bytes(
+                        token_count,
+                        &state_blobs,
+                        "after_device_checkpoint_capture",
+                    )?;
+                }
+                capture
             } else {
                 (0, 0.0)
             };
@@ -22485,7 +23437,131 @@ impl PrefillEngine {
         self.stream_sync()?;
         let capture = self.capture_sequence_boundary_state(token_count, incremental_base);
         self.restore_decode_kv_pointers();
+        if std::env::var_os("KRASIS_SESSION_BOUNDARY_INTEGRITY_DIAG").is_some() {
+            self.verify_decode_kv_pointers()?;
+        }
         capture
+    }
+
+    /// Diagnostic-only byte-for-byte verification of the live sequence state.
+    /// This is deliberately opt-in because it performs an additional complete
+    /// D2H capture after each boundary phase. It never supplies a fallback or
+    /// changes cache behavior: a mismatch fails the request with the exact
+    /// allocation and first differing byte.
+    fn verify_sequence_boundary_bytes(
+        &mut self,
+        logical_tokens: usize,
+        expected: &[crate::session_cache::SequenceStateBlob],
+        phase: &str,
+    ) -> Result<(), String> {
+        if self.prefill_hcs_store_addr == 0 {
+            return Err("boundary integrity verification requires a decode store".to_string());
+        }
+        let store = unsafe {
+            &mut *(self.prefill_hcs_store_addr as *mut crate::gpu_decode::GpuDecodeStore)
+        };
+        let (mut actual, _) = store.snapshot_sequence_state_rust(logical_tokens)?;
+        let (mut stage, _) = self.capture_stage_exact_sequence_state(logical_tokens, None)?;
+        actual.append(&mut stage);
+        if actual.len() != expected.len() {
+            return Err(format!(
+                "session boundary integrity {phase}: expected {} allocations, captured {}",
+                expected.len(),
+                actual.len()
+            ));
+        }
+        for (expected_blob, actual_blob) in expected.iter().zip(&actual) {
+            if expected_blob.allocation_name != actual_blob.allocation_name {
+                return Err(format!(
+                    "session boundary integrity {phase}: expected allocation {:?}, captured {:?}",
+                    expected_blob.allocation_name, actual_blob.allocation_name
+                ));
+            }
+            if expected_blob.kind != actual_blob.kind
+                || expected_blob.layer_idx != actual_blob.layer_idx
+                || expected_blob.device_ordinal != actual_blob.device_ordinal
+                || expected_blob.dtype != actual_blob.dtype
+                || expected_blob.element_size != actual_blob.element_size
+                || expected_blob.shape != actual_blob.shape
+                || expected_blob.strides_bytes != actual_blob.strides_bytes
+                || expected_blob.bytes.len() != actual_blob.bytes.len()
+            {
+                return Err(format!(
+                    "session boundary integrity {phase}: metadata changed for {}",
+                    expected_blob.allocation_name
+                ));
+            }
+            if expected_blob.bytes != actual_blob.bytes {
+                let first = expected_blob
+                    .bytes
+                    .iter()
+                    .zip(&actual_blob.bytes)
+                    .position(|(left, right)| left != right)
+                    .unwrap_or(0);
+                let different = expected_blob
+                    .bytes
+                    .iter()
+                    .zip(&actual_blob.bytes)
+                    .filter(|(left, right)| left != right)
+                    .count();
+                return Err(format!(
+                    "session boundary integrity {phase}: {} changed at byte {} (expected={} actual={}; differing_bytes={}/{})",
+                    expected_blob.allocation_name,
+                    first,
+                    expected_blob.bytes[first],
+                    actual_blob.bytes[first],
+                    different,
+                    expected_blob.bytes.len()
+                ));
+            }
+        }
+        log::info!(
+            "Session boundary integrity {}: {} allocations and {} bytes unchanged",
+            phase,
+            actual.len(),
+            actual.iter().map(|blob| blob.bytes.len()).sum::<usize>()
+        );
+        Ok(())
+    }
+
+    /// Verify that terminal boundary capture restored every prefill-visible KV
+    /// selector to its registered decode value. This catches pointer-only
+    /// corruption which byte snapshots cannot observe.
+    fn verify_decode_kv_pointers(&self) -> Result<(), String> {
+        for (label, current, expected) in [
+            ("k", &self.kv_k_ptrs, &self.decode_kv_k_ptrs),
+            ("v", &self.kv_v_ptrs, &self.decode_kv_v_ptrs),
+            ("k_scale", &self.kv_k_radius_ptrs, &self.decode_kv_k_radius_ptrs),
+            ("v_scale", &self.kv_v_radius_ptrs, &self.decode_kv_v_radius_ptrs),
+            ("k_packed", &self.kv_k_angles_ptrs, &self.decode_kv_k_angles_ptrs),
+            ("v_packed", &self.kv_v_angles_ptrs, &self.decode_kv_v_angles_ptrs),
+            ("tq4_sign", &self.kv_tq4_sign_ptrs, &self.decode_kv_tq4_sign_ptrs),
+        ] {
+            if current != expected {
+                let first = current
+                    .iter()
+                    .zip(expected.iter())
+                    .position(|(left, right)| left != right)
+                    .unwrap_or(current.len().min(expected.len()));
+                return Err(format!(
+                    "session boundary pointer integrity: {label} differs at index {first} (current_len={} expected_len={})",
+                    current.len(),
+                    expected.len()
+                ));
+            }
+        }
+        if self.kv_format != self.decode_kv_format
+            || self.kv_max_seq != self.decode_kv_max_seq
+            || self.kv_max_seq_by_layer != self.decode_kv_max_seq_by_layer
+            || self.kv_num_blocks != self.decode_kv_num_blocks
+            || self.kv_num_blocks_by_layer != self.decode_kv_num_blocks_by_layer
+            || self.prefill_kv_active
+        {
+            return Err("session boundary pointer integrity: decode KV geometry was not restored"
+                .to_string());
+        }
+        log::info!("Session boundary pointer integrity: decode KV selectors unchanged");
+        Ok(())
     }
 
     /// Restore an exact prefill-stage prefix after `prepare_for_prefill` has
@@ -22904,6 +23980,7 @@ impl PrefillEngine {
         self.d_fla_final_state = None;
         self.d_fla_v_new = None;
         self.d_fla_o = None;
+        self.clear_kda_chunk_scratch();
         self.prescan_active_experts.clear();
         self.prescan_token_count = 0;
         self.dsa_prefill_workspace = None;
@@ -23249,6 +24326,7 @@ impl PrefillEngine {
                         .map_err(|e| format!("alloc fla_o: {e}"))?,
                 );
             }
+            self.allocate_kda_chunk_scratch(scratch_tokens)?;
 
             // Shared expert Marlin workspace: sized for actual chunk, not max possible.
             let shared_w13_n = if self.config.moe_gated {
@@ -23312,6 +24390,7 @@ impl PrefillEngine {
                     self.d_fla_final_state = None;
                     self.d_fla_v_new = None;
                     self.d_fla_o = None;
+                    self.clear_kda_chunk_scratch();
                     unsafe {
                         cuda_sys::lib().cuCtxSynchronize();
                     }
@@ -23458,6 +24537,7 @@ impl PrefillEngine {
                 self.d_fla_final_state = None;
                 self.d_fla_v_new = None;
                 self.d_fla_o = None;
+                self.clear_kda_chunk_scratch();
                 self.release_prefill_kv_temp();
                 return Err(format!(
                     "prefill VRAM safety floor unavailable: {} MB free after minimum scratch, {} MB required ({} MB safety margin)",
@@ -23526,6 +24606,7 @@ impl PrefillEngine {
             self.d_fla_final_state = None;
             self.d_fla_v_new = None;
             self.d_fla_o = None;
+            self.clear_kda_chunk_scratch();
             unsafe {
                 cuda_sys::lib().cuCtxSynchronize();
             }
@@ -23703,6 +24784,7 @@ impl PrefillEngine {
         self.d_fla_final_state = None;
         self.d_fla_v_new = None;
         self.d_fla_o = None;
+        self.clear_kda_chunk_scratch();
         self.clear_predicted_w1_state();
         if !self.retain_prefill_kv_for_active {
             self.release_prefill_kv_temp();
@@ -23750,6 +24832,126 @@ impl PrefillEngine {
         self.pinning_pool_expert_bytes = 0;
         self.pinned_expert_offsets.clear();
         self.pinning_active = false;
+    }
+
+    fn clear_kda_chunk_scratch(&mut self) {
+        self.d_kda_g = None;
+        self.d_kda_aqk = None;
+        self.d_kda_akkd = None;
+        self.d_kda_akk = None;
+        self.d_kda_w = None;
+        self.d_kda_u = None;
+        self.d_kda_kg = None;
+        self.d_kda_h = None;
+        self.d_kda_final_state = None;
+        self.d_kda_v_new = None;
+    }
+
+    fn allocate_kda_chunk_scratch(&mut self, scratch_tokens: usize) -> Result<(), String> {
+        self.clear_kda_chunk_scratch();
+        if !self.layer_weights.iter().any(|layer| layer.kimi_delta.is_some()) {
+            return Ok(());
+        }
+        if self.fla.is_none() {
+            return Err(
+                "GLM-5.3 chunked KDA requires the compiled FLA sidecar; no fallback is allowed"
+                    .to_string(),
+            );
+        }
+        let first = self
+            .layer_weights
+            .iter()
+            .find_map(|layer| layer.kimi_delta.as_ref())
+            .ok_or("chunked KDA selected without a KDA layer descriptor")?;
+        let heads = first.num_heads;
+        let key_dim = first.head_dim;
+        let value_dim = first.head_dim;
+        if heads == 0 || key_dim == 0 || value_dim == 0 {
+            return Err(format!(
+                "chunked KDA has invalid runtime geometry heads={} key_dim={} value_dim={}",
+                heads, key_dim, value_dim
+            ));
+        }
+        for (layer_idx, layer) in self.layer_weights.iter().enumerate() {
+            let Some(desc) = layer.kimi_delta.as_ref() else {
+                continue;
+            };
+            if desc.num_heads != heads || desc.head_dim != key_dim {
+                return Err(format!(
+                    "chunked KDA sidecar geometry changes at layer {}: expected heads={} dim={}, got heads={} dim={}",
+                    layer_idx, heads, key_dim, desc.num_heads, desc.head_dim
+                ));
+            }
+        }
+        // These are compiled-kernel capabilities, not model assumptions. The
+        // sidecar fails closed for checkpoint geometry it was not built for.
+        if key_dim != 128 || value_dim != 128 {
+            return Err(format!(
+                "compiled chunked KDA sidecar supports key/value dimension 128, checkpoint requires {}/{}",
+                key_dim, value_dim
+            ));
+        }
+        let block_tokens = FLA_PREFILL_BLOCK_TOKENS;
+        let padded_tokens = scratch_tokens
+            .div_ceil(block_tokens)
+            .checked_mul(block_tokens)
+            .ok_or("chunked KDA padded token count overflow")?;
+        let chunks = padded_tokens / block_tokens;
+        let checked = |factors: &[usize], label: &str| -> Result<usize, String> {
+            factors.iter().try_fold(1usize, |value, factor| {
+                value
+                    .checked_mul(*factor)
+                    .ok_or_else(|| format!("chunked KDA {label} element count overflow"))
+            })
+        };
+        let token_heads = checked(&[padded_tokens, heads], "token-head")?;
+        self.d_kda_g = Some(
+            self.device
+                .alloc_zeros::<f32>(checked(&[token_heads, key_dim], "gate")?)
+                .map_err(|error| format!("alloc chunked KDA gate: {error}"))?,
+        );
+        self.d_kda_aqk = Some(
+            self.device
+                .alloc_zeros::<u16>(checked(&[token_heads, block_tokens], "Aqk")?)
+                .map_err(|error| format!("alloc chunked KDA Aqk: {error}"))?,
+        );
+        let subchunk_tokens = block_tokens / 4;
+        self.d_kda_akkd = Some(
+            self.device
+                .alloc_zeros::<f32>(checked(&[token_heads, subchunk_tokens], "Akkd")?)
+                .map_err(|error| format!("alloc chunked KDA Akkd: {error}"))?,
+        );
+        self.d_kda_akk = Some(
+            self.device
+                .alloc_zeros::<u16>(checked(&[token_heads, block_tokens], "Akk")?)
+                .map_err(|error| format!("alloc chunked KDA Akk: {error}"))?,
+        );
+        for (label, slot, dim) in [
+            ("w", &mut self.d_kda_w, key_dim),
+            ("u", &mut self.d_kda_u, value_dim),
+            ("kg", &mut self.d_kda_kg, key_dim),
+            ("v_new", &mut self.d_kda_v_new, value_dim),
+        ] {
+            *slot = Some(
+                self.device
+                    .alloc_zeros::<u16>(checked(&[token_heads, dim], label)?)
+                    .map_err(|error| format!("alloc chunked KDA {label}: {error}"))?,
+            );
+        }
+        self.d_kda_h = Some(
+            self.device
+                .alloc_zeros::<u16>(checked(
+                    &[chunks, heads, key_dim, value_dim],
+                    "chunk states",
+                )?)
+                .map_err(|error| format!("alloc chunked KDA states: {error}"))?,
+        );
+        self.d_kda_final_state = Some(
+            self.device
+                .alloc_zeros::<f32>(checked(&[heads, key_dim, value_dim], "final state")?)
+                .map_err(|error| format!("alloc chunked KDA final state: {error}"))?,
+        );
+        Ok(())
     }
 
     pub fn run_prefill(
@@ -24081,6 +25283,31 @@ impl PrefillEngine {
                         );
                     }
                 }
+                if let Some(kda) = lw.kimi_delta.as_ref() {
+                    let (conv_state_elements, recurrent_state_elements) =
+                        kimi_delta_state_elements_from_geometry(
+                            kda.num_heads,
+                            kda.head_dim,
+                            kda.kernel_dim,
+                        )
+                        .map_err(|error| {
+                            format!("GLM-5.3 KDA layer {} state reset: {}", layer_idx, error)
+                        })?;
+                    unsafe {
+                        cuda_sys::lib().cuMemsetD32Async(
+                            kda.conv_state_ptr,
+                            0,
+                            conv_state_elements,
+                            self.stream,
+                        );
+                        cuda_sys::lib().cuMemsetD32Async(
+                            kda.recur_state_ptr,
+                            0,
+                            recurrent_state_elements,
+                            self.stream,
+                        );
+                    }
+                }
             }
         }
 
@@ -24382,6 +25609,18 @@ impl PrefillEngine {
             for cell in &self.t_mamba2_stage_sync {
                 cell.set(0.0);
             }
+            for cell in &self.t_glm5_stage_wall {
+                cell.set(0.0);
+            }
+            for cell in &self.t_glm5_stage_event {
+                cell.set(0.0);
+            }
+            for cell in &self.t_glm5_stage_sync {
+                cell.set(0.0);
+            }
+            for cell in &self.glm5_stage_calls {
+                cell.set(0);
+            }
             for cell in &self.t_deepseek_v4_stage_wall {
                 cell.set(0.0);
             }
@@ -24657,6 +25896,7 @@ impl PrefillEngine {
             // 3. Layer-by-layer forward pass
             let mut has_residual = false;
             let mut deepseek_v4_hc_initialized = false;
+            let mut glm5_hc_initialized = false;
             for layer_idx in 0..num_hidden_layers {
                 let liveness_layer_t0 = Instant::now();
                 let layer_type = self.layer_weights[layer_idx].layer_type;
@@ -24666,8 +25906,56 @@ impl PrefillEngine {
                     2 => "pass",
                     3 => "la",
                     4 => "deepseek_v4",
+                    5 => "kimi_delta_attention",
                     _ => "unknown",
                 };
+                if self.layer_weights[layer_idx].hyper_connection.is_some() {
+                    if !glm5_hc_initialized {
+                        let hc_replicate_timing = self.glm5_timing_start("glm5 hc_replicate")?;
+                        let hc = self.layer_weights[layer_idx]
+                            .hyper_connection
+                            .as_ref()
+                            .ok_or_else(|| {
+                                format!("GLM-5.3 layer {} mHC descriptor is missing", layer_idx)
+                            })?;
+                        let expected_mult = self
+                            .glm5_hc_mean_mult
+                            .ok_or("GLM-5.3 final mHC mean is not registered")?;
+                        if hc.mult != expected_mult {
+                            return Err(format!(
+                                "GLM-5.3 layer {} mHC multiplicity {} != final mean {}",
+                                layer_idx, hc.mult, expected_mult
+                            ));
+                        }
+                        let hc_state = *self
+                            .scratch
+                            .d_deepseek_v4_hc_state
+                            .as_ref()
+                            .ok_or("GLM-5.3 mHC state is not allocated")?
+                            .device_ptr();
+                        self.launch_deepseek_v4_hc_replicate(
+                            hc_state,
+                            *self.scratch.d_hidden.device_ptr(),
+                            m,
+                            hc.mult,
+                        )?;
+                        self.glm5_timing_finish(
+                            GLM5_PREFILL_TIMING_STAGE_HC_REPLICATE,
+                            "glm5 hc_replicate",
+                            hc_replicate_timing,
+                        )?;
+                        glm5_hc_initialized = true;
+                    }
+                    self.forward_glm5_layer(
+                        layer_idx,
+                        m,
+                        chunk_idx,
+                        chunk_start,
+                        chunk_last_tok,
+                    )
+                        .map_err(|error| format!("GLM-5.3 layer {}: {}", layer_idx, error))?;
+                    continue;
+                }
                 if layer_type == 4 {
                     if !deepseek_v4_hc_initialized {
                         let hc_replicate_timing =
@@ -27069,41 +28357,43 @@ impl PrefillEngine {
         // Use last chunk's m for final processing
         let m = chunk_plan.last().copied().unwrap_or(total_m);
         let deepseek_v4_prefill = self.deepseek_v4_head.is_some();
+        let glm5_prefill = self.glm5_hc_mean_mult.is_some();
         let trace_prefill_final = self.trace.as_ref().map_or(false, |t| {
             t.should_emit(num_chunks.saturating_sub(1), None, "prefill")
         });
-        let final_trace_inputs = if !deepseek_v4_prefill && trace_prefill_final && m > 0 {
-            let last_pos = m - 1;
-            match (
-                download_device_u16(
-                    *self.scratch.d_residual.device_ptr() + (last_pos * h * 2) as u64,
-                    h,
-                ),
-                download_device_u16(
-                    *self.scratch.d_hidden.device_ptr() + (last_pos * h * 2) as u64,
-                    h,
-                ),
-            ) {
-                (Ok(residual_last), Ok(hidden_last)) => Some((residual_last, hidden_last)),
-                (Err(err), _) | (_, Err(err)) => {
-                    trace_emit_prefill_mark(
-                        self.trace.as_ref(),
-                        num_chunks.saturating_sub(1),
-                        total_prompt_tokens.saturating_sub(1),
-                        token_ids.last().copied().unwrap_or(0) as usize,
-                        None,
-                        "prefill",
-                        &format!(
-                            "phase=final_prefill_trace_input_download_failed error={}",
-                            err
-                        ),
-                    );
-                    None
+        let final_trace_inputs =
+            if !deepseek_v4_prefill && !glm5_prefill && trace_prefill_final && m > 0 {
+                let last_pos = m - 1;
+                match (
+                    download_device_u16(
+                        *self.scratch.d_residual.device_ptr() + (last_pos * h * 2) as u64,
+                        h,
+                    ),
+                    download_device_u16(
+                        *self.scratch.d_hidden.device_ptr() + (last_pos * h * 2) as u64,
+                        h,
+                    ),
+                ) {
+                    (Ok(residual_last), Ok(hidden_last)) => Some((residual_last, hidden_last)),
+                    (Err(err), _) | (_, Err(err)) => {
+                        trace_emit_prefill_mark(
+                            self.trace.as_ref(),
+                            num_chunks.saturating_sub(1),
+                            total_prompt_tokens.saturating_sub(1),
+                            token_ids.last().copied().unwrap_or(0) as usize,
+                            None,
+                            "prefill",
+                            &format!(
+                                "phase=final_prefill_trace_input_download_failed error={}",
+                                err
+                            ),
+                        );
+                        None
+                    }
                 }
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
         // 4. Final RMSNorm
         if deepseek_v4_prefill {
@@ -27123,6 +28413,21 @@ impl PrefillEngine {
                 head,
                 m,
             )?;
+            self.launch_rmsnorm(
+                *self.scratch.d_hidden.device_ptr(),
+                *self.scratch.d_hidden.device_ptr(),
+                self.final_norm_ptr,
+                m,
+                h,
+            )?;
+        } else if let Some(hc_mult) = self.glm5_hc_mean_mult {
+            let hc_state = *self
+                .scratch
+                .d_deepseek_v4_hc_state
+                .as_ref()
+                .ok_or("GLM-5.3 mHC state is not allocated for final mean")?
+                .device_ptr();
+            self.launch_glm5_hc_mean(hc_state, *self.scratch.d_hidden.device_ptr(), m, hc_mult)?;
             self.launch_rmsnorm(
                 *self.scratch.d_hidden.device_ptr(),
                 *self.scratch.d_hidden.device_ptr(),
@@ -27481,6 +28786,15 @@ impl PrefillEngine {
         );
 
         if timing {
+            let glm5_has_data = self
+                .glm5_stage_calls
+                .iter()
+                .any(|calls| calls.get() > 0);
+            let glm5_wall_total = if glm5_has_data {
+                self.t_glm5_stage_wall.iter().map(|cell| cell.get()).sum()
+            } else {
+                0.0
+            };
             let deepseek_v4_has_data = self
                 .deepseek_v4_stage_calls
                 .iter()
@@ -27498,8 +28812,13 @@ impl PrefillEngine {
             } else {
                 0.0
             };
-            let total =
-                t_embed_ms + t_norm_ms + t_attn_ms + t_moe_ms + t_other_ms + deepseek_v4_wall_total;
+            let total = t_embed_ms
+                + t_norm_ms
+                + t_attn_ms
+                + t_moe_ms
+                + t_other_ms
+                + glm5_wall_total
+                + deepseek_v4_wall_total;
             let unaccounted = (ms - total).max(0.0);
             eprintln!(
                 "[PREFILL-TIMING] {} suffix tokens from boundary {} ({} total), {:.1}ms total ({:.0} computed tok/s)",
@@ -27900,6 +29219,35 @@ impl PrefillEngine {
                     ha, hac
                 );
             }
+            if glm5_has_data {
+                let event_total: f64 = self.t_glm5_stage_event.iter().map(|cell| cell.get()).sum();
+                let sync_total: f64 = self.t_glm5_stage_sync.iter().map(|cell| cell.get()).sum();
+                eprintln!(
+                    "[PREFILL-TIMING]     glm5 breakdown (diagnostic sync-isolated): wall={:>8.1}ms ({:>5.1}% of prefill) event={:>8.1}ms sync={:>8.1}ms",
+                    glm5_wall_total,
+                    if ms > 0.0 { glm5_wall_total / ms * 100.0 } else { 0.0 },
+                    event_total,
+                    sync_total
+                );
+                for (idx, label) in GLM5_PREFILL_TIMING_LABELS.iter().enumerate() {
+                    let calls = self.glm5_stage_calls[idx].get();
+                    if calls == 0 {
+                        continue;
+                    }
+                    let wall_ms = self.t_glm5_stage_wall[idx].get();
+                    let event_ms = self.t_glm5_stage_event[idx].get();
+                    let sync_ms = self.t_glm5_stage_sync[idx].get();
+                    eprintln!(
+                        "[PREFILL-TIMING]       {:<24} wall={:>8.1}ms event={:>8.1}ms sync={:>8.1}ms wall_minus_event={:>8.1}ms over {} calls",
+                        label,
+                        wall_ms,
+                        event_ms,
+                        sync_ms,
+                        (wall_ms - event_ms).max(0.0),
+                        calls
+                    );
+                }
+            }
             if deepseek_v4_has_data {
                 let wall_total: f64 = self
                     .t_deepseek_v4_stage_wall
@@ -27942,31 +29290,6 @@ impl PrefillEngine {
                     );
                 }
                 if self
-                    .deepseek_v4_indexer_calls
-                    .iter()
-                    .any(|calls| calls.get() > 0)
-                {
-                    eprintln!("[PREFILL-TIMING]         indexer internals:");
-                    for (idx, label) in DEEPSEEK_V4_INDEXER_TIMING_LABELS.iter().enumerate() {
-                        let calls = self.deepseek_v4_indexer_calls[idx].get();
-                        if calls == 0 {
-                            continue;
-                        }
-                        let wall_ms = self.t_deepseek_v4_indexer_wall[idx].get();
-                        let event_ms = self.t_deepseek_v4_indexer_event[idx].get();
-                        let sync_ms = self.t_deepseek_v4_indexer_sync[idx].get();
-                        eprintln!(
-                            "[PREFILL-TIMING]           {:<16} wall={:>8.1}ms event={:>8.1}ms sync={:>8.1}ms wall_minus_event={:>8.1}ms over {} calls",
-                            label,
-                            wall_ms,
-                            event_ms,
-                            sync_ms,
-                            (wall_ms - event_ms).max(0.0),
-                            calls
-                        );
-                    }
-                }
-                if self
                     .deepseek_v4_hc_internal_calls
                     .iter()
                     .any(|calls| calls.get() > 0)
@@ -27984,6 +29307,37 @@ impl PrefillEngine {
                             calls
                         );
                     }
+                }
+            }
+            // GLM's registered DSA path uses the same indexer-stage counters
+            // without populating the DeepSeek-V4 top-level stage counters.
+            // Keep this diagnostic outside the architecture-specific summary
+            // so every caller that records real query/score/sort/merge events
+            // gets the evidence. This branch is timing-only and unreachable
+            // in normal speed runs.
+            if self
+                .deepseek_v4_indexer_calls
+                .iter()
+                .any(|calls| calls.get() > 0)
+            {
+                eprintln!("[PREFILL-TIMING]         sparse indexer internals:");
+                for (idx, label) in DEEPSEEK_V4_INDEXER_TIMING_LABELS.iter().enumerate() {
+                    let calls = self.deepseek_v4_indexer_calls[idx].get();
+                    if calls == 0 {
+                        continue;
+                    }
+                    let wall_ms = self.t_deepseek_v4_indexer_wall[idx].get();
+                    let event_ms = self.t_deepseek_v4_indexer_event[idx].get();
+                    let sync_ms = self.t_deepseek_v4_indexer_sync[idx].get();
+                    eprintln!(
+                        "[PREFILL-TIMING]           {:<16} wall={:>8.1}ms event={:>8.1}ms sync={:>8.1}ms wall_minus_event={:>8.1}ms over {} calls",
+                        label,
+                        wall_ms,
+                        event_ms,
+                        sync_ms,
+                        (wall_ms - event_ms).max(0.0),
+                        calls
+                    );
                 }
             }
             let mamba2_has_data = self.mamba2_stage_calls.iter().any(|calls| calls.get() > 0);
@@ -28396,7 +29750,7 @@ impl PrefillEngine {
                 return Err(format!("debug DSA positions H2D: {:?}", position_copy));
             }
         }
-        self.populate_dsa_prefill_owner_key_cache(layer_idx, positions.len())?;
+        self.populate_dsa_prefill_owner_key_cache(layer_idx, 0, positions.len())?;
         self.stream_sync()
     }
 
@@ -28498,7 +29852,7 @@ impl PrefillEngine {
                 ));
             }
         }
-        self.populate_dsa_prefill_owner_key_cache(layer_idx, rows)?;
+        self.populate_dsa_prefill_owner_key_cache(layer_idx, 0, rows)?;
         unsafe {
             let q_residual_copy = cuda_sys::lib().cuMemcpyHtoD_v2(
                 *self.scratch.d_scratch2.device_ptr(),
@@ -28535,6 +29889,8 @@ impl PrefillEngine {
             rows,
             context_end,
             registration.index_topk,
+            registration.index_topk,
+            1,
             registration.index_n_heads,
             registration.index_head_dim,
             0,
@@ -28766,8 +30122,56 @@ impl PrefillEngine {
         // 3. Layer-by-layer forward pass
         let mut has_residual = false;
         let mut deepseek_v4_hc_initialized = false;
+        let mut glm5_hc_initialized = false;
         for layer_idx in 0..num_hidden_layers {
             let layer_type = self.layer_weights[layer_idx].layer_type;
+
+            if self.layer_weights[layer_idx].hyper_connection.is_some() {
+                if !glm5_hc_initialized {
+                    let hc = self.layer_weights[layer_idx]
+                        .hyper_connection
+                        .as_ref()
+                        .ok_or_else(|| {
+                            format!(
+                                "GLM-5.3 logits layer {} mHC descriptor is missing",
+                                layer_idx
+                            )
+                        })?;
+                    let expected_mult = self
+                        .glm5_hc_mean_mult
+                        .ok_or("GLM-5.3 final mHC mean is not registered for prefill logits")?;
+                    if hc.mult != expected_mult {
+                        return Err(format!(
+                            "GLM-5.3 logits layer {} mHC multiplicity {} != final mean {}",
+                            layer_idx, hc.mult, expected_mult
+                        ));
+                    }
+                    let hc_state = *self
+                        .scratch
+                        .d_deepseek_v4_hc_state
+                        .as_ref()
+                        .ok_or("GLM-5.3 mHC state is not allocated for prefill logits")?
+                        .device_ptr();
+                    self.launch_deepseek_v4_hc_replicate(
+                        hc_state,
+                        *self.scratch.d_hidden.device_ptr(),
+                        m,
+                        hc.mult,
+                    )?;
+                    glm5_hc_initialized = true;
+                }
+                self.forward_glm5_layer(
+                    layer_idx,
+                    m,
+                    0,
+                    0,
+                    token_ids.last().copied().unwrap_or(0) as usize,
+                )
+                .map_err(|error| {
+                    format!("GLM-5.3 prefill-logit layer {}: {}", layer_idx, error)
+                })?;
+                continue;
+            }
 
             // The quality endpoint must execute the same complete V4 layer
             // pipeline as normal full-GPU prefill. It keeps every final hidden
@@ -28919,6 +30323,7 @@ impl PrefillEngine {
                     1 => "Mamba2",
                     2 => "Pass",
                     3 => "LA",
+                    5 => "KDA",
                     _ => "?",
                 };
                 let has_moe = self.layer_weights[layer_idx].moe_gate_ptr != 0;
@@ -28955,6 +30360,26 @@ impl PrefillEngine {
                 head,
                 m,
             )?;
+            self.launch_rmsnorm(
+                *self.scratch.d_hidden.device_ptr(),
+                *self.scratch.d_hidden.device_ptr(),
+                self.final_norm_ptr,
+                m,
+                h,
+            )?;
+        } else if let Some(hc_mult) = self.glm5_hc_mean_mult {
+            if !glm5_hc_initialized {
+                return Err(
+                    "GLM-5.3 final mHC mean requested without executing any GLM layer".to_string(),
+                );
+            }
+            let hc_state = *self
+                .scratch
+                .d_deepseek_v4_hc_state
+                .as_ref()
+                .ok_or("GLM-5.3 mHC state is not allocated for prefill-logit final mean")?
+                .device_ptr();
+            self.launch_glm5_hc_mean(hc_state, *self.scratch.d_hidden.device_ptr(), m, hc_mult)?;
             self.launch_rmsnorm(
                 *self.scratch.d_hidden.device_ptr(),
                 *self.scratch.d_hidden.device_ptr(),
@@ -36251,6 +37676,1190 @@ impl PrefillEngine {
         Ok(())
     }
 
+    fn launch_glm5_hc_mean(
+        &self,
+        state: u64,
+        hidden_out: u64,
+        m: usize,
+        hc_mult: usize,
+    ) -> Result<(), String> {
+        if state == 0 || hidden_out == 0 || m == 0 || hc_mult == 0 {
+            return Err("GLM-5.3 final mHC mean has an invalid contract".to_string());
+        }
+        let workspace = self
+            .scratch
+            .d_deepseek_v4_hc_workspace
+            .as_ref()
+            .ok_or("GLM-5.3 final mHC workspace is not allocated")?;
+        let mean_elems = m
+            .checked_mul(hc_mult)
+            .ok_or("GLM-5.3 final mHC mean size overflow")?;
+        if workspace.len < mean_elems {
+            return Err(format!(
+                "GLM-5.3 final mHC mean needs {} FP32 values, workspace has {}",
+                mean_elems, workspace.len
+            ));
+        }
+        let mean_ptr = *workspace.device_ptr();
+        let mean_bits = (1.0f32 / hc_mult as f32).to_bits();
+        let memset = unsafe {
+            cuda_sys::lib().cuMemsetD32Async(mean_ptr, mean_bits, mean_elems, self.stream)
+        };
+        if memset != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("GLM-5.3 final mHC mean fill failed: {:?}", memset));
+        }
+        let hidden = self.config.hidden_size;
+        let threads = std::cmp::max(32, ((std::cmp::min(1024, hidden) + 31) / 32) * 32) as u32;
+        let mut p0 = hidden_out;
+        let mut p1 = state;
+        let mut p2 = mean_ptr;
+        let mut p3 = i32::try_from(hidden)
+            .map_err(|_| "GLM-5.3 final mHC hidden width exceeds i32".to_string())?;
+        let mut p4 = i32::try_from(hc_mult)
+            .map_err(|_| "GLM-5.3 final mHC multiplicity exceeds i32".to_string())?;
+        unsafe {
+            launch(
+                self.kernels.deepseek_v4_hc_reduce,
+                (
+                    u32::try_from(m)
+                        .map_err(|_| "GLM-5.3 final mHC row count exceeds u32".to_string())?,
+                    1,
+                    1,
+                ),
+                (threads, 1, 1),
+                0,
+                self.stream,
+                &mut [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    &mut p3 as *mut _ as *mut std::ffi::c_void,
+                    &mut p4 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn forward_glm5_layer(
+        &mut self,
+        layer_idx: usize,
+        m: usize,
+        chunk_idx: usize,
+        chunk_start: usize,
+        last_token_id: usize,
+    ) -> Result<(), String> {
+        let h = self.config.hidden_size;
+        let state = *self
+            .scratch
+            .d_deepseek_v4_hc_state
+            .as_ref()
+            .ok_or("GLM-5.3 mHC state is not allocated")?
+            .device_ptr();
+        let temp_state_buffer = self
+            .scratch
+            .d_glm5_hc_temp_state
+            .as_ref()
+            .ok_or("GLM-5.3 dedicated temporary mHC state is not allocated")?;
+        let temp_state = *temp_state_buffer.device_ptr();
+        let hidden = *self.scratch.d_hidden.device_ptr();
+        let trace_position = chunk_start.saturating_add(m.saturating_sub(1));
+        let attn_hc_timing = self.glm5_timing_start("glm5 attn_hc_prep_norm")?;
+        let (attn_post, attn_comb, hc_mult) = {
+            let hc = self.layer_weights[layer_idx]
+                .hyper_connection
+                .as_ref()
+                .ok_or_else(|| format!("GLM-5.3 layer {} mHC descriptor is missing", layer_idx))?;
+            let prepared = self.launch_deepseek_v4_hc_prepare_sublayer(
+                state,
+                hidden,
+                &hc.attn_fn,
+                hc.attn_base_ptr,
+                hc.attn_scale_ptr,
+                hc.mult,
+                hc.sinkhorn_iters,
+                hc.eps,
+                m,
+            )?;
+            (prepared.0, prepared.1, hc.mult)
+        };
+        let required_state = m
+            .checked_mul(hc_mult)
+            .and_then(|value| value.checked_mul(h))
+            .ok_or_else(|| format!("GLM-5.3 layer {} mHC state size overflow", layer_idx))?;
+        if temp_state_buffer.len < required_state {
+            return Err(format!(
+                "GLM-5.3 layer {} temporary mHC state needs {} BF16 values, dedicated bank has {}",
+                layer_idx, required_state, temp_state_buffer.len
+            ));
+        }
+        let trace_state_width = hc_mult
+            .checked_mul(h)
+            .ok_or_else(|| format!("GLM-5.3 layer {} trace width overflow", layer_idx))?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_HC_INPUT_STATE_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            state,
+            m.saturating_sub(1),
+            trace_state_width,
+        )?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_ATTN_PREPARED_HIDDEN_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            hidden,
+            m.saturating_sub(1),
+            h,
+        )?;
+        self.launch_rmsnorm(
+            hidden,
+            hidden,
+            self.layer_weights[layer_idx].input_norm,
+            m,
+            h,
+        )?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_ATTN_NORM_HIDDEN_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            hidden,
+            m.saturating_sub(1),
+            h,
+        )?;
+        self.glm5_timing_finish(
+            GLM5_PREFILL_TIMING_STAGE_ATTN_HC_PREP_NORM,
+            "glm5 attn_hc_prep_norm",
+            attn_hc_timing,
+        )?;
+        self.prefetch_predicted_w1_for_layer(layer_idx, m, chunk_start, false)?;
+        let attention_output_location =
+            glm5_attention_output_location(self.layer_weights[layer_idx].layer_type)
+                .map_err(|error| format!("GLM-5.3 layer {} has {}", layer_idx, error))?;
+        match attention_output_location {
+            Glm5AttentionOutputLocation::Hidden => self.forward_kimi_delta_attention(
+                layer_idx,
+                m,
+                chunk_idx,
+                trace_position,
+                last_token_id,
+            )?,
+            Glm5AttentionOutputLocation::AttentionScratch => {
+                let dsa_timing = self.glm5_timing_start("glm5 dsa_attention")?;
+                self.forward_gqa_chunked(
+                    layer_idx,
+                    m,
+                    chunk_start,
+                    self.layer_weights[layer_idx].dsa_prefill.is_some(),
+                )?;
+                self.glm5_timing_finish(
+                    GLM5_PREFILL_TIMING_STAGE_DSA_ATTENTION,
+                    "glm5 dsa_attention",
+                    dsa_timing,
+                )?;
+            }
+        }
+        if attention_output_location == Glm5AttentionOutputLocation::AttentionScratch {
+            let attention_bytes = m
+                .checked_mul(h)
+                .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .ok_or_else(|| {
+                    format!(
+                        "GLM-5.3 layer {} DSA attention handoff size overflow for {}x{} BF16",
+                        layer_idx, m, h
+                    )
+                })?;
+            self.memcpy_d2d(
+                hidden,
+                *self.scratch.d_attn_out.device_ptr(),
+                attention_bytes,
+            )?;
+        }
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_ATTN_SUBLAYER_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            hidden,
+            m.saturating_sub(1),
+            h,
+        )?;
+        let attn_hc_post_timing = self.glm5_timing_start("glm5 attn_hc_post")?;
+        self.launch_deepseek_v4_hc_post(
+            temp_state, hidden, state, attn_post, attn_comb, hc_mult, m,
+        )?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_POST_ATTN_STATE_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            temp_state,
+            m.saturating_sub(1),
+            trace_state_width,
+        )?;
+        self.glm5_timing_finish(
+            GLM5_PREFILL_TIMING_STAGE_ATTN_HC_POST,
+            "glm5 attn_hc_post",
+            attn_hc_post_timing,
+        )?;
+
+        let ffn_hc_timing = self.glm5_timing_start("glm5 ffn_hc_prep_norm")?;
+        let (ffn_post, ffn_comb) = {
+            let hc = self.layer_weights[layer_idx]
+                .hyper_connection
+                .as_ref()
+                .ok_or_else(|| format!("GLM-5.3 layer {} mHC descriptor is missing", layer_idx))?;
+            if hc.mult != hc_mult {
+                return Err(format!(
+                    "GLM-5.3 layer {} mHC multiplicity changed within layer: {} vs {}",
+                    layer_idx, hc_mult, hc.mult
+                ));
+            }
+            self.launch_deepseek_v4_hc_prepare_sublayer(
+                temp_state,
+                hidden,
+                &hc.ffn_fn,
+                hc.ffn_base_ptr,
+                hc.ffn_scale_ptr,
+                hc.mult,
+                hc.sinkhorn_iters,
+                hc.eps,
+                m,
+            )?
+        };
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_FFN_PREPARED_HIDDEN_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            hidden,
+            m.saturating_sub(1),
+            h,
+        )?;
+        self.launch_rmsnorm(
+            hidden,
+            hidden,
+            self.layer_weights[layer_idx].post_attn_norm,
+            m,
+            h,
+        )?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_FFN_NORM_HIDDEN_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            hidden,
+            m.saturating_sub(1),
+            h,
+        )?;
+        self.glm5_timing_finish(
+            GLM5_PREFILL_TIMING_STAGE_FFN_HC_PREP_NORM,
+            "glm5 ffn_hc_prep_norm",
+            ffn_hc_timing,
+        )?;
+        let ffn_kind = glm5_ffn_kind(
+            self.layer_weights[layer_idx].moe_gate_ptr != 0,
+            self.layer_has_split_dense_mlp(layer_idx),
+        )
+        .map_err(|error| format!("GLM-5.3 layer {}: {}", layer_idx, error))?;
+        let ffn_timing = self.glm5_timing_start("glm5 ffn")?;
+        match ffn_kind {
+            Glm5FfnKind::RoutedMoe => {
+                self.forward_moe_with_inputs(layer_idx, m, hidden, hidden, hidden)?
+            }
+            Glm5FfnKind::Dense => {
+                self.forward_split_dense_mlp(layer_idx, hidden, hidden, m)?
+            }
+        }
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_FFN_SUBLAYER_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            hidden,
+            m.saturating_sub(1),
+            h,
+        )?;
+        self.glm5_timing_finish(GLM5_PREFILL_TIMING_STAGE_FFN, "glm5 ffn", ffn_timing)?;
+        let ffn_hc_post_timing = self.glm5_timing_start("glm5 ffn_hc_post")?;
+        self.launch_deepseek_v4_hc_post(
+            state,
+            hidden,
+            temp_state,
+            ffn_post,
+            ffn_comb,
+            hc_mult,
+            m,
+        )?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_OUTPUT_STATE_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            state,
+            m.saturating_sub(1),
+            trace_state_width,
+        )?;
+        self.glm5_timing_finish(
+            GLM5_PREFILL_TIMING_STAGE_FFN_HC_POST,
+            "glm5 ffn_hc_post",
+            ffn_hc_post_timing,
+        )
+    }
+
+    /// Diagnostic recurrent oracle for GLM-5.3 KDA prefill. This is never the
+    /// production default: it exists only to compare the mandatory chunkwise
+    /// implementation against the established CUDA recurrence using the exact
+    /// live projections and persistent state.
+    fn forward_kimi_delta_recurrent_oracle(
+        &self,
+        layer_idx: usize,
+        desc: &KimiDeltaPrefillDescriptor,
+        m: usize,
+        q: u64,
+        k: u64,
+        v: u64,
+        gate: u64,
+        beta: u64,
+        output: u64,
+    ) -> Result<(), String> {
+        let mut state = desc.recur_state_ptr;
+        let mut q = q;
+        let mut k = k;
+        let mut v = v;
+        let mut gate = gate;
+        let mut beta = beta;
+        let mut a_log = desc.a_log_ptr;
+        let mut dt_bias = desc.dt_bias_ptr;
+        let mut output = output;
+        let mut tokens = i32::try_from(m)
+            .map_err(|_| format!("GLM-5.3 layer {} token count exceeds i32", layer_idx))?;
+        let mut heads = i32::try_from(desc.num_heads)
+            .map_err(|_| format!("GLM-5.3 layer {} head count exceeds i32", layer_idx))?;
+        let mut dim = i32::try_from(desc.head_dim)
+            .map_err(|_| format!("GLM-5.3 layer {} head dimension exceeds i32", layer_idx))?;
+        let mut lower = desc.gate_lower_bound;
+        let mut q_scale = (desc.head_dim as f32).sqrt().recip();
+        let mut norm_eps = 1.0e-6f32;
+        let legacy_recurrent = glm53_kda_legacy_recurrent_oracle_enabled()?;
+        let threads = if legacy_recurrent {
+            desc.head_dim.next_power_of_two().max(32)
+        } else {
+            32
+        };
+        let value_tiles = if legacy_recurrent {
+            1
+        } else {
+            desc.head_dim.div_ceil(threads)
+        };
+        let shared_f32 = 3usize
+            .checked_mul(desc.head_dim)
+            .and_then(|value| {
+                value.checked_add(if legacy_recurrent { threads } else { 2 })
+            })
+            .ok_or_else(|| {
+                format!(
+                    "GLM-5.3 layer {} recurrent-oracle shared-memory element overflow",
+                    layer_idx
+                )
+            })?;
+        let shared_bytes = shared_f32
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                format!(
+                    "GLM-5.3 layer {} recurrent-oracle shared-memory size overflow",
+                    layer_idx
+                )
+            })?;
+        unsafe {
+            launch(
+                if legacy_recurrent {
+                    self.kernels.kimi_delta_recurrent_scan_bf16
+                } else {
+                    self.kernels.kimi_delta_recurrent_scan_tiled_bf16
+                },
+                (
+                    u32::try_from(desc.num_heads).map_err(|_| {
+                        format!("GLM-5.3 layer {} head grid exceeds u32", layer_idx)
+                    })?,
+                    u32::try_from(value_tiles).map_err(|_| {
+                        format!("GLM-5.3 layer {} value grid exceeds u32", layer_idx)
+                    })?,
+                    1,
+                ),
+                (
+                    u32::try_from(threads).map_err(|_| {
+                        format!("GLM-5.3 layer {} recurrent block exceeds u32", layer_idx)
+                    })?,
+                    1,
+                    1,
+                ),
+                u32::try_from(shared_bytes).map_err(|_| {
+                    format!(
+                        "GLM-5.3 layer {} recurrent-oracle shared memory exceeds u32",
+                        layer_idx
+                    )
+                })?,
+                self.stream,
+                &mut [
+                    &mut state as *mut _ as *mut std::ffi::c_void,
+                    &mut q as *mut _ as *mut std::ffi::c_void,
+                    &mut k as *mut _ as *mut std::ffi::c_void,
+                    &mut v as *mut _ as *mut std::ffi::c_void,
+                    &mut gate as *mut _ as *mut std::ffi::c_void,
+                    &mut beta as *mut _ as *mut std::ffi::c_void,
+                    &mut a_log as *mut _ as *mut std::ffi::c_void,
+                    &mut dt_bias as *mut _ as *mut std::ffi::c_void,
+                    &mut output as *mut _ as *mut std::ffi::c_void,
+                    &mut tokens as *mut _ as *mut std::ffi::c_void,
+                    &mut heads as *mut _ as *mut std::ffi::c_void,
+                    &mut dim as *mut _ as *mut std::ffi::c_void,
+                    &mut lower as *mut _ as *mut std::ffi::c_void,
+                    &mut q_scale as *mut _ as *mut std::ffi::c_void,
+                    &mut norm_eps as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn forward_kimi_delta_chunk_recurrence(
+        &self,
+        layer_idx: usize,
+        desc: &KimiDeltaPrefillDescriptor,
+        m: usize,
+        q: u64,
+        k: u64,
+        v: u64,
+        gate: u64,
+        beta: u64,
+        output: u64,
+    ) -> Result<(), String> {
+        let fla = self
+            .fla
+            .as_ref()
+            .ok_or("chunked KDA selected without the compiled FLA sidecar")?;
+        if desc.head_dim != 128 {
+            return Err(format!(
+                "GLM-5.3 layer {} chunked KDA sidecar supports head dimension 128, got {}",
+                layer_idx, desc.head_dim
+            ));
+        }
+        let block_tokens = FLA_PREFILL_BLOCK_TOKENS;
+        let chunks = m.div_ceil(block_tokens);
+        let heads = desc.num_heads;
+        let q_scale = (desc.head_dim as f32).sqrt().recip();
+        let g = *self.d_kda_g.as_ref().ok_or("no chunked KDA gate scratch")?.device_ptr();
+        let aqk = *self
+            .d_kda_aqk
+            .as_ref()
+            .ok_or("no chunked KDA Aqk scratch")?
+            .device_ptr();
+        let akkd = *self
+            .d_kda_akkd
+            .as_ref()
+            .ok_or("no chunked KDA Akkd scratch")?
+            .device_ptr();
+        let akk = *self
+            .d_kda_akk
+            .as_ref()
+            .ok_or("no chunked KDA Akk scratch")?
+            .device_ptr();
+        let w = *self.d_kda_w.as_ref().ok_or("no chunked KDA W scratch")?.device_ptr();
+        let u = *self.d_kda_u.as_ref().ok_or("no chunked KDA U scratch")?.device_ptr();
+        let kg = *self
+            .d_kda_kg
+            .as_ref()
+            .ok_or("no chunked KDA KG scratch")?
+            .device_ptr();
+        let h = *self.d_kda_h.as_ref().ok_or("no chunked KDA state scratch")?.device_ptr();
+        let final_state = *self
+            .d_kda_final_state
+            .as_ref()
+            .ok_or("no chunked KDA final-state scratch")?
+            .device_ptr();
+        let v_new = *self
+            .d_kda_v_new
+            .as_ref()
+            .ok_or("no chunked KDA corrected-value scratch")?
+            .device_ptr();
+        let t_arg = i32::try_from(m)
+            .map_err(|_| format!("GLM-5.3 layer {} token count exceeds i32", layer_idx))?;
+        let stream_ptr = self.stream as *mut std::ffi::c_void;
+
+        // Match the published KDA decomposition: unit L2-normalized Q/K,
+        // beta sigmoid, then apply 1/sqrt(K) in the attention products.
+        let prep_threads = desc.head_dim.next_power_of_two().min(1024);
+        let mut p0 = q;
+        let mut p1 = k;
+        let mut p2 = beta;
+        let mut p3 = t_arg;
+        let mut p4 = i32::try_from(heads)
+            .map_err(|_| format!("GLM-5.3 layer {} head count exceeds i32", layer_idx))?;
+        let mut p5 = i32::try_from(desc.head_dim)
+            .map_err(|_| format!("GLM-5.3 layer {} head dimension exceeds i32", layer_idx))?;
+        let mut p6 = 1.0f32;
+        let mut p7 = 1.0e-6f32;
+        unsafe {
+            launch(
+                self.kernels.kimi_delta_chunk_prepare_bf16,
+                (
+                    u32::try_from(m.checked_mul(heads).ok_or("chunked KDA row grid overflow")?)
+                        .map_err(|_| "chunked KDA row grid exceeds u32")?,
+                    1,
+                    1,
+                ),
+                (
+                    u32::try_from(prep_threads)
+                        .map_err(|_| "chunked KDA prepare threads exceed u32")?,
+                    1,
+                    1,
+                ),
+                u32::try_from(
+                    2usize
+                        .checked_mul(prep_threads)
+                        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+                        .ok_or("chunked KDA prepare shared-memory overflow")?,
+                )
+                .map_err(|_| "chunked KDA prepare shared memory exceeds u32")?,
+                self.stream,
+                &mut [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    &mut p3 as *mut _ as *mut std::ffi::c_void,
+                    &mut p4 as *mut _ as *mut std::ffi::c_void,
+                    &mut p5 as *mut _ as *mut std::ffi::c_void,
+                    &mut p6 as *mut _ as *mut std::ffi::c_void,
+                    &mut p7 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+
+        // FLA stores log-decay in base-2 because all following exponentials
+        // use exp2. 1/ln(2) is an algorithmic conversion, not a tuned value.
+        let rc = unsafe {
+            (fla.kda_gate_cumsum)(
+                gate,
+                desc.a_log_ptr,
+                desc.dt_bias_ptr,
+                g,
+                std::f32::consts::LOG2_E,
+                0,
+                0,
+                desc.gate_lower_bound,
+                t_arg,
+                u32::try_from(desc.head_dim.div_ceil(32))
+                    .map_err(|_| "chunked KDA gate grid exceeds u32")?,
+                u32::try_from(chunks).map_err(|_| "chunked KDA chunk grid exceeds u32")?,
+                u32::try_from(heads).map_err(|_| "chunked KDA head grid exceeds u32")?,
+                stream_ptr,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("GLM-5.3 layer {} KDA gate cumsum failed: {}", layer_idx, rc));
+        }
+        let rc = unsafe {
+            (fla.kda_intra)(
+                q,
+                k,
+                g,
+                beta,
+                aqk,
+                akkd,
+                q_scale,
+                0,
+                0,
+                t_arg,
+                u32::try_from(chunks).map_err(|_| "chunked KDA intra grid exceeds u32")?,
+                4,
+                u32::try_from(heads).map_err(|_| "chunked KDA head grid exceeds u32")?,
+                stream_ptr,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("GLM-5.3 layer {} KDA intra solve failed: {}", layer_idx, rc));
+        }
+        let rc = unsafe {
+            (fla.kda_inter_solve)(
+                q,
+                k,
+                g,
+                beta,
+                aqk,
+                akkd,
+                akk,
+                q_scale,
+                0,
+                0,
+                t_arg,
+                u32::try_from(chunks).map_err(|_| "chunked KDA inter grid exceeds u32")?,
+                u32::try_from(heads).map_err(|_| "chunked KDA head grid exceeds u32")?,
+                1,
+                stream_ptr,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("GLM-5.3 layer {} KDA inter solve failed: {}", layer_idx, rc));
+        }
+        let rc = unsafe {
+            (fla.kda_wy_repr)(
+                0,
+                k,
+                0,
+                kg,
+                v,
+                beta,
+                w,
+                u,
+                akk,
+                g,
+                0,
+                0,
+                t_arg,
+                u32::try_from(chunks).map_err(|_| "chunked KDA WY grid exceeds u32")?,
+                u32::try_from(heads).map_err(|_| "chunked KDA head grid exceeds u32")?,
+                1,
+                stream_ptr,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("GLM-5.3 layer {} KDA WY representation failed: {}", layer_idx, rc));
+        }
+        let rc = unsafe {
+            (fla.kda_state_recurrence)(
+                kg,
+                u,
+                w,
+                v_new,
+                0,
+                g,
+                h,
+                desc.recur_state_ptr,
+                final_state,
+                0,
+                0,
+                t_arg,
+                u32::try_from(desc.head_dim.div_ceil(32))
+                    .map_err(|_| "chunked KDA state value grid exceeds u32")?,
+                u32::try_from(heads).map_err(|_| "chunked KDA head grid exceeds u32")?,
+                1,
+                stream_ptr,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("GLM-5.3 layer {} KDA state recurrence failed: {}", layer_idx, rc));
+        }
+        let rc = unsafe {
+            (fla.kda_output)(
+                q,
+                v_new,
+                g,
+                h,
+                output,
+                aqk,
+                0,
+                0,
+                q_scale,
+                t_arg,
+                u32::try_from(desc.head_dim.div_ceil(64))
+                    .map_err(|_| "chunked KDA output value grid exceeds u32")?,
+                u32::try_from(chunks).map_err(|_| "chunked KDA output chunk grid exceeds u32")?,
+                u32::try_from(heads).map_err(|_| "chunked KDA head grid exceeds u32")?,
+                stream_ptr,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("GLM-5.3 layer {} KDA output failed: {}", layer_idx, rc));
+        }
+        let state_bytes = heads
+            .checked_mul(desc.head_dim)
+            .and_then(|value| value.checked_mul(desc.head_dim))
+            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or("chunked KDA persistent-state byte count overflow")?;
+        let copy_result = unsafe {
+            cuda_sys::lib().cuMemcpyDtoDAsync_v2(
+                desc.recur_state_ptr,
+                final_state,
+                state_bytes,
+                self.stream,
+            )
+        };
+        if copy_result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "GLM-5.3 layer {} KDA final-state copy failed: {:?}",
+                layer_idx, copy_result
+            ));
+        }
+        Ok(())
+    }
+
+    fn forward_kimi_delta_attention(
+        &self,
+        layer_idx: usize,
+        m: usize,
+        chunk_idx: usize,
+        trace_position: usize,
+        last_token_id: usize,
+    ) -> Result<(), String> {
+        let desc = self.layer_weights[layer_idx]
+            .kimi_delta
+            .as_ref()
+            .ok_or_else(|| format!("GLM-5.3 KDA layer {} descriptor is missing", layer_idx))?;
+        if m == 0 || desc.num_heads == 0 || desc.head_dim == 0 || desc.kernel_dim == 0 {
+            return Err(format!(
+                "GLM-5.3 KDA layer {} has invalid geometry rows={} heads={} dim={} kernel={}",
+                layer_idx, m, desc.num_heads, desc.head_dim, desc.kernel_dim
+            ));
+        }
+        let width = desc
+            .num_heads
+            .checked_mul(desc.head_dim)
+            .ok_or_else(|| format!("GLM-5.3 KDA layer {} width overflow", layer_idx))?;
+        let rows_width = m
+            .checked_mul(width)
+            .ok_or_else(|| format!("GLM-5.3 KDA layer {} work size overflow", layer_idx))?;
+        let rows_heads = m
+            .checked_mul(desc.num_heads)
+            .ok_or_else(|| format!("GLM-5.3 KDA layer {} beta size overflow", layer_idx))?;
+        let q = *self.scratch.d_q.device_ptr();
+        let k = *self.scratch.d_k.device_ptr();
+        let v = *self.scratch.d_v.device_ptr();
+        let recurrent_out = *self.scratch.d_attn_out.device_ptr();
+        let low_rank = *self.scratch.d_scratch1.device_ptr();
+        let gate = *self.scratch.d_scratch2.device_ptr();
+        let beta = *self
+            .scratch
+            .d_la_b
+            .as_ref()
+            .ok_or_else(|| format!("GLM-5.3 KDA layer {} beta scratch is absent", layer_idx))?
+            .device_ptr();
+        for (label, available, required) in [
+            ("q", self.scratch.d_q.len, rows_width),
+            ("k", self.scratch.d_k.len, rows_width),
+            ("v", self.scratch.d_v.len, rows_width),
+            ("attention", self.scratch.d_attn_out.len, rows_width),
+            ("scratch1", self.scratch.d_scratch1.len, rows_width),
+            ("scratch2", self.scratch.d_scratch2.len, rows_width),
+            (
+                "beta",
+                self.scratch.d_la_b.as_ref().map_or(0, |buffer| buffer.len),
+                rows_heads,
+            ),
+        ] {
+            if available < required {
+                return Err(format!(
+                    "GLM-5.3 KDA layer {} {} scratch {} is below required {}",
+                    layer_idx, label, available, required
+                ));
+            }
+        }
+
+        let hidden = *self.scratch.d_hidden.device_ptr();
+        let qkv_timing = self.glm5_timing_start("glm5 kda_qkv_proj")?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.q_proj, hidden, q, m)?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.k_proj, hidden, k, m)?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.v_proj, hidden, v, m)?;
+        for (stage, ptr) in [
+            (PDT_LAYER_GLM5_KDA_Q_PROJ_LAST, q),
+            (PDT_LAYER_GLM5_KDA_K_PROJ_LAST, k),
+            (PDT_LAYER_GLM5_KDA_V_PROJ_LAST, v),
+        ] {
+            self.record_prefill_device_trace_all_layer_bf16_row(
+                stage,
+                layer_idx,
+                chunk_idx,
+                trace_position,
+                last_token_id,
+                ptr,
+                m.saturating_sub(1),
+                width,
+            )?;
+        }
+        self.glm5_timing_finish(
+            GLM5_PREFILL_TIMING_STAGE_KDA_QKV_PROJ,
+            "glm5 kda_qkv_proj",
+            qkv_timing,
+        )?;
+
+        let conv_timing = self.glm5_timing_start("glm5 kda_conv")?;
+        let conv_threads = 256u32;
+        let conv_blocks = u32::try_from(width.div_ceil(conv_threads as usize))
+            .map_err(|_| format!("GLM-5.3 KDA layer {} convolution grid overflow", layer_idx))?;
+        let conv_state_stride = width
+            .checked_mul(desc.kernel_dim.saturating_sub(1))
+            .ok_or_else(|| format!("GLM-5.3 KDA layer {} conv-state stride overflow", layer_idx))?;
+        let conv_weight_stride = width.checked_mul(desc.kernel_dim).ok_or_else(|| {
+            format!(
+                "GLM-5.3 KDA layer {} conv-weight stride overflow",
+                layer_idx
+            )
+        })?;
+        let serial_conv_oracle = glm53_kda_serial_conv_oracle_enabled()?;
+        for (bank, buffer) in [(0usize, q), (1usize, k), (2usize, v)] {
+            let mut a1 = buffer;
+            let mut a2 = desc
+                .conv_weight_ptr
+                .checked_add(
+                    bank.checked_mul(conv_weight_stride)
+                        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+                        .ok_or_else(|| {
+                            format!(
+                                "GLM-5.3 KDA layer {} conv-weight offset overflow",
+                                layer_idx
+                            )
+                        })? as u64,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "GLM-5.3 KDA layer {} conv-weight pointer overflow",
+                        layer_idx
+                    )
+                })?;
+            let mut a3 = desc
+                .conv_state_ptr
+                .checked_add(
+                    bank.checked_mul(conv_state_stride)
+                        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+                        .ok_or_else(|| {
+                            format!("GLM-5.3 KDA layer {} conv-state offset overflow", layer_idx)
+                        })? as u64,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "GLM-5.3 KDA layer {} conv-state pointer overflow",
+                        layer_idx
+                    )
+                })?;
+            let mut a4 = i32::try_from(m)
+                .map_err(|_| format!("GLM-5.3 KDA layer {} token count exceeds i32", layer_idx))?;
+            let mut a5 = i32::try_from(width)
+                .map_err(|_| format!("GLM-5.3 KDA layer {} width exceeds i32", layer_idx))?;
+            let mut a6 = i32::try_from(desc.kernel_dim)
+                .map_err(|_| format!("GLM-5.3 KDA layer {} kernel exceeds i32", layer_idx))?;
+            let total = m.checked_mul(width).ok_or_else(|| {
+                format!("GLM-5.3 KDA layer {} convolution work overflow", layer_idx)
+            })?;
+            if serial_conv_oracle {
+                let mut output_ptr = buffer;
+                unsafe {
+                    launch(
+                        self.kernels.kimi_delta_conv_silu_bf16,
+                        (conv_blocks, 1, 1),
+                        (conv_threads, 1, 1),
+                        0,
+                        self.stream,
+                        &mut [
+                            &mut output_ptr as *mut _ as *mut std::ffi::c_void,
+                            &mut a1 as *mut _ as *mut std::ffi::c_void,
+                            &mut a2 as *mut _ as *mut std::ffi::c_void,
+                            &mut a3 as *mut _ as *mut std::ffi::c_void,
+                            &mut a4 as *mut _ as *mut std::ffi::c_void,
+                            &mut a5 as *mut _ as *mut std::ffi::c_void,
+                            &mut a6 as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )?;
+                }
+            } else {
+                let parallel_blocks = u32::try_from(total.div_ceil(conv_threads as usize))
+                    .map_err(|_| {
+                        format!(
+                            "GLM-5.3 KDA layer {} parallel convolution grid overflow",
+                            layer_idx
+                        )
+                    })?;
+                let mut output_ptr = gate;
+                unsafe {
+                    launch(
+                        self.kernels.kimi_delta_conv_silu_parallel_bf16,
+                        (parallel_blocks, 1, 1),
+                        (conv_threads, 1, 1),
+                        0,
+                        self.stream,
+                        &mut [
+                            &mut output_ptr as *mut _ as *mut std::ffi::c_void,
+                            &mut a1 as *mut _ as *mut std::ffi::c_void,
+                            &mut a2 as *mut _ as *mut std::ffi::c_void,
+                            &mut a3 as *mut _ as *mut std::ffi::c_void,
+                            &mut a4 as *mut _ as *mut std::ffi::c_void,
+                            &mut a5 as *mut _ as *mut std::ffi::c_void,
+                            &mut a6 as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )?;
+                    launch(
+                        self.kernels.kimi_delta_conv_state_update_bf16,
+                        (conv_blocks, 1, 1),
+                        (conv_threads, 1, 1),
+                        0,
+                        self.stream,
+                        &mut [
+                            &mut a3 as *mut _ as *mut std::ffi::c_void,
+                            &mut a1 as *mut _ as *mut std::ffi::c_void,
+                            &mut a4 as *mut _ as *mut std::ffi::c_void,
+                            &mut a5 as *mut _ as *mut std::ffi::c_void,
+                            &mut a6 as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )?;
+                }
+                let copy_bytes = total
+                    .checked_mul(std::mem::size_of::<u16>())
+                    .ok_or_else(|| {
+                        format!("GLM-5.3 KDA layer {} convolution copy overflow", layer_idx)
+                    })?;
+                let copy_result = unsafe {
+                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(buffer, gate, copy_bytes, self.stream)
+                };
+                if copy_result != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "GLM-5.3 KDA layer {} parallel convolution copy failed: {:?}",
+                        layer_idx, copy_result
+                    ));
+                }
+            }
+        }
+        for (stage, ptr) in [
+            (PDT_LAYER_GLM5_KDA_Q_CONV_LAST, q),
+            (PDT_LAYER_GLM5_KDA_K_CONV_LAST, k),
+            (PDT_LAYER_GLM5_KDA_V_CONV_LAST, v),
+        ] {
+            self.record_prefill_device_trace_all_layer_bf16_row(
+                stage,
+                layer_idx,
+                chunk_idx,
+                trace_position,
+                last_token_id,
+                ptr,
+                m.saturating_sub(1),
+                width,
+            )?;
+        }
+        self.glm5_timing_finish(
+            GLM5_PREFILL_TIMING_STAGE_KDA_CONV,
+            "glm5 kda_conv",
+            conv_timing,
+        )?;
+
+        let forget_beta_timing = self.glm5_timing_start("glm5 kda_forget_beta_proj")?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(
+            layer_idx,
+            &desc.f_a_proj,
+            hidden,
+            low_rank,
+            m,
+        )?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(
+            layer_idx,
+            &desc.f_b_proj,
+            low_rank,
+            gate,
+            m,
+        )?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.b_proj, hidden, beta, m)?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_KDA_FORGET_GATE_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            gate,
+            m.saturating_sub(1),
+            width,
+        )?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_KDA_BETA_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            beta,
+            m.saturating_sub(1),
+            desc.num_heads,
+        )?;
+        self.glm5_timing_finish(
+            GLM5_PREFILL_TIMING_STAGE_KDA_FORGET_BETA_PROJ,
+            "glm5 kda_forget_beta_proj",
+            forget_beta_timing,
+        )?;
+
+        let recurrent_timing = self.glm5_timing_start("glm5 kda_recurrent")?;
+        if glm53_kda_recurrent_oracle_enabled()? {
+            self.forward_kimi_delta_recurrent_oracle(
+                layer_idx,
+                desc,
+                m,
+                q,
+                k,
+                v,
+                gate,
+                beta,
+                recurrent_out,
+            )?;
+        } else {
+            self.forward_kimi_delta_chunk_recurrence(
+                layer_idx,
+                desc,
+                m,
+                q,
+                k,
+                v,
+                gate,
+                beta,
+                recurrent_out,
+            )?;
+        }
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_KDA_RECURRENT_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            recurrent_out,
+            m.saturating_sub(1),
+            width,
+        )?;
+        self.glm5_timing_finish(
+            GLM5_PREFILL_TIMING_STAGE_KDA_RECURRENT,
+            "glm5 kda_recurrent",
+            recurrent_timing,
+        )?;
+
+        let output_gate_timing = self.glm5_timing_start("glm5 kda_output_gate_proj")?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(
+            layer_idx,
+            &desc.g_a_proj,
+            hidden,
+            low_rank,
+            m,
+        )?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(
+            layer_idx,
+            &desc.g_b_proj,
+            low_rank,
+            gate,
+            m,
+        )?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_KDA_OUTPUT_GATE_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            gate,
+            m.saturating_sub(1),
+            width,
+        )?;
+        self.glm5_timing_finish(
+            GLM5_PREFILL_TIMING_STAGE_KDA_OUTPUT_GATE_PROJ,
+            "glm5 kda_output_gate_proj",
+            output_gate_timing,
+        )?;
+        let rms_gate_timing = self.glm5_timing_start("glm5 kda_rms_gate")?;
+        let mut g0 = v;
+        let mut g1 = recurrent_out;
+        let mut g2 = gate;
+        let mut g3 = desc.norm_weight_ptr;
+        let mut g4 = i32::try_from(m)
+            .map_err(|_| format!("GLM-5.3 KDA layer {} token count exceeds i32", layer_idx))?;
+        let mut g5 = i32::try_from(desc.num_heads)
+            .map_err(|_| format!("GLM-5.3 KDA layer {} heads exceed i32", layer_idx))?;
+        let mut g6 = i32::try_from(desc.head_dim)
+            .map_err(|_| format!("GLM-5.3 KDA layer {} head dimension exceeds i32", layer_idx))?;
+        let mut g7 = self.config.rms_norm_eps;
+        // The kernel rejects the launch without writing when `head_dim`
+        // exceeds the block width.  Derive the reduction geometry from the
+        // registered model dimension exactly as decode does; a fixed warp
+        // silently made every GLM-5.3 prefill KDA gated RMSNorm a no-op for
+        // its 128-wide heads.
+        let rms_gate_threads = kimi_delta_rmsnorm_gate_block_threads(desc.head_dim)
+            .map_err(|error| format!("GLM-5.3 KDA layer {}: {}", layer_idx, error))?;
+        unsafe {
+            launch(
+                self.kernels.kimi_delta_rmsnorm_gate_bf16,
+                (
+                    u32::try_from(rows_heads).map_err(|_| {
+                        format!("GLM-5.3 KDA layer {} RMSNorm grid exceeds u32", layer_idx)
+                    })?,
+                    1,
+                    1,
+                ),
+                (
+                    u32::try_from(rms_gate_threads).map_err(|_| {
+                        format!("GLM-5.3 KDA layer {} RMSNorm threads exceed u32", layer_idx)
+                    })?,
+                    1,
+                    1,
+                ),
+                u32::try_from(rms_gate_threads * std::mem::size_of::<f32>()).map_err(|_| {
+                    format!(
+                        "GLM-5.3 KDA layer {} RMSNorm shared memory exceeds u32",
+                        layer_idx
+                    )
+                })?,
+                self.stream,
+                &mut [
+                    &mut g0 as *mut _ as *mut std::ffi::c_void,
+                    &mut g1 as *mut _ as *mut std::ffi::c_void,
+                    &mut g2 as *mut _ as *mut std::ffi::c_void,
+                    &mut g3 as *mut _ as *mut std::ffi::c_void,
+                    &mut g4 as *mut _ as *mut std::ffi::c_void,
+                    &mut g5 as *mut _ as *mut std::ffi::c_void,
+                    &mut g6 as *mut _ as *mut std::ffi::c_void,
+                    &mut g7 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_KDA_RMS_GATE_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            v,
+            m.saturating_sub(1),
+            width,
+        )?;
+        self.glm5_timing_finish(
+            GLM5_PREFILL_TIMING_STAGE_KDA_RMS_GATE,
+            "glm5 kda_rms_gate",
+            rms_gate_timing,
+        )?;
+        // The recurrent result buffer is an internal KDA intermediate.  The
+        // caller's mHC post consumes `d_hidden` as the attention sublayer
+        // result, so the output projection must land there.  Leaving it in
+        // `recurrent_out` silently fed the normalized layer input into mHC and
+        // discarded KDA attention on every KDA layer.
+        let o_proj_timing = self.glm5_timing_start("glm5 kda_o_proj")?;
+        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.o_proj, v, hidden, m)?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_GLM5_KDA_O_PROJ_LAST,
+            layer_idx,
+            chunk_idx,
+            trace_position,
+            last_token_id,
+            hidden,
+            m.saturating_sub(1),
+            self.config.hidden_size,
+        )?;
+        self.glm5_timing_finish(
+            GLM5_PREFILL_TIMING_STAGE_KDA_O_PROJ,
+            "glm5 kda_o_proj",
+            o_proj_timing,
+        )
+    }
+
     fn forward_deepseek_v4_layer(
         &mut self,
         layer_idx: usize,
@@ -38744,18 +41353,22 @@ impl PrefillEngine {
             let Some(registration) = layer.dsa_prefill else {
                 continue;
             };
-            let hqq = layer.hqq_mla.as_ref().ok_or_else(|| {
+            let mla = layer.mla_prefill.as_ref().ok_or_else(|| {
                 format!(
-                    "DSA prefill layer {} has no HQQ MLA execution descriptor",
+                    "DSA prefill layer {} has no native MLA execution descriptor",
                     layer_idx
                 )
             })?;
+            let (index_topk, output_topk, context_divisor) =
+                registration.workspace_selection_geometry()?;
             let current = DsaPrefillWorkspaceGeometry {
-                index_topk: registration.index_topk,
+                index_topk,
+                output_topk,
+                context_divisor,
                 index_n_heads: registration.index_n_heads,
                 index_head_dim: registration.index_head_dim,
-                mla_num_heads: hqq.num_heads,
-                mla_ckv_cache_dim: hqq.ckv_cache_dim,
+                mla_num_heads: mla.num_heads,
+                mla_ckv_cache_dim: mla.ckv_cache_dim,
             };
             if let Some(expected) = geometry {
                 if expected != current {
@@ -38778,6 +41391,8 @@ impl PrefillEngine {
             };
             let current = DsaPrefillWorkspaceGeometry {
                 index_topk: indexer.index_topk,
+                output_topk: indexer.index_topk,
+                context_divisor: 1,
                 index_n_heads: indexer.index_n_heads,
                 index_head_dim: indexer.index_head_dim,
                 mla_num_heads: 0,
@@ -38813,11 +41428,11 @@ impl PrefillEngine {
         };
         let one_row_plan = plan_dsa_prefill_selection(
             1,
-            context_end,
+            dsa_score_context_rows(context_end, geometry.context_divisor).max(1),
             geometry.index_topk,
             usize::MAX,
             score_buffer_count,
-            1,
+            geometry.context_divisor,
         )?;
         let query_bytes = chunk_rows
             .checked_mul(geometry.index_n_heads)
@@ -38825,7 +41440,7 @@ impl PrefillEngine {
             .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
             .ok_or_else(|| "DSA prefill query workspace byte size overflow".to_string())?;
         let selected_bytes = chunk_rows
-            .checked_mul(geometry.index_topk.min(context_end))
+            .checked_mul(geometry.output_topk)
             .and_then(|value| value.checked_mul(std::mem::size_of::<i32>()))
             .ok_or_else(|| "DSA prefill selected workspace byte size overflow".to_string())?;
         let mla_bytes = chunk_rows
@@ -38882,9 +41497,11 @@ impl PrefillEngine {
         let geometry = self
             .dsa_prefill_workspace_geometry()?
             .ok_or("DSA prefill workspace requested for a graph without DSA layers")?;
+        let score_context_end =
+            dsa_score_context_rows(context_end, geometry.context_divisor).max(1);
         let plan = plan_dsa_prefill_selection(
             chunk_rows,
-            context_end,
+            score_context_end,
             geometry.index_topk,
             score_workspace_capacity_bytes,
             if self.config.deepseek_v4_hc_mult > 0 {
@@ -38893,12 +41510,14 @@ impl PrefillEngine {
             } else {
                 1
             },
-            1,
+            geometry.context_divisor,
         )?;
         let workspace = DsaPrefillRequestWorkspace::allocate(
             chunk_rows,
-            context_end,
+            score_context_end,
             geometry.index_topk,
+            geometry.output_topk,
+            geometry.context_divisor,
             geometry.index_n_heads,
             geometry.index_head_dim,
             geometry.mla_num_heads,
@@ -38920,7 +41539,7 @@ impl PrefillEngine {
         };
         let minimum_plan = plan_dsa_prefill_selection(
             1,
-            context_end,
+            dsa_score_context_rows(context_end, geometry.context_divisor).max(1),
             geometry.index_topk,
             usize::MAX,
             if self.config.deepseek_v4_hc_mult > 0 {
@@ -38929,7 +41548,7 @@ impl PrefillEngine {
             } else {
                 1
             },
-            1,
+            geometry.context_divisor,
         )?;
         let minimum_total = self.minimum_dsa_prefill_workspace_bytes(chunk_rows, context_end)?;
         let fixed_bytes = minimum_total
@@ -39017,27 +41636,36 @@ impl PrefillEngine {
         scalar_threads: u32,
     ) -> Result<(), String> {
         const CUDA_WARP_SIZE: usize = 32;
-        const K4_BLOCK_ELEMENTS: usize = 16;
-        const K4_BLOCK_BYTES: usize = 10;
+        const MLA_BLOCK_ELEMENTS: usize = 16;
         const BUFFER_ALIGNMENT: usize = 256;
+        let mla_block_bytes = native_mla_block_bytes(self.kv_format)?;
+        let score_kernel = native_mla_kernel_for_format(
+            self.kv_format,
+            self.kernels.mla_prefill_sparse_scores_k4_grouped_exact,
+            self.kernels.mla_prefill_sparse_scores_k6_grouped_exact,
+        )?;
+        let output_kernel = native_mla_kernel_for_format(
+            self.kv_format,
+            self.kernels.mla_prefill_sparse_output_k4_grouped_exact,
+            self.kernels.mla_prefill_sparse_output_k6_grouped_exact,
+        )?;
         if output == 0
             || q_absorbed == 0
             || packed_q == 0
             || ckv_cache == 0
-            || kpe_cache == 0
+            || (rope_dim > 0 && kpe_cache == 0)
             || selected.ptr == 0
             || positions == 0
             || rows == 0
             || num_heads == 0
             || packed_q_dim == 0
             || ckv_cache_dim == 0
-            || rope_dim == 0
             || selected.selected_per_row == 0
             || max_context == 0
             || nope_dim.checked_add(rope_dim).is_none()
             || nope_dim + rope_dim > packed_q_dim
-            || ckv_cache_dim % K4_BLOCK_ELEMENTS != 0
-            || rope_dim % K4_BLOCK_ELEMENTS != 0
+            || ckv_cache_dim % MLA_BLOCK_ELEMENTS != 0
+            || rope_dim % MLA_BLOCK_ELEMENTS != 0
             || scalar_threads < CUDA_WARP_SIZE as u32
             || scalar_threads > 1024
             || scalar_threads % CUDA_WARP_SIZE as u32 != 0
@@ -39135,12 +41763,12 @@ impl PrefillEngine {
             format!("DSA MLA grouped-exact layer {layer_idx} combined width overflow")
         })?;
         let ckv_row_bytes = ckv_cache_dim
-            .checked_div(K4_BLOCK_ELEMENTS)
-            .and_then(|blocks| blocks.checked_mul(K4_BLOCK_BYTES))
+            .checked_div(MLA_BLOCK_ELEMENTS)
+            .and_then(|blocks| blocks.checked_mul(mla_block_bytes))
             .ok_or_else(|| format!("DSA MLA grouped-exact layer {layer_idx} cKV row overflow"))?;
         let kpe_row_bytes = rope_dim
-            .checked_div(K4_BLOCK_ELEMENTS)
-            .and_then(|blocks| blocks.checked_mul(K4_BLOCK_BYTES))
+            .checked_div(MLA_BLOCK_ELEMENTS)
+            .and_then(|blocks| blocks.checked_mul(mla_block_bytes))
             .ok_or_else(|| format!("DSA MLA grouped-exact layer {layer_idx} kPE row overflow"))?;
         let packed_tile_bytes = CUDA_WARP_SIZE
             .checked_mul(ckv_row_bytes.checked_add(kpe_row_bytes).ok_or_else(|| {
@@ -39205,7 +41833,7 @@ impl PrefillEngine {
                 format!("DSA MLA grouped-exact layer {layer_idx} score shared bytes overflow")
             })?;
         let score_shared_u32 = dsa_prefill_configure_dynamic_shared(
-            self.kernels.mla_prefill_sparse_scores_k4_grouped_exact,
+            score_kernel,
             score_shared_bytes,
             "DSA MLA grouped-exact score",
         )?;
@@ -39222,13 +41850,13 @@ impl PrefillEngine {
         )?;
         let output_dim_span = CUDA_WARP_SIZE.min(ckv_cache_dim);
         let output_row_bytes = output_dim_span
-            .checked_div(K4_BLOCK_ELEMENTS)
-            .and_then(|blocks| blocks.checked_mul(K4_BLOCK_BYTES))
+            .checked_div(MLA_BLOCK_ELEMENTS)
+            .and_then(|blocks| blocks.checked_mul(mla_block_bytes))
             .ok_or_else(|| {
                 format!("DSA MLA grouped-exact layer {layer_idx} output row bytes overflow")
             })?;
         let output_shared_u32 = dsa_prefill_configure_dynamic_shared(
-            self.kernels.mla_prefill_sparse_output_k4_grouped_exact,
+            output_kernel,
             CUDA_WARP_SIZE
                 .checked_mul(output_row_bytes)
                 .ok_or_else(|| {
@@ -39290,7 +41918,7 @@ impl PrefillEngine {
             let mut s16 = context_i32;
             unsafe {
                 launch(
-                    self.kernels.mla_prefill_sparse_scores_k4_grouped_exact,
+                    score_kernel,
                     (
                         u32::try_from(head_groups).map_err(|_| {
                             format!("DSA MLA grouped-exact layer {layer_idx} head grid exceeds u32")
@@ -39377,7 +42005,7 @@ impl PrefillEngine {
             let mut o11 = context_i32;
             unsafe {
                 launch(
-                    self.kernels.mla_prefill_sparse_output_k4_grouped_exact,
+                    output_kernel,
                     (
                         u32::try_from(head_groups).map_err(|_| {
                             format!("DSA MLA grouped-exact layer {layer_idx} output head grid exceeds u32")
@@ -39431,18 +42059,28 @@ impl PrefillEngine {
         sm_scale: f32,
         max_context: usize,
     ) -> Result<(), String> {
+        let gather_policy = dsa_mla_gather_mode()?;
+        let flat_gather_kernel = native_mla_kernel_for_format(
+            self.kv_format,
+            self.kernels.mla_prefill_gather_query_k4_f32,
+            self.kernels.mla_prefill_gather_query_k6_f32,
+        )?;
+        let structured_gather_kernel = native_mla_kernel_for_format(
+            self.kv_format,
+            self.kernels.mla_prefill_gather_query_k4_f32_structured,
+            self.kernels.mla_prefill_gather_query_k6_f32_structured,
+        )?;
         if output == 0
             || q_absorbed == 0
             || packed_q == 0
             || ckv_cache == 0
-            || kpe_cache == 0
+            || (rope_dim > 0 && kpe_cache == 0)
             || selected.ptr == 0
             || positions == 0
             || rows == 0
             || num_heads == 0
             || packed_q_dim == 0
             || ckv_cache_dim == 0
-            || rope_dim == 0
             || selected.selected_per_row == 0
             || max_context == 0
             || nope_dim.checked_add(rope_dim).is_none()
@@ -39520,7 +42158,11 @@ impl PrefillEngine {
                 capacity_bytes, bytes_per_row, alignment_reserve,
             ));
         }
-
+        let gathered_substage_timing = hqq_mla_stage_timing_min_tokens()
+            .map(|min_tokens| rows >= min_tokens)
+            .unwrap_or(false);
+        let mut gathered_substage_ms = [0.0f64; 4];
+        let mut gathered_tile_count = 0usize;
         let align_up = |value: usize| -> Option<usize> {
             value
                 .checked_add(BUFFER_ALIGNMENT - 1)
@@ -39601,6 +42243,35 @@ impl PrefillEngine {
                 "DSA MLA gathered-GEMM layer {layer_idx} has no fail-closed cuBLAS workspace"
             ));
         }
+        let compute_mode = dsa_mla_gathered_compute_mode()?;
+        let score_tf32 = matches!(
+            compute_mode,
+            DsaMlaGatheredComputeMode::Tf32Score | DsaMlaGatheredComputeMode::Tf32Both
+        );
+        let output_tf32 = matches!(
+            compute_mode,
+            DsaMlaGatheredComputeMode::Tf32Output | DsaMlaGatheredComputeMode::Tf32Both
+        );
+        let score_compute = if score_tf32 {
+            cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32
+        } else {
+            cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC
+        };
+        let output_compute = if output_tf32 {
+            cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32
+        } else {
+            cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC
+        };
+        let score_algo = if score_tf32 {
+            cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP
+        } else {
+            cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT
+        };
+        let output_algo = if output_tf32 {
+            cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP
+        } else {
+            cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT
+        };
 
         let selected_i32 = i32::try_from(selected.selected_per_row).map_err(|_| {
             format!("DSA MLA gathered-GEMM layer {layer_idx} selected width exceeds i32")
@@ -39675,10 +42346,31 @@ impl PrefillEngine {
             let beta_output = 0.0f32;
             let mut tile_start = 0usize;
             while tile_start < rows {
+                gathered_tile_count += 1;
                 let tile_rows = (rows - tile_start).min(tile_capacity);
                 let tile_i32 = i32::try_from(tile_rows).map_err(|_| {
                     format!("DSA MLA gathered-GEMM layer {layer_idx} tile rows exceed i32")
                 })?;
+                let gather_autotune_key = DsaMlaGatherAutotuneKey {
+                    kv_format: self.kv_format,
+                    tile_rows,
+                    num_heads,
+                    selected_per_row: selected.selected_per_row,
+                    packed_q_dim,
+                    nope_dim,
+                    rope_dim,
+                    ckv_cache_dim,
+                    combined_dim,
+                };
+                let mut gather_mode = match gather_policy {
+                    DsaMlaGatherMode::Auto => self
+                        .dsa_mla_gather_autotune
+                        .borrow()
+                        .get(&gather_autotune_key)
+                        .copied(),
+                    DsaMlaGatherMode::Flat => Some(DsaMlaGatherMode::Flat),
+                    DsaMlaGatherMode::Structured => Some(DsaMlaGatherMode::Structured),
+                };
                 let gather_work = tile_rows
                     .checked_mul(gathered_elements_per_row)
                     .and_then(|value| {
@@ -39693,72 +42385,166 @@ impl PrefillEngine {
                     })
                     .ok_or_else(|| {
                         format!("DSA MLA gathered-GEMM layer {layer_idx} gather work overflow")
+                })?;
+                const GATHER_THREADS: usize = 256;
+                const GATHER_WARPS: usize = GATHER_THREADS / 32;
+                let flat_grid_blocks = gather_work.div_ceil(GATHER_THREADS);
+                let selected_groups = selected.selected_per_row.div_ceil(GATHER_WARPS);
+                let query_groups = num_heads.div_ceil(GATHER_WARPS);
+                let groups_per_row = selected_groups
+                    .checked_add(query_groups)
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or_else(|| {
+                        format!(
+                            "DSA MLA gathered-GEMM layer {layer_idx} structured gather group count overflow"
+                        )
                     })?;
-                let mut g0 = gathered;
-                let mut g1 = query;
-                let mut g2 = scores;
-                let mut g3 = q_absorbed;
-                let mut g4 = packed_q;
-                let mut g5 = ckv_cache;
-                let mut g6 = kpe_cache;
-                let mut g7 = selected.ptr;
-                let mut g8 = positions;
-                let mut g9 = i32::try_from(tile_start).map_err(|_| {
-                    format!("DSA MLA gathered-GEMM layer {layer_idx} tile start exceeds i32")
+                let structured_grid_blocks = tile_rows.checked_mul(groups_per_row).ok_or_else(|| {
+                    format!(
+                        "DSA MLA gathered-GEMM layer {layer_idx} structured gather grid overflow"
+                    )
                 })?;
-                let mut g10 = tile_i32;
-                let mut g11 = heads_i32;
-                let mut g12 = i32::try_from(packed_q_dim).map_err(|_| {
-                    format!("DSA MLA gathered-GEMM layer {layer_idx} packed Q width exceeds i32")
+                let launch_gather = |mode: DsaMlaGatherMode| -> Result<(), String> {
+                    let (kernel, grid_blocks) = match mode {
+                        DsaMlaGatherMode::Auto => {
+                            return Err(format!(
+                                "DSA MLA gathered-GEMM layer {layer_idx} unresolved auto gather mode"
+                            ));
+                        }
+                        DsaMlaGatherMode::Flat => {
+                            (flat_gather_kernel.clone(), flat_grid_blocks)
+                        }
+                        DsaMlaGatherMode::Structured => {
+                            (structured_gather_kernel.clone(), structured_grid_blocks)
+                        }
+                    };
+                    let mut g0 = gathered;
+                    let mut g1 = query;
+                    let mut g2 = scores;
+                    let mut g3 = q_absorbed;
+                    let mut g4 = packed_q;
+                    let mut g5 = ckv_cache;
+                    let mut g6 = kpe_cache;
+                    let mut g7 = selected.ptr;
+                    let mut g8 = positions;
+                    let mut g9 = i32::try_from(tile_start).map_err(|_| {
+                        format!(
+                            "DSA MLA gathered-GEMM layer {layer_idx} tile start exceeds i32"
+                        )
+                    })?;
+                    let mut g10 = tile_i32;
+                    let mut g11 = heads_i32;
+                    let mut g12 = i32::try_from(packed_q_dim).map_err(|_| {
+                        format!(
+                            "DSA MLA gathered-GEMM layer {layer_idx} packed Q width exceeds i32"
+                        )
+                    })?;
+                    let mut g13 = i32::try_from(nope_dim).map_err(|_| {
+                        format!(
+                            "DSA MLA gathered-GEMM layer {layer_idx} nope width exceeds i32"
+                        )
+                    })?;
+                    let mut g14 = i32::try_from(rope_dim).map_err(|_| {
+                        format!(
+                            "DSA MLA gathered-GEMM layer {layer_idx} rope width exceeds i32"
+                        )
+                    })?;
+                    let mut g15 = ckv_i32;
+                    let mut g16 = selected_i32;
+                    let mut g17 = i32::try_from(max_context).map_err(|_| {
+                        format!(
+                            "DSA MLA gathered-GEMM layer {layer_idx} context exceeds i32"
+                        )
+                    })?;
+                    unsafe {
+                        launch(
+                            kernel,
+                            (
+                                u32::try_from(grid_blocks).map_err(|_| {
+                                    format!(
+                                        "DSA MLA gathered-GEMM layer {layer_idx} gather grid exceeds u32"
+                                    )
+                                })?,
+                                1,
+                                1,
+                            ),
+                            (GATHER_THREADS as u32, 1, 1),
+                            0,
+                            self.stream,
+                            &mut [
+                                &mut g0 as *mut _ as *mut std::ffi::c_void,
+                                &mut g1 as *mut _ as *mut std::ffi::c_void,
+                                &mut g2 as *mut _ as *mut std::ffi::c_void,
+                                &mut g3 as *mut _ as *mut std::ffi::c_void,
+                                &mut g4 as *mut _ as *mut std::ffi::c_void,
+                                &mut g5 as *mut _ as *mut std::ffi::c_void,
+                                &mut g6 as *mut _ as *mut std::ffi::c_void,
+                                &mut g7 as *mut _ as *mut std::ffi::c_void,
+                                &mut g8 as *mut _ as *mut std::ffi::c_void,
+                                &mut g9 as *mut _ as *mut std::ffi::c_void,
+                                &mut g10 as *mut _ as *mut std::ffi::c_void,
+                                &mut g11 as *mut _ as *mut std::ffi::c_void,
+                                &mut g12 as *mut _ as *mut std::ffi::c_void,
+                                &mut g13 as *mut _ as *mut std::ffi::c_void,
+                                &mut g14 as *mut _ as *mut std::ffi::c_void,
+                                &mut g15 as *mut _ as *mut std::ffi::c_void,
+                                &mut g16 as *mut _ as *mut std::ffi::c_void,
+                                &mut g17 as *mut _ as *mut std::ffi::c_void,
+                            ],
+                        )?;
+                    }
+                    Ok(())
+                };
+                if gather_mode.is_none() {
+                    let flat_ms = time_dsa_mla_gather_candidate(self.stream, || {
+                        launch_gather(DsaMlaGatherMode::Flat)
+                    })?;
+                    let structured_ms = time_dsa_mla_gather_candidate(self.stream, || {
+                        launch_gather(DsaMlaGatherMode::Structured)
+                    })?;
+                    let selected_mode = if structured_ms < flat_ms {
+                        DsaMlaGatherMode::Structured
+                    } else {
+                        DsaMlaGatherMode::Flat
+                    };
+                    self.dsa_mla_gather_autotune
+                        .borrow_mut()
+                        .insert(gather_autotune_key, selected_mode);
+                    eprintln!(
+                        "[dsa-mla-gather-autotune] format={} tile_rows={} heads={} selected={} combined_dim={} flat={:.3}ms structured={:.3}ms -> {:?}",
+                        self.kv_format,
+                        tile_rows,
+                        num_heads,
+                        selected.selected_per_row,
+                        combined_dim,
+                        flat_ms,
+                        structured_ms,
+                        selected_mode,
+                    );
+                    gather_mode = Some(selected_mode);
+                }
+                let selected_gather_mode = gather_mode.ok_or_else(|| {
+                    format!("DSA MLA gathered-GEMM layer {layer_idx} gather autotune produced no result")
                 })?;
-                let mut g13 = i32::try_from(nope_dim).map_err(|_| {
-                    format!("DSA MLA gathered-GEMM layer {layer_idx} nope width exceeds i32")
-                })?;
-                let mut g14 = i32::try_from(rope_dim).map_err(|_| {
-                    format!("DSA MLA gathered-GEMM layer {layer_idx} rope width exceeds i32")
-                })?;
-                let mut g15 = ckv_i32;
-                let mut g16 = selected_i32;
-                let mut g17 = i32::try_from(max_context).map_err(|_| {
-                    format!("DSA MLA gathered-GEMM layer {layer_idx} context exceeds i32")
-                })?;
-                unsafe {
-                    launch(
-                        self.kernels.mla_prefill_gather_query_k4_f32,
-                        (
-                            u32::try_from(gather_work.div_ceil(256)).map_err(|_| {
-                                format!(
-                                    "DSA MLA gathered-GEMM layer {layer_idx} gather grid exceeds u32"
-                                )
-                            })?,
-                            1,
-                            1,
-                        ),
-                        (256, 1, 1),
-                        0,
-                        self.stream,
-                        &mut [
-                            &mut g0 as *mut _ as *mut std::ffi::c_void,
-                            &mut g1 as *mut _ as *mut std::ffi::c_void,
-                            &mut g2 as *mut _ as *mut std::ffi::c_void,
-                            &mut g3 as *mut _ as *mut std::ffi::c_void,
-                            &mut g4 as *mut _ as *mut std::ffi::c_void,
-                            &mut g5 as *mut _ as *mut std::ffi::c_void,
-                            &mut g6 as *mut _ as *mut std::ffi::c_void,
-                            &mut g7 as *mut _ as *mut std::ffi::c_void,
-                            &mut g8 as *mut _ as *mut std::ffi::c_void,
-                            &mut g9 as *mut _ as *mut std::ffi::c_void,
-                            &mut g10 as *mut _ as *mut std::ffi::c_void,
-                            &mut g11 as *mut _ as *mut std::ffi::c_void,
-                            &mut g12 as *mut _ as *mut std::ffi::c_void,
-                            &mut g13 as *mut _ as *mut std::ffi::c_void,
-                            &mut g14 as *mut _ as *mut std::ffi::c_void,
-                            &mut g15 as *mut _ as *mut std::ffi::c_void,
-                            &mut g16 as *mut _ as *mut std::ffi::c_void,
-                            &mut g17 as *mut _ as *mut std::ffi::c_void,
-                        ],
-                    )?;
+                let gather_started = if gathered_substage_timing {
+                    self.stream_sync()?;
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                launch_gather(selected_gather_mode)?;
+                if let Some(started) = gather_started {
+                    self.stream_sync()?;
+                    gathered_substage_ms[0] += started.elapsed().as_secs_f64() * 1000.0;
+                }
 
+                let score_started = if gathered_substage_timing {
+                    self.stream_sync()?;
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                unsafe {
                     cublas_result::gemm_strided_batched_ex(
                         self.cublas_handle,
                         cublas_sys::cublasOperation_t::CUBLAS_OP_T,
@@ -39781,14 +42567,18 @@ impl PrefillEngine {
                         selected_i32,
                         score_stride,
                         tile_i32,
-                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC,
-                        cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                        score_compute,
+                        score_algo,
                     )
                     .map_err(|error| {
                         format!(
                             "DSA MLA gathered-GEMM layer {layer_idx} score GEMM tile_start={tile_start} tile_rows={tile_rows}: {error:?}"
                         )
                     })?;
+                }
+                if let Some(started) = score_started {
+                    self.stream_sync()?;
+                    gathered_substage_ms[1] += started.elapsed().as_secs_f64() * 1000.0;
                 }
 
                 const WARPS_PER_BLOCK: usize = 8;
@@ -39800,6 +42590,12 @@ impl PrefillEngine {
                 let mut s2 = tile_i32;
                 let mut s3 = heads_i32;
                 let mut s4 = selected_i32;
+                let softmax_started = if gathered_substage_timing {
+                    self.stream_sync()?;
+                    Some(Instant::now())
+                } else {
+                    None
+                };
                 unsafe {
                     launch(
                         self.kernels.mla_prefill_softmax_weights_warp_f32,
@@ -39826,6 +42622,10 @@ impl PrefillEngine {
                         ],
                     )?;
                 }
+                if let Some(started) = softmax_started {
+                    self.stream_sync()?;
+                    gathered_substage_ms[2] += started.elapsed().as_secs_f64() * 1000.0;
+                }
 
                 let tile_output = output
                     .checked_add(
@@ -39850,6 +42650,12 @@ impl PrefillEngine {
                     .ok_or_else(|| {
                         format!("DSA MLA gathered-GEMM layer {layer_idx} output pointer overflow")
                     })?;
+                let output_started = if gathered_substage_timing {
+                    self.stream_sync()?;
+                    Some(Instant::now())
+                } else {
+                    None
+                };
                 unsafe {
                     cublas_result::gemm_strided_batched_ex(
                         self.cublas_handle,
@@ -39873,14 +42679,18 @@ impl PrefillEngine {
                         ckv_i32,
                         output_stride,
                         tile_i32,
-                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC,
-                        cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                        output_compute,
+                        output_algo,
                     )
                     .map_err(|error| {
                         format!(
                             "DSA MLA gathered-GEMM layer {layer_idx} output GEMM tile_start={tile_start} tile_rows={tile_rows}: {error:?}"
                         )
                     })?;
+                }
+                if let Some(started) = output_started {
+                    self.stream_sync()?;
+                    gathered_substage_ms[3] += started.elapsed().as_secs_f64() * 1000.0;
                 }
                 tile_start += tile_rows;
             }
@@ -39902,6 +42712,25 @@ impl PrefillEngine {
             return Err(format!(
                 "DSA MLA gathered-GEMM layer {layer_idx} failed to restore cuBLAS workspace: {restore_workspace:?}; operation={run_result:?}"
             ));
+        }
+        if gathered_substage_timing && run_result.is_ok() {
+            eprintln!(
+                "[HQQ-MLA-GATHERED] layer={} tokens={} compute={:?} gather={:?} tiles={} tile_capacity={} selected={} combined_dim={} workspace_bytes={} bytes_per_row={} gather_ms={:.3} score_gemm_ms={:.3} softmax_ms={:.3} output_gemm_ms={:.3}",
+                layer_idx,
+                rows,
+                compute_mode,
+                gather_policy,
+                gathered_tile_count,
+                tile_capacity,
+                selected.selected_per_row,
+                combined_dim,
+                capacity_bytes,
+                bytes_per_row,
+                gathered_substage_ms[0],
+                gathered_substage_ms[1],
+                gathered_substage_ms[2],
+                gathered_substage_ms[3],
+            );
         }
         run_result
     }
@@ -40236,10 +43065,23 @@ impl PrefillEngine {
         let context_end = chunk_start
             .checked_add(rows)
             .ok_or_else(|| "DSA prefill context end overflow".to_string())?;
-        if rows > workspace.max_chunk_rows || context_end > workspace.max_context_end {
+        let score_context_end = dsa_score_context_rows(
+            context_end,
+            if registration.index_kpool_compress {
+                registration.index_kpool
+            } else {
+                1
+            },
+        )
+        .max(1);
+        if rows > workspace.max_chunk_rows || score_context_end > workspace.max_context_end {
             return Err(format!(
                 "DSA prefill owner {} workspace maxima rows/context {}/{}, request requires {}/{}",
-                layer_idx, workspace.max_chunk_rows, workspace.max_context_end, rows, context_end
+                layer_idx,
+                workspace.max_chunk_rows,
+                workspace.max_context_end,
+                rows,
+                score_context_end
             ));
         }
         if q_lora_residual_ptr == 0 {
@@ -40267,7 +43109,7 @@ impl PrefillEngine {
                 head_weight_elements,
             ));
         }
-        self.populate_dsa_prefill_owner_key_cache(layer_idx, rows)?;
+        self.populate_dsa_prefill_owner_key_cache(layer_idx, chunk_start, rows)?;
         let raw_queries_ptr = *self.scratch.d_q.device_ptr();
         let head_weights_ptr = *self.scratch.d_scratch1.device_ptr();
         self.dsa_owner_projection_gemm(q_lora_residual_ptr, &owner.wq_b, raw_queries_ptr, rows)?;
@@ -40277,7 +43119,18 @@ impl PrefillEngine {
             head_weights_ptr,
             rows,
         )?;
-        launch_dsa_prefill_selection_chunk(
+        let selection_timing_events = if self.gqa_timing_enabled.get()
+            && !self.gqa_timing_start_event.is_null()
+            && !self.gqa_timing_stop_event.is_null()
+        {
+            Some(DsaPrefillSelectionTimingEvents {
+                start: self.gqa_timing_start_event,
+                stop: self.gqa_timing_stop_event,
+            })
+        } else {
+            None
+        };
+        let selection_timing = launch_dsa_prefill_selection_chunk(
             DsaPrefillSelectionKernels {
                 rope_query_bf16: self.kernels.dsa_prefill_rope_query_bf16,
                 fused_scores: self.kernels.dsa_prefill_fused_scores,
@@ -40291,9 +43144,13 @@ impl PrefillEngine {
             layer_idx,
             chunk_start,
             rows,
-            context_end,
+            score_context_end,
             raw_queries_ptr,
-            owner.key_cache_ptr,
+            if registration.index_kpool_compress {
+                owner.pool_key_cache_ptr
+            } else {
+                owner.key_cache_ptr
+            },
             head_weights_ptr,
             *self.scratch.d_positions.device_ptr(),
             self.rope_cos_ptr,
@@ -40302,19 +43159,103 @@ impl PrefillEngine {
             1.0f32
                 / ((registration.index_head_dim as f32).sqrt()
                     * (registration.index_n_heads as f32).sqrt()),
-            0,
-            DeepseekV4PrefillIndexScoreMode::Scalar,
-            DeepseekV4PrefillTopkMode::Bitonic,
-            std::ptr::null_mut(),
-            0,
-            0,
+            registration.index_kpool.max(1),
+            self.deepseek_v4_prefill_index_score_mode,
+            self.deepseek_v4_prefill_topk_mode,
+            self.cublas_handle,
+            *self.scratch.d_moe_accum.device_ptr(),
+            self.scratch
+                .d_moe_accum
+                .len()
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| {
+                    format!(
+                        "DSA prefill owner {layer_idx} index-score cuBLAS workspace overflow"
+                    )
+            })?,
             workspace,
-            None,
-        )
-        .map(|_| ())
+            selection_timing_events,
+        )?;
+        for (source, target) in [
+            (
+                DSA_PREFILL_SELECTION_TIMING_QUERY,
+                DEEPSEEK_V4_INDEXER_TIMING_STAGE_SELECT_QUERY,
+            ),
+            (
+                DSA_PREFILL_SELECTION_TIMING_SCORES,
+                DEEPSEEK_V4_INDEXER_TIMING_STAGE_SELECT_SCORES,
+            ),
+            (
+                DSA_PREFILL_SELECTION_TIMING_BASE_SORT,
+                DEEPSEEK_V4_INDEXER_TIMING_STAGE_SELECT_BASE_SORT,
+            ),
+            (
+                DSA_PREFILL_SELECTION_TIMING_MERGE,
+                DEEPSEEK_V4_INDEXER_TIMING_STAGE_SELECT_MERGE,
+            ),
+        ] {
+            self.t_deepseek_v4_indexer_wall[target].set(
+                self.t_deepseek_v4_indexer_wall[target].get() + selection_timing.wall_ms[source],
+            );
+            self.t_deepseek_v4_indexer_event[target].set(
+                self.t_deepseek_v4_indexer_event[target].get() + selection_timing.event_ms[source],
+            );
+            self.t_deepseek_v4_indexer_sync[target].set(
+                self.t_deepseek_v4_indexer_sync[target].get() + selection_timing.sync_ms[source],
+            );
+            self.deepseek_v4_indexer_calls[target]
+                .set(self.deepseek_v4_indexer_calls[target].get() + selection_timing.calls[source]);
+        }
+        if registration.index_kpool_compress {
+            let pooled = workspace
+                .d_pool_selected_indices
+                .as_ref()
+                .ok_or("DSA prefill pooled-selection buffer is absent")?;
+            let raw_width = workspace.output_topk;
+            let total = rows
+                .checked_mul(raw_width)
+                .ok_or_else(|| "DSA prefill k-pool expansion size overflow".to_string())?;
+            let threads = 256usize;
+            let mut e0 = *pooled.device_ptr();
+            let mut e1 = *workspace.d_selected_indices.device_ptr();
+            let mut e2 = *self.scratch.d_positions.device_ptr();
+            let mut e3 =
+                i32::try_from(rows).map_err(|_| "DSA prefill k-pool row count exceeds i32")?;
+            let mut e4 = i32::try_from(workspace.configured_topk.min(score_context_end))
+                .map_err(|_| "DSA prefill pooled selected width exceeds i32")?;
+            let mut e5 = i32::try_from(raw_width)
+                .map_err(|_| "DSA prefill raw selected width exceeds i32")?;
+            let mut e6 = i32::try_from(registration.index_kpool)
+                .map_err(|_| "DSA prefill k-pool size exceeds i32")?;
+            unsafe {
+                launch(
+                    self.kernels.dsa_prefill_kpool_expand,
+                    (
+                        u32::try_from(total.div_ceil(threads))
+                            .map_err(|_| "DSA prefill k-pool expansion grid exceeds u32")?,
+                        1,
+                        1,
+                    ),
+                    (threads as u32, 1, 1),
+                    0,
+                    self.stream,
+                    &mut [
+                        &mut e0 as *mut _ as *mut std::ffi::c_void,
+                        &mut e1 as *mut _ as *mut std::ffi::c_void,
+                        &mut e2 as *mut _ as *mut std::ffi::c_void,
+                        &mut e3 as *mut _ as *mut std::ffi::c_void,
+                        &mut e4 as *mut _ as *mut std::ffi::c_void,
+                        &mut e5 as *mut _ as *mut std::ffi::c_void,
+                        &mut e6 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )?;
+            }
+            workspace.mark_owner_result(layer_idx, chunk_start, rows, context_end, raw_width);
+        }
+        Ok(())
     }
 
-    fn forward_hqq_mla_chunked(
+    fn forward_mla_chunked(
         &self,
         layer_idx: usize,
         m: usize,
@@ -40330,21 +43271,21 @@ impl PrefillEngine {
         let sparse_dsa = lw.dsa_prefill.is_some() && self.dsa_prefill_workspace.is_some();
         if start_pos != 0 && !sparse_dsa {
             return Err(format!(
-                "HQQ MLA prefill cross-chunk execution is not implemented at layer {} (start_pos={}, tokens={}); refusing to route compressed MLA cache through a GQA fallback",
+                "native MLA prefill cross-chunk execution is not implemented at layer {} (start_pos={}, tokens={}); refusing to route compressed MLA cache through a GQA fallback",
                 layer_idx, start_pos, m
             ));
         }
-        let hqq = lw
-            .hqq_mla
+        let mla = lw
+            .mla_prefill
             .as_ref()
-            .ok_or_else(|| format!("layer {} has no HQQ MLA descriptor", layer_idx))?;
-        let nh = hqq.num_heads;
-        let klr = hqq.kv_lora_rank;
-        let ccd = hqq.ckv_cache_dim;
-        let nope = hqq.qk_nope_dim;
-        let rope = hqq.qk_rope_dim;
-        let vhd = hqq.v_head_dim;
-        let qlr = hqq.q_lora_rank;
+            .ok_or_else(|| format!("layer {} has no native MLA prefill descriptor", layer_idx))?;
+        let nh = mla.num_heads;
+        let klr = mla.kv_lora_rank;
+        let ccd = mla.ckv_cache_dim;
+        let nope = mla.qk_nope_dim;
+        let rope = mla.qk_rope_dim;
+        let vhd = mla.v_head_dim;
+        let qlr = mla.q_lora_rank;
         let qk_dim = nope.checked_add(rope).ok_or_else(|| {
             format!(
                 "HQQ MLA layer {} qk dimension overflow: nope={} rope={}",
@@ -40369,7 +43310,7 @@ impl PrefillEngine {
                 layer_idx, klr, rope
             )
         })?;
-        if nh == 0 || klr == 0 || nope == 0 || rope == 0 || vhd == 0 {
+        if nh == 0 || klr == 0 || nope == 0 || vhd == 0 {
             return Err(format!(
                 "HQQ MLA layer {} has zero execution dimension: heads={} kv_rank={} nope={} rope={} value={}",
                 layer_idx, nh, klr, nope, rope, vhd
@@ -40441,23 +43382,23 @@ impl PrefillEngine {
                 layer_idx, qk_dim
             )
         })?;
-        if hqq.kv_a_norm_ptr == 0
-            || hqq.w_kc_ptr == 0
-            || hqq.w_vc_ptr == 0
-            || self.rope_cos_ptr == 0
-            || self.rope_sin_ptr == 0
-            || (capture_kv_cache && (hqq.ckv_cache_ptr == 0 || hqq.kpe_cache_ptr == 0))
+        if mla.kv_a_norm_ptr == 0
+            || mla.w_kc_ptr == 0
+            || mla.w_vc_ptr == 0
+            || (rope > 0 && (self.rope_cos_ptr == 0 || self.rope_sin_ptr == 0))
+            || (capture_kv_cache
+                && (mla.ckv_cache_ptr == 0 || (rope > 0 && mla.kpe_cache_ptr == 0)))
         {
             return Err(format!(
                 "HQQ MLA layer {} has incomplete native prefill pointers: kv_norm=0x{:x} w_kc=0x{:x} w_vc=0x{:x} rope_cos=0x{:x} rope_sin=0x{:x} ckv_cache=0x{:x} kpe_cache=0x{:x}",
                 layer_idx,
-                hqq.kv_a_norm_ptr,
-                hqq.w_kc_ptr,
-                hqq.w_vc_ptr,
+                mla.kv_a_norm_ptr,
+                mla.w_kc_ptr,
+                mla.w_vc_ptr,
                 self.rope_cos_ptr,
                 self.rope_sin_ptr,
-                hqq.ckv_cache_ptr,
-                hqq.kpe_cache_ptr
+                mla.ckv_cache_ptr,
+                mla.kpe_cache_ptr
             ));
         }
         if !sparse_dsa
@@ -40470,75 +43411,65 @@ impl PrefillEngine {
             ));
         }
 
-        let validate = |name: &str, desc: &HqqTensorExecDescriptor| -> Result<(), String> {
-            self.validate_hqq_quantized_prefill_tensor_desc(name, desc)
-                .map(|_| ())
-                .map_err(|err| format!("HQQ MLA layer {}: {}", layer_idx, err))
-        };
-        validate("kv_a_proj_with_mqa", &hqq.kv_a_proj_with_mqa)?;
-        validate("o_proj", &hqq.o_proj)?;
-        if hqq.kv_a_proj_with_mqa.rows != kv_a_width
-            || hqq.kv_a_proj_with_mqa.cols != cfg.hidden_size
+        if mla.kv_a_proj_with_mqa.n() != kv_a_width
+            || mla.kv_a_proj_with_mqa.k() != cfg.hidden_size
         {
             return Err(format!(
                 "HQQ MLA layer {} KV-A projection shape mismatch: registered {}x{}, expected {}x{}",
                 layer_idx,
-                hqq.kv_a_proj_with_mqa.rows,
-                hqq.kv_a_proj_with_mqa.cols,
+                mla.kv_a_proj_with_mqa.n(),
+                mla.kv_a_proj_with_mqa.k(),
                 kv_a_width,
                 cfg.hidden_size
             ));
         }
-        if hqq.o_proj.rows != cfg.hidden_size || hqq.o_proj.cols != v_width {
+        if mla.o_proj.n() != cfg.hidden_size || mla.o_proj.k() != v_width {
             return Err(format!(
                 "HQQ MLA layer {} output projection shape mismatch: registered {}x{}, expected {}x{}",
                 layer_idx,
-                hqq.o_proj.rows,
-                hqq.o_proj.cols,
+                mla.o_proj.n(),
+                mla.o_proj.k(),
                 cfg.hidden_size,
                 v_width
             ));
         }
         if qlr > 0 {
-            let qa = hqq
+            let qa = mla
                 .q_a_proj
                 .as_ref()
                 .ok_or_else(|| format!("HQQ MLA layer {} is missing q_a_proj", layer_idx))?;
-            let qb = hqq
+            let qb = mla
                 .q_b_proj
                 .as_ref()
                 .ok_or_else(|| format!("HQQ MLA layer {} is missing q_b_proj", layer_idx))?;
-            validate("q_a_proj", qa)?;
-            validate("q_b_proj", qb)?;
-            if qa.rows != qlr
-                || qa.cols != cfg.hidden_size
-                || qb.rows != q_width
-                || qb.cols != qlr
-                || hqq.q_a_norm_ptr == 0
+            if qa.n() != qlr
+                || qa.k() != cfg.hidden_size
+                || qb.n() != q_width
+                || qb.k() != qlr
+                || mla.q_a_norm_ptr == 0
             {
                 return Err(format!(
                     "HQQ MLA layer {} Q-LoRA contract mismatch: q_a={}x{} q_b={}x{} q_rank={} q_width={} hidden={} q_norm=0x{:x}",
                     layer_idx,
-                    qa.rows,
-                    qa.cols,
-                    qb.rows,
-                    qb.cols,
+                    qa.n(),
+                    qa.k(),
+                    qb.n(),
+                    qb.k(),
                     qlr,
                     q_width,
                     cfg.hidden_size,
-                    hqq.q_a_norm_ptr
+                    mla.q_a_norm_ptr
                 ));
             }
         } else {
-            let q = hqq
+            let q = mla
                 .q_proj
                 .as_ref()
                 .ok_or_else(|| format!("HQQ MLA layer {} is missing q_proj", layer_idx))?;
-            validate("q_proj", q)?;
-            if q.rows != q_width || q.cols != cfg.hidden_size {
+            if q.n() != q_width || q.k() != cfg.hidden_size {
                 return Err(format!(
                     "HQQ MLA layer {} Q projection shape mismatch: registered {}x{}, expected {}x{}",
-                    layer_idx, q.rows, q.cols, q_width, cfg.hidden_size
+                    layer_idx, q.n(), q.k(), q_width, cfg.hidden_size
                 ));
             }
         }
@@ -40601,8 +43532,6 @@ impl PrefillEngine {
         let q_raw = attn_out;
         let scratch1 = *self.scratch.d_scratch1.device_ptr();
         let scratch2 = *self.scratch.d_scratch2.device_ptr();
-        let no_marlin: Option<MarlinWeight> = None;
-        let no_bf16: Option<Bf16Weight> = None;
         let trace_position = start_pos + m - 1;
         let trace_row = m - 1;
         let trace_chunk = start_pos;
@@ -40638,19 +43567,16 @@ impl PrefillEngine {
         }
 
         if qlr > 0 {
-            let qa = hqq.q_a_proj.as_ref().expect("validated q_a_proj");
-            let qb = hqq.q_b_proj.as_ref().expect("validated q_b_proj");
-            self.la_gemm(
+            let qa = mla.q_a_proj.as_ref().expect("validated q_a_proj");
+            let qb = mla.q_b_proj.as_ref().expect("validated q_b_proj");
+            self.deepseek_v4_projection_prefill_gemm_bf16(
                 layer_idx,
-                "q_a_proj",
+                qa,
                 hidden,
-                Some(qa),
-                &no_marlin,
-                &no_bf16,
                 scratch1,
                 m,
             )?;
-            self.launch_rmsnorm_fp32w(scratch2, scratch1, hqq.q_a_norm_ptr, m, qlr)?;
+            self.launch_rmsnorm_fp32w(scratch2, scratch1, mla.q_a_norm_ptr, m, qlr)?;
             finish_mla_stage!(HQQ_MLA_TIMING_Q_A_NORM);
             self.record_prefill_device_trace_bf16_row(
                 PDT_LAYER_MLA_Q_LORA_NORM_LAST,
@@ -40680,13 +43606,10 @@ impl PrefillEngine {
                 self.execute_dsa_prefill_owner_selection(layer_idx, m, start_pos, scratch2)?;
             }
             finish_mla_stage!(HQQ_MLA_TIMING_OWNER_SELECT);
-            self.la_gemm(
+            self.deepseek_v4_projection_prefill_gemm_bf16(
                 layer_idx,
-                "q_b_proj",
+                qb,
                 scratch2,
-                Some(qb),
-                &no_marlin,
-                &no_bf16,
                 q_raw,
                 m,
             )?;
@@ -40718,14 +43641,11 @@ impl PrefillEngine {
                     layer_idx
                 ));
             }
-            let q_proj = hqq.q_proj.as_ref().expect("validated q_proj");
-            self.la_gemm(
+            let q_proj = mla.q_proj.as_ref().expect("validated q_proj");
+            self.deepseek_v4_projection_prefill_gemm_bf16(
                 layer_idx,
-                "q_proj",
+                q_proj,
                 hidden,
-                Some(q_proj),
-                &no_marlin,
-                &no_bf16,
                 q_raw,
                 m,
             )?;
@@ -40733,20 +43653,17 @@ impl PrefillEngine {
             finish_mla_stage!(HQQ_MLA_TIMING_OWNER_SELECT);
             finish_mla_stage!(HQQ_MLA_TIMING_Q_B);
         }
-        self.la_gemm(
+        self.deepseek_v4_projection_prefill_gemm_bf16(
             layer_idx,
-            "kv_a_proj_with_mqa",
+            &mla.kv_a_proj_with_mqa,
             hidden,
-            Some(&hqq.kv_a_proj_with_mqa),
-            &no_marlin,
-            &no_bf16,
             scratch2,
             m,
         )?;
 
         let norm_threads = std::cmp::max(32, std::cmp::min(1024, klr).next_power_of_two()) as u32;
         let mut n0 = scratch2;
-        let mut n1 = hqq.kv_a_norm_ptr;
+        let mut n1 = mla.kv_a_norm_ptr;
         let mut n2 = kv_a_width as i32;
         let mut n3 = klr as i32;
         let mut n4 = cfg.rms_norm_eps;
@@ -40810,7 +43727,7 @@ impl PrefillEngine {
         self.cublas_bf16_gemm_layout_strided_batched(
             scratch2,
             kv_a_width,
-            hqq.w_kc_ptr,
+            mla.w_kc_ptr,
             ccd,
             kc_weight_batch_stride,
             k_content,
@@ -40823,7 +43740,7 @@ impl PrefillEngine {
         self.cublas_bf16_gemm_layout_strided_batched(
             scratch2,
             kv_a_width,
-            hqq.w_vc_ptr,
+            mla.w_vc_ptr,
             ccd,
             vc_weight_batch_stride,
             v_content,
@@ -40851,7 +43768,7 @@ impl PrefillEngine {
         let mut p13 = value_i32;
         let mut p14 = kv_a_width_i32;
         let mut p15 = token_count_i32;
-        let mut p16 = i32::from(hqq.rope_interleave);
+        let mut p16 = i32::from(mla.rope_interleave);
         unsafe {
             launch(
                 self.kernels.mla_pack_qkv_rope_bf16,
@@ -40922,16 +43839,21 @@ impl PrefillEngine {
         )?;
 
         if capture_kv_cache {
+            let cache_append_kernel = native_mla_kernel_for_format(
+                self.kv_format,
+                self.kernels.mla_cache_append_k4,
+                self.kernels.mla_cache_append_k6,
+            )?;
             let cache_blocks = std::cmp::max(ccd, rope) / 16;
             if cache_blocks > 1024 {
                 return Err(format!(
-                    "HQQ MLA layer {} k4 cache needs {} CUDA threads per token, exceeding the device launch contract",
+                    "HQQ MLA layer {} compact cache needs {} CUDA threads per token, exceeding the device launch contract",
                     layer_idx, cache_blocks
                 ));
             }
             let cache_threads = std::cmp::max(32, ((cache_blocks + 31) / 32) * 32) as u32;
-            let mut c0 = hqq.ckv_cache_ptr;
-            let mut c1 = hqq.kpe_cache_ptr;
+            let mut c0 = mla.ckv_cache_ptr;
+            let mut c1 = mla.kpe_cache_ptr;
             let mut c2 = scratch2;
             let mut c3 = k;
             let mut c4 = i32::try_from(start_pos).map_err(|_| {
@@ -40960,7 +43882,7 @@ impl PrefillEngine {
             let mut c12 = rope_i32;
             unsafe {
                 launch(
-                    self.kernels.mla_cache_append_k4,
+                    cache_append_kernel,
                     (m as u32, 1, 1),
                     (cache_threads, 1, 1),
                     0,
@@ -41002,9 +43924,10 @@ impl PrefillEngine {
             let context_end = start_pos
                 .checked_add(m)
                 .ok_or_else(|| "DSA prefill context end overflow".to_string())?;
+            let mla_block_bytes = native_mla_block_bytes(self.kv_format)?;
             let ckv_cache_prefix_bytes = context_end
                 .checked_mul(ccd / 16)
-                .and_then(|value| value.checked_mul(10))
+                .and_then(|value| value.checked_mul(mla_block_bytes))
                 .ok_or_else(|| {
                     format!(
                         "DSA sparse MLA layer {} cKV cache trace size overflow",
@@ -41013,7 +43936,7 @@ impl PrefillEngine {
                 })?;
             let kpe_cache_prefix_bytes = context_end
                 .checked_mul(rope / 16)
-                .and_then(|value| value.checked_mul(10))
+                .and_then(|value| value.checked_mul(mla_block_bytes))
                 .ok_or_else(|| {
                     format!(
                         "DSA sparse MLA layer {} KPE cache trace size overflow",
@@ -41034,7 +43957,7 @@ impl PrefillEngine {
                 trace_chunk,
                 trace_position,
                 0,
-                hqq.ckv_cache_ptr,
+                mla.ckv_cache_ptr,
                 0,
                 ckv_cache_prefix_bytes / std::mem::size_of::<i32>(),
             )?;
@@ -41044,7 +43967,7 @@ impl PrefillEngine {
                 trace_chunk,
                 trace_position,
                 0,
-                hqq.kpe_cache_ptr,
+                mla.kpe_cache_ptr,
                 0,
                 kpe_cache_prefix_bytes / std::mem::size_of::<i32>(),
             )?;
@@ -41118,7 +44041,7 @@ impl PrefillEngine {
             let threads = 256u32;
             let mut a0 = *workspace.d_mla_q_absorbed.device_ptr();
             let mut a1 = q;
-            let mut a2 = hqq.w_kc_ptr;
+            let mut a2 = mla.w_kc_ptr;
             let mut a3 = token_count_i32;
             let mut a4 = num_heads_i32;
             let mut a5 = qk_dim_i32;
@@ -41190,7 +44113,10 @@ impl PrefillEngine {
 
             let use_score_reuse = dsa_mla_score_reuse_enabled()?;
             let use_grouped_exact = dsa_mla_grouped_exact_enabled()?;
-            let native_dsa_registered = cfg.deepseek_v4_hc_mult == 0 && lw.dsa_prefill.is_some();
+            let native_dsa_registered = native_dsa_gathered_capability(
+                lw.dsa_prefill.is_some(),
+                lw.deepseek_v4.is_some(),
+            );
             let use_gathered_gemm =
                 dsa_mla_gathered_gemm_enabled(dsa_mla_gathered_default_enabled(
                     native_dsa_registered,
@@ -41232,10 +44158,20 @@ impl PrefillEngine {
                 .ok_or_else(|| {
                     format!("DSA sparse MLA layer {} shared-memory overflow", layer_idx)
                 })?;
+            let scalar_baseline_kernel = native_mla_kernel_for_format(
+                self.kv_format,
+                self.kernels.mla_prefill_sparse_attention_k4,
+                self.kernels.mla_prefill_sparse_attention_k6,
+            )?;
+            let scalar_reuse_kernel = native_mla_kernel_for_format(
+                self.kv_format,
+                self.kernels.mla_prefill_sparse_attention_k4_score_reuse,
+                self.kernels.mla_prefill_sparse_attention_k6_score_reuse,
+            )?;
             let scalar_attention_kernel = if use_score_reuse {
-                self.kernels.mla_prefill_sparse_attention_k4_score_reuse
+                scalar_reuse_kernel
             } else {
-                self.kernels.mla_prefill_sparse_attention_k4
+                scalar_baseline_kernel
             };
             let shared_bytes_u32 = dsa_prefill_configure_dynamic_shared(
                 scalar_attention_kernel,
@@ -41245,11 +44181,11 @@ impl PrefillEngine {
             let mut s0 = *workspace.d_mla_attention.device_ptr();
             let mut s1 = *workspace.d_mla_q_absorbed.device_ptr();
             let mut s2 = q;
-            let mut s3 = hqq.ckv_cache_ptr;
-            let mut s4 = hqq.kpe_cache_ptr;
+            let mut s3 = mla.ckv_cache_ptr;
+            let mut s4 = mla.kpe_cache_ptr;
             let mut s5 = selected.ptr;
             let mut s6 = *self.scratch.d_positions.device_ptr();
-            let mut s7 = hqq.sm_scale;
+            let mut s7 = mla.sm_scale;
             let mut s8 = token_count_i32;
             let mut s9 = num_heads_i32;
             let mut s10 = qk_dim_i32;
@@ -41270,8 +44206,8 @@ impl PrefillEngine {
                     *workspace.d_mla_attention.device_ptr(),
                     *workspace.d_mla_q_absorbed.device_ptr(),
                     q,
-                    hqq.ckv_cache_ptr,
-                    hqq.kpe_cache_ptr,
+                    mla.ckv_cache_ptr,
+                    mla.kpe_cache_ptr,
                     selected,
                     *self.scratch.d_positions.device_ptr(),
                     m,
@@ -41280,7 +44216,7 @@ impl PrefillEngine {
                     nope,
                     rope,
                     ccd,
-                    hqq.sm_scale,
+                    mla.sm_scale,
                     context_end,
                     threads,
                 )?;
@@ -41290,8 +44226,8 @@ impl PrefillEngine {
                     *workspace.d_mla_attention.device_ptr(),
                     *workspace.d_mla_q_absorbed.device_ptr(),
                     q,
-                    hqq.ckv_cache_ptr,
-                    hqq.kpe_cache_ptr,
+                    mla.ckv_cache_ptr,
+                    mla.kpe_cache_ptr,
                     selected,
                     *self.scratch.d_positions.device_ptr(),
                     m,
@@ -41300,7 +44236,7 @@ impl PrefillEngine {
                     nope,
                     rope,
                     ccd,
-                    hqq.sm_scale,
+                    mla.sm_scale,
                     context_end,
                 )?;
             } else {
@@ -41385,7 +44321,7 @@ impl PrefillEngine {
             {
                 unsafe {
                     launch(
-                        self.kernels.mla_prefill_sparse_attention_k4,
+                        scalar_baseline_kernel,
                         (
                             u32::try_from(nh).map_err(|_| "DSA MLA heads exceed u32")?,
                             u32::try_from(m).map_err(|_| "DSA MLA rows exceed u32")?,
@@ -41461,7 +44397,7 @@ impl PrefillEngine {
                     layer_idx,
                     attn_out,
                     *workspace.d_mla_attention.device_ptr(),
-                    hqq.w_vc_ptr,
+                    mla.w_vc_ptr,
                     m,
                     nh,
                     vhd,
@@ -41470,7 +44406,7 @@ impl PrefillEngine {
             } else {
                 let mut v0 = attn_out;
                 let mut v1 = *workspace.d_mla_attention.device_ptr();
-                let mut v2 = hqq.w_vc_ptr;
+                let mut v2 = mla.w_vc_ptr;
                 let mut v3 = token_count_i32;
                 let mut v4 = num_heads_i32;
                 let mut v5 = value_i32;
@@ -41538,7 +44474,7 @@ impl PrefillEngine {
                     qk_dim_i32,
                     token_count_i32,
                     token_count_i32,
-                    hqq.sm_scale,
+                    mla.sm_scale,
                     1,
                     0,
                     self.stream as *mut _,
@@ -41554,13 +44490,10 @@ impl PrefillEngine {
             finish_mla_stage!(HQQ_MLA_TIMING_APPLY_WVC);
         }
 
-        self.la_gemm(
+        self.deepseek_v4_projection_prefill_gemm_bf16(
             layer_idx,
-            "o_proj",
+            &mla.o_proj,
             attn_out,
-            Some(&hqq.o_proj),
-            &no_marlin,
-            &no_bf16,
             scratch1,
             m,
         )?;
@@ -41604,6 +44537,7 @@ impl PrefillEngine {
     fn populate_dsa_prefill_owner_key_cache(
         &self,
         layer_idx: usize,
+        chunk_start: usize,
         token_count: usize,
     ) -> Result<(), String> {
         let Some(owner) = self.layer_weights[layer_idx].dsa_prefill_owner.as_ref() else {
@@ -41618,10 +44552,13 @@ impl PrefillEngine {
         if token_count == 0 {
             return Ok(());
         }
-        if token_count > owner.max_context_tokens {
+        let context_end = chunk_start
+            .checked_add(token_count)
+            .ok_or_else(|| format!("DSA prefill owner {} context overflow", layer_idx))?;
+        if context_end > owner.max_context_tokens {
             return Err(format!(
                 "DSA prefill owner {} token count {} exceeds key-cache capacity {}",
-                layer_idx, token_count, owner.max_context_tokens
+                layer_idx, context_end, owner.max_context_tokens
             ));
         }
         if owner.index_head_dim == 0
@@ -41642,8 +44579,7 @@ impl PrefillEngine {
         if owner.norm_weight_ptr == 0
             || owner.norm_bias_ptr == 0
             || owner.key_cache_ptr == 0
-            || self.rope_cos_ptr == 0
-            || self.rope_sin_ptr == 0
+            || (owner.qk_rope_head_dim > 0 && (self.rope_cos_ptr == 0 || self.rope_sin_ptr == 0))
         {
             return Err(format!(
                 "DSA prefill owner {} has incomplete pointers: norm_weight=0x{:x} norm_bias=0x{:x} key_cache=0x{:x} rope_cos=0x{:x} rope_sin=0x{:x}",
@@ -41740,6 +44676,75 @@ impl PrefillEngine {
                 ],
             )?;
         }
+        if owner.index_kpool > 1 {
+            let gate = owner
+                .kpool_gate
+                .as_ref()
+                .ok_or_else(|| format!("DSA prefill owner {} k-pool gate is absent", layer_idx))?;
+            if owner.kpool_ape_ptr == 0
+                || owner.gate_cache_ptr == 0
+                || owner.pool_key_cache_ptr == 0
+                || gate.n != owner.index_head_dim
+                || gate.k != self.config.hidden_size
+            {
+                return Err(format!(
+                    "DSA prefill owner {} has incomplete k-pool resources",
+                    layer_idx
+                ));
+            }
+            let gate_offset_bytes = chunk_start
+                .checked_mul(owner.index_head_dim)
+                .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
+                .ok_or_else(|| format!("DSA prefill owner {} gate offset overflow", layer_idx))?;
+            let gate_output = owner
+                .gate_cache_ptr
+                .checked_add(u64::try_from(gate_offset_bytes).map_err(|_| {
+                    format!("DSA prefill owner {} gate offset exceeds u64", layer_idx)
+                })?)
+                .ok_or_else(|| format!("DSA prefill owner {} gate pointer overflow", layer_idx))?;
+            self.dsa_owner_projection_gemm(hidden, gate, gate_output, token_count)?;
+            let complete_pools = context_end / owner.index_kpool;
+            if complete_pools > 0 {
+                let total = complete_pools
+                    .checked_mul(owner.index_head_dim)
+                    .ok_or_else(|| format!("DSA prefill owner {} pool size overflow", layer_idx))?;
+                let threads = 256usize;
+                let mut k0 = owner.key_cache_ptr;
+                let mut k1 = owner.gate_cache_ptr;
+                let mut k2 = owner.pool_key_cache_ptr;
+                let mut k3 = owner.kpool_ape_ptr;
+                let mut k4 = i32::try_from(context_end)
+                    .map_err(|_| format!("DSA prefill owner {} context exceeds i32", layer_idx))?;
+                let mut k5 = head_dim_i32;
+                let mut k6 = i32::try_from(owner.index_kpool).map_err(|_| {
+                    format!("DSA prefill owner {} pool size exceeds i32", layer_idx)
+                })?;
+                unsafe {
+                    launch(
+                        self.kernels.dsa_prefill_kpool_build,
+                        (
+                            u32::try_from(total.div_ceil(threads)).map_err(|_| {
+                                format!("DSA prefill owner {} pool grid exceeds u32", layer_idx)
+                            })?,
+                            1,
+                            1,
+                        ),
+                        (threads as u32, 1, 1),
+                        0,
+                        self.stream,
+                        &mut [
+                            &mut k0 as *mut _ as *mut std::ffi::c_void,
+                            &mut k1 as *mut _ as *mut std::ffi::c_void,
+                            &mut k2 as *mut _ as *mut std::ffi::c_void,
+                            &mut k3 as *mut _ as *mut std::ffi::c_void,
+                            &mut k4 as *mut _ as *mut std::ffi::c_void,
+                            &mut k5 as *mut _ as *mut std::ffi::c_void,
+                            &mut k6 as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -41758,8 +44763,8 @@ impl PrefillEngine {
             self.validate_hqq_quantized_prefill_tensor_desc("v_proj", &hqq.v_proj)?;
             self.validate_hqq_quantized_prefill_tensor_desc("o_proj", &hqq.o_proj)?;
         }
-        if lw.hqq_mla.is_some() {
-            return self.forward_hqq_mla_chunked(layer_idx, m, start_pos, capture_kv_cache);
+        if lw.mla_prefill.is_some() {
+            return self.forward_mla_chunked(layer_idx, m, start_pos, capture_kv_cache);
         }
         let gt = self.gqa_timing_enabled.get();
         let trace_step = if self.config.prefill_chunk_size > 0 {
@@ -55079,26 +58084,18 @@ impl PrefillEngine {
         // gate_up = hidden @ w1 -> [m, 2*inter]
         self.marlin_gemm(hidden, w1, s1, m)?;
 
-        // SiLU + mul
+        // Config-derived gated activation. GLM uses the published raw-projection
+        // clamp contract; ordinary dense SwiGLU retains the standard path.
         let inter = w1.n / 2;
-        let t = std::cmp::max(32, ((std::cmp::min(1024, inter) + 31) / 32) * 32);
-        let mut sm0 = s2;
-        let mut sm1 = s1;
-        let mut sm2 = inter as i32;
-        unsafe {
-            launch(
-                self.kernels.silu_mul,
-                (m as u32, 1, 1),
-                (t as u32, 1, 1),
-                0,
-                self.stream,
-                &mut [
-                    &mut sm0 as *mut _ as *mut std::ffi::c_void,
-                    &mut sm1 as *mut _ as *mut std::ffi::c_void,
-                    &mut sm2 as *mut _ as *mut std::ffi::c_void,
-                ],
-            )?;
-        }
+        self.launch_gated_activation(
+            s2,
+            s1,
+            0,
+            m,
+            inter,
+            lw.moe_swiglu_limit,
+            lw.moe_deepseek_v4_activation,
+        )?;
 
         // down = inter @ w2 -> [m, hidden]
         self.marlin_gemm(s2, w2, hidden, m)?;
@@ -55866,6 +58863,8 @@ impl PrefillEngine {
         let reference_layer1_moe_trace = self.reference_debug_trace_enabled && layer_idx == 1;
         let reference_selected_moe_trace = self.reference_debug_trace_enabled
             && Self::env_layer_spec_contains("KRASIS_REFERENCE_MOE_TRACE_LAYERS", layer_idx);
+        let force_active_hcs_experts_cold = reference_selected_moe_trace
+            && std::env::var("KRASIS_PREFILL_FORCE_ACTIVE_HCS_EXPERTS_COLD").is_ok();
         let reference_layer1_or_selected_moe_trace =
             reference_layer1_moe_trace || reference_selected_moe_trace;
         let reference_routed_stage_trace =
@@ -56564,7 +59563,13 @@ impl PrefillEngine {
                             serde_json::json!({
                                 "row": row,
                                 "kernel": router_kernel_name(scoring_func),
-                                "production_prefill_sigmoid_kernel_correction_input": if scoring_func == 1 { "none_raw_sigmoid_selection_after_regression_revert" } else { "not_applicable" },
+                                "production_prefill_sigmoid_kernel_correction_input": if scoring_func != 1 {
+                                    "not_applicable"
+                                } else if self.layer_weights[layer_idx].moe_e_score_corr_ptr != 0 {
+                                    "e_score_correction_selection_only"
+                                } else {
+                                    "none"
+                                },
                                 "hf_selection_formula": "topk(sigmoid(logit) + e_score_correction_bias); gather weights from sigmoid(logit)",
                                 "scoring_func": scoring_func,
                                 "topk": topk,
@@ -57619,6 +60624,42 @@ impl PrefillEngine {
         let pinning_layer_idx = self
             .moe_ordinal_for_model_layer(layer_idx)
             .unwrap_or(hcs_layer_idx);
+        let forced_active_hcs_experts: std::collections::BTreeSet<usize> =
+            if force_active_hcs_experts_cold {
+                let forced = active
+                    .iter()
+                    .copied()
+                    .filter(|&eid| self.expert_lookup(hcs_layer_idx, eid).is_some())
+                    .collect::<std::collections::BTreeSet<_>>();
+                if !forced.is_empty() && self.ptr_prefetch_layer == Some(layer_idx) {
+                    self.release_prefetched_ptr_table();
+                }
+                self.push_reference_stage_metadata(
+                    &format!("{}_hcs_cold_equivalence_replay", routed_stage_trace_prefix),
+                    Some(layer_idx),
+                    0,
+                    trace_moe_last_pos,
+                    trace_moe_token_id,
+                    serde_json::json!({
+                        "enabled": true,
+                        "production_behavior_changed": true,
+                        "scope": "request-scoped diagnostic causal replay only",
+                        "prompt_rows": m,
+                        "active_experts": active_experts,
+                        "forced_active_hcs_experts_cold": forced.iter().copied().collect::<Vec<_>>(),
+                        "resident_active_experts_found": !forced.is_empty(),
+                        "unchanged_contracts": [
+                            "same host checkpoint bytes",
+                            "same routing and weights",
+                            "same HQQ kernels",
+                            "ordinary measured cold-staging capacity and safety margin",
+                        ],
+                    }),
+                );
+                forced
+            } else {
+                std::collections::BTreeSet::new()
+            };
         let mut predicted_w1_for_layer = self.predicted_w1_layer == Some(layer_idx);
         let mut cold_slots_needed = 0usize;
         if self.d_expert_w1_ptrs.is_some() && !prefill_disable_ptr_table() {
@@ -57628,10 +60669,13 @@ impl PrefillEngine {
                 .is_some();
             if has_moe_data {
                 for &eid in &active {
-                    if self.expert_lookup(hcs_layer_idx, eid).is_some() {
+                    if !forced_active_hcs_experts.contains(&eid)
+                        && self.expert_lookup(hcs_layer_idx, eid).is_some()
+                    {
                         continue;
                     }
-                    let pin_offset = if self.pinning_active
+                    let pin_offset = if !forced_active_hcs_experts.contains(&eid)
+                        && self.pinning_active
                         && pinning_layer_idx < self.pinned_expert_offsets.len()
                         && eid < self.pinned_expert_offsets[pinning_layer_idx].len()
                     {
@@ -57844,16 +60888,21 @@ impl PrefillEngine {
 
             for &eid in &active {
                 // Try prefill cache + HCS first (zero copy — point directly into VRAM)
-                if let Some((hw1p, hw1s, hw2p, hw2s)) = self.expert_lookup(hcs_layer_idx, eid) {
+                if !forced_active_hcs_experts.contains(&eid) {
+                    if let Some((hw1p, hw1s, hw2p, hw2s)) =
+                        self.expert_lookup(hcs_layer_idx, eid)
+                    {
                     self.h_expert_w1_ptrs[eid] = hw1p;
                     self.h_expert_w1s_ptrs[eid] = hw1s;
                     self.h_expert_w2_ptrs[eid] = hw2p;
                     self.h_expert_w2s_ptrs[eid] = hw2s;
                     hcs_count += 1;
                     continue;
+                    }
                 }
 
-                let pin_offset = if self.pinning_active
+                let pin_offset = if !forced_active_hcs_experts.contains(&eid)
+                    && self.pinning_active
                     && pinning_layer_idx < self.pinned_expert_offsets.len()
                     && eid < self.pinned_expert_offsets[pinning_layer_idx].len()
                 {
@@ -58242,6 +61291,17 @@ impl PrefillEngine {
                     }
                 }
             }
+        }
+
+        if use_ptr_table {
+            self.verify_cold_staging_layer(
+                layer_idx,
+                moe_layer_idx,
+                &active,
+                cold_staging_base,
+                [w1_ptrs_gpu, w1s_ptrs_gpu, w2_ptrs_gpu, w2s_ptrs_gpu],
+                n_experts,
+            )?;
         }
 
         trace_emit_prefill_mark(
@@ -71607,6 +74667,8 @@ impl PrefillKernels {
                     "mla_rmsnorm_prefix_bf16_fp32w_kernel",
                     "dsa_prefill_layernorm_rope_key_write_kernel",
                     "dsa_prefill_rope_query_bf16_kernel",
+                    "dsa_prefill_kpool_build_kernel",
+                    "dsa_prefill_kpool_expand_kernel",
                     "dsa_prefill_fused_scores_kernel",
                     "dsa_prefill_accumulate_gemm_scores_kernel",
                     "dsa_prefill_topk_sort_rows_kernel",
@@ -71615,13 +74677,21 @@ impl PrefillKernels {
                     "dsa_prefill_topk_linear_merge_rows_kernel",
                     "mla_pack_qkv_rope_bf16_kernel",
                     "mla_cache_append_k4_kernel",
+                    "mla_cache_append_k6_kernel",
                     "mla_prefill_absorb_wkc_kernel",
                     "mla_prefill_sparse_attention_k4_kernel",
+                    "mla_prefill_sparse_attention_k6_kernel",
                     "mla_prefill_sparse_attention_k4_score_reuse_kernel",
+                    "mla_prefill_sparse_attention_k6_score_reuse_kernel",
                     "mla_prefill_sparse_scores_k4_grouped_exact_kernel",
+                    "mla_prefill_sparse_scores_k6_grouped_exact_kernel",
                     "mla_prefill_sparse_softmax_exact_kernel",
                     "mla_prefill_sparse_output_k4_grouped_exact_kernel",
+                    "mla_prefill_sparse_output_k6_grouped_exact_kernel",
                     "mla_prefill_gather_query_k4_f32_kernel",
+                    "mla_prefill_gather_query_k6_f32_kernel",
+                    "mla_prefill_gather_query_k4_f32_structured_kernel",
+                    "mla_prefill_gather_query_k6_f32_structured_kernel",
                     "mla_prefill_softmax_weights_warp_f32_kernel",
                     "mla_prefill_pack_attention_head_major_bf16_kernel",
                     "mla_prefill_scatter_wvc_head_major_bf16_kernel",
@@ -71817,10 +74887,34 @@ impl PrefillKernels {
             )
             .map_err(|e| format!("Load prefill PTX: {e}"))?;
 
+        #[cfg(has_decode_kernels)]
+        device
+            .load_ptx(
+                Ptx::from_src(COLD_EXPERT_HELPERS_PTX),
+                "prefill_decode_helpers",
+                &[
+                    "kimi_delta_recurrent_scan_bf16",
+                    "kimi_delta_recurrent_scan_tiled_bf16",
+                    "kimi_delta_chunk_prepare_bf16",
+                    "kimi_delta_conv_silu_bf16",
+                    "kimi_delta_conv_silu_parallel_bf16",
+                    "kimi_delta_conv_state_update_bf16",
+                    "kimi_delta_rmsnorm_gate_bf16",
+                ],
+            )
+            .map_err(|e| format!("Load KDA prefill helper PTX: {e}"))?;
+
         let get = |name: &str| -> Result<RawCuFunc, String> {
             let f = device
                 .get_func("prefill_kernels", name)
                 .ok_or_else(|| format!("Kernel {name} not found"))?;
+            Ok(extract_cu_func(&f))
+        };
+        #[cfg(has_decode_kernels)]
+        let get_decode_helper = |name: &str| -> Result<RawCuFunc, String> {
+            let f = device
+                .get_func("prefill_decode_helpers", name)
+                .ok_or_else(|| format!("KDA prefill helper {name} not found"))?;
             Ok(extract_cu_func(&f))
         };
 
@@ -72087,6 +75181,8 @@ impl PrefillKernels {
                 "dsa_prefill_layernorm_rope_key_write_kernel",
             )?,
             dsa_prefill_rope_query_bf16: get("dsa_prefill_rope_query_bf16_kernel")?,
+            dsa_prefill_kpool_build: get("dsa_prefill_kpool_build_kernel")?,
+            dsa_prefill_kpool_expand: get("dsa_prefill_kpool_expand_kernel")?,
             dsa_prefill_fused_scores: get("dsa_prefill_fused_scores_kernel")?,
             dsa_prefill_accumulate_gemm_scores: get("dsa_prefill_accumulate_gemm_scores_kernel")?,
             dsa_prefill_topk_sort_rows: get("dsa_prefill_topk_sort_rows_kernel")?,
@@ -72095,19 +75191,37 @@ impl PrefillKernels {
             dsa_prefill_topk_linear_merge_rows: get("dsa_prefill_topk_linear_merge_rows_kernel")?,
             mla_pack_qkv_rope_bf16: get("mla_pack_qkv_rope_bf16_kernel")?,
             mla_cache_append_k4: get("mla_cache_append_k4_kernel")?,
+            mla_cache_append_k6: get("mla_cache_append_k6_kernel")?,
             mla_prefill_absorb_wkc: get("mla_prefill_absorb_wkc_kernel")?,
             mla_prefill_sparse_attention_k4: get("mla_prefill_sparse_attention_k4_kernel")?,
+            mla_prefill_sparse_attention_k6: get("mla_prefill_sparse_attention_k6_kernel")?,
             mla_prefill_sparse_attention_k4_score_reuse: get(
                 "mla_prefill_sparse_attention_k4_score_reuse_kernel",
             )?,
+            mla_prefill_sparse_attention_k6_score_reuse: get(
+                "mla_prefill_sparse_attention_k6_score_reuse_kernel",
+            )?,
             mla_prefill_sparse_scores_k4_grouped_exact: get(
                 "mla_prefill_sparse_scores_k4_grouped_exact_kernel",
+            )?,
+            mla_prefill_sparse_scores_k6_grouped_exact: get(
+                "mla_prefill_sparse_scores_k6_grouped_exact_kernel",
             )?,
             mla_prefill_sparse_softmax_exact: get("mla_prefill_sparse_softmax_exact_kernel")?,
             mla_prefill_sparse_output_k4_grouped_exact: get(
                 "mla_prefill_sparse_output_k4_grouped_exact_kernel",
             )?,
+            mla_prefill_sparse_output_k6_grouped_exact: get(
+                "mla_prefill_sparse_output_k6_grouped_exact_kernel",
+            )?,
             mla_prefill_gather_query_k4_f32: get("mla_prefill_gather_query_k4_f32_kernel")?,
+            mla_prefill_gather_query_k6_f32: get("mla_prefill_gather_query_k6_f32_kernel")?,
+            mla_prefill_gather_query_k4_f32_structured: get(
+                "mla_prefill_gather_query_k4_f32_structured_kernel",
+            )?,
+            mla_prefill_gather_query_k6_f32_structured: get(
+                "mla_prefill_gather_query_k6_f32_structured_kernel",
+            )?,
             mla_prefill_softmax_weights_warp_f32: get(
                 "mla_prefill_softmax_weights_warp_f32_kernel",
             )?,
@@ -72135,6 +75249,19 @@ impl PrefillKernels {
             deepseek_v4_hc_reduce: get("deepseek_v4_hc_reduce_kernel")?,
             deepseek_v4_hc_post: get("deepseek_v4_hc_post_kernel")?,
             deepseek_v4_hc_head_prepare: get("deepseek_v4_hc_head_prepare_kernel")?,
+            kimi_delta_recurrent_scan_bf16: get_decode_helper("kimi_delta_recurrent_scan_bf16")?,
+            kimi_delta_recurrent_scan_tiled_bf16: get_decode_helper(
+                "kimi_delta_recurrent_scan_tiled_bf16",
+            )?,
+            kimi_delta_chunk_prepare_bf16: get_decode_helper("kimi_delta_chunk_prepare_bf16")?,
+            kimi_delta_conv_silu_bf16: get_decode_helper("kimi_delta_conv_silu_bf16")?,
+            kimi_delta_conv_silu_parallel_bf16: get_decode_helper(
+                "kimi_delta_conv_silu_parallel_bf16",
+            )?,
+            kimi_delta_conv_state_update_bf16: get_decode_helper(
+                "kimi_delta_conv_state_update_bf16",
+            )?,
+            kimi_delta_rmsnorm_gate_bf16: get_decode_helper("kimi_delta_rmsnorm_gate_bf16")?,
             deepseek_v4_tail_rope_bf16: get("deepseek_v4_tail_rope_bf16_kernel")?,
             deepseek_v4_sparse_scores: get("deepseek_v4_sparse_scores_kernel")?,
             deepseek_v4_sparse_scores_query_cached: get(
@@ -72559,30 +75686,47 @@ fn prefill_chunk_guard_prompt_tokens(
 }
 
 fn project_prefill_runtime_reserve_bytes(
-    calibration: Option<(usize, usize, usize, usize)>,
+    calibration: Option<&[(usize, usize)]>,
     measured_high_water_bytes: usize,
     tokens: usize,
 ) -> usize {
-    let Some((short_tokens, long_tokens, short_bytes, long_bytes)) = calibration else {
+    let Some(points) = calibration.filter(|points| !points.is_empty()) else {
         return measured_high_water_bytes;
     };
-    if long_tokens <= short_tokens {
-        return short_bytes.max(long_bytes).max(measured_high_water_bytes);
+    let first = points[0];
+    if tokens <= first.0 {
+        return first.1;
     }
-    let t = (tokens.saturating_sub(short_tokens) as f64) / (long_tokens - short_tokens) as f64;
-    let reserve = short_bytes as f64 + t * (long_bytes as f64 - short_bytes as f64);
-    let projected_bytes = reserve.max(0.0) as usize;
 
-    // Inside the measured range, retain the calibrated prompt-length curve so
-    // short prompts do not inherit a legitimately larger long-prompt reserve.
-    // Beyond the last measurement, however, a small negative slope caused by
-    // allocator/baseline variation must not extrapolate below a runtime demand
-    // directly observed during this startup. Positive slopes still extrapolate.
-    if tokens > long_tokens {
-        projected_bytes.max(measured_high_water_bytes)
-    } else {
-        projected_bytes
+    for window in points.windows(2) {
+        let (right_tokens, right_bytes) = window[1];
+        if tokens > right_tokens {
+            continue;
+        }
+        return right_bytes.max(measured_high_water_bytes);
     }
+
+    let last = points[points.len() - 1];
+    if points.len() == 1 {
+        return last.1.max(measured_high_water_bytes);
+    }
+    let previous = points[points.len() - 2];
+    if last.0 <= previous.0 {
+        return last.1.max(previous.1).max(measured_high_water_bytes);
+    }
+    let value_rise = last.1.saturating_sub(previous.1);
+    let projected_bytes = if value_rise == 0 {
+        last.1
+    } else {
+        let token_span = last.0 - previous.0;
+        let token_offset = tokens - last.0;
+        let extrapolated_rise = (value_rise as u128)
+            .saturating_mul(token_offset as u128)
+            .div_ceil(token_span as u128) as usize;
+        last.1.saturating_add(extrapolated_rise)
+    };
+
+    projected_bytes.max(measured_high_water_bytes)
 }
 
 fn stage_exact_export_range(
@@ -72651,7 +75795,7 @@ fn hqq_prefill_materialize_weight_elems(config: &PrefillModelConfig) -> usize {
         .max(kv_dim.checked_mul(h).unwrap_or(0))
         .max(h.checked_mul(q_dim).unwrap_or(0));
 
-    if config.layer_types.iter().any(|&t| t == 3) {
+    if config.layer_types.iter().any(|&t| t == 3 || t == 5) {
         let nk = config.la_num_k_heads;
         let nv = config.la_num_v_heads;
         let dk = config.la_k_head_dim;
@@ -72742,6 +75886,30 @@ fn deepseek_v4_hc_workspace_floats_per_token(config: &PrefillModelConfig) -> usi
         .saturating_add(hc.saturating_mul(hc))
 }
 
+fn glm5_hc_temp_state_elements(config: &PrefillModelConfig, max_tokens: usize) -> usize {
+    glm5_hc_temp_state_elements_from_geometry(
+        config.deepseek_v4_hc_mult,
+        config.hidden_size,
+        &config.layer_types,
+        max_tokens,
+    )
+}
+
+fn glm5_hc_temp_state_elements_from_geometry(
+    hc_mult: usize,
+    hidden_size: usize,
+    layer_types: &[u8],
+    max_tokens: usize,
+) -> usize {
+    let uses_kda_hyper_connections = hc_mult > 0 && layer_types.iter().any(|&kind| kind == 5);
+    if !uses_kda_hyper_connections {
+        return 0;
+    }
+    max_tokens
+        .saturating_mul(hc_mult)
+        .saturating_mul(hidden_size)
+}
+
 fn prefill_chunk_local_fp32_scratch_floats(
     config: &PrefillModelConfig,
     max_tokens: usize,
@@ -72749,7 +75917,7 @@ fn prefill_chunk_local_fp32_scratch_floats(
 ) -> usize {
     let h = config.hidden_size;
     let inter = config.intermediate_size;
-    let has_la = config.layer_types.iter().any(|&t| t == 3);
+    let has_la = config.layer_types.iter().any(|&t| t == 3 || t == 5);
 
     let mut max_gemm_n = std::cmp::max(h, inter * 2);
     let gqa_q_n = config
@@ -72848,7 +76016,9 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     let moe_inter = config.moe_intermediate_size;
     let shared_inter = config.shared_expert_intermediate_size.max(moe_inter);
     let topk = config.num_experts_per_tok.max(1);
-    let has_la = config.layer_types.iter().any(|&t| t == 3);
+    let has_la = config.layer_types.iter().any(|&t| t == 3 || t == 5);
+    let has_fla_delta = config.layer_types.iter().any(|&t| t == 3);
+    let has_kda_chunk = config.layer_types.iter().any(|&t| t == 5);
     let has_mamba2 = config.layer_types.iter().any(|&t| t == 1);
     let (native_history_fixed_bytes, native_history_per_token_bytes) =
         if config.deepseek_v4_native_cache && config.deepseek_v4_min_compress_ratio > 0 {
@@ -72930,6 +76100,9 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     per_token += 4;
     if config.deepseek_v4_hc_mult > 0 {
         per_token += config.deepseek_v4_hc_mult * h * 2;
+        if glm5_hc_temp_state_elements(config, 1) > 0 {
+            per_token += config.deepseek_v4_hc_mult * h * 2;
+        }
         per_token += deepseek_v4_selected_per_token(config, config.max_seq_len) * 4;
         // Prompt-wide chronological raw KV history. In the linear reservation
         // model max_tokens is the requested prompt length, not the chunk size.
@@ -73028,14 +76201,25 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
         let group_dim_proj = 2 * dk + 2 * hr * dv;
         per_token += config.la_num_k_heads * group_dim_proj * 2;
         // d_la_chunk_out, d_la_q_contig: nv * chunk_size * dk * 4 -- fixed, not per-token
-        // Dedicated FLA buffers allocated dynamically in prepare_for_prefill.
-        // Most scale linearly with padded T; h scales as T/64 chunks.
-        per_token += nv * 4; // d_fla_g_cumsum
-        per_token += nv * 64 * 4; // d_fla_a
-        per_token += nv * 64 * 2; // d_fla_ai
-        per_token += nv * dk * 2; // d_fla_w
-        per_token += nv * dv * 2 * 3; // d_fla_u + d_fla_v_new + d_fla_o
-        per_token += nv * dk * dv * 2 / 64; // d_fla_h averaged over 64-token chunks
+        if has_fla_delta {
+            // Dedicated gated-delta FLA buffers. KDA uses a different exact
+            // scratch family below, so do not reserve nonexistent buffers.
+            per_token += nv * 4; // d_fla_g_cumsum
+            per_token += nv * 64 * 4; // d_fla_a
+            per_token += nv * 64 * 2; // d_fla_ai
+            per_token += nv * dk * 2; // d_fla_w
+            per_token += nv * dv * 2 * 3; // d_fla_u + d_fla_v_new + d_fla_o
+            per_token += nv * dk * dv * 2 / FLA_PREFILL_BLOCK_TOKENS; // d_fla_h
+        }
+        if has_kda_chunk {
+            per_token += nv * dk * 4; // d_kda_g
+            per_token += nv * FLA_PREFILL_BLOCK_TOKENS * 2; // d_kda_aqk
+            per_token += nv * (FLA_PREFILL_BLOCK_TOKENS / 4) * 4; // d_kda_akkd
+            per_token += nv * FLA_PREFILL_BLOCK_TOKENS * 2; // d_kda_akk
+            per_token += nv * dk * 2 * 2; // d_kda_w + d_kda_kg
+            per_token += nv * dv * 2 * 2; // d_kda_u + d_kda_v_new
+            per_token += nv * dk * dv * 2 / FLA_PREFILL_BLOCK_TOKENS; // d_kda_h
+        }
     }
     // d_fa2_lse: max per-layer q_heads * max_tokens * 4 (FP32).
     // Step sliding-attention layers can have more q heads than the base full
@@ -73066,9 +76250,13 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     }
     // d_logits: vocab_size * 4
     fixed += config.vocab_size * 4;
-    if has_la {
+    if has_fla_delta {
         let state_elements = config.la_num_v_heads * config.la_k_head_dim * config.la_v_head_dim;
         fixed += state_elements * std::mem::size_of::<f32>(); // d_fla_final_state
+    }
+    if has_kda_chunk {
+        let state_elements = config.la_num_v_heads * config.la_k_head_dim * config.la_v_head_dim;
+        fixed += state_elements * std::mem::size_of::<f32>(); // d_kda_final_state
     }
     // d_expert_counts, offsets, write_offsets: n_routed * 4 each
     fixed += config.n_routed_experts.max(1) * 4 * 3;
@@ -73153,7 +76341,9 @@ fn estimate_scratch_vram_for_prompt(
         1
     };
     let has_mamba2 = config.layer_types.iter().any(|&t| t == 1);
-    let has_la = config.layer_types.iter().any(|&t| t == 3);
+    let has_la = config.layer_types.iter().any(|&t| t == 3 || t == 5);
+    let has_fla_delta = config.layer_types.iter().any(|&t| t == 3);
+    let has_kda_chunk = config.layer_types.iter().any(|&t| t == 5);
     let la_max_len = if has_la {
         max_tokens.saturating_add(config.la_chunk_size)
     } else {
@@ -73188,7 +76378,7 @@ fn estimate_scratch_vram_for_prompt(
         add(config.sms.saturating_mul(MARLIN_MAX_LOCK_SLOTS_PER_SM), 4); // d_shared_workspace
     }
 
-    if has_la {
+    if has_fla_delta {
         let nv = config.la_num_v_heads;
         let dk = config.la_k_head_dim;
         let dv = config.la_v_head_dim;
@@ -73210,6 +76400,33 @@ fn estimate_scratch_vram_for_prompt(
         add(nv.saturating_mul(dk).saturating_mul(dv), 4); // d_fla_final_state
         add(fla_total.saturating_mul(nv).saturating_mul(dv), 2); // d_fla_v_new
         add(fla_total.saturating_mul(nv).saturating_mul(dv), 2); // d_fla_o
+    }
+    if has_kda_chunk {
+        let nv = config.la_num_v_heads;
+        let dk = config.la_k_head_dim;
+        let dv = config.la_v_head_dim;
+        let block_tokens = FLA_PREFILL_BLOCK_TOKENS;
+        let total = max_tokens
+            .div_ceil(block_tokens)
+            .saturating_mul(block_tokens);
+        let chunks = total / block_tokens;
+        let token_heads = total.saturating_mul(nv);
+        add(token_heads.saturating_mul(dk), 4); // d_kda_g
+        add(token_heads.saturating_mul(block_tokens), 2); // d_kda_aqk
+        add(token_heads.saturating_mul(block_tokens / 4), 4); // d_kda_akkd
+        add(token_heads.saturating_mul(block_tokens), 2); // d_kda_akk
+        add(token_heads.saturating_mul(dk), 2); // d_kda_w
+        add(token_heads.saturating_mul(dv), 2); // d_kda_u
+        add(token_heads.saturating_mul(dk), 2); // d_kda_kg
+        add(
+            chunks
+                .saturating_mul(nv)
+                .saturating_mul(dk)
+                .saturating_mul(dv),
+            2,
+        ); // d_kda_h
+        add(nv.saturating_mul(dk).saturating_mul(dv), 4); // d_kda_final_state
+        add(token_heads.saturating_mul(dv), 2); // d_kda_v_new
     }
 
     let mut max_inter = std::cmp::max(
@@ -73246,6 +76463,7 @@ fn estimate_scratch_vram_for_prompt(
                 .saturating_mul(h),
             2,
         ); // DeepSeek-V4 HC state
+        add(glm5_hc_temp_state_elements(config, max_tokens), 2); // GLM mHC temp state
         add(
             max_tokens.saturating_mul(deepseek_v4_hc_workspace_floats_per_token(config)),
             4,
@@ -73525,7 +76743,7 @@ pub fn allocate_scratch_for_prompt(
     };
 
     let has_mamba2 = config.layer_types.iter().any(|&t| t == 1);
-    let has_la = config.layer_types.iter().any(|&t| t == 3);
+    let has_la = config.layer_types.iter().any(|&t| t == 3 || t == 5);
     let deepseek_v4_native_history_elems = deepseek_v4_native_history_elems(config, prompt_tokens)?;
     // LA pads to chunk_size multiples, so total_len can be up to max_tokens + chunk_size - 1
     let la_max_len = if has_la {
@@ -73600,6 +76818,14 @@ pub fn allocate_scratch_for_prompt(
             )?)
         } else {
             None
+        },
+        d_glm5_hc_temp_state: {
+            let elements = glm5_hc_temp_state_elements(config, max_tokens);
+            if elements > 0 {
+                Some(alloc_u16(elements, "glm5_hc_temp_state")?)
+            } else {
+                None
+            }
         },
         d_deepseek_v4_hc_workspace: if config.deepseek_v4_hc_mult > 0 {
             Some(alloc_f32(
@@ -74576,6 +77802,30 @@ Set KRASIS_NO_FLA=1 only if you explicitly want the slower custom LA path."
             state_recurrence_bv64,
             state_recurrence_bv64_enabled: use_state_bv64,
             output: load_fla_sym!("krasis_fla_chunk_fwd_kernel_o", FlaOutputFn),
+            kda_gate_cumsum: load_fla_sym!(
+                "krasis_fla_kda_gate_chunk_cumsum_vector_kernel",
+                FlaKdaGateCumsumFn
+            ),
+            kda_intra: load_fla_sym!(
+                "krasis_fla_chunk_kda_fwd_kernel_intra_sub_chunk",
+                FlaKdaIntraFn
+            ),
+            kda_inter_solve: load_fla_sym!(
+                "krasis_fla_chunk_kda_fwd_kernel_inter_solve_fused",
+                FlaKdaInterSolveFn
+            ),
+            kda_wy_repr: load_fla_sym!(
+                "krasis_fla_recompute_w_u_fwd_kda_kernel",
+                FlaKdaWyReprFn
+            ),
+            kda_state_recurrence: load_fla_sym!(
+                "krasis_fla_chunk_kda_state_recurrence",
+                FlaStateRecurrenceFn
+            ),
+            kda_output: load_fla_sym!(
+                "krasis_fla_chunk_gla_fwd_kernel_o_kda",
+                FlaKdaOutputFn
+            ),
         };
 
         log::info!("Loaded FLA (Flash Linear Attention) kernels from {}", path);
@@ -74597,10 +77847,39 @@ mod chunk_plan_tests {
     use super::{
         build_balanced_prefill_chunk_plan, build_balanced_prefill_chunk_plan_at_boundary,
         build_prefill_chunk_plan, build_prefill_chunk_plan_at_boundary,
+        glm5_hc_temp_state_elements_from_geometry,
+        kimi_delta_state_elements_from_geometry,
         portable_predicted_w1_requires_exact_resize, prefill_chunk_guard_prompt_tokens,
         project_prefill_runtime_reserve_bytes, shared_moe_inter_scratch_elements,
         stage_exact_export_launch_scalars, stage_exact_export_range, PortablePredictedW1Policy,
     };
+
+    #[test]
+    fn glm5_hc_temp_state_is_checkpoint_geometry_derived() {
+        assert_eq!(
+            glm5_hc_temp_state_elements_from_geometry(4, 4096, &[5, 5, 0], 300),
+            300 * 4 * 4096
+        );
+        assert_eq!(
+            glm5_hc_temp_state_elements_from_geometry(4, 4096, &[4, 4, 4], 300),
+            0
+        );
+        assert_eq!(
+            glm5_hc_temp_state_elements_from_geometry(0, 4096, &[5, 5, 0], 300),
+            0
+        );
+    }
+
+    #[test]
+    fn kimi_delta_state_reset_is_checkpoint_geometry_derived() {
+        assert_eq!(
+            kimi_delta_state_elements_from_geometry(64, 128, 4).unwrap(),
+            (3 * 64 * 128 * 3, 64 * 128 * 128)
+        );
+        assert!(kimi_delta_state_elements_from_geometry(0, 128, 4).is_err());
+        assert!(kimi_delta_state_elements_from_geometry(64, 0, 4).is_err());
+        assert!(kimi_delta_state_elements_from_geometry(64, 128, 1).is_err());
+    }
 
     #[test]
     fn uses_single_chunk_when_prompt_fits() {
@@ -74717,9 +77996,10 @@ mod chunk_plan_tests {
     fn runtime_reserve_projection_cannot_discard_measured_high_water() {
         let short_bytes = 3_264usize * 1024 * 1024;
         let long_bytes = 3_198usize * 1024 * 1024;
+        let points = [(500, short_bytes), (39_920, long_bytes)];
         assert_eq!(
             project_prefill_runtime_reserve_bytes(
-                Some((500, 39_920, short_bytes, long_bytes)),
+                Some(&points),
                 short_bytes,
                 62_403,
             ),
@@ -74731,9 +78011,10 @@ mod chunk_plan_tests {
     fn runtime_reserve_projection_still_extrapolates_positive_growth() {
         let short_bytes = 100usize * 1024 * 1024;
         let long_bytes = 200usize * 1024 * 1024;
+        let points = [(100, short_bytes), (200, long_bytes)];
         assert_eq!(
             project_prefill_runtime_reserve_bytes(
-                Some((100, 200, short_bytes, long_bytes)),
+                Some(&points),
                 long_bytes,
                 100,
             ),
@@ -74741,11 +78022,39 @@ mod chunk_plan_tests {
         );
         assert_eq!(
             project_prefill_runtime_reserve_bytes(
-                Some((100, 200, short_bytes, long_bytes)),
+                Some(&points),
+                long_bytes,
+                150,
+            ),
+            long_bytes,
+        );
+        assert_eq!(
+            project_prefill_runtime_reserve_bytes(
+                Some(&points),
                 long_bytes,
                 300,
             ),
             300usize * 1024 * 1024,
+        );
+    }
+
+    #[test]
+    fn runtime_reserve_uses_next_probe_for_concave_interval_growth() {
+        let mb = 1024usize * 1024;
+        let points = [(500, 3_524 * mb), (4_000, 3_624 * mb)];
+        assert_eq!(
+            project_prefill_runtime_reserve_bytes(Some(&points), 3_624 * mb, 1_000),
+            3_624 * mb,
+        );
+    }
+
+    #[test]
+    fn runtime_reserve_projection_retains_interior_high_water() {
+        let mb = 1024usize * 1024;
+        let points = [(500, 3_500 * mb), (4_000, 3_660 * mb), (40_000, 3_660 * mb)];
+        assert_eq!(
+            project_prefill_runtime_reserve_bytes(Some(&points), 3_660 * mb, 5_000),
+            3_660 * mb,
         );
     }
 
@@ -75524,6 +78833,8 @@ mod kernel_tests {
                     "mla_rmsnorm_prefix_bf16_fp32w_kernel",
                     "dsa_prefill_layernorm_rope_key_write_kernel",
                     "dsa_prefill_rope_query_bf16_kernel",
+                    "dsa_prefill_kpool_build_kernel",
+                    "dsa_prefill_kpool_expand_kernel",
                     "dsa_prefill_fused_scores_kernel",
                     "dsa_prefill_accumulate_gemm_scores_kernel",
                     "dsa_prefill_topk_sort_rows_kernel",
@@ -75532,13 +78843,21 @@ mod kernel_tests {
                     "dsa_prefill_topk_linear_merge_rows_kernel",
                     "mla_pack_qkv_rope_bf16_kernel",
                     "mla_cache_append_k4_kernel",
+                    "mla_cache_append_k6_kernel",
                     "mla_prefill_absorb_wkc_kernel",
                     "mla_prefill_sparse_attention_k4_kernel",
+                    "mla_prefill_sparse_attention_k6_kernel",
                     "mla_prefill_sparse_attention_k4_score_reuse_kernel",
+                    "mla_prefill_sparse_attention_k6_score_reuse_kernel",
                     "mla_prefill_sparse_scores_k4_grouped_exact_kernel",
+                    "mla_prefill_sparse_scores_k6_grouped_exact_kernel",
                     "mla_prefill_sparse_softmax_exact_kernel",
                     "mla_prefill_sparse_output_k4_grouped_exact_kernel",
+                    "mla_prefill_sparse_output_k6_grouped_exact_kernel",
                     "mla_prefill_gather_query_k4_f32_kernel",
+                    "mla_prefill_gather_query_k6_f32_kernel",
+                    "mla_prefill_gather_query_k4_f32_structured_kernel",
+                    "mla_prefill_gather_query_k6_f32_structured_kernel",
                     "mla_prefill_softmax_weights_warp_f32_kernel",
                     "mla_prefill_pack_attention_head_major_bf16_kernel",
                     "mla_prefill_scatter_wvc_head_major_bf16_kernel",
@@ -75681,12 +79000,25 @@ mod kernel_tests {
                     "mla_attention_k4",
                     "mla_sparse_attention_k4_g",
                     "mla_sparse_attention_k4",
+                    "mla_kv_cache_write_k6_g",
+                    "mla_kv_cache_write_k6",
+                    "mla_attention_k6_g",
+                    "mla_attention_k6",
+                    "mla_sparse_attention_k6_g",
+                    "mla_sparse_attention_k6",
                     "kv_cache_write_polar4",
                     "kv_cache_write_polar4_g",
                     "gqa_attention_polar4",
                     "gqa_attention_polar4_tiled_g",
                     "gqa_attention_polar4_reduce_g",
                     "gated_delta_net_step",
+                    "kimi_delta_recurrent_scan_bf16",
+                    "kimi_delta_recurrent_scan_tiled_bf16",
+                    "kimi_delta_chunk_prepare_bf16",
+                    "kimi_delta_conv_silu_bf16",
+                    "kimi_delta_conv_silu_parallel_bf16",
+                    "kimi_delta_conv_state_update_bf16",
+                    "kimi_delta_rmsnorm_gate_bf16",
                     "cpu_int4_to_marlin_repack_batched",
                     "cpu_bf16_scales_to_marlin_repack_batched",
                     "cpu_expert_to_marlin_repack_batched",
@@ -76349,6 +79681,232 @@ mod kernel_tests {
         }
     }
 
+    #[test]
+    fn test_glm53_kpool_prefill_matches_cpu_reference() {
+        let ctx = GpuTestCtx::new();
+        let build = ctx.get_kernel("dsa_prefill_kpool_build_kernel");
+        let score = ctx.get_kernel("dsa_prefill_fused_scores_kernel");
+        let expand = ctx.get_kernel("dsa_prefill_kpool_expand_kernel");
+
+        let tokens = 11usize;
+        let dim = 8usize;
+        let pool = 4usize;
+        let complete_pools = tokens / pool;
+        let heads = 2usize;
+        let rows = 5usize;
+        let positions = vec![0i32, 3, 4, 7, 10];
+        let bf16 = |value: f32| half::bf16::from_f32(value).to_f32();
+        let keys = (0..tokens * dim)
+            .map(|index| bf16(((index * 13 % 47) as f32 - 23.0) * 0.03125))
+            .collect::<Vec<_>>();
+        let gates = (0..tokens * dim)
+            .map(|index| bf16(((index * 7 % 31) as f32 - 15.0) * 0.0625))
+            .collect::<Vec<_>>();
+        let ape = (0..pool * dim)
+            .map(|index| bf16(((index * 5 % 19) as f32 - 9.0) * 0.046875))
+            .collect::<Vec<_>>();
+
+        let mut expected_pool = vec![0.0f32; complete_pools * dim];
+        for pool_idx in 0..complete_pools {
+            for channel in 0..dim {
+                let logits = (0..pool)
+                    .map(|offset| {
+                        gates[(pool_idx * pool + offset) * dim + channel]
+                            + ape[offset * dim + channel]
+                    })
+                    .collect::<Vec<_>>();
+                let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let probabilities = logits
+                    .iter()
+                    .map(|value| (*value - maximum).exp())
+                    .collect::<Vec<_>>();
+                let denominator = probabilities.iter().sum::<f32>();
+                let numerator = probabilities
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, probability)| {
+                        probability * keys[(pool_idx * pool + offset) * dim + channel]
+                    })
+                    .sum::<f32>();
+                expected_pool[pool_idx * dim + channel] = bf16(numerator / denominator);
+            }
+        }
+
+        let d_keys = ctx.upload_bf16(&f32_to_bf16_bytes(&keys));
+        let d_gates = ctx.upload_bf16(&f32_to_bf16_bytes(&gates));
+        let d_ape = ctx.upload_bf16(&f32_to_bf16_bytes(&ape));
+        let d_pool = ctx.alloc_bf16(complete_pools * dim);
+        let total_pool = complete_pools * dim;
+        unsafe {
+            let mut p0 = *d_keys.device_ptr() as u64;
+            let mut p1 = *d_gates.device_ptr() as u64;
+            let mut p2 = *d_pool.device_ptr() as u64;
+            let mut p3 = *d_ape.device_ptr() as u64;
+            let mut p4 = tokens as i32;
+            let mut p5 = dim as i32;
+            let mut p6 = pool as i32;
+            launch(
+                build,
+                (total_pool.div_ceil(128) as u32, 1, 1),
+                (128, 1, 1),
+                0,
+                ctx.stream(),
+                &mut [
+                    &mut p0 as *mut _ as *mut _,
+                    &mut p1 as *mut _ as *mut _,
+                    &mut p2 as *mut _ as *mut _,
+                    &mut p3 as *mut _ as *mut _,
+                    &mut p4 as *mut _ as *mut _,
+                    &mut p5 as *mut _ as *mut _,
+                    &mut p6 as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+        self::cuda_sync();
+        let actual_pool = ctx.download_bf16(&d_pool);
+        assert_close_bf16(
+            &actual_pool,
+            &f32_to_bf16_bytes(&expected_pool),
+            2e-3,
+            2e-3,
+            "glm53_kpool_keys",
+        );
+
+        let queries = (0..rows * heads * dim)
+            .map(|index| bf16(((index * 11 % 41) as f32 - 20.0) * 0.025))
+            .collect::<Vec<_>>();
+        let head_weights = (0..rows * heads)
+            .map(|index| bf16(0.4 + index as f32 * 0.035))
+            .collect::<Vec<_>>();
+        let score_scale = 0.125f32;
+        let d_queries = ctx.upload_bf16(&f32_to_bf16_bytes(&queries));
+        let d_head_weights = ctx.upload_bf16(&f32_to_bf16_bytes(&head_weights));
+        let d_positions = ctx.dev.htod_copy(positions.clone()).unwrap();
+        let d_scores = ctx.alloc_f32(rows * complete_pools);
+        unsafe {
+            let mut s0 = *d_scores.device_ptr() as u64;
+            let mut s1 = *d_pool.device_ptr() as u64;
+            let mut s2 = *d_queries.device_ptr() as u64;
+            let mut s3 = *d_head_weights.device_ptr() as u64;
+            let mut s4 = *d_positions.device_ptr() as u64;
+            let mut s5 = rows as i32;
+            let mut s6 = complete_pools as i32;
+            let mut s7 = heads as i32;
+            let mut s8 = dim as i32;
+            let mut s9 = score_scale;
+            let mut s10 = pool as i32;
+            launch(
+                score,
+                (complete_pools as u32, rows as u32, 1),
+                (64, 1, 1),
+                ((dim + heads) * std::mem::size_of::<f32>()) as u32,
+                ctx.stream(),
+                &mut [
+                    &mut s0 as *mut _ as *mut _,
+                    &mut s1 as *mut _ as *mut _,
+                    &mut s2 as *mut _ as *mut _,
+                    &mut s3 as *mut _ as *mut _,
+                    &mut s4 as *mut _ as *mut _,
+                    &mut s5 as *mut _ as *mut _,
+                    &mut s6 as *mut _ as *mut _,
+                    &mut s7 as *mut _ as *mut _,
+                    &mut s8 as *mut _ as *mut _,
+                    &mut s9 as *mut _ as *mut _,
+                    &mut s10 as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+        self::cuda_sync();
+        let actual_scores = ctx.dev.dtoh_sync_copy(&d_scores).unwrap();
+        for row in 0..rows {
+            let visible_pools = ((positions[row] + 1).max(0) as usize / pool).min(complete_pools);
+            for pool_idx in 0..complete_pools {
+                let expected = if pool_idx < visible_pools {
+                    (0..heads)
+                        .map(|head| {
+                            let dot = (0..dim)
+                                .map(|channel| {
+                                    queries[(row * heads + head) * dim + channel]
+                                        * expected_pool[pool_idx * dim + channel]
+                                })
+                                .sum::<f32>();
+                            head_weights[row * heads + head] * (dot * score_scale).max(0.0)
+                        })
+                        .sum::<f32>()
+                } else {
+                    0.0
+                };
+                let actual = actual_scores[row * complete_pools + pool_idx];
+                assert!(
+                    (actual - expected).abs() <= 2e-4,
+                    "GLM kpool score mismatch row={row} pool={pool_idx}: actual={actual} expected={expected}",
+                );
+            }
+        }
+
+        let selected_pool_width = 2usize;
+        let raw_width = selected_pool_width * pool + pool - 1;
+        let selected_pools = vec![0, 1, 0, 1, 0, 1, 1, 0, 1, 0];
+        let d_selected_pools = ctx.dev.htod_copy(selected_pools.clone()).unwrap();
+        let d_raw = ctx.alloc_i32(rows * raw_width);
+        unsafe {
+            let mut e0 = *d_selected_pools.device_ptr() as u64;
+            let mut e1 = *d_raw.device_ptr() as u64;
+            let mut e2 = *d_positions.device_ptr() as u64;
+            let mut e3 = rows as i32;
+            let mut e4 = selected_pool_width as i32;
+            let mut e5 = raw_width as i32;
+            let mut e6 = pool as i32;
+            launch(
+                expand,
+                ((rows * raw_width).div_ceil(128) as u32, 1, 1),
+                (128, 1, 1),
+                0,
+                ctx.stream(),
+                &mut [
+                    &mut e0 as *mut _ as *mut _,
+                    &mut e1 as *mut _ as *mut _,
+                    &mut e2 as *mut _ as *mut _,
+                    &mut e3 as *mut _ as *mut _,
+                    &mut e4 as *mut _ as *mut _,
+                    &mut e5 as *mut _ as *mut _,
+                    &mut e6 as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+        self::cuda_sync();
+        let actual_raw = ctx.dev.dtoh_sync_copy(&d_raw).unwrap();
+        let mut expected_raw = vec![-1i32; rows * raw_width];
+        for row in 0..rows {
+            let visible = (positions[row] + 1).max(0) as usize;
+            let visible_pools = visible / pool;
+            let selected_pool_count = selected_pool_width.min(visible_pools);
+            for selected in 0..selected_pool_count {
+                let pool_idx = selected_pools[row * selected_pool_width + selected] as usize;
+                if pool_idx < visible_pools {
+                    for offset in 0..pool {
+                        expected_raw[row * raw_width + selected * pool + offset] =
+                            (pool_idx * pool + offset) as i32;
+                    }
+                }
+            }
+            for tail in 0..visible % pool {
+                expected_raw[row * raw_width + selected_pool_count * pool + tail] =
+                    (visible_pools * pool + tail) as i32;
+            }
+            let consumed = visible.min(raw_width);
+            let valid_prefix = &expected_raw[row * raw_width..row * raw_width + consumed];
+            assert!(
+                valid_prefix.iter().all(|index| *index >= 0),
+                "GLM k-pool causal prefix contains a sentinel at row={row}: {valid_prefix:?}",
+            );
+        }
+        assert_eq!(actual_raw, expected_raw);
+    }
+
     #[cfg(has_decode_kernels)]
     #[test]
     fn test_synthetic_repack_byte_exact_glm_and_qcn_experts() {
@@ -76529,6 +80087,35 @@ mod kernel_tests {
                     };
                     output[row * logical_dim + block * 16 + i] =
                         scale * (i32::from(code) - 8) as f32;
+                }
+            }
+        }
+        output
+    }
+
+    fn decode_mla_k6_rows(bytes: &[u8], rows: usize, logical_dim: usize) -> Vec<f32> {
+        assert_eq!(logical_dim % 16, 0);
+        let blocks = logical_dim / 16;
+        let row_bytes = blocks * 14;
+        assert_eq!(bytes.len(), rows * row_bytes);
+        let mut output = vec![0.0f32; rows * logical_dim];
+        for row in 0..rows {
+            for block in 0..blocks {
+                let offset = row * row_bytes + block * 14;
+                let scale =
+                    half::bf16::from_bits(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]))
+                        .to_f32();
+                let packed = &bytes[offset + 2..offset + 14];
+                for i in 0..16 {
+                    let bit = i * 6;
+                    let byte = bit / 8;
+                    let shift = bit % 8;
+                    let mut code = u16::from(packed[byte]) >> shift;
+                    if shift > 2 {
+                        code |= u16::from(packed[byte + 1]) << (8 - shift);
+                    }
+                    output[row * logical_dim + block * 16 + i] =
+                        scale * (i32::from(code & 0x3f) - 32) as f32;
                 }
             }
         }
@@ -79547,6 +83134,9 @@ mod kernel_tests {
         assert!(!dsa_prefill_candidate_enabled(false, None));
         assert!(!dsa_prefill_candidate_enabled(true, Some(false)));
         assert!(dsa_prefill_candidate_enabled(false, Some(true)));
+        assert!(native_dsa_gathered_capability(true, false));
+        assert!(!native_dsa_gathered_capability(false, false));
+        assert!(!native_dsa_gathered_capability(true, true));
         assert!(dsa_mla_gathered_default_enabled(true, false, false));
         assert!(!dsa_mla_gathered_default_enabled(false, false, false));
         assert!(!dsa_mla_gathered_default_enabled(true, true, false));
@@ -79554,7 +83144,105 @@ mod kernel_tests {
     }
 
     #[test]
+    fn test_dsa_mla_gathered_compute_mode_parser_is_strict() {
+        assert_eq!(
+            parse_dsa_mla_gathered_compute_mode(None).unwrap(),
+            DsaMlaGatheredComputeMode::Pedantic,
+        );
+        assert_eq!(
+            parse_dsa_mla_gathered_compute_mode(Some("pedantic")).unwrap(),
+            DsaMlaGatheredComputeMode::Pedantic,
+        );
+        assert_eq!(
+            parse_dsa_mla_gathered_compute_mode(Some("tf32_score")).unwrap(),
+            DsaMlaGatheredComputeMode::Tf32Score,
+        );
+        assert_eq!(
+            parse_dsa_mla_gathered_compute_mode(Some("tf32_output")).unwrap(),
+            DsaMlaGatheredComputeMode::Tf32Output,
+        );
+        assert_eq!(
+            parse_dsa_mla_gathered_compute_mode(Some("tf32_both")).unwrap(),
+            DsaMlaGatheredComputeMode::Tf32Both,
+        );
+        assert!(parse_dsa_mla_gathered_compute_mode(Some("tf32")).is_err());
+        assert!(parse_dsa_mla_gathered_compute_mode(Some("fast")).is_err());
+        assert_eq!(
+            parse_dsa_mla_gather_mode(None).unwrap(),
+            DsaMlaGatherMode::Auto,
+        );
+        assert_eq!(
+            parse_dsa_mla_gather_mode(Some("auto")).unwrap(),
+            DsaMlaGatherMode::Auto,
+        );
+        assert_eq!(
+            parse_dsa_mla_gather_mode(Some("flat")).unwrap(),
+            DsaMlaGatherMode::Flat,
+        );
+        assert_eq!(
+            parse_dsa_mla_gather_mode(Some("structured")).unwrap(),
+            DsaMlaGatherMode::Structured,
+        );
+        assert!(parse_dsa_mla_gather_mode(Some("warp")).is_err());
+    }
+
+    #[test]
     fn test_dsa_prefill_selection_plan() {
+        assert_eq!(dsa_score_context_rows(300, 4), 75);
+        assert_eq!(dsa_score_context_rows(303, 4), 75);
+        assert_eq!(dsa_score_context_rows(304, 4), 76);
+        assert_eq!(dsa_score_context_rows(303, 1), 303);
+        assert_eq!(
+            glm5_ffn_kind(true, false).unwrap(),
+            Glm5FfnKind::RoutedMoe
+        );
+        assert_eq!(glm5_ffn_kind(false, true).unwrap(), Glm5FfnKind::Dense);
+        assert!(glm5_ffn_kind(true, true).is_err());
+        assert!(glm5_ffn_kind(false, false).is_err());
+        assert_eq!(
+            glm5_attention_output_location(5).unwrap(),
+            Glm5AttentionOutputLocation::Hidden
+        );
+        assert_eq!(
+            glm5_attention_output_location(0).unwrap(),
+            Glm5AttentionOutputLocation::AttentionScratch
+        );
+        assert!(glm5_attention_output_location(1).is_err());
+        let pooled = DsaPrefillLayerDescriptor {
+            owner_layer_idx: 3,
+            owner_weights_present: true,
+            index_topk: 2048,
+            index_head_dim: 128,
+            index_n_heads: 32,
+            qk_rope_head_dim: 0,
+            q_lora_rank: 1536,
+            index_kpool: 4,
+            index_kpool_compress: true,
+            index_kpool_always_select_tail: true,
+        };
+        assert_eq!(pooled.workspace_selection_geometry().unwrap(), (512, 2051, 4));
+        assert_eq!(
+            DsaPrefillLayerDescriptor {
+                index_kpool_compress: false,
+                index_kpool_always_select_tail: false,
+                ..pooled
+            }
+            .workspace_selection_geometry()
+            .unwrap(),
+            (2048, 2048, 1)
+        );
+        assert!(DsaPrefillLayerDescriptor {
+            index_kpool: 0,
+            ..pooled
+        }
+        .workspace_selection_geometry()
+        .is_err());
+        assert!(DsaPrefillLayerDescriptor {
+            index_topk: 2049,
+            ..pooled
+        }
+        .workspace_selection_geometry()
+        .is_err());
         let short_row_bytes = 2048 * std::mem::size_of::<f32>();
         let short = plan_dsa_prefill_selection(2048, 2048, 2048, 2048 * short_row_bytes, 1, 1)
             .expect("short-context plan");
@@ -80181,15 +83869,14 @@ mod kernel_tests {
             (
                 65usize,
                 37usize,
-                3usize,
+                32usize,
+                128usize,
                 7usize,
-                7usize,
-                (8i32..73)
-                    .map(|position| (position + 1) / 4 - 1)
-                    .collect::<Vec<_>>(),
+                (8i32..73).collect::<Vec<_>>(),
                 Some((8usize, 4usize)),
             ),
         ] {
+            let context_divisor = causal_geometry.map(|(_, ratio)| ratio).unwrap_or(1);
             let raw_queries_host = (0..rows * num_heads * head_dim)
                 .map(|index| round_bf16((index as f32 * 0.0173).sin() * 0.25))
                 .collect::<Vec<_>>();
@@ -80255,11 +83942,7 @@ mod kernel_tests {
                     } else {
                         0
                     },
-                    if index_mode.uses_causal_gemm_bands() {
-                        causal_geometry.expect("causal geometry").1
-                    } else {
-                        0
-                    },
+                    context_divisor,
                     index_mode,
                     DeepseekV4PrefillTopkMode::Bitonic,
                     handle,
@@ -80333,8 +84016,9 @@ mod kernel_tests {
                         "causal-band and full learned-index selections differ"
                     );
                     for row in 0..rows {
-                        let causal_context =
-                            (positions_host[row] + 1).clamp(0, context_end as i32) as usize;
+                        let causal_context = ((positions_host[row] + 1).max(0) as usize
+                            / context_divisor)
+                            .min(context_end);
                         assert_eq!(
                             &actual_scores[row * context_end..row * context_end + causal_context],
                             &full_scores[row * context_end..row * context_end + causal_context],
@@ -80346,8 +84030,9 @@ mod kernel_tests {
                 let gamma_dim =
                     (head_dim as f32 * f32::EPSILON) / (1.0 - head_dim as f32 * f32::EPSILON);
                 for row in 0..rows {
-                    let causal_context =
-                        (positions_host[row] + 1).clamp(0, context_end as i32) as usize;
+                    let causal_context = ((positions_host[row] + 1).max(0) as usize
+                        / context_divisor)
+                        .min(context_end);
                     let mut row_actual = Vec::with_capacity(causal_context);
                     for token in 0..causal_context {
                         let mut expected = 0.0f32;
@@ -80521,6 +84206,436 @@ mod kernel_tests {
                 actual[index],
                 expected,
             );
+        }
+    }
+
+    #[test]
+    fn test_native_mla_k6_prefill_and_decode_writers_match_cpu() {
+        let ctx = GpuTestCtx::new();
+        let rows = 3usize;
+        let kv_rank = 16usize;
+        let cache_dim = 32usize;
+        let block_bytes = 14usize;
+        let row_bytes = cache_dim / 16 * block_bytes;
+        let source: Vec<f32> = (0..rows * kv_rank)
+            .map(|index| ((index * 13 % 47) as f32 - 23.0) / 16.0)
+            .collect();
+        let source_bf16 = bf16_bytes_to_f32(&f32_to_bf16_bytes(&source));
+        let d_source_bf16 = ctx.upload_bf16(&f32_to_bf16_bytes(&source));
+        let d_dummy_bf16 = ctx.alloc_bf16(1);
+        let d_prefill_cache = ctx.alloc_u8(rows * row_bytes);
+        let d_dummy_cache = ctx.alloc_u8(1);
+        let prefill_kernel = ctx.get_kernel("mla_cache_append_k6_kernel");
+        let mut p0 = *d_prefill_cache.device_ptr() as u64;
+        let mut p1 = *d_dummy_cache.device_ptr() as u64;
+        let mut p2 = *d_source_bf16.device_ptr() as u64;
+        let mut p3 = *d_dummy_bf16.device_ptr() as u64;
+        let mut p4 = 0i32;
+        let mut p5 = rows as i32;
+        let mut p6 = kv_rank as i32;
+        let mut p7 = kv_rank as i32;
+        let mut p8 = cache_dim as i32;
+        let mut p9 = 1i32;
+        let mut p10 = 0i32;
+        let mut p11 = 0i32;
+        let mut p12 = 0i32;
+        unsafe {
+            launch(
+                prefill_kernel,
+                (rows as u32, 1, 1),
+                (32, 1, 1),
+                0,
+                ctx.stream(),
+                &mut [
+                    &mut p0 as *mut _ as *mut _,
+                    &mut p1 as *mut _ as *mut _,
+                    &mut p2 as *mut _ as *mut _,
+                    &mut p3 as *mut _ as *mut _,
+                    &mut p4 as *mut _ as *mut _,
+                    &mut p5 as *mut _ as *mut _,
+                    &mut p6 as *mut _ as *mut _,
+                    &mut p7 as *mut _ as *mut _,
+                    &mut p8 as *mut _ as *mut _,
+                    &mut p9 as *mut _ as *mut _,
+                    &mut p10 as *mut _ as *mut _,
+                    &mut p11 as *mut _ as *mut _,
+                    &mut p12 as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+        self::cuda_sync();
+        let prefill_bytes = ctx.download_u8(&d_prefill_cache);
+        let decoded = decode_mla_k6_rows(&prefill_bytes, rows, cache_dim);
+        for row in 0..rows {
+            for dim in 0..kv_rank {
+                let block_offset = row * row_bytes + dim / 16 * block_bytes;
+                let scale = half::bf16::from_bits(u16::from_le_bytes([
+                    prefill_bytes[block_offset],
+                    prefill_bytes[block_offset + 1],
+                ]))
+                .to_f32();
+                let actual = decoded[row * cache_dim + dim];
+                let expected = source_bf16[row * kv_rank + dim];
+                assert!(
+                    (actual - expected).abs() <= scale * 0.55 + 0.002,
+                    "MLA K6 prefill mismatch row={row} dim={dim}: actual={actual} expected={expected} scale={scale}"
+                );
+            }
+            assert!(
+                decoded[row * cache_dim + kv_rank..(row + 1) * cache_dim]
+                    .iter()
+                    .all(|value| value.abs() <= 1e-7),
+                "MLA K6 padded cache tail is nonzero at row {row}"
+            );
+        }
+
+        // The structured gathered preparation changes only scheduling. Prove
+        // the production K6 dequantized KV, absorbed query, and sentinel score
+        // buffers are bit-identical to the established flat kernel.
+        let gather_rows = 2usize;
+        let gather_heads = 2usize;
+        let gather_selected = 3usize;
+        let gathered_elements = gather_rows * gather_selected * cache_dim;
+        let query_elements = gather_rows * gather_heads * cache_dim;
+        let score_elements = gather_rows * gather_heads * gather_selected;
+        let d_gather_q = ctx
+            .dev
+            .htod_copy(
+                (0..query_elements)
+                    .map(|index| ((index * 11 % 37) as f32 - 18.0) * 0.015625)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let d_gather_indices = ctx
+            .dev
+            .htod_copy(vec![0i32, -1, 2, 1, 0, -1])
+            .unwrap();
+        let d_gather_positions = ctx.dev.htod_copy(vec![2i32, 1]).unwrap();
+        let d_flat_gathered = ctx.alloc_f32(gathered_elements);
+        let d_flat_query = ctx.alloc_f32(query_elements);
+        let d_flat_scores = ctx.alloc_f32(score_elements);
+        let d_structured_gathered = ctx.alloc_f32(gathered_elements);
+        let d_structured_query = ctx.alloc_f32(query_elements);
+        let d_structured_scores = ctx.alloc_f32(score_elements);
+        let flat_kernel = ctx.get_kernel("mla_prefill_gather_query_k6_f32_kernel");
+        let structured_kernel =
+            ctx.get_kernel("mla_prefill_gather_query_k6_f32_structured_kernel");
+        let flat_work = gathered_elements + query_elements + score_elements;
+        let structured_blocks = gather_rows
+            * (gather_selected.div_ceil(8) + gather_heads.div_ceil(8) + 1);
+        for (kernel, grid, gathered_ptr, query_ptr, score_ptr) in [
+            (
+                flat_kernel,
+                flat_work.div_ceil(256),
+                *d_flat_gathered.device_ptr() as u64,
+                *d_flat_query.device_ptr() as u64,
+                *d_flat_scores.device_ptr() as u64,
+            ),
+            (
+                structured_kernel,
+                structured_blocks,
+                *d_structured_gathered.device_ptr() as u64,
+                *d_structured_query.device_ptr() as u64,
+                *d_structured_scores.device_ptr() as u64,
+            ),
+        ] {
+            let mut g0 = gathered_ptr;
+            let mut g1 = query_ptr;
+            let mut g2 = score_ptr;
+            let mut g3 = *d_gather_q.device_ptr() as u64;
+            let mut g4 = *d_dummy_bf16.device_ptr() as u64;
+            let mut g5 = *d_prefill_cache.device_ptr() as u64;
+            let mut g6 = *d_dummy_cache.device_ptr() as u64;
+            let mut g7 = *d_gather_indices.device_ptr() as u64;
+            let mut g8 = *d_gather_positions.device_ptr() as u64;
+            let mut g9 = 0i32;
+            let mut g10 = gather_rows as i32;
+            let mut g11 = gather_heads as i32;
+            let mut g12 = cache_dim as i32;
+            let mut g13 = cache_dim as i32;
+            let mut g14 = 0i32;
+            let mut g15 = cache_dim as i32;
+            let mut g16 = gather_selected as i32;
+            let mut g17 = rows as i32;
+            unsafe {
+                launch(
+                    kernel,
+                    (grid as u32, 1, 1),
+                    (256, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut g0 as *mut _ as *mut _,
+                        &mut g1 as *mut _ as *mut _,
+                        &mut g2 as *mut _ as *mut _,
+                        &mut g3 as *mut _ as *mut _,
+                        &mut g4 as *mut _ as *mut _,
+                        &mut g5 as *mut _ as *mut _,
+                        &mut g6 as *mut _ as *mut _,
+                        &mut g7 as *mut _ as *mut _,
+                        &mut g8 as *mut _ as *mut _,
+                        &mut g9 as *mut _ as *mut _,
+                        &mut g10 as *mut _ as *mut _,
+                        &mut g11 as *mut _ as *mut _,
+                        &mut g12 as *mut _ as *mut _,
+                        &mut g13 as *mut _ as *mut _,
+                        &mut g14 as *mut _ as *mut _,
+                        &mut g15 as *mut _ as *mut _,
+                        &mut g16 as *mut _ as *mut _,
+                        &mut g17 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        self::cuda_sync();
+        for (label, flat, structured) in [
+            (
+                "gathered KV",
+                ctx.dev.dtoh_sync_copy(&d_flat_gathered).unwrap(),
+                ctx.dev.dtoh_sync_copy(&d_structured_gathered).unwrap(),
+            ),
+            (
+                "query",
+                ctx.dev.dtoh_sync_copy(&d_flat_query).unwrap(),
+                ctx.dev.dtoh_sync_copy(&d_structured_query).unwrap(),
+            ),
+            (
+                "scores",
+                ctx.dev.dtoh_sync_copy(&d_flat_scores).unwrap(),
+                ctx.dev.dtoh_sync_copy(&d_structured_scores).unwrap(),
+            ),
+        ] {
+            for (index, (flat, structured)) in flat.iter().zip(structured.iter()).enumerate() {
+                assert_eq!(
+                    flat.to_bits(),
+                    structured.to_bits(),
+                    "MLA K6 structured {label} mismatch at {index}: flat={flat} structured={structured}"
+                );
+            }
+        }
+
+        #[cfg(has_decode_kernels)]
+        {
+            let d_source_f32 = ctx.dev.htod_copy(source_bf16.clone()).unwrap();
+            let d_decode_cache = ctx.alloc_u8(rows * row_bytes);
+            let d_graph_cache = ctx.alloc_u8(rows * row_bytes);
+            let write_kernel = ctx.get_decode_kernel("mla_kv_cache_write_k6");
+            let graph_kernel = ctx.get_decode_kernel("mla_kv_cache_write_k6_g");
+            let source_row_bytes = (kv_rank * std::mem::size_of::<f32>()) as u64;
+            for row in 0..rows {
+                let d_position = ctx.dev.htod_copy(vec![row as i32]).unwrap();
+                let source_ptr = *d_source_f32.device_ptr() as u64
+                    + u64::try_from(row).unwrap() * source_row_bytes;
+                let mut w0 = *d_decode_cache.device_ptr() as u64;
+                let mut w1 = *d_dummy_cache.device_ptr() as u64;
+                let mut w2 = source_ptr;
+                let mut w3 = source_ptr;
+                let mut w4 = row as i32;
+                let mut w5 = kv_rank as i32;
+                let mut w6 = cache_dim as i32;
+                let mut w7 = 0i32;
+                unsafe {
+                    launch(
+                        write_kernel,
+                        (1, 1, 1),
+                        (256, 1, 1),
+                        0,
+                        ctx.stream(),
+                        &mut [
+                            &mut w0 as *mut _ as *mut _,
+                            &mut w1 as *mut _ as *mut _,
+                            &mut w2 as *mut _ as *mut _,
+                            &mut w3 as *mut _ as *mut _,
+                            &mut w4 as *mut _ as *mut _,
+                            &mut w5 as *mut _ as *mut _,
+                            &mut w6 as *mut _ as *mut _,
+                            &mut w7 as *mut _ as *mut _,
+                        ],
+                    )
+                    .unwrap();
+                }
+                let mut g0 = *d_graph_cache.device_ptr() as u64;
+                let mut g1 = *d_dummy_cache.device_ptr() as u64;
+                let mut g2 = source_ptr;
+                let mut g3 = source_ptr;
+                let mut g4 = *d_position.device_ptr() as u64;
+                let mut g5 = kv_rank as i32;
+                let mut g6 = cache_dim as i32;
+                let mut g7 = 0i32;
+                unsafe {
+                    launch(
+                        graph_kernel,
+                        (1, 1, 1),
+                        (256, 1, 1),
+                        0,
+                        ctx.stream(),
+                        &mut [
+                            &mut g0 as *mut _ as *mut _,
+                            &mut g1 as *mut _ as *mut _,
+                            &mut g2 as *mut _ as *mut _,
+                            &mut g3 as *mut _ as *mut _,
+                            &mut g4 as *mut _ as *mut _,
+                            &mut g5 as *mut _ as *mut _,
+                            &mut g6 as *mut _ as *mut _,
+                            &mut g7 as *mut _ as *mut _,
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+            self::cuda_sync();
+            assert_eq!(
+                ctx.download_u8(&d_decode_cache),
+                prefill_bytes,
+                "ordinary decode MLA K6 writer differs from prefill capture"
+            );
+            assert_eq!(
+                ctx.download_u8(&d_graph_cache),
+                prefill_bytes,
+                "graph decode MLA K6 writer differs from prefill capture"
+            );
+
+            // Exercise the ordinary and graph K6 sparse readers with two
+            // non-contiguous positions. This covers both score construction
+            // and the selected-value softmax reduction against the exact
+            // dequantized cache values produced above.
+            let q_absorbed: Vec<f32> = (0..cache_dim)
+                .map(|dim| ((dim * 7 % 29) as f32 - 14.0) * 0.03125)
+                .collect();
+            let selected_indices = vec![2i32, 0i32];
+            let selected_count = selected_indices.len();
+            let d_q_absorbed = ctx.dev.htod_copy(q_absorbed.clone()).unwrap();
+            let d_selected_indices = ctx.dev.htod_copy(selected_indices.clone()).unwrap();
+            let d_seq_len = ctx.dev.htod_copy(vec![rows as i32]).unwrap();
+            let d_sparse_out = ctx.alloc_f32(cache_dim);
+            let d_sparse_graph_out = ctx.alloc_f32(cache_dim);
+            let sparse_kernel = ctx.get_decode_kernel("mla_sparse_attention_k6");
+            let sparse_graph_kernel = ctx.get_decode_kernel("mla_sparse_attention_k6_g");
+            let threads = 256u32;
+            let num_warps = threads / 32;
+            let shared_mem = (cache_dim as u32 + num_warps + 4096) * 4;
+            let sm_scale = 0.25f32;
+
+            let mut s0 = *d_sparse_out.device_ptr() as u64;
+            let mut s1 = *d_q_absorbed.device_ptr() as u64;
+            let mut s2 = *d_dummy_bf16.device_ptr() as u64;
+            let mut s3 = *d_prefill_cache.device_ptr() as u64;
+            let mut s4 = *d_dummy_cache.device_ptr() as u64;
+            let mut s5 = *d_selected_indices.device_ptr() as u64;
+            let mut s6 = sm_scale;
+            let mut s7 = 1i32;
+            let mut s8 = cache_dim as i32;
+            let mut s9 = 0i32;
+            let mut s10 = selected_count as i32;
+            let mut s11 = rows as i32;
+            unsafe {
+                launch(
+                    sparse_kernel,
+                    (1, 1, 1),
+                    (threads, 1, 1),
+                    shared_mem,
+                    ctx.stream(),
+                    &mut [
+                        &mut s0 as *mut _ as *mut _,
+                        &mut s1 as *mut _ as *mut _,
+                        &mut s2 as *mut _ as *mut _,
+                        &mut s3 as *mut _ as *mut _,
+                        &mut s4 as *mut _ as *mut _,
+                        &mut s5 as *mut _ as *mut _,
+                        &mut s6 as *mut _ as *mut _,
+                        &mut s7 as *mut _ as *mut _,
+                        &mut s8 as *mut _ as *mut _,
+                        &mut s9 as *mut _ as *mut _,
+                        &mut s10 as *mut _ as *mut _,
+                        &mut s11 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+
+            let mut sg0 = *d_sparse_graph_out.device_ptr() as u64;
+            let mut sg1 = *d_q_absorbed.device_ptr() as u64;
+            let mut sg2 = *d_dummy_bf16.device_ptr() as u64;
+            let mut sg3 = *d_graph_cache.device_ptr() as u64;
+            let mut sg4 = *d_dummy_cache.device_ptr() as u64;
+            let mut sg5 = *d_selected_indices.device_ptr() as u64;
+            let mut sg6 = sm_scale;
+            let mut sg7 = 1i32;
+            let mut sg8 = cache_dim as i32;
+            let mut sg9 = 0i32;
+            let mut sg10 = selected_count as i32;
+            let mut sg11 = *d_seq_len.device_ptr() as u64;
+            unsafe {
+                launch(
+                    sparse_graph_kernel,
+                    (1, 1, 1),
+                    (threads, 1, 1),
+                    shared_mem,
+                    ctx.stream(),
+                    &mut [
+                        &mut sg0 as *mut _ as *mut _,
+                        &mut sg1 as *mut _ as *mut _,
+                        &mut sg2 as *mut _ as *mut _,
+                        &mut sg3 as *mut _ as *mut _,
+                        &mut sg4 as *mut _ as *mut _,
+                        &mut sg5 as *mut _ as *mut _,
+                        &mut sg6 as *mut _ as *mut _,
+                        &mut sg7 as *mut _ as *mut _,
+                        &mut sg8 as *mut _ as *mut _,
+                        &mut sg9 as *mut _ as *mut _,
+                        &mut sg10 as *mut _ as *mut _,
+                        &mut sg11 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+            self::cuda_sync();
+
+            let scores: Vec<f32> = selected_indices
+                .iter()
+                .map(|&row| {
+                    q_absorbed
+                        .iter()
+                        .zip(decoded[row as usize * cache_dim..(row as usize + 1) * cache_dim].iter())
+                        .map(|(query, cached)| query * cached)
+                        .sum::<f32>()
+                        * sm_scale
+                })
+                .collect();
+            let score_max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let weights: Vec<f32> = scores
+                .iter()
+                .map(|score| (score - score_max).exp())
+                .collect();
+            let weight_sum: f32 = weights.iter().sum();
+            let expected: Vec<f32> = (0..cache_dim)
+                .map(|dim| {
+                    selected_indices
+                        .iter()
+                        .zip(weights.iter())
+                        .map(|(&row, weight)| weight * decoded[row as usize * cache_dim + dim])
+                        .sum::<f32>()
+                        / weight_sum
+                })
+                .collect();
+            for (label, actual) in [
+                ("ordinary", ctx.dev.dtoh_sync_copy(&d_sparse_out).unwrap()),
+                (
+                    "graph",
+                    ctx.dev.dtoh_sync_copy(&d_sparse_graph_out).unwrap(),
+                ),
+            ] {
+                for (dim, (&actual, &expected)) in
+                    actual.iter().zip(expected.iter()).enumerate()
+                {
+                    assert!(
+                        (actual - expected).abs() <= 2e-4,
+                        "MLA sparse K6 {label} mismatch dim={dim}: actual={actual} expected={expected}"
+                    );
+                }
+            }
         }
     }
 
@@ -82025,58 +86140,108 @@ mod kernel_tests {
             let d_gathered = ctx.alloc_f32(gathered_elements);
             let d_gathered_query = ctx.alloc_f32(query_elements);
             let d_gathered_scores = ctx.alloc_f32(score_elements);
+            let d_structured_gathered = ctx.alloc_f32(gathered_elements);
+            let d_structured_query = ctx.alloc_f32(query_elements);
+            let d_structured_scores = ctx.alloc_f32(score_elements);
             let d_gathered_weights = ctx.alloc_f32(score_elements);
             let d_gathered_output = ctx.alloc_f32(prefill_rows * num_heads * ckv_dim);
             let gather_kernel = ctx.get_kernel("mla_prefill_gather_query_k4_f32_kernel");
+            let structured_gather_kernel =
+                ctx.get_kernel("mla_prefill_gather_query_k4_f32_structured_kernel");
             let softmax_kernel = ctx.get_kernel("mla_prefill_softmax_weights_warp_f32_kernel");
             let gather_work = gathered_elements + query_elements + score_elements;
-            let mut gg0 = *d_gathered.device_ptr() as u64;
-            let mut gg1 = *d_gathered_query.device_ptr() as u64;
-            let mut gg2 = *d_gathered_scores.device_ptr() as u64;
-            let mut gg3 = *d_prefill_q_absorbed.device_ptr() as u64;
-            let mut gg4 = *d_prefill_q.device_ptr() as u64;
-            let mut gg5 = *d_ckv_cache.device_ptr() as u64;
-            let mut gg6 = *d_kpe_cache.device_ptr() as u64;
-            let mut gg7 = *d_prefill_selected.device_ptr() as u64;
-            let mut gg8 = *d_prefill_positions.device_ptr() as u64;
-            let mut gg9 = 0i32;
-            let mut gg10 = prefill_rows as i32;
-            let mut gg11 = num_heads as i32;
-            let mut gg12 = qk_dim as i32;
-            let mut gg13 = nope_dim as i32;
-            let mut gg14 = rope_dim as i32;
-            let mut gg15 = ckv_dim as i32;
-            let mut gg16 = selected_per_row as i32;
-            let mut gg17 = token_count as i32;
-            unsafe {
-                launch(
+            let structured_blocks = prefill_rows
+                * (selected_per_row.div_ceil(8) + num_heads.div_ceil(8) + 1);
+            for (kernel, grid, gathered_ptr, query_ptr, score_ptr) in [
+                (
                     gather_kernel,
-                    (gather_work.div_ceil(256) as u32, 1, 1),
-                    (256, 1, 1),
-                    0,
-                    ctx.stream(),
-                    &mut [
-                        &mut gg0 as *mut _ as *mut _,
-                        &mut gg1 as *mut _ as *mut _,
-                        &mut gg2 as *mut _ as *mut _,
-                        &mut gg3 as *mut _ as *mut _,
-                        &mut gg4 as *mut _ as *mut _,
-                        &mut gg5 as *mut _ as *mut _,
-                        &mut gg6 as *mut _ as *mut _,
-                        &mut gg7 as *mut _ as *mut _,
-                        &mut gg8 as *mut _ as *mut _,
-                        &mut gg9 as *mut _ as *mut _,
-                        &mut gg10 as *mut _ as *mut _,
-                        &mut gg11 as *mut _ as *mut _,
-                        &mut gg12 as *mut _ as *mut _,
-                        &mut gg13 as *mut _ as *mut _,
-                        &mut gg14 as *mut _ as *mut _,
-                        &mut gg15 as *mut _ as *mut _,
-                        &mut gg16 as *mut _ as *mut _,
-                        &mut gg17 as *mut _ as *mut _,
-                    ],
-                )
-                .unwrap();
+                    gather_work.div_ceil(256),
+                    *d_gathered.device_ptr() as u64,
+                    *d_gathered_query.device_ptr() as u64,
+                    *d_gathered_scores.device_ptr() as u64,
+                ),
+                (
+                    structured_gather_kernel,
+                    structured_blocks,
+                    *d_structured_gathered.device_ptr() as u64,
+                    *d_structured_query.device_ptr() as u64,
+                    *d_structured_scores.device_ptr() as u64,
+                ),
+            ] {
+                let mut gg0 = gathered_ptr;
+                let mut gg1 = query_ptr;
+                let mut gg2 = score_ptr;
+                let mut gg3 = *d_prefill_q_absorbed.device_ptr() as u64;
+                let mut gg4 = *d_prefill_q.device_ptr() as u64;
+                let mut gg5 = *d_ckv_cache.device_ptr() as u64;
+                let mut gg6 = *d_kpe_cache.device_ptr() as u64;
+                let mut gg7 = *d_prefill_selected.device_ptr() as u64;
+                let mut gg8 = *d_prefill_positions.device_ptr() as u64;
+                let mut gg9 = 0i32;
+                let mut gg10 = prefill_rows as i32;
+                let mut gg11 = num_heads as i32;
+                let mut gg12 = qk_dim as i32;
+                let mut gg13 = nope_dim as i32;
+                let mut gg14 = rope_dim as i32;
+                let mut gg15 = ckv_dim as i32;
+                let mut gg16 = selected_per_row as i32;
+                let mut gg17 = token_count as i32;
+                unsafe {
+                    launch(
+                        kernel,
+                        (grid as u32, 1, 1),
+                        (256, 1, 1),
+                        0,
+                        ctx.stream(),
+                        &mut [
+                            &mut gg0 as *mut _ as *mut _,
+                            &mut gg1 as *mut _ as *mut _,
+                            &mut gg2 as *mut _ as *mut _,
+                            &mut gg3 as *mut _ as *mut _,
+                            &mut gg4 as *mut _ as *mut _,
+                            &mut gg5 as *mut _ as *mut _,
+                            &mut gg6 as *mut _ as *mut _,
+                            &mut gg7 as *mut _ as *mut _,
+                            &mut gg8 as *mut _ as *mut _,
+                            &mut gg9 as *mut _ as *mut _,
+                            &mut gg10 as *mut _ as *mut _,
+                            &mut gg11 as *mut _ as *mut _,
+                            &mut gg12 as *mut _ as *mut _,
+                            &mut gg13 as *mut _ as *mut _,
+                            &mut gg14 as *mut _ as *mut _,
+                            &mut gg15 as *mut _ as *mut _,
+                            &mut gg16 as *mut _ as *mut _,
+                            &mut gg17 as *mut _ as *mut _,
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+            self::cuda_sync();
+            for (label, flat, structured) in [
+                (
+                    "gathered KV",
+                    ctx.dev.dtoh_sync_copy(&d_gathered).unwrap(),
+                    ctx.dev.dtoh_sync_copy(&d_structured_gathered).unwrap(),
+                ),
+                (
+                    "query",
+                    ctx.dev.dtoh_sync_copy(&d_gathered_query).unwrap(),
+                    ctx.dev.dtoh_sync_copy(&d_structured_query).unwrap(),
+                ),
+                (
+                    "scores",
+                    ctx.dev.dtoh_sync_copy(&d_gathered_scores).unwrap(),
+                    ctx.dev.dtoh_sync_copy(&d_structured_scores).unwrap(),
+                ),
+            ] {
+                for (index, (flat, structured)) in flat.iter().zip(structured.iter()).enumerate() {
+                    assert_eq!(
+                        flat.to_bits(),
+                        structured.to_bits(),
+                        "MLA K4 structured {label} mismatch at {index}: flat={flat} structured={structured}"
+                    );
+                }
             }
             let handle = cublas_result::create_handle().expect("create MLA gathered cuBLAS handle");
             let alpha_score = sm_scale;
@@ -86567,6 +90732,941 @@ mod kernel_tests {
             2e-2,
             2e-2,
             "fla_solve_tril_cpu_parity",
+        );
+    }
+
+    #[cfg(has_decode_kernels)]
+    #[test]
+    fn test_glm53_kda_parallel_conv_matches_serial_state_contract() {
+        let ctx = GpuTestCtx::new();
+        let serial = ctx.get_decode_kernel("kimi_delta_conv_silu_bf16");
+        let parallel = ctx.get_decode_kernel("kimi_delta_conv_silu_parallel_bf16");
+        let update = ctx.get_decode_kernel("kimi_delta_conv_state_update_bf16");
+        let channels = 37usize;
+        let kernel_dim = 4usize;
+        let state_len = kernel_dim - 1;
+        let threads = 64u32;
+        let bf16_bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|value| half::bf16::from_f32(*value).to_bits().to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let f32_bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+
+        for tokens in [2usize, 7usize] {
+            let input: Vec<f32> = (0..tokens * channels)
+                .map(|i| half::bf16::from_f32(((i as f32) * 0.031 + 0.2).sin()).to_f32())
+                .collect();
+            let weights: Vec<f32> = (0..channels * kernel_dim)
+                .map(|i| ((i as f32) * 0.017 - 0.4).cos() * 0.2)
+                .collect();
+            let initial_state: Vec<f32> = (0..channels * state_len)
+                .map(|i| ((i as f32) * 0.023 + 0.7).sin() * 0.3)
+                .collect();
+            let d_serial_io = ctx.upload_bf16(&bf16_bytes(&input));
+            let d_parallel_input = ctx.upload_bf16(&bf16_bytes(&input));
+            let d_parallel_output = ctx.alloc_bf16(tokens * channels);
+            let d_weights = ctx.upload_f32(&f32_bytes(&weights));
+            let d_serial_state = ctx.upload_f32(&f32_bytes(&initial_state));
+            let d_parallel_state = ctx.upload_f32(&f32_bytes(&initial_state));
+            let mut tokens_i32 = tokens as i32;
+            let mut channels_i32 = channels as i32;
+            let mut kernel_i32 = kernel_dim as i32;
+            unsafe {
+                let mut serial_out = *d_serial_io.device_ptr() as u64;
+                let mut serial_in = serial_out;
+                let mut weights_ptr = *d_weights.device_ptr() as u64;
+                let mut state_ptr = *d_serial_state.device_ptr() as u64;
+                launch(
+                    serial,
+                    (channels.div_ceil(threads as usize) as u32, 1, 1),
+                    (threads, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut serial_out as *mut _ as *mut _,
+                        &mut serial_in as *mut _ as *mut _,
+                        &mut weights_ptr as *mut _ as *mut _,
+                        &mut state_ptr as *mut _ as *mut _,
+                        &mut tokens_i32 as *mut _ as *mut _,
+                        &mut channels_i32 as *mut _ as *mut _,
+                        &mut kernel_i32 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+
+                let mut parallel_out = *d_parallel_output.device_ptr() as u64;
+                let mut parallel_in = *d_parallel_input.device_ptr() as u64;
+                let mut parallel_weights = *d_weights.device_ptr() as u64;
+                let mut parallel_state = *d_parallel_state.device_ptr() as u64;
+                launch(
+                    parallel,
+                    ((tokens * channels).div_ceil(threads as usize) as u32, 1, 1),
+                    (threads, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut parallel_out as *mut _ as *mut _,
+                        &mut parallel_in as *mut _ as *mut _,
+                        &mut parallel_weights as *mut _ as *mut _,
+                        &mut parallel_state as *mut _ as *mut _,
+                        &mut tokens_i32 as *mut _ as *mut _,
+                        &mut channels_i32 as *mut _ as *mut _,
+                        &mut kernel_i32 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+                launch(
+                    update,
+                    (channels.div_ceil(threads as usize) as u32, 1, 1),
+                    (threads, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut parallel_state as *mut _ as *mut _,
+                        &mut parallel_in as *mut _ as *mut _,
+                        &mut tokens_i32 as *mut _ as *mut _,
+                        &mut channels_i32 as *mut _ as *mut _,
+                        &mut kernel_i32 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+            self::cuda_sync();
+            assert_close_bf16(
+                &ctx.download_bf16(&d_parallel_output),
+                &ctx.download_bf16(&d_serial_io),
+                0.0,
+                0.0,
+                &format!("glm53_kda_parallel_conv_output_t{tokens}"),
+            );
+            assert_close_f32(
+                &ctx.download_f32(&d_parallel_state),
+                &ctx.download_f32(&d_serial_state),
+                0.0,
+                0.0,
+                &format!("glm53_kda_parallel_conv_state_t{tokens}"),
+            );
+        }
+    }
+
+    #[cfg(has_decode_kernels)]
+    #[test]
+    fn test_glm53_kda_rmsnorm_gate_real_head_geometry_matches_cpu() {
+        let ctx = GpuTestCtx::new();
+        let kernel = ctx.get_decode_kernel("kimi_delta_rmsnorm_gate_bf16");
+        let tokens = 2usize;
+        let heads = 3usize;
+        let dim = 128usize;
+        let eps = 1.0e-6f32;
+        let rows = tokens * heads;
+        let quantize = |value: f32| half::bf16::from_f32(value).to_f32();
+        let input: Vec<f32> = (0..rows * dim)
+            .map(|index| quantize(((index as f32) * 0.037 + 0.2).sin() * 0.7))
+            .collect();
+        let gate: Vec<f32> = (0..rows * dim)
+            .map(|index| quantize(((index as f32) * 0.021 - 0.4).cos()))
+            .collect();
+        let norm_weight: Vec<f32> = (0..dim)
+            .map(|index| 0.8 + ((index as f32) * 0.013).sin() * 0.2)
+            .collect();
+        let mut expected = vec![0.0f32; rows * dim];
+        for row in 0..rows {
+            let row_offset = row * dim;
+            let mean_square = input[row_offset..row_offset + dim]
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                / dim as f32;
+            let inv_rms = (mean_square + eps).sqrt().recip();
+            for column in 0..dim {
+                let index = row_offset + column;
+                expected[index] = quantize(
+                    input[index]
+                        * inv_rms
+                        * norm_weight[column]
+                        / (1.0 + (-gate[index]).exp()),
+                );
+            }
+        }
+
+        let d_input = ctx.upload_bf16(&f32_to_bf16_bytes(&input));
+        let d_gate = ctx.upload_bf16(&f32_to_bf16_bytes(&gate));
+        // Initialize the output with the input, matching the production
+        // in-place V workspace. A launch that silently returns is therefore
+        // distinguished from a correct gated normalization.
+        let d_output = ctx.upload_bf16(&f32_to_bf16_bytes(&input));
+        let d_weight = ctx.upload_f32(
+            &norm_weight
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>(),
+        );
+        let threads = kimi_delta_rmsnorm_gate_block_threads(dim).unwrap();
+        assert!(threads >= dim);
+        let mut output_ptr = *d_output.device_ptr() as u64;
+        let mut input_ptr = *d_input.device_ptr() as u64;
+        let mut gate_ptr = *d_gate.device_ptr() as u64;
+        let mut weight_ptr = *d_weight.device_ptr() as u64;
+        let mut tokens_i32 = tokens as i32;
+        let mut heads_i32 = heads as i32;
+        let mut dim_i32 = dim as i32;
+        let mut eps_arg = eps;
+        unsafe {
+            launch(
+                kernel,
+                (rows as u32, 1, 1),
+                (threads as u32, 1, 1),
+                (threads * std::mem::size_of::<f32>()) as u32,
+                ctx.stream(),
+                &mut [
+                    &mut output_ptr as *mut _ as *mut _,
+                    &mut input_ptr as *mut _ as *mut _,
+                    &mut gate_ptr as *mut _ as *mut _,
+                    &mut weight_ptr as *mut _ as *mut _,
+                    &mut tokens_i32 as *mut _ as *mut _,
+                    &mut heads_i32 as *mut _ as *mut _,
+                    &mut dim_i32 as *mut _ as *mut _,
+                    &mut eps_arg as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+        self::cuda_sync();
+        assert_close_bf16(
+            &ctx.download_bf16(&d_output),
+            &f32_to_bf16_bytes(&expected),
+            2e-2,
+            2e-2,
+            "glm53_kda_rmsnorm_gate_real_head_geometry",
+        );
+    }
+
+    #[cfg(has_decode_kernels)]
+    #[test]
+    fn test_glm53_kda_recurrent_scan_matches_cpu_reference() {
+        let ctx = GpuTestCtx::new();
+        let kernel = ctx.get_decode_kernel("kimi_delta_recurrent_scan_bf16");
+        let tiled_kernel =
+            ctx.get_decode_kernel("kimi_delta_recurrent_scan_tiled_bf16");
+        // Exercise the real GLM-5.3 KDA geometry. The earlier 2x8 fixture
+        // launched only one value tile and could not detect cross-tile bugs.
+        let tokens = 3usize;
+        let heads = 64usize;
+        let dim = 128usize;
+        let lower = -5.0f32;
+        let q_scale = (dim as f32).sqrt().recip();
+        let eps = 1.0e-6f32;
+
+        let quantize = |value: f32| half::bf16::from_f32(value).to_f32();
+        let q: Vec<f32> = (0..tokens * heads * dim)
+            .map(|i| quantize(((i as f32) * 0.071 + 0.2).sin()))
+            .collect();
+        let k: Vec<f32> = (0..tokens * heads * dim)
+            .map(|i| quantize(((i as f32) * 0.053 + 0.7).cos()))
+            .collect();
+        let v: Vec<f32> = (0..tokens * heads * dim)
+            .map(|i| quantize(((i as f32) * 0.037 - 0.4).sin() * 0.8))
+            .collect();
+        let gates: Vec<f32> = (0..tokens * heads * dim)
+            .map(|i| quantize(((i % 13) as f32 - 6.0) * 0.09))
+            .collect();
+        let betas: Vec<f32> = (0..tokens * heads)
+            .map(|i| quantize(((i % 7) as f32 - 3.0) * 0.17))
+            .collect();
+        let a_log: Vec<f32> = (0..heads)
+            .map(|head| -2.3 + head as f32 * 0.03125)
+            .collect();
+        let dt_bias: Vec<f32> = (0..heads * dim)
+            .map(|i| ((i % 5) as f32 - 2.0) * 0.08)
+            .collect();
+        let initial_state: Vec<f32> = (0..heads * dim * dim)
+            .map(|i| ((i as f32) * 0.019 + 0.1).sin() * 0.03)
+            .collect();
+
+        let mut expected_state = initial_state.clone();
+        let mut expected_output = vec![0.0f32; tokens * heads * dim];
+        for token in 0..tokens {
+            for head in 0..heads {
+                let base = (token * heads + head) * dim;
+                let q_norm = (q[base..base + dim]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    + eps)
+                    .sqrt();
+                let k_norm = (k[base..base + dim]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    + eps)
+                    .sqrt();
+                let normalized_q: Vec<f32> = q[base..base + dim]
+                    .iter()
+                    .map(|value| value / q_norm * q_scale)
+                    .collect();
+                let normalized_k: Vec<f32> = k[base..base + dim]
+                    .iter()
+                    .map(|value| value / k_norm)
+                    .collect();
+                let beta = 1.0 / (1.0 + (-betas[token * heads + head]).exp());
+                let state_base = head * dim * dim;
+                for value_col in 0..dim {
+                    let mut recalled = 0.0f32;
+                    for key_row in 0..dim {
+                        let param = head * dim + key_row;
+                        let raw = gates[base + key_row] + dt_bias[param];
+                        let log_decay = lower / (1.0 + (-(a_log[head].exp() * raw)).exp());
+                        let state_index = state_base + key_row * dim + value_col;
+                        expected_state[state_index] *= log_decay.exp();
+                        recalled += expected_state[state_index] * normalized_k[key_row];
+                    }
+                    let delta = (v[base + value_col] - recalled) * beta;
+                    let mut readout = 0.0f32;
+                    for key_row in 0..dim {
+                        let state_index = state_base + key_row * dim + value_col;
+                        expected_state[state_index] += normalized_k[key_row] * delta;
+                        readout += expected_state[state_index] * normalized_q[key_row];
+                    }
+                    expected_output[base + value_col] = quantize(readout);
+                }
+            }
+        }
+
+        let bf16_bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|value| half::bf16::from_f32(*value).to_bits().to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let f32_bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let d_state = ctx.upload_f32(&f32_bytes(&initial_state));
+        let d_q = ctx.upload_bf16(&bf16_bytes(&q));
+        let d_k = ctx.upload_bf16(&bf16_bytes(&k));
+        let d_v = ctx.upload_bf16(&bf16_bytes(&v));
+        let d_gates = ctx.upload_bf16(&bf16_bytes(&gates));
+        let d_betas = ctx.upload_bf16(&bf16_bytes(&betas));
+        let d_a_log = ctx.upload_f32(&f32_bytes(&a_log));
+        let d_dt_bias = ctx.upload_f32(&f32_bytes(&dt_bias));
+        let d_output = ctx.alloc_bf16(tokens * heads * dim);
+
+        let threads = dim.next_power_of_two().max(32) as u32;
+        let shared = ((3 * dim) as u32 + threads) * std::mem::size_of::<f32>() as u32;
+        let mut tokens_i32 = tokens as i32;
+        let mut heads_i32 = heads as i32;
+        let mut dim_i32 = dim as i32;
+        let mut lower_f32 = lower;
+        let mut scale_f32 = q_scale;
+        let mut eps_f32 = eps;
+        unsafe {
+            let mut state_ptr = *d_state.device_ptr() as u64;
+            let mut q_ptr = *d_q.device_ptr() as u64;
+            let mut k_ptr = *d_k.device_ptr() as u64;
+            let mut v_ptr = *d_v.device_ptr() as u64;
+            let mut gates_ptr = *d_gates.device_ptr() as u64;
+            let mut betas_ptr = *d_betas.device_ptr() as u64;
+            let mut a_log_ptr = *d_a_log.device_ptr() as u64;
+            let mut dt_bias_ptr = *d_dt_bias.device_ptr() as u64;
+            let mut output_ptr = *d_output.device_ptr() as u64;
+            let mut params: Vec<*mut std::ffi::c_void> = vec![
+                &mut state_ptr as *mut _ as *mut _,
+                &mut q_ptr as *mut _ as *mut _,
+                &mut k_ptr as *mut _ as *mut _,
+                &mut v_ptr as *mut _ as *mut _,
+                &mut gates_ptr as *mut _ as *mut _,
+                &mut betas_ptr as *mut _ as *mut _,
+                &mut a_log_ptr as *mut _ as *mut _,
+                &mut dt_bias_ptr as *mut _ as *mut _,
+                &mut output_ptr as *mut _ as *mut _,
+                &mut tokens_i32 as *mut _ as *mut _,
+                &mut heads_i32 as *mut _ as *mut _,
+                &mut dim_i32 as *mut _ as *mut _,
+                &mut lower_f32 as *mut _ as *mut _,
+                &mut scale_f32 as *mut _ as *mut _,
+                &mut eps_f32 as *mut _ as *mut _,
+            ];
+            launch(
+                kernel,
+                (heads as u32, 1, 1),
+                (threads, 1, 1),
+                shared,
+                ctx.stream(),
+                &mut params,
+            )
+            .unwrap();
+        }
+        self::cuda_sync();
+
+        let actual_output = ctx.download_bf16(&d_output);
+        assert_close_bf16(
+            &actual_output,
+            &bf16_bytes(&expected_output),
+            4e-3,
+            4e-3,
+            "glm53_kda_recurrent_output",
+        );
+        let actual_state: Vec<f32> = ctx
+            .download_f32(&d_state)
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        for (index, (actual, expected)) in
+            actual_state.iter().zip(expected_state.iter()).enumerate()
+        {
+            assert!(
+                (actual - expected).abs() <= 2e-5,
+                "KDA state mismatch at {index}: actual={actual} expected={expected}"
+            );
+        }
+
+        let d_tiled_state = ctx.upload_f32(&f32_bytes(&initial_state));
+        let d_tiled_output = ctx.alloc_bf16(tokens * heads * dim);
+        let mut tiled_tokens_i32 = tokens as i32;
+        let mut tiled_heads_i32 = heads as i32;
+        let mut tiled_dim_i32 = dim as i32;
+        let mut tiled_lower_f32 = lower;
+        let mut tiled_scale_f32 = q_scale;
+        let mut tiled_eps_f32 = eps;
+        unsafe {
+            let mut state_ptr = *d_tiled_state.device_ptr() as u64;
+            let mut q_ptr = *d_q.device_ptr() as u64;
+            let mut k_ptr = *d_k.device_ptr() as u64;
+            let mut v_ptr = *d_v.device_ptr() as u64;
+            let mut gates_ptr = *d_gates.device_ptr() as u64;
+            let mut betas_ptr = *d_betas.device_ptr() as u64;
+            let mut a_log_ptr = *d_a_log.device_ptr() as u64;
+            let mut dt_bias_ptr = *d_dt_bias.device_ptr() as u64;
+            let mut output_ptr = *d_tiled_output.device_ptr() as u64;
+            let mut params: Vec<*mut std::ffi::c_void> = vec![
+                &mut state_ptr as *mut _ as *mut _,
+                &mut q_ptr as *mut _ as *mut _,
+                &mut k_ptr as *mut _ as *mut _,
+                &mut v_ptr as *mut _ as *mut _,
+                &mut gates_ptr as *mut _ as *mut _,
+                &mut betas_ptr as *mut _ as *mut _,
+                &mut a_log_ptr as *mut _ as *mut _,
+                &mut dt_bias_ptr as *mut _ as *mut _,
+                &mut output_ptr as *mut _ as *mut _,
+                &mut tiled_tokens_i32 as *mut _ as *mut _,
+                &mut tiled_heads_i32 as *mut _ as *mut _,
+                &mut tiled_dim_i32 as *mut _ as *mut _,
+                &mut tiled_lower_f32 as *mut _ as *mut _,
+                &mut tiled_scale_f32 as *mut _ as *mut _,
+                &mut tiled_eps_f32 as *mut _ as *mut _,
+            ];
+            launch(
+                tiled_kernel,
+                (heads as u32, dim.div_ceil(32) as u32, 1),
+                (32, 1, 1),
+                ((3 * dim + 2) * std::mem::size_of::<f32>()) as u32,
+                ctx.stream(),
+                &mut params,
+            )
+            .unwrap();
+        }
+        self::cuda_sync();
+
+        let actual_tiled_output = ctx.download_bf16(&d_tiled_output);
+        assert_close_bf16(
+            &actual_tiled_output,
+            &bf16_bytes(&expected_output),
+            4e-3,
+            4e-3,
+            "glm53_kda_tiled_recurrent_output",
+        );
+        let actual_tiled_state: Vec<f32> = ctx
+            .download_f32(&d_tiled_state)
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        for (index, (actual, expected)) in actual_tiled_state
+            .iter()
+            .zip(expected_state.iter())
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() <= 2e-5,
+                "Tiled KDA state mismatch at {index}: actual={actual} expected={expected}"
+            );
+        }
+    }
+
+    #[cfg(has_decode_kernels)]
+    #[test]
+    fn test_glm53_kda_chunk_chain_matches_recurrent_oracle_across_partial_chunk() {
+        let ctx = GpuTestCtx::new();
+        // GLM-5.3 registers 64 KDA heads.  Exercise the same FLA sidecar
+        // specialization as the production runtime rather than relying on the
+        // smaller 32-head specialization used by earlier linear-attention
+        // fixtures.
+        let fla = load_test_fla(64);
+        let prepare = ctx.get_decode_kernel("kimi_delta_chunk_prepare_bf16");
+        let recurrent = ctx.get_decode_kernel("kimi_delta_recurrent_scan_tiled_bf16");
+        let tokens = 73usize;
+        let heads = 64usize;
+        let dim = 128usize;
+        let block_tokens = FLA_PREFILL_BLOCK_TOKENS;
+        let chunks = tokens.div_ceil(block_tokens);
+        let lower = -5.0f32;
+        let q_scale = (dim as f32).sqrt().recip();
+        let eps = 1.0e-6f32;
+
+        let quantize = |value: f32| half::bf16::from_f32(value).to_f32();
+        let q: Vec<f32> = (0..tokens * heads * dim)
+            .map(|i| quantize(((i as f32) * 0.000_71 + 0.2).sin() * 0.7))
+            .collect();
+        let k: Vec<f32> = (0..tokens * heads * dim)
+            .map(|i| quantize(((i as f32) * 0.000_53 + 0.7).cos() * 0.6))
+            .collect();
+        let v: Vec<f32> = (0..tokens * heads * dim)
+            .map(|i| quantize(((i as f32) * 0.000_37 - 0.4).sin() * 0.5))
+            .collect();
+        let gates: Vec<f32> = (0..tokens * heads * dim)
+            .map(|i| quantize(((i % 29) as f32 - 14.0) * 0.035))
+            .collect();
+        let betas: Vec<f32> = (0..tokens * heads)
+            .map(|i| quantize(((i % 17) as f32 - 8.0) * 0.09))
+            .collect();
+        let a_log: Vec<f32> = (0..heads)
+            .map(|head| -2.3 + head as f32 * 0.003_125)
+            .collect();
+        let dt_bias: Vec<f32> = (0..heads * dim)
+            .map(|i| ((i % 11) as f32 - 5.0) * 0.025)
+            .collect();
+        let initial_state: Vec<f32> = (0..heads * dim * dim)
+            .map(|i| ((i as f32) * 0.000_19 + 0.1).sin() * 0.01)
+            .collect();
+        let bf16_bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|value| half::bf16::from_f32(*value).to_bits().to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let f32_bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+
+        // The tiled recurrent kernel has an independent CPU-parity test above;
+        // retain raw inputs for it because the chunk preparation kernel
+        // deliberately normalizes Q/K and applies sigmoid(beta) in place.
+        let d_oracle_q = ctx.upload_bf16(&bf16_bytes(&q));
+        let d_oracle_k = ctx.upload_bf16(&bf16_bytes(&k));
+        let d_oracle_v = ctx.upload_bf16(&bf16_bytes(&v));
+        let d_oracle_gates = ctx.upload_bf16(&bf16_bytes(&gates));
+        let d_oracle_betas = ctx.upload_bf16(&bf16_bytes(&betas));
+        let d_a_log = ctx.upload_f32(&f32_bytes(&a_log));
+        let d_dt_bias = ctx.upload_f32(&f32_bytes(&dt_bias));
+        let d_oracle_state = ctx.upload_f32(&f32_bytes(&initial_state));
+        let d_oracle_output = ctx.alloc_bf16(tokens * heads * dim);
+        let mut tokens_i32 = tokens as i32;
+        let mut heads_i32 = heads as i32;
+        let mut dim_i32 = dim as i32;
+        let mut lower_f32 = lower;
+        let mut scale_f32 = q_scale;
+        let mut eps_f32 = eps;
+        unsafe {
+            let mut state_ptr = *d_oracle_state.device_ptr() as u64;
+            let mut q_ptr = *d_oracle_q.device_ptr() as u64;
+            let mut k_ptr = *d_oracle_k.device_ptr() as u64;
+            let mut v_ptr = *d_oracle_v.device_ptr() as u64;
+            let mut gates_ptr = *d_oracle_gates.device_ptr() as u64;
+            let mut betas_ptr = *d_oracle_betas.device_ptr() as u64;
+            let mut a_log_ptr = *d_a_log.device_ptr() as u64;
+            let mut dt_bias_ptr = *d_dt_bias.device_ptr() as u64;
+            let mut output_ptr = *d_oracle_output.device_ptr() as u64;
+            launch(
+                recurrent,
+                (heads as u32, dim.div_ceil(32) as u32, 1),
+                (32, 1, 1),
+                ((3 * dim + 2) * std::mem::size_of::<f32>()) as u32,
+                ctx.stream(),
+                &mut [
+                    &mut state_ptr as *mut _ as *mut _,
+                    &mut q_ptr as *mut _ as *mut _,
+                    &mut k_ptr as *mut _ as *mut _,
+                    &mut v_ptr as *mut _ as *mut _,
+                    &mut gates_ptr as *mut _ as *mut _,
+                    &mut betas_ptr as *mut _ as *mut _,
+                    &mut a_log_ptr as *mut _ as *mut _,
+                    &mut dt_bias_ptr as *mut _ as *mut _,
+                    &mut output_ptr as *mut _ as *mut _,
+                    &mut tokens_i32 as *mut _ as *mut _,
+                    &mut heads_i32 as *mut _ as *mut _,
+                    &mut dim_i32 as *mut _ as *mut _,
+                    &mut lower_f32 as *mut _ as *mut _,
+                    &mut scale_f32 as *mut _ as *mut _,
+                    &mut eps_f32 as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+
+        let d_q = ctx.upload_bf16(&bf16_bytes(&q));
+        let d_k = ctx.upload_bf16(&bf16_bytes(&k));
+        let d_v = ctx.upload_bf16(&bf16_bytes(&v));
+        let d_gates = ctx.upload_bf16(&bf16_bytes(&gates));
+        let d_betas = ctx.upload_bf16(&bf16_bytes(&betas));
+        let d_state = ctx.upload_f32(&f32_bytes(&initial_state));
+        let d_output = ctx.alloc_bf16(tokens * heads * dim);
+        let d_g = ctx.alloc_f32(tokens * heads * dim);
+        let d_aqk = ctx.alloc_f32(tokens * heads * block_tokens);
+        let d_akkd = ctx.alloc_f32(tokens * heads * block_tokens);
+        let d_akk = ctx.alloc_bf16(tokens * heads * block_tokens);
+        let d_w = ctx.alloc_bf16(tokens * heads * dim);
+        let d_u = ctx.alloc_bf16(tokens * heads * dim);
+        let d_kg = ctx.alloc_bf16(tokens * heads * dim);
+        let d_h = ctx.alloc_f32(chunks * heads * dim * dim);
+        let d_final_state = ctx.alloc_f32(heads * dim * dim);
+        let d_v_new = ctx.alloc_bf16(tokens * heads * dim);
+
+        let mut q_ptr = *d_q.device_ptr() as u64;
+        let mut k_ptr = *d_k.device_ptr() as u64;
+        let mut beta_ptr = *d_betas.device_ptr() as u64;
+        let mut prep_tokens = tokens as i32;
+        let mut prep_heads = heads as i32;
+        let mut prep_dim = dim as i32;
+        let mut prep_scale = 1.0f32;
+        let mut prep_eps = eps;
+        unsafe {
+            launch(
+                prepare,
+                ((tokens * heads) as u32, 1, 1),
+                (dim as u32, 1, 1),
+                (2 * dim * std::mem::size_of::<f32>()) as u32,
+                ctx.stream(),
+                &mut [
+                    &mut q_ptr as *mut _ as *mut _,
+                    &mut k_ptr as *mut _ as *mut _,
+                    &mut beta_ptr as *mut _ as *mut _,
+                    &mut prep_tokens as *mut _ as *mut _,
+                    &mut prep_heads as *mut _ as *mut _,
+                    &mut prep_dim as *mut _ as *mut _,
+                    &mut prep_scale as *mut _ as *mut _,
+                    &mut prep_eps as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+
+        let stream_ptr = ctx.stream() as *mut std::ffi::c_void;
+        let t_arg = tokens as i32;
+        let call = |label: &str, rc: u32| assert_eq!(rc, 0, "{label} returned rc={rc}");
+        unsafe {
+            call(
+                "KDA gate cumsum",
+                (fla.kda_gate_cumsum)(
+                    *d_gates.device_ptr() as u64,
+                    *d_a_log.device_ptr() as u64,
+                    *d_dt_bias.device_ptr() as u64,
+                    *d_g.device_ptr() as u64,
+                    std::f32::consts::LOG2_E,
+                    0,
+                    0,
+                    lower,
+                    t_arg,
+                    dim.div_ceil(32) as u32,
+                    chunks as u32,
+                    heads as u32,
+                    stream_ptr,
+                ),
+            );
+            call(
+                "KDA intra",
+                (fla.kda_intra)(
+                    *d_q.device_ptr() as u64,
+                    *d_k.device_ptr() as u64,
+                    *d_g.device_ptr() as u64,
+                    *d_betas.device_ptr() as u64,
+                    *d_aqk.device_ptr() as u64,
+                    *d_akkd.device_ptr() as u64,
+                    q_scale,
+                    0,
+                    0,
+                    t_arg,
+                    chunks as u32,
+                    dim.div_ceil(32) as u32,
+                    heads as u32,
+                    stream_ptr,
+                ),
+            );
+            call(
+                "KDA inter solve",
+                (fla.kda_inter_solve)(
+                    *d_q.device_ptr() as u64,
+                    *d_k.device_ptr() as u64,
+                    *d_g.device_ptr() as u64,
+                    *d_betas.device_ptr() as u64,
+                    *d_aqk.device_ptr() as u64,
+                    *d_akkd.device_ptr() as u64,
+                    *d_akk.device_ptr() as u64,
+                    q_scale,
+                    0,
+                    0,
+                    t_arg,
+                    chunks as u32,
+                    heads as u32,
+                    1,
+                    stream_ptr,
+                ),
+            );
+            call(
+                "KDA WY",
+                (fla.kda_wy_repr)(
+                    0,
+                    *d_k.device_ptr() as u64,
+                    0,
+                    *d_kg.device_ptr() as u64,
+                    *d_v.device_ptr() as u64,
+                    *d_betas.device_ptr() as u64,
+                    *d_w.device_ptr() as u64,
+                    *d_u.device_ptr() as u64,
+                    *d_akk.device_ptr() as u64,
+                    *d_g.device_ptr() as u64,
+                    0,
+                    0,
+                    t_arg,
+                    chunks as u32,
+                    heads as u32,
+                    1,
+                    stream_ptr,
+                ),
+            );
+            call(
+                "KDA state recurrence",
+                (fla.kda_state_recurrence)(
+                    *d_kg.device_ptr() as u64,
+                    *d_u.device_ptr() as u64,
+                    *d_w.device_ptr() as u64,
+                    *d_v_new.device_ptr() as u64,
+                    0,
+                    *d_g.device_ptr() as u64,
+                    *d_h.device_ptr() as u64,
+                    *d_state.device_ptr() as u64,
+                    *d_final_state.device_ptr() as u64,
+                    0,
+                    0,
+                    t_arg,
+                    dim.div_ceil(32) as u32,
+                    heads as u32,
+                    1,
+                    stream_ptr,
+                ),
+            );
+            call(
+                "KDA output",
+                (fla.kda_output)(
+                    *d_q.device_ptr() as u64,
+                    *d_v_new.device_ptr() as u64,
+                    *d_g.device_ptr() as u64,
+                    *d_h.device_ptr() as u64,
+                    *d_output.device_ptr() as u64,
+                    *d_aqk.device_ptr() as u64,
+                    0,
+                    0,
+                    q_scale,
+                    t_arg,
+                    dim.div_ceil(64) as u32,
+                    chunks as u32,
+                    heads as u32,
+                    stream_ptr,
+                ),
+            );
+        }
+        self::cuda_sync();
+
+        let oracle_output = ctx.download_bf16(&d_oracle_output);
+        let chunk_output = ctx.download_bf16(&d_output);
+        let max_chunk_output_abs = oracle_output
+            .chunks_exact(2)
+            .zip(chunk_output.chunks_exact(2))
+            .map(|(left, right)| {
+                let left = half::bf16::from_bits(u16::from_le_bytes(left.try_into().unwrap()))
+                    .to_f32();
+                let right = half::bf16::from_bits(u16::from_le_bytes(right.try_into().unwrap()))
+                    .to_f32();
+                (left - right).abs()
+            })
+            .fold(0.0f32, f32::max);
+        assert_close_bf16(
+            &chunk_output,
+            &oracle_output,
+            5e-2,
+            5e-2,
+            "glm53_kda_chunk_output",
+        );
+        let oracle_state = ctx.download_f32(&d_oracle_state);
+        let chunk_state = ctx.download_f32(&d_final_state);
+        let max_chunk_state_abs = oracle_state
+            .chunks_exact(4)
+            .zip(chunk_state.chunks_exact(4))
+            .map(|(left, right)| {
+                let left = f32::from_le_bytes(left.try_into().unwrap());
+                let right = f32::from_le_bytes(right.try_into().unwrap());
+                (left - right).abs()
+            })
+            .fold(0.0f32, f32::max);
+        eprintln!(
+            "GLM-5.3 KDA chunk oracle: max_output_abs={max_chunk_output_abs:.9} max_state_abs={max_chunk_state_abs:.9}",
+        );
+        assert_close_f32(
+            &chunk_state,
+            &oracle_state,
+            5e-2,
+            5e-2,
+            "glm53_kda_chunk_final_state",
+        );
+
+        // Exercise the runtime boundary that the one-shot parity check above
+        // does not cover: the chunked final state is copied into a distinct
+        // persistent decode buffer, then consumed by the first recurrent
+        // decode token.  The serial recurrent path remains a test oracle only.
+        let d_persistent_state = ctx.alloc_f32(heads * dim * dim);
+        let state_bytes = heads * dim * dim * std::mem::size_of::<f32>();
+        let copy_result = unsafe {
+            cuda_sys::lib().cuMemcpyDtoDAsync_v2(
+                *d_persistent_state.device_ptr() as u64,
+                *d_final_state.device_ptr() as u64,
+                state_bytes,
+                ctx.stream(),
+            )
+        };
+        assert_eq!(
+            copy_result,
+            cuda_sys::CUresult::CUDA_SUCCESS,
+            "chunked KDA persistent-state copy failed: {copy_result:?}",
+        );
+
+        let next_q: Vec<f32> = (0..heads * dim)
+            .map(|i| quantize(((i as f32) * 0.000_83 + 0.4).sin() * 0.65))
+            .collect();
+        let next_k: Vec<f32> = (0..heads * dim)
+            .map(|i| quantize(((i as f32) * 0.000_61 + 0.9).cos() * 0.55))
+            .collect();
+        let next_v: Vec<f32> = (0..heads * dim)
+            .map(|i| quantize(((i as f32) * 0.000_43 - 0.2).sin() * 0.45))
+            .collect();
+        let next_gates: Vec<f32> = (0..heads * dim)
+            .map(|i| quantize(((i % 31) as f32 - 15.0) * 0.031))
+            .collect();
+        let next_betas: Vec<f32> = (0..heads)
+            .map(|i| quantize(((i % 19) as f32 - 9.0) * 0.085))
+            .collect();
+        let d_next_q = ctx.upload_bf16(&bf16_bytes(&next_q));
+        let d_next_k = ctx.upload_bf16(&bf16_bytes(&next_k));
+        let d_next_v = ctx.upload_bf16(&bf16_bytes(&next_v));
+        let d_next_gates = ctx.upload_bf16(&bf16_bytes(&next_gates));
+        let d_next_betas = ctx.upload_bf16(&bf16_bytes(&next_betas));
+        let d_oracle_next_output = ctx.alloc_bf16(heads * dim);
+        let d_chunk_next_output = ctx.alloc_bf16(heads * dim);
+
+        let launch_next = |state_ptr: u64, output_ptr: u64| {
+            let mut state_ptr = state_ptr;
+            let mut q_ptr = *d_next_q.device_ptr() as u64;
+            let mut k_ptr = *d_next_k.device_ptr() as u64;
+            let mut v_ptr = *d_next_v.device_ptr() as u64;
+            let mut gates_ptr = *d_next_gates.device_ptr() as u64;
+            let mut betas_ptr = *d_next_betas.device_ptr() as u64;
+            let mut a_log_ptr = *d_a_log.device_ptr() as u64;
+            let mut dt_bias_ptr = *d_dt_bias.device_ptr() as u64;
+            let mut output_ptr = output_ptr;
+            let mut next_tokens_i32 = 1i32;
+            let mut next_heads_i32 = heads as i32;
+            let mut next_dim_i32 = dim as i32;
+            let mut next_lower_f32 = lower;
+            let mut next_scale_f32 = q_scale;
+            let mut next_eps_f32 = eps;
+            unsafe {
+                launch(
+                    recurrent.clone(),
+                    (heads as u32, dim.div_ceil(32) as u32, 1),
+                    (32, 1, 1),
+                    ((3 * dim + 2) * std::mem::size_of::<f32>()) as u32,
+                    ctx.stream(),
+                    &mut [
+                        &mut state_ptr as *mut _ as *mut _,
+                        &mut q_ptr as *mut _ as *mut _,
+                        &mut k_ptr as *mut _ as *mut _,
+                        &mut v_ptr as *mut _ as *mut _,
+                        &mut gates_ptr as *mut _ as *mut _,
+                        &mut betas_ptr as *mut _ as *mut _,
+                        &mut a_log_ptr as *mut _ as *mut _,
+                        &mut dt_bias_ptr as *mut _ as *mut _,
+                        &mut output_ptr as *mut _ as *mut _,
+                        &mut next_tokens_i32 as *mut _ as *mut _,
+                        &mut next_heads_i32 as *mut _ as *mut _,
+                        &mut next_dim_i32 as *mut _ as *mut _,
+                        &mut next_lower_f32 as *mut _ as *mut _,
+                        &mut next_scale_f32 as *mut _ as *mut _,
+                        &mut next_eps_f32 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+        };
+        launch_next(
+            *d_oracle_state.device_ptr() as u64,
+            *d_oracle_next_output.device_ptr() as u64,
+        );
+        launch_next(
+            *d_persistent_state.device_ptr() as u64,
+            *d_chunk_next_output.device_ptr() as u64,
+        );
+        self::cuda_sync();
+
+        let oracle_next_output = ctx.download_bf16(&d_oracle_next_output);
+        let chunk_next_output = ctx.download_bf16(&d_chunk_next_output);
+        let oracle_next_state = ctx.download_f32(&d_oracle_state);
+        let chunk_next_state = ctx.download_f32(&d_persistent_state);
+        let max_abs_bf16 = oracle_next_output
+            .chunks_exact(2)
+            .zip(chunk_next_output.chunks_exact(2))
+            .map(|(left, right)| {
+                let left = half::bf16::from_bits(u16::from_le_bytes(left.try_into().unwrap()))
+                    .to_f32();
+                let right = half::bf16::from_bits(u16::from_le_bytes(right.try_into().unwrap()))
+                    .to_f32();
+                (left - right).abs()
+            })
+            .fold(0.0f32, f32::max);
+        let max_abs_state = oracle_next_state
+            .chunks_exact(4)
+            .zip(chunk_next_state.chunks_exact(4))
+            .map(|(left, right)| {
+                let left = f32::from_le_bytes(left.try_into().unwrap());
+                let right = f32::from_le_bytes(right.try_into().unwrap());
+                (left - right).abs()
+            })
+            .fold(0.0f32, f32::max);
+        eprintln!(
+            "GLM-5.3 KDA prefill->decode boundary: max_output_abs={max_abs_bf16:.9} max_state_abs={max_abs_state:.9}",
+        );
+        assert_close_bf16(
+            &chunk_next_output,
+            &oracle_next_output,
+            5e-2,
+            5e-2,
+            "glm53_kda_first_decode_output",
+        );
+        assert_close_f32(
+            &chunk_next_state,
+            &oracle_next_state,
+            5e-2,
+            5e-2,
+            "glm53_kda_first_decode_state",
         );
     }
 

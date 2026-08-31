@@ -1,0 +1,25 @@
+Purpose: single-RTX-PRO radix-only DSA top-k attribution. Timing was enabled; this is not speed-regression evidence.
+
+Command:
+  KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE=radix_linear KRASIS_PREFILL_TIMING=1 KRASIS_STARTUP_DIAG=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+
+tmux session:
+  glm53_radix_only_prefill_profile_20260830
+
+Run directory:
+  /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260830_102641
+
+Result:
+  exit 0
+  39,920-token named-stage wall: 25,982.6 ms versus corrected bitonic 26,350.6 ms (+1.42% throughput).
+  DSA: 14,048.8 ms versus 14,428.3 ms (-379.5 ms, -2.63%).
+  FFN: 8,022.7 ms versus 8,017.2 ms (stable).
+  KDA recurrence: 1,142.4 ms versus 1,142.2 ms (stable).
+  KDA QKV: 1,074.1 ms versus 1,070.9 ms (stable).
+  Calibration free-VRAM floors at 500/4K/8K/16K/32K/39,920 tokens: 1223/1111/1199/1199/1211/1215 MiB.
+  No below-margin event, CUDA error, or OOM.
+
+Hashes:
+  stdout f5924b746810af06302e34b69cb1b8e5ac55bc0a6ad763dc016ce26e62d286b2
+  runtime b1b87a7753e66a26aa6a1d077f722a5522534f47a85c07d40d955a7845a6a1ae
+  outer b7aebdb61f58c7e104ffb8e3f4ec28bd4dfd31f1f9ad7af8ac2d240ed876fb86

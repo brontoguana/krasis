@@ -1,0 +1,7 @@
+Command: ./dev speed-test
+Working directory: /home/main/Documents/Claude/krasis
+tmux session: qcn_cross_model_speed_fixed
+Timing instrumentation: disabled
+Fixed config: tests/qcn-k4v4-hqq4-int4-benchmark.conf
+Run directory: logs/dev-benchmark_20260828_054253
+Result: QCN_CROSS_MODEL_SPEED_FIXED_EXIT=0

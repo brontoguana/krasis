@@ -177,9 +177,16 @@ class Tokenizer:
 
     @staticmethod
     def _close_initial_think_block(rendered: str) -> str:
-        suffix = "<|im_start|>assistant\n<think>\n"
-        if rendered.endswith(suffix):
+        qwen_suffix = "<|im_start|>assistant\n<think>\n"
+        if rendered.endswith(qwen_suffix):
             return rendered + "\n</think>\n\n"
+        # Some checkpoint templates unconditionally end the generation prompt
+        # with a bare opening marker (for example ``<|assistant|><think>``)
+        # and do not expose an ``enable_thinking`` switch.  Close only that
+        # exact terminal marker so thinking-disabled mode follows the template
+        # contract without relying on a model-name exception.
+        if rendered.endswith("<think>"):
+            return rendered + "</think>"
         return rendered
 
     def apply_chat_template(

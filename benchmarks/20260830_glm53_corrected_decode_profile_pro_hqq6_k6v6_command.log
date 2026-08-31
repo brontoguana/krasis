@@ -1,0 +1,30 @@
+Purpose: corrected-source single-RTX-PRO decode attribution diagnostic. This run enabled timing and VRAM instrumentation and is not speed-regression evidence.
+
+Command:
+  KRASIS_VRAM_LEDGER=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing
+
+tmux session:
+  glm53_corrected_profile_continuation_20260830
+
+Run directory:
+  /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260830_095815
+
+Approved/generated heatmap:
+  /home/main/.krasis/cache/GLM-5.3-Flash--4ab65dd91f64191f2206f16e896d5af056833466fe12dfbf29baa89ce76c6c1f/auto_heatmap.json
+  SHA256 33d3a64d2f8ee3c7d213ee3a33f2c617580f37ed21725ffa57b1621282010e36
+
+Result:
+  exit 0
+  Calibration free-VRAM floors at 500/4K/8K/16K/32K/39,920 tokens: 1251/1133/1211/1201/1179/1197 MiB.
+  HCS residents: 6540/12096. Decode idle floor: 1279 MiB; externally observed active floor: 696 MiB.
+  Formal internal decode: 21.99/22.60/22.48 tok/s at 50/100/250 target tokens.
+  Formal graph segment: 18.44/18.84/19.28 ms/token.
+  Formal split-hot CUDA: 9.57/9.65/9.58 ms/token.
+  Formal demand-H2D: 20.75/19.23/19.44 ms/token, 510.15/469.62/484.81 MiB/token.
+  HCS hit rate: 87.73/88.71/88.34%.
+  Zero budget skips, no-slot events, copy failures, CUDA errors, or OOMs.
+
+Hashes:
+  report 8cc9723fc914642381cecbd830b25ea23c365a6cd3d0eb074db30c34efc9acc1
+  stdout 722ec948de4cce2ad39aeac0f5a6aeaffaab230ed1f61ba24a6373b66890778f
+  runtime c1140eb2fddd9f8b02ddee451660666e7d86f56e840d47d1cd7c9a4731b871ef

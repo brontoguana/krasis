@@ -1,0 +1,13 @@
+Date: 2026-08-28
+Purpose: timing-disabled RTX PRO prefill freeze after GLM-5.3 KDA, mHC, HQQ staging, and expert-DMA optimization
+Working directory: /home/main/Documents/Claude/krasis
+tmux session: glm53_prefill_final_speed_pro
+Command: ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+Run directory: logs/dev-benchmark_20260828_134513
+Timing instrumentation: disabled
+Trace instrumentation: disabled
+Exit: 0
+Config SHA-256: 727457f140661b90fe9ab0d412f0f5a10e3dda54a96a4c7c339fbe7dbd15121c
+Report SHA-256: c0c85a83ee03d185bed30776415aa81e2b6e37e186455c3dcf6a09b35acede89
+Stdout SHA-256: a7c061d60eb4f53ad75222c01b5a81cc4a26a35de00b7db8f142ac9d8eaec147
+Runtime log SHA-256: 2294aacae4165e98792a6975318fe24b30f67f106cd6e6b434b04ce42e3c99d0

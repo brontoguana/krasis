@@ -1,0 +1,43 @@
+Date: 2026-08-30
+Purpose: timing-disabled single-RTX-PRO GLM-5.3 combined candidate benchmark: causal BF16 owner scoring, radix-linear owner selection, and bit-exact INT4 N32 W13/W2 decode kernels.
+
+Command (run through tmux session glm53_combined_candidate_speed_20260830):
+  KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE=bf16_bf16_causal_gemm KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE=radix_linear KRASIS_DECODE_INT4_W13_N32=1 KRASIS_DECODE_INT4_W2_N32=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+
+Run directory:
+  logs/dev-benchmark_20260830_112210
+
+Exit:
+  0
+
+Instrumentation:
+  Timing, trace, startup diagnostics and VRAM-ledger instrumentation were unset.
+
+Hardware:
+  One NVIDIA RTX PRO 6000 Blackwell Workstation Edition (physical GPU 1). The RTX A6000 remained unused.
+
+Internal prefill (1K/5K/10K/20K/35K/39,920):
+  120.1 / 519.7 / 842.1 / 1218.6 / 1449.5 / 1483.7 tok/s
+
+Correctness-qualified control prefill:
+  119.8 / 517.6 / 834.4 / 1195.7 / 1392.5 / 1419.0 tok/s
+
+Internal decode (50/100/250 outputs):
+  22.29 / 23.72 / 22.49 tok/s
+
+Correctness-qualified control decode:
+  21.84 / 23.14 / 22.66 tok/s
+
+Interpretation:
+  Long prefill improves 4.56%. Decode changes +2.06%/+2.51%/-0.75% at matched lengths, but the causal-score candidate generated a different heatmap/route workload: formal HCS hits were 86.65/88.06/87.10% versus the control's 87.73/88.71/88.34%. The separate N32-only A/B with exactly matched HCS hits remains the authoritative kernel-speed evidence.
+
+Safety/counters:
+  HCS 6540/12096; minimum decode free VRAM 1279 MiB. Runtime calibration measured 500/4K/8K/16K/32K/39,920-token low-water values 1225/1105/1229/1211/1197/1203 MiB. Dynamic HCS reported budget_skips=0, no_slot=0 and copy_failures=0. No CUDA error, OOM or below-600-MiB warning occurred.
+
+Heatmap:
+  The command built and used its own exact-runtime six-prompt non-benchmark heatmap. auto_heatmap.json SHA-256: ae575d970b72da629cf391028ba27258bb106855b20aefc6438e81cfa1662e76.
+
+Artifact SHA-256:
+  report  4383abeec904888b23ff0f3285aa1f1f9d1ace33647898cb8d1187719699e272
+  stdout  1bb43dd29b22ca6c26079ee85528c3fe771c138590c0ec2ae6ca365729e338bb
+  runtime a54131fc503c5b0de62b67f7b016f5f5eae33e9878560579666abb7eda3c2b1e

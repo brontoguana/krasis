@@ -31,11 +31,13 @@ class ManagerLauncherTests(unittest.TestCase):
         self.assertEqual(result["gpu_uuids"], ["GPU-stable"])
         self.assertEqual(result["vram_safety_margin_mb"], 600)
         self.assertEqual(result["attention_quant"], "hqq6")
+        self.assertEqual(result["vision_quant"], "int4")
         self.assertEqual(result["kv_dtype"], "k6v6")
         self.assertNotIn("gpu_expert_bits", result)
         self.assertNotIn("cpu_expert_bits", result)
         expected = {
             "model_path", "gpu_uuids", "host", "port", "attention_quant",
+            "vision_quant",
             "hqq_cache_profile", "hqq_group_size", "hqq_auto_budget_pct",
             "hqq_sidecar_manifest", "kv_dtype", "kv_cache_mb",
             "max_context_tokens", "vram_safety_margin_mb", "layer_group_size",

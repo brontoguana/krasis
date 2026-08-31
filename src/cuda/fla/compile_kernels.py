@@ -224,6 +224,118 @@ KERNEL_SPECS = [
         "h_dependent": True,
     },
     {
+        "name": "kda_gate_chunk_cumsum_vector_kernel",
+        "import": ("fla.ops.kda_forward",
+                    "kda_gate_chunk_cumsum_vector_kernel"),
+        "symbol_base": "kda_gate_chunk_cumsum_vector_kernel",
+        "signature": {
+            "s": "*bf16", "A_log": "*fp32", "dt_bias": "*fp32",
+            "o": "*fp32", "scale": "fp32", "cu_seqlens": "*i32",
+            "chunk_indices": "*i32", "lower_bound": "fp32", "T": "i32",
+        },
+        "constexprs": {
+            "S": 128, "BT": 64, "BS": 32, "REVERSE": False,
+            "HAS_A": True, "HAS_BIAS": True, "HAS_SCALE": True,
+            "IS_VARLEN": False, "USE_LOWER_BOUND": True,
+        },
+        "options": {"num_warps": 4, "num_stages": 2},
+        "h_dependent": True,
+    },
+    {
+        "name": "chunk_kda_fwd_kernel_intra_sub_chunk",
+        "import": ("fla.ops.kda_forward",
+                    "chunk_kda_fwd_kernel_intra_sub_chunk"),
+        "symbol_base": "chunk_kda_fwd_kernel_intra_sub_chunk",
+        "signature": {
+            "q": "*bf16", "k": "*bf16", "g": "*fp32",
+            "beta": "*bf16", "Aqk": "*bf16", "Akk": "*fp32",
+            "scale": "fp32", "cu_seqlens": "*i32",
+            "chunk_indices": "*i32", "T": "i32",
+        },
+        "constexprs": {
+            "HV": "H", "K": 128, "BT": 64, "BC": 16, "BK": 128,
+            "IS_VARLEN": False, "USE_GATHER": False,
+        },
+        "options": {"num_warps": 4, "num_stages": 2},
+        "h_dependent": True,
+    },
+    {
+        "name": "chunk_kda_fwd_kernel_inter_solve_fused",
+        "import": ("fla.ops.kda_forward",
+                    "chunk_kda_fwd_kernel_inter_solve_fused"),
+        "symbol_base": "chunk_kda_fwd_kernel_inter_solve_fused",
+        "signature": {
+            "q": "*bf16", "k": "*bf16", "g": "*fp32",
+            "beta": "*bf16", "Aqk": "*bf16", "Akkd": "*fp32",
+            "Akk": "*bf16", "scale": "fp32", "cu_seqlens": "*i32",
+            "chunk_indices": "*i32", "T": "i32",
+        },
+        "constexprs": {
+            "HV": "H", "K": 128, "BT": 64, "BC": 16, "NC": 4,
+            "BK": 64, "IS_VARLEN": False, "USE_SAFE_GATE": True,
+        },
+        "options": {"num_warps": 4, "num_stages": 2},
+        "h_dependent": True,
+    },
+    {
+        "name": "recompute_w_u_fwd_kda_kernel",
+        "import": ("fla.ops.kda_forward", "recompute_w_u_fwd_kda_kernel"),
+        "symbol_base": "recompute_w_u_fwd_kda_kernel",
+        "signature": {
+            "q": "*bf16", "k": "*bf16", "qg": "*bf16",
+            "kg": "*bf16", "v": "*bf16", "beta": "*bf16",
+            "w": "*bf16", "u": "*bf16", "A": "*bf16",
+            "gk": "*fp32", "cu_seqlens": "*i32",
+            "chunk_indices": "*i32", "T": "i32",
+        },
+        "constexprs": {
+            "HV": "H", "K": 128, "V": 128, "BT": 64,
+            "BK": 64, "BV": 64, "STORE_QG": False, "STORE_KG": True,
+            "IS_VARLEN": False,
+        },
+        "options": {"num_warps": 4, "num_stages": 2},
+        "h_dependent": True,
+    },
+    {
+        "name": "chunk_kda_state_recurrence",
+        "import": ("fla.ops.common.chunk_delta_h",
+                    "chunk_gated_delta_rule_fwd_kernel_h_blockdim64"),
+        "symbol_base": "chunk_kda_state_recurrence",
+        "signature": {
+            "k": "*bf16", "v": "*bf16", "w": "*bf16",
+            "v_new": "*bf16", "g": "*fp32", "gk": "*fp32",
+            "h": "*bf16", "h0": "*fp32", "ht": "*fp32",
+            "cu_seqlens": "*i32", "chunk_offsets": "*i32", "T": "i32",
+        },
+        "constexprs": {
+            "K": 128, "V": 128, "BT": 64, "BV": 32,
+            "USE_G": False, "USE_GK": True,
+            "USE_INITIAL_STATE": True, "STORE_FINAL_STATE": True,
+            "SAVE_NEW_VALUE": True, "USE_EXP2": True,
+            "TRANSPOSE_STATE": False, "IS_VARLEN": False,
+        },
+        "options": {"num_warps": 2, "num_stages": 2},
+        "h_dependent": True,
+    },
+    {
+        "name": "chunk_gla_fwd_kernel_o_kda",
+        "import": ("fla.ops.kda_forward", "chunk_gla_fwd_kernel_o"),
+        "symbol_base": "chunk_gla_fwd_kernel_o_kda",
+        "signature": {
+            "q": "*bf16", "v": "*bf16", "g": "*fp32",
+            "h": "*bf16", "o": "*bf16", "A": "*bf16",
+            "cu_seqlens": "*i32", "chunk_indices": "*i32",
+            "scale": "fp32", "T": "i32",
+        },
+        "constexprs": {
+            "HV": "H", "K": 128, "V": 128, "BT": 64,
+            "BK": 64, "BV": 64, "STATE_V_FIRST": False,
+            "IS_VARLEN": False,
+        },
+        "options": {"num_warps": 4, "num_stages": 2},
+        "h_dependent": True,
+    },
+    {
         "name": "merge_16x16_to_64x64_inverse_kernel",
         "import": ("fla.ops.utils.solve_tril",
                     "merge_16x16_to_64x64_inverse_kernel"),
@@ -375,6 +487,9 @@ def compile_kernel(spec: dict, h_value: int | None, arch: int):
         constexprs = dict(spec["constexprs"])
         if spec["h_dependent"] and h_value is not None:
             constexprs["H"] = h_value
+            for key, value in tuple(constexprs.items()):
+                if value == "H":
+                    constexprs[key] = h_value
 
         ast_params = inspect.signature(ASTSource).parameters
         ast_kwargs = {

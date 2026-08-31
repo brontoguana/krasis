@@ -1,0 +1,3 @@
+env -u KRASIS_DECODE_MLA_SPARSE_THREADS ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+
+Source-default runtime selector; timing, trace, VRAM-ledger, CPU-tail, startup-diagnostic, and MLA path-clock instrumentation were unset. Run logs/dev-benchmark_20260831_032325, exit 0, one NVIDIA RTX PRO 6000 Blackwell Workstation Edition.

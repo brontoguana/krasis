@@ -1,0 +1,5 @@
+./dev benchmark tests/glm53-flash-hqq6-k6v6-pro.conf
+
+Timing and instrumentation disabled. Run in tmux session glm53_opt_pro_default_speed_exact.
+Exit status: 0
+No heatmap override was supplied; Krasis built a fresh exact-runtime six-prompt heatmap for the RTX PRO configuration before HCS admission.

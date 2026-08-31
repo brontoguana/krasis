@@ -106,6 +106,28 @@ fn qwen36_thinking_generation_prompt_modes() {
 }
 
 #[test]
+fn unconditional_terminal_think_marker_closes_when_disabled() {
+    let template = concat!(
+        "{% for message in messages %}",
+        "<|{{ message.role }}|>{{ message.content }}",
+        "{% endfor %}",
+        "{% if add_generation_prompt %}<|assistant|><think>{% endif %}"
+    );
+    let config_path = write_tokenizer_config(template, "unconditional-thinking");
+    let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+    let messages = r#"[{"role":"user","content":"hi"}]"#;
+
+    assert_eq!(
+        engine.apply(messages, true, false).unwrap(),
+        "<|user|>hi<|assistant|><think></think>"
+    );
+    assert_eq!(
+        engine.apply(messages, true, true).unwrap(),
+        "<|user|>hi<|assistant|><think>"
+    );
+}
+
+#[test]
 fn text_content_parts_are_flattened_for_templates() {
     let template = "{% for message in messages %}{{ message.content }}{% endfor %}";
     let config_path = write_tokenizer_config(template, "text_parts");

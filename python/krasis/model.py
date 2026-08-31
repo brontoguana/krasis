@@ -90,6 +90,7 @@ from krasis.gemma4_vision import (
     Gemma4VisionConfig,
     Gemma4VisionModel,
 )
+from krasis.glm53_vision import Glm53ImagePreprocessor, Glm53VisionConfig, Glm53VisionModel
 from krasis.step_vision_int4 import quantize_step_vision_modules_int4, quantize_vision_modules_int4
 
 from krasis.tokenizer import Tokenizer
@@ -159,9 +160,14 @@ def _dsa_owner_layers_for_segment(
             f"Invalid DSA decode segment [{layer_start}, {layer_end}) for "
             f"{cfg.num_hidden_layers} layers"
         )
+    dsa_layers = [
+        layer_idx
+        for layer_idx in range(layer_start, layer_end)
+        if cfg.is_dsa_layer(layer_idx)
+    ]
     owners = {
         cfg.dsa_indexer_owner_layer(layer_idx)
-        for layer_idx in range(layer_start, layer_end)
+        for layer_idx in dsa_layers
     }
     if None in owners:
         raise RuntimeError(
@@ -578,8 +584,8 @@ def _compute_layer_groups(
     if cfg.layer_types is not None:
         _abs_to_moe = {}
         _moe_seq = 0
-        for i, lt in enumerate(cfg.layer_types):
-            if lt == "moe":
+        for i in range(cfg.num_hidden_layers):
+            if cfg.is_moe_layer(i):
                 _abs_to_moe[i] = _moe_seq
                 _moe_seq += 1
         dense_layers = [l for l in all_layers if l not in _abs_to_moe]
@@ -960,6 +966,12 @@ class KrasisModel:
         self._gemma_vision_raw_config = None
         self._gemma_vision_quant_mode = None
         self._gemma_vision_quant_stats = None
+        self._glm53_vision_processor = None
+        self._glm53_vision_model = None
+        self._glm53_vision_config = None
+        self._glm53_vision_raw_config = None
+        self._glm53_vision_quant_mode = None
+        self._glm53_vision_quant_stats = None
         self._last_multimodal_prefill_tensors = None
 
     def supports_image_inputs(self) -> bool:
@@ -968,6 +980,7 @@ class KrasisModel:
             self.supports_qwen_image_inputs()
             or self.supports_step_image_inputs()
             or self.supports_gemma_image_inputs()
+            or self.supports_glm53_image_inputs()
         )
 
     def supports_qwen_image_inputs(self) -> bool:
@@ -1037,6 +1050,45 @@ class KrasisModel:
                 any(key.startswith("model.vision_tower.") for key in weight_map)
                 and "model.embed_vision.embedding_projection.weight" in weight_map
             )
+        except Exception:
+            return False
+
+    def supports_glm53_image_inputs(self) -> bool:
+        """Return True only for the qualified GLM-5.3 BF16 image path."""
+        vision_quant = str(
+            getattr(getattr(self, "quant_cfg", None), "step_vision_quant", "int4") or "int4"
+        ).lower()
+        if vision_quant != "bf16":
+            return False
+        config_path = os.path.join(self.cfg.model_path, "config.json")
+        index_path = os.path.join(self.cfg.model_path, "model.safetensors.index.json")
+        processor_path = os.path.join(self.cfg.model_path, "processor_config.json")
+        if not (os.path.exists(config_path) and os.path.exists(index_path) and os.path.exists(processor_path)):
+            return False
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                raw = json.load(f)
+            text_cfg = raw.get("text_config") or {}
+            if raw.get("model_type") != "glm5_next" or text_cfg.get("model_type") != "glm5_next_text":
+                return False
+            if not isinstance(raw.get("vision_config"), dict) or not isinstance(raw.get("image_token_id"), int):
+                return False
+            with open(processor_path, encoding="utf-8") as f:
+                processor_raw = json.load(f)
+            image_cfg = processor_raw.get("image_processor")
+            if not isinstance(image_cfg, dict):
+                return False
+            vision_cfg = Glm53VisionConfig.from_dict(raw["vision_config"])
+            Glm53ImagePreprocessor.from_checkpoint_config(image_cfg, vision_cfg)
+            with open(index_path, encoding="utf-8") as f:
+                weight_map = json.load(f).get("weight_map", {})
+            required = {
+                "model.visual.patch_embed.proj.weight",
+                "model.visual.blocks.0.attn.qkv.weight",
+                "model.visual.merger.proj.weight",
+                "model.visual.downsample.weight",
+            }
+            return required.issubset(weight_map)
         except Exception:
             return False
 
@@ -1488,7 +1540,100 @@ class KrasisModel:
         )
         return vision, embedder
 
+    def _ensure_glm53_vision_model(self):
+        vision_quant = str(
+            getattr(self.quant_cfg, "step_vision_quant", "int4") or "int4"
+        ).lower()
+        if vision_quant != "bf16":
+            raise RuntimeError(
+                "GLM-5.3 image execution is accuracy-qualified only with "
+                "CFG_VISION_QUANT=bf16; INT4 vision failed the native-resolution "
+                "image-reading acceptance gate"
+            )
+        if self._glm53_vision_processor is None:
+            config_path = os.path.join(self.cfg.model_path, "config.json")
+            processor_path = os.path.join(self.cfg.model_path, "processor_config.json")
+            with open(config_path, encoding="utf-8") as f:
+                raw_cfg = json.load(f)
+            with open(processor_path, encoding="utf-8") as f:
+                processor_cfg = json.load(f)
+            image_cfg = processor_cfg.get("image_processor")
+            if not isinstance(image_cfg, dict):
+                raise ValueError("GLM-5.3 processor config has no image_processor object")
+            vision_cfg = Glm53VisionConfig.from_dict(raw_cfg["vision_config"])
+            self._glm53_vision_processor = Glm53ImagePreprocessor.from_checkpoint_config(
+                image_cfg,
+                vision_cfg,
+            )
+            self._glm53_vision_config = vision_cfg
+            self._glm53_vision_raw_config = raw_cfg
+
+        if self._glm53_vision_model is not None:
+            return self._glm53_vision_model
+
+        vision_cfg = self._glm53_vision_config
+        log_ram_ledger("before-glm53-vision-load")
+        vision = Glm53VisionModel(vision_cfg).to(dtype=torch.bfloat16)
+        index_path = os.path.join(self.cfg.model_path, "model.safetensors.index.json")
+        with open(index_path, encoding="utf-8") as f:
+            weight_map = json.load(f)["weight_map"]
+        shard_to_keys = {}
+        for key, shard in weight_map.items():
+            if key.startswith("model.visual."):
+                shard_to_keys.setdefault(shard, []).append(key)
+        if not shard_to_keys:
+            raise RuntimeError("No GLM-5.3 model.visual.* tensors found in safetensors index")
+
+        state = {}
+        for shard, keys in shard_to_keys.items():
+            shard_path = os.path.join(self.cfg.model_path, shard)
+            with safe_open(shard_path, framework="pt", device="cpu") as f:
+                for key in keys:
+                    state[key.removeprefix("model.visual.")] = f.get_tensor(key)
+        state_bytes = sum(t.numel() * t.element_size() for t in state.values())
+        state_dtypes = sorted({str(t.dtype) for t in state.values()})
+        missing, unexpected = vision.load_state_dict(state, strict=False)
+        missing = [name for name in missing if name != "rotary_inv_freq"]
+        if missing or unexpected:
+            raise RuntimeError(
+                f"GLM-5.3 vision state mismatch: missing={missing[:8]} unexpected={list(unexpected)[:8]}"
+            )
+        del state
+        gc.collect()
+
+        vision.eval()
+        vision.requires_grad_(False)
+        self._glm53_vision_model = vision
+        self._glm53_vision_quant_mode = vision_quant
+        self._glm53_vision_quant_stats = None
+        param_bytes, buffer_bytes = self._module_param_buffer_bytes(vision)
+        log_ram_ledger(
+            "after-glm53-vision-load",
+            {"vision_params": param_bytes, "vision_buffers": buffer_bytes},
+        )
+        logger.info(
+            "Loaded GLM-5.3 vision tower on CPU: quant=%s params_mb=%.1f "
+            "buffers_mb=%.1f state_mb=%.1f state_dtypes=%s",
+            vision_quant,
+            param_bytes / (1024 * 1024),
+            buffer_bytes / (1024 * 1024),
+            state_bytes / (1024 * 1024),
+            state_dtypes,
+        )
+        return vision
+
     def _release_qwen_vision_gpu(self, vision, device, label: str = "after-qwen-vision-release"):
+        if getattr(device, "type", None) != "cuda":
+            return
+        try:
+            vision.to("cpu")
+        finally:
+            torch.cuda.empty_cache()
+            log_ram_ledger(label)
+            if _vram_ledger_enabled():
+                _vram_checkpoint(label, [device])
+
+    def _release_glm53_vision_gpu(self, vision, device, label: str = "after-glm53-vision-release"):
         if getattr(device, "type", None) != "cuda":
             return
         try:
@@ -2107,6 +2252,131 @@ class KrasisModel:
             "image_tokens": int(expected_image_tokens),
         }
 
+    def _build_glm53_multimodal_prefill_inputs(self, messages_json: str, rendered_prompt: str):
+        """Build text-width image embeddings for a GLM-5.3 image request."""
+        if self.embedding is None:
+            raise RuntimeError("Model embedding is not loaded")
+        images = self._extract_openai_images(messages_json)
+        vision = self._ensure_glm53_vision_model()
+        processor = self._glm53_vision_processor
+        raw_cfg = self._glm53_vision_raw_config or {}
+        vision_cfg = self._glm53_vision_config
+        device = self.embedding.device
+        dtype = torch.bfloat16
+
+        batch = processor(images)
+        image_grid_thw = batch["image_grid_thw"]
+        image_token_counts = [
+            int(t * h * w) // (vision_cfg.spatial_merge_size**2)
+            for t, h, w in image_grid_thw.tolist()
+        ]
+        placeholder = "<|image|>"
+        placeholder_count = rendered_prompt.count(placeholder)
+        if placeholder_count != len(images):
+            raise ValueError(
+                f"GLM-5.3 prompt/image count mismatch: placeholders={placeholder_count} images={len(images)}"
+            )
+        expanded_prompt = rendered_prompt
+        for image_tokens in image_token_counts:
+            expanded_prompt = expanded_prompt.replace(placeholder, placeholder * image_tokens, 1)
+
+        if self.tokenizer is None:
+            self.tokenizer = Tokenizer(self.cfg.model_path)
+        input_ids_cpu = self.tokenizer.encode(expanded_prompt, add_special_tokens=False)
+        input_ids_cpu = torch.tensor(input_ids_cpu, dtype=torch.long)
+        image_token_id = int(raw_cfg["image_token_id"])
+        expected_image_tokens = int(sum(image_token_counts))
+        actual_image_tokens = int((input_ids_cpu == image_token_id).sum().item())
+        if actual_image_tokens != expected_image_tokens:
+            raise RuntimeError(
+                f"GLM-5.3 image placeholder expansion mismatch: tokens={actual_image_tokens} "
+                f"expected={expected_image_tokens}"
+            )
+
+        vision_param_bytes, vision_buffer_bytes = self._module_param_buffer_bytes(vision)
+        vision_resident_bytes = vision_param_bytes + vision_buffer_bytes
+        vision_quant = str(
+            getattr(self, "_glm53_vision_quant_mode", None)
+            or getattr(self.quant_cfg, "step_vision_quant", "int4")
+        )
+        try:
+            if getattr(device, "type", None) == "cuda":
+                free_before, total = torch.cuda.mem_get_info(device)
+                logger.info(
+                    "GLM-5.3 image request staging: quant=%s images=%d image_tokens=%d "
+                    "prompt_tokens=%d free_vram_mb=%d total_vram_mb=%d vision_resident_mb=%.1f",
+                    vision_quant,
+                    len(images),
+                    expected_image_tokens,
+                    int(input_ids_cpu.numel()),
+                    int(free_before // (1024 * 1024)),
+                    int(total // (1024 * 1024)),
+                    vision_resident_bytes / (1024 * 1024),
+                )
+            input_ids = input_ids_cpu.to(device=device)
+            pixel_values = batch["pixel_values"].to(device=device, dtype=dtype)
+            image_grid_thw = image_grid_thw.to(device=device)
+            log_ram_ledger("before-glm53-vision-to-gpu")
+            if _vram_ledger_enabled():
+                _vram_checkpoint("before-glm53-vision-to-gpu", [device])
+            vision = vision.to(device=device, dtype=dtype)
+            if _vram_ledger_enabled():
+                _vram_checkpoint("after-glm53-vision-to-gpu", [device])
+            with torch.inference_mode():
+                image_embeds = vision(pixel_values, image_grid_thw)
+                image_embeds = image_embeds.to(device=device, dtype=self.embedding.dtype)
+                image_mask = input_ids == image_token_id
+                if int(image_mask.sum().item()) != int(image_embeds.shape[0]):
+                    raise RuntimeError(
+                        f"GLM-5.3 image feature/token mismatch: tokens={int(image_mask.sum().item())} "
+                        f"features={int(image_embeds.shape[0])}"
+                    )
+                inputs_embeds = self.embedding[input_ids].clone()
+                inputs_embeds[image_mask] = image_embeds
+                if getattr(device, "type", None) == "cuda":
+                    torch.cuda.synchronize(device)
+        except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError) as e:
+            self._last_multimodal_prefill_tensors = None
+            self._release_glm53_vision_gpu(vision, device, "after-glm53-vision-oom-release")
+            raise KrasisVisionVramError(
+                "VRAM is too constrained for this GLM-5.3 image request. "
+                f"Transient {vision_quant} vision staging needs about "
+                f"{vision_resident_bytes / (1024 * 1024):.1f} MB for vision parameters plus "
+                f"image activations and multimodal prefill scratch; images={len(images)}, "
+                f"image_tokens={expected_image_tokens}. Use a smaller/fewer images or a GPU "
+                "with more free VRAM."
+            ) from e
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                self._last_multimodal_prefill_tensors = None
+                self._release_glm53_vision_gpu(vision, device, "after-glm53-vision-oom-release")
+                raise KrasisVisionVramError(
+                    "VRAM is too constrained for this GLM-5.3 image request. "
+                    f"images={len(images)}, image_tokens={expected_image_tokens}. "
+                    "Use a smaller/fewer images or a GPU with more free VRAM."
+                ) from e
+            self._release_glm53_vision_gpu(vision, device)
+            raise
+        except Exception:
+            self._release_glm53_vision_gpu(vision, device)
+            raise
+
+        self._release_glm53_vision_gpu(vision, device)
+        self._last_multimodal_prefill_tensors = (inputs_embeds,)
+        return {
+            "token_ids": [int(x) for x in input_ids.detach().cpu().tolist()],
+            "prompt_tokens": int(input_ids.numel()),
+            "hidden_size": int(inputs_embeds.shape[-1]),
+            "inputs_embeds_ptr": int(inputs_embeds.data_ptr()),
+            "mrope_cos_ptr": 0,
+            "mrope_sin_ptr": 0,
+            "mrope_half_dim": 0,
+            "rope_delta": 0,
+            "vision_block_ids_ptr": 0,
+            "image_count": int(len(images)),
+            "image_tokens": expected_image_tokens,
+        }
+
     def build_multimodal_prefill_inputs(self, messages_json: str, rendered_prompt: str):
         """Build GPU inputs_embeds for a supported image prompt."""
         if self.supports_qwen_image_inputs():
@@ -2115,6 +2385,8 @@ class KrasisModel:
             return self._build_step_multimodal_prefill_inputs(messages_json, rendered_prompt)
         if self.supports_gemma_image_inputs():
             return self._build_gemma_multimodal_prefill_inputs(messages_json, rendered_prompt)
+        if self.supports_glm53_image_inputs():
+            return self._build_glm53_multimodal_prefill_inputs(messages_json, rendered_prompt)
         raise ValueError("loaded model does not support Krasis image inputs")
 
     def clear_multimodal_prefill_inputs(self):
@@ -2468,7 +2740,10 @@ class KrasisModel:
         # SM architecture. Inductor generates PTX for the current device's arch, so
         # compiling while cuda:1 (e.g. Ada sm_89) is current would produce kernels
         # that fail on cuda:0 (e.g. Blackwell sm_120).
-        if self.cfg.linear_num_value_heads > 0:
+        if (
+            self.cfg.linear_num_value_heads > 0
+            and self.cfg.linear_attention_family == "gated_deltanet"
+        ):
             try:
                 from krasis.linear_attention import warmup_compiled_chunk_step
                 primary = devices[0]
@@ -2564,15 +2839,18 @@ class KrasisModel:
         elif layer.layer_type == "moe" and attn is None:
             pass  # MoE-only layer, no attention weights
         elif layer.layer_type == "linear_attention":
-            result["linear_attention"] = {
-                "in_proj_qkvz": attn.in_proj_qkvz,
-                "in_proj_ba": attn.in_proj_ba,
-                "out_proj": attn.out_proj,
-                "conv1d_weight": attn.conv1d_weight,
-                "A_log": attn.A_log,
-                "dt_bias": attn.dt_bias,
-                "norm_weight": attn.norm_weight,
-            }
+            if layer.cfg.is_kimi_delta_attention_layer(layer.layer_idx):
+                result["kimi_delta_attention"] = dict(attn.weights)
+            else:
+                result["linear_attention"] = {
+                    "in_proj_qkvz": attn.in_proj_qkvz,
+                    "in_proj_ba": attn.in_proj_ba,
+                    "out_proj": attn.out_proj,
+                    "conv1d_weight": attn.conv1d_weight,
+                    "A_log": attn.A_log,
+                    "dt_bias": attn.dt_bias,
+                    "norm_weight": attn.norm_weight,
+                }
         elif layer.cfg.is_deepseek_v4:
             if attn is None or not hasattr(attn, "attention"):
                 raise RuntimeError(
@@ -2729,7 +3007,20 @@ class KrasisModel:
             _add("", weights, ("wq_a", "wq_b", "wkv", "wo_b"))
             return result
         if layer_type == "linear_attention":
-            ordered = ("in_proj_qkvz", "in_proj_ba", "out_proj")
+            if self.cfg.linear_attention_family == "kimi_delta_attention":
+                ordered = (
+                    "q_proj",
+                    "k_proj",
+                    "v_proj",
+                    "o_proj",
+                    "f_a_proj",
+                    "f_b_proj",
+                    "b_proj",
+                    "g_a_proj",
+                    "g_b_proj",
+                )
+            else:
+                ordered = ("in_proj_qkvz", "in_proj_ba", "out_proj")
         elif layer_type in ("full_attention", "sliding_attention"):
             if self.cfg.is_mla:
                 ordered = ("q_a_proj", "q_b_proj", "q_proj", "kv_a_proj_with_mqa", "o_proj")
@@ -2751,6 +3042,15 @@ class KrasisModel:
             if isinstance(fused_qkv, torch.Tensor):
                 result["fused_qkv"] = fused_qkv
         return result
+
+    def _attention_weight_key(self, layer_type: str) -> str:
+        if layer_type == "linear_attention":
+            if self.cfg.linear_attention_family == "kimi_delta_attention":
+                return "kimi_delta_attention"
+            return "linear_attention"
+        if layer_type == "mamba2":
+            return "mamba2"
+        return "attention"
 
     def _record_hqq_expected_attention_tensors(
         self,
@@ -3567,7 +3867,7 @@ class KrasisModel:
         for layer_idx in range(self.cfg.num_hidden_layers):
             weights = loader.load_layer(layer_idx, primary_dev, attn_device=cpu)
             layer_type = weights.get("layer_type", "full_attention")
-            attn_key = "linear_attention" if layer_type == "linear_attention" else "attention"
+            attn_key = self._attention_weight_key(layer_type)
             self._maybe_write_hqq_attention_artifacts(
                 layer_idx,
                 layer_type,
@@ -3631,7 +3931,7 @@ class KrasisModel:
             for layer_idx, layer in enumerate(self.layers):
                 layer_weights = self._extract_layer_weights(layer, layer.device)
                 layer_type = layer_weights.get("layer_type", "full_attention")
-                attn_key = "linear_attention" if layer_type == "linear_attention" else "attention"
+                attn_key = self._attention_weight_key(layer_type)
                 attn_weights = layer_weights.get(attn_key, {})
                 expected_tensor_names = list(self._hqq_attention_tensor_map(layer_type, attn_weights))
                 if (
@@ -4015,6 +4315,8 @@ class KrasisModel:
         if getattr(layer.cfg, "is_deepseek_v4", False):
             return "deepseek_v4"
         if layer.layer_type == "linear_attention":
+            if layer.cfg.is_kimi_delta_attention_layer(layer.layer_idx):
+                return "kimi_delta_attention"
             return "linear_attention"
         attn = layer.attention
         if attn is not None and hasattr(attn, "kv_a_proj"):
@@ -4330,8 +4632,24 @@ class KrasisModel:
             elif hqq_layer.layer_type == "linear_attention":
                 if attn_obj is None:
                     continue
-                for name in ("in_proj_qkvz", "in_proj_ba", "out_proj"):
-                    _release_attr(attn_obj, name)
+                if hqq_layer.cfg.is_kimi_delta_attention_layer(
+                    hqq_layer.layer_idx
+                ):
+                    for name in (
+                        "q_proj",
+                        "k_proj",
+                        "v_proj",
+                        "o_proj",
+                        "f_a_proj",
+                        "f_b_proj",
+                        "b_proj",
+                        "g_a_proj",
+                        "g_b_proj",
+                    ):
+                        _release_dict_tensor(attn_obj.weights, name)
+                else:
+                    for name in ("in_proj_qkvz", "in_proj_ba", "out_proj"):
+                        _release_attr(attn_obj, name)
             elif attn_obj is not None and hasattr(attn_obj, "kv_a_proj"):
                 for name in (
                     "q_proj", "q_a_proj", "q_b_proj",
@@ -5038,24 +5356,25 @@ class KrasisModel:
                 kpe_layer, target_device, keepalive
             )
             if sequence_state_registrations is not None:
-                sequence_state_registrations.extend(
-                    [
-                        (
-                            f"layer{layer_idx}.mla.compressed",
-                            "mla_compressed_kv",
-                            layer_idx,
-                            ckv_cache,
-                            1,
-                        ),
+                sequence_state_registrations.append(
+                    (
+                        f"layer{layer_idx}.mla.compressed",
+                        "mla_compressed_kv",
+                        layer_idx,
+                        ckv_cache,
+                        1,
+                    )
+                )
+                if kpe_cache.numel() > 0:
+                    sequence_state_registrations.append(
                         (
                             f"layer{layer_idx}.mla.position",
                             "mla_positional_k",
                             layer_idx,
                             kpe_cache,
                             1,
-                        ),
-                    ]
-                )
+                        )
+                    )
             q_a_norm_ptr = 0
             if attn.has_q_lora:
                 attn._hqq_q_a_norm = self._move_hqq_tensor_to_device(
@@ -5079,36 +5398,81 @@ class KrasisModel:
                 "kpe_cache_ptr": int(kpe_cache.data_ptr()),
                 "q_a_norm_ptr": int(q_a_norm_ptr),
             }
-            if self.cfg.is_dsa:
-                owner_layer_idx = attn.dsa_indexer_owner_layer
-                if owner_layer_idx is None:
-                    raise RuntimeError(
-                        f"DSA layer {layer_idx} has no validated IndexShare owner"
-                    )
-                owner_weights_present = attn.dsa_indexer is not None
-                if owner_weights_present != (owner_layer_idx == layer_idx):
-                    raise RuntimeError(
-                        f"DSA layer {layer_idx} owner={owner_layer_idx} has "
-                        f"owner_weights_present={owner_weights_present}"
-                    )
-                metadata["dsa_indexer"] = {
-                    "owner_layer_idx": int(owner_layer_idx),
-                    "owner_weights_present": bool(owner_weights_present),
-                    "index_topk": int(self.cfg.index_topk),
-                    "index_head_dim": int(self.cfg.index_head_dim),
-                    "index_n_heads": int(self.cfg.index_n_heads),
-                    "qk_rope_head_dim": int(self.cfg.qk_rope_head_dim),
-                    "index_topk_freq": int(self.cfg.index_topk_freq),
-                    "index_skip_topk_offset": int(
-                        self.cfg.index_skip_topk_offset
-                    ),
-                    "q_lora_rank": int(self.cfg.q_lora_rank),
-                    "hidden_size": int(self.cfg.hidden_size),
-                    "rope_interleave": bool(
-                        self.cfg.indexer_rope_interleave
-                    ),
-                }
             return metadata
+
+        if layer_kind == "kimi_delta_attention":
+            weights = attn.weights
+            qkv_dim = int(
+                self.cfg.linear_num_key_heads * self.cfg.linear_key_head_dim
+            )
+            conv_weight = torch.cat(
+                (
+                    weights["q_conv1d"],
+                    weights["k_conv1d"],
+                    weights["v_conv1d"],
+                ),
+                dim=0,
+            ).squeeze(1)
+            attn._hqq_conv_weight = self._move_hqq_tensor_to_device(
+                conv_weight.float().contiguous(), target_device, keepalive
+            )
+            attn._hqq_a_log = self._move_hqq_tensor_to_device(
+                weights["A_log"].float().contiguous(), target_device, keepalive
+            )
+            attn._hqq_dt_bias = self._move_hqq_tensor_to_device(
+                weights["dt_bias"].float().contiguous(), target_device, keepalive
+            )
+            attn._hqq_norm_weight = self._move_hqq_tensor_to_device(
+                weights["o_norm"].float().contiguous(), target_device, keepalive
+            )
+            attn._hqq_conv_state = torch.zeros(
+                3,
+                qkv_dim,
+                self.cfg.linear_conv_kernel_dim - 1,
+                device=target_device,
+                dtype=torch.float32,
+            )
+            attn._hqq_recur_state = torch.zeros(
+                self.cfg.linear_num_key_heads,
+                self.cfg.linear_key_head_dim,
+                self.cfg.linear_value_head_dim,
+                device=target_device,
+                dtype=torch.float32,
+            )
+            keepalive.extend(
+                [attn._hqq_conv_state, attn._hqq_recur_state]
+            )
+            if sequence_state_registrations is not None:
+                sequence_state_registrations.extend(
+                    [
+                        (
+                            f"layer{layer_idx}.kda.conv",
+                            "kimi_delta_conv_state",
+                            layer_idx,
+                            attn._hqq_conv_state,
+                            0,
+                        ),
+                        (
+                            f"layer{layer_idx}.kda.recurrent",
+                            "kimi_delta_recurrent_state",
+                            layer_idx,
+                            attn._hqq_recur_state,
+                            0,
+                        ),
+                    ]
+                )
+            return {
+                "num_heads": int(self.cfg.linear_num_key_heads),
+                "head_dim": int(self.cfg.linear_key_head_dim),
+                "kernel_dim": int(self.cfg.linear_conv_kernel_dim),
+                "gate_lower_bound": float(self.cfg.linear_gate_lower_bound),
+                "conv_weight_ptr": int(attn._hqq_conv_weight.data_ptr()),
+                "a_log_ptr": int(attn._hqq_a_log.data_ptr()),
+                "dt_bias_ptr": int(attn._hqq_dt_bias.data_ptr()),
+                "norm_weight_ptr": int(attn._hqq_norm_weight.data_ptr()),
+                "conv_state_ptr": int(attn._hqq_conv_state.data_ptr()),
+                "recur_state_ptr": int(attn._hqq_recur_state.data_ptr()),
+            }
 
         if layer_kind == "linear_attention":
             conv_weight = attn.conv1d_weight
@@ -5171,6 +5535,51 @@ class KrasisModel:
 
         raise RuntimeError(f"Unsupported HQQ layer kind {layer_kind} for layer {layer_idx}")
 
+    def _dsa_indexer_layer_metadata(self, layer_idx: int, attn) -> dict | None:
+        """Return the checkpoint-derived native DSA contract for one MLA layer."""
+        if not self.cfg.is_dsa_layer(layer_idx):
+            return None
+        owner_layer_idx = attn.dsa_indexer_owner_layer
+        if owner_layer_idx is None:
+            raise RuntimeError(
+                f"DSA layer {layer_idx} has no validated IndexShare owner"
+            )
+        owner_weights_present = attn.dsa_indexer is not None
+        if owner_weights_present != (owner_layer_idx == layer_idx):
+            raise RuntimeError(
+                f"DSA layer {layer_idx} owner={owner_layer_idx} has "
+                f"owner_weights_present={owner_weights_present}"
+            )
+        return {
+            "layer_idx": int(layer_idx),
+            "owner_layer_idx": int(owner_layer_idx),
+            "owner_weights_present": bool(owner_weights_present),
+            "index_topk": int(self.cfg.index_topk),
+            "index_head_dim": int(self.cfg.index_head_dim),
+            "index_n_heads": int(self.cfg.index_n_heads),
+            "qk_rope_head_dim": int(self.cfg.qk_rope_head_dim),
+            "index_topk_freq": int(self.cfg.index_topk_freq),
+            "index_skip_topk_offset": int(self.cfg.index_skip_topk_offset),
+            "q_lora_rank": int(self.cfg.q_lora_rank),
+            "hidden_size": int(self.cfg.hidden_size),
+            "rope_interleave": bool(self.cfg.indexer_rope_interleave),
+            "index_kpool": int(self.cfg.index_kpool),
+            "index_kpool_compress": bool(self.cfg.index_kpool_compress),
+            "index_kpool_always_select_tail": bool(
+                self.cfg.index_kpool_always_select_tail
+            ),
+        }
+
+    def _register_dsa_indexer_layer_on_store(
+        self, store, layer_idx: int, attn
+    ) -> bool:
+        """Attach one validated DSA contract after its native MLA registration."""
+        metadata = self._dsa_indexer_layer_metadata(layer_idx, attn)
+        if metadata is None:
+            return False
+        store.register_dsa_indexer_layer(**metadata)
+        return True
+
     def _stage_dsa_indexer_resources_on_store(
         self,
         store,
@@ -5189,6 +5598,8 @@ class KrasisModel:
 
         segment_contexts = set()
         for layer_idx in range(layer_start, layer_end):
+            if not self.cfg.is_dsa_layer(layer_idx):
+                continue
             cache, _ = self._kv_cache_slot_for_layer(layer_idx)
             segment_contexts.add(int(cache.max_pages * cache.page_size))
         if len(segment_contexts) != 1:
@@ -5216,6 +5627,19 @@ class KrasisModel:
             "k_norm_weight": (1, self.cfg.index_head_dim),
             "k_norm_bias": (1, self.cfg.index_head_dim),
         }
+        if self.cfg.index_kpool_compress:
+            tensor_shapes.update(
+                {
+                    "index_kpool_compress_ape": (
+                        self.cfg.index_kpool,
+                        self.cfg.index_head_dim,
+                    ),
+                    "index_kpool_compress_gate": (
+                        self.cfg.index_head_dim,
+                        self.cfg.hidden_size,
+                    ),
+                }
+            )
         staged = 0
         for owner_layer_idx in local_owner_layers:
             owner_attn = self.layers[owner_layer_idx].attention
@@ -5266,6 +5690,8 @@ class KrasisModel:
                 weights_proj_wid=weight_ids["weights_proj"],
                 k_norm_weight_wid=weight_ids["k_norm_weight"],
                 k_norm_bias_wid=weight_ids["k_norm_bias"],
+                kpool_ape_wid=weight_ids.get("index_kpool_compress_ape"),
+                kpool_gate_wid=weight_ids.get("index_kpool_compress_gate"),
                 max_context_tokens=max_context_tokens,
             )
             staged += 1
@@ -5304,6 +5730,8 @@ class KrasisModel:
             return 0
         contexts = set()
         for layer_idx in range(layer_start, layer_end):
+            if not self.cfg.is_dsa_layer(layer_idx):
+                continue
             cache, _ = self._kv_cache_slot_for_layer(layer_idx)
             contexts.add(int(cache.max_pages * cache.page_size))
         if len(contexts) != 1:
@@ -5337,11 +5765,43 @@ class KrasisModel:
                         f"tensor {tensor_name}"
                     )
                 total += tensor.numel() * tensor.element_size()
+            if self.cfg.index_kpool_compress:
+                for tensor_name in (
+                    "index_kpool_compress_ape",
+                    "index_kpool_compress_gate",
+                ):
+                    tensor = getattr(owner, tensor_name, None)
+                    if not isinstance(tensor, torch.Tensor):
+                        raise RuntimeError(
+                            f"DSA resource sizing requires owner {owner_layer_idx} "
+                            f"tensor {tensor_name}"
+                        )
+                    total += tensor.numel() * tensor.element_size()
             total += max_context_tokens * self.cfg.index_head_dim * 2
-            total += min(self.cfg.index_topk, max_context_tokens) * 4
+            if self.cfg.index_kpool_compress:
+                pool_capacity = (
+                    max_context_tokens + self.cfg.index_kpool - 1
+                ) // self.cfg.index_kpool
+                total += max_context_tokens * self.cfg.index_head_dim * 2
+                total += pool_capacity * self.cfg.index_head_dim * 2
+                total += min(
+                    self.cfg.index_topk // self.cfg.index_kpool,
+                    pool_capacity,
+                ) * 4
+                selected_capacity = min(
+                    self.cfg.index_topk, max_context_tokens
+                ) + self.cfg.index_kpool - 1
+            else:
+                selected_capacity = min(
+                    self.cfg.index_topk, max_context_tokens
+                )
+            total += selected_capacity * 4
         total += (
             len(replica_owner_layers)
-            * min(self.cfg.index_topk, max_context_tokens)
+            * (
+                min(self.cfg.index_topk, max_context_tokens)
+                + (self.cfg.index_kpool - 1 if self.cfg.index_kpool_compress else 0)
+            )
             * 4
         )
         if not local_owner_layers:
@@ -5350,6 +5810,8 @@ class KrasisModel:
         # One graph-stable workspace is reused sequentially by every owner on
         # this store rather than multiplied by the IndexShare owner count.
         total += self.cfg.index_head_dim * 2
+        total += self.cfg.index_head_dim * 2
+        total += 4
         total += query_elems * 2
         total += query_elems * 2
         total += self.cfg.index_n_heads * 2
@@ -5448,6 +5910,9 @@ class KrasisModel:
                     tensor_name=tensor_name,
                     backend=manifest["backend"],
                     deepseek_v4=bool(self.cfg.is_deepseek_v4),
+                    prefill_materialize_default=bool(
+                        self.cfg.is_deepseek_v4 or self.cfg.is_glm5_next
+                    ),
                     nbits=int(desc["nbits"]),
                     format_version=int(manifest["format_version"]),
                     packed_ptr=int(desc["packed"].data_ptr()),
@@ -5602,34 +6067,11 @@ class KrasisModel:
                     kpe_cache_ptr=int(layer_meta["kpe_cache_ptr"]),
                     q_a_norm_ptr=int(layer_meta["q_a_norm_ptr"]),
                 )
-                dsa_indexer = layer_meta.get("dsa_indexer")
-                if dsa_indexer is not None:
-                    store.register_dsa_indexer_layer(
-                        layer_idx=int(common_args["layer_idx"]),
-                        owner_layer_idx=int(
-                            dsa_indexer["owner_layer_idx"]
-                        ),
-                        owner_weights_present=bool(
-                            dsa_indexer["owner_weights_present"]
-                        ),
-                        index_topk=int(dsa_indexer["index_topk"]),
-                        index_head_dim=int(dsa_indexer["index_head_dim"]),
-                        index_n_heads=int(dsa_indexer["index_n_heads"]),
-                        qk_rope_head_dim=int(
-                            dsa_indexer["qk_rope_head_dim"]
-                        ),
-                        index_topk_freq=int(
-                            dsa_indexer["index_topk_freq"]
-                        ),
-                        index_skip_topk_offset=int(
-                            dsa_indexer["index_skip_topk_offset"]
-                        ),
-                        q_lora_rank=int(dsa_indexer["q_lora_rank"]),
-                        hidden_size=int(dsa_indexer["hidden_size"]),
-                        rope_interleave=bool(
-                            dsa_indexer["rope_interleave"]
-                        ),
-                    )
+                self._register_dsa_indexer_layer_on_store(
+                    store,
+                    int(common_args["layer_idx"]),
+                    self.layers[int(common_args["layer_idx"])].attention,
+                )
             elif layer_kind == "linear_attention":
                 store.register_hqq_runtime_linear_attention_layer(
                     **common_args,
@@ -5641,6 +6083,20 @@ class KrasisModel:
                     kernel_dim=int(layer_meta["kernel_dim"]),
                     conv_dim=int(layer_meta["conv_dim"]),
                     scale=float(layer_meta["scale"]),
+                    conv_weight_ptr=int(layer_meta["conv_weight_ptr"]),
+                    a_log_ptr=int(layer_meta["a_log_ptr"]),
+                    dt_bias_ptr=int(layer_meta["dt_bias_ptr"]),
+                    norm_weight_ptr=int(layer_meta["norm_weight_ptr"]),
+                    conv_state_ptr=int(layer_meta["conv_state_ptr"]),
+                    recur_state_ptr=int(layer_meta["recur_state_ptr"]),
+                )
+            elif layer_kind == "kimi_delta_attention":
+                store.register_hqq_runtime_kimi_delta_attention_layer(
+                    **common_args,
+                    num_heads=int(layer_meta["num_heads"]),
+                    head_dim=int(layer_meta["head_dim"]),
+                    kernel_dim=int(layer_meta["kernel_dim"]),
+                    gate_lower_bound=float(layer_meta["gate_lower_bound"]),
                     conv_weight_ptr=int(layer_meta["conv_weight_ptr"]),
                     a_log_ptr=int(layer_meta["a_log_ptr"]),
                     dt_bias_ptr=int(layer_meta["dt_bias_ptr"]),
@@ -5764,7 +6220,7 @@ class KrasisModel:
                 weights = loader.load_layer(layer_idx, primary_dev, attn_device=_cpu)
                 if hqq_active:
                     layer_type = weights.get("layer_type", "full_attention")
-                    attn_key = "linear_attention" if layer_type == "linear_attention" else "attention"
+                    attn_key = self._attention_weight_key(layer_type)
                     self._maybe_write_hqq_attention_artifacts(
                         layer_idx,
                         layer_type,
@@ -5778,12 +6234,7 @@ class KrasisModel:
                 )
                 # Extract attention weights to CPU, null GPU refs
                 w = self._extract_layer_weights(layer, layer.device)
-                if layer.layer_type == "linear_attention":
-                    attn_key = "linear_attention"
-                elif layer.layer_type == "mamba2":
-                    attn_key = "mamba2"
-                else:
-                    attn_key = "attention"
+                attn_key = self._attention_weight_key(layer.layer_type)
                 attn_dict = w.get(attn_key, {})
                 cpu_attn = self._copy_weights_dict(attn_dict, 'cpu') if attn_dict else {}
                 # Store for _init_stream_attention to pin later
@@ -5833,7 +6284,7 @@ class KrasisModel:
                 weights = loader.load_layer(layer_idx, primary_dev, attn_device=_attn_dev)
                 if hqq_active:
                     layer_type = weights.get("layer_type", "full_attention")
-                    attn_key = "linear_attention" if layer_type == "linear_attention" else "attention"
+                    attn_key = self._attention_weight_key(layer_type)
                     self._maybe_write_hqq_attention_artifacts(
                         layer_idx,
                         layer_type,
@@ -5909,7 +6360,7 @@ class KrasisModel:
             if isinstance(value, (tuple, list)):
                 return sum(tensor_bytes(item) for item in value)
             return 0
-        for layer in self.layers:
+        for layer_idx, layer in enumerate(self.layers):
             # Norms
             if layer.input_norm_weight is not None:
                 total += layer.input_norm_weight.nelement() * layer.input_norm_weight.element_size()
@@ -6725,7 +7176,7 @@ class KrasisModel:
         # Wire engine to MoE layers on ALL devices + allocate pinned buffers
         # (CPU MoE buffers only needed when NOT gpu_only — they're for CPU decode path)
         first_k = self.cfg.first_k_dense_replace
-        for layer in self.layers:
+        for layer_idx, layer in enumerate(self.layers):
             if layer.is_moe:
                 layer.krasis_engine = engine
                 if not gpu_only and layer._cpu_act_buf is None:
@@ -6862,6 +7313,27 @@ class KrasisModel:
             if attn is None:
                 # GQA attention handled by Rust prefill — no Python attention object
                 attn_saved = {"type": "rust_prefill"}
+            elif (
+                layer.layer_type == "linear_attention"
+                and self.cfg.is_kimi_delta_attention_layer(layer_idx)
+            ):
+                attn_saved["weights"] = dict(attn.weights)
+                attn.weights = {
+                    name: mv(tensor, device)
+                    for name, tensor in attn.weights.items()
+                }
+            elif (
+                layer.layer_type == "linear_attention"
+                and self.cfg.is_kimi_delta_attention_layer(layer_idx)
+            ):
+                # KDA uses independent Q/K/V projections whose exact output
+                # width is heads * head_dim.  Do not apply GatedDeltaNet's
+                # fused QKVZ geometry to this distinct attention family.
+                kda_width = (
+                    self.cfg.linear_num_key_heads
+                    * self.cfg.linear_key_head_dim
+                )
+                max_qkv = max(max_qkv, kda_width)
             elif layer.layer_type == "linear_attention":
                 # GatedDeltaNetAttention
                 attn_saved["device"] = attn.device
@@ -8890,6 +9362,10 @@ class KrasisModel:
         """
         if not isinstance(tensor, torch.Tensor) or not tensor.is_cuda:
             raise RuntimeError(f"Sequence-state tensor {name} must be a CUDA tensor")
+        if tensor.numel() == 0:
+            raise RuntimeError(
+                f"Sequence-state tensor {name} is empty and has no CUDA allocation"
+            )
         if not tensor.is_contiguous():
             raise RuntimeError(
                 f"Sequence-state tensor {name} must retain its registered contiguous layout; "
@@ -8966,7 +9442,7 @@ class KrasisModel:
 
         def register(name, kind, layer_idx, tensor, tokens_per_row=0):
             nonlocal registered
-            if tensor is None or not on_store(tensor):
+            if tensor is None or tensor.numel() == 0 or not on_store(tensor):
                 return
             self._register_sequence_state_tensor(
                 store,
@@ -9162,7 +9638,7 @@ class KrasisModel:
         # Use dimension attributes (not weight tensors) since streaming may have
         # offloaded weights to CPU, leaving tensor attributes as None.
         max_qkv = self.cfg.hidden_size * 3  # default for standard GQA
-        for layer in self.layers:
+        for layer_idx, layer in enumerate(self.layers):
             if layer.attention is None:
                 # Mamba2 or MoE-only layers have no attention QKV buffers
                 if layer.layer_type == "mamba2" and layer.mamba2_weights is not None:
@@ -9170,6 +9646,18 @@ class KrasisModel:
                     m2 = self.cfg
                     in_proj_out = m2.mamba_d_inner * 2 + m2.mamba_conv_dim + m2.mamba_num_heads
                     max_qkv = max(max_qkv, in_proj_out)
+            elif (
+                layer.layer_type == "linear_attention"
+                and self.cfg.is_kimi_delta_attention_layer(layer_idx)
+            ):
+                # KDA has independent Q/K/V projections.  Its exact projection
+                # width comes from the checkpoint's linear-attention geometry;
+                # the fused GatedDeltaNet QKVZ formula does not apply.
+                kda_width = (
+                    self.cfg.linear_num_key_heads
+                    * self.cfg.linear_key_head_dim
+                )
+                max_qkv = max(max_qkv, kda_width)
             elif layer.layer_type == "linear_attention":
                 attn = layer.attention
                 # in_proj_qkvz output dim = nk*(dk + dk + hr*dv + hr*dv)
@@ -9245,6 +9733,7 @@ class KrasisModel:
 
         # Track weight IDs for LA layers (needed for re-registration after state reset)
         self._la_wids = {}
+        self._kda_wids = {}
         rope_set = False
 
         class _DecodeKeepalive(list):
@@ -9739,6 +10228,115 @@ class KrasisModel:
                         layer_idx=layer_idx,
                         tensor_names=sorted(v4_hqq_runtime),
                     )
+            elif (
+                layer.layer_type == "linear_attention"
+                and self.cfg.is_kimi_delta_attention_layer(layer_idx)
+            ):
+                projection_names = (
+                    "q_proj", "k_proj", "v_proj", "o_proj",
+                    "f_a_proj", "f_b_proj", "b_proj",
+                    "g_a_proj", "g_b_proj",
+                )
+                if hqq_active:
+                    projection_wids = {
+                        name: store.register_hqq_runtime_weight_view(
+                            layer_idx=layer_idx, tensor_name=name
+                        )
+                        for name in projection_names
+                    }
+                    conv_weight = attn._hqq_conv_weight
+                    a_log = attn._hqq_a_log
+                    dt_bias = attn._hqq_dt_bias
+                    o_norm = attn._hqq_norm_weight
+                    conv_state = attn._hqq_conv_state
+                    recurrent_state = attn._hqq_recur_state
+                else:
+                    kda = attn.weights
+                    cpu_kda = (
+                        self._stream_attn_cpu.get(layer_idx, {})
+                        if self._stream_attn_enabled
+                        else {}
+                    )
+                    projection_wids = {
+                        name: _register_attn_weight(
+                            cpu_kda.get(name, kda[name]),
+                            layer_idx,
+                            "kimi_delta_attention",
+                            name,
+                        )
+                        for name in projection_names
+                    }
+                    conv_weight = torch.cat(
+                        tuple(
+                            cpu_kda.get(name, kda[name])
+                            for name in ("q_conv1d", "k_conv1d", "v_conv1d")
+                        ),
+                        dim=0,
+                    ).squeeze(1).float().contiguous().to(device)
+                    a_log = cpu_kda.get(
+                        "A_log", kda["A_log"]
+                    ).float().contiguous().to(device)
+                    dt_bias = cpu_kda.get(
+                        "dt_bias", kda["dt_bias"]
+                    ).float().contiguous().to(device)
+                    o_norm = cpu_kda.get(
+                        "o_norm", kda["o_norm"]
+                    ).float().contiguous().to(device)
+                    qkv_dim = (
+                        self.cfg.linear_num_key_heads
+                        * self.cfg.linear_key_head_dim
+                    )
+                    conv_state = torch.zeros(
+                        3,
+                        qkv_dim,
+                        self.cfg.linear_conv_kernel_dim - 1,
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                    recurrent_state = torch.zeros(
+                        self.cfg.linear_num_key_heads,
+                        self.cfg.linear_key_head_dim,
+                        self.cfg.linear_value_head_dim,
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                    self._rust_decode_weights.extend(
+                        [conv_weight, a_log, dt_bias, o_norm,
+                         conv_state, recurrent_state]
+                    )
+                    attn._rust_conv_weight = conv_weight
+                    attn._rust_a_log = a_log
+                    attn._rust_dt_bias = dt_bias
+                    attn._rust_norm_weight = o_norm
+                    attn._rust_conv_state = conv_state
+                    attn._rust_recur_state = recurrent_state
+                self._kda_wids[layer_idx] = projection_wids
+                store.register_kda_layer(
+                    layer_idx=layer_idx,
+                    input_norm_ptr=inp_norm.data_ptr(),
+                    input_norm_size=inp_norm.numel(),
+                    post_attn_norm_ptr=post_norm.data_ptr(),
+                    post_attn_norm_size=post_norm.numel(),
+                    q_proj_wid=projection_wids["q_proj"],
+                    k_proj_wid=projection_wids["k_proj"],
+                    v_proj_wid=projection_wids["v_proj"],
+                    o_proj_wid=projection_wids["o_proj"],
+                    f_a_proj_wid=projection_wids["f_a_proj"],
+                    f_b_proj_wid=projection_wids["f_b_proj"],
+                    b_proj_wid=projection_wids["b_proj"],
+                    g_a_proj_wid=projection_wids["g_a_proj"],
+                    g_b_proj_wid=projection_wids["g_b_proj"],
+                    conv_weight_ptr=conv_weight.data_ptr(),
+                    a_log_ptr=a_log.data_ptr(),
+                    dt_bias_ptr=dt_bias.data_ptr(),
+                    norm_weight_ptr=o_norm.data_ptr(),
+                    conv_state_ptr=conv_state.data_ptr(),
+                    recur_state_ptr=recurrent_state.data_ptr(),
+                    num_heads=self.cfg.linear_num_key_heads,
+                    head_dim=self.cfg.linear_key_head_dim,
+                    kernel_dim=self.cfg.linear_conv_kernel_dim,
+                    gate_lower_bound=self.cfg.linear_gate_lower_bound,
+                )
             elif hqq_active:
                 # HQQ registration below owns attention projection residency.
                 # Do not route HQQ tensors through the normal BF16/Marlin
@@ -9987,6 +10585,9 @@ class KrasisModel:
                     q_lora_rank=attn.q_lora_rank if attn.has_q_lora else 0,
                     ckv_cache_dim=attn.ckv_dim,  # padded to ≥512 for MLA decode
                 )
+                self._register_dsa_indexer_layer_on_store(
+                    store, layer_idx, attn
+                )
 
                 # Set up RoPE tables from first MLA layer
                 if not rope_set:
@@ -10170,6 +10771,47 @@ class KrasisModel:
                     )
                     rope_set = True
 
+            if self.cfg.is_glm5_next:
+                hc = layer.hyper_connection.tensors
+                attn_fn = hc["hc_attn_fn"]
+                ffn_fn = hc["hc_ffn_fn"]
+                self._rust_decode_weights.extend(
+                    [
+                        attn_fn,
+                        hc["hc_attn_base"],
+                        hc["hc_attn_scale"],
+                        ffn_fn,
+                        hc["hc_ffn_base"],
+                        hc["hc_ffn_scale"],
+                    ]
+                )
+                store.register_glm5_hyper_connection(
+                    layer_idx=layer_idx,
+                    attn_fn_wid=store.register_weight(
+                        attn_fn.data_ptr(),
+                        attn_fn.shape[0],
+                        attn_fn.shape[1],
+                        1,
+                    ),
+                    attn_base_ptr=hc["hc_attn_base"].data_ptr(),
+                    attn_base_elems=hc["hc_attn_base"].numel(),
+                    attn_scale_ptr=hc["hc_attn_scale"].data_ptr(),
+                    attn_scale_elems=hc["hc_attn_scale"].numel(),
+                    ffn_fn_wid=store.register_weight(
+                        ffn_fn.data_ptr(),
+                        ffn_fn.shape[0],
+                        ffn_fn.shape[1],
+                        1,
+                    ),
+                    ffn_base_ptr=hc["hc_ffn_base"].data_ptr(),
+                    ffn_base_elems=hc["hc_ffn_base"].numel(),
+                    ffn_scale_ptr=hc["hc_ffn_scale"].data_ptr(),
+                    ffn_scale_elems=hc["hc_ffn_scale"].numel(),
+                    mult=self.cfg.hc_mult,
+                    sinkhorn_iters=self.cfg.hc_sinkhorn_iters,
+                    eps=self.cfg.hc_eps,
+                )
+
             # Register MLP type
             if layer.is_moe and self.cfg.gemma4_text and layer.dense_mlp is not None:
                 gp = self._dense_mlp_tensor(layer.dense_mlp["gate_proj"])
@@ -10211,8 +10853,15 @@ class KrasisModel:
                 gp_wid = store.register_weight(gp.data_ptr(), gp.shape[0], gp.shape[1], 0)
                 up_wid = store.register_weight(up.data_ptr(), up.shape[0], up.shape[1], 0)
                 dp_wid = store.register_weight(dp.data_ptr(), dp.shape[0], dp.shape[1], 0)
-                store.register_mlp(layer_idx, "dense",
-                                   gate_proj_wid=gp_wid, up_proj_wid=up_wid, down_proj_wid=dp_wid)
+                store.register_mlp(
+                    layer_idx,
+                    "dense",
+                    gate_proj_wid=gp_wid,
+                    up_proj_wid=up_wid,
+                    down_proj_wid=dp_wid,
+                    swiglu_limit=float(self.cfg.swiglu_limit_for_layer(layer_idx)),
+                    deepseek_clamp=bool(self.cfg.is_glm5_next),
+                )
             else:
                 store.register_mlp(layer_idx, "none")
 
@@ -10240,6 +10889,19 @@ class KrasisModel:
             logger.info(
                 "DeepSeek-V4 runtime registration complete: %d/%d layers",
                 registered_v4_layers,
+                self.cfg.num_hidden_layers,
+            )
+        elif self.cfg.is_glm5_next:
+            store.register_glm5_hyper_head_mean(mult=self.cfg.hc_mult)
+            registered_glm5_layers = store.finalize_glm5_layers()
+            if registered_glm5_layers != self.cfg.num_hidden_layers:
+                raise RuntimeError(
+                    "GLM-5.3 runtime registration count mismatch: "
+                    f"{registered_glm5_layers}/{self.cfg.num_hidden_layers}"
+                )
+            logger.info(
+                "GLM-5.3 runtime registration complete: %d/%d layers",
+                registered_glm5_layers,
                 self.cfg.num_hidden_layers,
             )
 
@@ -10444,11 +11106,13 @@ class KrasisModel:
             logger.info("Shared %s KV cache: %d GQA layers, max_seq=%d (%d pages × %d)",
                         cache_label, len(kv_ptrs), max_seq, cache.max_pages, cache.page_size)
         elif cache is not None and cache.ckv_cache is not None:
-            # MLA-only model (no GQA layers): still need to set max_seq for Rust decode
+            # Native MLA layers own their compact cache pointers in their Rust
+            # layer descriptors. Finalize the shared format/capacity contract
+            # without mislabelling those byte stores as legacy FP8 GQA cache.
             max_seq = cache.max_pages * cache.page_size
-            store.set_kv_cache_ptrs([], max_seq)
-            logger.info("MLA-only KV cache: max_seq=%d (%d pages × %d)",
-                        max_seq, cache.max_pages, cache.page_size)
+            store.set_native_mla_kv_cache(cache.kv_format, max_seq)
+            logger.info("Native MLA %s KV cache: max_seq=%d (%d pages × %d)",
+                        cache.kv_format_str, max_seq, cache.max_pages, cache.page_size)
 
         if hqq_active and not rope_set:
             max_seq = max(
@@ -10505,10 +11169,6 @@ class KrasisModel:
             )
 
         if self.cfg.is_dsa:
-            if not hqq_active:
-                raise RuntimeError(
-                    "Native DSA execution requires HQQ attention registration"
-                )
             staged_dsa = self._stage_dsa_indexer_resources_on_store(
                 store,
                 device,
@@ -10973,14 +11633,25 @@ class KrasisModel:
                     f"Aux sequence-state tensor {name} is on {tensor.device}, "
                     f"expected {aux_device}"
                 )
+            if tensor.numel() == 0:
+                return
             aux_sequence_state.append(
                 (name, kind, int(layer_idx), tensor, int(tokens_per_row))
             )
 
         # Same configure as primary
         max_qkv = self.cfg.hidden_size * 3
-        for layer in self.layers:
-            if layer.layer_type == "linear_attention":
+        for layer_idx, layer in enumerate(self.layers):
+            if (
+                layer.layer_type == "linear_attention"
+                and self.cfg.is_kimi_delta_attention_layer(layer_idx)
+            ):
+                kda_width = (
+                    self.cfg.linear_num_key_heads
+                    * self.cfg.linear_key_head_dim
+                )
+                max_qkv = max(max_qkv, kda_width)
+            elif layer.layer_type == "linear_attention":
                 attn = layer.attention
                 qkvz_out = attn.num_k_heads * (2 * attn.k_head_dim + 2 * attn.head_ratio * attn.v_head_dim)
                 max_qkv = max(max_qkv, qkvz_out)
@@ -11199,6 +11870,9 @@ class KrasisModel:
                         q_a_proj_wid=None, q_b_proj_wid=None, q_a_norm_ptr=0,
                         q_proj_wid=None, q_lora_rank=0,
                         ckv_cache_dim=attn.ckv_dim,
+                    )
+                    self._register_dsa_indexer_layer_on_store(
+                        store, layer_idx, attn
                     )
                 else:
                     _gqa_head_dim = self.cfg.gqa_head_dim_for_layer(layer_idx)
@@ -11947,10 +12621,6 @@ class KrasisModel:
                 registered_layers,
             )
         if self.cfg.is_dsa:
-            if not hqq_active:
-                raise RuntimeError(
-                    "Native DSA execution requires HQQ attention registration"
-                )
             staged_dsa = self._stage_dsa_indexer_resources_on_store(
                 store,
                 aux_device,

@@ -1,0 +1,24 @@
+Diagnostic only; decode and prefill timing instrumentation enabled.
+
+tmux session: glm53_cpu_tail_admission_dsa_attribution_20260830
+
+env -u KRASIS_TRACE \
+    -u KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE \
+    -u KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE \
+    -u KRASIS_DECODE_INT4_W13_N32 \
+    -u KRASIS_DECODE_INT4_W2_N32 \
+    -u KRASIS_PREFETCH \
+    -u KRASIS_APFL \
+    KRASIS_GPU_ROUTE_SYNC=0 \
+    KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC=0 \
+    KRASIS_SPLIT_EXPERT_LAUNCH=1 \
+    KRASIS_CPU_TAIL_RACE=1 \
+    KRASIS_CPU_TAIL_TRANSPOSED=1 \
+    KRASIS_CPU_TAIL_WORKERS=2 \
+    KRASIS_CPU_TAIL_CALIBRATION_JSON=benchmarks/20260830_glm53_cpu_tail_calibration_pro_hqq6_k6v6.json \
+    KRASIS_PREFILL_TIMING=1 \
+    KRASIS_STARTUP_DIAG=1 \
+    ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing
+
+This run is for attribution and admission validation only. Timing-enabled
+throughput is not accepted as a speed benchmark.

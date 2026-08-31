@@ -1,0 +1,28 @@
+Date: 2026-08-30
+Purpose: instrumented single-RTX-PRO GLM-5.3 prefill attribution for causal BF16 index scoring plus radix-linear owner selection.
+
+Command (run through tmux session glm53_aggressive_radix_prefill_profile_20260830):
+  KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE=bf16_bf16_causal_gemm KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE=radix_linear KRASIS_PREFILL_TIMING=1 KRASIS_STARTUP_DIAG=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 KRASIS_VRAM_LEDGER=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+
+Run directory:
+  logs/dev-benchmark_20260830_111418
+
+Exit:
+  0
+
+Instrumentation:
+  Prefill stage timing, startup diagnostics and VRAM ledger enabled. This run is attribution evidence only, not speed-benchmark evidence.
+
+39,920-token instrumented stage comparison versus radix-only profile:
+  named GLM wall: 25,415.9 ms vs 25,982.6 ms (-566.7 ms, -2.18%)
+  DSA attention: 13,350.7 ms vs 14,048.8 ms (-698.1 ms, -4.97%)
+  FFN: 8,150.9 ms vs 8,022.7 ms (+128.2 ms; run variance outside the changed DSA path)
+  KDA recurrence: 1,142.2 ms vs 1,142.2 ms (identical)
+
+Calibration low-water 500/4K/8K/16K/32K/39,920:
+  1231 / 1121 / 1193 / 1213 / 1205 / 1187 MiB
+
+Artifact SHA-256:
+  outer   3769dbeaef80f8b300e21e817ff1f991e205a918d7ee62697a30809a8a845c16
+  stdout  2a611f8a7d85b8e69b3f87c5ceb0f0bf57e640f87eeb22f9ddd8d7a5617887dc
+  runtime 102dc645b440efd4af126e2f78f5134a5ca407d59603ff832f1c63b8b8337ed7

@@ -1,5 +1,6 @@
 pub mod adaptive_cold_drop;
 pub mod chat_template;
+pub mod checkpoint_identity;
 pub mod cpu_tail;
 pub mod cpu_tail_calibrate;
 pub mod decode;

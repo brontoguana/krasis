@@ -1,0 +1,10 @@
+Date: 2026-08-31
+Host GPU: NVIDIA RTX A6000
+Working directory: /home/main/Documents/Claude/krasis
+Command: ./dev speed-test
+Instrumentation: disabled
+Run directory: logs/dev-benchmark_20260831_072143
+Wrapper exit: 0
+
+This is the fixed built QCN speed-test command. No timing, trace, selector,
+attention, HCS, calibration, or model-specific environment override was set.

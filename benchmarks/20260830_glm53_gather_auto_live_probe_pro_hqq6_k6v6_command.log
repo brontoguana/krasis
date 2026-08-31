@@ -1,0 +1,26 @@
+Purpose: timing-enabled startup-calibration proof of runtime DSA MLA gather selection and per-geometry cache reuse on one RTX PRO 6000. Diagnostic only; not speed evidence.
+
+Working directory: /home/main/Documents/Claude/krasis
+Tmux session: glm53_gather_auto_live_probe_corrected_20260830
+Run directory: logs/dev-benchmark_20260830_212723
+
+env \
+  -u KRASIS_TRACE \
+  -u KRASIS_PREFILL_TIMING \
+  -u KRASIS_CPU_TAIL_RACE \
+  -u KRASIS_CPU_TAIL_TRANSPOSED \
+  -u KRASIS_CPU_TAIL_WORKERS \
+  -u KRASIS_CPU_TAIL_CALIBRATION_JSON \
+  -u KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE \
+  -u KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE \
+  -u KRASIS_DECODE_INT4_W13_N32 \
+  -u KRASIS_DECODE_INT4_W2_N32 \
+  -u KRASIS_DSA_MLA_GATHERED_COMPUTE_MODE \
+  -u KRASIS_DSA_MLA_GATHER_MODE \
+  KRASIS_STARTUP_DIAG=1 \
+  KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 \
+  KRASIS_HQQ_MLA_STAGE_TIMING=1 \
+  KRASIS_HQQ_MLA_STAGE_TIMING_MIN_TOKENS=39920 \
+  ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+
+Result: exit 0. Timing and CUDA-event synchronization were enabled; no throughput row from this run is accepted as speed evidence.

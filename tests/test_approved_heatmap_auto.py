@@ -2,6 +2,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,23 @@ from krasis import server
 
 
 class ApprovedHeatmapAutoTest(unittest.TestCase):
+    def test_runtime_heatmap_counts_preserve_exact_values_and_sort_by_route(self):
+        counts = {
+            "4,2": 17,
+            "_metadata": {"ignored": True},
+            "3,9": 23,
+            "3,1": 5,
+        }
+
+        self.assertEqual(
+            server._runtime_heatmap_count_tuples(counts, "test heatmap"),
+            [(3, 1, 5), (3, 9, 23), (4, 2, 17)],
+        )
+
+    def test_runtime_heatmap_counts_reject_non_integer_route_coordinates(self):
+        with self.assertRaisesRegex(RuntimeError, "non-integer route key"):
+            server._runtime_heatmap_count_tuples({"layer,2": 1}, "test heatmap")
+
     def test_peer_format_eligibility_accepts_only_production_int4(self):
         self.assertIsNone(server._peer_expert_format_error(4))
         self.assertEqual(
@@ -22,6 +40,9 @@ class ApprovedHeatmapAutoTest(unittest.TestCase):
 
     def test_quick_heatmap_persists_measured_decode_token_denominator(self):
         class FakeStore:
+            def moe_route_shape(self):
+                return [(0, 1)]
+
             def hcs_init_collection(self, *args):
                 return None
 
@@ -50,7 +71,7 @@ class ApprovedHeatmapAutoTest(unittest.TestCase):
             _gpu_decode_store=FakeStore(),
             server_cleanup=lambda: None,
         )
-        args = SimpleNamespace()
+        args = SimpleNamespace(dspark_mode="off")
         metadata = {
             "heatmap_build": {
                 "decode_params": {
@@ -160,8 +181,10 @@ class ApprovedHeatmapAutoTest(unittest.TestCase):
             ],
         )
 
+        route_store = SimpleNamespace(moe_route_shape=lambda: [(0, 3), (2, 3)])
         ranking = server._full_heatmap_ranking(
             model,
+            route_store,
             {"2,1": 4, "0,2": 9, "0,0": 4},
         )
 
@@ -179,6 +202,9 @@ class ApprovedHeatmapAutoTest(unittest.TestCase):
                 self.pool_rankings = []
                 self.reload_calls = []
                 self.collection_inits = 0
+
+            def moe_route_shape(self):
+                return [(0, 2)]
 
             def set_vram_calibration(self, *args):
                 return "calibrated"
@@ -250,6 +276,10 @@ class ApprovedHeatmapAutoTest(unittest.TestCase):
                     "short_prefill_post_alloc_free_mb": 1050,
                     "long_prefill_post_alloc_free_mb": 950,
                     "decode_hcs_budget_mb": 500,
+                    "measured_vram_demand_points": [
+                        (8, 200, 50, 100),
+                        (16, 300, 50, 200),
+                    ],
                 },
             )
             out = Path(tmp) / "approved.json"
@@ -288,6 +318,9 @@ class ApprovedHeatmapAutoTest(unittest.TestCase):
         class FakeStore:
             def __init__(self):
                 self.pool_rankings = []
+
+            def moe_route_shape(self):
+                return [(0, 2)]
 
             def set_vram_calibration(self, *args):
                 return "calibrated"
@@ -357,6 +390,10 @@ class ApprovedHeatmapAutoTest(unittest.TestCase):
                     "short_prefill_post_alloc_free_mb": 1050,
                     "long_prefill_post_alloc_free_mb": 950,
                     "decode_hcs_budget_mb": 500,
+                    "measured_vram_demand_points": [
+                        (8, 200, 50, 100),
+                        (16, 300, 50, 200),
+                    ],
                 },
             )
             out = Path(tmp) / "approved.json"
@@ -417,9 +454,20 @@ class ApprovedHeatmapAutoTest(unittest.TestCase):
             layer_types=None,
         )
         model = SimpleNamespace(cfg=cfg)
-        args = SimpleNamespace(model_path=".")
+        args = SimpleNamespace(model_path=".", dspark_mode="off")
 
-        signature = server._heatmap_route_signature(model, args)
+        with patch.object(
+            server,
+            "route_checkpoint_identity",
+            return_value={
+                "format": "krasis_checkpoint_identity",
+                "format_version": 1,
+                "sha256": "0" * 64,
+                "weight_file_count": 1,
+                "weight_bytes": 1,
+            },
+        ):
+            signature = server._heatmap_route_signature(model, args)
 
         self.assertEqual(
             signature["routing"]["layer_types_sha256"],

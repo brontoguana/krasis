@@ -1,0 +1,21 @@
+Purpose: timing-enabled startup-calibration attribution of the 39,920-token gathered sparse-attention substages on one RTX PRO 6000. Diagnostic only; not speed evidence.
+
+Working directory: /home/main/Documents/Claude/krasis
+Tmux session: glm53_hqq_mla_gathered_substage_attribution_20260830
+
+env \
+  -u KRASIS_TRACE \
+  -u KRASIS_PREFILL_TIMING \
+  -u KRASIS_CPU_TAIL_RACE \
+  -u KRASIS_CPU_TAIL_TRANSPOSED \
+  -u KRASIS_CPU_TAIL_WORKERS \
+  -u KRASIS_CPU_TAIL_CALIBRATION_JSON \
+  -u KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE \
+  -u KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE \
+  -u KRASIS_DECODE_INT4_W13_N32 \
+  -u KRASIS_DECODE_INT4_W2_N32 \
+  KRASIS_STARTUP_DIAG=1 \
+  KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 \
+  KRASIS_HQQ_MLA_STAGE_TIMING=1 \
+  KRASIS_HQQ_MLA_STAGE_TIMING_MIN_TOKENS=39920 \
+  ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf

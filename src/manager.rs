@@ -211,6 +211,38 @@ struct InstalledModel {
     has_safetensors: bool,
 }
 
+fn normalize_dynamic_hcs_tail_blocks(value: &str) -> Result<String, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized == "auto" {
+        return Ok(normalized);
+    }
+    let blocks = normalized
+        .parse::<u32>()
+        .map_err(|_| "dynamic_hcs_tail_blocks must be auto or an integer in 1..5".to_string())?;
+    if !(1..=5).contains(&blocks) {
+        return Err("dynamic_hcs_tail_blocks must be auto or an integer in 1..5".to_string());
+    }
+    Ok(blocks.to_string())
+}
+
+fn deserialize_dynamic_hcs_tail_blocks<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TailPolicyInput {
+        Text(String),
+        Blocks(u32),
+    }
+
+    let raw = match TailPolicyInput::deserialize(deserializer)? {
+        TailPolicyInput::Text(value) => value,
+        TailPolicyInput::Blocks(value) => value.to_string(),
+    };
+    normalize_dynamic_hcs_tail_blocks(&raw).map_err(serde::de::Error::custom)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct ManagerConfig {
@@ -219,6 +251,7 @@ struct ManagerConfig {
     host: String,
     port: u16,
     attention_quant: String,
+    vision_quant: String,
     hqq_cache_profile: String,
     hqq_group_size: u32,
     hqq_auto_budget_pct: f64,
@@ -236,7 +269,8 @@ struct ManagerConfig {
     krasis_threads: u32,
     hcs: bool,
     dynamic_hcs: bool,
-    dynamic_hcs_tail_blocks: u32,
+    #[serde(deserialize_with = "deserialize_dynamic_hcs_tail_blocks")]
+    dynamic_hcs_tail_blocks: String,
     hcs_host_cache_mode: String,
     multi_gpu_mode: String,
     dynamic_peer: bool,
@@ -266,6 +300,7 @@ impl Default for ManagerConfig {
             host: "0.0.0.0".to_string(),
             port: 8012,
             attention_quant: "hqq6".to_string(),
+            vision_quant: "int4".to_string(),
             hqq_cache_profile: "baseline".to_string(),
             hqq_group_size: 128,
             hqq_auto_budget_pct: 0.0,
@@ -283,7 +318,7 @@ impl Default for ManagerConfig {
             krasis_threads: 40,
             hcs: true,
             dynamic_hcs: true,
-            dynamic_hcs_tail_blocks: 2,
+            dynamic_hcs_tail_blocks: "auto".to_string(),
             hcs_host_cache_mode: "source".to_string(),
             multi_gpu_mode: "auto".to_string(),
             dynamic_peer: false,
@@ -1407,6 +1442,7 @@ fn manager_config_from_saved(
     string_value!(host, "CFG_HOST");
     number_value!(port, "CFG_PORT");
     string_value!(attention_quant, "CFG_ATTENTION_QUANT");
+    string_value!(vision_quant, "CFG_VISION_QUANT");
     string_value!(hqq_cache_profile, "CFG_HQQ_CACHE_PROFILE");
     number_value!(hqq_group_size, "CFG_HQQ_GROUP_SIZE");
     number_value!(hqq_auto_budget_pct, "CFG_HQQ_AUTO_BUDGET_PCT");
@@ -1424,7 +1460,9 @@ fn manager_config_from_saved(
     number_value!(krasis_threads, "CFG_KRASIS_THREADS");
     bool_value!(hcs, "CFG_HCS");
     bool_value!(dynamic_hcs, "CFG_DYNAMIC_HCS");
-    number_value!(dynamic_hcs_tail_blocks, "CFG_DYNAMIC_HCS_TAIL_BLOCKS");
+    if let Some(value) = saved.get("CFG_DYNAMIC_HCS_TAIL_BLOCKS") {
+        config.dynamic_hcs_tail_blocks = normalize_dynamic_hcs_tail_blocks(value).ok()?;
+    }
     string_value!(hcs_host_cache_mode, "CFG_HCS_HOST_CACHE_MODE");
     string_value!(multi_gpu_mode, "CFG_MULTI_GPU_MODE");
     bool_value!(dynamic_peer, "CFG_DYNAMIC_PEER");
@@ -1589,6 +1627,8 @@ fn validate_config_syntax(
     if config.krasis_threads == 0 {
         return Err(ApiError::bad_request("krasis_threads must be positive"));
     }
+    normalize_dynamic_hcs_tail_blocks(&config.dynamic_hcs_tail_blocks)
+        .map_err(ApiError::bad_request)?;
     if !(0.0..=1.0).contains(&config.prefix_cache_ram_fraction) {
         return Err(ApiError::bad_request(
             "prefix_cache_ram_fraction must be between 0 and 1",
@@ -1598,6 +1638,9 @@ fn validate_config_syntax(
         return Err(ApiError::bad_request(
             "expert_group_size must be 32, 64, or 128",
         ));
+    }
+    if !matches!(config.vision_quant.as_str(), "bf16" | "int4") {
+        return Err(ApiError::bad_request("vision_quant must be bf16 or int4"));
     }
     for (name, value) in config_text_fields(config) {
         reject_config_text(name, value)?;
@@ -1626,6 +1669,7 @@ fn config_text_fields(config: &ManagerConfig) -> Vec<(&'static str, &str)> {
     vec![
         ("host", &config.host),
         ("attention_quant", &config.attention_quant),
+        ("vision_quant", &config.vision_quant),
         ("hqq_cache_profile", &config.hqq_cache_profile),
         ("hqq_sidecar_manifest", &config.hqq_sidecar_manifest),
         ("kv_dtype", &config.kv_dtype),
@@ -1689,6 +1733,7 @@ fn config_text(config: &ManagerConfig, model_path: &Path) -> String {
             config.gpu_expert_int4_calib.clone(),
         ),
         ("CFG_ATTENTION_QUANT", config.attention_quant.clone()),
+        ("CFG_VISION_QUANT", config.vision_quant.clone()),
         ("CFG_HQQ_CACHE_PROFILE", config.hqq_cache_profile.clone()),
         ("CFG_HQQ_GROUP_SIZE", config.hqq_group_size.to_string()),
         (
@@ -1731,7 +1776,7 @@ fn config_text(config: &ManagerConfig, model_path: &Path) -> String {
         ("CFG_DYNAMIC_HCS", bool_config(config.dynamic_hcs)),
         (
             "CFG_DYNAMIC_HCS_TAIL_BLOCKS",
-            config.dynamic_hcs_tail_blocks.to_string(),
+            config.dynamic_hcs_tail_blocks.clone(),
         ),
         (
             "CFG_ADAPTIVE_COLD_MASS_PRUNING",
@@ -2762,9 +2807,25 @@ mod tests {
         assert!(text.contains("CFG_GPU_EXPERT_BITS=\"4\""));
         assert!(text.contains("CFG_CPU_EXPERT_BITS=\"4\""));
         assert!(text.contains("CFG_SELECTED_GPUS=\"GPU-one,GPU-two\""));
+        assert!(text.contains("CFG_VISION_QUANT=\"int4\""));
         assert!(text.contains("CFG_SSH_TUNNEL=\"user@example\""));
+        assert!(text.contains("CFG_DYNAMIC_HCS_TAIL_BLOCKS=\"auto\""));
         assert!(!text.to_lowercase().contains("awq"));
         assert!(!text.to_lowercase().contains("fp8"));
+    }
+
+    #[test]
+    fn manager_tail_policy_accepts_auto_and_legacy_numeric_payloads() {
+        let automatic: ManagerConfig =
+            serde_json::from_str(r#"{"dynamic_hcs_tail_blocks":"auto"}"#).unwrap();
+        assert_eq!(automatic.dynamic_hcs_tail_blocks, "auto");
+
+        let legacy: ManagerConfig =
+            serde_json::from_str(r#"{"dynamic_hcs_tail_blocks":5}"#).unwrap();
+        assert_eq!(legacy.dynamic_hcs_tail_blocks, "5");
+
+        let invalid = serde_json::from_str::<ManagerConfig>(r#"{"dynamic_hcs_tail_blocks":6}"#);
+        assert!(invalid.is_err());
     }
 
     #[test]
@@ -2773,6 +2834,7 @@ mod tests {
             ("MODEL_PATH".to_string(), "/models/current".to_string()),
             ("CFG_PORT".to_string(), "8123".to_string()),
             ("CFG_ATTENTION_QUANT".to_string(), "hqq4".to_string()),
+            ("CFG_VISION_QUANT".to_string(), "bf16".to_string()),
             ("CFG_KV_DTYPE".to_string(), "k4v4".to_string()),
             ("CFG_VRAM_SAFETY_MARGIN".to_string(), "600".to_string()),
             ("CFG_DYNAMIC_HCS".to_string(), "0".to_string()),
@@ -2783,8 +2845,10 @@ mod tests {
         assert_eq!(config.gpu_uuids, ["GPU-stable"]);
         assert_eq!(config.port, 8123);
         assert_eq!(config.attention_quant, "hqq4");
+        assert_eq!(config.vision_quant, "bf16");
         assert_eq!(config.kv_dtype, "k4v4");
         assert!(!config.dynamic_hcs);
+        assert_eq!(config.dynamic_hcs_tail_blocks, "auto");
         assert_eq!(config.ssh_tunnel, "user@host");
     }
 
@@ -2937,6 +3001,8 @@ mod tests {
             "/stop",
             "/api/v1/operations/",
             "ACTIVE_CONFIG",
+            "visionQuantField",
+            "vision_quant",
         ] {
             assert!(html.contains(required), "missing {required}");
         }

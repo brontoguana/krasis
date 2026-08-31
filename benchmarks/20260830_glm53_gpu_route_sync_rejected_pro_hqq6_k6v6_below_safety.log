@@ -1,0 +1,1 @@
+{"timestamp_ms":1788128186673,"kind":"below_safety_margin","pid":2558073,"device":0,"free_mb":597,"safety_margin_mb":600,"deficit_mb":3,"hard_exit_floor_mb":125,"current_event":"prefill_start","request_context":""}

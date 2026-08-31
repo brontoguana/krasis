@@ -1,0 +1,9 @@
+Date: 2026-08-30
+Run directory: logs/dev-benchmark_20260830_122721
+tmux session: glm53_portable_autotune_default_benchmark_20260830
+GPU: one NVIDIA RTX PRO 6000 Blackwell Workstation Edition (physical GPU 1)
+Instrumentation: disabled for speed measurement
+
+env -u KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE -u KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE -u KRASIS_DECODE_INT4_W13_N32 -u KRASIS_DECODE_INT4_W2_N32 -u KRASIS_PREFILL_TIMING -u KRASIS_DECODE_TIMING -u KRASIS_TIMING -u KRASIS_STARTUP_DIAG -u KRASIS_VRAM_LEDGER ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+
+Exit: 0

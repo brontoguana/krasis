@@ -26,6 +26,7 @@ class VramPressureSourceTests(unittest.TestCase):
             source.index("/// Reload soft-tier HCS experts after prefill completes.")
         ]
 
+        self.assertIn("let calibrated_idle_floor_mb = self", section)
         self.assertIn("let pressure_floor_mb = pending", section)
         self.assertIn("saturating_add(p.deficit_mb as usize)", section)
         self.assertIn("let soft_chunk_guard_mb =", section)

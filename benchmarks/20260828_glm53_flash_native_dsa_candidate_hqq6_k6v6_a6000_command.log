@@ -1,0 +1,16 @@
+Timing-disabled candidate command executed from /home/main/Documents/Claude/krasis:
+
+KRASIS_DEEPSEEK_V4_PREFILL_HC_PROJECT_MODE=tf32_gemm \
+KRASIS_DEEPSEEK_V4_PREFILL_SPARSE_PIPELINE_MODE=tiled_fused_gather \
+KRASIS_DEEPSEEK_V4_PREFILL_GATHER_MODE=bf16x8 \
+KRASIS_DEEPSEEK_V4_PREFILL_SOFTMAX_MODE=warp_rows \
+KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE=bf16_bf16_causal_gemm \
+KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE=radix_linear \
+KRASIS_DEEPSEEK_V4_PREFILL_PREDICTED_W1=1 \
+KRASIS_PREFILL_SPLIT_EXPERT_DMA=1 \
+KRASIS_DSA_MLA_GATHERED_GEMM=1 \
+KRASIS_DSA_MLA_GATHERED_WVC=1 \
+./dev benchmark tests/glm53-flash-hqq6-k6v6-a6000.conf
+
+Component timing and instrumentation were disabled. The heatmap was rebuilt
+under these exact runtime parameters before the formal benchmark rows.

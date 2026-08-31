@@ -1,0 +1,5 @@
+KRASIS_VRAM_LEDGER=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+
+tmux session: glm53_dsa_fixed_single_full_benchmark_20260830
+run directory: logs/dev-benchmark_20260830_035045
+exit: 0

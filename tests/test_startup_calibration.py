@@ -64,7 +64,7 @@ class StartupCalibrationProbeTests(unittest.TestCase):
         self.assertEqual(next_target, 4_000)
         self.assertIn("initial adaptive", reason)
 
-    def test_long_calibration_uses_model_estimate_for_first_probe(self) -> None:
+    def test_long_calibration_model_estimate_cannot_skip_interior_probe(self) -> None:
         next_target, reason = server._next_startup_calibration_probe_target(
             short_tokens=500,
             default_long_tokens=39_920,
@@ -73,8 +73,20 @@ class StartupCalibrationProbeTests(unittest.TestCase):
             estimated_prefill_mb_per_token=0.20,
         )
 
-        self.assertEqual(next_target, 27_315)
-        self.assertIn("model-estimated", reason)
+        self.assertEqual(next_target, 4_000)
+        self.assertIn("bounded model-estimated", reason)
+
+    def test_long_calibration_model_estimate_remains_bounded_after_first_probe(self) -> None:
+        next_target, reason = server._next_startup_calibration_probe_target(
+            short_tokens=500,
+            default_long_tokens=39_920,
+            observed_prefill_mins=[(500, 42_000), (4_000, 41_000)],
+            target_floor_mb=1_200,
+            estimated_prefill_mb_per_token=0.20,
+        )
+
+        self.assertEqual(next_target, 8_000)
+        self.assertIn("model estimate", reason)
 
     def test_long_calibration_does_not_grow_when_short_probe_is_near_floor(self) -> None:
         next_target, reason = server._next_startup_calibration_probe_target(

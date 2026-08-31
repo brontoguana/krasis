@@ -1,0 +1,186 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d) to clear...
+[0;32m[1mOK[0m Selected GPUs (GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d) clear.
+[0;36m[1m=>[0m Running standard benchmark: tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260830_190015
+[0;36m[1m=>[0m Log: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260830_190015/benchmark_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d
+Loaded config from tests/glm53-flash-hqq6-k6v6-pro-50k.conf: {'model_path': '/home/main/.krasis/models/GLM-5.3-Flash', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d', 'num_gpus': 1, 'layer_group_size': 1, 'kv_cache_mb': 1000, 'max_context_tokens': 50000, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '127.0.0.1', 'port': 18254, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — GLM-5.3-Flash[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (config; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k6v6[0m
+  [32mLayer groups: 1  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=570 MB, free=96687 MB, total=97258 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=15248 MB, reserved=15304 MB, used=15982 MB, free=81275 MB, total=97258 MB
+  [0;32mHQQ attention artifacts validated (4483 MB cached), 81275 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 42 layers...
+    GPU Marlin cache loaded: 157.5 GB in 105s
+  [0;32mExpert weights loaded in 105s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=15248 MB, reserved=15304 MB, used=15982 MB, free=81275 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=15248 MB, reserved=15304 MB, used=15982 MB, free=81275 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=15483 MB, reserved=15540 MB, used=16218 MB, free=81039 MB, total=97258 MB
+The tokenizer class you load from this checkpoint is not the same type as the class this function is called from. It may result in unexpected tokenization. 
+The tokenizer class you load from this checkpoint is 'TokenizersBackend'. 
+The class this function is called from is 'PreTrainedTokenizerFast'.
+  [33m[VRAM after-full-load][0m cuda:0: alloc=15483 MB, reserved=15540 MB, used=16218 MB, free=81039 MB, total=97258 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x765a10f0)[0m
+  [32mReleased redundant GPU execution source tensors (794 MB)[0m
+  [2mVRAM monitor started (startup measurement 1 ms; runtime 50 ms)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+DeepSeek-V4 prefill sparse-score mode: bf16_fp32
+DeepSeek-V4 prefill sparse-output mode: bf16_fp32_gemm
+DeepSeek-V4 prefill sparse-pipeline mode: separate
+DeepSeek-V4 prefill gather mode: scalar
+DeepSeek-V4 prefill softmax mode: block_rows
+DeepSeek-V4 predicted-W1 prefetch: disabled
+DeepSeek-V4 split expert DMA: enabled
+DeepSeek-V4 prefill index-score mode: bf16_fp32_gemm
+DeepSeek-V4 prefill top-k mode: radix_linear
+DeepSeek-V4 prefill HC-project mode: tf32_gemm
+[FLA] Loading kernels for H=64 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=64)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=64)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=64)
+[FLA] loaded krasis_fla_kda_gate_chunk_cumsum_vector_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_kda_fwd_kernel_intra_sub_chunk (H=64)
+[FLA] loaded krasis_fla_chunk_kda_fwd_kernel_inter_solve_fused (H=64)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kda_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_kda_state_recurrence (H=64)
+[FLA] loaded krasis_fla_chunk_gla_fwd_kernel_o_kda (H=64)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mStartup diag: warmup tokens=300 (default 300, token=23745)[0m
+  [32mStartup diag env: no_graph=unset, mapped_reads=unset, prefill_debug=False, prefill_timing=unset, exit_after_calibration=True[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 5.2s[0m
+  [2mcuda:0 warmup:  peak 95,544 MB used / 97,258 MB total  (min free: 1,713 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 82,467 MB / 97,258 MB[0m
+  [32mStartup diag: calibration tokens short=500 (default 500), long=39,920 (default 39,920), cap=49,900, forced_long=False[0m
+  [32mCalibration prefill guard: 1,200 MB (runtime safety remains 600 MB)[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+[hqq6-decode-autotune] tensor=layer0.q_proj shape=8192x4096 scalar=0.0331ms vec4 [1:0.0881ms 2:0.0310ms 4:0.0187ms 8:0.0186ms 16:0.0165ms 32:0.0205ms] -> vec4 16 at 0.0165ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer0.o_proj shape=4096x8192 scalar=0.0349ms vec4 [1:0.1947ms 2:0.0698ms 4:0.0329ms 8:0.0208ms 16:0.0208ms 32:0.0187ms] -> vec4 32 at 0.0187ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer0.f_a_proj shape=128x4096 scalar=0.0104ms vec4 [1:0.0240ms 2:0.0146ms 4:0.0105ms 8:0.0084ms 16:0.0083ms 32:0.0106ms] -> vec4 16 at 0.0083ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer0.f_b_proj shape=8192x128 scalar=0.0042ms vec4 [1:0.0065ms 2:0.0044ms 4:0.0030ms 8:0.0030ms 16:0.0030ms 32:0.0041ms] -> vec4 4 at 0.0030ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer0.b_proj shape=64x4096 scalar=0.0103ms vec4 [1:0.0247ms 2:0.0147ms 4:0.0104ms 8:0.0084ms 16:0.0083ms 32:0.0105ms] -> vec4 16 at 0.0083ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer3.q_a_proj shape=1536x4096 scalar=0.0146ms vec4 [1:0.0248ms 2:0.0164ms 4:0.0106ms 8:0.0104ms 16:0.0084ms 32:0.0106ms] -> vec4 16 at 0.0084ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer3.q_b_proj shape=16384x1536 scalar=0.0248ms vec4 [1:0.0351ms 2:0.0168ms 4:0.0147ms 8:0.0127ms 16:0.0126ms 32:0.0126ms] -> vec4 16 at 0.0126ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer3.kv_a_proj_with_mqa shape=512x4096 scalar=0.0106ms vec4 [1:0.0247ms 2:0.0147ms 4:0.0104ms 8:0.0085ms 16:0.0083ms 32:0.0105ms] -> vec4 16 at 0.0083ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer3.o_proj shape=4096x16384 scalar=0.0656ms vec4 [1:0.6125ms 2:0.1866ms 4:0.0655ms 8:0.0390ms 16:0.0390ms 32:0.0349ms] -> vec4 32 at 0.0349ms (forced=false margin=5.0%)
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=4096 z=8 int8=false candidates [1:0.0813ms 2:0.0850ms 4:0.0950ms 8:0.1175ms] -> keeping formula ksplits=1 (0.0813 ms median; best 1 at 0.0813 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=3 shape k=4096 n=4096 z=1 int8=false candidates [1:0.0210ms 2:0.0174ms 3:0.0255ms 4:0.0210ms 8:0.0210ms] -> override ksplits=2 (0.0174 ms median vs formula 3 at 0.0255 ms, >5.0% margin)
+[shared-w2-autotune] layer=3 shape k=2048 n=4096 int8=false v1=0.0228ms candidates [2:0.0130ms 4:0.0167ms 8:0.0170ms] -> K-split 2 at 0.0130ms (>5.0% margin)
+[ksplit-autotune] complete: 1 W13 override(s), 1 shared-W2 override(s) installed
+[int4-n32-autotune] W13 k=4096 n=4096 z=1 ksplits=2 N16=0.0145ms N32=0.0145ms margin=5.0% -> N16
+[int4-n32-autotune] W13 k=4096 n=4096 z=2 ksplits=2 N16=0.0267ms N32=0.0188ms margin=5.0% -> N32
+[int4-n32-autotune] W13 k=4096 n=4096 z=3 ksplits=1 N16=0.0392ms N32=0.0308ms margin=5.0% -> N32
+[int4-n32-autotune] W13 k=4096 n=4096 z=4 ksplits=1 N16=0.0452ms N32=0.0309ms margin=5.0% -> N32
+[int4-n32-autotune] W13 k=4096 n=4096 z=5 ksplits=1 N16=0.0533ms N32=0.0392ms margin=5.0% -> N32
+[int4-n32-autotune] W13 k=4096 n=4096 z=6 ksplits=1 N16=0.0677ms N32=0.0488ms margin=5.0% -> N32
+[int4-n32-autotune] W13 k=4096 n=4096 z=7 ksplits=1 N16=0.0738ms N32=0.0493ms margin=5.0% -> N32
+[int4-n32-autotune] W13 k=4096 n=4096 z=8 ksplits=1 N16=0.0801ms N32=0.0575ms margin=5.0% -> N32
+[int4-n32-autotune] W2 k=2048 n=4096 z=1 limit=10 deepseek_activation=true N16=0.0227ms N32=0.0104ms margin=5.0% -> N32
+[int4-n32-autotune] W2 k=2048 n=4096 z=2 limit=10 deepseek_activation=true N16=0.0309ms N32=0.0127ms margin=5.0% -> N32
+[int4-n32-autotune] W2 k=2048 n=4096 z=3 limit=10 deepseek_activation=true N16=0.0493ms N32=0.0186ms margin=5.0% -> N32
+[int4-n32-autotune] W2 k=2048 n=4096 z=4 limit=10 deepseek_activation=true N16=0.0575ms N32=0.0187ms margin=5.0% -> N32
+[int4-n32-autotune] W2 k=2048 n=4096 z=5 limit=10 deepseek_activation=true N16=0.0676ms N32=0.0228ms margin=5.0% -> N32
+[int4-n32-autotune] W2 k=2048 n=4096 z=6 limit=10 deepseek_activation=true N16=0.0841ms N32=0.0275ms margin=5.0% -> N32
+[int4-n32-autotune] W2 k=2048 n=4096 z=7 limit=10 deepseek_activation=true N16=0.0943ms N32=0.0288ms margin=5.0% -> N32
+[int4-n32-autotune] W2 k=2048 n=4096 z=8 limit=10 deepseek_activation=true N16=0.1025ms N32=0.0329ms margin=5.0% -> N32
+[int4-n32-autotune] complete: 8 W13 shape(s), 8 W2 shape(s)
+  [32mdecode: 32 tokens in 6.65s (4.8 tok/s)  VRAM: 82409 MB free now, 82409 MB min free during decode[0m
+  [32mShort calibration: baseline=82,467 MB, prefill post-alloc=4,765 MB, prefill min=1,239 MB, decode min=82,409 MB, post-cleanup=82,409 MB[0m
+  [32mShort calibration: prefill 7.05s (70.9 tok/s), decode 7.33s (4.4 tok/s)[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=1.1943 MB/token[0m
+  [32mAdaptive long calibration fail-closed entry check: 4,000 tokens require 5,971 MB, 82,467 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 4,000 tokens (runtime-derived fail-closed probe (entry floor validated through 4000 tokens; projection declined: current low-water 1239 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 4,000 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 6.53s (4.9 tok/s)  VRAM: 82405 MB free now, 82405 MB min free during decode[0m
+  [32mLong calibration: baseline=82,409 MB, prefill post-alloc=4,765 MB, prefill min=1,121 MB, decode min=82,405 MB, post-cleanup=82,405 MB[0m
+  [32mLong calibration: prefill 9.27s (431.7 tok/s), decode 7.14s (4.5 tok/s)[0m
+  [32mAdaptive long calibration fail-closed entry check: 8,000 tokens require 6,301 MB, 82,409 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 8,000 tokens (runtime-derived fail-closed probe (entry floor validated through 8000 tokens; projection declined: current low-water 1121 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 8,000 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 6.43s (5.0 tok/s)  VRAM: 82399 MB free now, 82399 MB min free during decode[0m
+  [32mLong calibration: baseline=82,405 MB, prefill post-alloc=4,845 MB, prefill min=1,195 MB, decode min=82,399 MB, post-cleanup=82,399 MB[0m
+  [32mLong calibration: prefill 12.21s (655.2 tok/s), decode 7.02s (4.6 tok/s)[0m
+  [32mAdaptive long calibration fail-closed entry check: 16,000 tokens require 6,807 MB, 82,405 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 16,000 tokens (runtime-derived fail-closed probe (entry floor validated through 16000 tokens; projection declined: current low-water 1195 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 16,000 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 6.44s (5.0 tok/s)  VRAM: 82403 MB free now, 82403 MB min free during decode[0m
+  [32mLong calibration: baseline=82,399 MB, prefill post-alloc=4,851 MB, prefill min=1,215 MB, decode min=82,403 MB, post-cleanup=82,403 MB[0m
+  [32mLong calibration: prefill 14.61s (1095.5 tok/s), decode 7.03s (4.6 tok/s)[0m
+  [32mAdaptive long calibration fail-closed entry check: 32,000 tokens require 7,807 MB, 82,399 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 32,000 tokens (runtime-derived fail-closed probe (entry floor validated through 32000 tokens; projection declined: current low-water 1215 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 32,000 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 6.56s (4.9 tok/s)  VRAM: 82405 MB free now, 82405 MB min free during decode[0m
+  [32mLong calibration: baseline=82,403 MB, prefill post-alloc=4,851 MB, prefill min=1,209 MB, decode min=82,405 MB, post-cleanup=82,405 MB[0m
+  [32mLong calibration: prefill 22.28s (1436.1 tok/s), decode 7.16s (4.5 tok/s)[0m
+  [32mAdaptive long calibration fail-closed entry check: 39,920 tokens require 8,302 MB, 82,403 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 39,920 tokens (runtime-derived fail-closed probe (entry floor validated through 39920 tokens; projection declined: current low-water 1209 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+[HQQ-MLA-GATHERED] layer=3 tokens=39920 tiles=12 tile_capacity=3474 selected=2051 combined_dim=512 workspace_bytes=18698121408 bytes_per_row=5381632 gather_ms=248.620 score_gemm_ms=271.375 softmax_ms=47.318 output_gemm_ms=199.796
+[HQQ-MLA-STAGE] layer=3 tokens=39920 owner=true q_a_norm_ms=2.366 owner_select_ms=274.717 q_b_ms=7.858 kv_prep_ms=24.419 absorb_wkc_ms=139.493 attention_ms=767.219 apply_wvc_ms=17.934 o_proj_ms=20.123
+[HQQ-MLA-GATHERED] layer=7 tokens=39920 tiles=12 tile_capacity=3474 selected=2051 combined_dim=512 workspace_bytes=18698121408 bytes_per_row=5381632 gather_ms=249.618 score_gemm_ms=272.930 softmax_ms=47.264 output_gemm_ms=201.184
+[HQQ-MLA-STAGE] layer=7 tokens=39920 owner=true q_a_norm_ms=2.305 owner_select_ms=274.727 q_b_ms=7.790 kv_prep_ms=24.381 absorb_wkc_ms=139.770 attention_ms=771.100 apply_wvc_ms=18.018 o_proj_ms=20.241
+[HQQ-MLA-GATHERED] layer=11 tokens=39920 tiles=12 tile_capacity=3474 selected=2051 combined_dim=512 workspace_bytes=18698121408 bytes_per_row=5381632 gather_ms=251.374 score_gemm_ms=273.695 softmax_ms=47.334 output_gemm_ms=201.560
+[HQQ-MLA-STAGE] layer=11 tokens=39920 owner=true q_a_norm_ms=2.310 owner_select_ms=275.291 q_b_ms=7.829 kv_prep_ms=24.398 absorb_wkc_ms=140.914 attention_ms=774.063 apply_wvc_ms=18.084 o_proj_ms=20.246
+[HQQ-MLA-GATHERED] layer=15 tokens=39920 tiles=12 tile_capacity=3474 selected=2051 combined_dim=512 workspace_bytes=18698121408 bytes_per_row=5381632 gather_ms=250.859 score_gemm_ms=274.822 softmax_ms=47.327 output_gemm_ms=202.465
+[HQQ-MLA-STAGE] layer=15 tokens=39920 owner=true q_a_norm_ms=2.087 owner_select_ms=275.974 q_b_ms=7.863 kv_prep_ms=24.518 absorb_wkc_ms=140.951 attention_ms=775.568 apply_wvc_ms=18.111 o_proj_ms=20.286
+[HQQ-MLA-GATHERED] layer=19 tokens=39920 tiles=12 tile_capacity=3474 selected=2051 combined_dim=512 workspace_bytes=18698121408 bytes_per_row=5381632 gather_ms=251.869 score_gemm_ms=275.690 softmax_ms=47.323 output_gemm_ms=203.208
+[HQQ-MLA-STAGE] layer=19 tokens=39920 owner=true q_a_norm_ms=2.349 owner_select_ms=275.717 q_b_ms=7.903 kv_prep_ms=24.565 absorb_wkc_ms=141.115 attention_ms=778.189 apply_wvc_ms=18.181 o_proj_ms=20.364
+[HQQ-MLA-GATHERED] layer=23 tokens=39920 tiles=12 tile_capacity=3474 selected=2051 combined_dim=512 workspace_bytes=18698121408 bytes_per_row=5381632 gather_ms=252.150 score_gemm_ms=277.083 softmax_ms=48.147 output_gemm_ms=203.462
+[HQQ-MLA-STAGE] layer=23 tokens=39920 owner=true q_a_norm_ms=2.112 owner_select_ms=276.243 q_b_ms=7.930 kv_prep_ms=24.621 absorb_wkc_ms=141.231 attention_ms=780.943 apply_wvc_ms=18.193 o_proj_ms=20.374
+[HQQ-MLA-GATHERED] layer=27 tokens=39920 tiles=12 tile_capacity=3474 selected=2051 combined_dim=512 workspace_bytes=18698121408 bytes_per_row=5381632 gather_ms=252.273 score_gemm_ms=276.254 softmax_ms=47.176 output_gemm_ms=203.316
+[HQQ-MLA-STAGE] layer=27 tokens=39920 owner=true q_a_norm_ms=2.035 owner_select_ms=276.746 q_b_ms=7.940 kv_prep_ms=24.563 absorb_wkc_ms=141.254 attention_ms=779.123 apply_wvc_ms=18.247 o_proj_ms=20.487
+[HQQ-MLA-GATHERED] layer=31 tokens=39920 tiles=12 tile_capacity=3474 selected=2051 combined_dim=512 workspace_bytes=18698121408 bytes_per_row=5381632 gather_ms=253.187 score_gemm_ms=277.185 softmax_ms=47.423 output_gemm_ms=204.041
+[HQQ-MLA-STAGE] layer=31 tokens=39920 owner=true q_a_norm_ms=2.212 owner_select_ms=276.775 q_b_ms=7.928 kv_prep_ms=24.561 absorb_wkc_ms=141.552 attention_ms=781.935 apply_wvc_ms=18.227 o_proj_ms=20.411
+[HQQ-MLA-GATHERED] layer=35 tokens=39920 tiles=12 tile_capacity=3474 selected=2051 combined_dim=512 workspace_bytes=18698121408 bytes_per_row=5381632 gather_ms=253.723 score_gemm_ms=277.742 softmax_ms=47.269 output_gemm_ms=204.371
+[HQQ-MLA-STAGE] layer=35 tokens=39920 owner=true q_a_norm_ms=2.085 owner_select_ms=277.157 q_b_ms=7.952 kv_prep_ms=24.589 absorb_wkc_ms=141.868 attention_ms=783.204 apply_wvc_ms=18.298 o_proj_ms=20.464
+[HQQ-MLA-GATHERED] layer=39 tokens=39920 tiles=12 tile_capacity=3474 selected=2051 combined_dim=512 workspace_bytes=18698121408 bytes_per_row=5381632 gather_ms=253.960 score_gemm_ms=278.531 softmax_ms=47.253 output_gemm_ms=204.882
+[HQQ-MLA-STAGE] layer=39 tokens=39920 owner=true q_a_norm_ms=2.043 owner_select_ms=277.798 q_b_ms=7.958 kv_prep_ms=24.644 absorb_wkc_ms=141.660 attention_ms=784.725 apply_wvc_ms=18.346 o_proj_ms=20.594
+[HQQ-MLA-GATHERED] layer=43 tokens=39920 tiles=12 tile_capacity=3474 selected=2051 combined_dim=512 workspace_bytes=18698121408 bytes_per_row=5381632 gather_ms=254.590 score_gemm_ms=279.047 softmax_ms=47.369 output_gemm_ms=205.462
+[HQQ-MLA-STAGE] layer=43 tokens=39920 owner=true q_a_norm_ms=2.282 owner_select_ms=277.284 q_b_ms=7.951 kv_prep_ms=24.635 absorb_wkc_ms=142.203 attention_ms=786.574 apply_wvc_ms=18.317 o_proj_ms=20.548
+  [32mdecode: 32 tokens in 6.58s (4.9 tok/s)  VRAM: 82405 MB free now, 82405 MB min free during decode[0m
+  [32mLong calibration: baseline=82,405 MB, prefill post-alloc=4,851 MB, prefill min=1,207 MB, decode min=82,405 MB, post-cleanup=82,405 MB[0m
+  [32mLong calibration: prefill 27.03s (1477.0 tok/s), decode 7.17s (4.5 tok/s)[0m
+  [32mScratch reservation: max=60,510 MB (at 50,000 tokens)[0m
+  [32mVRAM monitor runtime cadence restored: 1 ms -> 50 ms[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 82,405 MB[0m
+  [32mTransient deltas: short prefill=81,228 MB, long prefill=81,198 MB, short decode=58 MB, long decode=0 MB[0m
+  [32mGPU0 decode HCS budget: 81,747 MB[0m
+  [32mPrefill HCS budgets: short=577 MB, long=517 MB[0m
+  [32mWorst-case prefill scratch reservation: 60,510 MB at 50,000 tokens[0m
+
+[1m[36m▸ Startup diagnostic exit[0m
+  [32mExiting after VRAM calibration by request[0m
+[0;36m[1m=>[0m Benchmark log saved: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260830_190015/benchmark_stdout.log

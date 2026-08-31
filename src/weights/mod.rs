@@ -4,7 +4,7 @@
 //! and stores in memory for CPU inference and GPU prefill.
 //!
 //! Disk cache: after first quantization, saves packed weights + scales to
-//! `~/.krasis/cache/<model_name>/` for instant loading.
+//! `~/.krasis/cache/<model_name>--<cache_identity_sha256>/` for instant loading.
 
 pub mod expert_hqq;
 pub mod marlin;
@@ -361,7 +361,7 @@ impl ModelConfig {
         // Must be present in config.json when swiglu_limit > 0.
         let swiglu_mode = if swiglu_limit <= 0.0 {
             SwiGluMode::Standard
-        } else if model_type == "deepseek_v4" {
+        } else if model_type == "deepseek_v4" || model_type == "glm5_next_text" {
             SwiGluMode::DeepSeekClamp
         } else {
             SwiGluMode::GptOss
@@ -378,27 +378,34 @@ impl ModelConfig {
             0.0
         };
 
-        let source_fp8_block_size = if model_type == "deepseek_v4" {
+        let source_quantization = cfg
+            .get("quantization_config")
+            .or_else(|| raw.get("quantization_config"));
+        let source_fp8_block_size = if source_quantization
+            .and_then(|value| value.get("weight_block_size"))
+            .is_some()
+        {
             let raw = cfg
                 .get("quantization_config")
+                .or_else(|| raw.get("quantization_config"))
                 .and_then(|value| value.get("weight_block_size"))
                 .and_then(|value| value.as_array())
-                .ok_or("deepseek_v4 requires quantization_config.weight_block_size")?;
+                .ok_or("quantization_config.weight_block_size must be an array")?;
             if raw.len() != 2 {
                 return Err(format!(
-                    "deepseek_v4 quantization_config.weight_block_size must have two entries, got {}",
+                    "quantization_config.weight_block_size must have two entries, got {}",
                     raw.len()
                 ));
             }
             let block_rows = raw[0]
                 .as_u64()
                 .filter(|value| *value > 0)
-                .ok_or("deepseek_v4 FP8 block row size must be a positive integer")?
+                .ok_or("FP8 block row size must be a positive integer")?
                 as usize;
             let block_cols = raw[1]
                 .as_u64()
                 .filter(|value| *value > 0)
-                .ok_or("deepseek_v4 FP8 block column size must be a positive integer")?
+                .ok_or("FP8 block column size must be a positive integer")?
                 as usize;
             Some((block_rows, block_cols))
         } else {
@@ -417,6 +424,26 @@ impl ModelConfig {
         // For hybrid models (Nemotron): parse hybrid_override_pattern, MoE layers are 'E'.
         // For standard models: contiguous from first_k_dense_replace.
         let moe_layer_indices = if let Some(indices) = explicit_moe_layer_indices {
+            indices
+        } else if let Some(types) = cfg.get("mlp_layer_types").and_then(|v| v.as_array()) {
+            if types.len() != num_hidden_layers {
+                return Err(format!(
+                    "mlp_layer_types has {} entries, expected {num_hidden_layers}",
+                    types.len()
+                ));
+            }
+            let mut indices = Vec::new();
+            for (layer_idx, value) in types.iter().enumerate() {
+                match value.as_str() {
+                    Some("dense") => {}
+                    Some("sparse") => indices.push(layer_idx),
+                    other => {
+                        return Err(format!(
+                            "mlp_layer_types[{layer_idx}] has unsupported value {other:?}"
+                        ))
+                    }
+                }
+            }
             indices
         } else if let Some(pattern) = cfg.get("hybrid_override_pattern").and_then(|v| v.as_str()) {
             pattern
@@ -1624,20 +1651,29 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// Resolve the cache directory for a model: `~/.krasis/cache/<model_folder_name>/`.
-/// Falls back to `<model_dir>/.krasis_cache/` if HOME is not set.
+/// Resolve the cache directory for an immutable source checkpoint.
+/// Falls back to a checkpoint-qualified directory inside the model if no user
+/// home environment variable is available.
 fn cache_dir_for_model(model_dir: &Path) -> PathBuf {
-    let model_name = model_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "unknown_model".to_string());
-    if let Ok(home) = std::env::var("HOME") {
-        Path::new(&home)
+    let namespace =
+        crate::checkpoint_identity::cache_namespace(model_dir).unwrap_or_else(|error| {
+            panic!(
+                "Cannot establish immutable checkpoint identity for {}: {error}",
+                model_dir.display()
+            )
+        });
+    let home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    } else {
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+    };
+    if let Some(home) = home {
+        PathBuf::from(home)
             .join(".krasis")
             .join("cache")
-            .join(&model_name)
+            .join(namespace)
     } else {
-        model_dir.join(".krasis_cache")
+        model_dir.join(format!(".krasis_cache--{namespace}"))
     }
 }
 
@@ -8401,6 +8437,125 @@ fn dequant_fp8_to_bf16(fp8_data: &[u8], scale: f32) -> Vec<u16> {
         .collect()
 }
 
+fn dequantize_fp8e4m3_f32_blocks_to_bf16(
+    weights: &[u8],
+    scales: &[f32],
+    rows: usize,
+    cols: usize,
+    scale_rows: usize,
+    scale_cols: usize,
+) -> Result<Vec<u16>, String> {
+    if scale_rows == 0
+        || scale_cols == 0
+        || rows % scale_rows != 0
+        || cols % scale_cols != 0
+    {
+        return Err(format!(
+            "F32 FP8 block scale grid [{scale_rows}, {scale_cols}] does not exactly tile [{rows}, {cols}]"
+        ));
+    }
+    if weights.len() != rows.saturating_mul(cols)
+        || scales.len() != scale_rows.saturating_mul(scale_cols)
+    {
+        return Err("F32 FP8 block payload size mismatch".to_string());
+    }
+    let block_rows = rows / scale_rows;
+    let block_cols = cols / scale_cols;
+    let mut output = Vec::with_capacity(rows * cols);
+    for row in 0..rows {
+        for col in 0..cols {
+            let scale = scales[(row / block_rows) * scale_cols + col / block_cols];
+            let value = fp8e4m3_to_f32(weights[row * cols + col]) * scale;
+            output.push(marlin::f32_to_bf16(value));
+        }
+    }
+    Ok(output)
+}
+
+/// Load an FP8 matrix using its mandatory scalar or rank-2 F32 scale-inverse.
+/// Rank-2 block geometry is derived exactly from the source tensor shapes and
+/// must divide the weight matrix; no model-specific block constant is used.
+fn load_fp8_weight_as_bf16(
+    tensor_name: &str,
+    weight_map: &HashMap<String, String>,
+    shards: &HashMap<String, MmapSafetensors>,
+) -> Result<Vec<u16>, String> {
+    let shard_name = weight_map
+        .get(tensor_name)
+        .ok_or_else(|| format!("Tensor not found in index: {tensor_name}"))?;
+    let shard = shards
+        .get(shard_name)
+        .ok_or_else(|| format!("Shard not loaded: {shard_name}"))?;
+    let info = shard
+        .tensor_info(tensor_name)
+        .ok_or_else(|| format!("Tensor not in shard: {tensor_name}"))?;
+    if !info.dtype.is_fp8() || info.shape.len() != 2 {
+        return Err(format!(
+            "{tensor_name} must be a rank-2 FP8 matrix, got {:?} {:?}",
+            info.dtype, info.shape
+        ));
+    }
+    let fp8_data: &[u8] = shard
+        .tensor_as_slice(tensor_name)
+        .map_err(|e| format!("Failed to read {tensor_name}: {e}"))?;
+    let scale_name = format!("{tensor_name}_scale_inv");
+    let scale_shard_name = weight_map
+        .get(&scale_name)
+        .ok_or_else(|| format!("FP8 scale_inv not found: {scale_name}"))?;
+    let scale_shard = shards
+        .get(scale_shard_name)
+        .ok_or_else(|| format!("Shard not loaded: {scale_shard_name}"))?;
+    let scale_info = scale_shard
+        .tensor_info(&scale_name)
+        .ok_or_else(|| format!("Tensor not in shard: {scale_name}"))?;
+    let scale_count = scale_info.shape.iter().try_fold(1usize, |acc, &dim| {
+        acc.checked_mul(dim)
+            .ok_or_else(|| format!("FP8 scale element count overflow: {scale_name}"))
+    })?;
+    if scale_count == 1 {
+        return Ok(dequant_fp8_to_bf16(
+            fp8_data,
+            load_fp8_scale(&scale_name, weight_map, shards)?,
+        ));
+    }
+    if scale_info.dtype != Dtype::F32 || scale_info.shape.len() != 2 {
+        return Err(format!(
+            "FP8 block scale {scale_name} must be rank-2 F32, got {:?} {:?}",
+            scale_info.dtype, scale_info.shape
+        ));
+    }
+    let rows = info.shape[0];
+    let cols = info.shape[1];
+    let scale_rows = scale_info.shape[0];
+    let scale_cols = scale_info.shape[1];
+    if scale_rows == 0
+        || scale_cols == 0
+        || rows % scale_rows != 0
+        || cols % scale_cols != 0
+    {
+        return Err(format!(
+            "FP8 block scale {scale_name} shape {:?} does not exactly tile {tensor_name} shape {:?}",
+            scale_info.shape, info.shape
+        ));
+    }
+    let scales: &[f32] = scale_shard
+        .tensor_as_slice(&scale_name)
+        .map_err(|e| format!("Failed to read {scale_name}: {e}"))?;
+    if scales.len() != scale_count || fp8_data.len() != rows * cols {
+        return Err(format!(
+            "FP8 payload size mismatch for {tensor_name}/{scale_name}"
+        ));
+    }
+    dequantize_fp8e4m3_f32_blocks_to_bf16(
+        fp8_data,
+        scales,
+        rows,
+        cols,
+        scale_rows,
+        scale_cols,
+    )
+}
+
 /// Dequantize a rank-2 E4M3 matrix with a rank-2 E8M0 block-scale grid.
 ///
 /// The block geometry is part of the checkpoint contract and is passed from
@@ -9160,15 +9315,7 @@ fn load_and_quantize_weight(
     let cols = info.shape[1];
 
     if info.dtype.is_fp8() {
-        // FP8 path: read as bytes, load per-tensor scale_inv, dequant to BF16
-        let fp8_data: &[u8] = shard
-            .tensor_as_slice(&tensor_name)
-            .map_err(|e| format!("Failed to read {tensor_name}: {e}"))?;
-
-        let scale_name = format!("{tensor_name}_scale_inv");
-        let scale = load_fp8_scale(&scale_name, weight_map, shards)?;
-
-        let bf16_data = dequant_fp8_to_bf16(fp8_data, scale);
+        let bf16_data = load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
         Ok(quantize_int4(&bf16_data, rows, cols, group_size))
     } else {
         let bf16_data: &[u16] = shard
@@ -9392,12 +9539,7 @@ fn load_and_quantize_expert_weight_int4(
     let cols = info.shape[1];
 
     if info.dtype.is_fp8() {
-        let fp8_data: &[u8] = shard
-            .tensor_as_slice(&tensor_name)
-            .map_err(|e| format!("Failed to read {tensor_name}: {e}"))?;
-        let scale_name = format!("{tensor_name}_scale_inv");
-        let scale = load_fp8_scale(&scale_name, weight_map, shards)?;
-        let bf16_data = dequant_fp8_to_bf16(fp8_data, scale);
+        let bf16_data = load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
         Ok(quantize_int4_expert_calibrated(
             &bf16_data, rows, cols, group_size, mode, layer_idx, expert_idx, proj_name, calib_data,
         ))
@@ -9439,12 +9581,8 @@ fn load_and_quantize_expert(
             let rows = info.shape[0];
             let cols = info.shape[1];
             if info.dtype.is_fp8() {
-                let fp8_data: &[u8] = shard
-                    .tensor_as_slice(&tensor_name)
-                    .map_err(|e| format!("Failed to read {tensor_name}: {e}"))?;
-                let scale_name = format!("{tensor_name}_scale_inv");
-                let scale = load_fp8_scale(&scale_name, weight_map, shards)?;
-                let bf16_data = dequant_fp8_to_bf16(fp8_data, scale);
+                let bf16_data =
+                    load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
                 Ok(QuantWeight::Bf16(QuantizedBf16 {
                     data: bf16_data,
                     rows,
@@ -9516,12 +9654,8 @@ fn load_and_quantize_expert(
             let rows = info.shape[0];
             let cols = info.shape[1];
             if info.dtype.is_fp8() {
-                let fp8_data: &[u8] = shard
-                    .tensor_as_slice(&tensor_name)
-                    .map_err(|e| format!("Failed to read {tensor_name}: {e}"))?;
-                let scale_name = format!("{tensor_name}_scale_inv");
-                let scale = load_fp8_scale(&scale_name, weight_map, shards)?;
-                let bf16_data = dequant_fp8_to_bf16(fp8_data, scale);
+                let bf16_data =
+                    load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
                 Ok(QuantWeight::Int8(quantize_int8(
                     &bf16_data, rows, cols, group_size,
                 )))
@@ -9567,12 +9701,8 @@ fn load_and_quantize_expert_ungated(
             let rows = info.shape[0];
             let cols = info.shape[1];
             if info.dtype.is_fp8() {
-                let fp8_data: &[u8] = shard
-                    .tensor_as_slice(&tensor_name)
-                    .map_err(|e| format!("Failed to read {tensor_name}: {e}"))?;
-                let scale_name = format!("{tensor_name}_scale_inv");
-                let scale = load_fp8_scale(&scale_name, weight_map, shards)?;
-                let bf16_data = dequant_fp8_to_bf16(fp8_data, scale);
+                let bf16_data =
+                    load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
                 Ok(QuantWeight::Bf16(QuantizedBf16 {
                     data: bf16_data,
                     rows,
@@ -9619,12 +9749,8 @@ fn load_and_quantize_expert_ungated(
             let rows = info.shape[0];
             let cols = info.shape[1];
             if info.dtype.is_fp8() {
-                let fp8_data: &[u8] = shard
-                    .tensor_as_slice(&tensor_name)
-                    .map_err(|e| format!("Failed to read {tensor_name}: {e}"))?;
-                let scale_name = format!("{tensor_name}_scale_inv");
-                let scale = load_fp8_scale(&scale_name, weight_map, shards)?;
-                let bf16_data = dequant_fp8_to_bf16(fp8_data, scale);
+                let bf16_data =
+                    load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
                 Ok(QuantWeight::Int8(quantize_int8(
                     &bf16_data, rows, cols, group_size,
                 )))
@@ -10133,6 +10259,59 @@ mod tests {
         let error =
             dequantize_fp8e4m3_e8m0_blocks_to_bf16(&weights, &scales[..3], 3, 5, 2, 3).unwrap_err();
         assert!(error.contains("expected 4"));
+    }
+
+    #[test]
+    fn test_glm5_next_f32_block_dequant_and_nested_config() {
+        let raw: serde_json::Value = serde_json::from_str(
+            r#"{
+                "quantization_config": {"weight_block_size": [128, 128]},
+                "text_config": {
+                    "model_type": "glm5_next_text",
+                    "hidden_size": 4096,
+                    "intermediate_size": 12288,
+                    "moe_intermediate_size": 2048,
+                    "n_routed_experts": 288,
+                    "num_experts_per_tok": 8,
+                    "num_hidden_layers": 5,
+                    "first_k_dense_replace": 3,
+                    "n_shared_experts": 1,
+                    "routed_scaling_factor": 2.5,
+                    "swiglu_limit": 10.0,
+                    "mlp_layer_types": ["dense", "dense", "dense", "sparse", "sparse"]
+                }
+            }"#,
+        )
+        .unwrap();
+        let config = ModelConfig::from_json(&raw).unwrap();
+        assert_eq!(config.source_fp8_block_size, Some((128, 128)));
+        assert_eq!(config.swiglu_mode, SwiGluMode::DeepSeekClamp);
+        assert_eq!(config.moe_layer_indices, vec![3, 4]);
+
+        // E4M3 0x38 is 1.0. A 4x6 matrix with a 2x3 scale grid gives
+        // shape-derived 2x2 blocks and exercises every scale region.
+        let weights = vec![0x38u8; 4 * 6];
+        let scales = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let actual = dequantize_fp8e4m3_f32_blocks_to_bf16(
+            &weights, &scales, 4, 6, 2, 3,
+        )
+        .unwrap();
+        let expected = [
+            1.0f32, 1.0, 2.0, 2.0, 3.0, 3.0,
+            1.0, 1.0, 2.0, 2.0, 3.0, 3.0,
+            4.0, 4.0, 5.0, 5.0, 6.0, 6.0,
+            4.0, 4.0, 5.0, 5.0, 6.0, 6.0,
+        ];
+        for (&got, &want) in actual.iter().zip(expected.iter()) {
+            assert_eq!(bf16_to_f32(got), want);
+        }
+        assert!(
+            dequantize_fp8e4m3_f32_blocks_to_bf16(
+                &weights, &scales, 4, 6, 3, 2,
+            )
+            .unwrap_err()
+            .contains("does not exactly tile")
+        );
     }
 
     #[test]

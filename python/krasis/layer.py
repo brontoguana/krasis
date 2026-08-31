@@ -98,6 +98,19 @@ class NativeDsaIndexerWeights:
             "k_norm_weight": (cfg.index_head_dim,),
             "k_norm_bias": (cfg.index_head_dim,),
         }
+        if cfg.index_kpool_compress:
+            expected_shapes.update(
+                {
+                    "index_kpool_compress_ape": (
+                        cfg.index_kpool,
+                        cfg.index_head_dim,
+                    ),
+                    "index_kpool_compress_gate": (
+                        cfg.index_head_dim,
+                        cfg.hidden_size,
+                    ),
+                }
+            )
         missing = sorted(set(expected_shapes) - set(weights))
         if missing:
             raise KeyError(
@@ -169,6 +182,12 @@ class NativeMLAWeights:
             mscale = 0.1 * mscale_all_dim * math.log(factor) + 1.0
             self.sm_scale *= mscale * mscale
 
+        # Rust owns MLA inference, but setup still needs a stable RoPE table
+        # contract for the decode store.  Keep the setup-owned tensors here so
+        # BF16 MLA registration has the same lifetime guarantees as HQQ MLA.
+        self.rope_theta = cfg.rope_theta
+        self._rope_cos_sin = None
+
         if self.has_q_lora:
             self.q_a_proj = weights["q_a_proj"]
             self.q_b_proj = weights["q_b_proj"]
@@ -208,6 +227,95 @@ class NativeMLAWeights:
             if pad_size
             else weights["w_vc"]
         )
+
+    def _get_rope_cos_sin(self, max_len: int):
+        """Build the checkpoint-defined MLA RoPE tables used by Rust setup."""
+        if max_len <= 0:
+            raise ValueError(f"MLA RoPE max_len must be positive, got {max_len}")
+        if (
+            self._rope_cos_sin is not None
+            and self._rope_cos_sin[0].shape[0] >= max_len
+        ):
+            return self._rope_cos_sin
+
+        dim = int(self.qk_rope_dim)
+        if dim < 0 or dim % 2:
+            raise ValueError(f"MLA RoPE dimension must be non-negative and even, got {dim}")
+        if dim == 0:
+            empty = torch.empty(
+                (max_len, 0), dtype=torch.bfloat16, device=self.device
+            )
+            self._rope_cos_sin = (empty, empty)
+            return self._rope_cos_sin
+
+        rope_cfg = self.cfg.rope_scaling or {}
+        if not isinstance(rope_cfg, dict):
+            raise ValueError("MLA rope_scaling must be an object")
+        factor = float(rope_cfg.get("factor", 1.0))
+        original_max = int(
+            rope_cfg.get("original_max_position_embeddings", 4096)
+        )
+        if factor <= 0.0 or original_max <= 0:
+            raise ValueError(
+                "MLA RoPE factor/original length must be positive, got "
+                f"{factor}/{original_max}"
+            )
+
+        freqs = 1.0 / (
+            float(self.rope_theta)
+            ** (
+                torch.arange(0, dim, 2, device=self.device, dtype=torch.float32)
+                / float(dim)
+            )
+        )
+        if factor > 1.0:
+            beta_fast = float(rope_cfg.get("beta_fast", 32.0))
+            beta_slow = float(rope_cfg.get("beta_slow", 1.0))
+            if beta_fast <= 0.0 or beta_slow <= 0.0:
+                raise ValueError(
+                    "MLA YaRN beta values must be positive, got "
+                    f"{beta_fast}/{beta_slow}"
+                )
+            low = math.floor(
+                dim
+                * math.log(original_max / (beta_fast * 2.0 * math.pi))
+                / (2.0 * math.log(float(self.rope_theta)))
+            )
+            high = math.ceil(
+                dim
+                * math.log(original_max / (beta_slow * 2.0 * math.pi))
+                / (2.0 * math.log(float(self.rope_theta)))
+            )
+            low = max(low, 0)
+            high = min(high, dim // 2 - 1)
+            ramp = torch.clamp(
+                (
+                    torch.arange(
+                        dim // 2, device=self.device, dtype=torch.float32
+                    )
+                    - low
+                )
+                / max(high - low, 0.001),
+                0,
+                1,
+            )
+            original_freqs = freqs
+            interpolated_freqs = freqs / factor
+            original_weight = 1.0 - ramp
+            freqs = (
+                interpolated_freqs * (1.0 - original_weight)
+                + original_freqs * original_weight
+            )
+
+        positions = torch.arange(
+            max_len, device=self.device, dtype=torch.float32
+        )
+        angles = torch.outer(positions, freqs)
+        self._rope_cos_sin = (
+            angles.cos().to(torch.bfloat16),
+            angles.sin().to(torch.bfloat16),
+        )
+        return self._rope_cos_sin
 
     def forward(self, *_args, **_kwargs):
         raise RuntimeError(
@@ -366,6 +474,86 @@ class NativeDeepseekV4Weights:
         )
 
 
+class NativeHyperConnectionWeights:
+    """Setup-only validated mHC tensor contract shared by native architectures."""
+
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        layer_idx: int,
+        tensors: Dict[str, torch.Tensor],
+    ):
+        if not cfg.has_hyper_connection:
+            raise ValueError("mHC tensors used for an architecture without mHC")
+        mix_width = (2 + cfg.hc_mult) * cfg.hc_mult
+        hc_input = cfg.hc_mult * cfg.hidden_size
+        expected = {
+            "hc_attn_fn": (mix_width, hc_input),
+            "hc_attn_base": (mix_width,),
+            "hc_attn_scale": (3,),
+            "hc_ffn_fn": (mix_width, hc_input),
+            "hc_ffn_base": (mix_width,),
+            "hc_ffn_scale": (3,),
+        }
+        NativeDeepseekV4Weights._validate_tensors(
+            f"layer {layer_idx} hyper-connection",
+            tensors,
+            expected,
+            expected_dtype=torch.float32,
+        )
+        self.tensors = tensors
+
+
+class NativeKimiDeltaAttentionWeights:
+    """Setup-only GLM-5.3 KDA tensor contract for Rust/CUDA execution."""
+
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        layer_idx: int,
+        weights: Dict[str, torch.Tensor],
+    ):
+        if not cfg.is_kimi_delta_attention_layer(layer_idx):
+            raise ValueError(f"KDA tensor set used for non-KDA layer {layer_idx}")
+        qkv_dim = cfg.linear_num_key_heads * cfg.linear_key_head_dim
+        expected = {
+            "q_proj": (qkv_dim, cfg.hidden_size),
+            "k_proj": (qkv_dim, cfg.hidden_size),
+            "v_proj": (qkv_dim, cfg.hidden_size),
+            "o_proj": (cfg.hidden_size, qkv_dim),
+            "f_a_proj": (cfg.linear_key_head_dim, cfg.hidden_size),
+            "f_b_proj": (qkv_dim, cfg.linear_key_head_dim),
+            "b_proj": (cfg.linear_num_key_heads, cfg.hidden_size),
+            "g_a_proj": (cfg.linear_key_head_dim, cfg.hidden_size),
+            "g_b_proj": (qkv_dim, cfg.linear_key_head_dim),
+            "q_conv1d": (qkv_dim, 1, cfg.linear_conv_kernel_dim),
+            "k_conv1d": (qkv_dim, 1, cfg.linear_conv_kernel_dim),
+            "v_conv1d": (qkv_dim, 1, cfg.linear_conv_kernel_dim),
+            "A_log": (cfg.linear_num_key_heads,),
+            "dt_bias": (qkv_dim,),
+            "o_norm": (cfg.linear_key_head_dim,),
+        }
+        NativeDeepseekV4Weights._validate_tensors(
+            f"GLM-5.3 KDA layer {layer_idx}", weights, expected
+        )
+        for name in ("A_log", "dt_bias", "o_norm"):
+            if weights[name].dtype != torch.float32:
+                raise ValueError(
+                    f"GLM-5.3 KDA layer {layer_idx} {name} must execute in FP32"
+                )
+        self.weights = weights
+
+    def forward(self, *_args, **_kwargs):
+        raise RuntimeError("KDA inference must run through native Rust/CUDA")
+
+    def reset_state(self):
+        """Clear the fixed-address native recurrent state between requests."""
+        for name in ("_hqq_conv_state", "_hqq_recur_state"):
+            state = getattr(self, name, None)
+            if isinstance(state, torch.Tensor):
+                state.zero_()
+
+
 class TransformerLayer:
     """One transformer layer: attention + MLP (dense or MoE)."""
 
@@ -413,8 +601,15 @@ class TransformerLayer:
             self.attention = None
             self.mamba2_weights = None
         elif self.layer_type == "linear_attention":
-            from krasis.linear_attention import GatedDeltaNetAttention
-            self.attention = GatedDeltaNetAttention(cfg, layer_idx, weights["linear_attention"], device)
+            if cfg.is_kimi_delta_attention_layer(layer_idx):
+                self.attention = NativeKimiDeltaAttentionWeights(
+                    cfg, layer_idx, weights["kimi_delta_attention"]
+                )
+            else:
+                from krasis.linear_attention import GatedDeltaNetAttention
+                self.attention = GatedDeltaNetAttention(
+                    cfg, layer_idx, weights["linear_attention"], device
+                )
             self.mamba2_weights = None
         elif cfg.is_deepseek_v4:
             self.attention = NativeDeepseekV4Weights(
@@ -424,6 +619,7 @@ class TransformerLayer:
                 weights["hyper_connection"],
             )
             self.mamba2_weights = None
+
         elif cfg.is_gqa or cfg.is_nemotron_h:
             # GQA attention is handled by Rust prefill engine — no Python attention object needed
             # Store raw weights dict for decode store registration (q_proj, k_proj, etc.)
@@ -438,6 +634,14 @@ class TransformerLayer:
                 device,
             )
             self.mamba2_weights = None
+
+        self.hyper_connection = (
+            NativeHyperConnectionWeights(
+                cfg, layer_idx, weights["hyper_connection"]
+            )
+            if cfg.is_glm5_next
+            else None
+        )
 
         # Latent MoE projections (Nemotron)
         self.latent_proj = weights.get("latent_proj")

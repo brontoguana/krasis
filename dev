@@ -23,6 +23,9 @@
 #                                    Add --resume-from <json> to append prompts to an existing artifact
 #   ./dev approved-heatmap-eval <config> <heatmap.json>
 #                                    Benchmark a config with an approved heatmap artifact
+#   ./dev checkpoint-identity-test   Test unified checkpoint/cache/heatmap identity
+#   ./dev approved-heatmap-migrate <audit|migrate|verify> [--dry-run]
+#                                    Audit/migrate dual-key online heatmaps
 #   ./dev speed-test                Run the fixed standard speed benchmark (QCN INT4 HQQ4 k4v4)
 #   ./dev perplexity <config>       Run perplexity eval (WikiText-2 by default) and exit
 #   ./dev quality-ppl <config>      Measure PPL through a running Rust prefill test endpoint
@@ -1427,6 +1430,28 @@ do_approved_heatmap_eval() {
     do_benchmark "$conf" --heatmap-path "$heatmap" "$@"
 }
 
+do_checkpoint_identity_test() {
+    cd "$SCRIPT_DIR"
+    KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_checkpoint_identity
+    KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_approved_heatmap_auto
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/checkpoint_identity.rs
+    PYO3_PYTHON="$PYTHON" \
+    LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+        cargo test --release --lib checkpoint_identity::tests -- --nocapture
+}
+
+do_approved_heatmap_migrate() {
+    [[ $# -lt 1 ]] && err "Usage: ./dev approved-heatmap-migrate <audit|migrate|verify> [--dry-run]"
+    cd "$SCRIPT_DIR"
+    KRASIS_DEV_SCRIPT=1 run_repo_python scripts/migrate_approved_heatmap_identities.py "$@"
+}
+
 do_speed_test() {
     [[ -f "$STANDARD_SPEED_TEST_CONFIG" ]] || err "Standard speed-test config not found: $STANDARD_SPEED_TEST_CONFIG"
     info "Standard speed benchmark config: $STANDARD_SPEED_TEST_CONFIG"
@@ -1579,6 +1604,15 @@ do_network() {
     local port="$1"
     shift
     exec_repo_python "$SCRIPT_DIR/tests/test_network.py" --port "$port" "$@"
+}
+
+do_vision_test() {
+    [[ $# -lt 2 ]] && err "Usage: ./dev vision-test <port> <image> --prompt TEXT [--expect TEXT ...]"
+    local port="$1"
+    local image="$2"
+    shift 2
+    KRASIS_DEV_SCRIPT=1 exec_repo_python "$SCRIPT_DIR/tests/test_vision_live.py" \
+        --port "$port" --image "$image" "$@"
 }
 
 do_session_cache_test() {
@@ -1749,10 +1783,34 @@ do_test_kernels() {
             filter="gpu_decode::dsa_registration_tests::hqq_stage_async_copy_mode_is_stage_specific_and_rejects_invalid_values"
         elif [[ "$1" == "shared_w2_reduce" ]]; then
             filter="gpu_decode::dsa_registration_tests::shared_w2_ksplit_reduce_matches_reference"
+        elif [[ "$1" == "gpu_route_split_classifier" ]]; then
+            filter="gpu_decode::dsa_registration_tests::gpu_route_split_classifier_partitions_weights_exactly"
         elif [[ "$1" == "route_prep_rmsnorm" ]]; then
             filter="gpu_decode::dsa_registration_tests::route_prep_wide_rmsnorm_matches_established_launch"
         elif [[ "$1" == "deepseek_v4_weights" ]]; then
             filter="weights::tests::test_deepseek_v4"
+        elif [[ "$1" == "glm53_weights" ]]; then
+            filter="weights::tests::test_glm5_next"
+        elif [[ "$1" == "glm53_kda" ]]; then
+            filter="gpu_prefill::kernel_tests::test_glm53_kda"
+        elif [[ "$1" == "glm53_kpool" ]]; then
+            filter="gpu_prefill::kernel_tests::test_glm53_kpool"
+        elif [[ "$1" == "glm53_dense_clamp" ]]; then
+            filter="gpu_decode::dsa_registration_tests::test_glm53_dense_deepseek_clamp"
+        elif [[ "$1" == "glm53_mla_k6" ]]; then
+            filter="gpu_prefill::kernel_tests::test_native_mla_k6_prefill_and_decode_writers_match_cpu"
+        elif [[ "$1" == "glm53_dsa_prefill" ]]; then
+            filter="gpu_prefill::kernel_tests::test_mla_prefill_norm_and_race_free_rope_pack"
+        elif [[ "$1" == "glm53_dsa_compute_mode" ]]; then
+            filter="gpu_prefill::kernel_tests::test_dsa_mla_gathered_compute_mode_parser_is_strict"
+        elif [[ "$1" == "glm53_dsa_schedule" ]]; then
+            filter="gpu_decode::dsa_registration_tests::owner_and_shared_contracts_are_fail_closed"
+        elif [[ "$1" == "glm53_dsa_capacity" ]]; then
+            filter="gpu_decode::dsa_registration_tests::compressed_dsa_keeps_logical_and_score_capacities_distinct"
+        elif [[ "$1" == "glm53_hcs_tail" ]]; then
+            filter="gpu_decode::dynamic_tail_tests"
+        elif [[ "$1" == "vram_calibration" ]]; then
+            filter="gpu_decode::vram_calibration_tests"
         elif [[ "$1" == "deepseek_v4_math" ]]; then
             filter="deepseek_v4_"
         elif [[ "$1" == "deepseek_v4_grouped_wo_a" ]]; then
@@ -1767,6 +1825,8 @@ do_test_kernels() {
             filter="cpu_tail"
         elif [[ "$1" == "cpu_tail_persistent" ]]; then
             filter="cpu_tail::tests::persistent_transposed_team_matches_rayon_glm_shape_and_tears_down"
+        elif [[ "$1" == "cpu_tail_calibrated_admission" ]]; then
+            filter="cpu_tail::tests::calibrated_admission_uses_first_measured_positive_win_depth_and_fails_closed"
         elif [[ "$1" == "cpu_tail_bench" ]]; then
             filter="moe::tests::test_cpu_tail_marlin_shape_bench"
         elif [[ "$1" == "marlin_cpu" ]]; then
@@ -1779,6 +1839,13 @@ do_test_kernels() {
         PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
             cargo test --release --lib kernel_tests -- --nocapture 2>&1
     fi
+}
+
+do_glm53_check() {
+    info "Checking the Rust/CUDA GLM-5.3 integration without linking a test binary..."
+    cd "$SCRIPT_DIR"
+    PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+        cargo check --release --lib 2>&1
 }
 
 do_cpu_tail_calibrate() {
@@ -2116,6 +2183,11 @@ witness_model_paths() {
             echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/input-sources/GLM-5.2/glm52_witness_input_tokens.json"
             echo "$HOME/.krasis/witness-gguf/GLM-5.2-bf16.gguf"
             ;;
+        glm53|glm5.3|glm-5.3|glm5.3-flash|glm-5.3-flash)
+            echo "$HOME/.krasis/models/GLM-5.3-Flash"
+            echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/input-sources/GLM-5.3-Flash/glm53_witness_input_tokens.json"
+            echo "$HOME/.krasis/witness-gguf/GLM-5.3-Flash-bf16.gguf"
+            ;;
         dsv4-preview|deepseek-v4-preview|deepseek-v4-flash-preview)
             echo "$HOME/.krasis/models/deepseek-ai/DeepSeek-V4-Flash"
             echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/input-sources/DeepSeek-V4-Flash/deepseek_v4_witness_input_tokens.json"
@@ -2128,7 +2200,7 @@ witness_model_paths() {
             ;;
         *)
             err "Unknown witness model: $model
-  Available: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, dsv4, dsv4-0731, dsv4-preview"
+  Available: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53, dsv4, dsv4-0731, dsv4-preview"
             ;;
     esac
 }
@@ -2621,7 +2693,7 @@ do_witness_gguf_preflight() {
                 echo "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16] [--converter-dry-run]"
                 echo "  Preflights BF16 GGUF witness conversion without starting conversion."
                 echo "  --converter-dry-run traverses the converter and tensor mappings without writing output data."
-                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, dsv4, dsv4-0731"
+                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53, dsv4, dsv4-0731"
                 return 0
                 ;;
             *)
@@ -2675,6 +2747,7 @@ do_witness_gguf_preflight() {
         case "$model_type:$text_model_type" in
             deepseek_v4:*) model_key="dsv4" ;;
             glm_moe_dsa:*) model_key="glm52" ;;
+            glm5_next:glm5_next_text) model_key="glm53" ;;
             step3p7:step3p5) model_key="step37" ;;
             qwen3_moe:*) model_key="q235" ;;
             nemotron_h:*) model_key="nemotron-nano" ;;
@@ -2693,6 +2766,11 @@ do_witness_gguf_preflight() {
             expected_arch="GlmMoeDsaForCausalLM"
             expected_model_type="glm_moe_dsa"
             expected_text_model_type=""
+            ;;
+        glm53|glm5.3|glm-5.3|glm5.3-flash|glm-5.3-flash)
+            expected_arch="Glm5NextForConditionalGeneration"
+            expected_model_type="glm5_next"
+            expected_text_model_type="glm5_next_text"
             ;;
         dsv4|deepseek-v4|deepseek-v4-flash|dsv4-0731|deepseek-v4-0731|deepseek-v4-flash-0731)
             expected_arch="DeepseekV4ForCausalLM"
@@ -2790,6 +2868,29 @@ do_witness_gguf_preflight() {
                 && rg -q 'GLM DSA sparse attention is not implemented in this graph' \
                     "$WITNESS_REPO/src/models/deepseek2.cpp" \
                 && [[ -f "$WITNESS_REPO/src/models/deepseek2.cpp" ]]; then
+                runtime_supported=true
+            else
+                status=1
+            fi
+            ;;
+        glm53|glm5.3|glm-5.3|glm5.3-flash|glm-5.3-flash)
+            local glm53_converter="$WITNESS_REPO/conversion/glm5next.py"
+            if [[ -f "$glm53_converter" ]] \
+                && rg -q 'Glm5NextForConditionalGeneration' "$glm53_converter" \
+                && rg -q 'class Glm5NextModel' "$glm53_converter" \
+                && rg -q 'MODEL_ARCH.GLM5NEXT' "$glm53_converter"; then
+                converter_supported=true
+            else
+                status=1
+            fi
+            if rg -q 'GLM5NEXT' "$WITNESS_REPO/gguf-py/gguf/constants.py"; then
+                gguf_supported=true
+            else
+                status=1
+            fi
+            if rg -q 'LLM_ARCH_GLM5NEXT' "$WITNESS_REPO/src/llama-arch.h" \
+                && rg -q 'llama_model_glm5next' "$WITNESS_REPO/src/llama-model.cpp" \
+                && [[ -f "$WITNESS_REPO/src/models/glm5next.cpp" ]]; then
                 runtime_supported=true
             else
                 status=1
@@ -2951,11 +3052,6 @@ do_witness_gguf_preflight() {
         ram_required_bytes="$expert_merge_peak_bytes"
     fi
     local disk_sane=false ram_sane=false
-    if [[ "$output_available_bytes" -ge "$disk_required_bytes" ]]; then
-        disk_sane=true
-    else
-        status=1
-    fi
     if [[ "$ram_available_bytes" -ge "$ram_required_bytes" ]]; then
         ram_sane=true
     else
@@ -2968,6 +3064,8 @@ do_witness_gguf_preflight() {
 
     local converter_dry_run_log=""
     local converter_dry_run_status=-1
+    local converter_dry_run_output_bytes=0
+    local disk_estimate_rule="source-sized output plus the largest runtime-derived materialized tensor"
     if [[ "$converter_dry_run" == "1" ]]; then
         converter_dry_run_log="$run_dir/converter_dry_run.log"
         info "Running converter dry-run; no GGUF tensor data will be written"
@@ -2981,7 +3079,37 @@ do_witness_gguf_preflight() {
         set -e
         if [[ "$converter_dry_run_status" != "0" ]]; then
             status=1
+        else
+            local dry_run_size dry_run_number dry_run_unit dry_run_multiplier
+            dry_run_size=$(sed -n 's/.*total_size = \([0-9][0-9.]*[KMGT]\).*/\1/p' "$converter_dry_run_log" | tail -n 1)
+            if [[ -z "$dry_run_size" ]]; then
+                status=1
+            else
+                dry_run_number="${dry_run_size%?}"
+                dry_run_unit="${dry_run_size: -1}"
+                case "$dry_run_unit" in
+                    K) dry_run_multiplier=1024 ;;
+                    M) dry_run_multiplier=$((1024 * 1024)) ;;
+                    G) dry_run_multiplier=$((1024 * 1024 * 1024)) ;;
+                    T) dry_run_multiplier=$((1024 * 1024 * 1024 * 1024)) ;;
+                    *) dry_run_multiplier=0 ;;
+                esac
+                converter_dry_run_output_bytes=$(awk \
+                    -v number="$dry_run_number" -v multiplier="$dry_run_multiplier" \
+                    'BEGIN { printf "%.0f", number * multiplier }')
+                if [[ "$converter_dry_run_output_bytes" -le 0 ]]; then
+                    status=1
+                else
+                    disk_required_bytes=$((converter_dry_run_output_bytes + largest_materialized_tensor_bytes))
+                    disk_estimate_rule="converter dry-run output size plus the largest runtime-derived materialized tensor"
+                fi
+            fi
         fi
+    fi
+    if [[ "$output_available_bytes" -ge "$disk_required_bytes" ]]; then
+        disk_sane=true
+    else
+        status=1
     fi
 
     {
@@ -3003,7 +3131,8 @@ do_witness_gguf_preflight() {
         if [[ "$converter_dry_run" == "1" ]]; then
             printf '    "requested": true,\n'
             printf '    "exit_status": %s,\n' "$converter_dry_run_status"
-            printf '    "log": "%s"\n' "$(json_escape "$converter_dry_run_log")"
+            printf '    "log": "%s",\n' "$(json_escape "$converter_dry_run_log")"
+            printf '    "estimated_output_bytes": %s\n' "$converter_dry_run_output_bytes"
         else
             printf '    "requested": false,\n'
             printf '    "exit_status": null,\n'
@@ -3044,7 +3173,7 @@ do_witness_gguf_preflight() {
         printf '  "resources": {\n'
         printf '    "disk_available_bytes": %s,\n' "$output_available_bytes"
         printf '    "disk_required_bytes": %s,\n' "$disk_required_bytes"
-        printf '    "disk_estimate_rule": "source-sized BF16 output plus the largest runtime-derived materialized tensor",\n'
+        printf '    "disk_estimate_rule": "%s",\n' "$(json_escape "$disk_estimate_rule")"
         printf '    "disk_sane": %s,\n' "$disk_sane"
         printf '    "ram_available_bytes": %s,\n' "$ram_available_bytes"
         printf '    "ram_required_bytes": %s,\n' "$ram_required_bytes"
@@ -3087,7 +3216,7 @@ do_witness_gguf_convert() {
         echo "  Writes logs and conversion manifest under logs/witness-gguf-convert_*."
         echo "  Refuses to overwrite an existing expected output unless --force is supplied."
         echo "  A direct local checkpoint directory is accepted for uncatalogued derivatives."
-        echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, dsv4, dsv4-0731"
+        echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53, dsv4, dsv4-0731"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-gguf-convert <model> [--output PATH] [--outtype bf16] [--force]"
@@ -3115,7 +3244,7 @@ do_witness_gguf_convert() {
             --help|-h)
                 echo "Usage: ./dev witness-gguf-convert <model> [--output PATH] [--outtype bf16] [--force]"
                 echo "  Converts a local safetensors model to BF16 GGUF only after the built preflight gate passes."
-                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, dsv4, dsv4-0731"
+                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53, dsv4, dsv4-0731"
                 return 0
                 ;;
             *)
@@ -3164,7 +3293,7 @@ Use --force only if overwriting that witness artifact is intentional."
 
     local preflight_status=0
     set +e
-    do_witness_gguf_preflight "$model" --output "$expected_gguf" --outtype "$outtype" 2>&1 | tee "$preflight_log"
+    do_witness_gguf_preflight "$model" --output "$expected_gguf" --outtype "$outtype" --converter-dry-run 2>&1 | tee "$preflight_log"
     preflight_status=${PIPESTATUS[0]}
     set -e
     local preflight_report
@@ -3248,7 +3377,7 @@ do_witness_capture() {
         echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]"
         echo "  Captures llama-witness JSON from stored input_token_ids only."
         echo "  A direct local checkpoint directory is accepted with --reference for its frozen input-token source."
-        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
+        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]
@@ -3265,7 +3394,7 @@ do_witness_capture() {
             --help|-h)
                 echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]"
                 echo "  Captures llama-witness JSON from stored input_token_ids only."
-                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
+                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53"
                 return 0
                 ;;
             --reference)
@@ -3337,7 +3466,7 @@ do_witness_inputs() {
         echo "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
         echo "  Tokenizes fixed prompt-source JSON into a stored llama-witness input_token_ids artifact."
         echo "  Qwen3.5 models require proven chat-template enable_thinking=false application."
-        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
+        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
@@ -3353,7 +3482,7 @@ do_witness_inputs() {
                 echo "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
                 echo "  Tokenizes fixed prompt-source JSON into a stored llama-witness input_token_ids artifact."
                 echo "  Qwen3.5 models require proven chat-template enable_thinking=false application."
-                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
+                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53"
                 return 0
                 ;;
             --prompt-source)
@@ -3919,6 +4048,8 @@ case "$cmd" in
     benchmark)      do_benchmark "$@" ;;
     approved-heatmap-build) do_approved_heatmap_build "$@" ;;
     approved-heatmap-eval) do_approved_heatmap_eval "$@" ;;
+    checkpoint-identity-test) do_checkpoint_identity_test "$@" ;;
+    approved-heatmap-migrate) do_approved_heatmap_migrate "$@" ;;
     speed-test|speedtest) do_speed_test "$@" ;;
     decode-harness) do_decode_harness "$@" ;;
     release-test)   do_release_test "$@" ;;
@@ -3955,6 +4086,7 @@ case "$cmd" in
     quality-ppl)    do_quality_ppl "$@" ;;
     awq-calibrate)  do_awq_calibrate "$@" ;;
     network)        do_network "$@" ;;
+    vision-test)    do_vision_test "$@" ;;
     session-cache-test) do_session_cache_test "$@" ;;
     session-cache-operations) do_session_cache_operations "$@" ;;
     session-cache-benchmark) do_session_cache_benchmark "$@" ;;
@@ -3963,6 +4095,7 @@ case "$cmd" in
     expert-compression-gpu) do_expert_compression_gpu "$@" ;;
     expert-compression-build) do_expert_compression_build "$@" ;;
     test-kernels)   do_test_kernels "$@" ;;
+    glm53-check)    do_glm53_check ;;
     cpu-tail-calibrate) do_cpu_tail_calibrate "$@" ;;
     pcie-batch-probe) do_pcie_batch_probe "$@" ;;
     validate)       do_validate "$@" ;;
@@ -3992,6 +4125,9 @@ case "$cmd" in
         echo "                                 Build approved cumulative HCS route heatmap checkpoints"
         echo "  approved-heatmap-eval <config> <heatmap.json>"
         echo "                                 Benchmark a config with an approved heatmap artifact"
+        echo "  checkpoint-identity-test      Test unified checkpoint/cache/heatmap identity"
+        echo "  approved-heatmap-migrate <audit|migrate|verify>"
+        echo "                                 Audit/migrate dual-key online heatmaps"
         echo "  speed-test                     Run the fixed standard speed benchmark"
         echo "  decode-harness <config>        Run synthetic GPU decode harness and exit"
         echo "  perplexity <config>            Run perplexity eval (WikiText-2) and exit"
@@ -4017,6 +4153,7 @@ case "$cmd" in
         echo "  windows-launcher-test          Build and test native Windows launcher logic"
         echo "  server-test                    Test Rust HTTP/template and reference-verdict contracts"
         echo "  manager-test                   Test Rust Manager/API and launcher schema contracts"
+        echo "  vision-test <port> <image> ... Test live image understanding against exact expected text"
         echo "  reference-inventory            Inventory stored reference artifacts"
         echo "  witness-inputs <model>         Build stored input_token_ids from fixed prompt-source JSON"
         echo "  witness-model-check <model>    Check expected BF16 GGUF witness model readiness"
@@ -4042,6 +4179,7 @@ case "$cmd" in
         echo ""
         echo "Maintenance commands:"
         echo "  test-kernels [name]            Run CUDA kernel unit tests (or filter by name)"
+        echo "  glm53-check                    Compile-check GLM-5.3 Rust/CUDA integration"
         echo "  chat [args]                    Run krasis chat from source"
         echo "  sanity                         Run sanity test prompts against running server"
         echo "  kill                           Kill all krasis/GPU processes, reset if needed"

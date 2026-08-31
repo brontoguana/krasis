@@ -1,0 +1,11 @@
+Date: 2026-08-29
+Working directory: /home/main/Documents/Claude/krasis
+Command: ./dev speed-test
+Run directory: logs/dev-benchmark_20260829_125518
+GPU: GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab (NVIDIA RTX A6000)
+Timing/profile instrumentation: disabled
+VRAM safety margin: 600 MiB
+Exit status: 0
+benchmark_report.log sha256: 70d4ebada4f6ca3a9ce0232b6bf62f72354530cc92d76ae62630571ce8870aaf
+benchmark_stdout.log sha256: 2ec173b3630a9c4d9fb7d96a2263e44b3f6d1d0c7bbbe272ce66ab3009ef7b63
+krasis.log sha256: adcdc3a3061041d6bf8d0aab56ec25b7bafa50781a406f975527a777cd2d5b4c

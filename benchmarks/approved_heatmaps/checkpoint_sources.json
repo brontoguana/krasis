@@ -1,0 +1,59 @@
+{
+  "format": "krasis_approved_heatmap_checkpoint_sources",
+  "format_version": 1,
+  "legacy_entries_sha256": "95708a398a57309373c5e95e83fff455e42a9b3ba325dd6ea556791b6b090fce",
+  "sources": {
+    "053350ef9663d7cefdd558fcb499f9423771c47f467538034361e630951f7cdc": {
+      "repo_id": "Qwen/Qwen3.6-35B-A3B",
+      "revision": "995ad96eacd98c81ed38be0c5b274b04031597b0"
+    },
+    "0d68d542f2e5b49cb14a4844c4e1a36c2b266a70613fab437ae8042537442b38": {
+      "repo_id": "google/gemma-4-26b-a4b-it",
+      "revision": "6e6f6edea8c52db2094dca3086e4b963a0034dfc"
+    },
+    "314bfa335614dcbb6ea63ab5b4d19ff8fd90791fea24903d56270a6a1226b114": {
+      "repo_id": "deepreinforce-ai/Ornith-1.0-397B",
+      "revision": "5e3e761811e804c295c1d3c0ce68b21da6154209"
+    },
+    "45af6eef344358036a1bfb11752dd33538920434a0062e45d89c81b072eb147a": {
+      "repo_id": "Qwen/Qwen3.5-35B-A3B",
+      "revision": "b1fc3d59ae0ab1e4279e04a8dd0fc4dc361fc2b6"
+    },
+    "468ccad0056dbffcca9fdccbf6e11bdbb1e19bcf2ace7016792c18ddf59e800d": {
+      "repo_id": "Qwen/Qwen3.5-122B-A10B",
+      "revision": "b000b2eb18a7f4cdf3153c4215842da339e09d99"
+    },
+    "48eea8e46c8df3157424fbece7bfe1cdb36337229afe9b7c6a321d3b44909c63": {
+      "repo_id": "Qwen/Qwen3.5-397B-A17B",
+      "revision": "8472618112abcbd45acbcdc58436aff4233c23f7"
+    },
+    "804a34d7de7f65be2201f8764cb36a0d0864b07c1aa3d8fd014bb1dc408db902": {
+      "repo_id": "stepfun-ai/Step-3.7-Flash",
+      "revision": "5f6244077ac62e04eec3f320501ff8c2b293373a"
+    },
+    "89f91d2ef91e25ba2c02e03bf8c40b8e26da57d3945cc3ccc1aaf430e0638b2a": {
+      "repo_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "revision": "49ad1f46ee9df444a0a3b8b63520faa1ca66324a"
+    },
+    "915ef9e692590c52b6d21aa49838dd10b2b9afa0d4ebcbb7e243ad8e9251ca61": {
+      "repo_id": "Qwen/Qwen3-235B-A22B",
+      "revision": "8efa61729e24bd65b1d152b5ab5409052aa80e65"
+    },
+    "c17cc3dd150d1987eef1477d826f9eeccd901710b983a52ff1a929b4ed78523d": {
+      "repo_id": "deepreinforce-ai/Ornith-1.0-35B",
+      "revision": "5df2ed3f675c7beaa490328cc70bb573b65fb660"
+    },
+    "c69ef3de0e98767113b8a43cfda86ce759f20415f6572d08b17562bd2bb1ace1": {
+      "repo_id": "Qwen/Qwen3-Coder-Next",
+      "revision": "a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb"
+    },
+    "ce0eb2e7391bf30d1a920d6706065899e9dcaf88117bdf23a4cdfe13450941ad": {
+      "repo_id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb"
+    },
+    "feef486bb8767ae239ce03ec4604e4bf945c36bde1e8c3ef36b9280e935c6bce": {
+      "repo_id": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "revision": "378df16e4b54901a3f514f38ea9a34db9d061634"
+    }
+  }
+}

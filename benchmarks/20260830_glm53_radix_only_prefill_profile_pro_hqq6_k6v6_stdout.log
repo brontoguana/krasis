@@ -1,0 +1,348 @@
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d
+Loaded config from tests/glm53-flash-hqq6-k6v6-pro-50k.conf: {'model_path': '/home/main/.krasis/models/GLM-5.3-Flash', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d', 'num_gpus': 1, 'layer_group_size': 1, 'kv_cache_mb': 1000, 'max_context_tokens': 50000, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '127.0.0.1', 'port': 18254, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — GLM-5.3-Flash[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (config; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k6v6[0m
+  [32mLayer groups: 1  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=570 MB, free=96687 MB, total=97258 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=15248 MB, reserved=15304 MB, used=15982 MB, free=81275 MB, total=97258 MB
+  [0;32mHQQ attention artifacts validated (4483 MB cached), 81275 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 42 layers...
+    GPU Marlin cache loaded: 157.5 GB in 104s
+  [0;32mExpert weights loaded in 104s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=15248 MB, reserved=15304 MB, used=15982 MB, free=81275 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=15248 MB, reserved=15304 MB, used=15982 MB, free=81275 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=15483 MB, reserved=15540 MB, used=16218 MB, free=81039 MB, total=97258 MB
+The tokenizer class you load from this checkpoint is not the same type as the class this function is called from. It may result in unexpected tokenization. 
+The tokenizer class you load from this checkpoint is 'TokenizersBackend'. 
+The class this function is called from is 'PreTrainedTokenizerFast'.
+  [33m[VRAM after-full-load][0m cuda:0: alloc=15483 MB, reserved=15540 MB, used=16218 MB, free=81039 MB, total=97258 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Marlin runtime warmup done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x53816420)[0m
+  [32mReleased redundant GPU execution source tensors (794 MB)[0m
+  [2mVRAM monitor started (startup measurement 1 ms; runtime 50 ms)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+DeepSeek-V4 prefill sparse-score mode: bf16_fp32
+DeepSeek-V4 prefill sparse-output mode: bf16_fp32_gemm
+DeepSeek-V4 prefill sparse-pipeline mode: separate
+DeepSeek-V4 prefill gather mode: scalar
+DeepSeek-V4 prefill softmax mode: block_rows
+DeepSeek-V4 predicted-W1 prefetch: disabled
+DeepSeek-V4 split expert DMA: enabled
+DeepSeek-V4 prefill index-score mode: bf16_fp32_gemm
+DeepSeek-V4 prefill top-k mode: radix_linear
+DeepSeek-V4 prefill HC-project mode: tf32_gemm
+[FLA] Loading kernels for H=64 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=64)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=64)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=64)
+[FLA] loaded krasis_fla_kda_gate_chunk_cumsum_vector_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_kda_fwd_kernel_intra_sub_chunk (H=64)
+[FLA] loaded krasis_fla_chunk_kda_fwd_kernel_inter_solve_fused (H=64)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kda_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_kda_state_recurrence (H=64)
+[FLA] loaded krasis_fla_chunk_gla_fwd_kernel_o_kda (H=64)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mStartup diag: warmup tokens=300 (default 300, token=23745)[0m
+  [32mStartup diag env: no_graph=unset, mapped_reads=unset, prefill_debug=False, prefill_timing=True, exit_after_calibration=True[0m
+[PREFILL-TIMING] 300 suffix tokens from boundary 0 (300 total), 2677.8ms total (112 computed tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     glm5 breakdown (diagnostic sync-isolated): wall=  2675.4ms ( 99.9% of prefill) event=  2672.3ms sync=   110.2ms
+[PREFILL-TIMING]       hc_replicate             wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm        wall=    96.3ms event=    96.1ms sync=     0.5ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       kda_qkv_proj             wall=   125.3ms event=   125.1ms sync=    22.9ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_conv                 wall=     2.4ms event=     2.2ms sync=     1.5ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_forget_beta_proj     wall=    23.5ms event=    23.3ms sync=     0.3ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_recurrent            wall=    11.5ms event=    11.3ms sync=     7.2ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_output_gate_proj     wall=     1.4ms event=     1.2ms sync=     0.4ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_rms_gate             wall=     0.8ms event=     0.5ms sync=     0.6ms wall_minus_event=     0.3ms over 34 calls
+[PREFILL-TIMING]       kda_o_proj               wall=     8.3ms event=     7.9ms sync=     7.6ms wall_minus_event=     0.3ms over 34 calls
+[PREFILL-TIMING]       attn_hc_post             wall=     1.2ms event=     0.9ms sync=     1.0ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm         wall=     6.7ms event=     6.4ms sync=     0.5ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       ffn                      wall=  2277.5ms event=  2277.3ms sync=     1.8ms wall_minus_event=     0.2ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_post              wall=     1.1ms event=     0.9ms sync=     0.9ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       dsa_attention            wall=   119.3ms event=   119.2ms sync=    64.9ms wall_minus_event=     0.1ms over 11 calls
+[PREFILL-TIMING]   moe:         0.0ms (  0.0%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         3.1ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       1928.6ms ( 84.8% of moe)
+[PREFILL-TIMING]         route_d2h:     1.1ms ptr_alloc:     0.7ms ptr_build:    16.6ms
+[PREFILL-TIMING]         cold_h2d:     16.7ms ptr_upload:     0.4ms dma_wait:  1852.3ms
+[PREFILL-TIMING]       w1+act:     318.9ms ( 14.0% of moe)
+[PREFILL-TIMING]       w2:          22.1ms (  1.0% of moe)
+[PREFILL-TIMING]       scatter:      0.9ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.8ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.3ms (  0.1%)
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 5.2s[0m
+  [2mcuda:0 warmup:  peak 95,560 MB used / 97,258 MB total  (min free: 1,697 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 82,467 MB / 97,258 MB[0m
+  [32mStartup diag: calibration tokens short=500 (default 500), long=39,920 (default 39,920), cap=49,900, forced_long=False[0m
+  [32mCalibration prefill guard: 1,200 MB (runtime safety remains 600 MB)[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+[PREFILL-TIMING] 500 suffix tokens from boundary 0 (500 total), 5274.1ms total (95 computed tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     glm5 breakdown (diagnostic sync-isolated): wall=  5272.0ms (100.0% of prefill) event=  5268.8ms sync=   164.2ms
+[PREFILL-TIMING]       hc_replicate             wall=     0.0ms event=     0.0ms sync=     0.0ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm        wall=     7.3ms event=     7.0ms sync=     0.6ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       kda_qkv_proj             wall=    26.1ms event=    25.6ms sync=    24.8ms wall_minus_event=     0.5ms over 34 calls
+[PREFILL-TIMING]       kda_conv                 wall=     3.3ms event=     3.1ms sync=     2.3ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_forget_beta_proj     wall=     2.3ms event=     2.0ms sync=     0.5ms wall_minus_event=     0.3ms over 34 calls
+[PREFILL-TIMING]       kda_recurrent            wall=    12.4ms event=    12.2ms sync=    11.6ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_output_gate_proj     wall=     1.5ms event=     1.3ms sync=     0.7ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_rms_gate             wall=     0.9ms event=     0.7ms sync=     0.7ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_o_proj               wall=     8.3ms event=     8.1ms sync=     7.7ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       attn_hc_post             wall=     1.6ms event=     1.3ms sync=     1.4ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm         wall=     7.1ms event=     6.8ms sync=     0.6ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       ffn                      wall=  5084.4ms event=  5084.2ms sync=     2.0ms wall_minus_event=     0.2ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_post              wall=     1.4ms event=     1.2ms sync=     1.2ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       dsa_attention            wall=   115.3ms event=   115.2ms sync=   110.1ms wall_minus_event=     0.1ms over 11 calls
+[PREFILL-TIMING]   moe:         0.0ms (  0.0%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         3.2ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       4940.8ms ( 97.2% of moe)
+[PREFILL-TIMING]         route_d2h:     1.2ms ptr_alloc:     0.8ms ptr_build:    94.6ms
+[PREFILL-TIMING]         cold_h2d:     42.3ms ptr_upload:     0.4ms dma_wait:  4798.8ms
+[PREFILL-TIMING]       w1+act:      89.3ms (  1.8% of moe)
+[PREFILL-TIMING]       w2:          45.9ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      1.3ms (  0.0% of moe)
+[PREFILL-TIMING]       shared:       0.9ms (  0.0% of moe)
+[PREFILL-TIMING]   other:       2.1ms (  0.0%)
+[hqq6-decode-autotune] tensor=layer0.q_proj shape=8192x4096 scalar=0.0331ms vec4 [1:0.0882ms 2:0.0310ms 4:0.0187ms 8:0.0186ms 16:0.0165ms 32:0.0206ms] -> vec4 16 at 0.0165ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer0.o_proj shape=4096x8192 scalar=0.0349ms vec4 [1:0.1951ms 2:0.0698ms 4:0.0329ms 8:0.0207ms 16:0.0208ms 32:0.0187ms] -> vec4 32 at 0.0187ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer0.f_a_proj shape=128x4096 scalar=0.0104ms vec4 [1:0.0243ms 2:0.0147ms 4:0.0104ms 8:0.0084ms 16:0.0083ms 32:0.0105ms] -> vec4 16 at 0.0083ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer0.f_b_proj shape=8192x128 scalar=0.0042ms vec4 [1:0.0066ms 2:0.0045ms 4:0.0030ms 8:0.0037ms 16:0.0030ms 32:0.0042ms] -> vec4 4 at 0.0030ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer0.b_proj shape=64x4096 scalar=0.0104ms vec4 [1:0.0247ms 2:0.0147ms 4:0.0104ms 8:0.0084ms 16:0.0083ms 32:0.0104ms] -> vec4 16 at 0.0083ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer3.q_a_proj shape=1536x4096 scalar=0.0145ms vec4 [1:0.0248ms 2:0.0165ms 4:0.0107ms 8:0.0104ms 16:0.0084ms 32:0.0106ms] -> vec4 16 at 0.0084ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer3.q_b_proj shape=16384x1536 scalar=0.0248ms vec4 [1:0.0351ms 2:0.0170ms 4:0.0146ms 8:0.0126ms 16:0.0126ms 32:0.0126ms] -> vec4 8 at 0.0126ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer3.kv_a_proj_with_mqa shape=512x4096 scalar=0.0106ms vec4 [1:0.0247ms 2:0.0147ms 4:0.0104ms 8:0.0084ms 16:0.0083ms 32:0.0106ms] -> vec4 16 at 0.0083ms (forced=false margin=5.0%)
+[hqq6-decode-autotune] tensor=layer3.o_proj shape=4096x16384 scalar=0.0657ms vec4 [1:0.6140ms 2:0.1868ms 4:0.0655ms 8:0.0390ms 16:0.0391ms 32:0.0350ms] -> vec4 32 at 0.0350ms (forced=false margin=5.0%)
+[ksplit-autotune] enabled: 1 routed MoE shape(s), max_experts_per_tok=8, expert_bits=4
+[ksplit-autotune] shape k=4096 n=4096 z=8 int8=false candidates [1:0.0825ms 2:0.0859ms 4:0.0951ms 8:0.1174ms] -> keeping formula ksplits=1 (0.0825 ms median; best 1 at 0.0825 ms is within the 5.0% margin)
+[ksplit-autotune] shared layer=3 shape k=4096 n=4096 z=1 int8=false candidates [1:0.0210ms 2:0.0174ms 3:0.0253ms 4:0.0210ms 8:0.0210ms] -> override ksplits=2 (0.0174 ms median vs formula 3 at 0.0253 ms, >5.0% margin)
+[shared-w2-autotune] layer=3 shape k=2048 n=4096 int8=false v1=0.0228ms candidates [2:0.0130ms 4:0.0166ms 8:0.0170ms] -> K-split 2 at 0.0130ms (>5.0% margin)
+[ksplit-autotune] complete: 1 W13 override(s), 1 shared-W2 override(s) installed
+  [32mdecode: 32 tokens in 6.65s (4.8 tok/s)  VRAM: 82409 MB free now, 82409 MB min free during decode[0m
+  [32mShort calibration: baseline=82,467 MB, prefill post-alloc=4,765 MB, prefill min=1,223 MB, decode min=82,409 MB, post-cleanup=82,409 MB[0m
+  [32mShort calibration: prefill 7.18s (69.7 tok/s), decode 7.33s (4.4 tok/s)[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=1.1943 MB/token[0m
+  [32mAdaptive long calibration fail-closed entry check: 4,000 tokens require 5,971 MB, 82,467 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 4,000 tokens (runtime-derived fail-closed probe (entry floor validated through 4000 tokens; projection declined: current low-water 1223 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 4,000 prompt tokens + 32 decode tokens[0m
+[PREFILL-TIMING] 4000 suffix tokens from boundary 0 (4000 total), 7272.2ms total (550 computed tok/s)
+[PREFILL-TIMING]   embed:       0.1ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     glm5 breakdown (diagnostic sync-isolated): wall=  7269.7ms (100.0% of prefill) event=  7266.7ms sync=  1201.2ms
+[PREFILL-TIMING]       hc_replicate             wall=     0.1ms event=     0.1ms sync=     0.1ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm        wall=    30.3ms event=    30.0ms sync=     2.4ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       kda_qkv_proj             wall=    83.1ms event=    82.8ms sync=    81.8ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_conv                 wall=    20.0ms event=    19.8ms sync=    19.0ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_forget_beta_proj     wall=     6.1ms event=     5.8ms sync=     4.6ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_recurrent            wall=   104.1ms event=   103.9ms sync=   103.2ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_output_gate_proj     wall=     5.1ms event=     4.8ms sync=     4.0ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_rms_gate             wall=     5.4ms event=     5.2ms sync=     5.3ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_o_proj               wall=    27.4ms event=    27.2ms sync=    27.0ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       attn_hc_post             wall=     9.7ms event=     9.3ms sync=     9.5ms wall_minus_event=     0.4ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm         wall=    30.4ms event=    30.1ms sync=     2.4ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       ffn                      wall=  5999.7ms event=  5999.5ms sync=    10.3ms wall_minus_event=     0.2ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_post              wall=     9.7ms event=     9.5ms sync=     9.5ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       dsa_attention            wall=   938.6ms event=   938.6ms sync=   922.0ms wall_minus_event=     0.1ms over 11 calls
+[PREFILL-TIMING]   moe:         0.0ms (  0.0%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:         6.7ms (  0.1% of moe)
+[PREFILL-TIMING]       dma:       5485.4ms ( 91.6% of moe)
+[PREFILL-TIMING]         route_d2h:     1.3ms ptr_alloc:     0.8ms ptr_build:   712.6ms
+[PREFILL-TIMING]         cold_h2d:     52.8ms ptr_upload:     0.4ms dma_wait:  4702.0ms
+[PREFILL-TIMING]       w1+act:     365.4ms (  6.1% of moe)
+[PREFILL-TIMING]       w2:         118.8ms (  2.0% of moe)
+[PREFILL-TIMING]       scatter:      7.6ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       4.3ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.3ms (  0.0%)
+  [32mdecode: 32 tokens in 6.53s (4.9 tok/s)  VRAM: 82405 MB free now, 82405 MB min free during decode[0m
+  [32mLong calibration: baseline=82,409 MB, prefill post-alloc=4,765 MB, prefill min=1,111 MB, decode min=82,405 MB, post-cleanup=82,405 MB[0m
+  [32mLong calibration: prefill 9.11s (439.2 tok/s), decode 7.13s (4.5 tok/s)[0m
+  [32mAdaptive long calibration fail-closed entry check: 8,000 tokens require 6,311 MB, 82,409 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 8,000 tokens (runtime-derived fail-closed probe (entry floor validated through 8000 tokens; projection declined: current low-water 1111 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 8,000 prompt tokens + 32 decode tokens[0m
+[PREFILL-TIMING] 8000 suffix tokens from boundary 0 (8000 total), 9288.6ms total (861 computed tok/s)
+[PREFILL-TIMING]   embed:       0.1ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     glm5 breakdown (diagnostic sync-isolated): wall=  9286.0ms (100.0% of prefill) event=  9282.8ms sync=  2869.1ms
+[PREFILL-TIMING]       hc_replicate             wall=     0.4ms event=     0.3ms sync=     0.3ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm        wall=    65.4ms event=    65.1ms sync=     5.5ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       kda_qkv_proj             wall=   148.8ms event=   148.5ms sync=   147.5ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_conv                 wall=    49.7ms event=    49.5ms sync=    48.8ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_forget_beta_proj     wall=    10.5ms event=    10.3ms sync=     9.1ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_recurrent            wall=   206.2ms event=   206.0ms sync=   205.4ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_output_gate_proj     wall=     8.2ms event=     8.0ms sync=     7.3ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_rms_gate             wall=    11.2ms event=    11.0ms sync=    11.1ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_o_proj               wall=    53.1ms event=    52.8ms sync=    52.6ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       attn_hc_post             wall=    19.5ms event=    18.9ms sync=    19.3ms wall_minus_event=     0.5ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm         wall=    65.6ms event=    65.3ms sync=     5.6ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       ffn                      wall=  6306.3ms event=  6306.0ms sync=    20.8ms wall_minus_event=     0.2ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_post              wall=    19.3ms event=    19.1ms sync=    19.1ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       dsa_attention            wall=  2322.0ms event=  2321.9ms sync=  2316.8ms wall_minus_event=     0.1ms over 11 calls
+[PREFILL-TIMING]   moe:         0.0ms (  0.0%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:        10.4ms (  0.2% of moe)
+[PREFILL-TIMING]       dma:       5438.9ms ( 86.5% of moe)
+[PREFILL-TIMING]         route_d2h:     1.3ms ptr_alloc:     0.7ms ptr_build:   776.4ms
+[PREFILL-TIMING]         cold_h2d:     53.1ms ptr_upload:     0.4ms dma_wait:  4604.2ms
+[PREFILL-TIMING]       w1+act:     596.7ms (  9.5% of moe)
+[PREFILL-TIMING]       w2:         207.9ms (  3.3% of moe)
+[PREFILL-TIMING]       scatter:     16.6ms (  0.3% of moe)
+[PREFILL-TIMING]       shared:      13.8ms (  0.2% of moe)
+[PREFILL-TIMING]   other:       2.5ms (  0.0%)
+  [32mdecode: 32 tokens in 6.54s (4.9 tok/s)  VRAM: 82399 MB free now, 82399 MB min free during decode[0m
+  [32mLong calibration: baseline=82,405 MB, prefill post-alloc=4,855 MB, prefill min=1,199 MB, decode min=82,399 MB, post-cleanup=82,399 MB[0m
+  [32mLong calibration: prefill 12.23s (654.0 tok/s), decode 7.14s (4.5 tok/s)[0m
+  [32mAdaptive long calibration fail-closed entry check: 16,000 tokens require 6,813 MB, 82,405 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 16,000 tokens (runtime-derived fail-closed probe (entry floor validated through 16000 tokens; projection declined: current low-water 1199 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 16,000 prompt tokens + 32 decode tokens[0m
+[PREFILL-TIMING] 16000 suffix tokens from boundary 0 (16000 total), 13092.3ms total (1222 computed tok/s)
+[PREFILL-TIMING]   embed:       0.2ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     glm5 breakdown (diagnostic sync-isolated): wall= 13089.1ms (100.0% of prefill) event= 13084.2ms sync=  6260.8ms
+[PREFILL-TIMING]       hc_replicate             wall=     0.8ms event=     0.8ms sync=     0.8ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm        wall=   136.6ms event=   136.3ms sync=    13.3ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       kda_qkv_proj             wall=   296.8ms event=   296.6ms sync=   295.6ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_conv                 wall=   100.8ms event=   100.5ms sync=    99.8ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_forget_beta_proj     wall=    14.2ms event=    14.0ms sync=    12.9ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_recurrent            wall=   414.4ms event=   414.1ms sync=   413.4ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_output_gate_proj     wall=    10.9ms event=    10.7ms sync=    10.1ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_rms_gate             wall=    22.6ms event=    22.4ms sync=    22.4ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_o_proj               wall=    98.7ms event=    98.5ms sync=    98.3ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       attn_hc_post             wall=    40.7ms event=    38.5ms sync=    40.4ms wall_minus_event=     2.2ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm         wall=   136.9ms event=   136.6ms sync=    13.4ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       ffn                      wall=  6616.6ms event=  6616.4ms sync=    46.8ms wall_minus_event=     0.2ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_post              wall=    38.0ms event=    37.7ms sync=    37.8ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       dsa_attention            wall=  5161.2ms event=  5161.1ms sync=  5155.9ms wall_minus_event=     0.0ms over 11 calls
+[PREFILL-TIMING]   moe:         0.0ms (  0.0%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:        18.5ms (  0.3% of moe)
+[PREFILL-TIMING]       dma:       4951.2ms ( 75.4% of moe)
+[PREFILL-TIMING]         route_d2h:     1.4ms ptr_alloc:     0.7ms ptr_build:   817.4ms
+[PREFILL-TIMING]         cold_h2d:     58.8ms ptr_upload:     0.4ms dma_wait:  4069.6ms
+[PREFILL-TIMING]       w1+act:    1143.2ms ( 17.4% of moe)
+[PREFILL-TIMING]       w2:         392.1ms (  6.0% of moe)
+[PREFILL-TIMING]       scatter:     33.9ms (  0.5% of moe)
+[PREFILL-TIMING]       shared:      29.7ms (  0.5% of moe)
+[PREFILL-TIMING]   other:       2.9ms (  0.0%)
+  [32mdecode: 32 tokens in 6.55s (4.9 tok/s)  VRAM: 82403 MB free now, 82403 MB min free during decode[0m
+  [32mLong calibration: baseline=82,399 MB, prefill post-alloc=4,857 MB, prefill min=1,199 MB, decode min=82,403 MB, post-cleanup=82,403 MB[0m
+  [32mLong calibration: prefill 14.68s (1090.0 tok/s), decode 7.14s (4.5 tok/s)[0m
+  [32mAdaptive long calibration fail-closed entry check: 32,000 tokens require 7,815 MB, 82,399 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 32,000 tokens (runtime-derived fail-closed probe (entry floor validated through 32000 tokens; projection declined: current low-water 1199 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 32,000 prompt tokens + 32 decode tokens[0m
+[PREFILL-TIMING] 32000 suffix tokens from boundary 0 (32000 total), 21072.4ms total (1519 computed tok/s)
+[PREFILL-TIMING]   embed:       0.4ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     glm5 breakdown (diagnostic sync-isolated): wall= 21068.3ms (100.0% of prefill) event= 21061.3ms sync= 13549.4ms
+[PREFILL-TIMING]       hc_replicate             wall=     1.5ms event=     1.5ms sync=     1.5ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm        wall=   275.4ms event=   275.1ms sync=    26.7ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       kda_qkv_proj             wall=   668.0ms event=   667.8ms sync=   666.7ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_conv                 wall=   229.8ms event=   229.6ms sync=   228.8ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_forget_beta_proj     wall=    32.6ms event=    32.3ms sync=    31.3ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_recurrent            wall=   892.1ms event=   891.9ms sync=   891.1ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_output_gate_proj     wall=    29.9ms event=    29.7ms sync=    29.0ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_rms_gate             wall=    52.2ms event=    51.9ms sync=    52.0ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_o_proj               wall=   282.0ms event=   281.7ms sync=   281.5ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       attn_hc_post             wall=    92.8ms event=    88.7ms sync=    92.6ms wall_minus_event=     4.2ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm         wall=   277.3ms event=   277.0ms sync=    27.1ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       ffn                      wall=  7108.4ms event=  7108.1ms sync=   101.6ms wall_minus_event=     0.2ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_post              wall=    75.8ms event=    75.5ms sync=    75.6ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       dsa_attention            wall= 11050.4ms event= 11050.4ms sync= 11044.0ms wall_minus_event=     0.0ms over 11 calls
+[PREFILL-TIMING]   moe:         0.0ms (  0.0%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:        40.3ms (  0.6% of moe)
+[PREFILL-TIMING]       dma:       3924.1ms ( 56.0% of moe)
+[PREFILL-TIMING]         route_d2h:     1.4ms ptr_alloc:     0.8ms ptr_build:   805.3ms
+[PREFILL-TIMING]         cold_h2d:     59.5ms ptr_upload:     0.4ms dma_wait:  3053.9ms
+[PREFILL-TIMING]       w1+act:    2096.8ms ( 29.9% of moe)
+[PREFILL-TIMING]       w2:         779.1ms ( 11.1% of moe)
+[PREFILL-TIMING]       scatter:     75.2ms (  1.1% of moe)
+[PREFILL-TIMING]       shared:      90.0ms (  1.3% of moe)
+[PREFILL-TIMING]   other:       3.8ms (  0.0%)
+  [32mdecode: 32 tokens in 6.70s (4.8 tok/s)  VRAM: 82405 MB free now, 82405 MB min free during decode[0m
+  [32mLong calibration: baseline=82,403 MB, prefill post-alloc=4,859 MB, prefill min=1,211 MB, decode min=82,405 MB, post-cleanup=82,405 MB[0m
+  [32mLong calibration: prefill 22.34s (1432.6 tok/s), decode 7.29s (4.4 tok/s)[0m
+  [32mAdaptive long calibration fail-closed entry check: 39,920 tokens require 8,310 MB, 82,403 MB available — admitted[0m
+  [32mAdaptive long calibration: next probe 39,920 tokens (runtime-derived fail-closed probe (entry floor validated through 39920 tokens; projection declined: current low-water 1211 MB leaves no validation reserve above 2400 MB))[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+[PREFILL-TIMING] 39920 suffix tokens from boundary 0 (39920 total), 25987.5ms total (1536 computed tok/s)
+[PREFILL-TIMING]   embed:       0.5ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.0ms (  0.0%)
+[PREFILL-TIMING]   attn:        0.0ms (  0.0%)  [gqa: 0.0ms, la: 0.0ms]
+[PREFILL-TIMING]     glm5 breakdown (diagnostic sync-isolated): wall= 25982.6ms (100.0% of prefill) event= 25974.8ms sync= 17453.9ms
+[PREFILL-TIMING]       hc_replicate             wall=     1.9ms event=     1.9ms sync=     1.9ms wall_minus_event=     0.0ms over 1 calls
+[PREFILL-TIMING]       attn_hc_prep_norm        wall=   344.5ms event=   344.2ms sync=    33.3ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       kda_qkv_proj             wall=  1074.1ms event=  1073.8ms sync=  1072.7ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_conv                 wall=   325.1ms event=   324.8ms sync=   323.7ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_forget_beta_proj     wall=    44.5ms event=    44.3ms sync=    43.2ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_recurrent            wall=  1142.4ms event=  1142.2ms sync=  1141.4ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_output_gate_proj     wall=    35.0ms event=    34.8ms sync=    34.1ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_rms_gate             wall=    62.3ms event=    62.0ms sync=    62.1ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       kda_o_proj               wall=   326.3ms event=   326.0ms sync=   325.8ms wall_minus_event=     0.2ms over 34 calls
+[PREFILL-TIMING]       attn_hc_post             wall=   111.0ms event=   105.9ms sync=   110.7ms wall_minus_event=     5.1ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_prep_norm         wall=   344.8ms event=   344.5ms sync=    33.3ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       ffn                      wall=  8022.7ms event=  8022.5ms sync=   131.6ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       ffn_hc_post              wall=    99.4ms event=    99.1ms sync=    99.1ms wall_minus_event=     0.3ms over 45 calls
+[PREFILL-TIMING]       dsa_attention            wall= 14048.8ms event= 14048.8ms sync= 14041.0ms wall_minus_event=     0.0ms over 11 calls
+[PREFILL-TIMING]   moe:         0.0ms (  0.0%)
+[PREFILL-TIMING]     moe breakdown:
+[PREFILL-TIMING]       gate:        53.0ms (  0.7% of moe)
+[PREFILL-TIMING]       dma:       3919.7ms ( 49.7% of moe)
+[PREFILL-TIMING]         route_d2h:     1.5ms ptr_alloc:     0.7ms ptr_build:   815.8ms
+[PREFILL-TIMING]         cold_h2d:     59.7ms ptr_upload:     0.4ms dma_wait:  3038.8ms
+[PREFILL-TIMING]       w1+act:    2661.0ms ( 33.7% of moe)
+[PREFILL-TIMING]       w2:        1009.2ms ( 12.8% of moe)
+[PREFILL-TIMING]       scatter:     96.3ms (  1.2% of moe)
+[PREFILL-TIMING]       shared:     150.5ms (  1.9% of moe)
+[PREFILL-TIMING]   other:       4.4ms (  0.0%)
+  [32mdecode: 32 tokens in 6.60s (4.9 tok/s)  VRAM: 82405 MB free now, 82405 MB min free during decode[0m
+  [32mLong calibration: baseline=82,405 MB, prefill post-alloc=4,859 MB, prefill min=1,215 MB, decode min=82,405 MB, post-cleanup=82,405 MB[0m
+  [32mLong calibration: prefill 27.16s (1469.7 tok/s), decode 7.19s (4.5 tok/s)[0m
+  [32mScratch reservation: max=60,510 MB (at 50,000 tokens)[0m
+  [32mVRAM monitor runtime cadence restored: 1 ms -> 50 ms[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 82,405 MB[0m
+  [32mTransient deltas: short prefill=81,244 MB, long prefill=81,190 MB, short decode=58 MB, long decode=0 MB[0m
+  [32mGPU0 decode HCS budget: 81,747 MB[0m
+  [32mPrefill HCS budgets: short=561 MB, long=507 MB[0m
+  [32mWorst-case prefill scratch reservation: 60,510 MB at 50,000 tokens[0m
+
+[1m[36m▸ Startup diagnostic exit[0m
+  [32mExiting after VRAM calibration by request[0m

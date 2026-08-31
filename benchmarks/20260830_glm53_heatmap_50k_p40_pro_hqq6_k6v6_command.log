@@ -1,0 +1,7 @@
+Timing-disabled approved-heatmap evaluation on one RTX PRO 6000:
+
+env -u KRASIS_TRACE -u KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE -u KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE -u KRASIS_DECODE_INT4_W13_N32 -u KRASIS_DECODE_INT4_W2_N32 -u KRASIS_PREFILL_TIMING -u KRASIS_DECODE_TIMING -u KRASIS_TIMING -u KRASIS_STARTUP_DIAG -u KRASIS_VRAM_LEDGER ./dev approved-heatmap-eval tests/glm53-flash-hqq6-k6v6-pro-50k.conf /home/main/Documents/Claude/krasis-internal/glm53_hqq6_k6v6_route_heatmap_50k_candidate.p00040.json
+
+Tmux session: glm53_heatmap_50k_p40_eval_20260830
+Run directory: logs/dev-benchmark_20260830_152635
+Exit: 0

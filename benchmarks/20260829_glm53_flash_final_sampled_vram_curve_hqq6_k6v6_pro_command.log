@@ -1,0 +1,8 @@
+Date: 2026-08-29
+Working directory: /home/main/Documents/Claude/krasis
+Command: ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+Execution: detached tmux session glm53_final_sampled_curve_speed_pro
+Instrumentation: timing and trace disabled
+GPU: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+Source log directory: logs/dev-benchmark_20260829_130346
+Exit status: 0

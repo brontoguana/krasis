@@ -1,0 +1,37 @@
+Date: 2026-08-30
+Purpose: timing-disabled single-RTX-PRO GLM-5.3 speed A/B for the bit-exact radix-linear DSA owner selector.
+
+Command (run through tmux session glm53_radix_only_speed_20260830):
+  KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE=radix_linear ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+
+Run directory:
+  logs/dev-benchmark_20260830_103338
+
+Exit:
+  0
+
+Instrumentation:
+  Timing, trace, startup diagnostics and VRAM-ledger instrumentation were unset.
+
+Hardware:
+  One NVIDIA RTX PRO 6000 Blackwell Workstation Edition (physical GPU 1). The RTX A6000 remained unused.
+
+Internal prefill (1K/5K/10K/20K/35K/39,920):
+  122.0 / 518.5 / 851.7 / 1214.0 / 1407.4 / 1444.4 tok/s
+
+Internal decode (50/100/250 outputs):
+  22.14 / 22.81 / 22.37 tok/s
+
+Comparison:
+  The correctness-qualified control long-prefill row is 1419.0 tok/s. This candidate is +1.79% at 39,920 tokens. Formal decode HCS hit rates were exactly 87.73 / 88.71 / 88.34%, identical to the corrected decode-profile control; the selector is prefill-only, so no decode-speed inference is drawn from this run.
+
+Safety/counters:
+  HCS 6540/12096; minimum decode free VRAM 1279 MiB. Runtime calibration measured 500/4K/8K/16K/32K/39,920-token low-water values 1227/1121/1195/1227/1203/1201 MiB. Dynamic HCS reported budget_skips=0, no_slot=0 and copy_failures=0. No CUDA error, OOM or below-600-MiB warning occurred.
+
+Heatmap:
+  The command built and used its own exact-runtime six-prompt non-benchmark heatmap. Final auto_heatmap.json SHA-256: fbce32ee142a05c03048ab3600461411b1681c5c224371bb3a9f519bb2766275.
+
+Artifact SHA-256:
+  report  039bd3a340b0a7c08c865e5acbc4c98aa92f688e75108fbed6ee2676558bc49c
+  stdout  e052089a1ac1dc2f9d42ac2e3d6b41349b5a279b6def0b8f5f5fc03973791379
+  runtime 34b36b40f33e80dffde1c260f198cdfa2fcd9d30a2f937a0c9b6050188f9f71f

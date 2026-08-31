@@ -1,7 +1,7 @@
 {
   "format": "krasis_approved_hcs_route_heatmap_manifest",
   "format_version": 1,
-  "generated_at_utc": "2026-07-16T16:45:32Z",
+  "generated_at_utc": "2026-08-27T04:11:09.904544Z",
   "artifacts": [
     {
       "artifact_id": "step37_flash_hqq4_p00006",
@@ -2679,6 +2679,4000 @@
         "baseline": "80 held-out approved heatmap prompts with per-prompt measured HCS refresh",
         "runtime": "INT4 experts, BF16 attention/KV, layer group 1",
         "notes": "Full DeepSeek-V4-Flash-0731 gathered-score-default route prior built from prompts disjoint from the benchmark corpus; all dimensions and residency budgets were measured from the loaded runtime."
+      }
+    },
+    {
+      "artifact_id": "step37_flash_hqq4_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "Step-3.7-Flash",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/step37_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "step37_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/step37_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "1dcd00cb594b94005629a1e1362639e87e67c643d9fbdaa7aa683927822a5f80",
+      "bytes": 176700,
+      "route_signature_sha256": "533608b66ee3c32695ac22c1368caaa24edaaf287531ace9ffbde7342f0b2581",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Step-3.7-Flash_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because measured KV-only routing impact was below the threshold for separate artifacts."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 11232,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ4 quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-13 as part of the Step HQQ4/HQQ6/HQQ8 comparison. Published as the matched HQQ4 artifact; HQQ6 was the best single canonical candidate, but exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "step37_flash_hqq4_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "39709626d90844a10ee93575d1198940fbacc7c1c97ce37f06ddf80a7bbc7b44",
+        "weight_file_count": 26,
+        "weight_bytes": 402730833632
+      },
+      "checkpoint_provenance": {
+        "repo_id": "stepfun-ai/Step-3.7-Flash",
+        "revision": "5f6244077ac62e04eec3f320501ff8c2b293373a",
+        "resolved_revision": "5f6244077ac62e04eec3f320501ff8c2b293373a",
+        "verified_config_fingerprints": {
+          "config.json": "8d740ba5819e574b7a606ea7aa6d7d381142ed5cc77cab96dde2892c10414042",
+          "generation_config.json": null,
+          "tokenizer.json": "b564c620eb77fa11d0926011c2202347d6cfc358d79724ee04ae7007e13636f0",
+          "tokenizer_config.json": "78202af487f4d4360e8d15cb0506d60718f8599770599c6f28f7f1fa045a591f"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "not_present_in_source_revision",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 26,
+        "weight_bytes": 402730833632
+      }
+    },
+    {
+      "artifact_id": "step37_flash_hqq6_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "Step-3.7-Flash",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/step37_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "step37_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/step37_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "c7e2c3eb12f7199f87e4e80b2220758574a97b2347e8d863487d3d1c34256a6e",
+      "bytes": 176847,
+      "route_signature_sha256": "533608b66ee3c32695ac22c1368caaa24edaaf287531ace9ffbde7342f0b2581",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Step-3.7-Flash_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because measured KV-only routing impact was below the threshold for separate artifacts."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 11239,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ6 quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-13 as part of the Step HQQ4/HQQ6/HQQ8 comparison. HQQ6 had the best average constrained-HCS transfer for Step and is also the matched HQQ6 artifact."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "step37_flash_hqq6_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "39709626d90844a10ee93575d1198940fbacc7c1c97ce37f06ddf80a7bbc7b44",
+        "weight_file_count": 26,
+        "weight_bytes": 402730833632
+      },
+      "checkpoint_provenance": {
+        "repo_id": "stepfun-ai/Step-3.7-Flash",
+        "revision": "5f6244077ac62e04eec3f320501ff8c2b293373a",
+        "resolved_revision": "5f6244077ac62e04eec3f320501ff8c2b293373a",
+        "verified_config_fingerprints": {
+          "config.json": "8d740ba5819e574b7a606ea7aa6d7d381142ed5cc77cab96dde2892c10414042",
+          "generation_config.json": null,
+          "tokenizer.json": "b564c620eb77fa11d0926011c2202347d6cfc358d79724ee04ae7007e13636f0",
+          "tokenizer_config.json": "78202af487f4d4360e8d15cb0506d60718f8599770599c6f28f7f1fa045a591f"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "not_present_in_source_revision",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 26,
+        "weight_bytes": 402730833632
+      }
+    },
+    {
+      "artifact_id": "step37_flash_hqq8_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "Step-3.7-Flash",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/step37_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "step37_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/step37_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "ad40c826c1cce40207135acd220454e417b813048ef54b35a47882410dbae9c2",
+      "bytes": 176686,
+      "route_signature_sha256": "533608b66ee3c32695ac22c1368caaa24edaaf287531ace9ffbde7342f0b2581",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Step-3.7-Flash_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because measured KV-only routing impact was below the threshold for separate artifacts."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 11228,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ8 quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-13 as part of the Step HQQ4/HQQ6/HQQ8 comparison. Published as the matched HQQ8 artifact; HQQ8 was not the best Step canonical candidate but should be used for exact HQQ8 runtimes."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "step37_flash_hqq8_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "39709626d90844a10ee93575d1198940fbacc7c1c97ce37f06ddf80a7bbc7b44",
+        "weight_file_count": 26,
+        "weight_bytes": 402730833632
+      },
+      "checkpoint_provenance": {
+        "repo_id": "stepfun-ai/Step-3.7-Flash",
+        "revision": "5f6244077ac62e04eec3f320501ff8c2b293373a",
+        "resolved_revision": "5f6244077ac62e04eec3f320501ff8c2b293373a",
+        "verified_config_fingerprints": {
+          "config.json": "8d740ba5819e574b7a606ea7aa6d7d381142ed5cc77cab96dde2892c10414042",
+          "generation_config.json": null,
+          "tokenizer.json": "b564c620eb77fa11d0926011c2202347d6cfc358d79724ee04ae7007e13636f0",
+          "tokenizer_config.json": "78202af487f4d4360e8d15cb0506d60718f8599770599c6f28f7f1fa045a591f"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "not_present_in_source_revision",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 26,
+        "weight_bytes": 402730833632
+      }
+    },
+    {
+      "artifact_id": "qwen35_122b_hqq6_k4v4_p00032__checkpoint_v1",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "Qwen3.5-122B-A10B",
+      "source_checkpoint": "p00032",
+      "path": "benchmarks/approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.checkpoint-v1.json",
+      "filename": "q122b_hqq6_k4v4_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.checkpoint-v1.json",
+      "sha256": "11287280877bb67f4327e13cd491a6bf616c93e59f0f4c3778326bf6567fbe50",
+      "bytes": 191274,
+      "route_signature_sha256": "1d0d6deb0f5700e9488a5a2eb596bb1951143a8cd6c133ed9910ec116740ad1c",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "capture": {
+        "prompt_count_processed": 32,
+        "captured_decode_route_tokens": 8148,
+        "ranked_entries": 11729,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 80.04,
+        "quick_hcs_hit_pct": 77.82,
+        "request_promotions": "19083/95616",
+        "quick_request_promotions": "21206/95616",
+        "internal_decode_tok_s": 30.6,
+        "quick_internal_decode_tok_s": 28.78,
+        "http_tok_s": 51.66,
+        "quick_http_tok_s": 49.0,
+        "notes": "Best HCS hit in the p00008-p00048 Q122B sweep. p00040 had slightly higher internal decode but lower HCS hit, so p00032 is selected by the primary plateau metric."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen35_122b_hqq6_k4v4_p00032",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "696736bad1c9551fccb246ad5a20d15ed3c7a9bb7c89403631a37873837e380c",
+        "weight_file_count": 39,
+        "weight_bytes": 250173250864
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.5-122B-A10B",
+        "revision": "b000b2eb18a7f4cdf3153c4215842da339e09d99",
+        "resolved_revision": "b000b2eb18a7f4cdf3153c4215842da339e09d99",
+        "verified_config_fingerprints": {
+          "config.json": "af07d0423658865afb52bd0d6fd3c2cc45d988425b76193467fd19129655cecd",
+          "generation_config.json": "303aba891d66ab63908a7b3cc9163bcb835fdf8b9f6301c73216f3f1eb3992dd",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 39,
+        "weight_bytes": 250173250864
+      }
+    },
+    {
+      "artifact_id": "qwen35_397b_hqq6_k4v4_p00080__checkpoint_v1",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "Qwen3.5-397B-A17B",
+      "source_checkpoint": "p00080",
+      "path": "benchmarks/approved_heatmaps/q397_hqq6_k4v4_approved_heatmap.checkpoint-v1.json",
+      "filename": "q397_hqq6_k4v4_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/q397_hqq6_k4v4_approved_heatmap.checkpoint-v1.json",
+      "sha256": "82958027d8339dc64a0351a39a994f1a2f073b7e83fbcda573f66b06d8d3d9fe",
+      "bytes": 470107,
+      "route_signature_sha256": "7ebf8e8db5a7a735151fc14ddb4ce6fc2710a4d272f40398fbf71ce4b3e2e839",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "capture": {
+        "prompt_count_processed": 80,
+        "captured_decode_route_tokens": 20535,
+        "ranked_entries": 28721,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 53.03,
+        "quick_hcs_hit_pct": 50.15,
+        "request_promotions": "70175/149400",
+        "quick_request_promotions": "74476/149400",
+        "internal_decode_tok_s": 9.98,
+        "quick_internal_decode_tok_s": 9.57,
+        "http_tok_s": 18.57,
+        "quick_http_tok_s": 16.52,
+        "notes": "Final p00080 artifact from the 80-prompt approved corpus. It improved the timed 250-token HCS hit rate from 50.15% to 53.03%, reduced request promotions by 4301, raised 250-token internal decode from 9.04 to 9.42 tok/s, and raised 250-token HTTP from 9.87 to 10.27 tok/s. Best internal decode improved from 9.57 to 9.98 tok/s. Improvement is modest because the 32 GB 5090 can keep only 2420/30720 experts resident."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen35_397b_hqq6_k4v4_p00080",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "531f4065890736b791bcc3a1920f5550e37fac257e8202d469462c6ddff95b69",
+        "weight_file_count": 94,
+        "weight_bytes": 806796241352
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.5-397B-A17B",
+        "revision": "8472618112abcbd45acbcdc58436aff4233c23f7",
+        "resolved_revision": "8472618112abcbd45acbcdc58436aff4233c23f7",
+        "verified_config_fingerprints": {
+          "config.json": "3ae7fa89c2f7d1354096418ddaf1331e9e0898a8ca11e804fb6dbaa087efb7da",
+          "generation_config.json": "303aba891d66ab63908a7b3cc9163bcb835fdf8b9f6301c73216f3f1eb3992dd",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 94,
+        "weight_bytes": 806796241352
+      }
+    },
+    {
+      "artifact_id": "nemotron_super_hqq4_k4v4_p00040__checkpoint_v1",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "source_checkpoint": "p00040",
+      "path": "benchmarks/approved_heatmaps/nemotron_super_hqq4_k4v4_approved_heatmap.checkpoint-v1.json",
+      "filename": "nemotron_super_hqq4_k4v4_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_super_hqq4_k4v4_approved_heatmap.checkpoint-v1.json",
+      "sha256": "1f8116c803c11e8a4b4c7ef74881d8739b5c2472dc1a006bf707f49fd208a656",
+      "bytes": 306774,
+      "route_signature_sha256": "5d28fd2c7a99e6bbe4b7e5070aff05134dc1e14a5d2d77b8520b146c6c5de29e",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "capture": {
+        "prompt_count_processed": 40,
+        "captured_decode_route_tokens": 10280,
+        "ranked_entries": 18759,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 95.82,
+        "quick_hcs_hit_pct": 95.26,
+        "request_promotions": "9165/219120",
+        "quick_request_promotions": "10378/219120",
+        "internal_decode_tok_s": 42.78,
+        "quick_internal_decode_tok_s": 42.68,
+        "http_tok_s": 52.46,
+        "quick_http_tok_s": 63.35,
+        "notes": "Best HCS hit in the p00008-p00048 Nemotron Super sweep. Decode speed was effectively flat, but request-promotion pressure fell 11.7%; HTTP rows were noisy and are not used as the acceptance metric."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "nemotron_super_hqq4_k4v4_p00040",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "990ec70647815e26b9253ef1be9578cb79b970d97f9355d71c3439144c6ca124",
+        "weight_file_count": 50,
+        "weight_bytes": 247227650480
+      },
+      "checkpoint_provenance": {
+        "repo_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+        "revision": "49ad1f46ee9df444a0a3b8b63520faa1ca66324a",
+        "resolved_revision": "49ad1f46ee9df444a0a3b8b63520faa1ca66324a",
+        "verified_config_fingerprints": {
+          "config.json": "699f34f0fc645d29ebffa5767fb59e6ae6ec98e3a4605485eb9913256d0df7e6",
+          "generation_config.json": "27d520b2df55efe6b978d06fbfe8213ae93288d063d462f40b4ed94637c019bf",
+          "tokenizer.json": "623c34567aebb18582765289fbe23d901c62704d6518d71866e0e58db892b5b7",
+          "tokenizer_config.json": "10f93eabcb9b1602fbb991d6308e787ce1df28ee9cd7a1c6d1e8c3f338b957bc"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 50,
+        "weight_bytes": 247227650480
+      }
+    },
+    {
+      "artifact_id": "qwen36_35b_hqq4_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 20,
+      "model_name": "Qwen3.6-35B-A3B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen36_35b_hqq4_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen36_35b_hqq4_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen36_35b_hqq4_approved_heatmap.checkpoint-v1.json",
+      "sha256": "cc1d326b97e84c30a81bacc0db101d74566c0b34012439cd86c81884772e4290",
+      "bytes": 145405,
+      "route_signature_sha256": "d47b42aaa0c4ac5976342490bd18351f03aaadc60110d8060dafba0ead39a78b",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.6-35B-A3B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because measured KV-only routing impact was below the threshold for separate artifacts."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 9272,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ4 quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-12 as part of the Qwen3.6 HQQ4/HQQ6/HQQ8/+10% comparison. Published as the matched HQQ4 artifact after switching policy from one canonical HQQ8 heatmap to per-HQQ artifacts."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen36_35b_hqq4_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "437ee942f4931486e88050987d9405b9fd39d25eb3e5a65b6ba9194111937b0d",
+        "weight_file_count": 26,
+        "weight_bytes": 71903776776
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.6-35B-A3B",
+        "revision": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+        "resolved_revision": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+        "verified_config_fingerprints": {
+          "config.json": "93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99",
+          "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 26,
+        "weight_bytes": 71903776776
+      }
+    },
+    {
+      "artifact_id": "qwen36_35b_hqq6_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 20,
+      "model_name": "Qwen3.6-35B-A3B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen36_35b_hqq6_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen36_35b_hqq6_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen36_35b_hqq6_approved_heatmap.checkpoint-v1.json",
+      "sha256": "51a366372b2a780bb2adb43ee8a3a78c709b284894b9c172470f49ffaeb494de",
+      "bytes": 145479,
+      "route_signature_sha256": "d47b42aaa0c4ac5976342490bd18351f03aaadc60110d8060dafba0ead39a78b",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.6-35B-A3B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because measured KV-only routing impact was below the threshold for separate artifacts."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 9276,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ6 quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-12 as part of the Qwen3.6 HQQ4/HQQ6/HQQ8/+10% comparison. Published as the matched HQQ6 artifact after switching policy from one canonical HQQ8 heatmap to per-HQQ artifacts."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen36_35b_hqq6_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "437ee942f4931486e88050987d9405b9fd39d25eb3e5a65b6ba9194111937b0d",
+        "weight_file_count": 26,
+        "weight_bytes": 71903776776
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.6-35B-A3B",
+        "revision": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+        "resolved_revision": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+        "verified_config_fingerprints": {
+          "config.json": "93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99",
+          "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 26,
+        "weight_bytes": 71903776776
+      }
+    },
+    {
+      "artifact_id": "qwen36_35b_hqq8_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 20,
+      "model_name": "Qwen3.6-35B-A3B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen36_35b_hqq8_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen36_35b_hqq8_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen36_35b_hqq8_approved_heatmap.checkpoint-v1.json",
+      "sha256": "6f824fecf33cbf95041dfb08b6b989f75cee830360549171a0381a342a19a347",
+      "bytes": 144710,
+      "route_signature_sha256": "d47b42aaa0c4ac5976342490bd18351f03aaadc60110d8060dafba0ead39a78b",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.6-35B-A3B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because measured KV-only routing impact was below the threshold for separate artifacts."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 9222,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ8 quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-12 as part of the Qwen3.6 HQQ4/HQQ6/HQQ8/+10% comparison. HQQ8 was the best single canonical candidate for Qwen3.6, and is now the matched HQQ8 artifact."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen36_35b_hqq8_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "437ee942f4931486e88050987d9405b9fd39d25eb3e5a65b6ba9194111937b0d",
+        "weight_file_count": 26,
+        "weight_bytes": 71903776776
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.6-35B-A3B",
+        "revision": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+        "resolved_revision": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+        "verified_config_fingerprints": {
+          "config.json": "93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99",
+          "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 26,
+        "weight_bytes": 71903776776
+      }
+    },
+    {
+      "artifact_id": "gemma4_26b_hqq4_k4v4_p00048__checkpoint_v1",
+      "status": "approved",
+      "priority": 20,
+      "model_name": "gemma-4-26b-a4b-it",
+      "source_checkpoint": "p00048",
+      "path": "benchmarks/approved_heatmaps/gemma4_26b_hqq4_k4v4_approved_heatmap.checkpoint-v1.json",
+      "filename": "gemma4_26b_hqq4_k4v4_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/gemma4_26b_hqq4_k4v4_approved_heatmap.checkpoint-v1.json",
+      "sha256": "1fc0903e509093bf077f1e3cd0ac1e748af8c9a0c6e4499c8be717326252e6b1",
+      "bytes": 60075,
+      "route_signature_sha256": "6301ce6a79096f78e5b247d538ae0d53f78310c4283a980ef6e7083dfacabeb1",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "capture": {
+        "prompt_count_processed": 48,
+        "captured_decode_route_tokens": 12327,
+        "ranked_entries": 3550,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 100.0,
+        "quick_hcs_hit_pct": 100.0,
+        "request_promotions": "0/59760",
+        "quick_request_promotions": "0/59760",
+        "internal_decode_tok_s": 63.37,
+        "quick_internal_decode_tok_s": 63.37,
+        "http_tok_s": 116.36,
+        "quick_http_tok_s": 116.36,
+        "notes": "Quick startup HCS is saturated on the RTX 5090 because all experts fit as soft/reclaimable HCS. p00048 is approved as a downloadable route-prior artifact based on p00040->p00048 ranking stability: 98.4% top-256, 98.3% top-1024, 99.5% top-3072 overlap."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "gemma4_26b_hqq4_k4v4_p00048",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "fe01e17976783ff504a6a0c59627bb0d243bb30054dd6e4d442362846abb4a9a",
+        "weight_file_count": 2,
+        "weight_bytes": 51612009916
+      },
+      "checkpoint_provenance": {
+        "repo_id": "google/gemma-4-26b-a4b-it",
+        "revision": "6e6f6edea8c52db2094dca3086e4b963a0034dfc",
+        "resolved_revision": "6e6f6edea8c52db2094dca3086e4b963a0034dfc",
+        "verified_config_fingerprints": {
+          "config.json": "ed0c1eb3633de771906e9ba004a44cc5635bcc06ee2062077c3d2e88a50707d3",
+          "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+          "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+          "tokenizer_config.json": "90c3a3ba5bf53818383a58e1a776cbcacd2a038d4812eaa373e1522f2d06f3df"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 2,
+        "weight_bytes": 51612009916
+      }
+    },
+    {
+      "artifact_id": "nemotron_nano_hqq4_k4v4_p00048__checkpoint_v1",
+      "status": "approved",
+      "priority": 20,
+      "model_name": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "source_checkpoint": "p00048",
+      "path": "benchmarks/approved_heatmaps/nemotron_nano_hqq4_k4v4_approved_heatmap.checkpoint-v1.json",
+      "filename": "nemotron_nano_hqq4_k4v4_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_nano_hqq4_k4v4_approved_heatmap.checkpoint-v1.json",
+      "sha256": "521e1eba4a8e21b71c9c661f4d87e471ad3ba0f0b25c6f876e0f67a153f2665b",
+      "bytes": 50400,
+      "route_signature_sha256": "56cfd31b2a3eddc548ed143f58ce3eb77b1b6c20cd9c25bf175e8d7676ed996a",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "capture": {
+        "prompt_count_processed": 48,
+        "captured_decode_route_tokens": 12336,
+        "ranked_entries": 2910,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 100.0,
+        "quick_hcs_hit_pct": 100.0,
+        "request_promotions": "0/34362",
+        "quick_request_promotions": "0/34362",
+        "internal_decode_tok_s": 151.25,
+        "quick_internal_decode_tok_s": 151.25,
+        "http_tok_s": 352.94,
+        "quick_http_tok_s": 352.94,
+        "notes": "Quick startup HCS is saturated on the RTX 5090 because all experts fit as soft/reclaimable HCS. p00048 is approved as a downloadable route-prior artifact based on p00040->p00048 ranking stability: 98.4% top-128, 99.0% top-512, 99.6% top-2048 overlap."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "nemotron_nano_hqq4_k4v4_p00048",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "b10fbc982f99b77e56bc7cacffc567063ae75ccaa4c6b3ed2ec8221ae200298e",
+        "weight_file_count": 13,
+        "weight_bytes": 63156694272
+      },
+      "checkpoint_provenance": {
+        "repo_id": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "revision": "378df16e4b54901a3f514f38ea9a34db9d061634",
+        "resolved_revision": "378df16e4b54901a3f514f38ea9a34db9d061634",
+        "verified_config_fingerprints": {
+          "config.json": "dd9fa380ac107b0477db5a26108db9febe6378e7bb3966a107944853ec4f76f8",
+          "generation_config.json": "7a8f2d91a749d7a09b755daceacab14da9d66ebfdaea7e8583e48c0be01ee73d",
+          "tokenizer.json": "c6021eb6847e682f89aa52d5eb6e8c7d902a23acfc8137e25211cf84828f1592",
+          "tokenizer_config.json": "3d568e506d0905285ae90a3fdd1482be7b6d0bf0b8ca9514d75dad4257b0827a"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 13,
+        "weight_bytes": 63156694272
+      }
+    },
+    {
+      "artifact_id": "qwen35_35b_hqq6_k6v6_p00048__checkpoint_v1",
+      "status": "approved",
+      "priority": 20,
+      "model_name": "Qwen3.5-35B-A3B",
+      "source_checkpoint": "p00048",
+      "path": "benchmarks/approved_heatmaps/qwen35_35b_hqq6_k6v6_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen35_35b_hqq6_k6v6_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_35b_hqq6_k6v6_approved_heatmap.checkpoint-v1.json",
+      "sha256": "ce8463ae2b493fdb3f1c85a53d3db2e84d04a172918592dcc50f0961c8af525a",
+      "bytes": 162800,
+      "route_signature_sha256": "b695482d479557a7a49df3b453f7e7f91e85e358c1ed48e9f2c0704cf9ff5949",
+      "validated_runtime_sha256s": [
+        "4128c8d7550c65d31d4fb347fc7de4a73d67a978c5cf1163d8425baa919d15ee"
+      ],
+      "capture": {
+        "prompt_count_processed": 48,
+        "captured_decode_route_tokens": 12197,
+        "ranked_entries": 9972,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 100.0,
+        "quick_hcs_hit_pct": 100.0,
+        "request_promotions": "0/79680",
+        "quick_request_promotions": "0/79680",
+        "internal_decode_tok_s": 114.15,
+        "quick_internal_decode_tok_s": 114.15,
+        "http_tok_s": 235.25,
+        "quick_http_tok_s": 235.25,
+        "notes": "Quick startup HCS is saturated on the RTX 5090 because all experts fit as soft/reclaimable HCS. p00048 is approved as a downloadable route-prior artifact based on p00040->p00048 ranking stability: 97.5% top-512, 97.2% top-2048, 99.1% top-8192 overlap."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen35_35b_hqq6_k6v6_p00048",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "4db75fa8b784813a8135d1fd4aa9089a0f2fa2ca46766877860f54ecef11c5fe",
+        "weight_file_count": 14,
+        "weight_bytes": 71903878016
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.5-35B-A3B",
+        "revision": "b1fc3d59ae0ab1e4279e04a8dd0fc4dc361fc2b6",
+        "resolved_revision": "b1fc3d59ae0ab1e4279e04a8dd0fc4dc361fc2b6",
+        "verified_config_fingerprints": {
+          "config.json": "5e4d7f74fec2f360eb9cfbfcd6ec0c4c76e684d3a11caaed259d9fd9bfbc7944",
+          "generation_config.json": "4f25002776b741773666203dcea8f54619f177ace3ae483d311102092a4658e0",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 14,
+        "weight_bytes": 71903878016
+      }
+    },
+    {
+      "artifact_id": "qcn_hqq4_k4v4_p00032__checkpoint_v1",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "Qwen3-Coder-Next",
+      "source_checkpoint": "p00032",
+      "path": "benchmarks/approved_heatmaps/qcn_hqq4_k4v4_approved_heatmap.checkpoint-v1.json",
+      "filename": "qcn_hqq4_k4v4_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qcn_hqq4_k4v4_approved_heatmap.checkpoint-v1.json",
+      "sha256": "09f7abc800d988e16d79d5a8a118bd679003cf01cb205fd2313f1f79ed5542dd",
+      "bytes": 363488,
+      "route_signature_sha256": "5f3f535edaa6b38c713017401a6617ecd045128ab6489fa7fdfb8248f408d4d5",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "capture": {
+        "prompt_count_processed": 32,
+        "captured_decode_route_tokens": 8062,
+        "ranked_entries": 22695,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 99.48,
+        "quick_hcs_hit_pct": 99.08,
+        "request_promotions": "621/119520",
+        "quick_request_promotions": "1104/119520",
+        "internal_decode_tok_s": 90.39,
+        "quick_internal_decode_tok_s": 89.91,
+        "http_tok_s": 162.41,
+        "quick_http_tok_s": 152.75,
+        "notes": "Best HCS hit in the p00008-p00048 QCN sweep. p00048 had slightly higher internal decode, but p00032 is selected by the primary HCS plateau metric and reduced request promotions by 43.8% versus quick."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qcn_hqq4_k4v4_p00032",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "727c0310d27d26378441de66a0d1cbdaff6d61a9c4584dadec00977ef996c3bf",
+        "weight_file_count": 40,
+        "weight_bytes": 159358031480
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3-Coder-Next",
+        "revision": "a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
+        "resolved_revision": "a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
+        "verified_config_fingerprints": {
+          "config.json": "a7b8098d3b05777f12bb5677a26bf1240a1bb09def1b06b29e6be86cae2e84f8",
+          "generation_config.json": "37a3c1ef63516ca489c575f0db1c0405ddc0c3dbaca9ed987344c966c37aeef5",
+          "tokenizer.json": "19564a48c4f71a2a1b937cce34c737a1e662b171c5f5d7edf641a15cd896f07d",
+          "tokenizer_config.json": "fc76878832c668e3f0f8be66e6239a475b9093d2fe5cef97c242369779e6c6e6"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 40,
+        "weight_bytes": 159358031480
+      }
+    },
+    {
+      "artifact_id": "qwen3_235b_hqq6_k4v4_p00016__checkpoint_v1",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "Qwen3-235B-A22B",
+      "source_checkpoint": "p00016",
+      "path": "benchmarks/approved_heatmaps/q235_hqq6_k4v4_approved_heatmap.checkpoint-v1.json",
+      "filename": "q235_hqq6_k4v4_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/q235_hqq6_k4v4_approved_heatmap.checkpoint-v1.json",
+      "sha256": "c58475f911d3cf993adf8ee0c4fd76a5a55855f11f84593f917a3c8ee467e1dd",
+      "bytes": 178810,
+      "route_signature_sha256": "aa63ed8449e556badca20ae4622ccf7c13b6087be4099c31bfa58690aa213871",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "capture": {
+        "prompt_count_processed": 16,
+        "captured_decode_route_tokens": 4112,
+        "ranked_entries": 11233,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 62.23,
+        "quick_hcs_hit_pct": 61.45,
+        "request_promotions": "70729/187248",
+        "quick_request_promotions": "72183/187248",
+        "internal_decode_tok_s": 7.1,
+        "quick_internal_decode_tok_s": 6.76,
+        "http_tok_s": 12.71,
+        "quick_http_tok_s": 11.65,
+        "notes": "Best final HCS hit in the p00008-p00048 Q235 sweep. p00048 had comparable decode speed but lower final HCS, so p00016 is selected by the primary plateau metric."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen3_235b_hqq6_k4v4_p00016",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "60dbc29f15e09ae699b7431470c381a20360d3931b077f99b2e67c474fa8e931",
+        "weight_file_count": 118,
+        "weight_bytes": 470191875096
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3-235B-A22B",
+        "revision": "8efa61729e24bd65b1d152b5ab5409052aa80e65",
+        "resolved_revision": "8efa61729e24bd65b1d152b5ab5409052aa80e65",
+        "verified_config_fingerprints": {
+          "config.json": "0ecd5d6fe6f2db6739e4e36ab06b88ebe7bd013ef31b9583f43796059a2b23a4",
+          "generation_config.json": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+          "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+          "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 118,
+        "weight_bytes": 470191875096
+      }
+    },
+    {
+      "artifact_id": "nemotron_super_hqq4_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/nemotron_super_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "nemotron_super_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_super_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "64a15850189ab3fc2f131460ba1ea8c269e9e90a6c5d1b47d8d962b12a40cd1a",
+      "bytes": 265069,
+      "route_signature_sha256": "5d28fd2c7a99e6bbe4b7e5070aff05134dc1e14a5d2d77b8520b146c6c5de29e",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Nemotron-3-Super-120B-A12B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored under the measured per-HQQ route-heatmap policy."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 16807,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ4 quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured locally on 2026-07-14 from the p00006 startup heatmap corpus and published as the matched per-HQQ Nemotron artifact."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "nemotron_super_hqq4_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "990ec70647815e26b9253ef1be9578cb79b970d97f9355d71c3439144c6ca124",
+        "weight_file_count": 50,
+        "weight_bytes": 247227650480
+      },
+      "checkpoint_provenance": {
+        "repo_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+        "revision": "49ad1f46ee9df444a0a3b8b63520faa1ca66324a",
+        "resolved_revision": "49ad1f46ee9df444a0a3b8b63520faa1ca66324a",
+        "verified_config_fingerprints": {
+          "config.json": "699f34f0fc645d29ebffa5767fb59e6ae6ec98e3a4605485eb9913256d0df7e6",
+          "generation_config.json": "27d520b2df55efe6b978d06fbfe8213ae93288d063d462f40b4ed94637c019bf",
+          "tokenizer.json": "623c34567aebb18582765289fbe23d901c62704d6518d71866e0e58db892b5b7",
+          "tokenizer_config.json": "10f93eabcb9b1602fbb991d6308e787ce1df28ee9cd7a1c6d1e8c3f338b957bc"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 50,
+        "weight_bytes": 247227650480
+      }
+    },
+    {
+      "artifact_id": "nemotron_super_hqq6_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/nemotron_super_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "nemotron_super_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_super_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "39e171398bfd53f8be638aa1164cf76cef00ca983b6682ab849a1760505db3fb",
+      "bytes": 265407,
+      "route_signature_sha256": "5d28fd2c7a99e6bbe4b7e5070aff05134dc1e14a5d2d77b8520b146c6c5de29e",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Nemotron-3-Super-120B-A12B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored under the measured per-HQQ route-heatmap policy."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 16826,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ6 quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured locally on 2026-07-14 from the p00006 startup heatmap corpus and published as the matched per-HQQ Nemotron artifact."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "nemotron_super_hqq6_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "990ec70647815e26b9253ef1be9578cb79b970d97f9355d71c3439144c6ca124",
+        "weight_file_count": 50,
+        "weight_bytes": 247227650480
+      },
+      "checkpoint_provenance": {
+        "repo_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+        "revision": "49ad1f46ee9df444a0a3b8b63520faa1ca66324a",
+        "resolved_revision": "49ad1f46ee9df444a0a3b8b63520faa1ca66324a",
+        "verified_config_fingerprints": {
+          "config.json": "699f34f0fc645d29ebffa5767fb59e6ae6ec98e3a4605485eb9913256d0df7e6",
+          "generation_config.json": "27d520b2df55efe6b978d06fbfe8213ae93288d063d462f40b4ed94637c019bf",
+          "tokenizer.json": "623c34567aebb18582765289fbe23d901c62704d6518d71866e0e58db892b5b7",
+          "tokenizer_config.json": "10f93eabcb9b1602fbb991d6308e787ce1df28ee9cd7a1c6d1e8c3f338b957bc"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 50,
+        "weight_bytes": 247227650480
+      }
+    },
+    {
+      "artifact_id": "nemotron_super_hqq8_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/nemotron_super_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "nemotron_super_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_super_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "56a5d6c1f35362e8566250b04f19f20dc8d87b5668be4694dfe149f8c2e68837",
+      "bytes": 263278,
+      "route_signature_sha256": "5d28fd2c7a99e6bbe4b7e5070aff05134dc1e14a5d2d77b8520b146c6c5de29e",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Nemotron-3-Super-120B-A12B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored under the measured per-HQQ route-heatmap policy."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1434,
+        "ranked_entries": 16710,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ8 quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured locally on 2026-07-14 from the p00006 startup heatmap corpus and published as the matched per-HQQ Nemotron artifact."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "nemotron_super_hqq8_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "990ec70647815e26b9253ef1be9578cb79b970d97f9355d71c3439144c6ca124",
+        "weight_file_count": 50,
+        "weight_bytes": 247227650480
+      },
+      "checkpoint_provenance": {
+        "repo_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+        "revision": "49ad1f46ee9df444a0a3b8b63520faa1ca66324a",
+        "resolved_revision": "49ad1f46ee9df444a0a3b8b63520faa1ca66324a",
+        "verified_config_fingerprints": {
+          "config.json": "699f34f0fc645d29ebffa5767fb59e6ae6ec98e3a4605485eb9913256d0df7e6",
+          "generation_config.json": "27d520b2df55efe6b978d06fbfe8213ae93288d063d462f40b4ed94637c019bf",
+          "tokenizer.json": "623c34567aebb18582765289fbe23d901c62704d6518d71866e0e58db892b5b7",
+          "tokenizer_config.json": "10f93eabcb9b1602fbb991d6308e787ce1df28ee9cd7a1c6d1e8c3f338b957bc"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 50,
+        "weight_bytes": 247227650480
+      }
+    },
+    {
+      "artifact_id": "nemotron_nano_hqq4_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/nemotron_nano_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "nemotron_nano_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_nano_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "4f6cb769881086cdeb649bee5083072b186ffdb0b5d72d82470111b78b8f8631",
+      "bytes": 46590,
+      "route_signature_sha256": "56cfd31b2a3eddc548ed143f58ce3eb77b1b6c20cd9c25bf175e8d7676ed996a",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Nemotron-3-Nano-30B-A3B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored under the measured per-HQQ route-heatmap policy."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 2821,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ4 quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured locally on 2026-07-14 from the p00006 startup heatmap corpus and published as the matched per-HQQ Nemotron artifact."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "nemotron_nano_hqq4_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "b10fbc982f99b77e56bc7cacffc567063ae75ccaa4c6b3ed2ec8221ae200298e",
+        "weight_file_count": 13,
+        "weight_bytes": 63156694272
+      },
+      "checkpoint_provenance": {
+        "repo_id": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "revision": "378df16e4b54901a3f514f38ea9a34db9d061634",
+        "resolved_revision": "378df16e4b54901a3f514f38ea9a34db9d061634",
+        "verified_config_fingerprints": {
+          "config.json": "dd9fa380ac107b0477db5a26108db9febe6378e7bb3966a107944853ec4f76f8",
+          "generation_config.json": "7a8f2d91a749d7a09b755daceacab14da9d66ebfdaea7e8583e48c0be01ee73d",
+          "tokenizer.json": "c6021eb6847e682f89aa52d5eb6e8c7d902a23acfc8137e25211cf84828f1592",
+          "tokenizer_config.json": "3d568e506d0905285ae90a3fdd1482be7b6d0bf0b8ca9514d75dad4257b0827a"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 13,
+        "weight_bytes": 63156694272
+      }
+    },
+    {
+      "artifact_id": "nemotron_nano_hqq6_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/nemotron_nano_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "nemotron_nano_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_nano_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "7dca5cb84650a27e452046dd3fb8bcf70717647787be6f94a6f68d681d88ba4f",
+      "bytes": 46940,
+      "route_signature_sha256": "56cfd31b2a3eddc548ed143f58ce3eb77b1b6c20cd9c25bf175e8d7676ed996a",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Nemotron-3-Nano-30B-A3B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored under the measured per-HQQ route-heatmap policy."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 2840,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ6 quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured locally on 2026-07-14 from the p00006 startup heatmap corpus and published as the matched per-HQQ Nemotron artifact."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "nemotron_nano_hqq6_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "b10fbc982f99b77e56bc7cacffc567063ae75ccaa4c6b3ed2ec8221ae200298e",
+        "weight_file_count": 13,
+        "weight_bytes": 63156694272
+      },
+      "checkpoint_provenance": {
+        "repo_id": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "revision": "378df16e4b54901a3f514f38ea9a34db9d061634",
+        "resolved_revision": "378df16e4b54901a3f514f38ea9a34db9d061634",
+        "verified_config_fingerprints": {
+          "config.json": "dd9fa380ac107b0477db5a26108db9febe6378e7bb3966a107944853ec4f76f8",
+          "generation_config.json": "7a8f2d91a749d7a09b755daceacab14da9d66ebfdaea7e8583e48c0be01ee73d",
+          "tokenizer.json": "c6021eb6847e682f89aa52d5eb6e8c7d902a23acfc8137e25211cf84828f1592",
+          "tokenizer_config.json": "3d568e506d0905285ae90a3fdd1482be7b6d0bf0b8ca9514d75dad4257b0827a"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 13,
+        "weight_bytes": 63156694272
+      }
+    },
+    {
+      "artifact_id": "nemotron_nano_hqq8_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/nemotron_nano_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "nemotron_nano_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_nano_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "1849c33f458748255f3ac1d2acaa1c455ba508cea2b9da64ae76413730956c46",
+      "bytes": 46821,
+      "route_signature_sha256": "56cfd31b2a3eddc548ed143f58ce3eb77b1b6c20cd9c25bf175e8d7676ed996a",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Nemotron-3-Nano-30B-A3B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored under the measured per-HQQ route-heatmap policy."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 2834,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ8 quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured locally on 2026-07-14 from the p00006 startup heatmap corpus and published as the matched per-HQQ Nemotron artifact."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "nemotron_nano_hqq8_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "b10fbc982f99b77e56bc7cacffc567063ae75ccaa4c6b3ed2ec8221ae200298e",
+        "weight_file_count": 13,
+        "weight_bytes": 63156694272
+      },
+      "checkpoint_provenance": {
+        "repo_id": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "revision": "378df16e4b54901a3f514f38ea9a34db9d061634",
+        "resolved_revision": "378df16e4b54901a3f514f38ea9a34db9d061634",
+        "verified_config_fingerprints": {
+          "config.json": "dd9fa380ac107b0477db5a26108db9febe6378e7bb3966a107944853ec4f76f8",
+          "generation_config.json": "7a8f2d91a749d7a09b755daceacab14da9d66ebfdaea7e8583e48c0be01ee73d",
+          "tokenizer.json": "c6021eb6847e682f89aa52d5eb6e8c7d902a23acfc8137e25211cf84828f1592",
+          "tokenizer_config.json": "3d568e506d0905285ae90a3fdd1482be7b6d0bf0b8ca9514d75dad4257b0827a"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 13,
+        "weight_bytes": 63156694272
+      }
+    },
+    {
+      "artifact_id": "qcn_hqq4_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3-Coder-Next",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qcn_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qcn_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qcn_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "800bd749a4c28562194be72c730929b1bb6b164d18b11cacf958efed1b6250d0",
+      "bytes": 327821,
+      "route_signature_sha256": "5f3f535edaa6b38c713017401a6617ecd045128ab6489fa7fdfb8248f408d4d5",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3-Coder-Next_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 21092,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-14 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qcn_hqq4_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "727c0310d27d26378441de66a0d1cbdaff6d61a9c4584dadec00977ef996c3bf",
+        "weight_file_count": 40,
+        "weight_bytes": 159358031480
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3-Coder-Next",
+        "revision": "a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
+        "resolved_revision": "a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
+        "verified_config_fingerprints": {
+          "config.json": "a7b8098d3b05777f12bb5677a26bf1240a1bb09def1b06b29e6be86cae2e84f8",
+          "generation_config.json": "37a3c1ef63516ca489c575f0db1c0405ddc0c3dbaca9ed987344c966c37aeef5",
+          "tokenizer.json": "19564a48c4f71a2a1b937cce34c737a1e662b171c5f5d7edf641a15cd896f07d",
+          "tokenizer_config.json": "fc76878832c668e3f0f8be66e6239a475b9093d2fe5cef97c242369779e6c6e6"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 40,
+        "weight_bytes": 159358031480
+      }
+    },
+    {
+      "artifact_id": "qcn_hqq6_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3-Coder-Next",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qcn_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qcn_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qcn_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "19cd30df1ff82d95c0529be64f32c5923ad361fcdd17a2585f1242c8bd14d3e8",
+      "bytes": 324208,
+      "route_signature_sha256": "5f3f535edaa6b38c713017401a6617ecd045128ab6489fa7fdfb8248f408d4d5",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3-Coder-Next_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 20867,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-14 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qcn_hqq6_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "727c0310d27d26378441de66a0d1cbdaff6d61a9c4584dadec00977ef996c3bf",
+        "weight_file_count": 40,
+        "weight_bytes": 159358031480
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3-Coder-Next",
+        "revision": "a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
+        "resolved_revision": "a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
+        "verified_config_fingerprints": {
+          "config.json": "a7b8098d3b05777f12bb5677a26bf1240a1bb09def1b06b29e6be86cae2e84f8",
+          "generation_config.json": "37a3c1ef63516ca489c575f0db1c0405ddc0c3dbaca9ed987344c966c37aeef5",
+          "tokenizer.json": "19564a48c4f71a2a1b937cce34c737a1e662b171c5f5d7edf641a15cd896f07d",
+          "tokenizer_config.json": "fc76878832c668e3f0f8be66e6239a475b9093d2fe5cef97c242369779e6c6e6"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 40,
+        "weight_bytes": 159358031480
+      }
+    },
+    {
+      "artifact_id": "qcn_hqq8_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3-Coder-Next",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qcn_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qcn_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qcn_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "aa420f0ebd596e23f6978b5258c7c838ac710f71c4753d9f4abf05b58c33d660",
+      "bytes": 323414,
+      "route_signature_sha256": "5f3f535edaa6b38c713017401a6617ecd045128ab6489fa7fdfb8248f408d4d5",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3-Coder-Next_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 20821,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-14 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qcn_hqq8_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "727c0310d27d26378441de66a0d1cbdaff6d61a9c4584dadec00977ef996c3bf",
+        "weight_file_count": 40,
+        "weight_bytes": 159358031480
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3-Coder-Next",
+        "revision": "a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
+        "resolved_revision": "a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
+        "verified_config_fingerprints": {
+          "config.json": "a7b8098d3b05777f12bb5677a26bf1240a1bb09def1b06b29e6be86cae2e84f8",
+          "generation_config.json": "37a3c1ef63516ca489c575f0db1c0405ddc0c3dbaca9ed987344c966c37aeef5",
+          "tokenizer.json": "19564a48c4f71a2a1b937cce34c737a1e662b171c5f5d7edf641a15cd896f07d",
+          "tokenizer_config.json": "fc76878832c668e3f0f8be66e6239a475b9093d2fe5cef97c242369779e6c6e6"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 40,
+        "weight_bytes": 159358031480
+      }
+    },
+    {
+      "artifact_id": "qwen35_35b_hqq4_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3.5-35B-A3B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen35_35b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen35_35b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_35b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "03cf090335e2a5c4b7d19ee7c6cfb5bd3809cbb736375867501edd43da0b6620",
+      "bytes": 151255,
+      "route_signature_sha256": "b695482d479557a7a49df3b453f7e7f91e85e358c1ed48e9f2c0704cf9ff5949",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.5-35B-A3B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 9650,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-14 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen35_35b_hqq4_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "4db75fa8b784813a8135d1fd4aa9089a0f2fa2ca46766877860f54ecef11c5fe",
+        "weight_file_count": 14,
+        "weight_bytes": 71903878016
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.5-35B-A3B",
+        "revision": "b1fc3d59ae0ab1e4279e04a8dd0fc4dc361fc2b6",
+        "resolved_revision": "b1fc3d59ae0ab1e4279e04a8dd0fc4dc361fc2b6",
+        "verified_config_fingerprints": {
+          "config.json": "5e4d7f74fec2f360eb9cfbfcd6ec0c4c76e684d3a11caaed259d9fd9bfbc7944",
+          "generation_config.json": "4f25002776b741773666203dcea8f54619f177ace3ae483d311102092a4658e0",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 14,
+        "weight_bytes": 71903878016
+      }
+    },
+    {
+      "artifact_id": "qwen35_35b_hqq6_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3.5-35B-A3B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen35_35b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen35_35b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_35b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "53edce3c80a15864caf6cf126688332c29ec20dd8bda1a174a915af6bcde01bb",
+      "bytes": 149938,
+      "route_signature_sha256": "b695482d479557a7a49df3b453f7e7f91e85e358c1ed48e9f2c0704cf9ff5949",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.5-35B-A3B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 9572,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-14 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen35_35b_hqq6_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "4db75fa8b784813a8135d1fd4aa9089a0f2fa2ca46766877860f54ecef11c5fe",
+        "weight_file_count": 14,
+        "weight_bytes": 71903878016
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.5-35B-A3B",
+        "revision": "b1fc3d59ae0ab1e4279e04a8dd0fc4dc361fc2b6",
+        "resolved_revision": "b1fc3d59ae0ab1e4279e04a8dd0fc4dc361fc2b6",
+        "verified_config_fingerprints": {
+          "config.json": "5e4d7f74fec2f360eb9cfbfcd6ec0c4c76e684d3a11caaed259d9fd9bfbc7944",
+          "generation_config.json": "4f25002776b741773666203dcea8f54619f177ace3ae483d311102092a4658e0",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 14,
+        "weight_bytes": 71903878016
+      }
+    },
+    {
+      "artifact_id": "qwen35_35b_hqq8_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3.5-35B-A3B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen35_35b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen35_35b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_35b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "ab0f17df69800ec3b0fcab34547db2cb911c252a3627aafc1066abd0ea4575d5",
+      "bytes": 151515,
+      "route_signature_sha256": "b695482d479557a7a49df3b453f7e7f91e85e358c1ed48e9f2c0704cf9ff5949",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.5-35B-A3B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 9664,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-14 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen35_35b_hqq8_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "4db75fa8b784813a8135d1fd4aa9089a0f2fa2ca46766877860f54ecef11c5fe",
+        "weight_file_count": 14,
+        "weight_bytes": 71903878016
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.5-35B-A3B",
+        "revision": "b1fc3d59ae0ab1e4279e04a8dd0fc4dc361fc2b6",
+        "resolved_revision": "b1fc3d59ae0ab1e4279e04a8dd0fc4dc361fc2b6",
+        "verified_config_fingerprints": {
+          "config.json": "5e4d7f74fec2f360eb9cfbfcd6ec0c4c76e684d3a11caaed259d9fd9bfbc7944",
+          "generation_config.json": "4f25002776b741773666203dcea8f54619f177ace3ae483d311102092a4658e0",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 14,
+        "weight_bytes": 71903878016
+      }
+    },
+    {
+      "artifact_id": "ornith397_397b_hqq4_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Ornith-1.0-397B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/ornith397_397b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "ornith397_397b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/ornith397_397b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "0edb6527d3daf8e5fbd46e2e93ac6641732ea6f72e8c53d2a79bd255abbcb852",
+      "bytes": 431311,
+      "route_signature_sha256": "7f635539c71c18a19517d09cfe39875f81347df2d1e235a2c85642404c5002ae",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Ornith-1.0-397B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 27712,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-16 as part of the Ornith-1.0-397B stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "ornith397_397b_hqq4_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "f5ff628347061f9c513069c6b661cc207414aa7225cc50dfa3a17c5afa3158ae",
+        "weight_file_count": 122,
+        "weight_bytes": 793604898928
+      },
+      "checkpoint_provenance": {
+        "repo_id": "deepreinforce-ai/Ornith-1.0-397B",
+        "revision": "5e3e761811e804c295c1d3c0ce68b21da6154209",
+        "resolved_revision": "5e3e761811e804c295c1d3c0ce68b21da6154209",
+        "verified_config_fingerprints": {
+          "config.json": "a343d268c6213a262539573413ae5b24d97f3510e33a2a08f4556aaef85c1c01",
+          "generation_config.json": "303aba891d66ab63908a7b3cc9163bcb835fdf8b9f6301c73216f3f1eb3992dd",
+          "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+          "tokenizer_config.json": "792fa3f0cb88b111e54ef3134c873531008c4df471d108da17903426e308aa7b"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 122,
+        "weight_bytes": 793604898928
+      }
+    },
+    {
+      "artifact_id": "ornith397_397b_hqq6_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Ornith-1.0-397B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/ornith397_397b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "ornith397_397b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/ornith397_397b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "8a97a0c8b714d385a6112eaaa8d2000cc31360d68831df1433bf63483a2db019",
+      "bytes": 440793,
+      "route_signature_sha256": "7f635539c71c18a19517d09cfe39875f81347df2d1e235a2c85642404c5002ae",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Ornith-1.0-397B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 28304,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-16 as part of the Ornith-1.0-397B stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "ornith397_397b_hqq6_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "f5ff628347061f9c513069c6b661cc207414aa7225cc50dfa3a17c5afa3158ae",
+        "weight_file_count": 122,
+        "weight_bytes": 793604898928
+      },
+      "checkpoint_provenance": {
+        "repo_id": "deepreinforce-ai/Ornith-1.0-397B",
+        "revision": "5e3e761811e804c295c1d3c0ce68b21da6154209",
+        "resolved_revision": "5e3e761811e804c295c1d3c0ce68b21da6154209",
+        "verified_config_fingerprints": {
+          "config.json": "a343d268c6213a262539573413ae5b24d97f3510e33a2a08f4556aaef85c1c01",
+          "generation_config.json": "303aba891d66ab63908a7b3cc9163bcb835fdf8b9f6301c73216f3f1eb3992dd",
+          "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+          "tokenizer_config.json": "792fa3f0cb88b111e54ef3134c873531008c4df471d108da17903426e308aa7b"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 122,
+        "weight_bytes": 793604898928
+      }
+    },
+    {
+      "artifact_id": "ornith397_397b_hqq8_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Ornith-1.0-397B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/ornith397_397b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "ornith397_397b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/ornith397_397b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "57c4fd5b820db845a7b0c3566ed311cb8a1201bf71debc76e11bb5b13b752103",
+      "bytes": 432392,
+      "route_signature_sha256": "7f635539c71c18a19517d09cfe39875f81347df2d1e235a2c85642404c5002ae",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Ornith-1.0-397B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 27783,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-16 as part of the Ornith-1.0-397B stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "ornith397_397b_hqq8_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "f5ff628347061f9c513069c6b661cc207414aa7225cc50dfa3a17c5afa3158ae",
+        "weight_file_count": 122,
+        "weight_bytes": 793604898928
+      },
+      "checkpoint_provenance": {
+        "repo_id": "deepreinforce-ai/Ornith-1.0-397B",
+        "revision": "5e3e761811e804c295c1d3c0ce68b21da6154209",
+        "resolved_revision": "5e3e761811e804c295c1d3c0ce68b21da6154209",
+        "verified_config_fingerprints": {
+          "config.json": "a343d268c6213a262539573413ae5b24d97f3510e33a2a08f4556aaef85c1c01",
+          "generation_config.json": "303aba891d66ab63908a7b3cc9163bcb835fdf8b9f6301c73216f3f1eb3992dd",
+          "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+          "tokenizer_config.json": "792fa3f0cb88b111e54ef3134c873531008c4df471d108da17903426e308aa7b"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 122,
+        "weight_bytes": 793604898928
+      }
+    },
+    {
+      "artifact_id": "ornith35_35b_hqq4_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Ornith-1.0-35B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/ornith35_35b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "ornith35_35b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/ornith35_35b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "cf7c9db31a7d84b158ab8fff1bd7d2dbf59a51fcbc5cfde2ff4164a87da4b156",
+      "bytes": 149818,
+      "route_signature_sha256": "26ec7c85a578bf21b2f6b870b69390d177f841bac9b8bb3cf536e7f70ba41578",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Ornith-1.0-35B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 9556,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-16 as part of the Ornith-1.0-35B stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "ornith35_35b_hqq4_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "96d6b1e5b1dc29f81b60b7910f96eed43f27caa1af707a3f428a1510a5a5c7a5",
+        "weight_file_count": 16,
+        "weight_bytes": 70218758304
+      },
+      "checkpoint_provenance": {
+        "repo_id": "deepreinforce-ai/Ornith-1.0-35B",
+        "revision": "5df2ed3f675c7beaa490328cc70bb573b65fb660",
+        "resolved_revision": "5df2ed3f675c7beaa490328cc70bb573b65fb660",
+        "verified_config_fingerprints": {
+          "config.json": "239494d64746abc0d5fc5881f784843733e1d432df106cda0a8b7543e882ed55",
+          "generation_config.json": "896eeba60a1195e034dc6b9a7bbddd64b6174992348f5dc7d75daaa93d0bdd45",
+          "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+          "tokenizer_config.json": "792fa3f0cb88b111e54ef3134c873531008c4df471d108da17903426e308aa7b"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 16,
+        "weight_bytes": 70218758304
+      }
+    },
+    {
+      "artifact_id": "ornith35_35b_hqq6_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Ornith-1.0-35B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/ornith35_35b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "ornith35_35b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/ornith35_35b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "217b67183325d13a1ebb4c242e05ff286cb7cb04c65adbe04ef2d819eeec456b",
+      "bytes": 150133,
+      "route_signature_sha256": "26ec7c85a578bf21b2f6b870b69390d177f841bac9b8bb3cf536e7f70ba41578",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Ornith-1.0-35B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 9582,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-16 as part of the Ornith-1.0-35B stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "ornith35_35b_hqq6_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "96d6b1e5b1dc29f81b60b7910f96eed43f27caa1af707a3f428a1510a5a5c7a5",
+        "weight_file_count": 16,
+        "weight_bytes": 70218758304
+      },
+      "checkpoint_provenance": {
+        "repo_id": "deepreinforce-ai/Ornith-1.0-35B",
+        "revision": "5df2ed3f675c7beaa490328cc70bb573b65fb660",
+        "resolved_revision": "5df2ed3f675c7beaa490328cc70bb573b65fb660",
+        "verified_config_fingerprints": {
+          "config.json": "239494d64746abc0d5fc5881f784843733e1d432df106cda0a8b7543e882ed55",
+          "generation_config.json": "896eeba60a1195e034dc6b9a7bbddd64b6174992348f5dc7d75daaa93d0bdd45",
+          "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+          "tokenizer_config.json": "792fa3f0cb88b111e54ef3134c873531008c4df471d108da17903426e308aa7b"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 16,
+        "weight_bytes": 70218758304
+      }
+    },
+    {
+      "artifact_id": "ornith35_35b_hqq8_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Ornith-1.0-35B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/ornith35_35b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "ornith35_35b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/ornith35_35b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "a5eb1176528148277fd437255c160439ee5ca5f9f511735f6fa054dade758745",
+      "bytes": 149500,
+      "route_signature_sha256": "26ec7c85a578bf21b2f6b870b69390d177f841bac9b8bb3cf536e7f70ba41578",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Ornith-1.0-35B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 9538,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-16 as part of the Ornith-1.0-35B stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "ornith35_35b_hqq8_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "96d6b1e5b1dc29f81b60b7910f96eed43f27caa1af707a3f428a1510a5a5c7a5",
+        "weight_file_count": 16,
+        "weight_bytes": 70218758304
+      },
+      "checkpoint_provenance": {
+        "repo_id": "deepreinforce-ai/Ornith-1.0-35B",
+        "revision": "5df2ed3f675c7beaa490328cc70bb573b65fb660",
+        "resolved_revision": "5df2ed3f675c7beaa490328cc70bb573b65fb660",
+        "verified_config_fingerprints": {
+          "config.json": "239494d64746abc0d5fc5881f784843733e1d432df106cda0a8b7543e882ed55",
+          "generation_config.json": "896eeba60a1195e034dc6b9a7bbddd64b6174992348f5dc7d75daaa93d0bdd45",
+          "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+          "tokenizer_config.json": "792fa3f0cb88b111e54ef3134c873531008c4df471d108da17903426e308aa7b"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 16,
+        "weight_bytes": 70218758304
+      }
+    },
+    {
+      "artifact_id": "gemma4_26b_hqq4_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Gemma-4-26B-A4B-it",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/gemma4_26b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "gemma4_26b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/gemma4_26b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "85aef2b14c37787fce64ad2e49a69944d7845dbc10be9da7f8261a2b030c2370",
+      "bytes": 56653,
+      "route_signature_sha256": "6301ce6a79096f78e5b247d538ae0d53f78310c4283a980ef6e7083dfacabeb1",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Gemma-4-26B-A4B-it_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 3472,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-14 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "gemma4_26b_hqq4_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "fe01e17976783ff504a6a0c59627bb0d243bb30054dd6e4d442362846abb4a9a",
+        "weight_file_count": 2,
+        "weight_bytes": 51612009916
+      },
+      "checkpoint_provenance": {
+        "repo_id": "google/gemma-4-26b-a4b-it",
+        "revision": "6e6f6edea8c52db2094dca3086e4b963a0034dfc",
+        "resolved_revision": "6e6f6edea8c52db2094dca3086e4b963a0034dfc",
+        "verified_config_fingerprints": {
+          "config.json": "ed0c1eb3633de771906e9ba004a44cc5635bcc06ee2062077c3d2e88a50707d3",
+          "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+          "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+          "tokenizer_config.json": "90c3a3ba5bf53818383a58e1a776cbcacd2a038d4812eaa373e1522f2d06f3df"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 2,
+        "weight_bytes": 51612009916
+      }
+    },
+    {
+      "artifact_id": "gemma4_26b_hqq6_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Gemma-4-26B-A4B-it",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/gemma4_26b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "gemma4_26b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/gemma4_26b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "2058f2157d4aa18fd27791b4a4b5bce568a74d5069a079eb494ee31ebb4d57c9",
+      "bytes": 57262,
+      "route_signature_sha256": "6301ce6a79096f78e5b247d538ae0d53f78310c4283a980ef6e7083dfacabeb1",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Gemma-4-26B-A4B-it_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 3514,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-14 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "gemma4_26b_hqq6_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "fe01e17976783ff504a6a0c59627bb0d243bb30054dd6e4d442362846abb4a9a",
+        "weight_file_count": 2,
+        "weight_bytes": 51612009916
+      },
+      "checkpoint_provenance": {
+        "repo_id": "google/gemma-4-26b-a4b-it",
+        "revision": "6e6f6edea8c52db2094dca3086e4b963a0034dfc",
+        "resolved_revision": "6e6f6edea8c52db2094dca3086e4b963a0034dfc",
+        "verified_config_fingerprints": {
+          "config.json": "ed0c1eb3633de771906e9ba004a44cc5635bcc06ee2062077c3d2e88a50707d3",
+          "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+          "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+          "tokenizer_config.json": "90c3a3ba5bf53818383a58e1a776cbcacd2a038d4812eaa373e1522f2d06f3df"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 2,
+        "weight_bytes": 51612009916
+      }
+    },
+    {
+      "artifact_id": "gemma4_26b_hqq8_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Gemma-4-26B-A4B-it",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/gemma4_26b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "gemma4_26b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/gemma4_26b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "db84c875a35aa3354a9bcf32abbd3df9ec0f88069e98edc707f39258069d816c",
+      "bytes": 57170,
+      "route_signature_sha256": "6301ce6a79096f78e5b247d538ae0d53f78310c4283a980ef6e7083dfacabeb1",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Gemma-4-26B-A4B-it_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 3509,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-14 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "gemma4_26b_hqq8_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "fe01e17976783ff504a6a0c59627bb0d243bb30054dd6e4d442362846abb4a9a",
+        "weight_file_count": 2,
+        "weight_bytes": 51612009916
+      },
+      "checkpoint_provenance": {
+        "repo_id": "google/gemma-4-26b-a4b-it",
+        "revision": "6e6f6edea8c52db2094dca3086e4b963a0034dfc",
+        "resolved_revision": "6e6f6edea8c52db2094dca3086e4b963a0034dfc",
+        "verified_config_fingerprints": {
+          "config.json": "ed0c1eb3633de771906e9ba004a44cc5635bcc06ee2062077c3d2e88a50707d3",
+          "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+          "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+          "tokenizer_config.json": "90c3a3ba5bf53818383a58e1a776cbcacd2a038d4812eaa373e1522f2d06f3df"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 2,
+        "weight_bytes": 51612009916
+      }
+    },
+    {
+      "artifact_id": "qwen35_122b_hqq4_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3.5-122B-A10B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen35_122b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen35_122b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_122b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "267365c0362a47afb8ae12398ff0251c2b8dadafc3a5e9f58cc83c12c6e124f9",
+      "bytes": 180500,
+      "route_signature_sha256": "1d0d6deb0f5700e9488a5a2eb596bb1951143a8cd6c133ed9910ec116740ad1c",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.5-122B-A10B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 11511,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-15 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen35_122b_hqq4_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "696736bad1c9551fccb246ad5a20d15ed3c7a9bb7c89403631a37873837e380c",
+        "weight_file_count": 39,
+        "weight_bytes": 250173250864
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.5-122B-A10B",
+        "revision": "b000b2eb18a7f4cdf3153c4215842da339e09d99",
+        "resolved_revision": "b000b2eb18a7f4cdf3153c4215842da339e09d99",
+        "verified_config_fingerprints": {
+          "config.json": "af07d0423658865afb52bd0d6fd3c2cc45d988425b76193467fd19129655cecd",
+          "generation_config.json": "303aba891d66ab63908a7b3cc9163bcb835fdf8b9f6301c73216f3f1eb3992dd",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 39,
+        "weight_bytes": 250173250864
+      }
+    },
+    {
+      "artifact_id": "qwen35_122b_hqq6_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3.5-122B-A10B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen35_122b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen35_122b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_122b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "954d15916666815524ebb28ddae19696bb708da938b7e098a89518121341d3f7",
+      "bytes": 180864,
+      "route_signature_sha256": "1d0d6deb0f5700e9488a5a2eb596bb1951143a8cd6c133ed9910ec116740ad1c",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.5-122B-A10B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 11533,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-15 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen35_122b_hqq6_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "696736bad1c9551fccb246ad5a20d15ed3c7a9bb7c89403631a37873837e380c",
+        "weight_file_count": 39,
+        "weight_bytes": 250173250864
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.5-122B-A10B",
+        "revision": "b000b2eb18a7f4cdf3153c4215842da339e09d99",
+        "resolved_revision": "b000b2eb18a7f4cdf3153c4215842da339e09d99",
+        "verified_config_fingerprints": {
+          "config.json": "af07d0423658865afb52bd0d6fd3c2cc45d988425b76193467fd19129655cecd",
+          "generation_config.json": "303aba891d66ab63908a7b3cc9163bcb835fdf8b9f6301c73216f3f1eb3992dd",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 39,
+        "weight_bytes": 250173250864
+      }
+    },
+    {
+      "artifact_id": "qwen35_122b_hqq8_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3.5-122B-A10B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen35_122b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen35_122b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_122b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "81bd8af43d5d242f0f15108167cf9b283f0523990759742d234151c48c498e85",
+      "bytes": 181495,
+      "route_signature_sha256": "1d0d6deb0f5700e9488a5a2eb596bb1951143a8cd6c133ed9910ec116740ad1c",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.5-122B-A10B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 11572,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-15 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen35_122b_hqq8_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "696736bad1c9551fccb246ad5a20d15ed3c7a9bb7c89403631a37873837e380c",
+        "weight_file_count": 39,
+        "weight_bytes": 250173250864
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.5-122B-A10B",
+        "revision": "b000b2eb18a7f4cdf3153c4215842da339e09d99",
+        "resolved_revision": "b000b2eb18a7f4cdf3153c4215842da339e09d99",
+        "verified_config_fingerprints": {
+          "config.json": "af07d0423658865afb52bd0d6fd3c2cc45d988425b76193467fd19129655cecd",
+          "generation_config.json": "303aba891d66ab63908a7b3cc9163bcb835fdf8b9f6301c73216f3f1eb3992dd",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 39,
+        "weight_bytes": 250173250864
+      }
+    },
+    {
+      "artifact_id": "qwen3_235b_hqq4_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3-235B-A22B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen3_235b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen3_235b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen3_235b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "1103317a16e951ac0dd4dd00ae0c3dc64e43e4c0c92283b5edf7f74124494306",
+      "bytes": 180750,
+      "route_signature_sha256": "aa63ed8449e556badca20ae4622ccf7c13b6087be4099c31bfa58690aa213871",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3-235B-A22B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 11488,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-15 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen3_235b_hqq4_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "60dbc29f15e09ae699b7431470c381a20360d3931b077f99b2e67c474fa8e931",
+        "weight_file_count": 118,
+        "weight_bytes": 470191875096
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3-235B-A22B",
+        "revision": "8efa61729e24bd65b1d152b5ab5409052aa80e65",
+        "resolved_revision": "8efa61729e24bd65b1d152b5ab5409052aa80e65",
+        "verified_config_fingerprints": {
+          "config.json": "0ecd5d6fe6f2db6739e4e36ab06b88ebe7bd013ef31b9583f43796059a2b23a4",
+          "generation_config.json": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+          "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+          "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 118,
+        "weight_bytes": 470191875096
+      }
+    },
+    {
+      "artifact_id": "qwen3_235b_hqq6_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3-235B-A22B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen3_235b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen3_235b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen3_235b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "d756f213b710ff46d021ac7e7cac7f1b346590c9b310bea4f104a7b44b21e805",
+      "bytes": 180573,
+      "route_signature_sha256": "aa63ed8449e556badca20ae4622ccf7c13b6087be4099c31bfa58690aa213871",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3-235B-A22B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 11479,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-15 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen3_235b_hqq6_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "60dbc29f15e09ae699b7431470c381a20360d3931b077f99b2e67c474fa8e931",
+        "weight_file_count": 118,
+        "weight_bytes": 470191875096
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3-235B-A22B",
+        "revision": "8efa61729e24bd65b1d152b5ab5409052aa80e65",
+        "resolved_revision": "8efa61729e24bd65b1d152b5ab5409052aa80e65",
+        "verified_config_fingerprints": {
+          "config.json": "0ecd5d6fe6f2db6739e4e36ab06b88ebe7bd013ef31b9583f43796059a2b23a4",
+          "generation_config.json": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+          "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+          "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 118,
+        "weight_bytes": 470191875096
+      }
+    },
+    {
+      "artifact_id": "qwen3_235b_hqq8_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3-235B-A22B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen3_235b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen3_235b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen3_235b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "40f0ce99e6fd1b249a44b11c078195fda141f45e84569c05a501919898e8d9fb",
+      "bytes": 180876,
+      "route_signature_sha256": "aa63ed8449e556badca20ae4622ccf7c13b6087be4099c31bfa58690aa213871",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3-235B-A22B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 11490,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-15 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen3_235b_hqq8_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "60dbc29f15e09ae699b7431470c381a20360d3931b077f99b2e67c474fa8e931",
+        "weight_file_count": 118,
+        "weight_bytes": 470191875096
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3-235B-A22B",
+        "revision": "8efa61729e24bd65b1d152b5ab5409052aa80e65",
+        "resolved_revision": "8efa61729e24bd65b1d152b5ab5409052aa80e65",
+        "verified_config_fingerprints": {
+          "config.json": "0ecd5d6fe6f2db6739e4e36ab06b88ebe7bd013ef31b9583f43796059a2b23a4",
+          "generation_config.json": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+          "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+          "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 118,
+        "weight_bytes": 470191875096
+      }
+    },
+    {
+      "artifact_id": "qwen35_397b_hqq4_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3.5-397B-A17B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen35_397b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen35_397b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_397b_hqq4_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "d6e5d77553f61550dd4df988ad5d8cd2a072723df833b8a673813e7e41b3d97e",
+      "bytes": 415121,
+      "route_signature_sha256": "7ebf8e8db5a7a735151fc14ddb4ce6fc2710a4d272f40398fbf71ce4b3e2e839",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.5-397B-A17B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 26689,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-15 as part of the Qwen3.5-397B stats heatmap batch. Published as a matched per-HQQ artifact; numeric priority is ahead of the legacy p00080 Q397 HQQ6 artifact so current stats profiles select the p00006 matched-HQQ heatmaps."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen35_397b_hqq4_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "531f4065890736b791bcc3a1920f5550e37fac257e8202d469462c6ddff95b69",
+        "weight_file_count": 94,
+        "weight_bytes": 806796241352
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.5-397B-A17B",
+        "revision": "8472618112abcbd45acbcdc58436aff4233c23f7",
+        "resolved_revision": "8472618112abcbd45acbcdc58436aff4233c23f7",
+        "verified_config_fingerprints": {
+          "config.json": "3ae7fa89c2f7d1354096418ddaf1331e9e0898a8ca11e804fb6dbaa087efb7da",
+          "generation_config.json": "303aba891d66ab63908a7b3cc9163bcb835fdf8b9f6301c73216f3f1eb3992dd",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 94,
+        "weight_bytes": 806796241352
+      }
+    },
+    {
+      "artifact_id": "qwen35_397b_hqq6_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3.5-397B-A17B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen35_397b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen35_397b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_397b_hqq6_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "6df05eca9175a6359547c45994e3866f4c8b411f18a8d09fe446ae74caeff134",
+      "bytes": 415287,
+      "route_signature_sha256": "7ebf8e8db5a7a735151fc14ddb4ce6fc2710a4d272f40398fbf71ce4b3e2e839",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.5-397B-A17B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 26692,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-15 as part of the Qwen3.5-397B stats heatmap batch. Published as a matched per-HQQ artifact; numeric priority is ahead of the legacy p00080 Q397 HQQ6 artifact so current stats profiles select the p00006 matched-HQQ heatmaps."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen35_397b_hqq6_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "531f4065890736b791bcc3a1920f5550e37fac257e8202d469462c6ddff95b69",
+        "weight_file_count": 94,
+        "weight_bytes": 806796241352
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.5-397B-A17B",
+        "revision": "8472618112abcbd45acbcdc58436aff4233c23f7",
+        "resolved_revision": "8472618112abcbd45acbcdc58436aff4233c23f7",
+        "verified_config_fingerprints": {
+          "config.json": "3ae7fa89c2f7d1354096418ddaf1331e9e0898a8ca11e804fb6dbaa087efb7da",
+          "generation_config.json": "303aba891d66ab63908a7b3cc9163bcb835fdf8b9f6301c73216f3f1eb3992dd",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 94,
+        "weight_bytes": 806796241352
+      }
+    },
+    {
+      "artifact_id": "qwen35_397b_hqq8_p00006__checkpoint_v1",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3.5-397B-A17B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen35_397b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "filename": "qwen35_397b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_397b_hqq8_p00006_approved_heatmap.checkpoint-v1.json",
+      "sha256": "cca99fc7b51000ed28ac6ed818a9410f9e43aefa40e3273cb6fe39789001b48e",
+      "bytes": 417491,
+      "route_signature_sha256": "7ebf8e8db5a7a735151fc14ddb4ce6fc2710a4d272f40398fbf71ce4b3e2e839",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.5-397B-A17B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 26833,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-15 as part of the Qwen3.5-397B stats heatmap batch. Published as a matched per-HQQ artifact; numeric priority is ahead of the legacy p00080 Q397 HQQ6 artifact so current stats profiles select the p00006 matched-HQQ heatmaps."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "qwen35_397b_hqq8_p00006",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "531f4065890736b791bcc3a1920f5550e37fac257e8202d469462c6ddff95b69",
+        "weight_file_count": 94,
+        "weight_bytes": 806796241352
+      },
+      "checkpoint_provenance": {
+        "repo_id": "Qwen/Qwen3.5-397B-A17B",
+        "revision": "8472618112abcbd45acbcdc58436aff4233c23f7",
+        "resolved_revision": "8472618112abcbd45acbcdc58436aff4233c23f7",
+        "verified_config_fingerprints": {
+          "config.json": "3ae7fa89c2f7d1354096418ddaf1331e9e0898a8ca11e804fb6dbaa087efb7da",
+          "generation_config.json": "303aba891d66ab63908a7b3cc9163bcb835fdf8b9f6301c73216f3f1eb3992dd",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 94,
+        "weight_bytes": 806796241352
+      }
+    },
+    {
+      "artifact_id": "deepseek_v4_flash_0731_bf16_index_score_gemm_p00080__checkpoint_v1",
+      "status": "approved",
+      "priority": 0,
+      "model_name": "DeepSeek-V4-Flash-0731",
+      "source_checkpoint": "p00080",
+      "path": "benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_promoted_approved_heatmap.checkpoint-v1.json",
+      "filename": "deepseek_v4_flash_0731_bf16_index_score_gemm_promoted_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_index_score_gemm_promoted_approved_heatmap.checkpoint-v1.json",
+      "sha256": "e35410e4b12d9414e301058be9306ee00570ab6b670edc148ea689256caab789",
+      "bytes": 168108,
+      "route_signature_sha256": "67969c161f05d8d3db516c610a7e7e09030c1bbf2ea9b574de5d7ddd759ddd13",
+      "validated_runtime_sha256s": [
+        "e736d5d6767d53daa055a377d92a2b20fe1e803d9b4ef11d479d3728166d51f0"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "bf16",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "bf16",
+          "layer_group_size": 1,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "capture": {
+        "prompt_count_processed": 80,
+        "captured_decode_route_tokens": 20554,
+        "ranked_entries": 10131,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "80 held-out approved heatmap prompts with per-prompt measured HCS refresh",
+        "runtime": "INT4 experts, BF16 attention/KV, gathered sparse scores, BF16/FP32 GEMM sparse output, and BF16/FP32 GEMM learned-index scores, layer group 1",
+        "notes": "Full DeepSeek-V4-Flash-0731 promoted learned-index-GEMM default route prior built from prompts disjoint from the benchmark corpus; all dimensions and residency budgets were measured from the loaded runtime."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "deepseek_v4_flash_0731_bf16_index_score_gemm_p00080",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "f514555ba4a159e87fcc74f617b1e0ee52109ffa9c40db40e6e3de7bee521ad7",
+        "weight_file_count": 48,
+        "weight_bytes": 166886535336
+      },
+      "checkpoint_provenance": {
+        "repo_id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+        "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+        "resolved_revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+        "verified_config_fingerprints": {
+          "config.json": "6c8f3d2d3b48707541b88f32f22ef3f0f8a6b57d8523281e2b8d3cdb0ae9a023",
+          "generation_config.json": "5fccff80f55a4d455bbe516bdd552edf3e9623df95e99fbf2a3c3389fdf91af0",
+          "tokenizer.json": "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf",
+          "tokenizer_config.json": "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 48,
+        "weight_bytes": 166886535336
+      }
+    },
+    {
+      "artifact_id": "deepseek_v4_flash_0731_bf16_sparse_output_gemm_p00080__checkpoint_v1",
+      "status": "approved",
+      "priority": 0,
+      "model_name": "DeepSeek-V4-Flash-0731",
+      "source_checkpoint": "p00080",
+      "path": "benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_sparse_output_gemm_approved_heatmap.checkpoint-v1.json",
+      "filename": "deepseek_v4_flash_0731_bf16_sparse_output_gemm_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_sparse_output_gemm_approved_heatmap.checkpoint-v1.json",
+      "sha256": "821cd0735b03b98bf4d3eb8ecc6e4cae3fec64e445a4e5a0300e37a78abde685",
+      "bytes": 168156,
+      "route_signature_sha256": "67969c161f05d8d3db516c610a7e7e09030c1bbf2ea9b574de5d7ddd759ddd13",
+      "validated_runtime_sha256s": [
+        "e736d5d6767d53daa055a377d92a2b20fe1e803d9b4ef11d479d3728166d51f0"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "bf16",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "bf16",
+          "layer_group_size": 1,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "capture": {
+        "prompt_count_processed": 80,
+        "captured_decode_route_tokens": 20560,
+        "ranked_entries": 10137,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "80 held-out approved heatmap prompts with per-prompt measured HCS refresh",
+        "runtime": "INT4 experts, BF16 attention/KV, gathered sparse scores and BF16/FP32 GEMM sparse output, layer group 1",
+        "notes": "Full DeepSeek-V4-Flash-0731 gathered-score and sparse-output-GEMM default route prior built from prompts disjoint from the benchmark corpus; all dimensions and residency budgets were measured from the loaded runtime."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "deepseek_v4_flash_0731_bf16_sparse_output_gemm_p00080",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "f514555ba4a159e87fcc74f617b1e0ee52109ffa9c40db40e6e3de7bee521ad7",
+        "weight_file_count": 48,
+        "weight_bytes": 166886535336
+      },
+      "checkpoint_provenance": {
+        "repo_id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+        "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+        "resolved_revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+        "verified_config_fingerprints": {
+          "config.json": "6c8f3d2d3b48707541b88f32f22ef3f0f8a6b57d8523281e2b8d3cdb0ae9a023",
+          "generation_config.json": "5fccff80f55a4d455bbe516bdd552edf3e9623df95e99fbf2a3c3389fdf91af0",
+          "tokenizer.json": "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf",
+          "tokenizer_config.json": "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 48,
+        "weight_bytes": 166886535336
+      }
+    },
+    {
+      "artifact_id": "deepseek_v4_flash_0731_bf16_gathered_p00080__checkpoint_v1",
+      "status": "approved",
+      "priority": 1,
+      "model_name": "DeepSeek-V4-Flash-0731",
+      "source_checkpoint": "p00080",
+      "path": "benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_gathered_approved_heatmap.checkpoint-v1.json",
+      "filename": "deepseek_v4_flash_0731_bf16_gathered_approved_heatmap.checkpoint-v1.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/deepseek_v4_flash_0731_bf16_gathered_approved_heatmap.checkpoint-v1.json",
+      "sha256": "ac74f1f61436585c53432900ff952376f5f7934765f53308daf5237c37f40eff",
+      "bytes": 168063,
+      "route_signature_sha256": "67969c161f05d8d3db516c610a7e7e09030c1bbf2ea9b574de5d7ddd759ddd13",
+      "validated_runtime_sha256s": [
+        "e736d5d6767d53daa055a377d92a2b20fe1e803d9b4ef11d479d3728166d51f0"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "bf16",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "bf16",
+          "layer_group_size": 1,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "capture": {
+        "prompt_count_processed": 80,
+        "captured_decode_route_tokens": 20529,
+        "ranked_entries": 10122,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "80 held-out approved heatmap prompts with per-prompt measured HCS refresh",
+        "runtime": "INT4 experts, BF16 attention/KV, layer group 1",
+        "notes": "Full DeepSeek-V4-Flash-0731 gathered-score-default route prior built from prompts disjoint from the benchmark corpus; all dimensions and residency budgets were measured from the loaded runtime."
+      },
+      "identity_generation": "checkpoint_v1",
+      "legacy_artifact_id": "deepseek_v4_flash_0731_bf16_gathered_p00080",
+      "checkpoint_identity": {
+        "format": "krasis_checkpoint_identity",
+        "format_version": 1,
+        "sha256": "f514555ba4a159e87fcc74f617b1e0ee52109ffa9c40db40e6e3de7bee521ad7",
+        "weight_file_count": 48,
+        "weight_bytes": 166886535336
+      },
+      "checkpoint_provenance": {
+        "repo_id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+        "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+        "resolved_revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+        "verified_config_fingerprints": {
+          "config.json": "6c8f3d2d3b48707541b88f32f22ef3f0f8a6b57d8523281e2b8d3cdb0ae9a023",
+          "generation_config.json": "5fccff80f55a4d455bbe516bdd552edf3e9623df95e99fbf2a3c3389fdf91af0",
+          "tokenizer.json": "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf",
+          "tokenizer_config.json": "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547"
+        },
+        "source_revision_fingerprint_audit": {
+          "config.json": "match",
+          "generation_config.json": "match",
+          "tokenizer.json": "match",
+          "tokenizer_config.json": "match"
+        },
+        "weight_file_count": 48,
+        "weight_bytes": 166886535336
       }
     }
   ]

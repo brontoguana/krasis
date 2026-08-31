@@ -660,6 +660,70 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertEqual(launcher.cfg.kv_dtype, "bf16")
         self.assertTrue(launcher._ensure_interactive_attention_ready())
 
+    def test_glm53_multi_gpu_exposes_only_qualified_peer_topology(self) -> None:
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = LauncherConfig()
+        launcher.cfg.selected_gpu_indices = [0, 1]
+        launcher.model_info = {
+            "name": "GLM-5.3-Flash",
+            "arch": "glm5_next_text",
+            "support_key": "glm53-flash",
+        }
+
+        self.assertEqual(launcher._multi_gpu_choices(), ["auto", "peer"])
+        launcher._apply_model_recommended_defaults()
+        launcher._validate_model_topology()
+        launcher.cfg.multi_gpu_mode = "peer"
+        launcher._validate_model_capabilities()
+        launcher._validate_model_topology()
+        launcher.cfg.multi_gpu_mode = "layer-split"
+        with self.assertRaisesRegex(ValueError, "does not support topology mode"):
+            launcher._validate_model_capabilities()
+
+        launcher.cfg.selected_gpu_indices = [0]
+        launcher.cfg.multi_gpu_mode = "auto"
+        launcher._validate_model_topology()
+
+    def test_glm53_exposes_only_accuracy_qualified_bf16_vision(self) -> None:
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = LauncherConfig()
+        launcher.model_info = {
+            "name": "GLM-5.3-Flash",
+            "arch": "glm5_next_text",
+            "support_key": "glm53-flash",
+        }
+
+        self.assertEqual(launcher._vision_choices(), ["bf16"])
+        launcher._apply_model_recommended_defaults()
+        self.assertEqual(launcher.cfg.vision_quant, "bf16")
+        self.assertEqual(launcher.cfg.to_save_dict()["CFG_VISION_QUANT"], "bf16")
+        launcher._validate_model_capabilities()
+        vision_option = next(
+            option for option in launcher_mod.OPTIONS if option.key == "vision_quant"
+        )
+        visible_info = dict(launcher.model_info, validation_status="validated")
+        self.assertTrue(
+            launcher_mod._is_option_visible(
+                vision_option,
+                visible_info,
+                launcher.cfg,
+                show_advanced=True,
+            )
+        )
+        self.assertFalse(
+            launcher_mod._is_option_visible(
+                vision_option,
+                dict(visible_info, support_key="unknown-model"),
+                launcher.cfg,
+                show_advanced=True,
+            )
+        )
+
+        launcher.cfg.vision_quant = "int4"
+        launcher.cfg._vision_quant_explicit = True
+        with self.assertRaisesRegex(ValueError, "accuracy-qualified vision modes: bf16"):
+            launcher._validate_model_capabilities()
+
     def test_gemma4_launcher_exposes_validated_mixed_hqq_presets(self) -> None:
         launcher = Launcher.__new__(Launcher)
         launcher.cfg = LauncherConfig()
@@ -682,6 +746,7 @@ class LauncherMatrixTest(unittest.TestCase):
             "qwen35-35b": ("auto", "layer-split"),
             "qwen35-122b": ("auto", "layer-split", "peer"),
             "glm52": ("auto", "peer"),
+            "glm53-flash": ("auto", "peer"),
         }
         expert_option = next(
             option for option in launcher_mod.OPTIONS
@@ -705,6 +770,12 @@ class LauncherMatrixTest(unittest.TestCase):
                 self.assertEqual(launcher._attention_choices(), list(spec.attention_modes))
                 self.assertEqual(launcher._kv_choices(), list(spec.kv_modes))
                 self.assertEqual(launcher._multi_gpu_choices(), list(spec.multi_gpu_modes))
+                self.assertEqual(launcher._vision_choices(), list(spec.vision_modes))
+                if spec.default_vision_quant:
+                    self.assertEqual(
+                        launcher.cfg.vision_quant,
+                        spec.default_vision_quant,
+                    )
                 self.assertEqual(
                     spec.multi_gpu_modes,
                     measured_topologies.get(spec.key, ("auto",)),
@@ -889,6 +960,7 @@ class LauncherMatrixTest(unittest.TestCase):
                 model_dir = Path(root) / name
                 model_dir.mkdir()
                 (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+                (model_dir / "model.safetensors").write_bytes(b"identity-fixture")
 
             step_path = str(Path(root) / "Step-3.7-Flash")
             step_info = launcher_mod._model_info_from_path(step_path)
@@ -1979,7 +2051,7 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(loaded.multi_gpu_mode, "peer")
             self.assertTrue(loaded.dynamic_peer)
             self.assertFalse(loaded.dynamic_hcs)
-            self.assertEqual(loaded.dynamic_hcs_tail_blocks, 5)
+            self.assertEqual(loaded.dynamic_hcs_tail_blocks, "5")
             self.assertEqual(loaded.adaptive_cold_mass_pruning, "75/8")
             self.assertTrue(loaded.expert_compression)
             self.assertEqual(
@@ -2539,7 +2611,7 @@ class LauncherMatrixTest(unittest.TestCase):
                     "attention_quant = 'hqq6'",
                     "hqq_auto_budget_pct = None",
                     "hqq46_auto_budget_mib = None",
-                    "dynamic_hcs_tail_blocks = 2",
+                    "dynamic_hcs_tail_blocks = 'auto'",
                     "kv_cache_mb = 1000",
                     "num_gpus = 1",
                 ],

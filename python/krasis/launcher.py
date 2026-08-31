@@ -492,6 +492,7 @@ _STRUCTURALLY_SUPPORTED_MODEL_TYPES = frozenset({
     "deepseek_v3",
     "deepseek_v4",
     "gemma4_text",
+    "glm5_next_text",
     "glm_moe_dsa",
     "nemotron_h",
     "qwen3",
@@ -793,7 +794,7 @@ def scan_gguf_files(search_dir: str) -> List[Dict[str, Any]]:
 
 CONFIG_KEYS = [
     "MODEL_PATH", "CFG_SELECTED_GPUS", "CFG_PP_PARTITION", "CFG_LAYER_GROUP_SIZE",
-    "CFG_KV_CACHE_MB", "CFG_MAX_CONTEXT_TOKENS", "CFG_KV_DTYPE", "CFG_RING_WINDOW_KV", "CFG_GPU_EXPERT_BITS",
+    "CFG_KV_CACHE_MB", "CFG_MAX_CONTEXT_TOKENS", "CFG_KV_DTYPE", "CFG_RING_WINDOW_KV", "CFG_VISION_QUANT", "CFG_GPU_EXPERT_BITS",
     "CFG_EXPERT_GROUP_SIZE", "CFG_CPU_EXPERT_BITS",
     "CFG_GPU_EXPERT_INT4_CALIB",
     "CFG_ATTENTION_QUANT", "CFG_HQQ_CACHE_PROFILE", "CFG_HQQ_GROUP_SIZE", "CFG_HQQ_AUTO_BUDGET_PCT", "CFG_HQQ46_AUTO_BUDGET_MB", "CFG_HQQ_SIDECAR_MANIFEST",
@@ -879,6 +880,8 @@ class LauncherConfig:
         self.cpu_expert_bits: int = 4
         self.attention_quant: str = "hqq6"
         self._attention_quant_explicit: bool = False  # set when user/config explicitly chose
+        self.vision_quant: str = "int4"
+        self._vision_quant_explicit: bool = False
         self.hqq_cache_profile: str = HQQ_CACHE_PROFILE_BASELINE
         self._hqq_cache_profile_explicit: bool = False
         self.hqq_group_size: int = HQQ_ATTENTION_DEFAULT_GROUP_SIZE
@@ -903,7 +906,7 @@ class LauncherConfig:
         self.dynamic_peer: bool = False
         self.hcs_host_cache_mode: str = "source"
         self.dynamic_hcs: bool = True
-        self.dynamic_hcs_tail_blocks: int = 2
+        self.dynamic_hcs_tail_blocks: str = "auto"
         self.adaptive_cold_mass_pruning: str = "off"
         self.expert_compression: bool = False
         self.expert_compression_sidecar: str = ""
@@ -1021,6 +1024,14 @@ class LauncherConfig:
                 )
             self.attention_quant = val
             self._attention_quant_explicit = True
+        if "CFG_VISION_QUANT" in saved and saved["CFG_VISION_QUANT"]:
+            value = saved["CFG_VISION_QUANT"].strip().lower()
+            if value not in ("bf16", "int4"):
+                raise ValueError(
+                    f"Unsupported saved CFG_VISION_QUANT={value!r}. Use bf16 or int4."
+                )
+            self.vision_quant = value
+            self._vision_quant_explicit = True
         if "CFG_HQQ_CACHE_PROFILE" in saved and saved["CFG_HQQ_CACHE_PROFILE"]:
             val = saved["CFG_HQQ_CACHE_PROFILE"].strip().lower()
             if val not in HQQ_CACHE_PROFILE_CHOICES:
@@ -1130,12 +1141,10 @@ class LauncherConfig:
         if "CFG_DYNAMIC_HCS" in saved:
             self.dynamic_hcs = saved["CFG_DYNAMIC_HCS"] != "0"
         if "CFG_DYNAMIC_HCS_TAIL_BLOCKS" in saved and saved["CFG_DYNAMIC_HCS_TAIL_BLOCKS"]:
-            try:
-                val = int(saved["CFG_DYNAMIC_HCS_TAIL_BLOCKS"])
-                if 1 <= val <= 5:
-                    self.dynamic_hcs_tail_blocks = val
-            except (ValueError, TypeError):
-                pass
+            self.dynamic_hcs_tail_blocks = _validated_dynamic_hcs_tail_blocks(
+                saved["CFG_DYNAMIC_HCS_TAIL_BLOCKS"],
+                "CFG_DYNAMIC_HCS_TAIL_BLOCKS",
+            )
         if "CFG_DYNAMIC_PEER" in saved:
             self.dynamic_peer = saved["CFG_DYNAMIC_PEER"] == "1"
         if "CFG_ADAPTIVE_COLD_MASS_PRUNING" in saved and saved["CFG_ADAPTIVE_COLD_MASS_PRUNING"]:
@@ -1225,6 +1234,7 @@ class LauncherConfig:
             "CFG_GPU_EXPERT_INT4_CALIB": self.gpu_expert_int4_calib,
             "CFG_CPU_EXPERT_BITS": str(self.cpu_expert_bits),
             "CFG_ATTENTION_QUANT": self.attention_quant,
+            "CFG_VISION_QUANT": self.vision_quant,
             "CFG_HQQ_CACHE_PROFILE": self.hqq_cache_profile,
             "CFG_HQQ_GROUP_SIZE": str(self.hqq_group_size),
             "CFG_SHARED_EXPERT_QUANT": self.shared_expert_quant,
@@ -1324,6 +1334,8 @@ OPTIONS = [
                  choices=list(GPU_EXPERT_INT4_CALIB_CHOICES), advanced=True),
     ConfigOption("Attention quant", "attention_quant",
                  choices=list(INTERACTIVE_ATTENTION_QUANT_CHOICES), affects_budget=True),
+    ConfigOption("Vision quant", "vision_quant",
+                 choices=["int4", "bf16"], advanced=True),
     ConfigOption("VRAM safety margin", "vram_safety_margin",
                  opt_type="number", min_val=500, max_val=8000, step=100),
     ConfigOption("Host/Port", "host", opt_type="text"),
@@ -1352,7 +1364,7 @@ OPTIONS = [
     ConfigOption("Dynamic HCS", "dynamic_hcs",
                  choices=[True, False], advanced=True),
     ConfigOption("HCS tail blocks", "dynamic_hcs_tail_blocks",
-                 choices=[1, 2, 3, 4, 5], advanced=True),
+                 choices=["auto", "1", "2", "3", "4", "5"], advanced=True),
     ConfigOption("D-Spark", "dspark_mode",
                  choices=["off", "resident", "shared"], advanced=True),
     ConfigOption("Rebuild Marlin cache", "force_rebuild_cache",
@@ -1373,6 +1385,20 @@ def _format_attention_quant_value(attention_quant: str, hqq_auto_budget_pct: Opt
 
 def _format_on_off(enabled: bool) -> str:
     return f"{GREEN}On{NC}" if enabled else f"{DIM}Off{NC}"
+
+
+def _validated_dynamic_hcs_tail_blocks(value: Any, label: str) -> str:
+    """Return the canonical measured/explicit dynamic-HCS tail policy."""
+    normalized = str(value).strip().lower()
+    if normalized == "auto":
+        return normalized
+    try:
+        blocks = int(normalized)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be auto or an integer in 1..5") from exc
+    if not 1 <= blocks <= 5:
+        raise ValueError(f"{label} must be auto or an integer in 1..5")
+    return str(blocks)
 
 
 def _format_kv_dtype_value(kv_dtype: str) -> str:
@@ -1396,6 +1422,8 @@ def _format_value(opt: ConfigOption, val: Any) -> str:
     if opt.key == "vram_safety_margin":
         return f"{val:,} MB"
     if opt.key == "dynamic_hcs_tail_blocks":
+        if str(val).strip().lower() == "auto":
+            return f"{GREEN}Auto{NC} {DIM}(measured){NC}"
         suffix = "block" if int(val) == 1 else "blocks"
         return f"{val} {suffix}"
     if opt.key == "hcs_host_cache_mode":
@@ -1440,6 +1468,19 @@ def _is_option_visible(
         return model_info is None or bool(model_info.get("experts", 0))
     if opt.key == "dspark_mode":
         return bool(model_info and model_info.get("dspark_qualified", False))
+    if opt.key == "vision_quant":
+        if not model_info or model_info.get("validation_status") != "validated":
+            return False
+        support_key = str(model_info.get("support_key", "")).strip()
+        if not support_key:
+            return False
+        from krasis.hf_downloader import supported_model_spec
+
+        try:
+            spec = supported_model_spec(support_key)
+        except ValueError:
+            return False
+        return bool(spec.vision_modes)
     return True
 
 
@@ -2034,6 +2075,10 @@ class Launcher:
         arch = str((self.model_info or {}).get("arch", "")).strip().lower().replace("-", "_")
         return arch == "gemma4_text"
 
+    def _is_glm5_next(self) -> bool:
+        arch = str((self.model_info or {}).get("arch", "")).strip().lower().replace("-", "_")
+        return arch == "glm5_next_text"
+
     def _supported_model_spec(self) -> Optional[Any]:
         from krasis.hf_downloader import supported_model_for_path, supported_model_spec
 
@@ -2072,6 +2117,12 @@ class Launcher:
             return ["auto"]
         return ["auto", "layer-split", "peer"]
 
+    def _vision_choices(self) -> List[str]:
+        spec = self._supported_model_spec()
+        if spec is not None and spec.vision_modes:
+            return list(spec.vision_modes)
+        return []
+
     def _apply_model_recommended_defaults(self) -> None:
         spec = self._supported_model_spec()
         if spec is not None:
@@ -2082,6 +2133,8 @@ class Launcher:
             if spec.max_context_tokens:
                 if not self.cfg.max_context_tokens:
                     self.cfg.max_context_tokens = spec.max_context_tokens
+            if spec.default_vision_quant and not self.cfg._vision_quant_explicit:
+                self.cfg.vision_quant = spec.default_vision_quant
         elif self._is_deepseek_v4():
             if not self.cfg._attention_quant_explicit:
                 self._set_interactive_attention_quant("hqq6")
@@ -2137,6 +2190,11 @@ class Launcher:
                 f"{(self.model_info or {}).get('name', 'Selected model')} does not support "
                 f"topology mode {self.cfg.multi_gpu_mode!r}; supported modes: "
                 f"{', '.join(topology_choices)}"
+            )
+        if spec is not None and spec.vision_modes and self.cfg.vision_quant not in spec.vision_modes:
+            raise ValueError(
+                f"{spec.display_name} does not support vision mode {self.cfg.vision_quant!r}; "
+                f"accuracy-qualified vision modes: {', '.join(spec.vision_modes)}"
             )
         if self.cfg.gpu_expert_bits != 4 or self.cfg.cpu_expert_bits != 4:
             raise ValueError(
@@ -3021,6 +3079,8 @@ class Launcher:
                 choices = self._kv_choices()
             elif opt.key == "multi_gpu_mode":
                 choices = self._multi_gpu_choices()
+            elif opt.key == "vision_quant":
+                choices = self._vision_choices()
             else:
                 choices = opt.choices
             try:
@@ -3539,6 +3599,8 @@ def parse_args() -> argparse.Namespace:
                         help="Offline calibration mode for GPU routed-expert INT4 cache build")
     parser.add_argument("--attention-quant", default=None,
                         help="Attention weight quant: interactive presets are hqq4, hqq46_auto with --hqq-auto-budget-pct 10, hqq6 default, and hqq68_auto with --hqq-auto-budget-pct 10; hqq8, hqq46, and bf16 remain explicit advanced modes")
+    parser.add_argument("--vision-quant", default=None, choices=["bf16", "int4"],
+                        help="Vision tower quantization; accepted modes are model-specific and launcher-qualified")
     parser.add_argument("--hqq-cache-profile", default=None,
                         help="HQQ attention cache profile: baseline or selfcal_v1")
     parser.add_argument("--hqq-group-size", type=int, default=None, choices=list(HQQ_ATTENTION_GROUP_SIZE_CHOICES),
@@ -3573,9 +3635,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dynamic-hcs", action=argparse.BooleanOptionalAction,
                         default=None,
                         help="Enable dynamic HCS heatmap-prefix + recency-tail cache (default: on)")
-    parser.add_argument("--dynamic-hcs-tail-blocks", type=int, default=None,
-                        choices=[1, 2, 3, 4, 5],
-                        help="Advanced: recency tail size in activated-expert blocks (1-5, default: 2)")
+    parser.add_argument(
+        "--dynamic-hcs-tail-blocks",
+        default=None,
+        choices=["auto", "1", "2", "3", "4", "5"],
+        help=(
+            "Advanced: measured recency-tail policy (auto, the default), or an "
+            "explicit activated-expert block count (1-5)"
+        ),
+    )
     parser.add_argument("--hcs-host-cache-mode", default=None,
                         choices=["auto", "mirror", "source"],
                         help="Soft HCS host storage: source/lower-system-RAM, mirror/fast, or auto")
@@ -3683,6 +3751,9 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
             )
         cfg.attention_quant = val
         cfg._attention_quant_explicit = True
+    if args.vision_quant is not None:
+        cfg.vision_quant = args.vision_quant
+        cfg._vision_quant_explicit = True
     if args.hqq_cache_profile is not None:
         val = args.hqq_cache_profile.strip().lower()
         if val not in HQQ_CACHE_PROFILE_CHOICES:
@@ -3721,7 +3792,10 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
     if args.dynamic_hcs is not None:
         cfg.dynamic_hcs = bool(args.dynamic_hcs)
     if args.dynamic_hcs_tail_blocks is not None:
-        cfg.dynamic_hcs_tail_blocks = int(args.dynamic_hcs_tail_blocks)
+        cfg.dynamic_hcs_tail_blocks = _validated_dynamic_hcs_tail_blocks(
+            args.dynamic_hcs_tail_blocks,
+            "--dynamic-hcs-tail-blocks",
+        )
     if args.hcs_host_cache_mode is not None:
         cfg.hcs_host_cache_mode = args.hcs_host_cache_mode
     if args.multi_gpu_mode is not None:
@@ -4016,6 +4090,7 @@ def _manager_config_dict(launcher: "Launcher") -> Dict[str, Any]:
         "host": cfg.host,
         "port": cfg.port,
         "attention_quant": cfg.attention_quant,
+        "vision_quant": cfg.vision_quant,
         "hqq_cache_profile": cfg.hqq_cache_profile,
         "hqq_group_size": cfg.hqq_group_size,
         "hqq_auto_budget_pct": cfg.hqq_auto_budget_pct,
@@ -4110,6 +4185,7 @@ def _manager_schema_main(argv: List[str]) -> None:
         "config": _manager_config_dict(launcher),
         "choices": {
             "attention_quant": launcher._attention_choices(),
+            "vision_quant": launcher._vision_choices(),
             "kv_dtype": launcher._kv_choices(),
             "multi_gpu_mode": launcher._multi_gpu_choices(),
         },

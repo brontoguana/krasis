@@ -1,5 +1,898 @@
 # Krasis Benchmark Results
 
+## GLM-5.3-Flash final installed-source repeat on RTX PRO 6000 — 2026-08-31
+
+The final installed restored source passed the exact timing-disabled command
+`./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf`, run
+`logs/dev-benchmark_20260831_073432`, exit 0. Internal prefill was
+`119.6/526.6/836.8/1232.7/1459.2/1506.6 tok/s`; internal decode was
+`21.82/25.20/23.84 tok/s`; HTTP round trip was
+`34.78/31.54/25.76 tok/s`.
+
+The runtime selector independently chose 1024 sparse-MLA threads from
+`0.3762/0.2937/0.1844 ms` medians. Formal HCS hit rates exactly reproduced the
+accepted source-default run at `85.96/89.23/88.25%`, with 6,540/12,096
+experts resident and a 1,277 MiB decode floor. Budget skips, no-slot events,
+copy failures, CUDA errors, OOMs, and below-margin warnings were zero. This
+packaged repeat preserves the 1,509.0 tok/s best long-prefill row within normal
+run variance and raises the best accepted decode row to 25.20 tok/s.
+
+Evidence: [report](20260831_glm53_final_installed_repeat_pro_hqq6_k6v6_report.log),
+[stdout](20260831_glm53_final_installed_repeat_pro_hqq6_k6v6_stdout.log),
+[runtime](20260831_glm53_final_installed_repeat_pro_hqq6_k6v6_runtime.log),
+[outer](20260831_glm53_final_installed_repeat_pro_hqq6_k6v6_outer.log), and
+[command](20260831_glm53_final_installed_repeat_pro_hqq6_k6v6_command.log).
+
+### Final installed-source llama-witness restoration gate
+
+The final installed restored source also passed the frozen 3,116-token,
+16-token llama-witness profile, run `logs/reference-test_20260831_075552`,
+exit 0. Prefill argmax/top-ten and first token were `1/1`; the exact prefix run
+was 3 tokens, total exact token identities were `11/16`, and witness-token
+top-ten containment was `13/16` (81.2%). The selected first-token logprob delta
+was exactly `0.07842576684150501`, matching the accepted bound. Request VRAM
+low water was 675 MiB against the configured 600 MiB margin.
+
+Evidence: [summary](20260831_glm53_final_installed_witness16_summary.json),
+[HTML](20260831_glm53_final_installed_witness16.html),
+[outer](20260831_glm53_final_installed_witness16_outer.log), and
+[command](20260831_glm53_final_installed_witness16_command.log).
+
+## QCN final cross-model speed guard on RTX A6000 — 2026-08-31
+
+The fixed timing-disabled `./dev speed-test` passed on the final installed
+source, run `logs/dev-benchmark_20260831_072143`, exit 0. Internal prefill was
+`1334.1/2365.7/2544.1/2563.4/2508.8/2474.0 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`61.88/62.30/61.37 tok/s`; HTTP round trip was
+`114.44/80.56/67.54 tok/s` for 50/100/250-token outputs.
+
+All 24,576 experts were resident with 100% HCS hits. Decode held 4,204 MiB
+free (4,108 MiB during the HTTP panel) against the 600 MiB margin, with zero
+budget skips, no-slot events, copy failures, CUDA errors, OOMs, or
+below-margin warnings. This clears the cross-model guard and improves the
+prior `54.41/54.31/53.60 tok/s` decode baseline rather than merely preserving
+it.
+
+Evidence: [report](20260831_qcn_cross_model_final_hqq4_k4v4_a6000_report.log),
+[stdout](20260831_qcn_cross_model_final_hqq4_k4v4_a6000_stdout.log),
+[runtime](20260831_qcn_cross_model_final_hqq4_k4v4_a6000_runtime.log),
+[outer](20260831_qcn_cross_model_final_hqq4_k4v4_a6000_outer.log), and
+[command](20260831_qcn_cross_model_final_hqq4_k4v4_a6000_command.log).
+
+## GLM-5.3-Flash sparse-MLA value-group rejection on RTX PRO 6000 — 2026-08-31
+
+This timing-disabled source-default run tested a geometry-derived second value
+accumulation group after its timing profile reduced saturated sparse attention
+from `6.67` to `5.07 ms/token` (24.0%) and the frozen llama-witness reproduced
+the accepted numerical bound. The complete benchmark rejected it: internal
+prefill was `119.6/516.9/836.1/1231.0/1457.8/1508.0 tok/s`, while internal
+decode was `21.77/23.60/23.43 tok/s`, below the accepted selector's
+`21.79/25.14/23.81` curve. Exact-runtime HCS hit rates also fell to
+`85.65/87.89/87.57%`, so locality loss outweighed the isolated kernel saving.
+
+The run retained 6,540/12,096 HCS experts, held a 1,277 MiB decode floor, and
+reported zero budget skips, no-slot events, copy failures, CUDA errors, OOMs,
+or below-600-MiB warnings. The grouped arithmetic was removed rather than
+shipping a subsystem microbenchmark regression.
+
+Evidence: [report](20260831_glm53_mla_value_groups_rejected_report.log),
+[stdout](20260831_glm53_mla_value_groups_rejected_stdout.log),
+[runtime](20260831_glm53_mla_value_groups_rejected_runtime.log),
+[outer](20260831_glm53_mla_value_groups_rejected_outer.log), and
+[command](20260831_glm53_mla_value_groups_rejected_command.log).
+
+## GLM-5.3-Flash current graph-bucket attribution on RTX PRO 6000 — 2026-08-31
+
+This timing-enabled current-default run measured sustained 49/99/249-token
+panels before selecting another decode optimization. Graph CUDA-event time was
+`18.25/18.72/19.37 ms/token`: KDA accounted for
+`6.04/6.01/6.01`, routed MoE expert kernels `2.07/2.20/2.25`, and the remaining
+route-segment residual `5.16/5.41/5.56`. Demand H2D separately consumed
+`17.02/20.31/21.53 ms/token`.
+
+The evidence selects the route-segment residual as the only unaccounted fixed
+bucket large enough to matter. KDA QKV was about 2.03 ms/token, recurrence about
+1.81, and route logits/top-k/scale-class only `0.15/0.70/0.09` on the long row.
+The run was stopped before redundant formal prefill rows. Calibration floors
+were 1,115--1,227 MiB against the unchanged 600 MiB runtime margin, and there
+was no HCS failure, CUDA error, or OOM.
+
+Evidence: [stdout](20260831_glm53_current_graph_buckets_attribution_stdout.log),
+[outer](20260831_glm53_current_graph_buckets_attribution_outer.log), and
+[command](20260831_glm53_current_graph_buckets_attribution_command.log).
+
+## GLM-5.3-Flash GPU-route selected-feedback rejection on RTX PRO 6000 — 2026-08-31
+
+This timing-enabled diagnostic repaired the opt-in GPU classifier's Dynamic-HCS
+feedback contract: strict CUDA validation passed exactly `1/1`, cold misses now
+produce promotions, and resident selected experts refresh recency. Sustained
+50/100/250-token rows measured HCS hit rates of `89.90/87.94/87.17%` and
+`1,663/4,012/10,734` request promotions, close to the legacy control's
+`90.37/87.76/87.92%` and `1,585/4,073/10,107`.
+
+The speed candidate was rejected. Total diagnostic time was
+`38.86/42.67/44.34 ms/token` versus legacy
+`38.74/43.18/43.28`; graph CUDA-event time was also no better at
+`17.83/18.28/18.87 ms/token` versus `17.59/18.10/18.66`. The run was stopped
+before formal timing-disabled rows. Long calibration held 1,223 MiB free
+against the unchanged 600 MiB runtime margin, all HCS failure counters remained
+zero, and there was no CUDA error or OOM.
+
+Evidence: [stdout](20260831_glm53_gpu_route_selected_feedback_rejected_stdout.log),
+[outer](20260831_glm53_gpu_route_selected_feedback_rejected_outer.log), and
+[command](20260831_glm53_gpu_route_selected_feedback_rejected_command.log).
+
+## GLM-5.3-Flash Dynamic-HCS promotion attribution on RTX PRO 6000 — 2026-08-30
+
+This timing-enabled standard run isolated CPU-side promotion planning and D2D
+submission without changing the timing-disabled path. Formal 50/100/250-token
+rows measured total promotion CPU cost at `0.765/0.706/0.729 ms/token`, of
+which four D2D submissions per promoted expert consumed
+`0.549/0.508/0.524 ms/token`. The production source-host HCS mode performed
+exactly zero host-mirror copies. Sync wait minus demand-H2D and graph CUDA-event
+time left only `0.68/1.05/0.89 ms/token`, bounding all unmeasured GPU D2D and
+event work. Promotion-copy optimization alone therefore cannot deliver a 5%
+decode gain.
+
+The run reproduced structured-gather prefill at
+`121.6/515.4/833.9/1,228.4/1,455.2/1,499.0 tok/s`. Diagnostic internal decode
+was `23.24/23.62/23.38 tok/s`; timing was enabled, so these decode rates are
+attribution rather than speed acceptance. HCS hits were
+`87.73/88.71/88.34%`, minimum free VRAM was 1,277 MiB, and there were no
+budget skips, no-slot events, copy failures, below-margin warnings, CUDA errors,
+or OOMs.
+
+Evidence: [report](20260830_glm53_dynamic_promotion_attribution_pro_hqq6_k6v6_report.log),
+[stdout](20260830_glm53_dynamic_promotion_attribution_pro_hqq6_k6v6_stdout.log),
+[runtime](20260830_glm53_dynamic_promotion_attribution_pro_hqq6_k6v6_runtime.log),
+[outer](20260830_glm53_dynamic_promotion_attribution_pro_hqq6_k6v6_outer.log), and
+[command](20260830_glm53_dynamic_promotion_attribution_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3-Flash structured gathered-attention attribution on RTX PRO 6000 — 2026-08-30
+
+This calibration-only diagnostic selected the exact-arithmetic structured K6
+preparation schedule while retaining the established pedantic FP32 score and
+output GEMMs. At 39,920 tokens, every one of the 11 DSA layers reported the
+runtime-selected structured schedule and the same 12-tile, 2,051-key,
+512-dimension production geometry.
+
+Across those layers, gather fell from the flat control's 2,772.223 ms to
+1,719.704 ms (`-37.97%`). Score GEMM, softmax, and output GEMM measured
+2,945.580/520.352/2,190.505 ms, making the full gathered stage 7,376.141 ms
+versus 8,561.527 ms (`-13.85%`). The enclosing attention events totalled
+7,377.325 ms. The 39,920-token diagnostic row held 1,215 MiB free and exited 0
+without CUDA, OOM, or below-margin failure. Timing barriers were enabled, so
+this is attribution rather than speed-acceptance evidence.
+
+Evidence: [stdout](20260830_glm53_hqq_mla_structured_gather_attribution_pro_hqq6_k6v6_stdout.log),
+[runtime](20260830_glm53_hqq_mla_structured_gather_attribution_pro_hqq6_k6v6_runtime.log),
+[outer](20260830_glm53_hqq_mla_structured_gather_attribution_pro_hqq6_k6v6_outer.log), and
+[command](20260830_glm53_hqq_mla_structured_gather_attribution_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3-Flash gathered sparse-attention substage attribution on RTX PRO 6000 — 2026-08-30
+
+This repeated calibration-only diagnostic split the measured 39,920-token
+gathered-attention stage using runtime-derived geometry. Every DSA layer used
+12 tiles with capacity 3,474 rows, 2,051 selected keys, a combined dimension
+of 512, an 18,698,121,408-byte workspace, and 5,381,632 bytes per row.
+
+Across 11 DSA layers, gather consumed 2,772.2 ms (32.4%), FP32 score GEMM
+3,034.4 ms (35.4%), softmax 521.2 ms (6.1%), and FP32 output GEMM 2,233.7 ms
+(26.1%), totalling 8,561.5 ms. No single launch dominates; both materialized
+gather traffic and the two pedantic FP32 GEMMs are first-order costs.
+
+The 39,920-token calibration row held 1,207 MiB free and the run exited 0 with
+no below-margin warning, CUDA error, or OOM. This is timing-enabled attribution,
+not speed acceptance.
+
+Evidence: [stdout](20260830_glm53_hqq_mla_gathered_substage_attribution_pro_hqq6_k6v6_stdout.log),
+[runtime](20260830_glm53_hqq_mla_gathered_substage_attribution_pro_hqq6_k6v6_runtime.log),
+[outer](20260830_glm53_hqq_mla_gathered_substage_attribution_pro_hqq6_k6v6_outer.log), and
+[command](20260830_glm53_hqq_mla_gathered_substage_attribution_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3-Flash HQQ MLA stage attribution on RTX PRO 6000 — 2026-08-30
+
+This calibration-only diagnostic enabled CUDA-event isolation for the existing
+HQQ MLA stage counters at exactly 39,920 tokens and exited before HCS loading.
+Across all 11 registered DSA layers, the measured totals were: sparse attention
+8,639.7 ms (61.4%), owner selection 3,055.7 ms (21.7%), absorbed WKC 1,558.6
+ms (11.1%), KV preparation 271.4 ms, output projection 226.5 ms, WVC 202.1 ms,
+Q-B 87.7 ms, and Q-A normalization 24.9 ms. Total sync-isolated stage time was
+14,066.4 ms. Sparse attention is therefore the dominant next optimization
+target; selector-only work cannot yield a comparable whole-prefill gain.
+
+Calibration low-water was 1,201 MiB at 39,920 tokens against the 600 MiB
+runtime safety margin. The run exited 0 with no CUDA error, OOM, or below-margin
+warning. This is attribution only, not timing-disabled speed evidence.
+
+Evidence: [stdout](20260830_glm53_hqq_mla_stage_attribution_pro_hqq6_k6v6_stdout.log),
+[runtime](20260830_glm53_hqq_mla_stage_attribution_pro_hqq6_k6v6_runtime.log),
+[outer](20260830_glm53_hqq_mla_stage_attribution_pro_hqq6_k6v6_outer.log), and
+[command](20260830_glm53_hqq_mla_stage_attribution_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3-Flash calibrated CPU-tail admission and DSA attribution on RTX PRO 6000 — 2026-08-30
+
+This timing-enabled standard diagnostic validated artifact-derived CPU-tail
+queue-depth admission and the repaired registered-DSA selector counters in one
+run. The calibration artifact admitted worker 0 from depth 3 and worker 1 from
+depth 8; depth-2 races were eliminated. Internal decode was
+`23.37/24.27/22.54 tok/s` at 50/100/250 target tokens, versus matched no-CPU
+diagnostic `23.03/23.92/23.41`. Because the 250-token row regressed, CPU-tail
+racing remains rejected and no timing-disabled speed gate is warranted.
+
+The 39,920-token instrumented prefill row reached 1,451.6 tok/s. Its complete
+DSA event time was 10,922.1 ms; sparse selection accounted for only 1,358.2 ms
+(query 6.7, scores 1,159.3, base sort 158.7, merge 33.5), localizing most
+remaining DSA time after owner selection. This is attribution only; accepted
+timing-disabled radix evidence remains 1,444.4 tok/s.
+
+Decode held 1,279 MiB minimum free VRAM. HCS ended at 6,540/12,096 residents;
+there were zero budget skips, no-slot events, copy failures, CPU-tail errors,
+CUDA errors, or OOMs. The run exited 0.
+
+Evidence: [report](20260830_glm53_cpu_tail_admission_dsa_attribution_pro_hqq6_k6v6_report.log),
+[stdout](20260830_glm53_cpu_tail_admission_dsa_attribution_pro_hqq6_k6v6_stdout.log),
+[runtime](20260830_glm53_cpu_tail_admission_dsa_attribution_pro_hqq6_k6v6_runtime.log),
+[outer](20260830_glm53_cpu_tail_admission_dsa_attribution_pro_hqq6_k6v6_outer.log), and
+[command](20260830_glm53_cpu_tail_admission_dsa_attribution_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3-Flash 50K-compatible held-out heatmap p48 on RTX PRO 6000 — 2026-08-30
+
+This timing-disabled standard benchmark evaluates the final p48 held-out route
+artifact under the exact 50,000-token HQQ6/k6v6 contract and the same 6,560
+soft-expert capacity as p32/p40.
+
+Internal prefill was
+`120.8/527.9/848.6/1,214.6/1,408.4/1,433.9 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`22.59/24.69/23.98 tok/s` at 50/100/250 target tokens, with formal HCS hits
+`87.07/89.13/88.56%`. Versus the portable source-default decode curve
+`22.91/24.16/23.60`, p48 regresses 50 tokens and improves 100/250; equal-row
+mean token latency improves only about 0.7%, which is below a convincing
+production win. The held-out heatmap campaign is therefore not promoted.
+
+Decode held 1,277 MiB minimum free VRAM. Final HCS hit was 88.59% with
+9,546/83,664 request promotions and zero budget skips, no-slot events, or copy
+failures. No below-margin warning, CUDA error, or OOM occurred.
+
+Evidence: [report](20260830_glm53_heatmap_50k_p48_pro_hqq6_k6v6_report.log),
+[stdout](20260830_glm53_heatmap_50k_p48_pro_hqq6_k6v6_stdout.log),
+[runtime](20260830_glm53_heatmap_50k_p48_pro_hqq6_k6v6_runtime.log),
+[outer](20260830_glm53_heatmap_50k_p48_pro_hqq6_k6v6_outer.log), and
+[command](20260830_glm53_heatmap_50k_p48_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3-Flash 50K-compatible held-out heatmap p40 on RTX PRO 6000 — 2026-08-30
+
+This timing-disabled standard benchmark evaluates the p40 checkpoint under the
+same exact 50,000-token HQQ6/k6v6 contract as p32. It loaded the same 6,560
+soft HCS experts (81,180 MiB), isolating the cumulative ranking change from
+residency capacity.
+
+Internal prefill was
+`120.1/521.4/836.9/1,201.0/1,409.7/1,434.0 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`22.38/25.21/23.22 tok/s` at 50/100/250 target tokens, with formal HCS hits
+`86.96/89.74/87.91%`. The 100-token row improves the portable source-default
+curve, but 50 and 250 regress; p40 is also weaker overall than p32. It is not
+selected before p48 evaluation.
+
+Decode held 1,277 MiB minimum free VRAM. Final HCS hit was 87.91% with
+10,114/83,664 request promotions and zero budget skips, no-slot events, or copy
+failures. No below-margin warning, CUDA error, or OOM occurred.
+
+Evidence: [report](20260830_glm53_heatmap_50k_p40_pro_hqq6_k6v6_report.log),
+[stdout](20260830_glm53_heatmap_50k_p40_pro_hqq6_k6v6_stdout.log),
+[runtime](20260830_glm53_heatmap_50k_p40_pro_hqq6_k6v6_runtime.log),
+[outer](20260830_glm53_heatmap_50k_p40_pro_hqq6_k6v6_outer.log), and
+[command](20260830_glm53_heatmap_50k_p40_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3-Flash 50K-compatible held-out heatmap p32 on RTX PRO 6000 — 2026-08-30
+
+This timing-disabled standard benchmark evaluates the p32 checkpoint from the
+48-prompt held-out route capture built under the exact 50,000-token HQQ6/k6v6
+runtime contract. The artifact was accepted fail-closed and initialized 6,560
+soft HCS experts from 8,167 measured decode-route tokens; no quick startup
+heatmap was substituted.
+
+Internal prefill was
+`122.1/528.0/836.9/1,213.2/1,409.3/1,442.8 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`21.03/25.75/23.70 tok/s` at 50/100/250 target tokens, with formal HCS hits
+`85.12/90.03/88.43%`. This is mixed versus the portable source-default decode
+curve `22.91/24.16/23.60`: p32 regresses the 50-token row, improves 100, and is
+flat at 250, so it is not selected before p40/p48 evaluation.
+
+Decode held 1,277 MiB minimum free VRAM against the unchanged 600 MiB safety
+margin. Final HCS hit was 88.44% with 9,675/83,664 request promotions and zero
+budget skips, no-slot events, or copy failures. No CUDA error or OOM occurred.
+
+Evidence: [report](20260830_glm53_heatmap_50k_p32_pro_hqq6_k6v6_report.log),
+[stdout](20260830_glm53_heatmap_50k_p32_pro_hqq6_k6v6_stdout.log),
+[runtime](20260830_glm53_heatmap_50k_p32_pro_hqq6_k6v6_runtime.log),
+[outer](20260830_glm53_heatmap_50k_p32_pro_hqq6_k6v6_outer.log), and
+[command](20260830_glm53_heatmap_50k_p32_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3-Flash radix-only DSA prefill attribution on RTX PRO 6000 — 2026-08-30
+
+This startup-exit diagnostic changed only DSA top-k from the bit-identical
+bitonic selector to the existing radix-linear selector; score precision and
+all other execution modes remained fixed. At 39,920 tokens, DSA fell from
+14,428.3 to 14,048.8 ms (-379.5 ms, -2.63%) and the complete named-stage wall
+fell from 26,350.6 to 25,982.6 ms (+1.42% throughput). FFN and both major KDA
+stages remained within 0.3%, localizing the change to DSA.
+
+This is timing-enabled attribution, not speed acceptance. Calibration held
+`1,223/1,111/1,199/1,199/1,211/1,215 MiB` free at
+500/4K/8K/16K/32K/39,920 tokens; no below-margin event, CUDA error, or OOM
+occurred. A timing-disabled full benchmark is the pending acceptance gate.
+
+Evidence: [stdout](20260830_glm53_radix_only_prefill_profile_pro_hqq6_k6v6_stdout.log),
+[runtime](20260830_glm53_radix_only_prefill_profile_pro_hqq6_k6v6_runtime.log),
+[outer log](20260830_glm53_radix_only_prefill_profile_pro_hqq6_k6v6_outer.log), and
+[command](20260830_glm53_radix_only_prefill_profile_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3-Flash corrected-source prefill attribution on RTX PRO 6000 — 2026-08-30
+
+This startup-exit diagnostic enabled sync-isolated CUDA stage timing and VRAM
+instrumentation, so it is attribution data rather than timing-disabled speed
+evidence. At 39,920 tokens, the named-stage wall was 26,350.6 ms: DSA
+14,428.3 ms (54.75%), FFN 8,017.2 ms (30.42%), KDA recurrence 1,142.2 ms
+(4.33%), KDA QKV 1,070.9 ms (4.06%), both mHC prep/norm stages 689.5 ms
+(2.62%), with the remaining named stages accounting for the balance.
+
+Within FFN, DMA consumed 3,917.5 ms (3,039.7 ms wait), W1+activation
+2,656.5 ms, and W2 1,012.3 ms. Calibration held
+`1,227/1,151/1,219/1,201/1,179/1,193 MiB` free at
+500/4K/8K/16K/32K/39,920 tokens against the unchanged 600 MiB safety margin.
+No below-margin event, CUDA error, or OOM occurred.
+
+Evidence: [stdout](20260830_glm53_corrected_prefill_profile_pro_hqq6_k6v6_stdout.log),
+[runtime](20260830_glm53_corrected_prefill_profile_pro_hqq6_k6v6_runtime.log),
+[outer log](20260830_glm53_corrected_prefill_profile_pro_hqq6_k6v6_outer.log), and
+[command](20260830_glm53_corrected_prefill_profile_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3-Flash corrected-source decode attribution on RTX PRO 6000 — 2026-08-30
+
+This instrumentation-enabled diagnostic identifies the current single-GPU
+decode costs after the DSA-to-mHC correctness repair. It is attribution data,
+not timing-disabled speed-regression evidence. The formal 50/100/250-token
+rows measured internal decode at `21.99/22.60/22.48 tok/s`, HCS hit rates of
+`87.73/88.71/88.34%`, graph-segment time of `18.44/18.84/19.28 ms/token`,
+split-hot CUDA time of `9.57/9.65/9.58 ms/token`, and demand-H2D time of
+`20.75/19.23/19.44 ms/token` while transferring
+`510.15/469.62/484.81 MiB/token`.
+
+The runtime retained 6,540/12,096 experts. Startup's runtime-derived pressure
+drain left 1,311 MiB idle after one 247.5 MiB eviction chunk; active decode
+then reached 696 MiB free, close to the unchanged 600 MiB safety margin. This
+rules out loading another fixed expert chunk as a safe decode optimization.
+The complete calibration curve held `1,251/1,133/1,211/1,201/1,179/1,197 MiB`
+free. No HCS budget/slot/copy failure, CUDA error, or OOM occurred.
+
+Evidence: [report](20260830_glm53_corrected_decode_profile_pro_hqq6_k6v6_report.log),
+[stdout](20260830_glm53_corrected_decode_profile_pro_hqq6_k6v6_stdout.log),
+[runtime](20260830_glm53_corrected_decode_profile_pro_hqq6_k6v6_runtime.log), and
+[command](20260830_glm53_corrected_decode_profile_pro_hqq6_k6v6_command.log).
+
+## QCN guard after GLM vision, peer multi-GPU and witness repair — 2026-08-30
+
+This timing-disabled fixed `./dev speed-test` validates the shared runtime
+after GLM vision enablement, peer-expert multi-GPU qualification, and the GLM
+DSA output-handoff repair. QCN retained all 24,576 routed experts with 100% HCS
+hits.
+
+Internal prefill was
+`1,330.3/2,352.4/2,530.6/2,558.5/2,499.9/2,463.8 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`54.41/54.31/53.60 tok/s` at 50/100/250 target tokens. HTTP rows were
+`112.22/73.16/59.68 tok/s` and are not internal decode. The 39,920-token
+calibration probe held 23,160 MiB free and decode held 4,204 MiB. Every HCS
+summary reported zero budget skips, no-slot events, and copy failures. No CUDA
+error or OOM occurred.
+
+Evidence: [report](20260830_qcn_post_glm53_vision_peer_witness_hqq4_k4v4_a6000_benchmark_report.log),
+[stdout](20260830_qcn_post_glm53_vision_peer_witness_hqq4_k4v4_a6000_benchmark_stdout.log),
+[runtime](20260830_qcn_post_glm53_vision_peer_witness_hqq4_k4v4_a6000_runtime.log), and
+[command](20260830_qcn_post_glm53_vision_peer_witness_hqq4_k4v4_a6000_command.log).
+
+## GLM-5.3-Flash corrected-DSA single RTX PRO 6000 full curve — 2026-08-30
+
+This timing-disabled standard benchmark is the corrected-graph single-GPU
+baseline after repairing GLM's DSA output handoff and passing single-GPU
+llama-witness accuracy gates. Startup measured the complete
+500/4K/8K/16K/32K/39,920 calibration curve; low-water values were
+1,239/1,141/1,169/1,225/1,221/1,201 MiB against the unchanged 600 MiB safety
+margin.
+
+Internal prefill was
+`119.8/517.6/834.4/1,195.7/1,392.5/1,419.0 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`21.84/23.14/22.66 tok/s` at 50/100/250 target tokens. HTTP rows were
+`39.36/28.25/24.52 tok/s` and are not internal decode. Runtime retained
+6,540/12,096 HCS experts and decode held a 1,279 MiB minimum free-VRAM floor.
+No HCS slot/copy/budget failure, CUDA error, OOM, or below-margin warning
+occurred.
+
+Against the corrected peer benchmark's internal decode
+`25.56/28.33/27.40 tok/s`, matched peer gains were 17.0%/22.4%/20.9%. At the
+only identical prefill length, peer 1K was 122.0 versus 119.8 tok/s (+1.8%);
+no unmatched 3,196/5,000-token comparison is presented.
+
+Evidence: [report](20260830_glm53_dsa_fixed_single_pro_hqq6_k6v6_full_benchmark_report.log),
+[stdout](20260830_glm53_dsa_fixed_single_pro_hqq6_k6v6_full_benchmark_stdout.log),
+[runtime](20260830_glm53_dsa_fixed_single_pro_hqq6_k6v6_full_runtime.log), and
+[command](20260830_glm53_dsa_fixed_single_pro_hqq6_k6v6_full_command.log).
+
+## GLM-5.3-Flash corrected-DSA peer decode on RTX PRO 6000 + RTX A6000 — 2026-08-30
+
+This timing-disabled standard benchmark requalifies the graph-compatible
+peer-expert strategy after repairing GLM's DSA output handoff. The complete
+stateful layer graph remains on the RTX PRO primary; the A6000 holds a
+runtime-measured, disjoint peer-expert tier.
+
+Internal prefill was `122.0/366.5 tok/s` at 1K/3,196 tokens. Internal decode
+was `25.56/28.33/27.40 tok/s` at 50/100/250 target tokens. HTTP rows were
+`44.77/35.62/30.04 tok/s` and are not internal decode. Runtime retained
+6,580/12,096 primary HCS experts plus 3,767 disjoint peer residents; primary
+decode held a 1,285 MiB minimum free-VRAM floor.
+
+The peer completed 32,945/32,955 requests with 54,806 cache hits, zero misses,
+ten bounded deadline fallbacks, and zero unavailable fallbacks. Every HCS
+summary reported zero budget skips, no-slot events, and copy failures; no CUDA
+error or OOM occurred.
+
+The separate corrected-graph real-service gate passed
+`./dev network 18254 --large` `18/18` in 144.2 seconds. It produced coherent
+canonical real-content output at 2,044 prompt tokens, correctly rejected three
+requests above the qualified 4,096-token context, and passed all five
+conversation-memory turns. Live peer transport ended at 13,596/13,613
+completed requests, 23,977 hits, zero misses, 17 measured-deadline fallbacks,
+one unavailable fallback, and zero HCS slot/copy/budget failures. Source and
+event-order inspection showed the single unavailable count was the next layer
+arriving while a timed-out asynchronous peer service was still completing; the
+primary completed it correctly. The counter is preserved, not hidden.
+
+Evidence: [report](20260830_glm53_dsa_fixed_peer_pro_a6000_hqq6_k6v6_benchmark_report.log),
+[stdout](20260830_glm53_dsa_fixed_peer_pro_a6000_hqq6_k6v6_benchmark_stdout.log),
+[runtime](20260830_glm53_dsa_fixed_peer_pro_a6000_hqq6_k6v6_runtime.log), and
+[benchmark command](20260830_glm53_dsa_fixed_peer_pro_a6000_hqq6_k6v6_command.log),
+[network gate](20260830_glm53_dsa_fixed_peer_pro_a6000_hqq6_k6v6_network_large.log),
+[network runtime](20260830_glm53_dsa_fixed_peer_pro_a6000_hqq6_k6v6_network_runtime.log),
+and [network command](20260830_glm53_dsa_fixed_peer_pro_a6000_hqq6_k6v6_network_command.log).
+
+## GLM-5.3-Flash peer-expert decode on RTX PRO 6000 + RTX A6000 — 2026-08-29
+
+This timing-disabled standard benchmark qualifies the graph-compatible
+multi-GPU strategy for GLM-5.3. The complete stateful layer graph remains
+on the RTX PRO primary while the A6000 holds a measured, disjoint peer-expert
+tier. Serial layer split is rejected before auxiliary-store load because it
+cannot preserve the registered stateful layer graph.
+
+Internal prefill was `122.3/367.5 tok/s` at 1K/3,196 tokens. Internal decode
+was `27.73/28.76/28.41 tok/s` at 50/100/250 target tokens, versus the accepted
+single-GPU rows `21.72/23.87/23.65 tok/s`; matched gains were
+27.7%/20.5%/20.1%. HTTP rows were `43.38/36.05/30.78 tok/s` and are not
+internal decode. Runtime retained 6,580/12,096 primary HCS experts plus 3,767
+disjoint peer residents; primary decode held a 1,285 MiB minimum free-VRAM
+floor. Every HCS summary reported zero budget skips, no-slot events, and copy
+failures, with no CUDA error or OOM.
+
+The separate real-service gate passed `./dev network 18254 --large` 18/18.
+Measured peer RTT p50/p95/p99 was 26.635/28.601/29.285 us; the peer tier held
+607 MiB free against the unchanged 600 MiB safety margin. Peer requests ended
+at 19,957 requested / 19,938 completed, 35,589 hits, zero misses, 19 bounded
+deadline fallbacks, and zero unavailable fallbacks.
+
+Evidence: [report](20260829_glm53_flash_peer_pro_a6000_hqq6_k6v6_benchmark_report.log),
+[stdout](20260829_glm53_flash_peer_pro_a6000_hqq6_k6v6_benchmark_stdout.log),
+[runtime](20260829_glm53_flash_peer_pro_a6000_hqq6_k6v6_runtime.log), and
+[command](20260829_glm53_flash_peer_pro_a6000_hqq6_k6v6_command.log).
+
+## GLM-5.3-Flash exact final sampled-VRAM source on RTX PRO 6000 — 2026-08-29
+
+This timing-disabled standard benchmark is the final exact-source speed gate
+after the conservative VRAM envelope and bounded interior-probe sampling were
+both repaired. Startup measured 500/4K/8K/16K/32K/39,920-token probes; their
+low-water values were 1,237/1,133/1,183/1,193/1,195/1,199 MiB against the
+unchanged 600 MiB safety margin. No fixed reserve, model/GPU exception, or
+fallback was added.
+
+Internal prefill was
+`122.4/518.7/834.3/1,205.2/1,386.8/1,420.5 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`21.72/23.87/23.65 tok/s` at 50/100/250 target tokens. HTTP rows were
+`37.83/29.56/25.55 tok/s` and are not internal decode. Runtime retained
+6,540/12,096 HCS experts; decode held a 1,279 MiB minimum free-VRAM floor.
+Every Dynamic-HCS summary reported zero budget skips, no-slot events, and copy
+failures. No below-margin warning, CUDA error, or OOM occurred.
+
+The same exact source then passed the full `./dev network 18254 --large`
+operational gate `18/18` in 215.9 seconds. It produced coherent canonical
+content at 2,044/8,585/23,072 prompt tokens, correctly rejected 61,891 tokens
+above the 50,000-token cap, and passed all five conversation-memory turns.
+
+Evidence: [report](20260829_glm53_flash_final_sampled_vram_curve_hqq6_k6v6_pro_benchmark_report.log),
+[stdout](20260829_glm53_flash_final_sampled_vram_curve_hqq6_k6v6_pro_benchmark_stdout.log),
+[runtime](20260829_glm53_flash_final_sampled_vram_curve_hqq6_k6v6_pro_krasis.log),
+[command](20260829_glm53_flash_final_sampled_vram_curve_hqq6_k6v6_pro_command.log),
+and [network gate](20260829_glm53_flash_final_sampled_vram_curve_hqq6_k6v6_pro_network_large.log).
+
+## QCN cross-model gate after measured VRAM-curve repair — 2026-08-29
+
+This timing-disabled fixed `./dev speed-test` validates the shared runtime
+after QCN exposed that a conservative demand envelope cannot be accurate when
+adaptive startup calibration skips all interior points. The accepted runtime
+measured 500/4K/8K/16K/32K/39,920-token probes before building the envelope;
+no fixed reserve or linear interpolation was restored. QCN retained all
+24,576 routed experts.
+
+Internal prefill was
+`1,329.5/2,359.4/2,533.5/2,553.4/2,499.8/2,463.5 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`54.40/54.26/53.51 tok/s` at 50/100/250 target tokens. HTTP rows were
+`111.71/73.38/59.63 tok/s` and are not internal decode. The 39,920-token
+calibration probe held 23,160 MiB free and decode held 4,204 MiB. Every HCS
+summary reported 100% hits with zero budget skips, no-slot events, and copy
+failures. No CUDA error or OOM occurred.
+
+Evidence: [report](20260829_qcn_post_glm53_vram_curve_hqq4_k4v4_a6000_benchmark_report.log),
+[stdout](20260829_qcn_post_glm53_vram_curve_hqq4_k4v4_a6000_benchmark_stdout.log),
+[runtime](20260829_qcn_post_glm53_vram_curve_hqq4_k4v4_a6000_krasis.log),
+and [command](20260829_qcn_post_glm53_vram_curve_hqq4_k4v4_a6000_command.log).
+
+## GLM-5.3-Flash final optimization and measured-VRAM acceptance on RTX PRO 6000 — 2026-08-29
+
+This timing-disabled standard benchmark validates the final prefill and decode
+optimization build after repairing the runtime VRAM model to retain every
+measured startup probe and conservatively bound requests by the next measured
+point. The earlier endpoint interpolation could underestimate a route-dependent
+short-prompt cold-staging peak; the repaired path uses no fixed reserve or
+model/GPU exception. Adaptive calibration measured 500/4K/8K/16K/32K/39,920
+tokens, with a 1,215 MiB low-water at the longest probe against the unchanged
+600 MiB safety margin. Runtime monitoring emitted no below-margin warning.
+
+Internal prefill was
+`120.2/519.7/848.0/1,209.0/1,393.7/1,427.4 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`21.65/24.09/23.45 tok/s` at 50/100/250 target tokens. HTTP rows were
+`37.26/29.50/25.35 tok/s` and are not internal decode. Runtime retained
+6,540/12,096 HCS experts; decode held a 1,279 MiB minimum free-VRAM floor.
+Every Dynamic-HCS summary reported zero budget skips, no-slot events, and copy
+failures. No CUDA error or OOM occurred.
+
+Evidence: [report](20260829_glm53_flash_final_upper_envelope_hqq6_k6v6_pro_benchmark_report.log),
+[stdout](20260829_glm53_flash_final_upper_envelope_hqq6_k6v6_pro_benchmark_stdout.log),
+[runtime](20260829_glm53_flash_final_upper_envelope_hqq6_k6v6_pro_krasis.log),
+and [command](20260829_glm53_flash_final_upper_envelope_hqq6_k6v6_pro_command.log).
+
+## GLM-5.3-Flash optimized prefill freeze on RTX PRO 6000 — 2026-08-28
+
+This timing-disabled standard benchmark freezes the measured GLM-5.3 prefill
+frontier after chunk-parallel KDA recurrence, token-parallel KDA convolution,
+TF32 mHC projection, bounded BF16 HQQ projection materialization, and split
+expert DMA were accepted independently. The remaining measured candidates
+were below 5% individually or regressed. Adaptive calibration accepted the
+39,920-token cap at a 1,231 MiB low-water against the unchanged 600 MiB safety
+margin.
+
+Internal prefill was
+`125.9/534.0/851.7/1,223.7/1,408.8/1,431.7 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. The best long-context result is 2.53x the
+earlier 565.2 tok/s control. Internal decode was
+`22.47/16.48/28.83 tok/s` at 50/100/250 target tokens and is the baseline for
+the subsequent decode campaign. HTTP rows were `41.03/19.91/31.65 tok/s` and
+are not internal decode. Runtime retained 6,540/12,096 HCS experts; decode
+held a 1,279 MiB minimum free-VRAM floor. Every Dynamic-HCS summary reported
+zero budget skips, no-slot events, and copy failures. No CUDA error or OOM
+occurred.
+
+Evidence: [report](20260828_glm53_flash_prefill_optimized_hqq6_k6v6_pro_benchmark_report.log),
+[stdout](20260828_glm53_flash_prefill_optimized_hqq6_k6v6_pro_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_prefill_optimized_hqq6_k6v6_pro_runtime.log),
+and [command](20260828_glm53_flash_prefill_optimized_hqq6_k6v6_pro_command.log).
+
+## GLM-5.3-Flash full long-context benchmark on RTX PRO 6000 — 2026-08-28
+
+This timing-disabled standard benchmark used a separate test-only 50,000-token
+profile to measure the complete runtime-qualified prefill curve without
+changing the accepted 4K profile. Adaptive calibration measured 4K, 8K, 16K,
+32K, and 39,920-token probes and accepted the standard 39,920-token cap at a
+1,199 MiB low-water against the unchanged 600 MiB runtime safety margin. A
+fresh six-prompt exact-runtime heatmap was built before HCS admission.
+
+Internal prefill was
+`114.8/280.5/446.2/532.9/565.2/564.6 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`21.59/21.94/21.39 tok/s` at 50/100/250 target tokens. HTTP rows were
+`35.58/26.97/23.03 tok/s` and are not internal decode. Runtime retained
+6,560/12,096 HCS experts; decode held a 1,285 MiB minimum free-VRAM floor.
+Every Dynamic-HCS summary reported zero budget skips, no-slot events, and copy
+failures. No CUDA error or OOM occurred.
+
+Evidence: [report](20260828_glm53_flash_full_50k_hqq6_k6v6_pro_benchmark_report.log),
+[stdout](20260828_glm53_flash_full_50k_hqq6_k6v6_pro_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_full_50k_hqq6_k6v6_pro_runtime.log),
+and [command](20260828_glm53_flash_full_50k_hqq6_k6v6_pro_command.log).
+
+## QCN final cross-model gate after HCS invariant review — 2026-08-28
+
+This timing-disabled fixed `./dev speed-test` validates the exact reviewed
+source after strengthening the layer-balanced Dynamic-HCS map invariants. QCN
+preserved its checkpoint-declared 16 key / 32 value head geometry, loaded the
+existing H=32 Ampere FLA path, and retained all 24,576 routed experts.
+
+Internal prefill was
+`1,378.7/2,385.4/2,574.9/2,595.1/2,516.1/2,465.9 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`54.31/54.40/53.66 tok/s` at 50/100/250 target tokens. HTTP rows were
+`112.88/73.56/59.84 tok/s` and are not internal decode. Decode held a
+4,204 MiB minimum free-VRAM floor against the unchanged 600 MiB safety margin;
+all HCS summaries reported zero budget skips, no-slot events, and copy
+failures. No CUDA error or OOM occurred.
+
+Evidence: [report](20260828_qcn_final_invariant_speed_hqq4_k4v4_a6000_benchmark_report.log),
+[stdout](20260828_qcn_final_invariant_speed_hqq4_k4v4_a6000_benchmark_stdout.log),
+[runtime](20260828_qcn_final_invariant_speed_hqq4_k4v4_a6000_runtime.log),
+and [command](20260828_qcn_final_invariant_speed_hqq4_k4v4_a6000_command.log).
+
+## GLM-5.3-Flash final invariant-checked source on RTX A6000 — 2026-08-28
+
+This timing-disabled standard benchmark validates the final reviewed source on
+the lower-residency 48 GB path. Runtime measurement admitted 2,730 experts and
+retained 2,715/12,096 after startup pressure handling. The exact layer map
+passed the strengthened allocator invariants, and every warmup, internal row,
+and HTTP row reported zero budget skips, no-slot events, and copy failures.
+
+Internal prefill was `79.1/162.1 tok/s` at 1,000/3,196 tokens. Internal decode
+was `6.83/7.67/7.29 tok/s` at 50/100/250 target tokens. HTTP rows were
+`11.71/9.90/7.96 tok/s` and are not internal decode. Decode held a 1,114 MiB
+minimum free-VRAM floor against the unchanged 600 MiB safety margin; long-
+prefill calibration reached 1,136 MiB. No CUDA error or OOM occurred.
+
+Evidence: [report](20260828_glm53_flash_final_invariant_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260828_glm53_flash_final_invariant_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_final_invariant_hqq6_k6v6_a6000_runtime.log),
+and [command](20260828_glm53_flash_final_invariant_hqq6_k6v6_a6000_command.log).
+
+## GLM-5.3-Flash final invariant-checked source on RTX PRO 6000 — 2026-08-28
+
+This timing-disabled standard benchmark validates the final reviewed source
+after removing the allocator's silent global-tail fallback and adding exact
+layer-map invariants. The real runtime admitted 6,620 experts and retained
+6,600/12,096 after measured pressure handling; every warmup, internal row, and
+HTTP row reported zero budget skips, no-slot events, and copy failures.
+
+Internal prefill was `106.0/265.8 tok/s` at 1,000/3,196 tokens. Internal
+decode was `20.50/22.26/21.61 tok/s` at 50/100/250 target tokens. HTTP rows
+were `33.64/27.51/23.04 tok/s` and are not internal decode. Decode held a
+1,293 MiB minimum free-VRAM floor against the unchanged 600 MiB safety margin;
+long-prefill calibration reached 1,125 MiB. No CUDA error or OOM occurred.
+
+Evidence: [report](20260828_glm53_flash_final_invariant_hqq6_k6v6_pro_benchmark_report.log),
+[stdout](20260828_glm53_flash_final_invariant_hqq6_k6v6_pro_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_final_invariant_hqq6_k6v6_pro_runtime.log),
+and [command](20260828_glm53_flash_final_invariant_hqq6_k6v6_pro_command.log).
+
+## QCN cross-model speed gate after GLM-5.3 optimisation — 2026-08-28
+
+This timing-disabled fixed `./dev speed-test` was run on the exact rebuilt
+source after correcting the GLM configuration parser's accidental collapse of
+Qwen3-Next's distinct linear-attention geometry. QCN loaded its checkpoint-
+declared 16 key heads and 32 value heads, selected the existing H=32 Ampere FLA
+sidecar kernels, and completed the full calibrated benchmark.
+
+Internal prefill was `1,385.9/2,386.6/2,579.2/2,598.6/2,519.1/2,472.9 tok/s`
+at 1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`54.97/55.18/54.17 tok/s` at 50/100/250 target tokens. HTTP rows were
+`113.64/74.35/60.60 tok/s` and are not internal decode. Runtime calibration
+admitted all 24,576 routed experts; every HCS summary reported zero budget
+skips, no-slot events, and copy failures. Decode held a 4,204 MiB minimum
+free-VRAM floor against the unchanged 600 MiB safety margin. No CUDA error or
+OOM occurred.
+
+Evidence: [report](20260828_qcn_cross_model_speed_fixed_hqq4_k4v4_a6000_benchmark_report.log),
+[stdout](20260828_qcn_cross_model_speed_fixed_hqq4_k4v4_a6000_benchmark_stdout.log),
+[runtime](20260828_qcn_cross_model_speed_fixed_hqq4_k4v4_a6000_runtime.log),
+and [command](20260828_qcn_cross_model_speed_fixed_hqq4_k4v4_a6000_command.log).
+
+## GLM-5.3-Flash final cleaned source on RTX A6000 — 2026-08-28
+
+This timing-disabled standard benchmark was run after fully removing the
+rejected QKV overlap experiment and rebuilding the exact accepted source.
+It created a fresh exact-runtime six-prompt heatmap, admitted 2,730 experts,
+and retained 2,715/12,096 after the measured startup pressure eviction.
+
+Internal prefill was `79.5/162.5 tok/s` at 1,000/3,196 tokens. Internal
+decode was `6.92/7.75/7.35 tok/s` at 50/100/250 target tokens. HTTP rows were
+`11.87/10.03/8.00 tok/s` and are not internal decode. The exact final prefill
+reproduces the accepted native-DSA control (`79.2/162.3`) while the paired
+A6000 runs bound ordinary route/history variance up to `84.2/169.2` prefill
+and `7.36/8.18/7.76` decode.
+
+Every emitted HCS summary reported zero budget skips, no-slot events, and copy
+failures. Decode held a 1,114 MiB minimum free-VRAM floor against the unchanged
+600 MiB safety margin; warmup prefill reached 637 MiB. No CUDA error or OOM
+occurred.
+
+Evidence: [report](20260828_glm53_flash_final_clean_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260828_glm53_flash_final_clean_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_final_clean_hqq6_k6v6_a6000_runtime.log),
+and [command](20260828_glm53_flash_final_clean_hqq6_k6v6_a6000_command.log).
+
+## GLM-5.3-Flash KDA Q/K/V overlap rejected on RTX A6000 — 2026-08-28
+
+This timing-disabled A/B used the exact layer-balanced control build,
+configuration, validated heatmap, 2,715-expert HCS capacity, and route history,
+changing only `KRASIS_KDA_PARALLEL_QKV=1`. The candidate placed K/V HQQ
+projections on a capture-joined auxiliary CUDA stream while Q remained on the
+graph stream. It survived graph capture, but internal decode regressed from
+`7.36/8.18/7.76 tok/s` to `7.06/7.93/7.53 tok/s` at 50/100/250 target
+tokens: `-4.1%/-3.1%/-3.0%`. Calibration and warmup rows showed the same
+direction with matched HCS hit rates, isolating the loss to stream/event
+coordination rather than locality.
+
+Internal prefill was also lower at `80.6/164.0 tok/s` versus
+`84.2/169.2 tok/s`; HTTP rows were `12.10/10.27/8.19 tok/s`. All correctness
+and HCS health counters remained clean, but a consistent speed regression is
+sufficient to reject the candidate. It is removed from the accepted source.
+
+Evidence: [report](20260828_glm53_flash_qkv_overlap_rejected_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260828_glm53_flash_qkv_overlap_rejected_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_qkv_overlap_rejected_hqq6_k6v6_a6000_runtime.log),
+and [command](20260828_glm53_flash_qkv_overlap_rejected_hqq6_k6v6_a6000_command.log).
+
+## GLM-5.3-Flash layer-balanced Dynamic HCS on RTX A6000 — 2026-08-28
+
+This timing-disabled standard benchmark validates the same portable
+layer-balanced tail at 48 GB, where runtime measurement retained only
+2,715/12,096 experts (22.4%). The tail remained the existing measured 672
+slots; only its distribution across active layers changed. Internal prefill
+was `84.2/169.2 tok/s` at 1,000/3,196 tokens. Internal decode was
+`7.36/8.18/7.76 tok/s` at 50/100/250 target tokens, gains of
+`6.0%/7.5%/6.4%` over the exact `6.94/7.61/7.29` native-DSA control. It also
+edged the manually widened five-block candidate's `7.22/8.02/7.64` while
+keeping the default tail size. HTTP rows were `12.63/10.55/8.44 tok/s` and
+are not internal decode.
+
+Every HCS summary reported zero budget skips, no-slot events, and copy
+failures. Decode held a 1,114 MiB floor against the unchanged 600 MiB safety
+margin; the warmup prefill low-water reached 637 MiB, showing close runtime
+use of the card without a failure. No CUDA error or OOM occurred. The fresh
+exact A6000 heatmap SHA-256 was
+`92f6ad10b1eb301ba6012c955003997e413017e28e3c65cbf8e606b88bbce9b2`.
+
+Evidence: [report](20260828_glm53_flash_hcs_layer_balanced_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260828_glm53_flash_hcs_layer_balanced_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_hcs_layer_balanced_hqq6_k6v6_a6000_runtime.log),
+and [command](20260828_glm53_flash_hcs_layer_balanced_hqq6_k6v6_a6000_command.log).
+
+## GLM-5.3-Flash layer-balanced Dynamic HCS on RTX PRO 6000 — 2026-08-28
+
+This timing-disabled standard benchmark validates the portable layer-balanced
+Dynamic HCS tail on the exact reviewed build. It preserved the measured total
+tail and the same 6,600/12,096 resident experts while distributing evictable
+slots across every active layer. The previous exact control accumulated 34
+`no_slot` events during its two short warmups; this run held `no_slot=0`
+through both short warmups, the 50/100/250 warmups, all internal rows, and all
+HTTP rows. Budget skips and copy failures were also zero.
+
+Internal prefill was `107.3/266.0 tok/s` at 1,000/3,196 tokens. Internal
+decode was `20.74/22.26/21.61 tok/s` at 50/100/250 target tokens; HTTP rows
+were `33.68/28.13/23.27 tok/s` and are not internal decode. Decode held a
+1,293 MiB floor against the unchanged 600 MiB safety margin. The exact fresh
+six-prompt heatmap SHA-256 was
+`c83ce2a89aa210c9ccf8dbca5f11969207a4b9ae206f2f49e0f289e9fccfafbc`.
+
+Evidence: [report](20260828_glm53_flash_hcs_layer_balanced_hqq6_k6v6_pro_benchmark_report.log),
+[stdout](20260828_glm53_flash_hcs_layer_balanced_hqq6_k6v6_pro_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_hcs_layer_balanced_hqq6_k6v6_pro_runtime.log),
+and [command](20260828_glm53_flash_hcs_layer_balanced_hqq6_k6v6_pro_command.log).
+
+## GLM-5.3-Flash native-DSA default on RTX PRO 6000 — 2026-08-28
+
+This timing-disabled standard benchmark measured the exact reviewed build on
+the RTX PRO after a fresh GPU-specific six-prompt heatmap and runtime VRAM
+calibration. Internal prefill was `106.0/265.7 tok/s` at 1,000/3,196 tokens.
+Internal decode was `20.03/21.92/21.58 tok/s` at 50/100/250 target tokens;
+HTTP rows were `32.58/27.64/23.23 tok/s` and are not internal decode.
+
+Runtime admission retained 6,600/12,096 experts (54.6%) after loading 6,620
+and evicting one measured chunk. Decode held a 1,293 MiB floor against the
+unchanged 600 MiB safety margin. The run exposed 34 startup no-slot events:
+the existing global 672-slot dynamic tail did not give every routed layer an
+evictable slot despite abundant total residency. Budget skips, copy failures,
+CUDA errors, and OOMs were zero. This control therefore supports the measured
+speed comparison while also motivating a layer-balanced tail fix before final
+acceptance.
+
+Evidence: [report](20260828_glm53_flash_native_dsa_default_hqq6_k6v6_pro_benchmark_report.log),
+[stdout](20260828_glm53_flash_native_dsa_default_hqq6_k6v6_pro_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_native_dsa_default_hqq6_k6v6_pro_runtime.log),
+and [command](20260828_glm53_flash_native_dsa_default_hqq6_k6v6_pro_command.log).
+
+## GLM-5.3-Flash five-block Dynamic HCS tail on RTX A6000 — 2026-08-28
+
+This timing-disabled A/B reused the exact checkpoint, build, configuration,
+and heatmap from the native-DSA default control, changing only
+`KRASIS_DYNAMIC_HCS_TAIL_BLOCKS=5`. Internal decode improved from
+`6.94/7.61/7.29 tok/s` to `7.22/8.02/7.64 tok/s` at 50/100/250 target
+tokens: `+4.0%/+5.4%/+4.8%`. Internal prefill was unchanged within run
+variance at `81.0/164.6 tok/s` versus `79.2/162.3 tok/s` at 1,000/3,196
+tokens. HTTP rows were `12.20/10.30/8.32 tok/s` and are not internal decode.
+
+The accepted rows retained the same 2,715/12,096 experts as the control. The
+five-block tail made 1,680 slots evictable and protected 1,035, versus
+672/2,043 in the control. Decode held a 1,114 MiB floor against the unchanged
+600 MiB safety margin, with zero budget skips, no-slot events, copy failures,
+CUDA errors, or OOMs. This is a measured candidate, not a new universal
+default: a portable runtime-derived policy and cross-model regression evidence
+are required before changing the existing two-block default.
+
+Evidence: [report](20260828_glm53_flash_tail5_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260828_glm53_flash_tail5_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_tail5_hqq6_k6v6_a6000_runtime.log),
+and [command](20260828_glm53_flash_tail5_hqq6_k6v6_a6000_command.log).
+
+## GLM-5.3-Flash native-DSA default exact control on RTX A6000 — 2026-08-28
+
+This timing-disabled, no-override standard run is the exact reviewed-build
+control after native DSA registration became the portable capability gate for
+the existing gathered-GEMM and gathered-WVC path. Internal prefill was
+`79.2/162.3 tok/s` at 1,000/3,196 tokens, `+17.2%/+88.3%` versus the original
+`67.6/86.2 tok/s` baseline. Internal decode was `6.94/7.61/7.29 tok/s`; HTTP
+rows were `11.89/9.79/7.96 tok/s`.
+
+The run retained 2,715/12,096 HCS experts and held a 1,114 MiB decode floor
+against the unchanged 600 MiB safety margin. There were zero budget skips,
+no-slot events, copy failures, CUDA errors, or OOMs. The exact six-prompt
+heatmap SHA-256 was
+`b3ddaba583c9ddba48c65190dc5c124a68ea126921bd8bc9db4f97e213d8753e`.
+
+Evidence: [report](20260828_glm53_flash_native_dsa_default_exact_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260828_glm53_flash_native_dsa_default_exact_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_native_dsa_default_exact_hqq6_k6v6_a6000_runtime.log),
+and [command](20260828_glm53_flash_native_dsa_default_exact_hqq6_k6v6_a6000_command.log).
+
+## GLM-5.3-Flash native-DSA prefill candidate on RTX A6000 — 2026-08-28
+
+This timing-disabled standard benchmark tested the registered native-DSA
+gathered-GEMM and gathered-WVC path after finding that GLM-5.3's simultaneous
+mHC capability excluded it from the existing default. Internal prefill rose
+from the fixed baseline's `67.6/86.2 tok/s` to `80.9/169.7 tok/s` at
+1,000/3,196 tokens: `+19.7%/+96.9%`. Internal decode was intentionally
+unchanged and measured `6.68/7.08/6.94 tok/s` at 50/100/250 target tokens;
+HTTP rows were `11.46/8.94/7.56 tok/s` and are not confused with internal
+engine decode.
+
+The exact-parameter startup heatmap retained 2,715/12,096 experts. Decode held
+a 1,114 MiB floor against the unchanged 600 MiB safety margin. Final-request
+HCS hit rate was 61.54%, with zero budget skips, no-slot events, copy failures,
+CUDA errors, or OOMs. The candidate remains subject to llama-witness parity
+before it can become a capability-derived default.
+
+Evidence: [report](20260828_glm53_flash_native_dsa_candidate_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260828_glm53_flash_native_dsa_candidate_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_native_dsa_candidate_hqq6_k6v6_a6000_runtime.log),
+and [command](20260828_glm53_flash_native_dsa_candidate_hqq6_k6v6_a6000_command.log).
+
+## GLM-5.3-Flash optimization baseline on RTX A6000 — 2026-08-28
+
+This timing-disabled standard benchmark is the fixed pre-optimization control
+for the initial GLM-5.3 KDA/DSA/mHC performance campaign. Internal prefill was
+`67.6/86.2 tok/s` at 1,000/3,196 tokens. Internal decode was
+`7.32/7.79/7.57 tok/s` at 50/100/250 target tokens; HTTP rows were
+`12.60/10.20/8.37 tok/s`. Runtime calibration admitted 2,730 HCS experts and
+the accepted rows retained 2,715/12,096 experts. Decode held a 1,114 MiB floor
+against the unchanged 600 MiB safety margin. Final-request HCS hit rate was
+61.65%, with zero budget skips, no-slot events, copy failures, CUDA errors, or
+OOMs. Instrumentation and component timing were disabled.
+
+Evidence: [report](20260828_glm53_flash_optimization_baseline_hqq6_k6v6_a6000_benchmark_report.log),
+[stdout](20260828_glm53_flash_optimization_baseline_hqq6_k6v6_a6000_benchmark_stdout.log),
+[runtime](20260828_glm53_flash_optimization_baseline_hqq6_k6v6_a6000_runtime.log),
+and [command](20260828_glm53_flash_optimization_baseline_hqq6_k6v6_a6000_command.log).
+
 ## DeepSeek-V4-Flash-0731 deferred-DMA accepted speed gate — 2026-08-22
 
 This timing-disabled A6000 standard benchmark validates deferred cold DMA as
@@ -10283,3 +11176,173 @@ Default: pure CPU MoE decode (no HCS), streamed attention with double buffering.
 - Raw evidence: [stdout](20260811_deepseek_v4_hqq6_native_rtxpro6000_450w_benchmark_stdout.log),
   [report](20260811_deepseek_v4_hqq6_native_rtxpro6000_450w_benchmark_report.log),
   [runtime](20260811_deepseek_v4_hqq6_native_rtxpro6000_450w_krasis.log).
+## GLM-5.3 radix-only prefill speed A/B — 2026-08-30
+
+- Timing-disabled command: `KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE=radix_linear ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf`, run `logs/dev-benchmark_20260830_103338`, exit 0, on one RTX PRO 6000. Timing, trace, startup diagnostics and VRAM-ledger instrumentation were unset.
+- Internal prefill at 1K/5K/10K/20K/35K/39,920 tokens was `122.0/518.5/851.7/1214.0/1407.4/1444.4 tok/s`. The long row improves the correctness-qualified `1419.0 tok/s` control by 1.79%.
+- Internal decode was `22.14/22.81/22.37 tok/s`. No decode inference is drawn: this selector is prefill-only and formal HCS hit rates were exactly the same `87.73/88.71/88.34%` as the corrected control profile.
+- HCS retained 6540/12096 experts; decode minimum free VRAM was 1279 MiB. Calibration low-water at 500/4K/8K/16K/32K/39,920 was `1227/1121/1195/1227/1203/1201 MiB`. There were zero budget skips, no-slot events and copy failures, with no CUDA/OOM/below-margin warning.
+- Raw evidence: [report](20260830_glm53_radix_only_speed_pro_hqq6_k6v6_report.log), [stdout](20260830_glm53_radix_only_speed_pro_hqq6_k6v6_stdout.log), [runtime](20260830_glm53_radix_only_speed_pro_hqq6_k6v6_runtime.log), [command](20260830_glm53_radix_only_speed_pro_hqq6_k6v6_command.log).
+## GLM-5.3 portable runtime-N32 default with bitonic control — 2026-08-30
+
+- Timing-disabled clean-default command: `env -u KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE -u KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE -u KRASIS_DECODE_INT4_W13_N32 -u KRASIS_DECODE_INT4_W2_N32 -u KRASIS_PREFILL_TIMING -u KRASIS_DECODE_TIMING -u KRASIS_TIMING -u KRASIS_STARTUP_DIAG -u KRASIS_VRAM_LEDGER ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf`, run `logs/dev-benchmark_20260830_122721`, exit 0, on one RTX PRO 6000.
+- Runtime CUDA-event autotuning used actual staged expert weights and selected W13 N16 only for `z=1` (within the 5% margin), W13 N32 for `z=2..8`, and W2 N32 for `z=1..8`; no model or GPU identity is encoded in the policy. Post-run audit found the prefill log selected `bitonic`: GLM's sparse indexer uses its separate DSA registration, which the attempted default capability predicate did not yet include. This run is therefore N32-only evidence, not radix-default evidence.
+- Internal prefill at 1K/5K/10K/20K/35K/39,920 tokens was `120.0/528.2/848.8/1210.1/1396.1/1428.9 tok/s`. It is a bitonic control and no radix gain is attributed to it; the explicit radix-only A/B above remains the demonstrated long-prefill best at `1444.4 tok/s`.
+- Internal decode at 50/100/250 requested outputs was `22.91/24.16/23.60 tok/s`, versus the correctness-qualified `21.84/23.14/22.66` control: `+4.90%/+4.41%/+4.15%`. Formal HCS hit rates exactly matched the control at `87.73/88.71/88.34%`.
+- HCS retained 6540/12096 experts; decode minimum free VRAM was 1279 MiB. Calibration low-water at 500/4K/8K/16K/32K/39,920 was `1223/1121/1185/1207/1229/1211 MiB`. There were zero budget skips, no-slot events and copy failures, with no CUDA/OOM/below-margin warning.
+- Raw evidence: [report](20260830_glm53_portable_n32_default_bitonic_pro_hqq6_k6v6_report.log), [stdout](20260830_glm53_portable_n32_default_bitonic_pro_hqq6_k6v6_stdout.log), [runtime](20260830_glm53_portable_n32_default_bitonic_pro_hqq6_k6v6_runtime.log), [outer](20260830_glm53_portable_n32_default_bitonic_pro_hqq6_k6v6_outer.log), [command](20260830_glm53_portable_n32_default_bitonic_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3 current portable-source decode attribution — 2026-08-30
+
+- Diagnostic command: `./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing` with trace, startup diagnostics and all explicit radix/N32 selector overrides unset. Run `logs/dev-benchmark_20260830_155424`, exit 0, on one RTX PRO 6000. Decode timing instrumentation was enabled and adds overhead, so throughput is not accepted speed evidence.
+- Formal internal decode was `23.03/23.92/23.41 tok/s`. The 50/100/250-token rows measured demand H2D at `20.76/19.23/19.96 ms/token`, `510.15/469.62/484.81 MiB/token`, and `25.35/25.36/25.35 GB/s`; split-hot CUDA work was `5.72/5.74/5.77 ms/token`, while total graph replay was `17.82/18.09/18.63 ms/token`.
+- Inter-layer wall time was dominated by synchronization (`39.22/38.31/39.54 ms/token`, 91.0–92.9% of instrumented total). The data identifies saturated cold-expert PCIe service and incomplete overlap—not INT4 expert compute—as the next decode target.
+- HCS retained 6540/12096 experts. Formal hit rates were `87.73/88.71/88.34%`; decode minimum free VRAM was 1279 MiB, with zero budget skips, no-slot events, copy failures, CUDA errors or OOMs.
+- Raw evidence: [report](20260830_glm53_portable_current_attribution_pro_hqq6_k6v6_report.log), [stdout](20260830_glm53_portable_current_attribution_pro_hqq6_k6v6_stdout.log), [runtime](20260830_glm53_portable_current_attribution_pro_hqq6_k6v6_runtime.log), [outer](20260830_glm53_portable_current_attribution_pro_hqq6_k6v6_outer.log), [command](20260830_glm53_portable_current_attribution_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3 uncalibrated CPU-tail attribution — 2026-08-30
+
+- Diagnostic command enabled legacy host-visible routing, split resident/cold launch, the opportunistic Rust CPU-tail race, the temporary transposed nonresident tier, and both decode/prefill timing. Run `logs/dev-benchmark_20260830_165711`, exit 0, on one RTX PRO 6000. Throughput is not accepted speed evidence because timing barriers were enabled.
+- Before HCS admission, the production Marlin source path attempted the depth-8 tail on every routed layer and completed at `1.57--1.66 ms/expert`, but accumulated `62--66 ms/token` race wait. After HCS, the temporary tier duplicated 5,536 nonresident experts in 66.902 GiB RAM; conversion took 291.0s and covered about 74--81% of attempted experts.
+- The formal post-HCS depth histogram showed the admission defect precisely. Across the 249-token row, depth-2 attempts won `0/1,829`, depth-3 won `51/683`, while depths 4--8 won `240/245`. The global Rayon worker spent about 0.99 ms/attempt and saved 14.36 MiB/token, but race wait remained 8.56 ms/token.
+- Instrumented internal decode was `20.53/23.94/22.34 tok/s`, versus the matched no-CPU diagnostic `23.03/23.92/23.41`; the uncalibrated path is rejected. Internal prefill was `122.1/528.9/851.4/1210.3/1418.7/1448.3 tok/s` and the decode floor was 1,279 MiB, with zero CPU-tail errors, HCS budget/no-slot/copy failures, CUDA errors or OOMs.
+- Raw evidence: [report](20260830_glm53_cpu_tail_uncalibrated_attribution_pro_hqq6_k6v6_report.log), [stdout](20260830_glm53_cpu_tail_uncalibrated_attribution_pro_hqq6_k6v6_stdout.log), [runtime](20260830_glm53_cpu_tail_uncalibrated_attribution_pro_hqq6_k6v6_runtime.log), [outer](20260830_glm53_cpu_tail_uncalibrated_attribution_pro_hqq6_k6v6_outer.log), [command](20260830_glm53_cpu_tail_uncalibrated_attribution_pro_hqq6_k6v6_command.log).
+## GLM-5.3 INT4 N32 decode speed A/B — 2026-08-30
+
+- Timing-disabled command: `KRASIS_DECODE_INT4_W13_N32=1 KRASIS_DECODE_INT4_W2_N32=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf`, run `logs/dev-benchmark_20260830_105426`, exit 0, on one RTX PRO 6000. Timing, trace, startup diagnostics and VRAM-ledger instrumentation were unset.
+- Internal decode at 50/100/250 requested outputs was `23.08/24.13/23.89 tok/s`, versus the correctness-qualified `21.84/23.14/22.66` control: `+5.68%/+4.28%/+5.43%` at matched lengths.
+- Formal HCS hit rates were exactly the control values `87.73/88.71/88.34%`, proving the gain was measured on the same route locality. Internal prefill remained control-like at `122.1/527.6/833.7/1195.7/1385.3/1419.3 tok/s`.
+- HCS retained 6540/12096 experts; decode minimum free VRAM was 1279 MiB. Calibration low-water at 500/4K/8K/16K/32K/39,920 was `1227/1115/1237/1203/1187/1199 MiB`. There were zero budget skips, no-slot events and copy failures, with no CUDA/OOM/below-margin warning.
+- Raw evidence: [report](20260830_glm53_n32_decode_speed_pro_hqq6_k6v6_report.log), [stdout](20260830_glm53_n32_decode_speed_pro_hqq6_k6v6_stdout.log), [runtime](20260830_glm53_n32_decode_speed_pro_hqq6_k6v6_runtime.log), [command](20260830_glm53_n32_decode_speed_pro_hqq6_k6v6_command.log).
+## GLM-5.3 causal-BF16 plus radix prefill profile — 2026-08-30
+
+- Instrumented attribution command: `KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE=bf16_bf16_causal_gemm KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE=radix_linear KRASIS_PREFILL_TIMING=1 KRASIS_STARTUP_DIAG=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 KRASIS_VRAM_LEDGER=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf`, run `logs/dev-benchmark_20260830_111418`, exit 0. This is not timing-disabled speed evidence.
+- At 39,920 tokens, named GLM wall fell from the radix-only profile's 25,982.6 ms to 25,415.9 ms (`-2.18%`). DSA fell from 14,048.8 to 13,350.7 ms (`-4.97%`), while KDA recurrence was identical at 1,142.2 ms. The changed path is therefore localized to DSA scoring/selection.
+- Calibration low-water at 500/4K/8K/16K/32K/39,920 was `1231/1121/1193/1213/1205/1187 MiB`, above the unchanged 600 MiB runtime margin.
+- Raw evidence: [outer](20260830_glm53_aggressive_radix_prefill_profile_pro_hqq6_k6v6_outer.log), [stdout](20260830_glm53_aggressive_radix_prefill_profile_pro_hqq6_k6v6_stdout.log), [runtime](20260830_glm53_aggressive_radix_prefill_profile_pro_hqq6_k6v6_runtime.log), [command](20260830_glm53_aggressive_radix_prefill_profile_pro_hqq6_k6v6_command.log).
+## GLM-5.3 combined prefill/decode candidate — 2026-08-30
+
+- Timing-disabled command: `KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE=bf16_bf16_causal_gemm KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE=radix_linear KRASIS_DECODE_INT4_W13_N32=1 KRASIS_DECODE_INT4_W2_N32=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf`, run `logs/dev-benchmark_20260830_112210`, exit 0, on one RTX PRO 6000.
+- Internal prefill was `120.1/519.7/842.1/1218.6/1449.5/1483.7 tok/s`, versus the correctness-qualified `119.8/517.6/834.4/1195.7/1392.5/1419.0` control. The 39,920-token row improves by 4.56%.
+- Internal decode was `22.29/23.72/22.49 tok/s`, or `+2.06%/+2.51%/-0.75%` versus control at matched output lengths. The candidate's formal HCS hits were `86.65/88.06/87.10%`, lower than control `87.73/88.71/88.34%`, because causal scoring changed generated routes. The separate N32-only matched-route A/B is the authoritative kernel-speed evidence.
+- HCS retained 6540/12096 experts; decode floor 1279 MiB; calibration floors `1225/1105/1229/1211/1197/1203 MiB`; zero HCS failures and no CUDA/OOM/below-margin warning.
+- Raw evidence: [report](20260830_glm53_combined_candidate_speed_pro_hqq6_k6v6_report.log), [stdout](20260830_glm53_combined_candidate_speed_pro_hqq6_k6v6_stdout.log), [runtime](20260830_glm53_combined_candidate_speed_pro_hqq6_k6v6_runtime.log), [command](20260830_glm53_combined_candidate_speed_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3 CPU-tail hardware calibration — 2026-08-30
+
+- Command: `./dev cpu-tail-calibrate tests/glm53-flash-hqq6-k6v6-pro-50k.conf --gpu-uuid GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d --group-size 128 --budget-seconds 240 --histogram-log benchmarks/20260830_glm53_cpu_tail_uncalibrated_attribution_pro_hqq6_k6v6_stdout.log --baseline-ms-per-token 42.57 --two-team --layer-gap-us 1014`, exit 0. The standalone Rust calibrator measured the loaded GLM geometry, live CPU topology and pinned-host DMA; it did not execute a model benchmark and is not speed-acceptance evidence.
+- Geometry was `hidden=4096`, `intermediate=2048`, `group=128`, `12,976,128 bytes/expert`; the machine exposed 64 physical cores and 16 cache domains. Steady DMA was `25.5938 GiB/s`, or `0.4722 ms/expert`.
+- The one-worker optimizer selected compact CPUs `0,1,2,3`. Its concurrent mean was `1.2159 ms/expert`; measured win probability was effectively zero at depths 2--3, `96.67%` at depth 4 and at least `99.91%` at depth 5+, predicting only `0.1916 ms/token` net saving.
+- The two-team optimizer selected compact `16+1` cores and predicted `1.0778 ms/token` net saving, but worker 1 absorbed only `0.000088` experts/token; the candidate therefore requires an integrated diagnostic before acceptance. No calibration row is treated as production throughput.
+- Raw evidence: [JSON](20260830_glm53_cpu_tail_calibration_pro_hqq6_k6v6.json), [calibrator log](20260830_glm53_cpu_tail_calibration_pro_hqq6_k6v6.log), [outer log](20260830_glm53_cpu_tail_calibration_pro_hqq6_k6v6_outer.log).
+
+## GLM-5.3 calibrated two-team CPU-tail attribution — 2026-08-30
+
+- Diagnostic command enabled the existing split cold/resident launch and transposed CPU-tail race with `KRASIS_CPU_TAIL_WORKERS=2` and the exact archived calibration artifact, then ran `./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing`. Run `logs/dev-benchmark_20260830_173749`, exit 0, on one RTX PRO 6000. Timing barriers were enabled, so throughput is attribution only.
+- The artifact selected compact `16+1` persistent teams. Formal internal decode was `22.86/24.24/22.71 tok/s` versus the matched no-CPU diagnostic `23.03/23.92/23.41`; only the 100-token row improved, so the unfiltered candidate is rejected.
+- Across the formal 50/100/250 rows, depth-2 attempts won exactly `0/3,614`; depth 3 and deeper won `1,026/1,542`. The 250-token row spent `7.946 ms/token` in race waits. This directly supports suppressing only artifact-measured zero-win depths before another integrated test.
+- Prefill was `120.0/519.4/852.8/1216.0/1409.4/1446.5 tok/s`; decode minimum free VRAM was 1,279 MiB. The transposed tier contained 5,536 nonresident duplicates in 66.902 GiB and, with calibrated persistent teams, built in 9.05s. There were zero CPU-tail errors, HCS budget/no-slot/copy failures, CUDA errors or OOMs.
+- Raw evidence: [report](20260830_glm53_cpu_tail_calibrated_two_team_attribution_pro_hqq6_k6v6_report.log), [stdout](20260830_glm53_cpu_tail_calibrated_two_team_attribution_pro_hqq6_k6v6_stdout.log), [runtime](20260830_glm53_cpu_tail_calibrated_two_team_attribution_pro_hqq6_k6v6_runtime.log), [outer](20260830_glm53_cpu_tail_calibrated_two_team_attribution_pro_hqq6_k6v6_outer.log).
+
+## GLM-5.3 gathered output-only TF32 attribution — 2026-08-30
+
+- Calibration-only diagnostic command selected `KRASIS_DSA_MLA_GATHERED_COMPUTE_MODE=tf32_output` and enabled the existing 39,920-token HQQ MLA stage timer, then ran `./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf` with startup exit after calibration. Run `logs/dev-benchmark_20260830_193044`, exit 0, on one RTX PRO 6000. Timing barriers were enabled, so throughput is attribution only.
+- Across 11 DSA layers, gathered output GEMM fell from the pedantic control's `2233.747 ms` to `1314.221 ms` (`-41.16%`). Score GEMM and softmax remained pedantic and measured `2985.323/520.345 ms`; gather was `2750.718 ms`. Total gathered attention fell from `8561.527` to `7570.607 ms` (`-11.57%`), and the enclosing attention stage from `8639.683` to `7571.858 ms` (`-12.36%`).
+- The candidate printed `compute=Tf32Output` on every applicable layer. Its 39,920-token low-water was 1,215 MiB; the complete calibration range was 1,145--1,239 MiB, above the unchanged 600 MiB runtime safety margin, with no CUDA error, OOM or below-margin warning.
+- This is a numerical candidate, not an accepted production default. It requires the frozen GLM-5.3 llama-witness gate before any timing-disabled speed benchmark or promotion.
+- Frozen llama-witness result: **rejected**. The 3,116-token-prefix/16-token gate kept the first token exact but produced only `5/16` witness-token top-ten containment (`31.2%`) versus the accepted production bound `13/16` (`81.2%`); exact identities also diverged after token 3. Wrapper exit 1. No timing-disabled candidate benchmark was run.
+- Raw evidence: [stdout](20260830_glm53_hqq_mla_tf32_output_attribution_pro_hqq6_k6v6_stdout.log), [runtime](20260830_glm53_hqq_mla_tf32_output_attribution_pro_hqq6_k6v6_runtime.log), [outer](20260830_glm53_hqq_mla_tf32_output_attribution_pro_hqq6_k6v6_outer.log), [command](20260830_glm53_hqq_mla_tf32_output_attribution_pro_hqq6_k6v6_command.log).
+## GLM-5.3 runtime structured-gather selector proof — 2026-08-30
+
+- Calibration-only diagnostic on one RTX PRO 6000 with gather policy unset (`auto`), pedantic FP32 GEMMs retained, HQQ MLA stage timing enabled, and exit requested after calibration. Run `logs/dev-benchmark_20260830_212723`, exit 0. Timing barriers and autotune events make this attribution only, not speed evidence.
+- Eleven distinct loaded-format/row geometries tuned exactly once; no complete key repeated across later DSA layers. Every measured geometry selected structured. At 39,920 tokens, full 3,473-row tiles measured `20.374 -> 12.195 ms`, while the independent 1,717-row remainder measured `10.646 -> 6.837 ms`.
+- Across all eleven 39,920-token DSA layers, cached-auto stages totaled gather `1720.107 ms`, score GEMM `2996.752 ms`, softmax `520.527 ms`, and output GEMM `2184.141 ms` (`7421.527 ms` total). This matches the earlier explicit-structured attribution while proving runtime selection and cache reuse.
+- The 39,920-token low-water was 1,215 MiB; no CUDA error, OOM, or below-600-MiB warning occurred. Frozen llama-witness and timing-disabled full benchmark are the next acceptance gates.
+- Raw evidence: [stdout](20260830_glm53_gather_auto_live_probe_pro_hqq6_k6v6_stdout.log), [runtime](20260830_glm53_gather_auto_live_probe_pro_hqq6_k6v6_runtime.log), [outer](20260830_glm53_gather_auto_live_probe_pro_hqq6_k6v6_outer.log), [command](20260830_glm53_gather_auto_live_probe_pro_hqq6_k6v6_command.log).
+## GLM-5.3 runtime structured-gather speed acceptance — 2026-08-30
+
+- Timing-disabled command ran the source-default runtime gather selector with all timing, trace, startup-diagnostic, VRAM-ledger, CPU-tail and explicit gather overrides unset: `./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf`. Run `logs/dev-benchmark_20260830_214701`, exit 0, on one RTX PRO 6000.
+- Internal prefill was `119.3/525.2/833.8/1227.5/1452.0/1498.9 tok/s`; the 39,920-token row took 26.633s. Versus the correctness-qualified 1,419.0 tok/s baseline this is +5.63%, and it exceeds the prior 1,483.7 tok/s candidate.
+- Internal decode control was `23.44/24.05/23.55 tok/s`. Formal HCS hit rates remained exactly `87.73/88.71/88.34%`; HCS retained 6,540/12,096 experts and minimum free VRAM was 1,277 MiB. This is the isolated control for the separately diagnosed decode-floor change.
+- Calibration low-water at 500/4K/8K/16K/32K/39,920 tokens was `1229/1111/1215/1207/1219/1211 MiB`; no HCS budget/no-slot/copy failure, CUDA error, OOM, or below-margin warning occurred.
+- Raw evidence: [report](20260830_glm53_gather_auto_speed_pro_hqq6_k6v6_report.log), [stdout](20260830_glm53_gather_auto_speed_pro_hqq6_k6v6_stdout.log), [runtime](20260830_glm53_gather_auto_speed_pro_hqq6_k6v6_runtime.log), [outer](20260830_glm53_gather_auto_speed_pro_hqq6_k6v6_outer.log), [command](20260830_glm53_gather_auto_speed_pro_hqq6_k6v6_command.log).
+## GLM-5.3 calibration-derived decode-floor candidate — 2026-08-30
+
+- Timing-disabled command was identical to the accepted gather-auto control: `./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf`, with timing, trace, ledger, CPU-tail and explicit selector overrides unset. Run `logs/dev-benchmark_20260830_222758`, exit 0, on one RTX PRO 6000.
+- The calibrated 658 MiB target admitted 6,580 experts versus the control's final 6,540. Decode low-water was 779--785 MiB during warmup/formal/network rows, safely above the 600 MiB margin and close by exactly one runtime-derived 247.5 MiB chunk. There were zero budget/no-slot/copy failures and no CUDA/OOM/below-margin warning.
+- **Rejected for speed:** internal decode was `20.48/23.77/23.39 tok/s` versus control `23.44/24.05/23.55`. Formal HCS hits fell to `84.09/88.37/88.15%` from `87.73/88.71/88.34%`, despite forty extra residents. The benchmark is greedy, so the changed hot/cold numerical execution mix deterministically changed a near-tie continuation and its later route demand; cache integrity counters remained clean.
+- Prefill was `119.6/516.5/848.6/1231.9/1465.3/1503.6 tok/s`; the floor change did not impair prefill. The candidate was reverted after this evidence, preserving the established runtime-derived chunk guards.
+- Raw evidence: [report](20260830_glm53_decode_floor_candidate_pro_hqq6_k6v6_report.log), [stdout](20260830_glm53_decode_floor_candidate_pro_hqq6_k6v6_stdout.log), [runtime](20260830_glm53_decode_floor_candidate_pro_hqq6_k6v6_runtime.log), [outer](20260830_glm53_decode_floor_candidate_pro_hqq6_k6v6_outer.log), [command](20260830_glm53_decode_floor_candidate_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3 metadata-only GPU route-sync rejection — 2026-08-30
+
+- Instrumented single-RTX-PRO diagnostic explicitly enabled
+  `KRASIS_GPU_ROUTE_SYNC=1` while mapped reads, CPU tail, trace, prefill timing
+  and the VRAM ledger were absent. HCS proved the mode was active with
+  `gpu_route_sync=true`, `mapped_reads=false`, 6,560 initial soft experts and
+  the established 6,540 post-pressure residents.
+- The mode reduced short-sample graph event time to about 15.4--15.7 ms/token,
+  but it removed host-visible cold routes from the Dynamic HCS promotion
+  contract. Warmup promotions collapsed from the matched control's
+  `1585/4073/10107` to `29/38/36`; HCS hit rate fell to
+  `86.81/83.37/79.61%` and decode fell to `22.9/20.3/18.1 tok/s`.
+- During the subsequent formal prefill, the monitor recorded 597 MiB free,
+  three MiB below the required 600 MiB safety margin. The run was stopped with
+  `./dev kill` and exited 137. It is an incomplete diagnostic, not a standard
+  benchmark or speed result. The existing GPU-route-sync default remains off.
+- Evidence: [stdout](20260830_glm53_gpu_route_sync_rejected_pro_hqq6_k6v6_stdout.log),
+  [runtime](20260830_glm53_gpu_route_sync_rejected_pro_hqq6_k6v6_runtime.log),
+  [outer](20260830_glm53_gpu_route_sync_rejected_pro_hqq6_k6v6_outer.log),
+  [below-safety record](20260830_glm53_gpu_route_sync_rejected_pro_hqq6_k6v6_below_safety.log),
+  [command](20260830_glm53_gpu_route_sync_rejected_pro_hqq6_k6v6_command.log).
+
+## GLM-5.3 registered MLA/DSA decode attribution — 2026-08-31
+
+- Timing-only command: `KRASIS_DECODE_MLA_PATH_CLOCKS=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing`, run `logs/dev-benchmark_20260831_012538`, on one RTX PRO 6000. The run was intentionally stopped after the complete calibration curve and before redundant formal speed rows; exit 137 is therefore expected and this is not speed evidence.
+- The eleven-stage CUDA-clock split localized the registered MLA path. At 500 tokens, sparse attention was `2.84 ms/token` of approximately `5.24 ms/token` named MLA work. At 4K/8K/16K/32K/39,920 tokens sparse attention was `11.12/11.14/11.15/11.18/11.23 ms/token`, plateauing when the exact measured 2,051-index capacity was reached.
+- At 39,920 tokens, the remaining named stages were Q-A `0.23`, DSA score `0.72`, DSA top-k `1.47`, Q-B `0.29`, KV-A/norm `0.21`, split/RoPE `0.02`, absorption `0.40`, cache write `0.03`, W-VC `0.54`, and O projection `0.53 ms/token`. Sparse attention is therefore the measured next decode CUDA target; the earlier 5.56 ms/token route residual was not one kernel.
+- Calibration low-water at 500/4K/8K/16K/32K/39,920 was `1251/1133/1183/1211/1207/1199 MiB`, above the unchanged 600 MiB runtime margin. No CUDA error, OOM, or below-margin warning occurred. Both GPUs returned idle after `./dev kill`.
+- Raw evidence: [stdout](20260831_glm53_mla_dsa_path_attribution_stdout.log), [runtime](20260831_glm53_mla_dsa_path_attribution_runtime.log), [outer](20260831_glm53_mla_dsa_path_attribution_outer.log), [command](20260831_glm53_mla_dsa_path_attribution_command.log).
+
+## GLM-5.3 512-thread sparse-MLA attribution — 2026-08-31
+
+- Timing-only candidate command: `KRASIS_DECODE_MLA_SPARSE_THREADS=512 KRASIS_DECODE_MLA_PATH_CLOCKS=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing`, run `logs/dev-benchmark_20260831_014408`, on one RTX PRO 6000. The run was stopped after the complete calibration curve; expected exit 137, not speed evidence.
+- Versus the matched 256-thread stage-clock control, sparse attention improved from `2.84` to `2.42 ms/token` at 500 tokens (`-14.8%`) and from `11.12/11.14/11.15/11.18/11.23` to `9.63/9.64/9.68/9.70/9.75 ms/token` at 4K/8K/16K/32K/39,920 (`-12.8%` to `-13.4%`).
+- At 4K, total graph replay improved `32.31 -> 30.32 ms/token` (`-6.2%`). At 39,920, the ten registered MLA route segments improved `16.76 -> 15.25 ms/token`; other stage costs remained control-like.
+- Calibration low-water was `1239/1141/1193/1195/1201/1195 MiB`, above the 600 MiB runtime safety margin. No CUDA error, OOM, or below-margin warning occurred. This candidate proceeds to frozen llama-witness before any timing-disabled speed run.
+- Raw evidence: [stdout](20260831_glm53_mla_sparse_512_attribution_stdout.log), [runtime](20260831_glm53_mla_sparse_512_attribution_runtime.log), [outer](20260831_glm53_mla_sparse_512_attribution_outer.log), [command](20260831_glm53_mla_sparse_512_attribution_command.log).
+
+## GLM-5.3 512-thread sparse-MLA speed acceptance — 2026-08-31
+
+- Timing-disabled command explicitly selected the 512-thread sparse-MLA launch and ran `./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf`. Run `logs/dev-benchmark_20260831_020411`, exit 0, on one RTX PRO 6000. All timing, trace, ledger, CPU-tail, and startup-diagnostic instrumentation was absent.
+- Internal prefill was `119.4/525.7/834.8/1244.6/1462.9/1504.6 tok/s`; the 39,920-token row took 26.532s. The decode-only launch change cannot claim the small prefill difference from the accepted 1498.9 tok/s control, but it proves prefill was preserved.
+- Internal decode was `21.76/24.77/24.03 tok/s`; repeated network-request engine rows were `21.7/24.8/23.7 tok/s`. Versus the matched 256-thread control `23.44/24.05/23.55`, the 100/250-token rows improved 3.0%/2.0%, while the 50-token row varied with route demand and was lower. The isolated CUDA stage improvement remains 12.8--14.8%.
+- Frozen llama-witness before this speed run preserved the accepted bound exactly: first token `1/1`, exact run `3/16`, witness-token top-ten containment `13/16`, and selected-token delta `0.07842576684150501`.
+- HCS retained 6,540/12,096 experts, formal decode low-water was 1,277 MiB, and all HCS budget/no-slot/copy, CUDA, OOM, and below-margin counters remained clean. This validates 512 on the measured RTX PRO but does not justify a hardware-global default; automatic production selection remains pending.
+- Raw evidence: [report](20260831_glm53_mla_sparse_512_speed_report.log), [stdout](20260831_glm53_mla_sparse_512_speed_stdout.log), [runtime](20260831_glm53_mla_sparse_512_speed_runtime.log), [outer](20260831_glm53_mla_sparse_512_speed_outer.log), [command](20260831_glm53_mla_sparse_512_speed_command.log).
+
+## GLM-5.3 1024-thread sparse-MLA attribution — 2026-08-31
+
+- Timing-only command explicitly selected 1024 threads with MLA path clocks and ran the standard 50K benchmark config. Run `logs/dev-benchmark_20260831_023232` on one RTX PRO 6000; intentionally stopped after the complete calibration curve, expected exit 137, not speed evidence.
+- Sparse attention at 500/4K/8K/16K/32K/39,920 tokens was `1.51/6.60/6.62/6.63/6.65/6.67 ms/token`. Versus 512, this is another 31.6--37.6% reduction; versus the 256 control, the 39,920-token stage improved `11.23 -> 6.67 ms/token` (`-40.6%`).
+- All other named MLA stages remained control-like. Calibration low-water was `1239/1117/1201/1189/1223/1229 MiB`, above the unchanged 600 MiB runtime safety margin, with no CUDA error, OOM, or below-margin warning.
+- The 1024 block is launch-valid on the measured GPU and proceeds to frozen llama-witness. It is not a universal default; production selection must be measured from live geometry before graph capture.
+- Raw evidence: [stdout](20260831_glm53_mla_sparse_1024_attribution_stdout.log), [runtime](20260831_glm53_mla_sparse_1024_attribution_runtime.log), [outer](20260831_glm53_mla_sparse_1024_attribution_outer.log), [command](20260831_glm53_mla_sparse_1024_attribution_command.log).
+
+## GLM-5.3 1024-thread sparse-MLA speed acceptance — 2026-08-31
+
+- Timing-disabled command explicitly selected the 1024-thread sparse-MLA launch and ran `./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf`. Run `logs/dev-benchmark_20260831_025227`, exit 0, on one RTX PRO 6000. All timing, trace, ledger, CPU-tail, and startup-diagnostic instrumentation was absent.
+- Internal prefill was `121.7/525.6/849.8/1240.9/1461.5/1503.6 tok/s`; the decode-only change preserves the accepted prefill improvement but does not claim its run-to-run variation.
+- Internal decode was `22.06/24.84/24.06 tok/s`, repeated by the network-request engine at `21.7/24.9/24.1`. Versus the 512 candidate `21.76/24.77/24.03`, all formal rows improved slightly; versus the matched 256 control `23.44/24.05/23.55`, the stable 100/250 rows improved 3.3%/2.2%, while short-route variation remains material.
+- The isolated sparse-attention stage improved 31.6--37.6% over 512 and 40.6% over 256 at 39,920 tokens. Frozen llama-witness exactly preserved the accepted bound before this run.
+- HCS retained 6,540/12,096 experts, formal decode low-water was 1,277 MiB, and all HCS budget/no-slot/copy, CUDA, OOM, and below-margin counters remained clean. This validates 1024 on the measured RTX PRO; source-default promotion still requires runtime measurement rather than a global fixed choice.
+- Raw evidence: [report](20260831_glm53_mla_sparse_1024_speed_report.log), [stdout](20260831_glm53_mla_sparse_1024_speed_stdout.log), [runtime](20260831_glm53_mla_sparse_1024_speed_runtime.log), [outer](20260831_glm53_mla_sparse_1024_speed_outer.log), [command](20260831_glm53_mla_sparse_1024_speed_command.log).
+
+## GLM-5.3 runtime sparse-MLA selector speed acceptance — 2026-08-31
+
+- Timing-disabled source-default command explicitly unset the launch override and ran `./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf`. Run `logs/dev-benchmark_20260831_032325`, exit 0, on one RTX PRO 6000. All timing, trace, ledger, CPU-tail, and startup-diagnostic instrumentation was absent.
+- Before first CUDA-graph capture, live selected-index/cache data at sequence length 501 measured aggregate CUDA-event medians `256:0.3754ms 512:0.2933ms 1024:0.1833ms` and selected 1024. No candidate failed occupancy; the selector ran once and subsequent requests reused the captured winning graph.
+- Internal prefill was `119.5/516.3/847.7/1229.4/1453.3/1509.0 tok/s`; the 39,920-token row took 26.454s, the best accepted run. The selector is decode-only, so the small difference from prior structured-gather runs is reported as preservation/run variance rather than causal gain.
+- Internal decode was `21.79/25.14/23.81 tok/s`; repeated engine rows were `21.4/25.2/23.8`. Versus the correctness-qualified starting baseline `21.84/23.14/22.66`, the 100/250 rows improved 8.6%/5.1%; the 50-token row is flat within route/startup variance. Versus the matched 256 post-prefill control `23.44/24.05/23.55`, the stable 100/250 rows improved 4.5%/1.1%.
+- HCS retained 6,540/12,096 experts, formal decode low-water was 1,277 MiB, and all HCS budget/no-slot/copy, CUDA, OOM, and below-margin counters remained clean. Frozen witness for the explicit winning geometry passed; the unset/default witness is the final numerical gate.
+- Raw evidence: [report](20260831_glm53_mla_sparse_auto_speed_report.log), [stdout](20260831_glm53_mla_sparse_auto_speed_stdout.log), [runtime](20260831_glm53_mla_sparse_auto_speed_runtime.log), [outer](20260831_glm53_mla_sparse_auto_speed_outer.log), [command](20260831_glm53_mla_sparse_auto_speed_command.log).

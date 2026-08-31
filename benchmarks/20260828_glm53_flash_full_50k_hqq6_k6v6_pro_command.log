@@ -1,0 +1,14 @@
+Date: 2026-08-28
+Purpose: full timing-disabled GLM-5.3-Flash RTX PRO benchmark, including the complete long-prefill curve
+Working directory: /home/main/Documents/Claude/krasis
+tmux session: glm53_full_50k_pro
+Command: ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+Run directory: logs/dev-benchmark_20260828_080644
+Timing instrumentation: disabled
+Trace instrumentation: disabled
+Exit: 0
+Config SHA-256: 727457f140661b90fe9ab0d412f0f5a10e3dda54a96a4c7c339fbe7dbd15121c
+Runtime extension SHA-256: 8ef9168f1118c9197258cc5998963ec975d2c3966dc2caadbcc530bb0189fc80
+Report SHA-256: 303fb090b27962eb3fa5bedb40c70b4791c332cd45e743a299c0caad05924bfe
+Stdout SHA-256: 9937564cf9a9d82081d9133e907ac8cad28169e8d68acad187a98c6c0dae3f1e
+Runtime log SHA-256: a52f2f9d9a17767258e636d98b7e358010fccc8aec1a12191a84cf37e9a7df82

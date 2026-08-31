@@ -1,0 +1,421 @@
+2026-08-28 06:50:15,012 krasis.server INFO Logging to /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260828_065007/krasis.log
+2026-08-28 06:50:15,012 krasis.server INFO === Config file: tests/glm53-flash-hqq6-k6v6-a6000.conf ===
+2026-08-28 06:50:15,012 krasis.server INFO   # GLM-5.3-Flash text-only single-GPU bring-up profile on the local RTX A6000.
+2026-08-28 06:50:15,012 krasis.server INFO   # Runtime calibration remains authoritative for VRAM/HCS admission; this file
+2026-08-28 06:50:15,012 krasis.server INFO   # supplies the requested execution modes and a bounded initial context gate.
+2026-08-28 06:50:15,012 krasis.server INFO   MODEL_PATH="/home/main/.krasis/models/GLM-5.3-Flash"
+2026-08-28 06:50:15,012 krasis.server INFO   CFG_SELECTED_GPUS="GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab"
+2026-08-28 06:50:15,012 krasis.server INFO   CFG_PP_PARTITION="45"
+2026-08-28 06:50:15,012 krasis.server INFO   CFG_LAYER_GROUP_SIZE="1"
+2026-08-28 06:50:15,012 krasis.server INFO   CFG_KV_CACHE_MB="1000"
+2026-08-28 06:50:15,012 krasis.server INFO   CFG_MAX_CONTEXT_TOKENS="4096"
+2026-08-28 06:50:15,012 krasis.server INFO   CFG_KV_DTYPE="k6v6"
+2026-08-28 06:50:15,012 krasis.server INFO   CFG_GPU_EXPERT_BITS="4"
+2026-08-28 06:50:15,012 krasis.server INFO   CFG_CPU_EXPERT_BITS="4"
+2026-08-28 06:50:15,012 krasis.server INFO   CFG_ATTENTION_QUANT="hqq6"
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_HQQ_GROUP_SIZE="128"
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_SHARED_EXPERT_QUANT="int8"
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_DENSE_MLP_QUANT="int8"
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_LM_HEAD_QUANT="int8"
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_KRASIS_THREADS="40"
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_HOST="127.0.0.1"
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_PORT="18253"
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_ENABLE_THINKING="0"
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_GPU_PREFILL_THRESHOLD="300"
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_VRAM_SAFETY_MARGIN="600"
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_HEATMAP_PATH=""
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_GGUF_PATH=""
+2026-08-28 06:50:15,013 krasis.server INFO   CFG_FORCE_LOAD=""
+2026-08-28 06:50:15,013 krasis.server INFO === Resolved arguments ===
+2026-08-28 06:50:15,013 krasis.server INFO   adaptive_cold_mass_pruning = None
+2026-08-28 06:50:15,013 krasis.server INFO   approved_heatmap_bootstrap_from = None
+2026-08-28 06:50:15,013 krasis.server INFO   approved_heatmap_build_out = None
+2026-08-28 06:50:15,013 krasis.server INFO   approved_heatmap_checkpoint_every = 0
+2026-08-28 06:50:15,013 krasis.server INFO   approved_heatmap_decode_tokens = 256
+2026-08-28 06:50:15,013 krasis.server INFO   approved_heatmap_manifest_url = 'https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/manifest.json'
+2026-08-28 06:50:15,013 krasis.server INFO   approved_heatmap_max_prompts = 0
+2026-08-28 06:50:15,013 krasis.server INFO   approved_heatmap_mode = 'auto'
+2026-08-28 06:50:15,013 krasis.server INFO   approved_heatmap_prompts = None
+2026-08-28 06:50:15,013 krasis.server INFO   approved_heatmap_residency_refresh_every = 1
+2026-08-28 06:50:15,013 krasis.server INFO   approved_heatmap_resume_from = None
+2026-08-28 06:50:15,013 krasis.server INFO   attention_quant = 'hqq6'
+2026-08-28 06:50:15,013 krasis.server INFO   benchmark = False
+2026-08-28 06:50:15,013 krasis.server INFO   benchmark_only = True
+2026-08-28 06:50:15,013 krasis.server INFO   build_cache = False
+2026-08-28 06:50:15,013 krasis.server INFO   config = None
+2026-08-28 06:50:15,014 krasis.server INFO   cpu_expert_bits = 4
+2026-08-28 06:50:15,014 krasis.server INFO   dense_mlp_quant = 'int8'
+2026-08-28 06:50:15,014 krasis.server INFO   draft_context = 512
+2026-08-28 06:50:15,014 krasis.server INFO   draft_k = 3
+2026-08-28 06:50:15,014 krasis.server INFO   draft_model = None
+2026-08-28 06:50:15,014 krasis.server INFO   dspark_mode = 'off'
+2026-08-28 06:50:15,014 krasis.server INFO   dynamic_hcs = True
+2026-08-28 06:50:15,014 krasis.server INFO   dynamic_hcs_tail_blocks = 2
+2026-08-28 06:50:15,014 krasis.server INFO   dynamic_peer = False
+2026-08-28 06:50:15,014 krasis.server INFO   enable_thinking = False
+2026-08-28 06:50:15,014 krasis.server INFO   expert_compression = False
+2026-08-28 06:50:15,014 krasis.server INFO   expert_compression_pipeline = 'grouped'
+2026-08-28 06:50:15,014 krasis.server INFO   expert_compression_sidecar = None
+2026-08-28 06:50:15,014 krasis.server INFO   expert_group_size = 128
+2026-08-28 06:50:15,014 krasis.server INFO   expert_hqq_diagnostic_cache_spec = None
+2026-08-28 06:50:15,014 krasis.server INFO   force_load = False
+2026-08-28 06:50:15,014 krasis.server INFO   force_rebuild_cache = False
+2026-08-28 06:50:15,014 krasis.server INFO   force_rebuild_hqq_cache = False
+2026-08-28 06:50:15,014 krasis.server INFO   gguf_path = None
+2026-08-28 06:50:15,014 krasis.server INFO   gpu_decode = True
+2026-08-28 06:50:15,014 krasis.server INFO   gpu_expert_bits = 4
+2026-08-28 06:50:15,014 krasis.server INFO   gpu_expert_int4_calib = 'amax'
+2026-08-28 06:50:15,014 krasis.server INFO   gpu_prefill_threshold = 300
+2026-08-28 06:50:15,014 krasis.server INFO   hcs = True
+2026-08-28 06:50:15,014 krasis.server INFO   hcs_host_cache_mode = 'source'
+2026-08-28 06:50:15,014 krasis.server INFO   heatmap_path = None
+2026-08-28 06:50:15,014 krasis.server INFO   host = '127.0.0.1'
+2026-08-28 06:50:15,014 krasis.server INFO   hqq46_auto_budget_mib = None
+2026-08-28 06:50:15,014 krasis.server INFO   hqq_auto_budget_pct = None
+2026-08-28 06:50:15,014 krasis.server INFO   hqq_cache_profile = 'baseline'
+2026-08-28 06:50:15,014 krasis.server INFO   hqq_group_size = 128
+2026-08-28 06:50:15,014 krasis.server INFO   hqq_sidecar_manifest = None
+2026-08-28 06:50:15,015 krasis.server INFO   krasis_threads = 40
+2026-08-28 06:50:15,015 krasis.server INFO   kv_cache_mb = 1000
+2026-08-28 06:50:15,015 krasis.server INFO   kv_dtype = 'k6v6'
+2026-08-28 06:50:15,015 krasis.server INFO   layer_group_size = 1
+2026-08-28 06:50:15,015 krasis.server INFO   lm_head_quant = 'int8'
+2026-08-28 06:50:15,015 krasis.server INFO   max_context_tokens = 4096
+2026-08-28 06:50:15,015 krasis.server INFO   model_path = '/home/main/.krasis/models/GLM-5.3-Flash'
+2026-08-28 06:50:15,015 krasis.server INFO   multi_gpu_hcs = False
+2026-08-28 06:50:15,015 krasis.server INFO   multi_gpu_mode = 'auto'
+2026-08-28 06:50:15,015 krasis.server INFO   no_stream_attention = False
+2026-08-28 06:50:15,015 krasis.server INFO   note = None
+2026-08-28 06:50:15,015 krasis.server INFO   num_gpus = 1
+2026-08-28 06:50:15,015 krasis.server INFO   perplexity = False
+2026-08-28 06:50:15,015 krasis.server INFO   port = 18253
+2026-08-28 06:50:15,015 krasis.server INFO   prefix_cache = True
+2026-08-28 06:50:15,015 krasis.server INFO   prefix_cache_ram_fraction = 0.25
+2026-08-28 06:50:15,015 krasis.server INFO   ring_window_kv = False
+2026-08-28 06:50:15,015 krasis.server INFO   selected_gpus = 'GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab'
+2026-08-28 06:50:15,015 krasis.server INFO   selected_gpus_source = 'config'
+2026-08-28 06:50:15,015 krasis.server INFO   shared_expert_quant = 'int8'
+2026-08-28 06:50:15,015 krasis.server INFO   ssh_key_path = ''
+2026-08-28 06:50:15,015 krasis.server INFO   ssh_tunnel = ''
+2026-08-28 06:50:15,015 krasis.server INFO   step_vision_group_size = 128
+2026-08-28 06:50:15,015 krasis.server INFO   step_vision_quant = 'int4'
+2026-08-28 06:50:15,015 krasis.server INFO   stream_attention = False
+2026-08-28 06:50:15,015 krasis.server INFO   stress_test = False
+2026-08-28 06:50:15,015 krasis.server INFO   temperature = 0.6
+2026-08-28 06:50:15,015 krasis.server INFO   test_endpoints = False
+2026-08-28 06:50:15,015 krasis.server INFO   tileq_cache = None
+2026-08-28 06:50:15,015 krasis.server INFO   timing = False
+2026-08-28 06:50:15,015 krasis.server INFO   vram_report = False
+2026-08-28 06:50:15,015 krasis.server INFO   vram_safety_margin = 600
+2026-08-28 06:50:15,015 krasis.server INFO Effective selected GPUs: GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab (source=config, CUDA_VISIBLE_DEVICES=GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab)
+2026-08-28 06:50:15,067 krasis.server INFO 
+[1m[36m▸ Krasis — GLM-5.3-Flash[0m
+2026-08-28 06:50:15,067 krasis.server INFO ── Krasis — GLM-5.3-Flash ──
+2026-08-28 06:50:15,067 krasis.server INFO   [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+2026-08-28 06:50:15,067 krasis.server INFO   [32mHCS host cache: source[0m
+2026-08-28 06:50:15,067 krasis.server INFO   [32mSelected physical GPUs: GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab (config; CUDA_VISIBLE_DEVICES=GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab)[0m
+2026-08-28 06:50:15,067 krasis.server INFO   [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k6v6[0m
+2026-08-28 06:50:15,067 krasis.server INFO   [32mLayer groups: 1  |  KV cache: 1000 MB  |  Threads: 40[0m
+2026-08-28 06:50:15,067 krasis.server INFO   [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+2026-08-28 06:50:15,068 krasis.server INFO HCS strategy: PP=1, 1 GPUs available
+2026-08-28 06:50:15,112 krasis.model INFO KrasisModel: 45 layers, PP=[45], 1 GPUs, attn=rust, hybrid=11 full + 34 linear
+2026-08-28 06:50:15,158 krasis.server INFO 
+[1m[36m▸ Loading model weights[0m
+2026-08-28 06:50:15,158 krasis.server INFO ── Loading model weights ──
+2026-08-28 06:50:15,527 krasis.server INFO   [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=276 MB, free=48272 MB, total=48549 MB
+2026-08-28 06:50:15,528 krasis.model INFO VRAM_CHECKPOINT [before-load] cuda:0: alloc=0 MB, reserved=0 MB, driver_used=276 MB, free=48272 MB, total=48549 MB
+2026-08-28 06:50:15,528 krasis.model INFO RAM watchdog started: will exit if < 5.0% free
+2026-08-28 06:50:15,528 krasis.server INFO 
+[1m[36m▸ Loading GPU weights[0m
+2026-08-28 06:50:15,528 krasis.model INFO Phase 1: Loading GPU weights (streaming INT8)...
+2026-08-28 06:50:15,568 krasis.model INFO Resident attention: all 45 layers permanently on GPU0, 1 GPUs for EP
+2026-08-28 06:50:15,568 krasis.model INFO Loading full base model to cuda:0...
+2026-08-28 06:50:15,568 krasis.weight_loader INFO Loading embedding: model.language_model.embed_tokens.weight
+2026-08-28 06:50:17,329 krasis.weight_loader INFO Layer 0 loaded in 1.3s (GPU alloc: 1620 MB, moe=False, type=linear_attention)
+2026-08-28 06:50:18,707 krasis.weight_loader INFO Layer 1 loaded in 1.4s (GPU alloc: 2030 MB, moe=False, type=linear_attention)
+2026-08-28 06:50:20,083 krasis.weight_loader INFO Layer 2 loaded in 1.4s (GPU alloc: 2440 MB, moe=False, type=linear_attention)
+2026-08-28 06:50:20,644 krasis.weight_loader INFO Layer 3 loaded in 0.6s (GPU alloc: 2709 MB, moe=True, type=full_attention)
+2026-08-28 06:50:20,900 krasis.weight_loader INFO Layer 4 loaded in 0.2s (GPU alloc: 3006 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:21,147 krasis.weight_loader INFO Layer 5 loaded in 0.2s (GPU alloc: 3303 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:21,391 krasis.weight_loader INFO Layer 6 loaded in 0.2s (GPU alloc: 3599 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:21,942 krasis.weight_loader INFO Layer 7 loaded in 0.6s (GPU alloc: 3872 MB, moe=True, type=full_attention)
+2026-08-28 06:50:22,187 krasis.weight_loader INFO Layer 8 loaded in 0.2s (GPU alloc: 4169 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:22,432 krasis.weight_loader INFO Layer 9 loaded in 0.2s (GPU alloc: 4466 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:22,678 krasis.weight_loader INFO Layer 10 loaded in 0.2s (GPU alloc: 4763 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:23,235 krasis.weight_loader INFO Layer 11 loaded in 0.6s (GPU alloc: 5035 MB, moe=True, type=full_attention)
+2026-08-28 06:50:23,477 krasis.weight_loader INFO Layer 12 loaded in 0.2s (GPU alloc: 5333 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:23,718 krasis.weight_loader INFO Layer 13 loaded in 0.2s (GPU alloc: 5630 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:23,958 krasis.weight_loader INFO Layer 14 loaded in 0.2s (GPU alloc: 5926 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:24,520 krasis.weight_loader INFO Layer 15 loaded in 0.6s (GPU alloc: 6199 MB, moe=True, type=full_attention)
+2026-08-28 06:50:24,758 krasis.weight_loader INFO Layer 16 loaded in 0.2s (GPU alloc: 6495 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:24,995 krasis.weight_loader INFO Layer 17 loaded in 0.2s (GPU alloc: 6792 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:25,230 krasis.weight_loader INFO Layer 18 loaded in 0.2s (GPU alloc: 7089 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:25,784 krasis.weight_loader INFO Layer 19 loaded in 0.6s (GPU alloc: 7361 MB, moe=True, type=full_attention)
+2026-08-28 06:50:26,020 krasis.weight_loader INFO Layer 20 loaded in 0.2s (GPU alloc: 7658 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:26,257 krasis.weight_loader INFO Layer 21 loaded in 0.2s (GPU alloc: 7956 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:26,495 krasis.weight_loader INFO Layer 22 loaded in 0.2s (GPU alloc: 8253 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:27,045 krasis.weight_loader INFO Layer 23 loaded in 0.5s (GPU alloc: 8525 MB, moe=True, type=full_attention)
+2026-08-28 06:50:27,281 krasis.weight_loader INFO Layer 24 loaded in 0.2s (GPU alloc: 8822 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:27,516 krasis.weight_loader INFO Layer 25 loaded in 0.2s (GPU alloc: 9119 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:27,751 krasis.weight_loader INFO Layer 26 loaded in 0.2s (GPU alloc: 9416 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:28,299 krasis.weight_loader INFO Layer 27 loaded in 0.5s (GPU alloc: 9688 MB, moe=True, type=full_attention)
+2026-08-28 06:50:28,539 krasis.weight_loader INFO Layer 28 loaded in 0.2s (GPU alloc: 9986 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:28,778 krasis.weight_loader INFO Layer 29 loaded in 0.2s (GPU alloc: 10283 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:29,020 krasis.weight_loader INFO Layer 30 loaded in 0.2s (GPU alloc: 10579 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:29,576 krasis.weight_loader INFO Layer 31 loaded in 0.6s (GPU alloc: 10852 MB, moe=True, type=full_attention)
+2026-08-28 06:50:29,815 krasis.weight_loader INFO Layer 32 loaded in 0.2s (GPU alloc: 11148 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:30,055 krasis.weight_loader INFO Layer 33 loaded in 0.2s (GPU alloc: 11445 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:30,294 krasis.weight_loader INFO Layer 34 loaded in 0.2s (GPU alloc: 11741 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:30,847 krasis.weight_loader INFO Layer 35 loaded in 0.6s (GPU alloc: 12014 MB, moe=True, type=full_attention)
+2026-08-28 06:50:31,087 krasis.weight_loader INFO Layer 36 loaded in 0.2s (GPU alloc: 12311 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:31,326 krasis.weight_loader INFO Layer 37 loaded in 0.2s (GPU alloc: 12608 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:31,565 krasis.weight_loader INFO Layer 38 loaded in 0.2s (GPU alloc: 12905 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:32,117 krasis.weight_loader INFO Layer 39 loaded in 0.6s (GPU alloc: 13177 MB, moe=True, type=full_attention)
+2026-08-28 06:50:32,356 krasis.weight_loader INFO Layer 40 loaded in 0.2s (GPU alloc: 13474 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:32,594 krasis.weight_loader INFO Layer 41 loaded in 0.2s (GPU alloc: 13771 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:32,835 krasis.weight_loader INFO Layer 42 loaded in 0.2s (GPU alloc: 14068 MB, moe=True, type=linear_attention)
+2026-08-28 06:50:33,390 krasis.weight_loader INFO Layer 43 loaded in 0.6s (GPU alloc: 14340 MB, moe=True, type=full_attention)
+2026-08-28 06:50:33,630 krasis.weight_loader INFO Layer 44 loaded in 0.2s (GPU alloc: 14638 MB, moe=True, type=linear_attention)
+2026-08-28 06:51:05,107 krasis.weight_loader INFO Loading final norm: model.language_model.norm.weight
+2026-08-28 06:51:05,128 krasis.weight_loader INFO Loading LM head: lm_head.weight (precision=int8)
+2026-08-28 06:51:07,907 krasis.model INFO VRAM[after-layers-loaded] GPU0: free=32924 MB, alloc=15248 MB, reserved=15304 MB, non-pytorch=320 MB
+2026-08-28 06:51:08,832 krasis.model INFO GPU0: 15249 MB allocated
+2026-08-28 06:51:08,832 krasis.model INFO GPU weights loaded in 53.7s
+2026-08-28 06:51:08,832 krasis.server INFO   [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=15248 MB, reserved=15304 MB, used=15624 MB, free=32924 MB, total=48549 MB
+2026-08-28 06:51:08,833 krasis.model INFO VRAM_CHECKPOINT [after-phase1-gpu-weights] cuda:0: alloc=15248 MB, reserved=15304 MB, driver_used=15624 MB, free=32924 MB, total=48549 MB
+2026-08-28 06:51:08,833 krasis.model INFO HQQ attention artifacts validated from cache: 4483 MB, GPU free: 32924 MB (runtime descriptors will be restored during decode-store setup)
+2026-08-28 06:51:08,833 krasis.server INFO   [0;32mHQQ attention artifacts validated (4483 MB cached), 32924 MB free[0m
+2026-08-28 06:51:08,876 krasis.server INFO 
+[1m[36m▸ Loading GPU expert weights from cache[0m
+2026-08-28 06:51:08,876 krasis.model INFO Phase 2: Loading GPU expert weights (INT4)...
+2026-08-28 06:52:51,024 krasis.model INFO Krasis engine: 42 MoE layers, 288 experts, hidden=4096
+2026-08-28 06:52:51,117 krasis.model INFO Routing weights sent to Rust engine (42 MoE layers)
+2026-08-28 06:52:51,117 krasis.model INFO Expert weights loaded in 102.3s
+2026-08-28 06:52:51,117 krasis.server INFO   [0;32mExpert weights loaded in 102s.[0m
+2026-08-28 06:52:51,117 krasis.server INFO   [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=15248 MB, reserved=15304 MB, used=15624 MB, free=32924 MB, total=48549 MB
+2026-08-28 06:52:51,117 krasis.model INFO VRAM_CHECKPOINT [after-phase2-expert-weights] cuda:0: alloc=15248 MB, reserved=15304 MB, driver_used=15624 MB, free=32924 MB, total=48549 MB
+2026-08-28 06:52:51,118 krasis.server INFO   [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=15248 MB, reserved=15304 MB, used=15624 MB, free=32924 MB, total=48549 MB
+2026-08-28 06:52:51,118 krasis.model INFO VRAM_CHECKPOINT [after-phase3-prefill-managers] cuda:0: alloc=15248 MB, reserved=15304 MB, driver_used=15624 MB, free=32924 MB, total=48549 MB
+2026-08-28 06:52:51,118 krasis.kv_cache INFO KV cache: 1000 MB → 256 pages (4.1K tokens, runtime limit 4096)
+2026-08-28 06:52:51,120 krasis.kv_cache INFO KV cache allocated: 11 layers × 256 pages × 16 tokens = 19 MB (hybrid_kda_dsa, mla-k6v6-split)
+2026-08-28 06:52:51,120 krasis.model INFO Hybrid model: 11 full attention layers (KV cache), 34 linear attention layers
+2026-08-28 06:52:51,120 krasis.server INFO   [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=15268 MB, reserved=15324 MB, used=15644 MB, free=32904 MB, total=48549 MB
+2026-08-28 06:52:51,120 krasis.model INFO VRAM_CHECKPOINT [after-kv-cache-init] cuda:0: alloc=15268 MB, reserved=15324 MB, driver_used=15644 MB, free=32904 MB, total=48549 MB
+2026-08-28 06:52:51,120 krasis.tokenizer INFO Tokenizer config extra_special_tokens is a list; overriding to empty dict for text-only loading
+2026-08-28 06:52:51,120 krasis.tokenizer INFO Loading tokenizer_class=TokenizersBackend through the equivalent PreTrainedTokenizerFast compatibility class
+2026-08-28 06:52:52,503 krasis.tokenizer INFO Tokenizer loaded: vocab=154820, eos=154820, bos=-1
+2026-08-28 06:52:52,504 krasis.server INFO   [33m[VRAM after-full-load][0m cuda:0: alloc=15268 MB, reserved=15324 MB, used=15644 MB, free=32904 MB, total=48549 MB
+2026-08-28 06:52:52,504 krasis.model INFO VRAM_CHECKPOINT [after-full-load] cuda:0: alloc=15268 MB, reserved=15324 MB, driver_used=15644 MB, free=32904 MB, total=48549 MB
+2026-08-28 06:52:52,504 krasis.model INFO Model fully loaded in 157.3s
+2026-08-28 06:52:52,549 krasis.server INFO 
+[1m[36m▸ CUDA runtime warmup[0m
+2026-08-28 06:52:52,549 krasis.server INFO ── CUDA runtime warmup ──
+2026-08-28 06:52:52,550 krasis.model INFO Warming up CUDA runtime on all devices: ['cuda:0']
+2026-08-28 06:52:52,574 krasis.model INFO Marlin warmup expert shape on cuda:0: k=4096 n=2048 group_size=128 gated=True latent_size=0
+2026-08-28 06:52:52,577 krasis.marlin_utils INFO Loaded vendored Marlin GEMM from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_marlin.so
+2026-08-28 06:52:52,709 krasis.model INFO CUDA runtime warmup on cuda:0 complete: 145 MB consumed (34503 MB free before → 34358 MB free after)
+2026-08-28 06:52:52,710 krasis.server INFO   [32mcuBLAS + Marlin runtime warmup done[0m
+2026-08-28 06:52:52,710 krasis.server INFO 
+[1m[36m▸ Setting up GPU decode store[0m
+2026-08-28 06:52:52,710 krasis.server INFO ── Setting up GPU decode store ──
+2026-08-28 06:53:45,681 krasis.model INFO HQQ BF16 attention projection residency released before VMM registration: tensors=350 cuda_mb=11037.00 free_before=31463 MB free_after=42181 MB
+2026-08-28 06:53:46,926 krasis.model INFO HQQ runtime staging prepared: tensors=350 host_mb=10468.66 prefill_mb=5949.63 decode_mb=4519.03 slot_mb=(packed 4138.88, scales 190.08, zeros 190.08) build_ms=46774.432 reg_ms=151.646 device_mb=4519.03 decode_swap_ms=514.683 decode_swap_mb=4519.03
+2026-08-28 06:54:01,212 krasis.model INFO HQQ attention registration completed on cuda:0: 45 layers, 4483 MB validated cache, 350 tensors loaded. Runtime execution descriptors are active on the decode store.
+2026-08-28 06:54:01,218 krasis.model INFO GLM-5.3 runtime registration complete: 45/45 layers
+2026-08-28 06:54:19,647 krasis.model INFO Native MLA k6v6 KV cache: max_seq=4096 (256 pages × 16)
+2026-08-28 06:54:19,648 krasis.model INFO HQQ attention RoPE tables registered: max_seq=4096 rope_half=0 reused_hqq_gqa_cache=False
+2026-08-28 06:54:19,648 krasis.model INFO HQQ attention execution descriptors retained after shared decode setup on cuda:0: 45 layers registered, 4483 MB validated cache, 350 tensors loaded.
+2026-08-28 06:54:19,648 krasis.model INFO DSA resources staged on cuda:0: local_owners=[3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43] replicas=[] layers=[0,45) max_context=4096
+2026-08-28 06:54:19,649 krasis.model INFO Primary full-prefill DSA resources staged on cuda:0: 11 owner/replica resources for layers [0,45)
+2026-08-28 06:54:19,649 krasis.model INFO GPU decode store configured: 45 layers, store_addr=1443505840
+2026-08-28 06:54:19,649 krasis.model INFO Sequence-state inventory on cuda:0: registered=79 required=90
+2026-08-28 06:54:19,649 krasis.server INFO   [32mGPU decode store ready (addr=0x560a26b0)[0m
+2026-08-28 06:54:20,165 krasis.model INFO Released redundant GPU execution tensors after Rust setup: total=794 MB, lm_head_source=605 MB, router_fp32_mirrors=189 MB, free_before=34148 MB, free_after=34946 MB
+2026-08-28 06:54:20,166 krasis.server INFO   [32mReleased redundant GPU execution source tensors (794 MB)[0m
+2026-08-28 06:54:20,166 krasis.server INFO   [2mVRAM monitor started (startup measurement 1 ms; runtime 50 ms)[0m
+2026-08-28 06:54:20,166 krasis.server INFO   [2mcuda:0: 0 MB total[0m
+2026-08-28 06:54:20,166 krasis.server INFO 
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+2026-08-28 06:54:20,166 krasis.server INFO ── Pre-allocating Rust prefill engine ──
+2026-08-28 06:54:21,323 krasis.server INFO   [32mPrefill engine scratch buffers allocated[0m
+2026-08-28 06:54:21,324 krasis.server INFO 
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+2026-08-28 06:54:21,324 krasis.server INFO ── Warmup (Rust prefill engine) ──
+2026-08-28 06:54:27,687 krasis.server INFO   [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+2026-08-28 06:54:27,687 krasis.server INFO   [32mWarmup complete in 6.4s[0m
+2026-08-28 06:54:27,687 krasis.server INFO   [2mcuda:0 warmup:  peak 46,544 MB used / 48,549 MB total  (min free: 2,004 MB)[0m
+2026-08-28 06:54:27,687 krasis.server INFO VRAM warmup cuda:0: peak_used=46544 MB, min_free=2004 MB, total=48549 MB
+2026-08-28 06:54:27,687 krasis.server INFO 
+[1m[36m▸ VRAM calibration[0m
+2026-08-28 06:54:27,687 krasis.server INFO ── VRAM calibration ──
+2026-08-28 06:54:27,687 krasis.server INFO   [32mSafety margin: 600 MB[0m
+2026-08-28 06:54:27,814 krasis.server INFO   [32mFree VRAM after startup: 34,838 MB / 48,549 MB[0m
+2026-08-28 06:54:27,815 krasis.server INFO VRAM calibration baseline: free=34838 MB, total=48549 MB
+2026-08-28 06:54:27,815 krasis.server INFO   [32mCalibration prefill guard: 1,200 MB (runtime safety remains 600 MB)[0m
+2026-08-28 06:54:27,815 krasis.server INFO Startup calibration prefill guard: previous=600 MB guard=1200 MB runtime=600 MB
+2026-08-28 06:54:28,114 krasis.server INFO   [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+2026-08-28 06:54:49,064 krasis.server INFO   [32mShort calibration: baseline=34,838 MB, prefill post-alloc=4,764 MB, prefill min=1,286 MB, decode min=34,784 MB, post-cleanup=34,784 MB[0m
+2026-08-28 06:54:49,065 krasis.server INFO   [32mAdaptive long calibration: default target=3,196 tokens, target low-water floor=1,200 MB, estimated prefill growth=1.1669 MB/token[0m
+2026-08-28 06:54:49,065 krasis.server INFO Adaptive startup calibration: default_long=3196 target_floor=1200 MB estimated_prefill_mb_per_token=1.166914
+2026-08-28 06:54:49,065 krasis.server INFO Adaptive startup calibration fail-closed probe: current_tokens=500 next_tokens=3196 entry_floor_mb=5661 available_mb=34838 admitted=True
+2026-08-28 06:54:49,065 krasis.server INFO   [32mAdaptive long calibration fail-closed entry check: 3,196 tokens require 5,661 MB, 34,838 MB available — admitted[0m
+2026-08-28 06:54:49,065 krasis.server INFO   [32mAdaptive long calibration: next probe 3,196 tokens (runtime-derived fail-closed probe (entry floor validated through 3196 tokens; projection declined: current low-water 1286 MB leaves no validation reserve above 2400 MB))[0m
+2026-08-28 06:54:49,065 krasis.server INFO Adaptive startup calibration probe: next_tokens=3196 reason=runtime-derived fail-closed probe (entry floor validated through 3196 tokens; projection declined: current low-water 1286 MB leaves no validation reserve above 2400 MB)
+2026-08-28 06:54:49,346 krasis.server INFO   [32mLong calibration: probing 3,196 prompt tokens + 32 decode tokens[0m
+2026-08-28 06:55:28,692 krasis.server INFO   [32mLong calibration: baseline=34,784 MB, prefill post-alloc=4,764 MB, prefill min=1,136 MB, decode min=34,782 MB, post-cleanup=34,782 MB[0m
+2026-08-28 06:55:28,693 krasis.server INFO Startup calibration prefill guard restored: previous=1200 MB runtime=600 MB
+2026-08-28 06:55:28,693 krasis.server INFO   [32mScratch reservation: max=5,318 MB (at 4,096 tokens)[0m
+2026-08-28 06:55:28,921 krasis.server INFO   [32mVRAM monitor runtime cadence restored: 1 ms -> 50 ms[0m
+2026-08-28 06:55:28,921 krasis.server INFO 
+[1m[36m▸ VRAM calibration complete[0m
+2026-08-28 06:55:28,922 krasis.server INFO ── VRAM calibration complete ──
+2026-08-28 06:55:28,922 krasis.server INFO   [32mPost-calibration free VRAM: 34,782 MB[0m
+2026-08-28 06:55:28,922 krasis.server INFO   [32mTransient deltas: short prefill=33,552 MB, long prefill=33,648 MB, short decode=54 MB, long decode=2 MB[0m
+2026-08-28 06:55:28,922 krasis.server INFO   [32mGPU0 decode HCS budget: 34,128 MB[0m
+2026-08-28 06:55:28,922 krasis.server INFO   [32mPrefill HCS budgets: short=630 MB, long=534 MB[0m
+2026-08-28 06:55:28,922 krasis.server INFO   [32mWorst-case prefill scratch reservation: 5,318 MB at 4,096 tokens[0m
+2026-08-28 06:55:28,922 krasis.server INFO VRAM calibration: post_free=34782 MB, short=500tok, long=3196tok, gpu0_decode_hcs=34128 MB, prefill_short_hcs=630 MB, prefill_long_hcs=534 MB, max_scratch=5318 MB
+2026-08-28 06:55:28,922 krasis.server INFO 
+[1m[36m▸ Calculating HCS budget[0m
+2026-08-28 06:55:28,922 krasis.server INFO ── Calculating HCS budget ──
+2026-08-28 06:55:28,960 krasis.server INFO 
+[1m[36m▸ Checking approved route heatmap cache[0m
+2026-08-28 06:55:28,960 krasis.server INFO ── Checking approved route heatmap cache ──
+2026-08-28 06:55:29,298 krasis.server INFO   [2mNo approved heatmap artifact matches this model/router signature and validated runtime; falling back to quick startup heatmap generation[0m
+2026-08-28 06:55:29,298 krasis.server INFO 
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+2026-08-28 06:55:29,298 krasis.server INFO ── Building expert heatmap (decode-weighted calibration) ──
+2026-08-28 06:55:29,361 krasis.server INFO Building heatmap from 6 held-out prompts (256 decode tokens each, temperature=0.000 top_k=50 top_p=0.950 enable_thinking=False mode=benchmark)...
+2026-08-28 06:55:29,362 krasis.server INFO   [2mQuick heatmap prompt 1/6: 36 prefill tokens + 256 decode tokens[0m
+2026-08-28 06:55:29,362 krasis.server INFO HEATMAP prompt_start index=1 total=6 prompt_tokens=36 decode_tokens=256 tokenize_s=0.000402
+2026-08-28 06:55:35,079 krasis.server INFO HEATMAP prompt_prefill_done index=1 total=6 prompt_len=36 first_token=2 kv_overflow=False prefill_s=5.717
+2026-08-28 06:55:35,079 krasis.server INFO HEATMAP prompt_decode_start index=1 total=6 start_position=36 max_tokens=256
+2026-08-28 06:56:41,965 krasis.server INFO HEATMAP prompt_done index=1 total=6 prompt_len=36 first_token=2 kv_overflow=False stopped_before_decode=False generated_tokens=256 total_decode_tokens=257 tokenize_s=0.000402 prefill_s=5.717 decode_s=66.886 prompt_s=72.604 elapsed_s=72.604 eta_s=363.019
+2026-08-28 06:56:41,965 krasis.server INFO   [2mQuick heatmap prompt 1/6 done: 257 route tokens, 72.6s (elapsed 72.6s, eta 363.0s)[0m
+2026-08-28 06:56:41,966 krasis.server INFO   [2mQuick heatmap prompt 2/6: 44 prefill tokens + 256 decode tokens[0m
+2026-08-28 06:56:41,966 krasis.server INFO HEATMAP prompt_start index=2 total=6 prompt_tokens=44 decode_tokens=256 tokenize_s=0.000552
+2026-08-28 06:56:48,263 krasis.server INFO HEATMAP prompt_prefill_done index=2 total=6 prompt_len=44 first_token=2 kv_overflow=False prefill_s=6.297
+2026-08-28 06:56:48,263 krasis.server INFO HEATMAP prompt_decode_start index=2 total=6 start_position=44 max_tokens=256
+2026-08-28 06:57:54,886 krasis.server INFO HEATMAP prompt_done index=2 total=6 prompt_len=44 first_token=2 kv_overflow=False stopped_before_decode=False generated_tokens=256 total_decode_tokens=514 tokenize_s=0.000552 prefill_s=6.297 decode_s=66.623 prompt_s=72.921 elapsed_s=145.525 eta_s=291.050
+2026-08-28 06:57:54,886 krasis.server INFO   [2mQuick heatmap prompt 2/6 done: 257 route tokens, 72.9s (elapsed 145.5s, eta 291.1s)[0m
+2026-08-28 06:57:54,887 krasis.server INFO   [2mQuick heatmap prompt 3/6: 36 prefill tokens + 256 decode tokens[0m
+2026-08-28 06:57:54,887 krasis.server INFO HEATMAP prompt_start index=3 total=6 prompt_tokens=36 decode_tokens=256 tokenize_s=0.000501
+2026-08-28 06:58:00,542 krasis.server INFO HEATMAP prompt_prefill_done index=3 total=6 prompt_len=36 first_token=2 kv_overflow=False prefill_s=5.655
+2026-08-28 06:58:00,542 krasis.server INFO HEATMAP prompt_decode_start index=3 total=6 start_position=36 max_tokens=256
+2026-08-28 06:59:07,300 krasis.server INFO HEATMAP prompt_done index=3 total=6 prompt_len=36 first_token=2 kv_overflow=False stopped_before_decode=False generated_tokens=256 total_decode_tokens=771 tokenize_s=0.000501 prefill_s=5.655 decode_s=66.757 prompt_s=72.413 elapsed_s=217.939 eta_s=217.939
+2026-08-28 06:59:07,300 krasis.server INFO   [2mQuick heatmap prompt 3/6 done: 257 route tokens, 72.4s (elapsed 217.9s, eta 217.9s)[0m
+2026-08-28 06:59:07,300 krasis.server INFO   [2mQuick heatmap prompt 4/6: 30 prefill tokens + 256 decode tokens[0m
+2026-08-28 06:59:07,300 krasis.server INFO HEATMAP prompt_start index=4 total=6 prompt_tokens=30 decode_tokens=256 tokenize_s=0.000480
+2026-08-28 06:59:12,776 krasis.server INFO HEATMAP prompt_prefill_done index=4 total=6 prompt_len=30 first_token=2 kv_overflow=False prefill_s=5.475
+2026-08-28 06:59:12,776 krasis.server INFO HEATMAP prompt_decode_start index=4 total=6 start_position=30 max_tokens=256
+2026-08-28 07:00:19,418 krasis.server INFO HEATMAP prompt_done index=4 total=6 prompt_len=30 first_token=2 kv_overflow=False stopped_before_decode=False generated_tokens=256 total_decode_tokens=1028 tokenize_s=0.000480 prefill_s=5.475 decode_s=66.642 prompt_s=72.118 elapsed_s=290.057 eta_s=145.028
+2026-08-28 07:00:19,418 krasis.server INFO   [2mQuick heatmap prompt 4/6 done: 257 route tokens, 72.1s (elapsed 290.1s, eta 145.0s)[0m
+2026-08-28 07:00:19,419 krasis.server INFO   [2mQuick heatmap prompt 5/6: 42 prefill tokens + 256 decode tokens[0m
+2026-08-28 07:00:19,419 krasis.server INFO HEATMAP prompt_start index=5 total=6 prompt_tokens=42 decode_tokens=256 tokenize_s=0.000517
+2026-08-28 07:00:26,325 krasis.server INFO HEATMAP prompt_prefill_done index=5 total=6 prompt_len=42 first_token=2 kv_overflow=False prefill_s=6.907
+2026-08-28 07:00:26,325 krasis.server INFO HEATMAP prompt_decode_start index=5 total=6 start_position=42 max_tokens=256
+2026-08-28 07:01:33,033 krasis.server INFO HEATMAP prompt_done index=5 total=6 prompt_len=42 first_token=2 kv_overflow=False stopped_before_decode=False generated_tokens=256 total_decode_tokens=1285 tokenize_s=0.000517 prefill_s=6.907 decode_s=66.708 prompt_s=73.615 elapsed_s=363.672 eta_s=72.734
+2026-08-28 07:01:33,034 krasis.server INFO   [2mQuick heatmap prompt 5/6 done: 257 route tokens, 73.6s (elapsed 363.7s, eta 72.7s)[0m
+2026-08-28 07:01:33,034 krasis.server INFO   [2mQuick heatmap prompt 6/6: 47 prefill tokens + 256 decode tokens[0m
+2026-08-28 07:01:33,034 krasis.server INFO HEATMAP prompt_start index=6 total=6 prompt_tokens=47 decode_tokens=256 tokenize_s=0.000649
+2026-08-28 07:01:39,429 krasis.server INFO HEATMAP prompt_prefill_done index=6 total=6 prompt_len=47 first_token=2 kv_overflow=False prefill_s=6.395
+2026-08-28 07:01:39,430 krasis.server INFO HEATMAP prompt_decode_start index=6 total=6 start_position=47 max_tokens=256
+2026-08-28 07:02:46,330 krasis.server INFO HEATMAP prompt_done index=6 total=6 prompt_len=47 first_token=2 kv_overflow=False stopped_before_decode=False generated_tokens=256 total_decode_tokens=1542 tokenize_s=0.000649 prefill_s=6.395 decode_s=66.900 prompt_s=73.296 elapsed_s=436.969 eta_s=0.000
+2026-08-28 07:02:46,330 krasis.server INFO   [2mQuick heatmap prompt 6/6 done: 257 route tokens, 73.3s (elapsed 437.0s, eta 0.0s)[0m
+2026-08-28 07:02:46,330 krasis.server INFO Heatmap collection complete: 1542 decode tokens across 6 prompts
+2026-08-28 07:02:46,341 krasis.server INFO Heatmap saved to /home/main/.krasis/cache/GLM-5.3-Flash--4ab65dd91f64191f2206f16e896d5af056833466fe12dfbf29baa89ce76c6c1f/auto_heatmap.json (11821 entries)
+2026-08-28 07:02:46,342 krasis.server INFO Heatmap internal decode cleanup complete
+2026-08-28 07:02:46,352 krasis.server INFO   [32mHeatmap: 11,820 experts ranked from 11,820 entries[0m
+2026-08-28 07:02:46,352 krasis.server INFO   [2mVRAM calibration: baseline 34782 MB | prefill 36.5 KB/tok, decode -19.8 KB/tok | HCS allowance prefill: short 630 MB, long 534 MB | decode: short 34128 MB, long 34180 MB | idle floors prefill=34152 MB decode=654 MB | decode-resident HCS budget=34128 MB[0m
+2026-08-28 07:02:46,354 krasis.server INFO   [2mGPU0 HCS: 12096 experts (11820 ranked + 276 unranked), reclaimable: 34,128 MB[0m
+2026-08-28 07:02:46,354 krasis.server INFO 
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+2026-08-28 07:02:46,354 krasis.server INFO ── Loading GPU0 HCS pool (fully reclaimable) ──
+2026-08-28 07:02:48,139 krasis.server INFO 
+[1m[36m▸ HCS pool loaded[0m
+2026-08-28 07:02:48,139 krasis.server INFO ── HCS pool loaded ──
+2026-08-28 07:02:48,139 krasis.server INFO   [32mHCS pool: 0/12096 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 2730 experts in 1.75s (33783.8 MB, host_mode=source) | total: 2730/12096 (22.6%) coverage[0m
+2026-08-28 07:02:48,139 krasis.server INFO   [2mLoaded in 1.8s[0m
+2026-08-28 07:02:48,140 krasis.server INFO HCS pool: HCS pool: 0/12096 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 2730 experts in 1.75s (33783.8 MB, host_mode=source) | total: 2730/12096 (22.6%) coverage (1.8s)
+2026-08-28 07:02:48,140 krasis.server INFO 
+[1m[36m▸ Decode validation[0m
+2026-08-28 07:02:48,140 krasis.server INFO ── Decode validation ──
+2026-08-28 07:02:48,140 krasis.server INFO   [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+2026-08-28 07:02:48,140 krasis.server INFO 
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+2026-08-28 07:02:48,140 krasis.server INFO ── VRAM monitor: runtime warnings enabled ──
+2026-08-28 07:02:48,140 krasis.server INFO   [32mSafety margin: 600 MB — warnings on every new low below this[0m
+2026-08-28 07:02:48,140 krasis.server INFO VRAM monitor: runtime warnings enabled (safety margin: 600 MB)
+2026-08-28 07:02:48,141 krasis.server INFO   [33mVRAM pressure eviction at startup_ready: evicted 15 soft HCS experts, freed 185.6 MB, final free 1,116 MB[0m
+2026-08-28 07:02:48,261 krasis.server INFO Registry entry written: /home/main/.krasis/servers/3249040.json
+2026-08-28 07:02:48,261 krasis.server INFO Thinking end token: </think> = 154842
+2026-08-28 07:02:48,261 krasis.server INFO Model loaded, starting server on 127.0.0.1:18253 (max context: 4096, decode: GPU)
+2026-08-28 07:02:49,382 krasis.server INFO [1m[32mKRASIS SERVER READY[0m
+2026-08-28 07:02:49,382 krasis.server INFO   [32mModel:[0m    [1mGLM-5.3-Flash[0m
+2026-08-28 07:02:49,382 krasis.server INFO   [32mAddress:[0m  [1m127.0.0.1:18253[0m
+2026-08-28 07:02:49,382 krasis.server INFO   [32mContext:[0m  4,096 tokens  |  KV cache: 1,000 MB
+2026-08-28 07:02:49,383 krasis.server INFO   [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+2026-08-28 07:02:49,383 krasis.server INFO   [32mClient setup:[0m
+2026-08-28 07:02:49,383 krasis.server INFO     Base URL:      [1mhttp://127.0.0.1:18253/v1[0m
+2026-08-28 07:02:49,383 krasis.server INFO     Chat endpoint: http://127.0.0.1:18253/v1/chat/completions
+2026-08-28 07:02:49,383 krasis.server INFO     Models:        http://127.0.0.1:18253/v1/models
+2026-08-28 07:02:49,383 krasis.server INFO     API key:       [1mX[0m [2m(any value)[0m
+2026-08-28 07:02:49,383 krasis.server INFO     Model name:    [1mGLM-5.3-Flash[0m
+2026-08-28 07:02:49,383 krasis.server INFO   [2mPress Q or Ctrl-C to stop[0m
+2026-08-28 07:02:49,385 krasis.server INFO [1m[36mKRASIS BENCHMARK[0m
+2026-08-28 07:02:49,385 krasis.server INFO 
+[1m[36m▸ Collecting system info[0m
+2026-08-28 07:02:49,480 krasis.server INFO   Model:    [1mGLM-5.3-Flash[0m
+2026-08-28 07:02:49,480 krasis.server INFO   GPUs:     1x NVIDIA RTX A6000
+2026-08-28 07:02:49,480 krasis.server INFO   Strategy: gpu_decode (layer_grouped(1))
+2026-08-28 07:02:49,480 krasis.server INFO 
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/3,196)[0m
+2026-08-28 07:02:49,480 krasis.server INFO   Prefill sizing:  [33mruntime-calibrated prefill cap 3,196 tokens (long probe low-water 1,134 MB, safety 600 MB)[0m
+2026-08-28 07:02:50,860 krasis.server INFO   Warmup prefill:  3 prompts, ~3,196 tokens each
+2026-08-28 07:02:50,860 krasis.server INFO   Timed prefill:   2 prompts at 1K/3,196 tokens
+2026-08-28 07:02:50,860 krasis.server INFO     [1] 1,000 tokens
+2026-08-28 07:02:50,860 krasis.server INFO     [2] 3,196 tokens
+2026-08-28 07:02:50,860 krasis.server INFO   Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+2026-08-28 07:02:50,860 krasis.server INFO 
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+2026-08-28 07:02:50,860 krasis.server INFO   Warmup: 2 short engine requests...
+2026-08-28 07:03:10,567 krasis.server INFO   Warmup complete.
+2026-08-28 07:03:10,567 krasis.server INFO   Prefill warmup (3 runs, ~3,196 tokens each)...
+2026-08-28 07:03:32,740 krasis.server INFO     [1/3] 3,196 tokens
+2026-08-28 07:03:55,042 krasis.server INFO     [2/3] 3,196 tokens
+2026-08-28 07:04:17,185 krasis.server INFO     [3/3] 3,196 tokens
+2026-08-28 07:04:17,186 krasis.server INFO   Decode warmup (50/100/250 tokens, 3 separate prompts)...
+2026-08-28 07:04:33,774 krasis.server INFO     50 tokens done
+2026-08-28 07:04:56,895 krasis.server INFO     100 tokens done
+2026-08-28 07:05:42,396 krasis.server INFO     250 tokens done
+2026-08-28 07:05:42,396 krasis.server INFO   Warmup complete (151.8s). All kernels compiled.
+2026-08-28 07:05:42,397 krasis.server INFO 
+[1m[36m▸ Prefill (internal) — 1K/3,196 tokens, 2 runs[0m
+2026-08-28 07:06:19,993 krasis.server INFO   Run 1: 79.1 tok/s (1,000 tokens in 12636.6ms)
+2026-08-28 07:06:19,993 krasis.server INFO   Run 2: 162.1 tok/s (3,196 tokens in 19710.8ms)
+2026-08-28 07:06:19,993 krasis.server INFO   [1mBest: 162.1 tok/s (3,196 tokens)[0m
+2026-08-28 07:06:19,994 krasis.server INFO 
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+2026-08-28 07:07:44,663 krasis.server INFO    50 tokens: 6.83 tok/s (146.4ms/tok)
+2026-08-28 07:07:44,663 krasis.server INFO   100 tokens: 7.67 tok/s (130.4ms/tok)
+2026-08-28 07:07:44,664 krasis.server INFO   250 tokens: 7.29 tok/s (137.2ms/tok)
+2026-08-28 07:07:44,664 krasis.server INFO   [1mBest: 7.67 tok/s[0m
+2026-08-28 07:07:44,664 krasis.server INFO   HCS:  2715/12096 experts loaded (22.4%)
+2026-08-28 07:07:44,664 krasis.server INFO   VRAM: 1114 MB min free during decode (safety margin: 600 MB)
+2026-08-28 07:07:44,664 krasis.server INFO 
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+2026-08-28 07:09:16,191 krasis.server INFO    50 tokens: 11.71 tok/s (16.70s total)
+2026-08-28 07:09:16,191 krasis.server INFO   100 tokens: 9.90 tok/s (23.38s total)
+2026-08-28 07:09:16,191 krasis.server INFO   250 tokens: 7.96 tok/s (43.73s total)
+2026-08-28 07:09:16,191 krasis.server INFO   [1mBest: 11.71 tok/s[0m
+2026-08-28 07:09:16,191 krasis.server INFO 
+[1m[36m▸ Writing results[0m
+2026-08-28 07:09:16,192 krasis.server INFO [1m[32mBENCHMARK COMPLETE[0m
+2026-08-28 07:09:16,192 krasis.server INFO   Model:                 [1mGLM-5.3-Flash[0m
+2026-08-28 07:09:16,192 krasis.server INFO   Config:                INT4/4 HQQ6 KV=k6v6 1 GPU
+2026-08-28 07:09:16,192 krasis.server INFO   Prefill (internal):    [32m[1m162.1 tok/s[0m  (best of 1K/3,196)
+2026-08-28 07:09:16,192 krasis.server INFO   Decode (internal):     [32m[1m7.67 tok/s[0m  (best of 50/100/250)
+2026-08-28 07:09:16,192 krasis.server INFO   Round trip (network):  [32m[1m11.71 tok/s[0m  (best of 50/100/250)
+2026-08-28 07:09:16,192 krasis.server INFO   HCS coverage:          2715/12096 (22.4%)
+2026-08-28 07:09:16,192 krasis.server INFO   Min free VRAM:         1114 MB
+2026-08-28 07:09:16,192 krasis.server INFO   Log:     [2mlogs/dev-benchmark_20260828_065007/benchmark_report.log[0m

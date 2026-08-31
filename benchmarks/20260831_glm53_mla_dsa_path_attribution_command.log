@@ -1,0 +1,12 @@
+Date: 2026-08-31 Europe/London
+GPU: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+Config: tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+Command: KRASIS_DECODE_MLA_PATH_CLOCKS=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing
+tmux: glm53_mla_path_clocks_diag_20260831
+run directory: logs/dev-benchmark_20260831_012538
+termination: intentionally stopped with ./dev kill after the complete 500/4K/8K/16K/32K/39,920 calibration curve and before redundant formal speed rows; wrapper exit 137
+purpose: timing-only registered MLA/DSA CUDA graph stage attribution; not speed evidence
+instrumentation: KRASIS_DECODE_MLA_PATH_CLOCKS=1 and --timing
+stdout sha256: 4ed6b9e78a16498dbb99e2856b3e61d87376d264b300ff004634722014605e1e
+runtime sha256: 210d676f4321d13a9e3ba3ac3e8abe8eafac5a640a33bbdf00f304f7cccef5f4
+outer sha256: 8911b7664a427fc1bd5d02ce769e5a279313d153389408e4381ac633a791faa3

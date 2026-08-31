@@ -1,0 +1,11 @@
+Date: 2026-08-29
+Working directory: /home/main/Documents/Claude/krasis
+Command: ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+Run directory: logs/dev-benchmark_20260829_122535
+GPU: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (NVIDIA RTX PRO 6000 Blackwell Workstation Edition)
+Timing/profile instrumentation: disabled
+VRAM safety margin: 600 MiB
+Exit status: 0
+benchmark_report.log sha256: 1d211946e8e08074862db469a3330593531dc5e5a4056fe875ac3c15e1cc207d
+benchmark_stdout.log sha256: 49a8bfa348f7413d7d7dac9934b1ed2a8233605ecd0a37b054a7ea6374562819
+krasis.log sha256: 283bf737041d7ba340e65fd76f4f8a7c2ad1a28bb4f219e0561a2f2896b305ce

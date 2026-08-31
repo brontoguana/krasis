@@ -1,0 +1,4 @@
+./dev benchmark tests/glm53-flash-hqq6-k6v6-a6000.conf
+
+Purpose: timing-disabled optimization baseline before targeted GLM-5.3 KDA/DSA/mHC prefill and decode work.
+

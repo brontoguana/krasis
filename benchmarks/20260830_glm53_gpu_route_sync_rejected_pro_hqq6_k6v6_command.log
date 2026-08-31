@@ -1,0 +1,16 @@
+Diagnostic only; incomplete by design after decisive rejection.
+
+tmux session: glm53_gpu_route_sync_attribution_20260830
+run directory: logs/dev-benchmark_20260830_230022
+command:
+  env -u KRASIS_TRACE -u KRASIS_PREFILL_TIMING -u KRASIS_STARTUP_DIAG \
+    -u KRASIS_VRAM_LEDGER -u KRASIS_CPU_TAIL_RACE \
+    -u KRASIS_CPU_TAIL_TRANSPOSED -u KRASIS_MAPPED_READS \
+    KRASIS_GPU_ROUTE_SYNC=1 \
+    ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing
+
+Stop command: ./dev kill
+Exit: 137 after deliberate stop.
+Reason: GPU route sync suppressed Dynamic HCS promotion and regressed decode;
+the formal prefill then reached 597 MiB, below the required 600 MiB margin.
+No benchmark report was produced and no speed claim is made.

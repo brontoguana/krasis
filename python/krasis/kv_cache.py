@@ -68,6 +68,8 @@ class PagedKVCache:
         self.kv_dtype = kv_dtype
         self.combined = combined
         self.attention_type = cfg.attention_type  # "mla" or "gqa"
+        self.is_mla = bool(cfg.is_mla)
+        self.is_gqa = bool(cfg.is_gqa)
         kv_aliases = {
             "fp8": "fp8",
             "fp8_e4m3": "fp8",
@@ -157,7 +159,7 @@ class PagedKVCache:
         elif cfg.is_mla:
             if combined:
                 raise ValueError(
-                    "Native MLA k4v4 cache uses separate compressed and positional stores; "
+                    "Native MLA compact cache uses separate compressed and positional stores; "
                     "the legacy combined cache layout is unsupported."
                 )
             self.ckv_dim = max(cfg.kv_lora_rank, MLA_CKV_KERNEL_MIN_DIM)
@@ -165,20 +167,21 @@ class PagedKVCache:
             self.kv_cache_dim = self.ckv_dim + self.kpe_dim
             self.num_kv_heads = None
             self.gqa_head_dim = None
-            if self.kv_format != 9:
+            if self.kv_format not in (7, 9):
                 raise ValueError(
-                    "Native MLA execution currently requires k4v4 KV cache; "
+                    "Native MLA execution requires k4v4 or k6v6 KV cache; "
                     f"got kv_format={self.kv_format_str!r}. No fallback cache format is available."
                 )
             if self.ckv_dim % 16 != 0 or self.kpe_dim % 16 != 0:
                 raise ValueError(
-                    "Native MLA k4v4 cache requires dimensions divisible by 16; "
+                    "Native MLA compact cache requires dimensions divisible by 16; "
                     f"got compressed_dim={self.ckv_dim}, positional_dim={self.kpe_dim}."
                 )
-            # One BF16 least-squares scale plus eight packed INT4 bytes for
-            # each 16-element block.
-            self.ckv_row_bytes = (self.ckv_dim // 16) * 10
-            self.kpe_row_bytes = (self.kpe_dim // 16) * 10
+            # Each 16-element block stores one BF16 least-squares scale plus
+            # either eight packed INT4 bytes or twelve packed INT6 bytes.
+            self.mla_block_bytes = 10 if self.kv_format == 9 else 14
+            self.ckv_row_bytes = (self.ckv_dim // 16) * self.mla_block_bytes
+            self.kpe_row_bytes = (self.kpe_dim // 16) * self.mla_block_bytes
         else:
             # GQA: standard K/V with head dimension
             self.ckv_dim = None
@@ -644,8 +647,8 @@ class PagedKVCache:
             alloc_mb = self.kv_cache.nbytes / (1024**2)
             layout_str = "mla-combined"
         else:
-            # MLA k4v4 split format. Each logical 16-element block occupies
-            # 10 bytes: one BF16 scale followed by eight packed INT4 bytes.
+            # Native MLA split format. The row width was derived from the
+            # selected compact cache format during configuration validation.
             self.ckv_cache = torch.zeros(
                 num_layers, max_pages, page_size, self.ckv_row_bytes,
                 dtype=torch.uint8, device=device,
@@ -655,7 +658,7 @@ class PagedKVCache:
                 dtype=torch.uint8, device=device,
             )
             alloc_mb = (self.ckv_cache.nbytes + self.kpe_cache.nbytes) / (1024**2)
-            layout_str = "mla-k4v4-split"
+            layout_str = f"mla-{self.kv_format_str}-split"
 
         logger.info(
             "KV cache allocated: %d layers × %d pages × %d tokens = %.0f MB (%s, %s)",
@@ -760,7 +763,7 @@ class PagedKVCache:
                 1,
                 self._dsv4_bytes_for_pages(2) - self._dsv4_bytes_for_pages(1),
             )
-        if self.attention_type == "mla":
+        if self.is_mla:
             return self.page_size * (
                 self.ckv_row_bytes + self.kpe_row_bytes
             ) * self.num_layers
@@ -933,12 +936,12 @@ class PagedKVCache:
 
         Returns (ckv_cache, kpe_cache) each [max_pages, page_size, dim].
         """
-        assert self.attention_type == "mla" and not self.combined
+        assert self.is_mla and not self.combined
         return self.ckv_cache[layer_offset], self.kpe_cache[layer_offset]
 
     def get_combined_layer_cache(self, layer_offset: int) -> torch.Tensor:
         """Get combined KV cache for MLA (TRTLLM format)."""
-        assert self.attention_type == "mla" and self.combined
+        assert self.is_mla and self.combined
         return self.kv_cache[layer_offset].unsqueeze(0)
 
     def get_deepseek_v4_layer_caches(self, layer_offset: int) -> dict:
@@ -973,7 +976,7 @@ class PagedKVCache:
 
         Returns (k, v) each [max_pages, page_size, num_kv_heads, head_dim].
         """
-        assert self.attention_type == "gqa"
+        assert self.is_gqa
         return self.k_cache[layer_offset], self.v_cache[layer_offset]
 
 

@@ -1,0 +1,95 @@
+Checking server health at http://localhost:18254... [0;32mOK[0m
+Sending warmup request... done (7.3s)
+  [2m>>> Hello! 👋 How can I help[0m
+
+[1m[0;36mTest 4: Network Multi-Prompt Validation[0m
+============================================================
+  [0;32mPASS[0m OK (7.3s) [factual_qa]
+  [0;32mPASS[0m OK (8.2s) [math_simple]
+  [0;32mPASS[0m OK (12.2s) [code_gen]
+  [0;32mPASS[0m OK (9.3s, 14 words) [multi_turn]
+  [0;32mPASS[0m OK (6.5s, 7 words) [short_prompt]
+  [0;32mPASS[0m OK (7.6s) [streaming_factual]
+  [0;32mPASS[0m OK (8.4s) [streaming_code]
+  [0;32mPASS[0m OK (9.7s) [json_output]
+  [0;32mPASS[0m OK (9.3s) [blocking_math]
+
+[1m[0;36mTest 5: Network Large-Prompt Validation[0m
+============================================================
+  Loading ~1K token prompt... done (7044 chars)
+  [0;32mPASS[0m OK (19.8s, 74 words) | prompt_tokens=2044 | Prefill (internal)=240.1 tok/s | Decode (internal)=18.57 tok/s | Round trip=18.57 tok/s [large_2k]
+  Loading ~8K token prompt... done (35045 chars)
+  [0;32mPASS[0m OK (23.2s, 87 words) | prompt_tokens=8585 | Prefill (internal)=760.5 tok/s | Decode (internal)=17.11 tok/s | Round trip=17.11 tok/s [large_10k]
+  Loading ~21K token prompt... done (87555 chars)
+  [0;32mPASS[0m OK (30.0s, 84 words) | prompt_tokens=23072 | Prefill (internal)=1260.4 tok/s | Decode (internal)=17.56 tok/s | Round trip=17.56 tok/s [large_25k]
+  Loading ~87K token prompt... done (244208 chars)
+  [0;32mPASS[0m Correctly rejected over-context prompt (61891>50000) (0.4s) [large_100k]
+
+[1m[0;36mTest 6: Multi-Turn Sequential Conversation[0m
+============================================================
+  Turn 1: establishing facts... [0;32mPASS[0m OK (13.7s)
+  Turn 2: recalling dog's name... [0;32mPASS[0m OK (9.5s)
+  Turn 3: recalling city... [0;32mPASS[0m OK (9.1s)
+  Turn 4: recalling number (streaming)... [0;32mPASS[0m OK (10.1s)
+  Turn 5: recalling all three facts... [0;32mPASS[0m OK (14.4s)
+
+============================================================
+[1mSUMMARY[0m: 18/18 passed, 0 failed, 215.9s total
+
+[1mResponse texts (review for coherence):[0m
+
+  [[0;32mPASS[0m] factual_qa: OK (7.3s)
+  [2m>>> Paris[0m
+
+  [[0;32mPASS[0m] math_simple: OK (8.2s)
+  [2m>>> 56[0m
+
+  [[0;32mPASS[0m] code_gen: OK (12.2s)
+  [2m>>> def fibonacci(n):\n    if n <= 0:\n        return 0\n    elif n == 1:\n        return 1\n    else:\n        a, b = 0, 1\n        for _ in range(2, n + 1):\n            a, b = b, a + b\n        return b[0m
+
+  [[0;32mPASS[0m] multi_turn: OK (9.3s, 14 words)
+  [2m>>> Your name is Alice — you told me at the start of our conversation![0m
+
+  [[0;32mPASS[0m] short_prompt: OK (6.5s, 7 words)
+  [2m>>> Hello! How can I help you today?[0m
+
+  [[0;32mPASS[0m] streaming_factual: OK (7.6s)
+  [2m>>> Tokyo[0m
+
+  [[0;32mPASS[0m] streaming_code: OK (8.4s)
+  [2m>>> ```python\nprint("Hello, World!")\n```[0m
+
+  [[0;32mPASS[0m] json_output: OK (9.7s)
+  [2m>>> {"name": "Bob", "age": 30}[0m
+
+  [[0;32mPASS[0m] blocking_math: OK (9.3s)
+  [2m>>> 42[0m
+
+  [[0;32mPASS[0m] large_2k: OK (19.8s, 74 words) | prompt_tokens=2044 | Prefill (internal)=240.1 tok/s | Decode (internal)=18.57 tok/s | Round trip=18.57 tok/s
+  [2m>>> # Summary\n\nThis text is the front matter of Herman Melville's *Moby-Dick; or, The Whale*, beginning with a table of contents listing all 135 chapters plus the epilogue, followed by the book's famous "Etymology" section and "Extracts." The Etymology section—supplied by a fictional "Late Consumptive Usher to a Grammar School"—playfully traces the word "whale" across multiple languages (Hebrew, Greek, Latin, Anglo-Saxon, Danish, Dutch, Swedish, Icelandic, English, French, Spanish, and the fictional[0m
+
+  [[0;32mPASS[0m] large_10k: OK (23.2s, 87 words) | prompt_tokens=8585 | Prefill (internal)=760.5 tok/s | Decode (internal)=17.11 tok/s | Round trip=17.11 tok/s
+  [2m>>> # Main Themes in the Text\n\nThis passage is from the opening of **War and Peace** by Leo Tolstoy (Book One, Chapters I–IV). Several major themes emerge:\n\n## 1. **Social Performance and Insincerity**\nThe aristocratic drawing room of Anna Pávlovna is a stage where everyone performs roles. Anna Pávlovna "became enthusiastic in order not to disappoint the expectations of those who knew her," and Prince Vasíli speaks "like an actor repeating a stale part." Politeness masks indifference and even irony.[0m
+
+  [[0;32mPASS[0m] large_25k: OK (30.0s, 84 words) | prompt_tokens=23072 | Prefill (internal)=1260.4 tok/s | Decode (internal)=17.56 tok/s | Round trip=17.56 tok/s
+  [2m>>> # Summary of Key Events\n\nThis text is the opening of Victor Hugo's *Les Misérables*, covering the introduction of Bishop Charles-François-Bienvenu Myriel and the beginning of Jean Valjean's story.\n\n## The Bishop Myriel\n\n- **M. Myriel**, Bishop of D——, is introduced as a 75-year-old man who has served since 1806. Formerly a man of the world devoted to gallantry, the Revolution transformed him; after emigrating to Italy (where his wife died), he returned as a priest.\n\n- **His generosity**: Despite[0m
+
+  [[0;32mPASS[0m] large_100k: Correctly rejected over-context prompt (61891>50000) (0.4s)
+  [2m>>> (no response text captured)[0m
+
+  [[0;32mPASS[0m] multi_turn_t1: OK (13.7s)
+  [2m>>> I'll remember these three facts for our conversation:\n\n1. **Your dog's name is Biscuit** — acknowledged! 🐕\n2. **You live in Wellington, New Zealand** — acknowledged!\n3. **Your favorite number is 42** — acknowledged!\n\nI've got all three noted. Feel free to reference them anytime during our chat — whether you want to talk about Biscuit, something related to Wellington, or work with the number 42![0m
+
+  [[0;32mPASS[0m] multi_turn_t2_dog: OK (9.5s)
+  [2m>>> Based on what you told me, your dog's name is **Biscuit**! 🐕\n\nGreat name, by the way — very fitting for a pup in New Zealand. Is there anything else you'd like to chat about regarding Biscuit?[0m
+
+  [[0;32mPASS[0m] multi_turn_t3_city: OK (9.1s)
+  [2m>>> Based on what you shared, you live in **Wellington, New Zealand**! 🇳🇿\n\nThat's the capital city, known for its beautiful harbor, vibrant arts scene, and being the windiest city in the world. Is there anything else you'd like to know or discuss?[0m
+
+  [[0;32mPASS[0m] multi_turn_t4_number: OK (10.1s)
+  [2m>>> Based on what you told me, your favorite number is **42**! 🔢\n\nA classic choice — famously known as "the answer to life, the universe, and everything" from *The Hitchhiker's Guide to the Galaxy*. Is there anything else you'd like to chat about?[0m
+
+  [[0;32mPASS[0m] multi_turn_t5_all: OK (14.4s)
+  [2m>>> I need to be honest with you here — I can only repeat back **two** of the three facts you shared:\n\n1. ✅ **Where you live:** Wellington, New Zealand\n2. ✅ **Your favorite number:** 42\n3. ❌ **Your dog's name:** You told me your dog's name is **Biscuit**, but you never actually told me your *own* name.\n\nWait — I misread your question! Let me correct myself:\n\nLooking back at your original message, you told me:\n1. Your **dog's name is Biscuit** 🐕\n2. You[0m
+
+[0;32m[1mALL TESTS PASSED[0m

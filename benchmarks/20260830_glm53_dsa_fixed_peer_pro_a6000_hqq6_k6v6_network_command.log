@@ -1,0 +1,8 @@
+KRASIS_VRAM_LEDGER=1 ./dev run tests/glm53-flash-hqq6-k6v6-peer-pro-a6000.conf
+./dev network 18254 --large
+
+server tmux: glm53_dsa_fixed_peer_server_20260830
+network tmux: glm53_dsa_fixed_peer_network_large_20260830
+server run directory: logs/dev-run_20260830_033520
+server exit: 0
+network exit: 0

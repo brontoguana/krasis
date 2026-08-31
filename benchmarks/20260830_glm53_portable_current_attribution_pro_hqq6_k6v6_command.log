@@ -1,0 +1,7 @@
+Purpose: diagnostic current-source attribution after portable radix-linear prefill and runtime-measured INT4 N16/N32 selection.
+Hardware: one NVIDIA RTX PRO 6000 Blackwell 96 GB.
+Run directory: logs/dev-benchmark_20260830_155424
+Exit: 0
+Instrumentation: ./dev --timing enabled GPU decode timing; KRASIS_TRACE, explicit prefill/decode selector overrides, startup diagnostics and VRAM ledger were unset. Reported throughput is diagnostic and is not timing-disabled speed evidence.
+
+env -u KRASIS_TRACE -u KRASIS_DEEPSEEK_V4_PREFILL_INDEX_SCORE_MODE -u KRASIS_DEEPSEEK_V4_PREFILL_TOPK_MODE -u KRASIS_DECODE_INT4_W13_N32 -u KRASIS_DECODE_INT4_W2_N32 -u KRASIS_STARTUP_DIAG -u KRASIS_VRAM_LEDGER ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing

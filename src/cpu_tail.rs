@@ -379,8 +379,44 @@ struct CalibratedCpuTailConfig {
     artifact: String,
     placement: String,
     cpu_ids: Vec<usize>,
+    minimum_queue_depth: usize,
     worker_index: usize,
     worker_count: usize,
+}
+
+fn minimum_positive_win_depth(
+    probabilities: Option<&serde_json::Value>,
+    artifact: &str,
+    field: &str,
+) -> Result<usize, String> {
+    let probabilities = probabilities
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("CPU-tail calibration artifact {artifact} has no {field} object"))?;
+    let mut minimum = None;
+    for depth in 2..=9 {
+        let label = if depth == 9 {
+            "9+".to_string()
+        } else {
+            depth.to_string()
+        };
+        let probability = probabilities
+            .get(&label)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+            .ok_or_else(|| {
+                format!(
+                    "CPU-tail calibration artifact {artifact} has no valid {field}.{label} probability"
+                )
+            })?;
+        if minimum.is_none() && probability > 0.0 {
+            minimum = Some(depth);
+        }
+    }
+    minimum.ok_or_else(|| {
+        format!(
+            "CPU-tail calibration artifact {artifact} reports zero measured win probability at every queue depth for {field}"
+        )
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -440,6 +476,9 @@ pub fn configured_worker_count() -> Result<usize, String> {
 fn calibrated_cpu_tail_config(
     worker_index: usize,
     worker_count: usize,
+    hidden_size: usize,
+    intermediate_size: usize,
+    group_size: usize,
 ) -> Result<Option<CalibratedCpuTailConfig>, String> {
     if worker_index >= worker_count || !(1..=2).contains(&worker_count) {
         return Err(format!(
@@ -465,10 +504,53 @@ fn calibrated_cpu_tail_config(
             .map_err(|e| format!("read CPU-tail calibration artifact {artifact}: {e}"))?;
         let report: serde_json::Value = serde_json::from_str(&contents)
             .map_err(|e| format!("parse CPU-tail calibration artifact {artifact}: {e}"))?;
-        let (placement, threads, cpu_ids, all_team_cpu_ids) = if worker_count == 1 {
+        if report
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(2)
+        {
+            return Err(format!(
+                "CPU-tail calibration artifact {artifact} does not use supported schema_version=2"
+            ));
+        }
+        let geometry = report.get("geometry").ok_or_else(|| {
+            format!("CPU-tail calibration artifact {artifact} has no geometry object")
+        })?;
+        for (field, actual) in [
+            ("hidden_size", hidden_size),
+            ("intermediate_size", intermediate_size),
+            ("group_size", group_size),
+        ] {
+            let measured = geometry
+                .get(field)
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    format!(
+                        "CPU-tail calibration artifact {artifact} has no valid geometry.{field}"
+                    )
+                })?;
+            if measured != actual {
+                return Err(format!(
+                    "CPU-tail calibration artifact {artifact} geometry mismatch for {field}: measured={measured}, runtime={actual}"
+                ));
+            }
+        }
+        let (placement, threads, cpu_ids, all_team_cpu_ids, minimum_queue_depth) = if worker_count
+            == 1
+        {
             let optimizer = report.get("optimizer").ok_or_else(|| {
                 format!("CPU-tail calibration artifact {artifact} has no optimizer object")
             })?;
+            if optimizer
+                .get("recommendation")
+                .and_then(serde_json::Value::as_str)
+                != Some("enable_candidate")
+            {
+                return Err(format!(
+                    "CPU-tail calibration artifact {artifact} does not recommend enabling its single-worker candidate"
+                ));
+            }
             let threads = optimizer
                 .get("best_threads")
                 .and_then(|value| value.as_u64())
@@ -493,7 +575,21 @@ fn calibrated_cpu_tail_config(
                 &artifact,
                 "optimizer.best_cpu_ids",
             )?;
-            (placement, threads, cpu_ids.clone(), vec![cpu_ids])
+            let probability_field = "optimizer.conservative_prediction.win_probability_by_depth";
+            let minimum_queue_depth = minimum_positive_win_depth(
+                optimizer
+                    .get("conservative_prediction")
+                    .and_then(|prediction| prediction.get("win_probability_by_depth")),
+                &artifact,
+                probability_field,
+            )?;
+            (
+                placement,
+                threads,
+                cpu_ids.clone(),
+                vec![cpu_ids],
+                minimum_queue_depth,
+            )
         } else {
             let optimizer = report.get("two_team_optimizer").ok_or_else(|| {
                 format!("CPU-tail calibration artifact {artifact} has no two_team_optimizer object")
@@ -555,7 +651,23 @@ fn calibrated_cpu_tail_config(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let cpu_ids = all_team_cpu_ids[worker_index].clone();
-            (placement, threads, cpu_ids, all_team_cpu_ids)
+            let probability_field = format!(
+                "two_team_optimizer.prediction.worker_{worker_index}_win_probability_by_depth"
+            );
+            let minimum_queue_depth = minimum_positive_win_depth(
+                optimizer.get("prediction").and_then(|prediction| {
+                    prediction.get(format!("worker_{worker_index}_win_probability_by_depth"))
+                }),
+                &artifact,
+                &probability_field,
+            )?;
+            (
+                placement,
+                threads,
+                cpu_ids,
+                all_team_cpu_ids,
+                minimum_queue_depth,
+            )
         };
         if cpu_ids.len() != threads {
             return Err(format!(
@@ -598,6 +710,7 @@ fn calibrated_cpu_tail_config(
             artifact,
             placement,
             cpu_ids,
+            minimum_queue_depth,
             worker_index,
             worker_count,
         }))
@@ -935,7 +1048,8 @@ pub(crate) fn expert_forward_transposed_persistent(
             if up < -swiglu_limit {
                 up = -swiglu_limit;
             }
-            scratch.w13_out[i] = (up + 1.0) * gate * fast_sigmoid(gate * activation_alpha);
+            let glu = gate * fast_sigmoid(gate * activation_alpha);
+            scratch.w13_out[i] = (up + 1.0) * glu;
         }
         quantize_activation_int16_f32(
             &scratch.w13_out[..intermediate_size],
@@ -983,6 +1097,7 @@ pub(crate) fn expert_forward_transposed_persistent(
 pub struct CpuTailRuntime {
     hidden_size: usize,
     timing_enabled: bool,
+    minimum_queue_depth: usize,
     input: PinnedHostBuffer,
     output: PinnedHostBuffer,
     command_tx: SyncSender<CpuTailCommand>,
@@ -1051,14 +1166,23 @@ impl CpuTailRuntime {
         let (result_tx, result_rx) = mpsc::sync_channel::<CpuTailResult>(1);
         let cancel_sequence = Arc::new(AtomicU64::new(0));
         let worker_cancel = Arc::clone(&cancel_sequence);
-        let calibrated_config = calibrated_cpu_tail_config(worker_index, worker_count)?;
+        let calibrated_config = calibrated_cpu_tail_config(
+            worker_index,
+            worker_count,
+            hidden_size,
+            intermediate_size,
+            group_size,
+        )?;
+        let minimum_queue_depth = calibrated_config
+            .as_ref()
+            .map_or(2, |config| config.minimum_queue_depth);
         let persistent_team = calibrated_config
             .as_ref()
             .map(|config| PersistentTransposedTeam::new(&config.cpu_ids))
             .transpose()?;
         if let Some(config) = calibrated_config.as_ref() {
             eprintln!(
-                "CPU TAIL EXECUTOR worker={}/{} source=calibration artifact={} placement={} threads={} cpu_ids={} strategy=persistent_two_phase",
+                "CPU TAIL EXECUTOR worker={}/{} source=calibration artifact={} placement={} threads={} cpu_ids={} minimum_queue_depth={} strategy=persistent_two_phase",
                 config.worker_index,
                 config.worker_count,
                 config.artifact,
@@ -1070,6 +1194,7 @@ impl CpuTailRuntime {
                     .map(|cpu| cpu.to_string())
                     .collect::<Vec<_>>()
                     .join(","),
+                config.minimum_queue_depth,
             );
         } else {
             eprintln!(
@@ -1272,6 +1397,7 @@ impl CpuTailRuntime {
         Ok(Self {
             hidden_size,
             timing_enabled,
+            minimum_queue_depth,
             input,
             output,
             command_tx,
@@ -1380,6 +1506,10 @@ impl CpuTailRuntime {
         self.hidden_size
     }
 
+    pub fn minimum_queue_depth(&self) -> usize {
+        self.minimum_queue_depth
+    }
+
     pub fn busy_sequence(&self) -> Option<u64> {
         self.busy_sequence
     }
@@ -1400,6 +1530,57 @@ impl Drop for CpuTailRuntime {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calibrated_admission_uses_first_measured_positive_win_depth_and_fails_closed() {
+        let probabilities = serde_json::json!({
+            "2": 0.0,
+            "3": 0.0,
+            "4": 0.25,
+            "5": 1.0,
+            "6": 1.0,
+            "7": 1.0,
+            "8": 1.0,
+            "9+": 1.0
+        });
+        assert_eq!(
+            minimum_positive_win_depth(Some(&probabilities), "artifact.json", "prediction")
+                .expect("positive depth"),
+            4
+        );
+
+        let zero_probabilities = serde_json::json!({
+            "2": 0.0,
+            "3": 0.0,
+            "4": 0.0,
+            "5": 0.0,
+            "6": 0.0,
+            "7": 0.0,
+            "8": 0.0,
+            "9+": 0.0
+        });
+        let error =
+            minimum_positive_win_depth(Some(&zero_probabilities), "artifact.json", "prediction")
+                .expect_err("all-zero calibration must fail closed");
+        assert!(error.contains("zero measured win probability"), "{error}");
+
+        let malformed = serde_json::json!({
+            "2": 0.0,
+            "3": 1.25,
+            "4": 1.0,
+            "5": 1.0,
+            "6": 1.0,
+            "7": 1.0,
+            "8": 1.0,
+            "9+": 1.0
+        });
+        let error = minimum_positive_win_depth(Some(&malformed), "artifact.json", "prediction")
+            .expect_err("out-of-range probability must fail closed");
+        assert!(
+            error.contains("no valid prediction.3 probability"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn two_persistent_cpu_tail_teams_cancel_independently_and_together() {
@@ -1547,6 +1728,47 @@ mod tests {
             1,
         )
         .expect("persistent forward"));
+        assert_eq!(persistent_output, rayon_output);
+
+        // Positive runtime clamp values use the DeepSeek/GLM activation
+        // contract already implemented by both CPU-tail executors. Keep a
+        // production-shaped equality guard so the live scheduler capability
+        // cannot drift back to an obsolete "unclamped only" restriction.
+        let swiglu_limit = 10.0f32;
+        assert!(expert_forward_transposed_int4_cpu_tail(
+            &w13_packed,
+            &w13_scales,
+            &w2_packed,
+            &w2_scales,
+            &activation,
+            &mut rayon_output,
+            hidden,
+            intermediate,
+            group_size,
+            swiglu_limit,
+            1.0,
+            &mut rayon_scratch,
+            &cancel,
+            1,
+        ));
+        assert!(expert_forward_transposed_persistent(
+            &team,
+            &w13_packed,
+            &w13_scales,
+            &w2_packed,
+            &w2_scales,
+            &activation,
+            &mut persistent_output,
+            hidden,
+            intermediate,
+            group_size,
+            swiglu_limit,
+            1.0,
+            &mut persistent_scratch,
+            &cancel,
+            1,
+        )
+        .expect("persistent clamped forward"));
         assert_eq!(persistent_output, rayon_output);
 
         if persistent_bench {

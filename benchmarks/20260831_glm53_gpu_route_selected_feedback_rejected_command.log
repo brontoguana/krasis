@@ -1,0 +1,50 @@
+Date: 2026-08-31
+Status: rejected decode-speed diagnostic; timing enabled, stopped before formal benchmark rows
+GPU: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+Config: tests/glm53-flash-hqq6-k6v6-pro-50k.conf
+Command: KRASIS_GPU_ROUTE_SYNC=1 ./dev benchmark tests/glm53-flash-hqq6-k6v6-pro-50k.conf --timing
+Tmux: glm53_gpu_route_selected_feedback_diag_20260831
+Run directory: logs/dev-benchmark_20260831_003721
+
+Purpose:
+- Verify the corrected opt-in GPU route classifier feeds both cold promotions and hot selected-expert recency back into Dynamic HCS.
+- Determine whether GPU-side classification reduces sustained decode time relative to the archived legacy host classification control.
+
+Strict prerequisite:
+- ./dev test-kernels gpu_route_split_classifier
+- Exact filter: gpu_decode::dsa_registration_tests::gpu_route_split_classifier_partitions_weights_exactly
+- Result: 1 passed, 0 failed, 444 filtered, exit 0.
+
+Installed build prerequisite:
+- ./dev build
+- Rust release build: 7m12s; total 441s; exit 0.
+- Repository Python and extension import origins verified.
+
+Measured sustained diagnostic rows (50/100/250-token requests, timing enabled):
+- HCS hit: 89.90 / 87.94 / 87.17 percent.
+- Request promotions: 1663 / 4012 / 10734.
+- Total: 38.86 / 42.67 / 44.34 ms/token.
+- Graph CUDA events: 17.83 / 18.28 / 18.87 ms/token.
+- Demand H2D CUDA events: 16.68 / 20.60 / 22.04 ms/token.
+- Promotion CPU: 0.646 / 0.744 / 0.789 ms/token.
+
+Archived legacy host-classification control:
+- HCS hit: 90.37 / 87.76 / 87.92 percent.
+- Request promotions: 1585 / 4073 / 10107.
+- Total: 38.74 / 43.18 / 43.28 ms/token.
+- Graph CUDA events: 17.59 / 18.10 / 18.66 ms/token.
+- Demand H2D CUDA events: 16.34 / 20.96 / 20.80 ms/token.
+
+Decision:
+- Correctness/feedback parity is substantially restored, but the GPU route path is not faster: one row improved 0.51 ms/token while the other two regressed 0.12 and 1.06 ms/token, and graph replay did not improve.
+- The opt-in path remains non-default. No timing-disabled speed run is justified.
+- The run was stopped with ./dev kill before formal prefill rows. Both GPUs returned idle at 11/15 MiB; no model process remained.
+
+Safety/correctness observations:
+- Calibration 39,920-token floor: 1,223 MiB free with the unchanged 600 MiB safety margin.
+- Dynamic HCS budget_skips, no_slot, and copy_failures were all zero.
+- No CUDA error or OOM.
+
+SHA256:
+- stdout dadafa141f1d0b71e0b1d2e965703f80a7f07ea6dd13e104b485083a719623a0
+- outer 1b452b8b55bd54194b34bc84f670d7a6fc8e201c431d34353bc569049f2fd972
