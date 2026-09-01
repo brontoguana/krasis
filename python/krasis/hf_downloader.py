@@ -123,23 +123,15 @@ class SupportedHFModel:
     notes: str
     default_attention: str
     default_kv: str
-    runtime_profiles: tuple[tuple[str, str], ...]
+    attention_modes: tuple[str, ...]
+    kv_modes: tuple[str, ...]
     multi_gpu_modes: tuple[str, ...] = ("auto",)
     multi_gpu_qualified: bool = False
     vision_modes: tuple[str, ...] = ()
     default_vision_quant: str = ""
     max_context_tokens: int = 0
 
-    @property
-    def attention_modes(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(attention for attention, _kv in self.runtime_profiles))
-
-    @property
-    def kv_modes(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(kv for _attention, kv in self.runtime_profiles))
-
-
-HQQ4_HQQ6_PROFILES = (("hqq4", "k4v4"), ("hqq6", "k6v6"))
+GENERIC_MIXED_HQQ_ATTENTION_MODES = ("hqq4", "hqq46_auto", "hqq6", "hqq68_auto")
 
 
 SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
@@ -153,7 +145,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Current production coding model.",
         default_attention="hqq4",
         default_kv="k4v4",
-        runtime_profiles=HQQ4_HQQ6_PROFILES,
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k4v4", "k6v6"),
         multi_gpu_modes=("auto", "layer-split", "peer"),
         multi_gpu_qualified=True,
     ),
@@ -167,7 +160,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Validated StepFun sparse MoE target with HQQ4 attention and k4v4 KV.",
         default_attention="hqq4",
         default_kv="k4v4",
-        runtime_profiles=HQQ4_HQQ6_PROFILES,
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k4v4", "k6v6"),
     ),
     SupportedHFModel(
         key="dsv4",
@@ -182,15 +176,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         ),
         default_attention="hqq6",
         default_kv="native",
-        runtime_profiles=(
-            ("hqq6", "native"),
-            ("hqq4", "native"),
-            ("hqq46_auto", "native"),
-            ("hqq68_auto", "native"),
-            ("hqq8", "native"),
-            ("hqq8", "bf16"),
-            ("bf16", "bf16"),
-        ),
+        attention_modes=(*GENERIC_MIXED_HQQ_ATTENTION_MODES, "hqq8", "bf16"),
+        kv_modes=("native", "bf16"),
         multi_gpu_modes=("auto", "peer"),
         multi_gpu_qualified=True,
     ),
@@ -204,7 +191,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Validated Nemotron-H Nano target with HQQ4 attention and k4v4 KV.",
         default_attention="hqq4",
         default_kv="k4v4",
-        runtime_profiles=(("hqq4", "k4v4"),),
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k4v4",),
     ),
     SupportedHFModel(
         key="nemotron-super",
@@ -216,7 +204,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Validated Nemotron-H Super target with HQQ4 attention and k4v4 KV.",
         default_attention="hqq4",
         default_kv="k4v4",
-        runtime_profiles=(("hqq4", "k4v4"),),
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k4v4",),
     ),
     SupportedHFModel(
         key="qwen36-35b",
@@ -228,7 +217,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Qwen 35B-class MoE target with canonical HQQ8 heatmap reused across HQQ/KV profiles.",
         default_attention="hqq4",
         default_kv="k4v4",
-        runtime_profiles=HQQ4_HQQ6_PROFILES,
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k4v4", "k6v6"),
     ),
     SupportedHFModel(
         key="ornith35",
@@ -240,7 +230,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Validated Ornith 35B-class Qwen3.5-MoE target with HQQ6 attention and k6v6 KV.",
         default_attention="hqq6",
         default_kv="k6v6",
-        runtime_profiles=HQQ4_HQQ6_PROFILES,
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k4v4", "k6v6"),
     ),
     SupportedHFModel(
         key="ornith397",
@@ -252,7 +243,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Validated Ornith 397B-class Qwen3.5-MoE target with HQQ6 attention and k6v6 KV.",
         default_attention="hqq6",
         default_kv="k6v6",
-        runtime_profiles=HQQ4_HQQ6_PROFILES,
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k4v4", "k6v6"),
     ),
     SupportedHFModel(
         key="qwen35-35b",
@@ -264,7 +256,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Validated Qwen 35B-class MoE target.",
         default_attention="hqq6",
         default_kv="k6v6",
-        runtime_profiles=HQQ4_HQQ6_PROFILES,
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k4v4", "k6v6"),
         multi_gpu_modes=("auto", "layer-split"),
         multi_gpu_qualified=True,
     ),
@@ -278,11 +271,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Large Qwen MoE target for multi-GPU/high-memory runs.",
         default_attention="hqq6",
         default_kv="k4v4",
-        runtime_profiles=(
-            ("hqq6", "k4v4"),
-            ("hqq6", "k6v6"),
-            ("hqq4", "k4v4"),
-        ),
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k4v4", "k6v6"),
         multi_gpu_modes=("auto", "layer-split", "peer"),
         multi_gpu_qualified=True,
     ),
@@ -296,11 +286,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Validated 397B Qwen MoE target with published Krasis speed and quality evidence.",
         default_attention="hqq6",
         default_kv="k4v4",
-        runtime_profiles=(
-            ("hqq6", "k4v4"),
-            ("hqq6", "k6v6"),
-            ("hqq4", "k4v4"),
-        ),
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k4v4", "k6v6"),
     ),
     SupportedHFModel(
         key="qwen3-235b",
@@ -312,11 +299,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Large Qwen MoE target.",
         default_attention="hqq6",
         default_kv="k4v4",
-        runtime_profiles=(
-            ("hqq6", "k4v4"),
-            ("hqq6", "k6v6"),
-            ("hqq4", "k4v4"),
-        ),
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k4v4", "k6v6"),
     ),
     SupportedHFModel(
         key="gemma4-26b-a4b-it",
@@ -328,13 +312,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Gemma4 text plus lazy image path; non-ring k6v6 is the validated fast text mode.",
         default_attention="hqq6",
         default_kv="k6v6",
-        runtime_profiles=(
-            ("hqq6", "k6v6"),
-            ("hqq4", "k4v4"),
-            ("hqq46_auto", "k6v6"),
-            ("hqq68_auto", "k6v6"),
-            ("bf16", "k6v6"),
-        ),
+        attention_modes=(*GENERIC_MIXED_HQQ_ATTENTION_MODES, "bf16"),
+        kv_modes=("k4v4", "k6v6"),
     ),
     SupportedHFModel(
         key="glm52",
@@ -346,7 +325,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Validated sparse-DSA production target; launcher context is capped to the qualified 4K mode.",
         default_attention="hqq4",
         default_kv="k4v4",
-        runtime_profiles=(("hqq4", "k4v4"),),
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k4v4",),
         multi_gpu_modes=("auto", "peer"),
         multi_gpu_qualified=True,
         max_context_tokens=4096,
@@ -365,7 +345,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         ),
         default_attention="hqq6",
         default_kv="k6v6",
-        runtime_profiles=(("hqq6", "k6v6"),),
+        attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        kv_modes=("k6v6",),
         multi_gpu_modes=("auto", "peer"),
         multi_gpu_qualified=True,
         vision_modes=("bf16",),

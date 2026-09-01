@@ -15,6 +15,7 @@ from krasis.attention_backend import (
     HQQ_DEFAULT_AXIS,
     HQQ_DEFAULT_GROUP_SIZE,
     HQQ_LAYOUT,
+    hqq_cache_algorithm_for_nbits,
     hqq_attention_cache_dir,
     hqq_attention_manifest_path,
     load_hqq_attention_artifact,
@@ -42,7 +43,24 @@ def isolated_home():
                 os.environ["HOME"] = old_home
 
 
+def write_model_checkpoint(model_path: Path) -> None:
+    model_path.mkdir(parents=True, exist_ok=True)
+    (model_path / "config.json").write_text(
+        json.dumps({"model_type": "fixture"}),
+        encoding="utf-8",
+    )
+    save_file(
+        {"toy.attn.weight": torch.tensor([[0.0, 14.0, 2.0, 6.0]], dtype=torch.bfloat16)},
+        str(model_path / "model-00001-of-00001.safetensors"),
+    )
+    (model_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"toy.attn.weight": "model-00001-of-00001.safetensors"}}),
+        encoding="utf-8",
+    )
+
+
 def write_baseline_manifest(model_path: Path) -> Path:
+    write_model_checkpoint(model_path)
     manifest_path = Path(hqq_attention_manifest_path(str(model_path), HQQ_CACHE_PROFILE_BASELINE))
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -52,6 +70,7 @@ def write_baseline_manifest(model_path: Path) -> Path:
         "group_size": HQQ_DEFAULT_GROUP_SIZE,
         "axis": HQQ_DEFAULT_AXIS,
         "layout": HQQ_LAYOUT,
+        "quantizer": hqq_cache_algorithm_for_nbits(4),
         "num_hidden_layers": 40,
         "complete": True,
         "tensors": [
@@ -98,14 +117,6 @@ def write_baseline_manifest(model_path: Path) -> Path:
         },
         str(manifest_path.parent / "layer_000_in_proj_qkvz_hqq4.safetensors"),
         metadata={"backend": "hqq4", "layout": HQQ_LAYOUT},
-    )
-    save_file(
-        {"toy.attn.weight": torch.tensor([[0.0, 14.0, 2.0, 6.0]], dtype=torch.bfloat16)},
-        str(model_path / "model-00001-of-00001.safetensors"),
-    )
-    (model_path / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {"toy.attn.weight": "model-00001-of-00001.safetensors"}}),
-        encoding="utf-8",
     )
     return manifest_path
 
@@ -315,7 +326,7 @@ def test_int8_exception_split_budget_prefers_decode_and_excludes_inactive() -> N
 def test_hqq8_rejects_self_calibration_and_sidecar_workflows() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
-        model_path.mkdir(parents=True)
+        write_model_checkpoint(model_path)
         config_path = home / "tiny_hqq8.conf"
         trace_path = home / "trace.log"
         output_path = home / "hqq8_selfcal_rejected.json"
@@ -437,7 +448,7 @@ def write_witness_summary(path: Path, deltas, *, first_match=True, top_overlap=9
 def test_evidence_file_is_not_loadable_calibrated_manifest() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
-        model_path.mkdir(parents=True)
+        write_model_checkpoint(model_path)
         config_path = home / "tiny.conf"
         trace_path = home / "trace.log"
         output_path = (
@@ -489,7 +500,7 @@ def test_evidence_file_is_not_loadable_calibrated_manifest() -> None:
 def test_sensitivity_candidates_are_not_loadable_calibrated_manifest() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
-        model_path.mkdir(parents=True)
+        write_model_checkpoint(model_path)
         config_path = home / "tiny.conf"
         trace_path = home / "trace.log"
         calib_dir = Path(hqq_attention_cache_dir(str(model_path), HQQ_CACHE_PROFILE_SELFCAL_V1)) / "calibration"
@@ -552,7 +563,7 @@ def test_sensitivity_candidates_are_not_loadable_calibrated_manifest() -> None:
 def test_int8_exception_candidates_are_intrinsic_and_non_loadable() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
-        model_path.mkdir(parents=True)
+        write_model_checkpoint(model_path)
         config_path = home / "tiny.conf"
         train_trace_path = home / "train.trace.log"
         heldout_trace_path = home / "heldout.trace.log"
@@ -774,7 +785,7 @@ def test_int8_exception_candidates_are_intrinsic_and_non_loadable() -> None:
 def test_int8_exception_candidate_build_rejects_shared_train_heldout_trace() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
-        model_path.mkdir(parents=True)
+        write_model_checkpoint(model_path)
         config_path = home / "tiny.conf"
         trace_path = home / "shared.trace.log"
         calib_dir = Path(hqq_attention_cache_dir(str(model_path), HQQ_CACHE_PROFILE_SELFCAL_V1)) / "calibration"
@@ -847,7 +858,7 @@ def test_evidence_trace_log_path_is_unique_per_output() -> None:
 def test_refit_evaluation_is_not_loadable_calibrated_manifest() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
-        model_path.mkdir(parents=True)
+        write_model_checkpoint(model_path)
         config_path = home / "tiny.conf"
         trace_path = home / "trace.log"
         calib_dir = Path(hqq_attention_cache_dir(str(model_path), HQQ_CACHE_PROFILE_SELFCAL_V1)) / "calibration"
@@ -932,7 +943,7 @@ def test_refit_evaluation_is_not_loadable_calibrated_manifest() -> None:
 def test_sidecar_simulation_is_non_loadable_and_reports_estimates() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
-        model_path.mkdir(parents=True)
+        write_model_checkpoint(model_path)
         config_path = home / "tiny.conf"
         trace_path = home / "trace.log"
         calib_dir = Path(hqq_attention_cache_dir(str(model_path), HQQ_CACHE_PROFILE_SELFCAL_V1)) / "calibration"
@@ -1034,7 +1045,7 @@ def test_sidecar_simulation_is_non_loadable_and_reports_estimates() -> None:
 def test_sidecar_artifact_writer_stays_separate_from_hqq_manifest() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
-        model_path.mkdir(parents=True)
+        write_model_checkpoint(model_path)
         config_path = home / "tiny.conf"
         trace_path = home / "trace.log"
         calib_dir = Path(hqq_attention_cache_dir(str(model_path), HQQ_CACHE_PROFILE_SELFCAL_V1)) / "calibration"
@@ -1321,7 +1332,7 @@ def test_sidecar_artifact_writer_stays_separate_from_hqq_manifest() -> None:
 def test_experimental_cache_writer_creates_loadable_manifest_without_touching_baseline() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
-        model_path.mkdir(parents=True)
+        write_model_checkpoint(model_path)
         config_path = home / "tiny.conf"
         trace_path = home / "trace.log"
         calib_dir = Path(hqq_attention_cache_dir(str(model_path), HQQ_CACHE_PROFILE_SELFCAL_V1)) / "calibration"
@@ -1443,7 +1454,7 @@ def test_experimental_cache_writer_creates_loadable_manifest_without_touching_ba
 def test_ablation_report_applies_strict_dominance() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
-        model_path.mkdir(parents=True)
+        write_model_checkpoint(model_path)
         config_path = home / "tiny.conf"
         calib_dir = Path(hqq_attention_cache_dir(str(model_path), HQQ_CACHE_PROFILE_SELFCAL_V1)) / "calibration"
         baseline_summary = home / "baseline_summary.json"
@@ -1515,7 +1526,7 @@ def test_ablation_report_applies_strict_dominance() -> None:
 def test_sidecar_conflict_search_prefers_zero_regression_then_gain() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
-        model_path.mkdir(parents=True)
+        write_model_checkpoint(model_path)
         config_path = home / "tiny.conf"
         work = home / "conflict_search"
         work.mkdir()

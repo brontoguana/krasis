@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- Made attention precision and KV format independent interactive-launcher
+  controls. The launcher now exposes measured planner presets at
+  `HQQ4+10/15/20%` and `HQQ6+10/15/20%` wherever mixed HQQ is supported;
+  changing attention no longer changes KV, and changing KV no longer changes
+  attention or its promotion percentage. Architecture-owned cache constraints
+  remain fail-closed. GQA and linear-attention BF16 materialization now
+  dispatches each cached tensor from its own HQQ4/HQQ6/HQQ8 descriptor rather
+  than rejecting non-HQQ4 layers, and focused CUDA coverage checks all three
+  widths in both prefill and decode materialization. Cache-build helpers now
+  initialize their lazy Torch dependency explicitly, and checkpoint-bound test
+  fixtures exercise the current manifest/quantizer identity contract instead
+  of relying on obsolete incomplete model directories.
+  The representative DeepSeek-V4 gate also exposed a pre-existing DSA prefill
+  mismatch: its positions were converted to compressed-cache counts and then
+  divided by the compression ratio a second time. The shared workspace now
+  carries separate runtime-derived position divisors and logical cache-row
+  spans: DeepSeek uses compressed positions with its descriptor's row span,
+  while GLM uses its measured pool geometry for both. Allocation, planning,
+  score dispatch, and top-k dispatch consume that single workspace contract.
+  Representative llama-witness gates passed DeepSeek-V4 HQQ6+10%/Native
+  formally. Qwen3.6 HQQ4+20%/k6v6 and Step HQQ4+15%/k6v6 both exercised the
+  new mixed paths and improved their matched fixed-HQQ4 aggregate agreement,
+  while retaining pre-existing formal continuation failures; those models are
+  not claimed witness-qualified from these rows. GLM-5.3 HQQ6+20%/k6v6
+  formally passed its 3,116-token long-prefix witness with 13/16 witness tokens
+  in Krasis's top ten and a 0.0464388 selected-logprob delta. The fixed QCN
+  speed guard retained all 24,576 resident experts and its 4,204 MiB floor;
+  matched current-versus-`rc.8` timing attribution found no component
+  regression (current `16.34/16.41/16.65`, control
+  `16.40/16.43/16.69 ms/token`). The Manager schema now distinguishes
+  executable attention modes from combined browser presets, and the browser
+  serializes `HQQ4/6+10/15/20%` into separate attention-mode and promotion-
+  percentage fields without changing the independently selected KV format.
+
 - Fixed the native Windows interactive launcher leaving the GPU-selection
   screen visible while model-specific VRAM/RAM preparation ran. The launcher
   now renders an explicit non-actionable preparation screen, discards complete

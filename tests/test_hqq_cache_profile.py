@@ -39,6 +39,7 @@ from krasis.config import (
     HQQ_CACHE_PROFILE_BASELINE,
     HQQ_CACHE_PROFILE_SELFCAL_V1,
     QuantConfig,
+    cache_dir_for_model,
 )
 
 
@@ -72,6 +73,7 @@ def minimal_manifest(complete=True, profile=HQQ_CACHE_PROFILE_BASELINE):
             "num_tensors": 0,
         },
     }
+    manifest["quantizer"] = hqq_cache_algorithm_for_nbits(4)
     if profile != HQQ_CACHE_PROFILE_BASELINE:
         manifest["cache_profile"] = profile
         manifest["calibration"] = {
@@ -79,6 +81,20 @@ def minimal_manifest(complete=True, profile=HQQ_CACHE_PROFILE_BASELINE):
             "method": "selfcal_v1",
         }
     return manifest
+
+
+def write_minimal_checkpoint(model_path: Path) -> None:
+    model_path.mkdir(parents=True, exist_ok=True)
+    shard_name = "model-00001-of-00001.safetensors"
+    (model_path / shard_name).write_bytes(b"minimal checkpoint fixture")
+    (model_path / "config.json").write_text(
+        json.dumps({"model_type": "fixture"}),
+        encoding="utf-8",
+    )
+    (model_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"fixture.weight": shard_name}}),
+        encoding="utf-8",
+    )
 
 
 def write_manifest(model_path: Path, profile: str, manifest: dict, nbits: int = 4) -> Path:
@@ -102,20 +118,22 @@ def assert_raises_contains(fn, text: str) -> None:
 def test_profile_path_resolution() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
+        write_minimal_checkpoint(model_path)
+        cache_root = Path(cache_dir_for_model(str(model_path)))
         baseline_dir = Path(hqq_attention_cache_dir(str(model_path)))
         selfcal_dir = Path(hqq_attention_cache_dir(str(model_path), HQQ_CACHE_PROFILE_SELFCAL_V1))
         g32_dir = Path(hqq_attention_cache_dir(str(model_path), group_size=32))
         mixed_dir = Path(hqq_attention_cache_dir(str(model_path), nbits=HQQ_MIXED_46_CACHE_NBITS))
         auto_dir = Path(hqq_attention_cache_dir(str(model_path), nbits=HQQ_MIXED_46_AUTO_CACHE_NBITS))
         auto68_dir = Path(hqq_attention_cache_dir(str(model_path), nbits=HQQ_MIXED_68_AUTO_CACHE_NBITS))
-        assert baseline_dir == home / ".krasis" / "cache" / "TinyModel" / HQQ_ATTENTION_CACHE_DIRNAME
+        assert baseline_dir == cache_root / HQQ_ATTENTION_CACHE_DIRNAME
         assert selfcal_dir == (
-            home / ".krasis" / "cache" / "TinyModel" / f"{HQQ_ATTENTION_CACHE_DIRNAME}_calib_selfcal_v1"
+            cache_root / f"{HQQ_ATTENTION_CACHE_DIRNAME}_calib_selfcal_v1"
         )
-        assert g32_dir == home / ".krasis" / "cache" / "TinyModel" / f"{HQQ_ATTENTION_CACHE_DIRNAME}_g32"
-        assert mixed_dir == home / ".krasis" / "cache" / "TinyModel" / HQQ46_ATTENTION_CACHE_DIRNAME
-        assert auto_dir == home / ".krasis" / "cache" / "TinyModel" / HQQ46_AUTO_ATTENTION_CACHE_DIRNAME
-        assert auto68_dir == home / ".krasis" / "cache" / "TinyModel" / HQQ68_AUTO_ATTENTION_CACHE_DIRNAME
+        assert g32_dir == cache_root / f"{HQQ_ATTENTION_CACHE_DIRNAME}_g32"
+        assert mixed_dir == cache_root / HQQ46_ATTENTION_CACHE_DIRNAME
+        assert auto_dir == cache_root / HQQ46_AUTO_ATTENTION_CACHE_DIRNAME
+        assert auto68_dir == cache_root / HQQ68_AUTO_ATTENTION_CACHE_DIRNAME
         assert normalize_hqq_attention_cache_profile(None) == HQQ_CACHE_PROFILE_BASELINE
         assert normalize_hqq_attention_cache_profile("SELFCAL_V1") == HQQ_CACHE_PROFILE_SELFCAL_V1
 
@@ -123,6 +141,8 @@ def test_profile_path_resolution() -> None:
 def test_hqq4_cuda_search_cache_identity_is_explicit() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
+        write_minimal_checkpoint(model_path)
+        cache_root = Path(cache_dir_for_model(str(model_path)))
         default_dir = Path(hqq_attention_cache_dir(str(model_path)))
         default_quantizer = hqq_cache_algorithm_for_nbits(4)
 
@@ -137,13 +157,9 @@ def test_hqq4_cuda_search_cache_identity_is_explicit() -> None:
             else:
                 os.environ["KRASIS_HQQ4_CACHE_IMPL"] = old_impl
 
-        assert default_dir == home / ".krasis" / "cache" / "TinyModel" / HQQ_ATTENTION_CACHE_DIRNAME
+        assert default_dir == cache_root / HQQ_ATTENTION_CACHE_DIRNAME
         assert cuda_dir == (
-            home
-            / ".krasis"
-            / "cache"
-            / "TinyModel"
-            / f"{HQQ_ATTENTION_CACHE_DIRNAME}_{HQQ4_CACHE_IMPL_RUST_CUDA_SEARCH}"
+            cache_root / f"{HQQ_ATTENTION_CACHE_DIRNAME}_{HQQ4_CACHE_IMPL_RUST_CUDA_SEARCH}"
         )
         assert "hqq4_cache_impl" not in default_quantizer
         assert cuda_quantizer["hqq4_cache_impl"] == HQQ4_CACHE_IMPL_RUST_CUDA_SEARCH
@@ -164,7 +180,7 @@ def test_quant_config_profile_validation() -> None:
     )
     assert_raises_contains(
         lambda: QuantConfig(attention="bf16", hqq_cache_profile="selfcal_v1"),
-        "requires attention='hqq4'",
+        "requires an HQQ attention mode",
     )
     assert_raises_contains(
         lambda: QuantConfig(attention="bf16", hqq_sidecar_manifest="/tmp/sidecar.json"),
@@ -204,13 +220,14 @@ def test_quant_config_profile_validation() -> None:
     )
     assert_raises_contains(
         lambda: QuantConfig(attention="bf16", hqq_group_size=32),
-        "requires attention='hqq4'",
+        "requires an HQQ attention mode",
     )
 
 
 def test_selected_calibrated_profile_requires_complete_manifest_without_fallback() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
+        write_minimal_checkpoint(model_path)
         assert_raises_contains(
             lambda: require_complete_hqq_attention_manifest(
                 str(model_path),
@@ -256,6 +273,7 @@ def test_selected_calibrated_profile_requires_complete_manifest_without_fallback
 def test_baseline_manifest_loading_remains_unchanged() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
+        write_minimal_checkpoint(model_path)
         write_manifest(model_path, HQQ_CACHE_PROFILE_BASELINE, minimal_manifest(complete=True))
         manifest = require_complete_hqq_attention_manifest(
             str(model_path),
@@ -270,10 +288,12 @@ def test_baseline_manifest_loading_remains_unchanged() -> None:
 def test_hqq46_manifest_validation_accepts_mixed_cache_metadata() -> None:
     with isolated_home() as home:
         model_path = home / "models" / "TinyModel"
+        write_minimal_checkpoint(model_path)
         manifest = minimal_manifest(complete=True)
         manifest["backend"] = "hqq46"
         manifest["nbits"] = HQQ_MIXED_46_CACHE_NBITS
         manifest["layout"] = HQQ46_LAYOUT
+        manifest["quantizer"] = hqq_cache_algorithm_for_nbits(HQQ_MIXED_46_CACHE_NBITS)
         manifest["mixed_precision"] = {
             "base_nbits": 4,
             "promoted_nbits": 6,
@@ -337,6 +357,10 @@ def test_hqq_auto_zero_budget_selects_no_promotions() -> None:
 
 def test_hqq_auto_budget_pct_scales_from_promotion_span() -> None:
     assert hqq_auto_budget_bytes_from_pct(0.0, 400, "hqq68_auto") == 0
+    for attention_quant in ("hqq46_auto", "hqq68_auto"):
+        assert hqq_auto_budget_bytes_from_pct(10.0, 400, attention_quant) == 40
+        assert hqq_auto_budget_bytes_from_pct(15.0, 400, attention_quant) == 60
+        assert hqq_auto_budget_bytes_from_pct(20.0, 400, attention_quant) == 80
     assert hqq_auto_budget_bytes_from_pct(25.0, 400, "hqq68_auto") == 100
     assert hqq_auto_budget_bytes_from_pct(100.0, 400, "hqq68_auto") == 400
     assert_raises_contains(
@@ -388,6 +412,30 @@ def test_hqq_auto_full_budget_selects_every_promotion() -> None:
     assert summary["selected_count"] == 3
 
 
+def test_hqq_auto_partial_budget_never_selects_zero_gain() -> None:
+    candidates = [
+        {
+            "layer_idx": 0,
+            "tensor_name": "positive",
+            "extra_bytes": 10,
+            "relative_rmse_reduction": 1.0,
+        },
+        {
+            "layer_idx": 1,
+            "tensor_name": "zero",
+            "extra_bytes": 10,
+            "relative_rmse_reduction": 0.0,
+        },
+    ]
+    selected, summary = select_hqq_auto_promotions(
+        candidates,
+        budget_bytes=19,
+        max_dp_units=19,
+    )
+    assert selected == {(0, "positive")}
+    assert summary["budget_used_bytes"] == 10
+
+
 def test_hqq6_packed_roundtrip_contract() -> None:
     quant = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]], dtype=torch.uint8)
     packed = _pack_hqq_quant(quant, 6)
@@ -435,6 +483,7 @@ if __name__ == "__main__":
     test_hqq46_auto_planner_selects_by_global_budget()
     test_hqq_auto_budget_pct_scales_from_promotion_span()
     test_hqq_auto_full_budget_selects_every_promotion()
+    test_hqq_auto_partial_budget_never_selects_zero_gain()
     test_hqq6_packed_roundtrip_contract()
     test_hqq6_probe_quantizer_uses_true_packed_storage()
     print("ok")

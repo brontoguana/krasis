@@ -187,16 +187,16 @@ class HFDownloaderTests(unittest.TestCase):
             )
             self.assertIn(model.default_attention, model.attention_modes)
             self.assertIn(model.default_kv, model.kv_modes)
-            self.assertIn(
-                (model.default_attention, model.default_kv),
-                model.runtime_profiles,
-            )
-            self.assertEqual(len(model.runtime_profiles), len(set(model.runtime_profiles)))
+            self.assertEqual(len(model.attention_modes), len(set(model.attention_modes)))
+            self.assertEqual(len(model.kv_modes), len(set(model.kv_modes)))
             self.assertTrue(model.multi_gpu_modes)
 
         glm52 = next(model for model in models if model.key == "glm52")
         self.assertEqual(glm52.max_context_tokens, 4096)
-        self.assertEqual(glm52.attention_modes, ("hqq4",))
+        self.assertEqual(
+            glm52.attention_modes,
+            hf_downloader.GENERIC_MIXED_HQQ_ATTENTION_MODES,
+        )
         self.assertEqual(glm52.kv_modes, ("k4v4",))
         self.assertEqual(glm52.vision_modes, ())
 
@@ -204,57 +204,37 @@ class HFDownloaderTests(unittest.TestCase):
         self.assertEqual(glm53.vision_modes, ("bf16",))
         self.assertEqual(glm53.default_vision_quant, "bf16")
 
-    def test_supported_model_profiles_are_measured_and_defaults_match_configs(self):
+    def test_supported_model_controls_are_independent_and_defaults_match_configs(self):
         from krasis.launcher import _load_config
 
-        expected_profiles = {
-            "qcn": (("hqq4", "k4v4"), ("hqq6", "k6v6")),
-            "step37": (("hqq4", "k4v4"), ("hqq6", "k6v6")),
-            "dsv4": (
-                ("hqq6", "native"),
-                ("hqq4", "native"),
-                ("hqq46_auto", "native"),
-                ("hqq68_auto", "native"),
-                ("hqq8", "native"),
-                ("hqq8", "bf16"),
-                ("bf16", "bf16"),
-            ),
-            "nemotron-nano": (("hqq4", "k4v4"),),
-            "nemotron-super": (("hqq4", "k4v4"),),
-            "qwen36-35b": (("hqq4", "k4v4"), ("hqq6", "k6v6")),
-            "ornith35": (("hqq4", "k4v4"), ("hqq6", "k6v6")),
-            "ornith397": (("hqq4", "k4v4"), ("hqq6", "k6v6")),
-            "qwen35-35b": (("hqq4", "k4v4"), ("hqq6", "k6v6")),
-            "qwen35-122b": (
-                ("hqq6", "k4v4"),
-                ("hqq6", "k6v6"),
-                ("hqq4", "k4v4"),
-            ),
-            "qwen35-397b": (
-                ("hqq6", "k4v4"),
-                ("hqq6", "k6v6"),
-                ("hqq4", "k4v4"),
-            ),
-            "qwen3-235b": (
-                ("hqq6", "k4v4"),
-                ("hqq6", "k6v6"),
-                ("hqq4", "k4v4"),
-            ),
-            "gemma4-26b-a4b-it": (
-                ("hqq6", "k6v6"),
-                ("hqq4", "k4v4"),
-                ("hqq46_auto", "k6v6"),
-                ("hqq68_auto", "k6v6"),
-                ("bf16", "k6v6"),
-            ),
-            "glm52": (("hqq4", "k4v4"),),
-            "glm53-flash": (("hqq6", "k6v6"),),
+        expected_kv_modes = {
+            "qcn": ("k4v4", "k6v6"),
+            "step37": ("k4v4", "k6v6"),
+            "dsv4": ("native", "bf16"),
+            "nemotron-nano": ("k4v4",),
+            "nemotron-super": ("k4v4",),
+            "qwen36-35b": ("k4v4", "k6v6"),
+            "ornith35": ("k4v4", "k6v6"),
+            "ornith397": ("k4v4", "k6v6"),
+            "qwen35-35b": ("k4v4", "k6v6"),
+            "qwen35-122b": ("k4v4", "k6v6"),
+            "qwen35-397b": ("k4v4", "k6v6"),
+            "qwen3-235b": ("k4v4", "k6v6"),
+            "gemma4-26b-a4b-it": ("k4v4", "k6v6"),
+            "glm52": ("k4v4",),
+            "glm53-flash": ("k6v6",),
         }
         repo_root = os.path.dirname(os.path.dirname(__file__))
-        self.assertEqual(set(expected_profiles), {model.key for model in supported_models()})
+        self.assertEqual(set(expected_kv_modes), {model.key for model in supported_models()})
         for model in supported_models():
             with self.subTest(model=model.key):
-                self.assertEqual(model.runtime_profiles, expected_profiles[model.key])
+                expected_attention_modes = hf_downloader.GENERIC_MIXED_HQQ_ATTENTION_MODES
+                if model.key == "dsv4":
+                    expected_attention_modes += ("hqq8", "bf16")
+                elif model.key == "gemma4-26b-a4b-it":
+                    expected_attention_modes += ("bf16",)
+                self.assertEqual(model.attention_modes, expected_attention_modes)
+                self.assertEqual(model.kv_modes, expected_kv_modes[model.key])
                 saved = _load_config(os.path.join(repo_root, model.recommended_config))
                 self.assertEqual(saved.get("CFG_ATTENTION_QUANT"), model.default_attention)
                 self.assertEqual(saved.get("CFG_KV_DTYPE"), model.default_kv)

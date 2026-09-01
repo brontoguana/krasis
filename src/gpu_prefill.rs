@@ -7254,9 +7254,9 @@ pub struct DsaPrefillLayerDescriptor {
 }
 
 impl DsaPrefillLayerDescriptor {
-    fn workspace_selection_geometry(&self) -> Result<(usize, usize, usize), String> {
+    fn selection_context_divisor(&self) -> Result<usize, String> {
         if !self.index_kpool_compress {
-            return Ok((self.index_topk, self.index_topk, 1));
+            return Ok(1);
         }
         if self.index_kpool == 0 || self.index_topk % self.index_kpool != 0 {
             return Err(format!(
@@ -7269,12 +7269,20 @@ impl DsaPrefillLayerDescriptor {
                 "compressed DSA IndexShare requires visible-tail selection".to_string(),
             );
         }
+        Ok(self.index_kpool)
+    }
+
+    fn workspace_selection_geometry(&self) -> Result<(usize, usize, usize), String> {
+        let context_divisor = self.selection_context_divisor()?;
+        if !self.index_kpool_compress {
+            return Ok((self.index_topk, self.index_topk, context_divisor));
+        }
         let score_topk = self.index_topk / self.index_kpool;
         let output_topk = self
             .index_topk
             .checked_add(self.index_kpool - 1)
             .ok_or_else(|| "compressed DSA output topk overflow".to_string())?;
-        Ok((score_topk, output_topk, self.index_kpool))
+        Ok((score_topk, output_topk, context_divisor))
     }
 }
 
@@ -7303,6 +7311,7 @@ struct DsaPrefillWorkspaceGeometry {
     index_topk: usize,
     output_topk: usize,
     context_divisor: usize,
+    causal_context_row_span: usize,
     index_n_heads: usize,
     index_head_dim: usize,
     mla_num_heads: usize,
@@ -7569,6 +7578,7 @@ pub(crate) struct DsaPrefillRequestWorkspace {
     configured_topk: usize,
     output_topk: usize,
     context_divisor: usize,
+    causal_context_row_span: usize,
     d_rope_queries: GpuBuf<u16>,
     d_selection_workspace: GpuBuf<u8>,
     d_selected_indices: GpuBuf<i32>,
@@ -7600,6 +7610,7 @@ impl DsaPrefillRequestWorkspace {
         configured_topk: usize,
         output_topk: usize,
         context_divisor: usize,
+        causal_context_row_span: usize,
         index_n_heads: usize,
         index_head_dim: usize,
         mla_num_heads: usize,
@@ -7612,10 +7623,13 @@ impl DsaPrefillRequestWorkspace {
                 index_n_heads, index_head_dim
             ));
         }
-        if output_topk < configured_topk || context_divisor == 0 {
+        if output_topk < configured_topk
+            || context_divisor == 0
+            || causal_context_row_span == 0
+        {
             return Err(format!(
-                "DSA prefill workspace has invalid selection geometry score_topk={} output_topk={} divisor={}",
-                configured_topk, output_topk, context_divisor
+                "DSA prefill workspace has invalid selection geometry score_topk={} output_topk={} position_divisor={} causal_row_span={}",
+                configured_topk, output_topk, context_divisor, causal_context_row_span
             ));
         }
         if (mla_num_heads == 0) != (mla_ckv_cache_dim == 0) {
@@ -7630,7 +7644,7 @@ impl DsaPrefillRequestWorkspace {
             configured_topk,
             workspace_capacity_bytes,
             1,
-            context_divisor,
+            causal_context_row_span,
         )?;
         let query_elements = chunk_rows
             .checked_mul(index_n_heads)
@@ -7650,6 +7664,7 @@ impl DsaPrefillRequestWorkspace {
             configured_topk,
             output_topk,
             context_divisor,
+            causal_context_row_span,
             d_rope_queries: GpuBuf::alloc_zeroed(query_elements)
                 .map_err(|error| format!("alloc DSA prefill RoPE queries: {error}"))?,
             d_selection_workspace: GpuBuf::alloc_zeroed(workspace_capacity_bytes)
@@ -7902,7 +7917,8 @@ fn launch_dsa_prefill_gemm_scores(
     score_scale: f32,
     temporary_is_bf16: bool,
     causal_position_start: usize,
-    causal_compress_ratio: usize,
+    causal_position_divisor: usize,
+    causal_context_row_span: usize,
     causal_band_rows: usize,
     buffers: DsaPrefillSelectionBuffers,
 ) -> Result<(), String> {
@@ -7925,10 +7941,12 @@ fn launch_dsa_prefill_gemm_scores(
         ));
     }
     let causal_bands_enabled = causal_band_rows > 0;
-    if causal_bands_enabled && causal_compress_ratio == 0 {
+    if causal_bands_enabled
+        && (causal_position_divisor == 0 || causal_context_row_span == 0)
+    {
         return Err(format!(
-            "DSA prefill causal GEMM requires a positive compression ratio when banding is enabled, got ratio={} band_rows={}",
-            causal_compress_ratio, causal_band_rows
+            "DSA prefill causal GEMM requires positive position divisor and causal row span when banding is enabled, got divisor={} row_span={} band_rows={}",
+            causal_position_divisor, causal_context_row_span, causal_band_rows
         ));
     }
     let output_context_i32 = i32::try_from(context_end)
@@ -8034,18 +8052,18 @@ fn launch_dsa_prefill_gemm_scores(
                     .checked_add(band_row_start)
                     .and_then(|value| value.checked_add(band_rows))
                     .ok_or_else(|| "DSA prefill causal GEMM position overflow".to_string())?
-                    / causal_compress_ratio
+                    / causal_context_row_span
             } else {
                 context_end
             }
             .min(context_end);
             if score_context_end == 0 {
                 return Err(format!(
-                    "DSA prefill causal GEMM band [{}, {}) has no causal compressed rows (position_start={} ratio={})",
+                    "DSA prefill causal GEMM band [{}, {}) has no causal compressed rows (position_start={} row_span={})",
                     band_row_start,
                     band_row_start + band_rows,
                     causal_position_start,
-                    causal_compress_ratio
+                    causal_context_row_span
                 ));
             }
             let band_score_elements = band_rows
@@ -8200,8 +8218,8 @@ fn launch_dsa_prefill_gemm_scores(
                 })?;
                 let mut e11 = if head_start == 0 { 1i32 } else { 0i32 };
                 let mut e12 = i32::from(temporary_is_bf16);
-                let mut e13 = i32::try_from(causal_compress_ratio.max(1)).map_err(|_| {
-                    "DSA prefill GEMM causal compression ratio exceeds i32".to_string()
+                let mut e13 = i32::try_from(causal_position_divisor.max(1)).map_err(|_| {
+                    "DSA prefill GEMM causal position divisor exceeds i32".to_string()
                 })?;
                 unsafe {
                     launch(
@@ -8269,7 +8287,8 @@ fn launch_dsa_prefill_selection_rows(
     configured_topk: usize,
     score_scale: f32,
     causal_position_start: usize,
-    causal_compress_ratio: usize,
+    causal_position_divisor: usize,
+    causal_context_row_span: usize,
     index_score_mode: DeepseekV4PrefillIndexScoreMode,
     topk_mode: DeepseekV4PrefillTopkMode,
     cublas_handle: cudarc::cublas::sys::cublasHandle_t,
@@ -8454,7 +8473,7 @@ fn launch_dsa_prefill_selection_rows(
             let mut s7 = index_n_heads_i32;
             let mut s8 = index_head_dim_i32;
             let mut s9 = score_scale;
-            let mut s10 = i32::try_from(causal_compress_ratio.max(1))
+            let mut s10 = i32::try_from(causal_position_divisor.max(1))
                 .map_err(|_| "DSA causal compression ratio exceeds i32")?;
             unsafe {
                 launch(
@@ -8487,14 +8506,14 @@ fn launch_dsa_prefill_selection_rows(
         | DeepseekV4PrefillIndexScoreMode::Bf16Bf16Gemm
         | DeepseekV4PrefillIndexScoreMode::Bf16Bf16CausalGemm => {
             let causal_band_rows = if index_score_mode.uses_causal_gemm_bands() {
-                if causal_compress_ratio == 0 {
+                if causal_context_row_span == 0 {
                     return Err(
-                        "DSA prefill causal GEMM mode requires a positive compression ratio"
+                        "DSA prefill causal GEMM mode requires a positive causal row span"
                             .to_string(),
                     );
                 }
                 configured_topk
-                    .checked_mul(causal_compress_ratio)
+                    .checked_mul(causal_context_row_span)
                     .ok_or_else(|| "DSA prefill causal GEMM band rows overflow".to_string())?
             } else {
                 0
@@ -8516,7 +8535,8 @@ fn launch_dsa_prefill_selection_rows(
                 score_scale,
                 index_score_mode.temporary_is_bf16(),
                 causal_position_start,
-                causal_compress_ratio.max(1),
+                causal_position_divisor.max(1),
+                causal_context_row_span,
                 causal_band_rows,
                 buffers,
             )?;
@@ -8592,7 +8612,7 @@ fn launch_dsa_prefill_selection_rows(
     let mut t8 = candidate_stride_i32;
     let mut t9 = initial_runs_i32;
     let mut t10 = sort_width_i32;
-    let mut t11 = i32::try_from(causal_compress_ratio.max(1))
+    let mut t11 = i32::try_from(causal_position_divisor.max(1))
         .map_err(|_| "DSA causal compression ratio exceeds i32".to_string())?;
     let base_sort_timing = dsa_prefill_selection_timing_start(
         timing_events,
@@ -8725,7 +8745,6 @@ fn launch_dsa_prefill_selection_chunk(
     rope_sin_ptr: u64,
     qk_rope_head_dim: usize,
     score_scale: f32,
-    causal_compress_ratio: usize,
     index_score_mode: DeepseekV4PrefillIndexScoreMode,
     topk_mode: DeepseekV4PrefillTopkMode,
     cublas_handle: cudarc::cublas::sys::cublasHandle_t,
@@ -8740,20 +8759,20 @@ fn launch_dsa_prefill_selection_chunk(
             chunk_rows, context_end, workspace.max_chunk_rows, workspace.max_context_end
         ));
     }
-    if causal_compress_ratio.max(1) != workspace.context_divisor {
-        return Err(format!(
-            "DSA prefill selection compression ratio {} differs from workspace divisor {}",
-            causal_compress_ratio.max(1),
-            workspace.context_divisor,
-        ));
-    }
+    // The workspace geometry is derived from the representation actually fed
+    // to selection. GLM passes raw token positions with a pooled cache, while
+    // DeepSeek-V4 passes count-1 positions that are already in compressed-cache
+    // rows. Keep allocation, planning, and execution on this single source of
+    // truth so callers cannot divide an already-compressed position twice.
+    let causal_position_divisor = workspace.context_divisor;
+    let causal_context_row_span = workspace.causal_context_row_span;
     let plan = plan_dsa_prefill_selection(
         chunk_rows,
         context_end,
         workspace.configured_topk,
         workspace.selection_workspace_capacity_bytes,
         index_score_mode.score_buffer_count(),
-        causal_compress_ratio.max(1),
+        causal_context_row_span,
     )?;
     if plan.selected_per_row > workspace.max_selected_per_row {
         return Err(format!(
@@ -8927,7 +8946,8 @@ fn launch_dsa_prefill_selection_chunk(
             chunk_start
                 .checked_add(row_start)
                 .ok_or_else(|| "DSA prefill causal position start overflow".to_string())?,
-            causal_compress_ratio,
+            causal_position_divisor,
+            causal_context_row_span,
             index_score_mode,
             topk_mode,
             cublas_handle,
@@ -29891,6 +29911,7 @@ impl PrefillEngine {
             registration.index_topk,
             registration.index_topk,
             1,
+            1,
             registration.index_n_heads,
             registration.index_head_dim,
             0,
@@ -29936,7 +29957,6 @@ impl PrefillEngine {
             1.0f32
                 / ((registration.index_head_dim as f32).sqrt()
                     * (registration.index_n_heads as f32).sqrt()),
-            0,
             DeepseekV4PrefillIndexScoreMode::Scalar,
             DeepseekV4PrefillTopkMode::Bitonic,
             std::ptr::null_mut(),
@@ -34601,7 +34621,6 @@ impl PrefillEngine {
             desc.rope_sin_ptr,
             0,
             1.0,
-            desc.compress_ratio,
             self.deepseek_v4_prefill_index_score_mode,
             self.deepseek_v4_prefill_topk_mode,
             self.cublas_handle,
@@ -40197,12 +40216,6 @@ impl PrefillEngine {
             let Some(desc) = self.layer_weights[layer_idx].hqq_gqa.clone() else {
                 continue;
             };
-            if desc.nbits != 4 {
-                return Err(format!(
-                    "HQQ prefill GQA only supports nbits=4 today, got {} at layer {}",
-                    desc.nbits, layer_idx
-                ));
-            }
 
             let ensure_weight_ptr = |engine: &mut Self,
                                      existing: Option<Bf16Weight>,
@@ -40245,7 +40258,7 @@ impl PrefillEngine {
                 desc.q_proj.cols,
                 "q_proj",
             )?;
-            self.hqq4_dequant_to_bf16("q_proj", &desc.q_proj, q_weight.ptr)?;
+            self.hqq_row_major_dequant_to_bf16("q_proj", &desc.q_proj, q_weight.ptr)?;
             self.apply_hqq_prefill_sidecars(
                 layer_idx,
                 "q_proj",
@@ -40268,7 +40281,7 @@ impl PrefillEngine {
                 desc.k_proj.cols,
                 "k_proj",
             )?;
-            self.hqq4_dequant_to_bf16("k_proj", &desc.k_proj, k_weight.ptr)?;
+            self.hqq_row_major_dequant_to_bf16("k_proj", &desc.k_proj, k_weight.ptr)?;
             self.apply_hqq_prefill_sidecars(
                 layer_idx,
                 "k_proj",
@@ -40291,7 +40304,7 @@ impl PrefillEngine {
                 desc.v_proj.cols,
                 "v_proj",
             )?;
-            self.hqq4_dequant_to_bf16("v_proj", &desc.v_proj, v_weight.ptr)?;
+            self.hqq_row_major_dequant_to_bf16("v_proj", &desc.v_proj, v_weight.ptr)?;
             self.apply_hqq_prefill_sidecars(
                 layer_idx,
                 "v_proj",
@@ -40314,7 +40327,7 @@ impl PrefillEngine {
                 desc.o_proj.cols,
                 "o_proj",
             )?;
-            self.hqq4_dequant_to_bf16("o_proj", &desc.o_proj, o_weight.ptr)?;
+            self.hqq_row_major_dequant_to_bf16("o_proj", &desc.o_proj, o_weight.ptr)?;
             self.apply_hqq_prefill_sidecars(
                 layer_idx,
                 "o_proj",
@@ -40342,13 +40355,6 @@ impl PrefillEngine {
             let Some(desc) = self.layer_weights[layer_idx].hqq_linear_attention.clone() else {
                 continue;
             };
-            if desc.nbits != 4 {
-                return Err(format!(
-                    "HQQ prefill linear attention only supports nbits=4 today, got {} at layer {}",
-                    desc.nbits, layer_idx
-                ));
-            }
-
             let ensure_weight_ptr = |engine: &mut Self,
                                      existing: Option<Bf16Weight>,
                                      rows: usize,
@@ -40398,7 +40404,11 @@ impl PrefillEngine {
                 desc.in_proj_qkvz.cols,
                 "in_proj_qkvz",
             )?;
-            self.hqq4_dequant_to_bf16("in_proj_qkvz", &desc.in_proj_qkvz, in_proj_qkvz.ptr)?;
+            self.hqq_row_major_dequant_to_bf16(
+                "in_proj_qkvz",
+                &desc.in_proj_qkvz,
+                in_proj_qkvz.ptr,
+            )?;
             self.apply_hqq_prefill_sidecars(
                 layer_idx,
                 "in_proj_qkvz",
@@ -40421,7 +40431,11 @@ impl PrefillEngine {
                 desc.in_proj_ba.cols,
                 "in_proj_ba",
             )?;
-            self.hqq4_dequant_to_bf16("in_proj_ba", &desc.in_proj_ba, in_proj_ba.ptr)?;
+            self.hqq_row_major_dequant_to_bf16(
+                "in_proj_ba",
+                &desc.in_proj_ba,
+                in_proj_ba.ptr,
+            )?;
             self.apply_hqq_prefill_sidecars(
                 layer_idx,
                 "in_proj_ba",
@@ -40444,7 +40458,7 @@ impl PrefillEngine {
                 desc.out_proj.cols,
                 "out_proj",
             )?;
-            self.hqq4_dequant_to_bf16("out_proj", &desc.out_proj, out_proj.ptr)?;
+            self.hqq_row_major_dequant_to_bf16("out_proj", &desc.out_proj, out_proj.ptr)?;
             self.apply_hqq_prefill_sidecars(
                 layer_idx,
                 "out_proj",
@@ -41365,6 +41379,7 @@ impl PrefillEngine {
                 index_topk,
                 output_topk,
                 context_divisor,
+                causal_context_row_span: context_divisor,
                 index_n_heads: registration.index_n_heads,
                 index_head_dim: registration.index_head_dim,
                 mla_num_heads: mla.num_heads,
@@ -41382,17 +41397,17 @@ impl PrefillEngine {
             }
         }
         for (layer_idx, layer) in self.layer_weights.iter().enumerate() {
-            let Some(indexer) = layer
-                .deepseek_v4
-                .as_ref()
-                .and_then(|descriptor| descriptor.indexer.as_ref())
-            else {
+            let Some(descriptor) = layer.deepseek_v4.as_ref() else {
+                continue;
+            };
+            let Some(indexer) = descriptor.indexer.as_ref() else {
                 continue;
             };
             let current = DsaPrefillWorkspaceGeometry {
                 index_topk: indexer.index_topk,
                 output_topk: indexer.index_topk,
                 context_divisor: 1,
+                causal_context_row_span: descriptor.compress_ratio,
                 index_n_heads: indexer.index_n_heads,
                 index_head_dim: indexer.index_head_dim,
                 mla_num_heads: 0,
@@ -41432,7 +41447,7 @@ impl PrefillEngine {
             geometry.index_topk,
             usize::MAX,
             score_buffer_count,
-            geometry.context_divisor,
+            geometry.causal_context_row_span,
         )?;
         let query_bytes = chunk_rows
             .checked_mul(geometry.index_n_heads)
@@ -41510,7 +41525,7 @@ impl PrefillEngine {
             } else {
                 1
             },
-            geometry.context_divisor,
+            geometry.causal_context_row_span,
         )?;
         let workspace = DsaPrefillRequestWorkspace::allocate(
             chunk_rows,
@@ -41518,6 +41533,7 @@ impl PrefillEngine {
             geometry.index_topk,
             geometry.output_topk,
             geometry.context_divisor,
+            geometry.causal_context_row_span,
             geometry.index_n_heads,
             geometry.index_head_dim,
             geometry.mla_num_heads,
@@ -41548,7 +41564,7 @@ impl PrefillEngine {
             } else {
                 1
             },
-            geometry.context_divisor,
+            geometry.causal_context_row_span,
         )?;
         let minimum_total = self.minimum_dsa_prefill_workspace_bytes(chunk_rows, context_end)?;
         let fixed_bytes = minimum_total
@@ -43159,7 +43175,6 @@ impl PrefillEngine {
             1.0f32
                 / ((registration.index_head_dim as f32).sqrt()
                     * (registration.index_n_heads as f32).sqrt()),
-            registration.index_kpool.max(1),
             self.deepseek_v4_prefill_index_score_mode,
             self.deepseek_v4_prefill_topk_mode,
             self.cublas_handle,
@@ -79024,6 +79039,7 @@ mod kernel_tests {
                     "cpu_expert_to_marlin_repack_batched",
                     "tileq_rank_project_bf16",
                     "tileq_int3_gemv_bf16",
+                    "hqq_dequant_bf16",
                 ],
             )
             .expect("Failed to load decode kernels PTX");
@@ -79130,7 +79146,7 @@ mod kernel_tests {
     }
 
     #[test]
-    fn test_hqq_materialized_prefill_dequant_matches_cpu_all_bit_widths() {
+    fn test_hqq_materialized_dequant_matches_cpu_all_bit_widths() {
         let ctx = GpuTestCtx::new();
         let kernel = ctx.get_kernel("hqq_dequant_bf16_kernel");
         let rows = 3usize;
@@ -79244,6 +79260,52 @@ mod kernel_tests {
                 expected,
                 "HQQ{nbits} row-major materialization"
             );
+
+            #[cfg(has_decode_kernels)]
+            {
+                let decode_kernel = ctx.get_decode_kernel("hqq_dequant_bf16");
+                let d_decode_output = ctx.alloc_bf16(rows * cols);
+                unsafe {
+                    let mut a0 = *d_decode_output.device_ptr() as u64;
+                    let mut a1 = *d_packed.device_ptr() as u64;
+                    let mut a2 = *d_scales.device_ptr() as u64;
+                    let mut a3 = *d_zeros.device_ptr() as u64;
+                    let mut a4 = rows as i32;
+                    let mut a5 = cols as i32;
+                    let mut a6 = group_size as i32;
+                    let mut a7 = packed_stride as i32;
+                    let mut a8 = (groups * std::mem::size_of::<f32>()) as i32;
+                    let mut a9 = a8;
+                    let mut a10 = nbits as i32;
+                    launch(
+                        decode_kernel,
+                        (blocks, 1, 1),
+                        (threads, 1, 1),
+                        0,
+                        ctx.stream(),
+                        &mut [
+                            &mut a0 as *mut _ as *mut std::ffi::c_void,
+                            &mut a1 as *mut _ as *mut std::ffi::c_void,
+                            &mut a2 as *mut _ as *mut std::ffi::c_void,
+                            &mut a3 as *mut _ as *mut std::ffi::c_void,
+                            &mut a4 as *mut _ as *mut std::ffi::c_void,
+                            &mut a5 as *mut _ as *mut std::ffi::c_void,
+                            &mut a6 as *mut _ as *mut std::ffi::c_void,
+                            &mut a7 as *mut _ as *mut std::ffi::c_void,
+                            &mut a8 as *mut _ as *mut std::ffi::c_void,
+                            &mut a9 as *mut _ as *mut std::ffi::c_void,
+                            &mut a10 as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )
+                    .unwrap();
+                }
+                ctx.dev.synchronize().unwrap();
+                assert_eq!(
+                    ctx.dev.dtoh_sync_copy(&d_decode_output).unwrap(),
+                    expected,
+                    "HQQ{nbits} decode materialization"
+                );
+            }
         }
     }
 
@@ -83221,6 +83283,7 @@ mod kernel_tests {
             index_kpool_always_select_tail: true,
         };
         assert_eq!(pooled.workspace_selection_geometry().unwrap(), (512, 2051, 4));
+        assert_eq!(pooled.selection_context_divisor().unwrap(), 4);
         assert_eq!(
             DsaPrefillLayerDescriptor {
                 index_kpool_compress: false,
@@ -83230,6 +83293,16 @@ mod kernel_tests {
             .workspace_selection_geometry()
             .unwrap(),
             (2048, 2048, 1)
+        );
+        assert_eq!(
+            DsaPrefillLayerDescriptor {
+                index_kpool_compress: false,
+                index_kpool_always_select_tail: false,
+                ..pooled
+            }
+            .selection_context_divisor()
+            .unwrap(),
+            1
         );
         assert!(DsaPrefillLayerDescriptor {
             index_kpool: 0,
@@ -83501,6 +83574,7 @@ mod kernel_tests {
             1.0f32 / ((head_dim as f32).sqrt() * (num_heads as f32).sqrt()),
             0,
             0,
+            1,
             DeepseekV4PrefillIndexScoreMode::Scalar,
             DeepseekV4PrefillTopkMode::Bitonic,
             std::ptr::null_mut(),
@@ -83651,6 +83725,7 @@ mod kernel_tests {
             1.0f32 / ((head_dim as f32).sqrt() * (num_heads as f32).sqrt()),
             0,
             0,
+            1,
             DeepseekV4PrefillIndexScoreMode::Scalar,
             DeepseekV4PrefillTopkMode::Bitonic,
             std::ptr::null_mut(),
@@ -83761,6 +83836,7 @@ mod kernel_tests {
                 1.0,
                 0,
                 0,
+                1,
                 DeepseekV4PrefillIndexScoreMode::Scalar,
                 mode,
                 std::ptr::null_mut(),
@@ -83873,10 +83949,26 @@ mod kernel_tests {
                 128usize,
                 7usize,
                 (8i32..73).collect::<Vec<_>>(),
-                Some((8usize, 4usize)),
+                Some((8usize, 4usize, 4usize)),
+            ),
+            (
+                65usize,
+                37usize,
+                32usize,
+                128usize,
+                7usize,
+                (0usize..65)
+                    .map(|position| ((position + 1) / 4) as i32 - 1)
+                    .collect::<Vec<_>>(),
+                Some((0usize, 1usize, 4usize)),
             ),
         ] {
-            let context_divisor = causal_geometry.map(|(_, ratio)| ratio).unwrap_or(1);
+            let position_divisor = causal_geometry
+                .map(|(_, divisor, _)| divisor)
+                .unwrap_or(1);
+            let causal_row_span = causal_geometry
+                .map(|(_, _, row_span)| row_span)
+                .unwrap_or(1);
             let raw_queries_host = (0..rows * num_heads * head_dim)
                 .map(|index| round_bf16((index as f32 * 0.0173).sin() * 0.25))
                 .collect::<Vec<_>>();
@@ -83942,7 +84034,8 @@ mod kernel_tests {
                     } else {
                         0
                     },
-                    context_divisor,
+                    position_divisor,
+                    causal_row_span,
                     index_mode,
                     DeepseekV4PrefillTopkMode::Bitonic,
                     handle,
@@ -84017,7 +84110,7 @@ mod kernel_tests {
                     );
                     for row in 0..rows {
                         let causal_context = ((positions_host[row] + 1).max(0) as usize
-                            / context_divisor)
+                            / position_divisor)
                             .min(context_end);
                         assert_eq!(
                             &actual_scores[row * context_end..row * context_end + causal_context],
@@ -84031,7 +84124,7 @@ mod kernel_tests {
                     (head_dim as f32 * f32::EPSILON) / (1.0 - head_dim as f32 * f32::EPSILON);
                 for row in 0..rows {
                     let causal_context = ((positions_host[row] + 1).max(0) as usize
-                        / context_divisor)
+                        / position_divisor)
                         .min(context_end);
                     let mut row_actual = Vec::with_capacity(causal_context);
                     for token in 0..causal_context {

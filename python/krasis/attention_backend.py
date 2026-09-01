@@ -820,6 +820,7 @@ def _file_sha256(path: str) -> str:
 
 
 def _tensor_sha256(tensor: torch.Tensor) -> str:
+    _require_torch()
     cpu = tensor.detach().contiguous().cpu()
     if cpu.dtype == torch.bfloat16:
         data = cpu.view(torch.uint16).numpy().tobytes()
@@ -1242,6 +1243,7 @@ def _unpack_uint6(packed: torch.Tensor, cols: int) -> torch.Tensor:
 
 
 def _pack_hqq_quant(quant: torch.Tensor, nbits: int) -> torch.Tensor:
+    _require_torch()
     if nbits == 4:
         return _pack_uint4(quant)
     if nbits == 6:
@@ -1254,6 +1256,7 @@ def _pack_hqq_quant(quant: torch.Tensor, nbits: int) -> torch.Tensor:
 
 
 def _unpack_hqq_quant(packed: torch.Tensor, cols: int, nbits: int) -> torch.Tensor:
+    _require_torch()
     if nbits == 4:
         return _unpack_uint4(packed, cols)
     if nbits == 6:

@@ -53,6 +53,22 @@ class ManagerLauncherTests(unittest.TestCase):
         }
         self.assertEqual(set(result), expected)
 
+    def test_manager_config_keeps_mixed_attention_budget_separate_from_kv(self):
+        cfg = launcher.LauncherConfig()
+        cfg.model_path = "/models/example"
+        cfg.attention_quant = "hqq46_auto"
+        cfg.hqq_auto_budget_pct = 15.0
+        cfg.kv_dtype = "k6v6"
+        fake = SimpleNamespace(
+            cfg=cfg,
+            selected_gpus=[{"index": 0, "uuid": "GPU-stable"}],
+        )
+        result = launcher._manager_config_dict(fake)
+        self.assertEqual(result["attention_quant"], "hqq46_auto")
+        self.assertEqual(result["hqq_auto_budget_pct"], 15.0)
+        self.assertEqual(result["kv_dtype"], "k6v6")
+        self.assertNotIn(":", result["attention_quant"])
+
     def test_manager_cli_rejects_invalid_port_before_rust_start(self):
         with self.assertRaises(SystemExit) as caught:
             launcher._manager_main(["--port", "0", "--no-open"])

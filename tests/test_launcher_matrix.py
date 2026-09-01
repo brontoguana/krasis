@@ -330,7 +330,7 @@ class LauncherMatrixTest(unittest.TestCase):
 
             invalid_capabilities = (
                 ("attention_quant", "hqq4", "HQQ6 attention / Native cache"),
-                ("kv_dtype", "bf16", "has not been launcher-qualified"),
+                ("kv_dtype", "bf16", "HQQ6 attention / Native cache"),
                 ("hcs", False, "requires HCS"),
                 ("dynamic_hcs", False, "dynamic HCS enabled"),
                 ("hcs_host_cache_mode", "mirror", "source HCS host cache"),
@@ -618,7 +618,9 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertEqual(launcher.cfg.kv_dtype, "native")
         self.assertEqual(
             launcher._attention_choices(),
-            ["hqq4", "hqq46_auto", "hqq6", "hqq68_auto", "hqq8", "bf16"],
+            launcher_mod._expand_interactive_attention_modes(
+                ("hqq4", "hqq46_auto", "hqq6", "hqq68_auto", "hqq8", "bf16")
+            ),
         )
         self.assertEqual(launcher._kv_choices(), ["native", "bf16"])
         self.assertEqual(launcher._multi_gpu_choices(), ["auto"])
@@ -731,11 +733,29 @@ class LauncherMatrixTest(unittest.TestCase):
 
         self.assertEqual(
             launcher._attention_choices(),
-            ["hqq4", "hqq46_auto", "hqq6", "hqq68_auto"],
+            [
+                "hqq4",
+                "hqq46_auto:10",
+                "hqq46_auto:15",
+                "hqq46_auto:20",
+                "hqq6",
+                "hqq68_auto:10",
+                "hqq68_auto:15",
+                "hqq68_auto:20",
+            ],
         )
         for supported_attention in ("hqq46_auto", "hqq68_auto"):
-            launcher.cfg.attention_quant = supported_attention
-            launcher._validate_model_capabilities()
+            for budget_pct in launcher_mod.INTERACTIVE_HQQ_AUTO_BUDGET_PCTS:
+                self.assertTrue(
+                    launcher._set_interactive_attention_quant(
+                        launcher_mod._interactive_attention_choice(
+                            supported_attention, budget_pct
+                        )
+                    )
+                )
+                self.assertEqual(launcher.cfg.attention_quant, supported_attention)
+                self.assertEqual(launcher.cfg.hqq_auto_budget_pct, budget_pct)
+                launcher._validate_model_capabilities()
 
     def test_every_download_catalog_entry_drives_launcher_capabilities(self) -> None:
         from krasis.hf_downloader import supported_models
@@ -767,7 +787,11 @@ class LauncherMatrixTest(unittest.TestCase):
                 launcher._apply_model_recommended_defaults()
                 self.assertEqual(launcher.cfg.attention_quant, spec.default_attention)
                 self.assertEqual(launcher.cfg.kv_dtype, spec.default_kv)
-                self.assertEqual(launcher._attention_choices(), list(spec.attention_modes))
+                self.assertEqual(launcher._attention_modes(), list(spec.attention_modes))
+                self.assertEqual(
+                    launcher._attention_choices(),
+                    launcher_mod._expand_interactive_attention_modes(spec.attention_modes),
+                )
                 self.assertEqual(launcher._kv_choices(), list(spec.kv_modes))
                 self.assertEqual(launcher._multi_gpu_choices(), list(spec.multi_gpu_modes))
                 self.assertEqual(launcher._vision_choices(), list(spec.vision_modes))
@@ -790,23 +814,10 @@ class LauncherMatrixTest(unittest.TestCase):
                         spec.max_context_tokens,
                     )
                 launcher._validate_model_capabilities()
-                for attention, kv in spec.runtime_profiles:
-                    launcher.cfg.attention_quant = attention
-                    launcher.cfg.kv_dtype = kv
-                    launcher._validate_model_capabilities()
-
-                unmeasured = next(
-                    (
-                        (attention, kv)
-                        for attention in spec.attention_modes
-                        for kv in spec.kv_modes
-                        if (attention, kv) not in spec.runtime_profiles
-                    ),
-                    None,
-                )
-                if unmeasured is not None:
-                    launcher.cfg.attention_quant, launcher.cfg.kv_dtype = unmeasured
-                    with self.assertRaisesRegex(ValueError, "has not been launcher-qualified"):
+                for attention in spec.attention_modes:
+                    for kv in spec.kv_modes:
+                        launcher.cfg.attention_quant = attention
+                        launcher.cfg.kv_dtype = kv
                         launcher._validate_model_capabilities()
 
                 launcher.cfg.attention_quant = spec.default_attention
@@ -824,7 +835,7 @@ class LauncherMatrixTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "INT4 experts only"):
                     launcher._validate_model_capabilities()
 
-    def test_qcn_release_matrix_uses_launcher_qualified_profiles(self) -> None:
+    def test_qcn_release_matrix_uses_launcher_capabilities(self) -> None:
         from krasis.hf_downloader import supported_model_spec
         from tests.release_test import CONFIG_VARIANTS
 
@@ -832,14 +843,12 @@ class LauncherMatrixTest(unittest.TestCase):
         for variant in CONFIG_VARIANTS:
             with self.subTest(variant=variant["name"]):
                 self.assertEqual(variant["bits"], 4)
-                self.assertIn(
-                    (variant["attention"], variant["kv"]),
-                    spec.runtime_profiles,
-                )
+                self.assertIn(variant["attention"], spec.attention_modes)
+                self.assertIn(variant["kv"], spec.kv_modes)
                 if variant.get("multi_gpu"):
                     self.assertIn("peer", spec.multi_gpu_modes)
 
-    def test_profile_cycles_keep_catalog_pairs_qualified(self) -> None:
+    def test_attention_and_kv_cycles_are_independent(self) -> None:
         from krasis.hf_downloader import supported_model_spec
 
         launcher = Launcher.__new__(Launcher)
@@ -859,8 +868,22 @@ class LauncherMatrixTest(unittest.TestCase):
         launcher._cycle_value(attention_option, 1)
         self.assertEqual(
             (launcher.cfg.attention_quant, launcher.cfg.kv_dtype),
-            ("hqq6", "k6v6"),
+            ("hqq46_auto", "k4v4"),
         )
+        self.assertEqual(launcher.cfg.hqq_auto_budget_pct, 10.0)
+        launcher._cycle_value(attention_option, 1)
+        self.assertEqual(launcher.cfg.attention_quant, "hqq46_auto")
+        self.assertEqual(launcher.cfg.hqq_auto_budget_pct, 15.0)
+        self.assertEqual(launcher.cfg.kv_dtype, "k4v4")
+
+        kv_option = next(
+            option for option in launcher_mod.OPTIONS
+            if option.key == "kv_dtype"
+        )
+        launcher._cycle_value(kv_option, 1)
+        self.assertEqual(launcher.cfg.kv_dtype, "k6v6")
+        self.assertEqual(launcher.cfg.attention_quant, "hqq46_auto")
+        self.assertEqual(launcher.cfg.hqq_auto_budget_pct, 15.0)
         launcher._validate_model_capabilities()
 
     def test_every_catalog_entry_is_selectable_in_download_screen(self) -> None:

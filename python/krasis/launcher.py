@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import urllib.request
 
 from krasis.attention_backend import (
@@ -146,12 +146,35 @@ def _unique_gpu_alias_match(spec: str, gpus: List[Dict[str, Any]]) -> Tuple[Opti
     return None, matches
 
 
-INTERACTIVE_ATTENTION_QUANT_CHOICES = ("hqq4", "hqq46_auto", "hqq6", "hqq68_auto")
-DEEPSEEK_V4_ATTENTION_QUANT_CHOICES = (
-    "hqq4",
-    "hqq46_auto",
-    "hqq6",
-    "hqq68_auto",
+INTERACTIVE_HQQ_AUTO_BUDGET_PCTS = (10.0, 15.0, 20.0)
+
+
+def _interactive_attention_choice(attention_quant: str, budget_pct: Optional[float] = None) -> str:
+    if attention_quant not in ("hqq46_auto", "hqq68_auto"):
+        return attention_quant
+    pct = INTERACTIVE_HQQ_AUTO_BUDGET_PCTS[0] if budget_pct is None else float(budget_pct)
+    return f"{attention_quant}:{pct:g}"
+
+
+def _expand_interactive_attention_modes(attention_modes: Sequence[str]) -> List[str]:
+    choices: List[str] = []
+    for attention_quant in attention_modes:
+        if attention_quant in ("hqq46_auto", "hqq68_auto"):
+            choices.extend(
+                _interactive_attention_choice(attention_quant, pct)
+                for pct in INTERACTIVE_HQQ_AUTO_BUDGET_PCTS
+            )
+        else:
+            choices.append(attention_quant)
+    return choices
+
+
+INTERACTIVE_ATTENTION_QUANT_MODES = ("hqq4", "hqq46_auto", "hqq6", "hqq68_auto")
+INTERACTIVE_ATTENTION_QUANT_CHOICES = tuple(
+    _expand_interactive_attention_modes(INTERACTIVE_ATTENTION_QUANT_MODES)
+)
+DEEPSEEK_V4_ATTENTION_QUANT_MODES = (
+    *INTERACTIVE_ATTENTION_QUANT_MODES,
     "hqq8",
     "bf16",
 )
@@ -159,13 +182,8 @@ DEEPSEEK_V4_KV_CHOICES = ("native", "bf16")
 # Keep this model-owned even while it matches the generic tuple: Gemma4 has an
 # architecture-specific runtime contract and must not inherit future presets
 # until they have their own quality gate.
-GEMMA4_ATTENTION_QUANT_CHOICES = (
-    "hqq4",
-    "hqq46_auto",
-    "hqq6",
-    "hqq68_auto",
-)
-INTERACTIVE_HQQ_AUTO_BUDGET_PCT = 10.0
+GEMMA4_ATTENTION_QUANT_MODES = INTERACTIVE_ATTENTION_QUANT_MODES
+INTERACTIVE_HQQ_AUTO_BUDGET_PCT = INTERACTIVE_HQQ_AUTO_BUDGET_PCTS[0]
 INSTALLER_URL = "https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh"
 
 
@@ -2039,6 +2057,21 @@ class Launcher:
 
         Choices are supplied by the selected model's capability contract.
         """
+        raw_value = str(value)
+        budget_pct: Optional[float] = None
+        if ":" in raw_value:
+            value, raw_pct = raw_value.split(":", 1)
+            if value not in ("hqq46_auto", "hqq68_auto"):
+                return False
+            try:
+                budget_pct = float(raw_pct)
+            except ValueError:
+                return False
+            if budget_pct not in INTERACTIVE_HQQ_AUTO_BUDGET_PCTS:
+                return False
+        else:
+            value = raw_value
+
         if value in ("hqq8", "bf16"):
             self.cfg.attention_quant = value
             self.cfg.hqq_cache_profile = HQQ_CACHE_PROFILE_BASELINE
@@ -2067,7 +2100,9 @@ class Launcher:
             self.cfg.attention_quant = "hqq46_auto"
             self.cfg.hqq_cache_profile = HQQ_CACHE_PROFILE_BASELINE
             self.cfg.hqq_group_size = HQQ_ATTENTION_DEFAULT_GROUP_SIZE
-            self.cfg.hqq_auto_budget_pct = INTERACTIVE_HQQ_AUTO_BUDGET_PCT
+            self.cfg.hqq_auto_budget_pct = (
+                INTERACTIVE_HQQ_AUTO_BUDGET_PCT if budget_pct is None else budget_pct
+            )
             self.cfg.hqq46_auto_budget_mib = 0
             self.cfg.hqq_sidecar_manifest = ""
             return True
@@ -2075,7 +2110,9 @@ class Launcher:
             self.cfg.attention_quant = "hqq68_auto"
             self.cfg.hqq_cache_profile = HQQ_CACHE_PROFILE_BASELINE
             self.cfg.hqq_group_size = HQQ_ATTENTION_DEFAULT_GROUP_SIZE
-            self.cfg.hqq_auto_budget_pct = INTERACTIVE_HQQ_AUTO_BUDGET_PCT
+            self.cfg.hqq_auto_budget_pct = (
+                INTERACTIVE_HQQ_AUTO_BUDGET_PCT if budget_pct is None else budget_pct
+            )
             self.cfg.hqq46_auto_budget_mib = 0
             self.cfg.hqq_sidecar_manifest = ""
             return True
@@ -2102,15 +2139,18 @@ class Launcher:
         model_path = str((self.model_info or {}).get("path", self.cfg.model_path or ""))
         return supported_model_for_path(model_path) if model_path else None
 
-    def _attention_choices(self) -> List[str]:
+    def _attention_modes(self) -> List[str]:
         spec = self._supported_model_spec()
         if spec is not None:
             return list(spec.attention_modes)
         if self._is_deepseek_v4():
-            return list(DEEPSEEK_V4_ATTENTION_QUANT_CHOICES)
+            return list(DEEPSEEK_V4_ATTENTION_QUANT_MODES)
         if self._is_gemma4():
-            return list(GEMMA4_ATTENTION_QUANT_CHOICES)
-        return list(INTERACTIVE_ATTENTION_QUANT_CHOICES)
+            return list(GEMMA4_ATTENTION_QUANT_MODES)
+        return list(INTERACTIVE_ATTENTION_QUANT_MODES)
+
+    def _attention_choices(self) -> List[str]:
+        return _expand_interactive_attention_modes(self._attention_modes())
 
     def _kv_choices(self) -> List[str]:
         spec = self._supported_model_spec()
@@ -2171,14 +2211,14 @@ class Launcher:
                     "The selected checkpoint has no compatible Krasis runtime.",
                 )
             )
-        attention_choices = self._attention_choices()
+        attention_modes = self._attention_modes()
         kv_choices = self._kv_choices()
         topology_choices = self._multi_gpu_choices()
-        if self.cfg.attention_quant not in attention_choices:
+        if self.cfg.attention_quant not in attention_modes:
             raise ValueError(
                 f"{(self.model_info or {}).get('name', 'Selected model')} does not support "
                 f"attention mode {self.cfg.attention_quant!r}; supported modes: "
-                f"{', '.join(attention_choices)}"
+                f"{', '.join(attention_modes)}"
             )
         if self.cfg.kv_dtype not in kv_choices:
             raise ValueError(
@@ -2186,19 +2226,6 @@ class Launcher:
                 f"cache mode {self.cfg.kv_dtype!r}; supported modes: {', '.join(kv_choices)}"
             )
         spec = self._supported_model_spec()
-        if (
-            spec is not None
-            and (self.cfg.attention_quant, self.cfg.kv_dtype)
-            not in spec.runtime_profiles
-        ):
-            profiles = ", ".join(
-                f"{attention}/{kv}" for attention, kv in spec.runtime_profiles
-            )
-            raise ValueError(
-                f"{spec.display_name} has not been launcher-qualified with "
-                f"{self.cfg.attention_quant}/{self.cfg.kv_dtype}; measured profiles: "
-                f"{profiles}"
-            )
         if self.cfg.multi_gpu_mode not in topology_choices:
             raise ValueError(
                 f"{(self.model_info or {}).get('name', 'Selected model')} does not support "
@@ -3080,8 +3107,14 @@ class Launcher:
         if opt.opt_type == "cycle" and opt.choices:
             if opt.key == "attention_quant":
                 choices = self._attention_choices()
+                current_choice = _interactive_attention_choice(
+                    str(val),
+                    self.cfg.hqq_auto_budget_pct
+                    if str(val) in ("hqq46_auto", "hqq68_auto")
+                    else None,
+                )
                 try:
-                    idx = choices.index(val)
+                    idx = choices.index(current_choice)
                 except ValueError:
                     idx = 0
                 idx = (idx + direction) % len(choices)
@@ -3089,17 +3122,6 @@ class Launcher:
                     self._show_attention_unavailable()
                 else:
                     self.cfg._attention_quant_explicit = True
-                    spec = self._supported_model_spec()
-                    if (
-                        spec is not None
-                        and (self.cfg.attention_quant, self.cfg.kv_dtype)
-                        not in spec.runtime_profiles
-                    ):
-                        self.cfg.kv_dtype = next(
-                            kv for attention, kv in spec.runtime_profiles
-                            if attention == self.cfg.attention_quant
-                        )
-                        self.cfg._kv_dtype_explicit = True
                 return
             if opt.key == "kv_dtype":
                 choices = self._kv_choices()
@@ -3118,18 +3140,6 @@ class Launcher:
             setattr(self.cfg, opt.key, new_val)
             if opt.key == "kv_dtype":
                 self.cfg._kv_dtype_explicit = True
-                spec = self._supported_model_spec()
-                if (
-                    spec is not None
-                    and (self.cfg.attention_quant, self.cfg.kv_dtype)
-                    not in spec.runtime_profiles
-                ):
-                    attention = next(
-                        attention for attention, kv in spec.runtime_profiles
-                        if kv == self.cfg.kv_dtype
-                    )
-                    self._set_interactive_attention_quant(attention)
-                    self.cfg._attention_quant_explicit = True
             if opt.key == "gpu_expert_bits":
                 # The launcher exposes one expert quantization choice, so keep
                 # the underlying runtime config keys aligned.
@@ -3626,7 +3636,7 @@ def parse_args() -> argparse.Namespace:
                         choices=list(GPU_EXPERT_INT4_CALIB_CHOICES),
                         help="Offline calibration mode for GPU routed-expert INT4 cache build")
     parser.add_argument("--attention-quant", default=None,
-                        help="Attention weight quant: interactive presets are hqq4, hqq46_auto with --hqq-auto-budget-pct 10, hqq6 default, and hqq68_auto with --hqq-auto-budget-pct 10; hqq8, hqq46, and bf16 remain explicit advanced modes")
+                        help="Attention weight quant: interactive presets are hqq4, hqq46_auto at 10/15/20%, hqq6 default, and hqq68_auto at 10/15/20%; hqq8, hqq46, and bf16 remain explicit advanced modes")
     parser.add_argument("--vision-quant", default=None, choices=["bf16", "int4"],
                         help="Vision tower quantization; accepted modes are model-specific and launcher-qualified")
     parser.add_argument("--hqq-cache-profile", default=None,
@@ -4212,7 +4222,13 @@ def _manager_schema_main(argv: List[str]) -> None:
         "model": launcher.model_info,
         "config": _manager_config_dict(launcher),
         "choices": {
-            "attention_quant": launcher._attention_choices(),
+            # API consumers receive executable config values separately from
+            # the browser's combined display presets. A preset such as
+            # hqq46_auto:15 must serialize as attention_quant=hqq46_auto plus
+            # hqq_auto_budget_pct=15, never as an invented runtime mode.
+            "attention_quant": launcher._attention_modes(),
+            "attention_presets": launcher._attention_choices(),
+            "hqq_auto_budget_pct": list(INTERACTIVE_HQQ_AUTO_BUDGET_PCTS),
             "vision_quant": launcher._vision_choices(),
             "kv_dtype": launcher._kv_choices(),
             "multi_gpu_mode": launcher._multi_gpu_choices(),

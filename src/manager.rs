@@ -3003,6 +3003,12 @@ mod tests {
             "ACTIVE_CONFIG",
             "visionQuantField",
             "vision_quant",
+            "attention_presets",
+            "attentionChoice",
+            "attentionSelection",
+            "attention_quant:attention.mode",
+            "hqq_auto_budget_pct:attention.pct",
+            "syncAttentionBudget",
         ] {
             assert!(html.contains(required), "missing {required}");
         }

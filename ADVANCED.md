@@ -61,7 +61,8 @@ Config files use `KEY=VALUE` format. CLI flags override config file values.
 DeepSeek-V4-Flash-0731 INT4-expert, HQQ8-attention, expanded-BF16-cache config.
 This remains a measured comparison profile. Fresh launcher selections default
 to HQQ6 attention plus `Native` cache; DeepSeek also supports explicit HQQ4,
-HQQ4+10%, HQQ6+10%, HQQ8, BF16-attention, and expanded-BF16-cache choices.
+HQQ4+10/15/20%, HQQ6+10/15/20%, HQQ8, BF16-attention, and
+expanded-BF16-cache choices.
 The mixed presets promote the most beneficial DeepSeek projection tensors
 within the configured measured memory budget. The `Native` cache
 stores the checkpoint's existing packed QAT state without a second
@@ -147,7 +148,7 @@ a reason to parse unstructured text as a tool call.
 |------|---------|-------------|
 | `--gpu-expert-bits` | 4 | GPU Marlin expert bits: `4` or `8` |
 | `--cpu-expert-bits` | 4 | CPU decode expert bits: `4` or `8` |
-| `--attention-quant` | bf16 direct, hqq6 launcher | Attention weight precision: interactive launcher presets are HQQ4, HQQ4+10% (`hqq46_auto`), HQQ6, and HQQ6+10% (`hqq68_auto`); `hqq8`, `hqq46`, and `bf16` remain explicit advanced modes |
+| `--attention-quant` | bf16 direct, hqq6 launcher | Attention weight precision: interactive launcher presets are HQQ4, HQQ4+10/15/20% (`hqq46_auto` plus the selected percentage), HQQ6, and HQQ6+10/15/20% (`hqq68_auto` plus the selected percentage); `hqq8`, `hqq46`, and `bf16` remain explicit advanced modes |
 | `--shared-expert-quant` | int8 | Shared expert quant: `int8` or `bf16` |
 | `--dense-mlp-quant` | int8 | Dense MLP quant: `int8` or `bf16` |
 | `--lm-head-quant` | int8 | LM head quant: `int8` or `bf16` |
@@ -337,7 +338,7 @@ Krasis lets you quantize each component independently. The defaults are a good s
 |-----------|---------|---------|
 | GPU experts | INT4, INT8 | INT4 |
 | CPU experts | INT4, INT8 | INT4 |
-| Attention | HQQ4, HQQ4+10%, HQQ6, HQQ6+10%, HQQ8, BF16 | BF16 |
+| Attention | HQQ4, HQQ4+10/15/20%, HQQ6, HQQ6+10/15/20%, HQQ8, BF16 | BF16 |
 | Shared expert | INT8, BF16 | INT8 |
 | Dense MLP | INT8, BF16 | INT8 |
 | LM head | INT8, BF16 | INT8 |
@@ -347,3 +348,8 @@ Krasis lets you quantize each component independently. The defaults are a good s
 Embeddings, norms, routing gates, and vision norms/positional plumbing are always kept at BF16. Vision towers are lazy-loaded on the first image request, staged on GPU only for image embedding generation, then released back to CPU.
 
 HQQ attention artifacts live under the normal model cache tree and the runtime restores staged prefill/decode descriptors from that cache. AWQ attention is deprecated and disabled for new runs; do not use it for production validation. BF16 is full precision with no calibration needed.
+
+Attention precision and KV format are independent launcher controls. Changing
+one never changes the other. Each model still advertises only KV formats its
+architecture can represent—for example, DeepSeek-V4 uses Native or BF16 shared
+sequence state rather than conventional separate K/V formats.

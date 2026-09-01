@@ -371,6 +371,83 @@ extern "C" __global__ void hqq4_dequant_bf16(
     out[idx] = f32_to_bf16((float(q) - zero) * scale);
 }
 
+template<int NBITS>
+__device__ __forceinline__ int hqq_dequant_load_q(
+    const unsigned char* __restrict__ row,
+    int col)
+{
+    if constexpr (NBITS == 4) {
+        unsigned char byte = row[col >> 1];
+        return (col & 1) ? (int)(byte >> 4) : (int)(byte & 0x0F);
+    } else if constexpr (NBITS == 6) {
+        int quartet = col >> 2;
+        int offset = col & 3;
+        const unsigned char* tri = row + quartet * 3;
+        unsigned int bits = ((unsigned int)tri[0])
+            | (((unsigned int)tri[1]) << 8)
+            | (((unsigned int)tri[2]) << 16);
+        return (bits >> (offset * 6)) & 0x3F;
+    } else {
+        return (int)row[col];
+    }
+}
+
+template<int NBITS>
+__device__ __forceinline__ void hqq_dequant_bf16_impl(
+    __nv_bfloat16* __restrict__ out,
+    const unsigned char* __restrict__ packed,
+    const float* __restrict__ scales,
+    const float* __restrict__ zeros,
+    int rows,
+    int cols,
+    int group_size,
+    int packed_row_stride_bytes,
+    int scales_row_stride_bytes,
+    int zeros_row_stride_bytes)
+{
+    int idx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    int total = rows * cols;
+    if (idx >= total) return;
+    int row = idx / cols;
+    int col = idx - row * cols;
+    const unsigned char* packed_row = packed + (long long)row * packed_row_stride_bytes;
+    const float* scales_row = reinterpret_cast<const float*>(
+        reinterpret_cast<const char*>(scales) + (long long)row * scales_row_stride_bytes);
+    const float* zeros_row = reinterpret_cast<const float*>(
+        reinterpret_cast<const char*>(zeros) + (long long)row * zeros_row_stride_bytes);
+    int group = col / group_size;
+    int q = hqq_dequant_load_q<NBITS>(packed_row, col);
+    out[idx] = f32_to_bf16(((float)q - zeros_row[group]) * scales_row[group]);
+}
+
+extern "C" __global__ void hqq_dequant_bf16(
+    __nv_bfloat16* __restrict__ out,
+    const unsigned char* __restrict__ packed,
+    const float* __restrict__ scales,
+    const float* __restrict__ zeros,
+    int rows,
+    int cols,
+    int group_size,
+    int packed_row_stride_bytes,
+    int scales_row_stride_bytes,
+    int zeros_row_stride_bytes,
+    int nbits)
+{
+    if (nbits == 4) {
+        hqq_dequant_bf16_impl<4>(
+            out, packed, scales, zeros, rows, cols, group_size,
+            packed_row_stride_bytes, scales_row_stride_bytes, zeros_row_stride_bytes);
+    } else if (nbits == 6) {
+        hqq_dequant_bf16_impl<6>(
+            out, packed, scales, zeros, rows, cols, group_size,
+            packed_row_stride_bytes, scales_row_stride_bytes, zeros_row_stride_bytes);
+    } else if (nbits == 8) {
+        hqq_dequant_bf16_impl<8>(
+            out, packed, scales, zeros, rows, cols, group_size,
+            packed_row_stride_bytes, scales_row_stride_bytes, zeros_row_stride_bytes);
+    }
+}
+
 // ── Embedding Lookup ───────────────────────────────────────────────────
 
 // Copy one row from embedding table [vocab, hidden] BF16 into hidden state BF16.

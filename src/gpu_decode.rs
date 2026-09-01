@@ -3939,6 +3939,7 @@ const KERNEL_NAMES: &[&str] = &[
     "rmsnorm_scale",
     "dual_rmsnorm_scale",
     "hqq4_dequant_bf16",
+    "hqq_dequant_bf16",
     "silu_mul",
     "silu_mul_deepseek_clamp",
     "tileq_rank_project_bf16",
@@ -25105,6 +25106,51 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    fn hqq_dequant_to_bf16(
+        &self,
+        tensor_name: &str,
+        desc: &HqqTensorExecDescriptor,
+        out_ptr: u64,
+    ) -> Result<(), String> {
+        let nbits = hqq_nbits_from_desc(desc)?;
+        validate_hqq_tensor_desc_for_layout(
+            tensor_name,
+            desc,
+            nbits,
+            hqq_expected_layout(nbits, "decode")?,
+            true,
+        )?;
+        let total = desc.rows * desc.cols;
+        if total == 0 {
+            return Ok(());
+        }
+        let kernel = self
+            .device
+            .get_func(MODULE_NAME, "hqq_dequant_bf16")
+            .ok_or_else(|| "decode kernel hqq_dequant_bf16 not loaded".to_string())?;
+        unsafe {
+            kernel
+                .launch(
+                    LaunchConfig::for_num_elems(total as u32),
+                    (
+                        out_ptr,
+                        desc.packed_ptr,
+                        desc.scales_ptr,
+                        desc.zeros_ptr,
+                        desc.rows as i32,
+                        desc.cols as i32,
+                        desc.group_size as i32,
+                        desc.packed_row_stride_bytes as i32,
+                        desc.scales_row_stride_bytes as i32,
+                        desc.zeros_row_stride_bytes as i32,
+                        nbits as i32,
+                    ),
+                )
+                .map_err(|e| format!("hqq_dequant_bf16 {tensor_name}: {:?}", e))?;
+        }
+        Ok(())
+    }
+
     fn launch_hqq4_decode_gemv_f32(
         &self,
         tensor_name: &str,
@@ -26674,13 +26720,6 @@ impl GpuDecodeStore {
                 layer_idx
             ));
         };
-        if desc.nbits != 4 {
-            return Err(format!(
-                "HQQ decode GQA only supports nbits=4 today, got {} at layer {}",
-                desc.nbits, layer_idx
-            ));
-        }
-
         let t0 = std::time::Instant::now();
         let make_weight = |rows: usize, cols: usize, ptr: u64| GpuWeight::new(ptr, rows, cols, 0);
         let mut staged_weights: Vec<GpuWeight> = Vec::with_capacity(4);
@@ -26696,7 +26735,7 @@ impl GpuDecodeStore {
                         )
                     })?;
                 let ptr = *buf.device_ptr();
-                self.hqq4_dequant_to_bf16(tensor_name, tensor, ptr)?;
+                self.hqq_dequant_to_bf16(tensor_name, tensor, ptr)?;
                 self.hqq_bf16_weight_bufs.push(buf);
                 staged_weights.push(make_weight(tensor.rows, tensor.cols, ptr));
                 Ok(())
