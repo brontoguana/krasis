@@ -1282,6 +1282,48 @@ class LauncherMatrixTest(unittest.TestCase):
             chat_mod._HAS_WINDOWS_CONSOLE = old_chat_flag
             chat_mod._read_windows_key_native = old_chat_reader
 
+    def test_native_windows_console_discards_complete_queued_keys(self) -> None:
+        chars = iter(["\r", "\xe0", "P", "q"])
+        remaining = [4]
+
+        def key_available() -> bool:
+            return remaining[0] > 0
+
+        def read_char() -> str:
+            remaining[0] -= 1
+            return next(chars)
+
+        self.assertEqual(
+            console_input_mod.discard_windows_keys(
+                key_available=key_available,
+                read_char=read_char,
+            ),
+            3,
+        )
+        self.assertEqual(remaining[0], 0)
+
+    def test_initial_budget_transition_renders_then_discards_queued_input(self) -> None:
+        launcher = Launcher.__new__(Launcher)
+        events = []
+        launcher._compute_budget = lambda: events.append("compute") or {"ok": True}
+
+        old_clear = launcher_mod._clear_screen
+        old_discard = launcher_mod._discard_pending_keys
+        try:
+            launcher_mod._clear_screen = lambda: events.append("clear")
+            launcher_mod._discard_pending_keys = lambda: events.append("discard")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                launcher._prepare_initial_budget()
+        finally:
+            launcher_mod._clear_screen = old_clear
+            launcher_mod._discard_pending_keys = old_discard
+
+        self.assertEqual(events, ["clear", "compute", "discard"])
+        self.assertEqual(launcher.budget, {"ok": True})
+        self.assertIn("Preparing model configuration", out.getvalue())
+        self.assertIn("Input is paused", out.getvalue())
+
     def test_native_windows_console_input_never_mutates_mouse_modes(self) -> None:
         self.assertFalse(
             hasattr(console_input_mod, "windows_console_key_mode"),

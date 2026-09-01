@@ -40,6 +40,7 @@ from krasis.config import (
 from krasis.config import GPU_EXPERT_INT4_CALIB_CHOICES
 from krasis.console_input import (
     HAS_WINDOWS_CONSOLE as _HAS_WINDOWS_CONSOLE,
+    discard_windows_keys as _discard_windows_keys,
     read_windows_key as _read_windows_key,
     read_windows_key_timeout as _read_windows_key_timeout,
 )
@@ -250,6 +251,19 @@ def _hide_cursor():
 def _show_cursor():
     sys.stdout.write("\033[?25h")
     sys.stdout.flush()
+
+
+def _discard_pending_keys() -> None:
+    """Discard input entered while a non-interactive transition was running."""
+    if _HAS_WINDOWS_CONSOLE:
+        _discard_windows_keys()
+        return
+    if not _HAS_TERMIOS or not sys.stdin.isatty():
+        return
+    try:
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except (OSError, termios.error):
+        return
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2368,6 +2382,18 @@ class Launcher:
             self.budget_error = str(exc)
             return None
 
+    def _prepare_initial_budget(self) -> None:
+        """Compute the first budget without leaving an actionable screen stale."""
+        _clear_screen()
+        sys.stdout.write(
+            f"  {BOLD}Preparing model configuration{NC}\n\n"
+            "  Calculating the model-specific VRAM and RAM budget...\n"
+            f"  {DIM}Input is paused until the configuration screen is ready.{NC}\n"
+        )
+        sys.stdout.flush()
+        self.budget = self._compute_budget()
+        _discard_pending_keys()
+
     def _visible_config_options(self, show_advanced: bool = False) -> List[ConfigOption]:
         """Return config options visible in the current TUI mode."""
         return [
@@ -3204,8 +3230,10 @@ class Launcher:
         # cycled among the supported public KV modes in the TUI.
         self.cfg.cpu_expert_bits = self.cfg.gpu_expert_bits
 
-        # Compute initial budget
-        self.budget = self._compute_budget()
+        # Computing a model-scale budget can take long enough for users to
+        # retry Enter.  Show a non-actionable transition and discard only the
+        # keys queued while it runs, so unseen screens cannot be confirmed.
+        self._prepare_initial_budget()
 
         cursor = 0
         show_advanced = False
@@ -4382,6 +4410,10 @@ def main():
             if args.benchmark:
                 launch_mode = "benchmark"
             else:
+                # Require a fresh confirmation for the next actionable screen.
+                # This prevents an auto-repeated Enter from accepting both the
+                # configuration and the default launch mode.
+                _discard_pending_keys()
                 _hide_cursor()
                 try:
                     launch_mode = _launch_mode_screen()

@@ -68,3 +68,25 @@ def read_windows_key_timeout(
         if remaining <= 0:
             return None
         sleep(min(0.01, remaining))
+
+
+def discard_windows_keys(
+    *,
+    key_available: Optional[Callable[[], bool]] = None,
+    read_char: Optional[Callable[[], str]] = None,
+) -> int:
+    """Discard complete key events already queued in the Windows console."""
+    if key_available is None:
+        if _msvcrt is None:
+            raise RuntimeError("native Windows console input is unavailable")
+        key_available = _msvcrt.kbhit
+    if read_char is None:
+        if _msvcrt is None:
+            raise RuntimeError("native Windows console input is unavailable")
+        read_char = _msvcrt.getwch
+
+    discarded = 0
+    while key_available():
+        _read_windows_key_unmanaged(read_char)
+        discarded += 1
+    return discarded

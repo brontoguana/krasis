@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fixed the native Windows interactive launcher leaving the GPU-selection
+  screen visible while model-specific VRAM/RAM preparation ran. The launcher
+  now renders an explicit non-actionable preparation screen, discards complete
+  key events queued during that interval, and requires fresh input for the
+  later launch-mode screen. This prevents repeated Enter input from accepting
+  configuration or launching a model through screens that were never shown.
+  The input drain is limited to interactive transitions; non-interactive
+  launches, model/runtime calculations, and GPU selection are unchanged.
+
 - Fixed the registered DSA owner-pipeline CUDA test fixture to declare its
   configured non-MoE layer explicitly before constructing the prefill engine.
   The production constructor remains fail-closed on incomplete layer metadata.
