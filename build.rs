@@ -199,7 +199,12 @@ fn nvcc_host_compiler_args() -> Vec<String> {
     // declaration that conflicts with CUDA 13.0/13.1's math_functions.h.
     // Keep the standard/default interfaces while hiding those GNU additions.
     if cfg!(target_os = "linux") {
-        args.extend(["-U_GNU_SOURCE".to_string(), "-D_DEFAULT_SOURCE".to_string()]);
+        args.extend([
+            "-U_GNU_SOURCE".to_string(),
+            "-D_DEFAULT_SOURCE".to_string(),
+            "-include".to_string(),
+            "src/cuda/cuda_glibc_compat.h".to_string(),
+        ]);
     }
     args
 }
