@@ -10218,13 +10218,13 @@ pub(crate) mod dsa_registration_tests {
     use super::{
         checked_ungraphed_decode_scalars, claimed_peer_route_slots, create_decode_timing_event,
         deepseek_v4_prefill_overlap_default, dependency_preserving_route_schedule,
-        dsa_expanded_topk_capacity, dsa_score_context_capacity,
-        dspark_canonical_cold_schedule, dspark_canonical_phase_capacity,
-        dspark_canonical_route_plan, dspark_canonical_suffix_indices,
-        dspark_expected_emitted_tokens, dspark_residency_scan_required,
-        dspark_resident_batch_eligible, dspark_resident_w13_ksplits,
-        dspark_routed_expert_uses_gelu_tanh, dspark_scalar_lm_head_accounting_exact,
-        dspark_service_timing_enabled, dspark_target_cache_restore_slots, dspark_target_cache_rows,
+        dsa_expanded_topk_capacity, dsa_score_context_capacity, dspark_canonical_cold_schedule,
+        dspark_canonical_phase_capacity, dspark_canonical_route_plan,
+        dspark_canonical_suffix_indices, dspark_expected_emitted_tokens,
+        dspark_residency_scan_required, dspark_resident_batch_eligible,
+        dspark_resident_w13_ksplits, dspark_routed_expert_uses_gelu_tanh,
+        dspark_scalar_lm_head_accounting_exact, dspark_service_timing_enabled,
+        dspark_target_cache_restore_slots, dspark_target_cache_rows,
         dspark_target_graph_replay_plan, dspark_verification_batch_plan, dynamic_peer_shard,
         graph_w13_path, invalidate_validation_decode_start_authority,
         layer_split_sequence_state_contract, marlin_dispatch_for_bits,
@@ -81862,8 +81862,9 @@ impl GpuDecodeStore {
             // equivalent equation but not a bitwise-equivalent reduction.
             let resident_w13_ksplits =
                 dspark_resident_w13_ksplits(resident_gelu_batch, w13_ksplits, w13_ksplits_batched);
-            let w13_n32 =
-                !resident_gelu_batch && !is_int8 && graph.deepseek_v4_decode_policy.int4_w13_n32;
+            let w13_n32 = !resident_gelu_batch
+                && !is_int8
+                && select_int4_w13_n32(graph, hs, w13_n, topk.max(1), resident_w13_ksplits)?;
             let w13_tile_width = if w13_n32 { 32 } else { 16 };
             let w13_threads = if w13_n32 { 512 } else { 256 };
             let w13_n_tiles = w13_n.div_ceil(w13_tile_width);
@@ -81931,8 +81932,16 @@ impl GpuDecodeStore {
                     })?;
             }
 
-            let w2_n32 =
-                !resident_gelu_batch && !is_int8 && graph.deepseek_v4_decode_policy.int4_w2_n32;
+            let w2_n32 = !resident_gelu_batch
+                && !is_int8
+                && select_int4_w2_n32(
+                    graph,
+                    intermediate,
+                    hs,
+                    topk.max(1),
+                    moe.swiglu_limit,
+                    moe.deepseek_v4_activation,
+                )?;
             let w2_tile_width = if w2_n32 { 32 } else { 16 };
             let w2_threads = if w2_n32 { 512 } else { 256 };
             let w2_n_tiles = hs.div_ceil(w2_tile_width);
