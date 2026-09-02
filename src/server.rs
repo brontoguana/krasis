@@ -2709,6 +2709,9 @@ struct MultimodalPrefillInputs {
     mrope_half_dim: usize,
     rope_delta: i32,
     vision_block_ids_ptr: u64,
+    vision_visible_left_ptr: u64,
+    vision_visible_right_ptr: u64,
+    vision_max_tokens: usize,
     image_count: usize,
     image_tokens: usize,
 }
@@ -3152,6 +3155,37 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     .map_err(|e| {
                         format!("image prefill vision_block_ids_ptr extract failed: {}", e)
                     })?;
+                let vision_visible_left_ptr: u64 = mm
+                    .get_item("vision_visible_left_ptr")
+                    .map_err(|e| {
+                        format!("image prefill vision_visible_left_ptr read failed: {}", e)
+                    })?
+                    .extract()
+                    .map_err(|e| {
+                        format!(
+                            "image prefill vision_visible_left_ptr extract failed: {}",
+                            e
+                        )
+                    })?;
+                let vision_visible_right_ptr: u64 = mm
+                    .get_item("vision_visible_right_ptr")
+                    .map_err(|e| {
+                        format!("image prefill vision_visible_right_ptr read failed: {}", e)
+                    })?
+                    .extract()
+                    .map_err(|e| {
+                        format!(
+                            "image prefill vision_visible_right_ptr extract failed: {}",
+                            e
+                        )
+                    })?;
+                let vision_max_tokens: usize = mm
+                    .get_item("vision_max_tokens")
+                    .map_err(|e| format!("image prefill vision_max_tokens read failed: {}", e))?
+                    .extract()
+                    .map_err(|e| {
+                        format!("image prefill vision_max_tokens extract failed: {}", e)
+                    })?;
                 let image_count: usize = mm
                     .get_item("image_count")
                     .map_err(|e| format!("image prefill image_count read failed: {}", e))?
@@ -3170,6 +3204,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     mrope_half_dim,
                     rope_delta,
                     vision_block_ids_ptr,
+                    vision_visible_left_ptr,
+                    vision_visible_right_ptr,
+                    vision_max_tokens,
                     image_count,
                     image_tokens,
                 })
@@ -3825,6 +3862,23 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             }
         };
 
+        // Image visibility changes only the request-scoped V4 sparse-index
+        // geometry, so publish it before dynamic scratch sizing.
+        if let Some(mm) = multimodal_inputs.as_ref() {
+            engine.set_external_prefill_inputs(
+                mm.inputs_embeds_ptr,
+                mm.mrope_cos_ptr,
+                mm.mrope_sin_ptr,
+                mm.mrope_half_dim,
+                mm.vision_block_ids_ptr,
+                mm.vision_visible_left_ptr,
+                mm.vision_visible_right_ptr,
+                mm.vision_max_tokens,
+            );
+        } else {
+            engine.clear_external_prefill_inputs();
+        }
+
         engine.set_prefill_hcs_guard_store_addr(state.gpu_store_addr);
 
         let mut retry_cap: Option<usize> = None;
@@ -4033,6 +4087,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     mm.mrope_sin_ptr,
                     mm.mrope_half_dim,
                     mm.vision_block_ids_ptr,
+                    mm.vision_visible_left_ptr,
+                    mm.vision_visible_right_ptr,
+                    mm.vision_max_tokens,
                 );
             } else {
                 engine.clear_external_prefill_inputs();

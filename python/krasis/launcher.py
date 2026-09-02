@@ -2850,8 +2850,12 @@ class Launcher:
                 if metadata_error:
                     line3 = f"       {RED}Pinned metadata error: {metadata_error}{NC}"
                 else:
+                    config_label = (
+                        model.recommended_config
+                        or "launcher-generated hardware profile"
+                    )
                     line3 = (
-                        f"       {DIM}Config: {model.recommended_config}"
+                        f"       {DIM}Config: {config_label}"
                         f" | revision {model.revision[:12]}{NC}"
                     )
                 lines.extend([
@@ -2936,7 +2940,8 @@ class Launcher:
                 f"  {DIM}{candidate.summary}{NC}",
                 f"  {line2}",
                 f"  Compatibility: {candidate.compatibility}",
-                f"  Recommended config: {candidate.recommended_config or 'manual'}",
+                "  Recommended config: "
+                f"{candidate.recommended_config or 'launcher-generated hardware profile'}",
                 f"  Pinned revision: {candidate.revision[:12] if candidate.revision else 'default'}",
                 f"  Files selected: {candidate.selected_file_count} "
                 f"({candidate.safetensors_file_count} safetensors)",

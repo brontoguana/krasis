@@ -1239,6 +1239,40 @@ mod tests {
     }
 
     #[test]
+    fn bundled_deepseek_v4_template_renders_image_placeholder_in_order() {
+        let config_path = write_tokenizer_config("{{ bos_token }}");
+        let config_dir = std::path::Path::new(&config_path).parent().unwrap();
+        fs::write(
+            config_dir.join("config.json"),
+            serde_json::json!({"model_type": "deepseek_v4"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            &config_path,
+            serde_json::json!({
+                "chat_template": null,
+                "bos_token": {"content": "<｜begin▁of▁sentence｜>"},
+                "eos_token": {"content": "<｜end▁of▁sentence｜>"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        let rendered = engine
+            .apply_multimodal_with_tools(
+                r#"[{"role":"user","content":[{"type":"text","text":"Before "},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}},{"type":"text","text":" after"}]}]"#,
+                "",
+                true,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            rendered,
+            "<｜begin▁of▁sentence｜><｜User｜>Before <｜deepseek_image｜> after<｜Assistant｜></think>"
+        );
+    }
+
+    #[test]
     fn deepseek_v4_template_renders_openai_tool_calls() {
         let config_path = write_tokenizer_config("{{ bos_token }}");
         let config_dir = std::path::Path::new(&config_path).parent().unwrap();

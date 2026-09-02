@@ -8445,11 +8445,7 @@ fn dequantize_fp8e4m3_f32_blocks_to_bf16(
     scale_rows: usize,
     scale_cols: usize,
 ) -> Result<Vec<u16>, String> {
-    if scale_rows == 0
-        || scale_cols == 0
-        || rows % scale_rows != 0
-        || cols % scale_cols != 0
-    {
+    if scale_rows == 0 || scale_cols == 0 || rows % scale_rows != 0 || cols % scale_cols != 0 {
         return Err(format!(
             "F32 FP8 block scale grid [{scale_rows}, {scale_cols}] does not exactly tile [{rows}, {cols}]"
         ));
@@ -8528,11 +8524,7 @@ fn load_fp8_weight_as_bf16(
     let cols = info.shape[1];
     let scale_rows = scale_info.shape[0];
     let scale_cols = scale_info.shape[1];
-    if scale_rows == 0
-        || scale_cols == 0
-        || rows % scale_rows != 0
-        || cols % scale_cols != 0
-    {
+    if scale_rows == 0 || scale_cols == 0 || rows % scale_rows != 0 || cols % scale_cols != 0 {
         return Err(format!(
             "FP8 block scale {scale_name} shape {:?} does not exactly tile {tensor_name} shape {:?}",
             scale_info.shape, info.shape
@@ -8546,14 +8538,7 @@ fn load_fp8_weight_as_bf16(
             "FP8 payload size mismatch for {tensor_name}/{scale_name}"
         ));
     }
-    dequantize_fp8e4m3_f32_blocks_to_bf16(
-        fp8_data,
-        scales,
-        rows,
-        cols,
-        scale_rows,
-        scale_cols,
-    )
+    dequantize_fp8e4m3_f32_blocks_to_bf16(fp8_data, scales, rows, cols, scale_rows, scale_cols)
 }
 
 /// Dequantize a rank-2 E4M3 matrix with a rank-2 E8M0 block-scale grid.
@@ -9581,8 +9566,7 @@ fn load_and_quantize_expert(
             let rows = info.shape[0];
             let cols = info.shape[1];
             if info.dtype.is_fp8() {
-                let bf16_data =
-                    load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
+                let bf16_data = load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
                 Ok(QuantWeight::Bf16(QuantizedBf16 {
                     data: bf16_data,
                     rows,
@@ -9654,8 +9638,7 @@ fn load_and_quantize_expert(
             let rows = info.shape[0];
             let cols = info.shape[1];
             if info.dtype.is_fp8() {
-                let bf16_data =
-                    load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
+                let bf16_data = load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
                 Ok(QuantWeight::Int8(quantize_int8(
                     &bf16_data, rows, cols, group_size,
                 )))
@@ -9701,8 +9684,7 @@ fn load_and_quantize_expert_ungated(
             let rows = info.shape[0];
             let cols = info.shape[1];
             if info.dtype.is_fp8() {
-                let bf16_data =
-                    load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
+                let bf16_data = load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
                 Ok(QuantWeight::Bf16(QuantizedBf16 {
                     data: bf16_data,
                     rows,
@@ -9749,8 +9731,7 @@ fn load_and_quantize_expert_ungated(
             let rows = info.shape[0];
             let cols = info.shape[1];
             if info.dtype.is_fp8() {
-                let bf16_data =
-                    load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
+                let bf16_data = load_fp8_weight_as_bf16(&tensor_name, weight_map, shards)?;
                 Ok(QuantWeight::Int8(quantize_int8(
                     &bf16_data, rows, cols, group_size,
                 )))
@@ -10292,25 +10273,18 @@ mod tests {
         // shape-derived 2x2 blocks and exercises every scale region.
         let weights = vec![0x38u8; 4 * 6];
         let scales = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let actual = dequantize_fp8e4m3_f32_blocks_to_bf16(
-            &weights, &scales, 4, 6, 2, 3,
-        )
-        .unwrap();
+        let actual = dequantize_fp8e4m3_f32_blocks_to_bf16(&weights, &scales, 4, 6, 2, 3).unwrap();
         let expected = [
-            1.0f32, 1.0, 2.0, 2.0, 3.0, 3.0,
-            1.0, 1.0, 2.0, 2.0, 3.0, 3.0,
-            4.0, 4.0, 5.0, 5.0, 6.0, 6.0,
-            4.0, 4.0, 5.0, 5.0, 6.0, 6.0,
+            1.0f32, 1.0, 2.0, 2.0, 3.0, 3.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0, 5.0, 6.0,
+            6.0, 4.0, 4.0, 5.0, 5.0, 6.0, 6.0,
         ];
         for (&got, &want) in actual.iter().zip(expected.iter()) {
             assert_eq!(bf16_to_f32(got), want);
         }
         assert!(
-            dequantize_fp8e4m3_f32_blocks_to_bf16(
-                &weights, &scales, 4, 6, 3, 2,
-            )
-            .unwrap_err()
-            .contains("does not exactly tile")
+            dequantize_fp8e4m3_f32_blocks_to_bf16(&weights, &scales, 4, 6, 3, 2,)
+                .unwrap_err()
+                .contains("does not exactly tile")
         );
     }
 

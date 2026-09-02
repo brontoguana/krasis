@@ -182,6 +182,26 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         multi_gpu_qualified=True,
     ),
     SupportedHFModel(
+        key="dsv4-vision-exp",
+        display_name="DeepSeek-V4-Flash-Vision-Exp",
+        repo_id="deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+        local_dir_name="deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+        revision="6821d6ad3681a4b137b066b76094fa82ebd0a380",
+        recommended_config="",
+        notes=(
+            "Validated single-GPU DeepSeek-V4 image-and-text target with HQQ6 "
+            "attention, Native cache, INT4 experts, checkpoint-native image "
+            "routing, and the lazy BF16 vision tower. The launcher generates "
+            "hardware-specific GPU, memory, and serving fields at runtime."
+        ),
+        default_attention="hqq6",
+        default_kv="native",
+        attention_modes=("hqq6",),
+        kv_modes=("native",),
+        vision_modes=("bf16",),
+        default_vision_quant="bf16",
+    ),
+    SupportedHFModel(
         key="nemotron-nano",
         display_name="NVIDIA Nemotron-3 Nano 30B A3B",
         repo_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",

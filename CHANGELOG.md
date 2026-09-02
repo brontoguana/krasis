@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Added complete image-and-text serving for the official
+  `DeepSeek-V4-Flash-Vision-Exp` checkpoint, including checkpoint-native image
+  preprocessing, strict weight validation, multimodal chat input, and a
+  request-scoped BF16 vision tower. The launcher advertises the pinned
+  checkpoint only with its validated HQQ6/Native/BF16-vision profile. The
+  supported-model list publishes it alongside the existing GLM-5.3-Flash
+  HQQ6/k6v6/BF16-vision entry while preserving each model's independently
+  measured topology and context limits. Real
+  checkpoint validation also fixed two DeepSeek-V4 decode-state defects that
+  caused corrupted text after an initially correct token. The final live build
+  passed all `9/9` text/network checks and a deterministic image-colour gate. A
+  detailed screenshot response correctly extracted the model name and
+  VRAM/RAM values but read `Krasis` as `Keras`; that OCR miss remains recorded
+  rather than being reported as an exact-text pass.
+
 - Made attention precision and KV format independent interactive-launcher
   controls. The launcher now exposes measured planner presets at
   `HQQ4+10/15/20%` and `HQQ6+10/15/20%` wherever mixed HQQ is supported;

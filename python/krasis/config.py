@@ -557,6 +557,19 @@ class ModelConfig:
     dspark_target_layer_ids: Optional[List[int]] = None
     dspark_markov_rank: int = 0
 
+    # DeepSeek-V4-Flash-Vision image tower. Zero values mean a text-only V4
+    # checkpoint; populated values are read directly from checkpoint config.
+    vision_n_layers: int = 0
+    vision_dim: int = 0
+    vision_n_heads: int = 0
+    vision_inter_dim: int = 0
+    vision_patch_size: int = 0
+    vision_rope_theta: float = 0.0
+    vision_downsample_ratio: int = 0
+    vision_max_n_token: int = 0
+    vision_min_pixels: int = 0
+    vision_max_wh_ratio: float = 0.0
+
     # GQA dimensions (None for MLA models)
     gqa_head_dim: Optional[int] = None    # per-head dim (e.g. 128 for Qwen3)
     global_head_dim: int = 0              # Gemma4 full-attention head dim
@@ -765,6 +778,39 @@ class ModelConfig:
         else:
             raise ValueError("dspark_target_layer_ids must be an array when present")
         dspark_markov_rank = int(cfg.get("dspark_markov_rank", 0) or 0)
+        vision_n_layers = int(cfg.get("vision_n_layers", 0) or 0)
+        vision_dim = int(cfg.get("vision_dim", 0) or 0)
+        vision_n_heads = int(cfg.get("vision_n_heads", 0) or 0)
+        vision_inter_dim = int(cfg.get("vision_inter_dim", 0) or 0)
+        vision_patch_size = int(cfg.get("vision_patch_size", 0) or 0)
+        vision_rope_theta = float(cfg.get("vision_rope_theta", 0.0) or 0.0)
+        vision_downsample_ratio = int(cfg.get("vision_downsample_ratio", 0) or 0)
+        vision_max_n_token = int(cfg.get("vision_max_n_token", 0) or 0)
+        vision_min_pixels = int(cfg.get("vision_min_pixels", 0) or 0)
+        vision_max_wh_ratio = float(cfg.get("vision_max_wh_ratio", 0.0) or 0.0)
+        vision_values = (
+            vision_n_layers,
+            vision_dim,
+            vision_n_heads,
+            vision_inter_dim,
+            vision_patch_size,
+            vision_downsample_ratio,
+            vision_max_n_token,
+            vision_min_pixels,
+        )
+        if any(vision_values):
+            if arch != "deepseek_v4" or not all(value > 0 for value in vision_values):
+                raise ValueError(
+                    "DeepSeek-V4 vision configuration must provide all positive vision dimensions"
+                )
+            if vision_dim % vision_n_heads != 0:
+                raise ValueError(
+                    f"vision_dim={vision_dim} must be divisible by vision_n_heads={vision_n_heads}"
+                )
+            if vision_rope_theta <= 0.0 or vision_max_wh_ratio <= 0.0:
+                raise ValueError(
+                    "DeepSeek-V4 vision_rope_theta and vision_max_wh_ratio must be positive"
+                )
 
         linear_attn_cfg = cfg.get("linear_attn_config", {}) or {}
         if not isinstance(linear_attn_cfg, dict):
@@ -1233,6 +1279,16 @@ class ModelConfig:
             dspark_noise_token_id=dspark_noise_token_id,
             dspark_target_layer_ids=dspark_target_layer_ids,
             dspark_markov_rank=dspark_markov_rank,
+            vision_n_layers=vision_n_layers,
+            vision_dim=vision_dim,
+            vision_n_heads=vision_n_heads,
+            vision_inter_dim=vision_inter_dim,
+            vision_patch_size=vision_patch_size,
+            vision_rope_theta=vision_rope_theta,
+            vision_downsample_ratio=vision_downsample_ratio,
+            vision_max_n_token=vision_max_n_token,
+            vision_min_pixels=vision_min_pixels,
+            vision_max_wh_ratio=vision_max_wh_ratio,
             # GQA fields (None for MLA)
             gqa_head_dim=cfg.get("head_dim") if not (is_mla or is_deepseek_v4) else None,
             global_head_dim=cfg.get("global_head_dim", 0),

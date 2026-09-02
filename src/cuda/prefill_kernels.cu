@@ -4291,11 +4291,13 @@ extern "C" __global__ void deepseek_v4_sqrtsoftplus_topk_kernel(
     int* __restrict__ topk_ids,             /* [M, topk] */
     const float* __restrict__ gate,         /* [M, E] FP32 */
     const float* __restrict__ correction,   /* [E] or NULL */
+    const float* __restrict__ vl_bias,      /* [E] image-token selection bias or NULL */
     const int* __restrict__ hash_table,     /* [vocab_size, topk] or NULL */
     const int* __restrict__ token_ids,      /* [M], required for hash */
     int E,
     int topk,
-    int hash_vocab_size)
+    int hash_vocab_size,
+    int vocab_size)
 {
     int token = blockIdx.x;
     const float* g = gate + (int64_t)token * E;
@@ -4308,19 +4310,21 @@ extern "C" __global__ void deepseek_v4_sqrtsoftplus_topk_kernel(
     float* top_vals = raw_scores + E;
     int* top_idxs = (int*)(top_vals + topk);
 
+    int token_id = token_ids[token];
+    bool image_token = token_id >= vocab_size;
+    const float* selection_bias = image_token ? vl_bias : correction;
     for (int i = threadIdx.x; i < E; i += blockDim.x) {
         float x = g[i];
         float softplus = fmaxf(x, 0.0f) + log1pf(expf(-fabsf(x)));
         float raw = sqrtf(softplus);
         raw_scores[i] = raw;
-        selection_scores[i] = raw + (correction ? correction[i] : 0.0f);
+        selection_scores[i] = raw + (selection_bias ? selection_bias[i] : 0.0f);
     }
     __syncthreads();
 
     if (threadIdx.x == 0) {
         bool valid_hash = false;
-        if (hash_table) {
-            int token_id = token_ids[token];
+        if (hash_table && !image_token) {
             valid_hash = token_id >= 0 && token_id < hash_vocab_size;
             if (valid_hash) {
                 const int* hash_row = hash_table + (int64_t)token_id * topk;
@@ -4349,7 +4353,7 @@ extern "C" __global__ void deepseek_v4_sqrtsoftplus_topk_kernel(
 
         for (int k = 0; k < topk; ++k) {
             int expert = ti[k];
-            if ((hash_table && !valid_hash) || expert < 0 || expert >= E) {
+            if ((hash_table && !image_token && !valid_hash) || expert < 0 || expert >= E) {
                 ti[k] = -1;
                 tw[k] = 0.0f;
             } else {

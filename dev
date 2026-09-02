@@ -1606,6 +1606,14 @@ do_network() {
     exec_repo_python "$SCRIPT_DIR/tests/test_network.py" --port "$port" "$@"
 }
 
+do_prefill_decode_compare() {
+    [[ $# -lt 1 ]] && err "Usage: ./dev prefill-decode-compare <port> [--prompt TEXT] [--output PATH] [--debug-early] [--prefill-trace-layer N]"
+    local port="$1"
+    shift
+    KRASIS_DEV_SCRIPT=1 exec_repo_python "$SCRIPT_DIR/tests/prefill_decode_compare_live.py" \
+        --port "$port" "$@"
+}
+
 do_vision_test() {
     [[ $# -lt 2 ]] && err "Usage: ./dev vision-test <port> <image> --prompt TEXT [--expect TEXT ...]"
     local port="$1"
@@ -1761,6 +1769,8 @@ do_test_kernels() {
             filter="gpu_decode::dsa_registration_tests::n_peer_"
         elif [[ "$1" == "dsa_registration" ]]; then
             filter="dsa_registration_tests"
+        elif [[ "$1" == "owner_score_pipeline_matches_cpu_reference_on_cuda" ]]; then
+            filter="gpu_decode::dsa_registration_tests::test_owner_score_pipeline_matches_cpu_reference_on_cuda"
         elif [[ "$1" == "dspark" ]]; then
             filter="gpu_decode::dsa_registration_tests::dspark_"
         elif [[ "$1" == "split_expert_launch" ]]; then
@@ -2600,6 +2610,7 @@ do_model_config_test() {
     verify_repo_imports
     KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_model_config.py"
     KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_deepseek_v4_hqq_contract.py"
+    KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_deepseek_v4_vision.py"
     KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_startup_calibration.py"
 }
 
@@ -4086,6 +4097,7 @@ case "$cmd" in
     quality-ppl)    do_quality_ppl "$@" ;;
     awq-calibrate)  do_awq_calibrate "$@" ;;
     network)        do_network "$@" ;;
+    prefill-decode-compare) do_prefill_decode_compare "$@" ;;
     vision-test)    do_vision_test "$@" ;;
     session-cache-test) do_session_cache_test "$@" ;;
     session-cache-operations) do_session_cache_operations "$@" ;;
@@ -4139,6 +4151,7 @@ case "$cmd" in
         echo "  test <config>                  Short model test (benchmark + network tests)"
         echo "  test <config> --thorough       Thorough test (+ stress + large prompts)"
         echo "  network <port> [--large]       Run network tests against a running server"
+        echo "  prefill-decode-compare <port>  Compare exact-token prefill and teacher-forced decode logits"
         echo "  session-cache-test <port>      Compare active/RAM cached continuations with full prefill"
         echo "  session-cache-operations <port> Test eviction, branches, cancellation and concurrency"
         echo "  session-cache-benchmark <port> Benchmark interleaved agent conversations cache off/on"

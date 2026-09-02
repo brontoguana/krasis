@@ -686,6 +686,40 @@ class LauncherMatrixTest(unittest.TestCase):
         launcher.cfg.multi_gpu_mode = "auto"
         launcher._validate_model_topology()
 
+    def test_deepseek_v4_vision_exposes_only_accepted_profile(self) -> None:
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = LauncherConfig()
+        launcher.model_info = {
+            "name": "DeepSeek-V4-Flash-Vision-Exp",
+            "arch": "deepseek_v4",
+            "support_key": "dsv4-vision-exp",
+        }
+
+        launcher._apply_model_recommended_defaults()
+        self.assertEqual(launcher._attention_choices(), ["hqq6"])
+        self.assertEqual(launcher._kv_choices(), ["native"])
+        self.assertEqual(launcher._vision_choices(), ["bf16"])
+        self.assertEqual(launcher._multi_gpu_choices(), ["auto"])
+        self.assertEqual(launcher.cfg.attention_quant, "hqq6")
+        self.assertEqual(launcher.cfg.kv_dtype, "native")
+        self.assertEqual(launcher.cfg.vision_quant, "bf16")
+        launcher._validate_model_capabilities()
+
+        launcher.cfg.attention_quant = "hqq68_auto"
+        with self.assertRaisesRegex(ValueError, "does not support attention mode"):
+            launcher._validate_model_capabilities()
+        launcher.cfg.attention_quant = "hqq6"
+        launcher.cfg.kv_dtype = "bf16"
+        with self.assertRaisesRegex(ValueError, "does not support cache mode"):
+            launcher._validate_model_capabilities()
+
+    def test_supported_list_contains_deepseek_vision_and_glm53_flash(self) -> None:
+        from krasis.hf_downloader import supported_models
+
+        displayed = {spec.display_name for spec in supported_models()}
+        self.assertIn("DeepSeek-V4-Flash-Vision-Exp", displayed)
+        self.assertIn("GLM-5.3-Flash", displayed)
+
     def test_glm53_exposes_only_accuracy_qualified_bf16_vision(self) -> None:
         launcher = Launcher.__new__(Launcher)
         launcher.cfg = LauncherConfig()

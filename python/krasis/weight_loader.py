@@ -178,6 +178,7 @@ class WeightLoader:
         main_layer_ids = set()
         auxiliary_count = 0
         auxiliary_block_ids = set()
+        vision_names = set()
         unexpected = []
 
         for name in self._weight_map:
@@ -204,6 +205,12 @@ class WeightLoader:
                     continue
                 auxiliary_count += 1
                 auxiliary_block_ids.add(block_idx)
+            elif self.cfg.vision_n_layers > 0 and (
+                name.startswith("vision.")
+                or name.startswith("aligner.")
+                or name in {"image_start", "image_pad", "image_newline", "image_end"}
+            ):
+                vision_names.add(name)
             elif name not in root_main:
                 unexpected.append(name)
 
@@ -229,6 +236,42 @@ class WeightLoader:
                 raise ValueError(
                     "DeepSeek-V4 MTP block inventory must be contiguous from zero: "
                     f"found={sorted(auxiliary_block_ids)}"
+                )
+
+        if self.cfg.vision_n_layers > 0:
+            required_vision = {
+                "vision.patch_embed.proj.weight",
+                "vision.patch_embed.proj.bias",
+                "vision.norm.weight",
+                "aligner.w1.weight",
+                "aligner.w1.bias",
+                "aligner.w2.weight",
+                "aligner.w2.bias",
+                "image_start",
+                "image_pad",
+                "image_newline",
+                "image_end",
+            }
+            for block_idx in range(self.cfg.vision_n_layers):
+                prefix = f"vision.blocks.{block_idx}"
+                required_vision.update(
+                    {
+                        f"{prefix}.attn.wqkv.weight",
+                        f"{prefix}.attn.wqkv.bias",
+                        f"{prefix}.attn.wo.weight",
+                        f"{prefix}.attn.wo.bias",
+                        f"{prefix}.mlp.w1.weight",
+                        f"{prefix}.mlp.w2.weight",
+                        f"{prefix}.norm1.weight",
+                        f"{prefix}.norm2.weight",
+                    }
+                )
+            missing_vision = sorted(required_vision - vision_names)
+            extra_vision = sorted(vision_names - required_vision)
+            if missing_vision or extra_vision:
+                raise ValueError(
+                    "DeepSeek-V4 vision tensor inventory mismatch: "
+                    f"missing={missing_vision[:8]}, extra={extra_vision[:8]}"
                 )
             targets = self.cfg.dspark_target_layer_ids
             if targets is not None and len(auxiliary_block_ids) != len(targets):
@@ -1016,6 +1059,11 @@ class WeightLoader:
             result = {"weight": self._load_bf16(f"{prefix}.weight", device)}
             table_name = f"{prefix}.tid2eid"
             bias_name = f"{prefix}.bias"
+            vl_bias_name = f"{prefix}.bias_vl"
+            if vl_bias_name in self._weight_map:
+                result["vl_bias"] = self._load_f32(vl_bias_name, device)
+            elif self.cfg.vision_n_layers > 0:
+                raise KeyError(f"Missing DeepSeek-V4 vision router bias {vl_bias_name}")
             if layer_idx < self.cfg.num_hash_layers:
                 if table_name not in self._weight_map:
                     raise KeyError(f"Missing DeepSeek-V4 hash table {table_name}")

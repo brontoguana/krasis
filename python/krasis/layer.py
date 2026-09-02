@@ -651,6 +651,7 @@ class TransformerLayer:
             self.gate_weight = weights["gate"]["weight"]  # [n_experts, hidden]
             self.gate_bias = weights["gate"].get("bias")  # [n_experts] or None (GPT OSS)
             self.e_score_correction_bias = weights["gate"].get("e_score_correction_bias")
+            self.router_vl_bias = weights["gate"].get("vl_bias")
             self.router_tid2eid = weights["gate"].get("tid2eid")
             self.router_input_scale = weights["gate"].get("input_scale")
             self.router_per_expert_scale = weights["gate"].get("per_expert_scale")
@@ -683,6 +684,7 @@ class TransformerLayer:
             self.router_input_scale = None
             self.router_per_expert_scale = None
             self.router_tid2eid = None
+            self.router_vl_bias = None
 
         # Krasis CPU engine for routed experts
         self.krasis_engine = krasis_engine
@@ -697,6 +699,11 @@ class TransformerLayer:
         self._e_score_correction_bias_f32 = (
             self.e_score_correction_bias.float()
             if self.is_moe and self.e_score_correction_bias is not None
+            else None
+        )
+        self._router_vl_bias_f32 = (
+            self.router_vl_bias.float()
+            if self.is_moe and self.router_vl_bias is not None
             else None
         )
 

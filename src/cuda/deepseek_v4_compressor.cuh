@@ -1103,20 +1103,27 @@ extern "C" __global__ void deepseek_v4_scale_index_weights_kernel(
 extern "C" __global__ void deepseek_v4_window_indices_kernel(
     int* __restrict__ output,
     const int* __restrict__ positions,
+    const int* __restrict__ visible_left,
+    const int* __restrict__ visible_right,
     int rows,
     int window,
+    int raw_width,
     int output_stride,
     int physical_ring)
 {
     int column = (int)blockIdx.x * blockDim.x + threadIdx.x;
     int row = (int)blockIdx.y;
-    if (row >= rows || column >= window || positions == nullptr ||
-        output_stride < window || window <= 0) return;
+    if (row >= rows || column >= raw_width || positions == nullptr ||
+        output_stride < raw_width || window <= 0 || raw_width < window) return;
     int position = positions[row];
-    int count = min(position + 1, window);
+    int left = visible_left ? visible_left[position] : 0;
+    int right = visible_right ? visible_right[position] : 0;
+    int earliest = max(0, position + 1 - window);
+    if (left > window - 1) earliest = position - left;
+    int latest = position + right;
+    int count = min(raw_width, latest - earliest + 1);
     int value = -1;
     if (column < count) {
-        int earliest = position + 1 - count;
         int absolute = earliest + column;
         value = physical_ring ? absolute % window : absolute;
     }

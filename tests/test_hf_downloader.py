@@ -162,6 +162,7 @@ class HFDownloaderTests(unittest.TestCase):
                 "Qwen/Qwen3-Coder-Next",
                 "stepfun-ai/Step-3.7-Flash",
                 "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
                 "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
                 "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
                 "Qwen/Qwen3.6-35B-A3B",
@@ -181,10 +182,13 @@ class HFDownloaderTests(unittest.TestCase):
         repo_root = os.path.dirname(os.path.dirname(__file__))
         for model in models:
             self.assertRegex(model.revision, r"^[0-9a-f]{40}$")
-            self.assertTrue(
-                os.path.exists(os.path.join(repo_root, model.recommended_config)),
-                model.recommended_config,
-            )
+            if model.recommended_config:
+                self.assertTrue(
+                    os.path.exists(os.path.join(repo_root, model.recommended_config)),
+                    model.recommended_config,
+                )
+            else:
+                self.assertEqual(model.key, "dsv4-vision-exp")
             self.assertIn(model.default_attention, model.attention_modes)
             self.assertIn(model.default_kv, model.kv_modes)
             self.assertEqual(len(model.attention_modes), len(set(model.attention_modes)))
@@ -204,6 +208,13 @@ class HFDownloaderTests(unittest.TestCase):
         self.assertEqual(glm53.vision_modes, ("bf16",))
         self.assertEqual(glm53.default_vision_quant, "bf16")
 
+        dsv4_vision = next(model for model in models if model.key == "dsv4-vision-exp")
+        self.assertEqual(dsv4_vision.recommended_config, "")
+        self.assertEqual(dsv4_vision.attention_modes, ("hqq6",))
+        self.assertEqual(dsv4_vision.kv_modes, ("native",))
+        self.assertEqual(dsv4_vision.vision_modes, ("bf16",))
+        self.assertEqual(dsv4_vision.default_vision_quant, "bf16")
+
     def test_supported_model_controls_are_independent_and_defaults_match_configs(self):
         from krasis.launcher import _load_config
 
@@ -211,6 +222,7 @@ class HFDownloaderTests(unittest.TestCase):
             "qcn": ("k4v4", "k6v6"),
             "step37": ("k4v4", "k6v6"),
             "dsv4": ("native", "bf16"),
+            "dsv4-vision-exp": ("native",),
             "nemotron-nano": ("k4v4",),
             "nemotron-super": ("k4v4",),
             "qwen36-35b": ("k4v4", "k6v6"),
@@ -231,15 +243,20 @@ class HFDownloaderTests(unittest.TestCase):
                 expected_attention_modes = hf_downloader.GENERIC_MIXED_HQQ_ATTENTION_MODES
                 if model.key == "dsv4":
                     expected_attention_modes += ("hqq8", "bf16")
+                elif model.key == "dsv4-vision-exp":
+                    expected_attention_modes = ("hqq6",)
                 elif model.key == "gemma4-26b-a4b-it":
                     expected_attention_modes += ("bf16",)
                 self.assertEqual(model.attention_modes, expected_attention_modes)
                 self.assertEqual(model.kv_modes, expected_kv_modes[model.key])
-                saved = _load_config(os.path.join(repo_root, model.recommended_config))
-                self.assertEqual(saved.get("CFG_ATTENTION_QUANT"), model.default_attention)
-                self.assertEqual(saved.get("CFG_KV_DTYPE"), model.default_kv)
-                self.assertEqual(saved.get("CFG_GPU_EXPERT_BITS"), "4")
-                self.assertEqual(saved.get("CFG_CPU_EXPERT_BITS"), "4")
+                if model.recommended_config:
+                    saved = _load_config(os.path.join(repo_root, model.recommended_config))
+                    self.assertEqual(saved.get("CFG_ATTENTION_QUANT"), model.default_attention)
+                    self.assertEqual(saved.get("CFG_KV_DTYPE"), model.default_kv)
+                    self.assertEqual(saved.get("CFG_GPU_EXPERT_BITS"), "4")
+                    self.assertEqual(saved.get("CFG_CPU_EXPERT_BITS"), "4")
+                else:
+                    self.assertEqual(model.key, "dsv4-vision-exp")
 
     def test_supported_model_path_resolution_survives_ornith_namespace_move(self):
         old = hf_downloader.supported_model_for_path(

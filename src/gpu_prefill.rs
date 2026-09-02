@@ -163,9 +163,9 @@ fn optional_bool_env(name: &str) -> Result<Option<bool>, String> {
 fn glm53_kda_recurrent_oracle_enabled() -> Result<bool, String> {
     static ENABLED: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
     ENABLED
-        .get_or_init(|| {
-            Ok(optional_bool_env("KRASIS_GLM53_KDA_RECURRENT_ORACLE")?.unwrap_or(false))
-        })
+        .get_or_init(
+            || Ok(optional_bool_env("KRASIS_GLM53_KDA_RECURRENT_ORACLE")?.unwrap_or(false)),
+        )
         .clone()
 }
 
@@ -173,8 +173,7 @@ fn glm53_kda_legacy_recurrent_oracle_enabled() -> Result<bool, String> {
     static ENABLED: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
     ENABLED
         .get_or_init(|| {
-            Ok(optional_bool_env("KRASIS_GLM53_KDA_LEGACY_RECURRENT_ORACLE")?
-                .unwrap_or(false))
+            Ok(optional_bool_env("KRASIS_GLM53_KDA_LEGACY_RECURRENT_ORACLE")?.unwrap_or(false))
         })
         .clone()
 }
@@ -192,12 +191,15 @@ fn kimi_delta_rmsnorm_gate_block_threads(head_dim: usize) -> Result<usize, Strin
     if head_dim == 0 {
         return Err("KDA gated RMSNorm head dimension is zero".to_string());
     }
-    head_dim.checked_next_power_of_two().map(|threads| threads.max(32)).ok_or_else(|| {
-        format!(
-            "KDA gated RMSNorm thread geometry overflow for head dimension {}",
-            head_dim
-        )
-    })
+    head_dim
+        .checked_next_power_of_two()
+        .map(|threads| threads.max(32))
+        .ok_or_else(|| {
+            format!(
+                "KDA gated RMSNorm thread geometry overflow for head dimension {}",
+                head_dim
+            )
+        })
 }
 
 fn dsa_prefill_candidate_enabled(default_enabled: bool, override_value: Option<bool>) -> bool {
@@ -386,8 +388,7 @@ fn parse_dsa_mla_gather_mode(value: Option<&str>) -> Result<DsaMlaGatherMode, St
 }
 
 fn dsa_mla_gather_mode() -> Result<DsaMlaGatherMode, String> {
-    static MODE: std::sync::OnceLock<Result<DsaMlaGatherMode, String>> =
-        std::sync::OnceLock::new();
+    static MODE: std::sync::OnceLock<Result<DsaMlaGatherMode, String>> = std::sync::OnceLock::new();
     MODE.get_or_init(|| {
         let value = std::env::var("KRASIS_DSA_MLA_GATHER_MODE").ok();
         parse_dsa_mla_gather_mode(value.as_deref())
@@ -6096,15 +6097,11 @@ fn prefill_device_trace_stage_label(stage_id: u64) -> &'static str {
         PDT_LAYER_MLA_MOE_W1_PTR_TABLE_FULL => "layer_mla_moe_w1_ptr_table_full",
         PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL => "layer_mla_moe_w1_scale_ptr_table_full",
         PDT_LAYER_GLM5_HC_INPUT_STATE_LAST => "layer_glm5_hc_input_state_last",
-        PDT_LAYER_GLM5_ATTN_PREPARED_HIDDEN_LAST => {
-            "layer_glm5_attn_prepared_hidden_last"
-        }
+        PDT_LAYER_GLM5_ATTN_PREPARED_HIDDEN_LAST => "layer_glm5_attn_prepared_hidden_last",
         PDT_LAYER_GLM5_ATTN_NORM_HIDDEN_LAST => "layer_glm5_attn_norm_hidden_last",
         PDT_LAYER_GLM5_ATTN_SUBLAYER_LAST => "layer_glm5_attn_sublayer_last",
         PDT_LAYER_GLM5_POST_ATTN_STATE_LAST => "layer_glm5_post_attn_state_last",
-        PDT_LAYER_GLM5_FFN_PREPARED_HIDDEN_LAST => {
-            "layer_glm5_ffn_prepared_hidden_last"
-        }
+        PDT_LAYER_GLM5_FFN_PREPARED_HIDDEN_LAST => "layer_glm5_ffn_prepared_hidden_last",
         PDT_LAYER_GLM5_FFN_NORM_HIDDEN_LAST => "layer_glm5_ffn_norm_hidden_last",
         PDT_LAYER_GLM5_FFN_SUBLAYER_LAST => "layer_glm5_ffn_sublayer_last",
         PDT_LAYER_GLM5_OUTPUT_STATE_LAST => "layer_glm5_output_state_last",
@@ -7074,6 +7071,8 @@ pub struct PrefillModelConfig {
     pub deepseek_v4_static_compress_ratio: usize,
     pub deepseek_v4_native_cache: bool,
     pub deepseek_v4_min_compress_ratio: usize,
+    /// Request-scoped maximum image span. Zero keeps text-only geometry unchanged.
+    pub deepseek_v4_vision_max_tokens: usize,
     /// Store-scoped DeepSeek HQQ policy resolved during model setup. Keeping
     /// this in the model config prevents request-time environment reads.
     pub hqq_prefill_materialize_bf16: bool,
@@ -7265,9 +7264,7 @@ impl DsaPrefillLayerDescriptor {
             ));
         }
         if !self.index_kpool_always_select_tail {
-            return Err(
-                "compressed DSA IndexShare requires visible-tail selection".to_string(),
-            );
+            return Err("compressed DSA IndexShare requires visible-tail selection".to_string());
         }
         Ok(self.index_kpool)
     }
@@ -7334,9 +7331,7 @@ enum Glm5AttentionOutputLocation {
     AttentionScratch,
 }
 
-fn glm5_attention_output_location(
-    layer_type: u8,
-) -> Result<Glm5AttentionOutputLocation, String> {
+fn glm5_attention_output_location(layer_type: u8) -> Result<Glm5AttentionOutputLocation, String> {
     match layer_type {
         // KDA's output projection writes directly to scratch.d_hidden.
         5 => Ok(Glm5AttentionOutputLocation::Hidden),
@@ -7353,7 +7348,9 @@ fn glm5_ffn_kind(has_routed_moe: bool, has_complete_dense: bool) -> Result<Glm5F
         (true, false) => Ok(Glm5FfnKind::RoutedMoe),
         (false, true) => Ok(Glm5FfnKind::Dense),
         (true, true) => Err("both routed MoE and dense FFN descriptors are present".to_string()),
-        (false, false) => Err("neither a routed MoE nor a complete dense FFN is present".to_string()),
+        (false, false) => {
+            Err("neither a routed MoE nor a complete dense FFN is present".to_string())
+        }
     }
 }
 
@@ -7623,10 +7620,7 @@ impl DsaPrefillRequestWorkspace {
                 index_n_heads, index_head_dim
             ));
         }
-        if output_topk < configured_topk
-            || context_divisor == 0
-            || causal_context_row_span == 0
-        {
+        if output_topk < configured_topk || context_divisor == 0 || causal_context_row_span == 0 {
             return Err(format!(
                 "DSA prefill workspace has invalid selection geometry score_topk={} output_topk={} position_divisor={} causal_row_span={}",
                 configured_topk, output_topk, context_divisor, causal_context_row_span
@@ -7941,9 +7935,7 @@ fn launch_dsa_prefill_gemm_scores(
         ));
     }
     let causal_bands_enabled = causal_band_rows > 0;
-    if causal_bands_enabled
-        && (causal_position_divisor == 0 || causal_context_row_span == 0)
-    {
+    if causal_bands_enabled && (causal_position_divisor == 0 || causal_context_row_span == 0) {
         return Err(format!(
             "DSA prefill causal GEMM requires positive position divisor and causal row span when banding is enabled, got divisor={} row_span={} band_rows={}",
             causal_position_divisor, causal_context_row_span, causal_band_rows
@@ -9179,6 +9171,7 @@ pub struct PrefillLayerWeights {
     pub moe_gate_cols: usize,       // hidden_size
     pub moe_gate_bias_ptr: u64,     // 0 = no bias
     pub moe_e_score_corr_ptr: u64,  // 0 = none
+    pub moe_vl_bias_ptr: u64,       // DeepSeek-V4 image-token selection bias or 0
     pub moe_hash_table_ptr: u64,    // DeepSeek-V4 [vocab, topk] I32 or 0
     pub moe_hash_vocab_size: usize,
     pub moe_num_experts: usize,
@@ -9809,6 +9802,8 @@ pub struct PrefillEngine {
     pub external_mrope_sin_ptr: u64,
     pub external_mrope_half_dim: usize,
     pub external_vision_block_ids_ptr: u64,
+    pub external_vision_visible_left_ptr: u64,
+    pub external_vision_visible_right_ptr: u64,
     pub kv_k_ptrs: Vec<u64>, // per-layer K cache pointers (FP8)
     pub kv_v_ptrs: Vec<u64>, // per-layer V cache pointers (FP8)
     pub kv_max_seq: usize,
@@ -10180,14 +10175,14 @@ pub struct PrefillEngine {
     pub d_fla_o: Option<CudaSlice<u16>>,        // [B, T, H, V] BF16 output
     // Forward-only GLM-5.3 KDA chunk intermediates. Allocated from exact
     // runtime geometry only when the explicit chunkwise path is selected.
-    pub d_kda_g: Option<CudaSlice<f32>>,     // [T, H, K] cumulative log2 gate
-    pub d_kda_aqk: Option<CudaSlice<u16>>,   // [T, H, 64]
-    pub d_kda_akkd: Option<CudaSlice<f32>>,  // [T, H, 16]
-    pub d_kda_akk: Option<CudaSlice<u16>>,   // [T, H, 64]
-    pub d_kda_w: Option<CudaSlice<u16>>,     // [T, H, K]
-    pub d_kda_u: Option<CudaSlice<u16>>,     // [T, H, V]
-    pub d_kda_kg: Option<CudaSlice<u16>>,    // [T, H, K]
-    pub d_kda_h: Option<CudaSlice<u16>>,     // [NT, H, K, V]
+    pub d_kda_g: Option<CudaSlice<f32>>, // [T, H, K] cumulative log2 gate
+    pub d_kda_aqk: Option<CudaSlice<u16>>, // [T, H, 64]
+    pub d_kda_akkd: Option<CudaSlice<f32>>, // [T, H, 16]
+    pub d_kda_akk: Option<CudaSlice<u16>>, // [T, H, 64]
+    pub d_kda_w: Option<CudaSlice<u16>>, // [T, H, K]
+    pub d_kda_u: Option<CudaSlice<u16>>, // [T, H, V]
+    pub d_kda_kg: Option<CudaSlice<u16>>, // [T, H, K]
+    pub d_kda_h: Option<CudaSlice<u16>>, // [NT, H, K, V]
     pub d_kda_final_state: Option<CudaSlice<f32>>, // [H, K, V]
     pub d_kda_v_new: Option<CudaSlice<u16>>, // [T, H, V]
     /// Runtime-configured VRAM reserve for dynamic prefill scratch sizing.
@@ -15052,34 +15047,22 @@ impl PrefillEngine {
             if let Some(mla) = layer.mla_prefill.as_mut() {
                 match patch.tensor_name.as_str() {
                     "q_a_proj" => {
-                        applied |= apply_optional_deepseek_projection_patch(
-                            &mut mla.q_a_proj,
-                            patch,
-                        );
+                        applied |=
+                            apply_optional_deepseek_projection_patch(&mut mla.q_a_proj, patch);
                     }
                     "q_b_proj" => {
-                        applied |= apply_optional_deepseek_projection_patch(
-                            &mut mla.q_b_proj,
-                            patch,
-                        );
+                        applied |=
+                            apply_optional_deepseek_projection_patch(&mut mla.q_b_proj, patch);
                     }
                     "q_proj" => {
-                        applied |= apply_optional_deepseek_projection_patch(
-                            &mut mla.q_proj,
-                            patch,
-                        );
+                        applied |= apply_optional_deepseek_projection_patch(&mut mla.q_proj, patch);
                     }
                     "kv_a_proj_with_mqa" => {
-                        applied |= apply_deepseek_projection_patch(
-                            &mut mla.kv_a_proj_with_mqa,
-                            patch,
-                        );
+                        applied |=
+                            apply_deepseek_projection_patch(&mut mla.kv_a_proj_with_mqa, patch);
                     }
                     "o_proj" => {
-                        applied |= apply_deepseek_projection_patch(
-                            &mut mla.o_proj,
-                            patch,
-                        );
+                        applied |= apply_deepseek_projection_patch(&mut mla.o_proj, patch);
                     }
                     _ => {}
                 }
@@ -15107,19 +15090,11 @@ impl PrefillEngine {
                     "k_proj" => apply_deepseek_projection_patch(&mut kda.k_proj, patch),
                     "v_proj" => apply_deepseek_projection_patch(&mut kda.v_proj, patch),
                     "o_proj" => apply_deepseek_projection_patch(&mut kda.o_proj, patch),
-                    "f_a_proj" => {
-                        apply_deepseek_projection_patch(&mut kda.f_a_proj, patch)
-                    }
-                    "f_b_proj" => {
-                        apply_deepseek_projection_patch(&mut kda.f_b_proj, patch)
-                    }
+                    "f_a_proj" => apply_deepseek_projection_patch(&mut kda.f_a_proj, patch),
+                    "f_b_proj" => apply_deepseek_projection_patch(&mut kda.f_b_proj, patch),
                     "b_proj" => apply_deepseek_projection_patch(&mut kda.b_proj, patch),
-                    "g_a_proj" => {
-                        apply_deepseek_projection_patch(&mut kda.g_a_proj, patch)
-                    }
-                    "g_b_proj" => {
-                        apply_deepseek_projection_patch(&mut kda.g_b_proj, patch)
-                    }
+                    "g_a_proj" => apply_deepseek_projection_patch(&mut kda.g_a_proj, patch),
+                    "g_b_proj" => apply_deepseek_projection_patch(&mut kda.g_b_proj, patch),
                     _ => false,
                 };
             }
@@ -18061,12 +18036,18 @@ impl PrefillEngine {
         mrope_sin_ptr: u64,
         mrope_half_dim: usize,
         vision_block_ids_ptr: u64,
+        vision_visible_left_ptr: u64,
+        vision_visible_right_ptr: u64,
+        vision_max_tokens: usize,
     ) {
         self.external_prefill_embeddings_ptr = embeddings_ptr;
         self.external_mrope_cos_ptr = mrope_cos_ptr;
         self.external_mrope_sin_ptr = mrope_sin_ptr;
         self.external_mrope_half_dim = mrope_half_dim;
         self.external_vision_block_ids_ptr = vision_block_ids_ptr;
+        self.external_vision_visible_left_ptr = vision_visible_left_ptr;
+        self.external_vision_visible_right_ptr = vision_visible_right_ptr;
+        self.config.deepseek_v4_vision_max_tokens = vision_max_tokens;
     }
 
     pub fn clear_external_prefill_inputs(&mut self) {
@@ -18075,6 +18056,9 @@ impl PrefillEngine {
         self.external_mrope_sin_ptr = 0;
         self.external_mrope_half_dim = 0;
         self.external_vision_block_ids_ptr = 0;
+        self.external_vision_visible_left_ptr = 0;
+        self.external_vision_visible_right_ptr = 0;
+        self.config.deepseek_v4_vision_max_tokens = 0;
     }
 
     pub fn last_prepare_post_alloc_free_mb(&self) -> usize {
@@ -18365,10 +18349,8 @@ impl PrefillEngine {
             .gqa_timing_event_elapsed_ms(event_active, label)?
             .unwrap_or(0.0);
         if stage_idx < GLM5_PREFILL_TIMING_STAGES {
-            self.t_glm5_stage_wall[stage_idx].set(
-                self.t_glm5_stage_wall[stage_idx].get()
-                    + t0.elapsed().as_secs_f64() * 1000.0,
-            );
+            self.t_glm5_stage_wall[stage_idx]
+                .set(self.t_glm5_stage_wall[stage_idx].get() + t0.elapsed().as_secs_f64() * 1000.0);
             self.t_glm5_stage_event[stage_idx]
                 .set(self.t_glm5_stage_event[stage_idx].get() + event_ms);
             self.t_glm5_stage_sync[stage_idx]
@@ -19002,8 +18984,7 @@ impl PrefillEngine {
         }
         if self.synthetic_repack.is_some() {
             return Err(
-                "KRASIS_PREFILL_VERIFY_COLD_STAGING does not support synthetic repack"
-                    .to_string(),
+                "KRASIS_PREFILL_VERIFY_COLD_STAGING does not support synthetic repack".to_string(),
             );
         }
         if n_experts > self.h_expert_w1_ptrs.len()
@@ -19079,9 +19060,7 @@ impl PrefillEngine {
                 continue;
             }
             let slot_offset = w1 - cold_staging_base;
-            if self.cold_expert_bytes == 0
-                || slot_offset % self.cold_expert_bytes as u64 != 0
-            {
+            if self.cold_expert_bytes == 0 || slot_offset % self.cold_expert_bytes as u64 != 0 {
                 return Err(format!(
                     "cold staging verification misaligned slot: layer={} expert={} pointer={:#x} base={:#x} expert_bytes={}",
                     layer_idx, expert_id, w1, cold_staging_base, self.cold_expert_bytes
@@ -23410,11 +23389,7 @@ impl PrefillEngine {
             &state_blobs,
         )?;
         if std::env::var_os("KRASIS_SESSION_BOUNDARY_INTEGRITY_DIAG").is_some() {
-            self.verify_sequence_boundary_bytes(
-                token_count,
-                &state_blobs,
-                "after_ram_restore",
-            )?;
+            self.verify_sequence_boundary_bytes(token_count, &state_blobs, "after_ram_restore")?;
         }
         let (active_device_checkpoint_bytes, active_device_checkpoint_ms) =
             if self.prefill_kv_active {
@@ -23551,11 +23526,31 @@ impl PrefillEngine {
         for (label, current, expected) in [
             ("k", &self.kv_k_ptrs, &self.decode_kv_k_ptrs),
             ("v", &self.kv_v_ptrs, &self.decode_kv_v_ptrs),
-            ("k_scale", &self.kv_k_radius_ptrs, &self.decode_kv_k_radius_ptrs),
-            ("v_scale", &self.kv_v_radius_ptrs, &self.decode_kv_v_radius_ptrs),
-            ("k_packed", &self.kv_k_angles_ptrs, &self.decode_kv_k_angles_ptrs),
-            ("v_packed", &self.kv_v_angles_ptrs, &self.decode_kv_v_angles_ptrs),
-            ("tq4_sign", &self.kv_tq4_sign_ptrs, &self.decode_kv_tq4_sign_ptrs),
+            (
+                "k_scale",
+                &self.kv_k_radius_ptrs,
+                &self.decode_kv_k_radius_ptrs,
+            ),
+            (
+                "v_scale",
+                &self.kv_v_radius_ptrs,
+                &self.decode_kv_v_radius_ptrs,
+            ),
+            (
+                "k_packed",
+                &self.kv_k_angles_ptrs,
+                &self.decode_kv_k_angles_ptrs,
+            ),
+            (
+                "v_packed",
+                &self.kv_v_angles_ptrs,
+                &self.decode_kv_v_angles_ptrs,
+            ),
+            (
+                "tq4_sign",
+                &self.kv_tq4_sign_ptrs,
+                &self.decode_kv_tq4_sign_ptrs,
+            ),
         ] {
             if current != expected {
                 let first = current
@@ -23577,8 +23572,10 @@ impl PrefillEngine {
             || self.kv_num_blocks_by_layer != self.decode_kv_num_blocks_by_layer
             || self.prefill_kv_active
         {
-            return Err("session boundary pointer integrity: decode KV geometry was not restored"
-                .to_string());
+            return Err(
+                "session boundary pointer integrity: decode KV geometry was not restored"
+                    .to_string(),
+            );
         }
         log::info!("Session boundary pointer integrity: decode KV selectors unchanged");
         Ok(())
@@ -24869,7 +24866,11 @@ impl PrefillEngine {
 
     fn allocate_kda_chunk_scratch(&mut self, scratch_tokens: usize) -> Result<(), String> {
         self.clear_kda_chunk_scratch();
-        if !self.layer_weights.iter().any(|layer| layer.kimi_delta.is_some()) {
+        if !self
+            .layer_weights
+            .iter()
+            .any(|layer| layer.kimi_delta.is_some())
+        {
             return Ok(());
         }
         if self.fla.is_none() {
@@ -25170,7 +25171,15 @@ impl PrefillEngine {
             self.scratch.max_tokens
         };
         let capture_suffix_boundary = capture_boundary.map(|boundary| boundary - sequence_start);
-        let chunk_plan = if self.deepseek_v4_head.is_some() {
+        let chunk_plan = if self.config.deepseek_v4_vision_max_tokens > 0 {
+            if sequence_start != 0 || capture_suffix_boundary.is_some() {
+                return Err(
+                    "DeepSeek-V4 image requests cannot use prefix-cache continuation boundaries"
+                        .to_string(),
+                );
+            }
+            build_image_aware_prefill_chunk_plan(token_ids, self.config.vocab_size, max_chunk)?
+        } else if self.deepseek_v4_head.is_some() {
             build_balanced_prefill_chunk_plan_at_boundary(
                 total_m,
                 max_chunk,
@@ -25966,13 +25975,7 @@ impl PrefillEngine {
                         )?;
                         glm5_hc_initialized = true;
                     }
-                    self.forward_glm5_layer(
-                        layer_idx,
-                        m,
-                        chunk_idx,
-                        chunk_start,
-                        chunk_last_tok,
-                    )
+                    self.forward_glm5_layer(layer_idx, m, chunk_idx, chunk_start, chunk_last_tok)
                         .map_err(|error| format!("GLM-5.3 layer {}: {}", layer_idx, error))?;
                     continue;
                 }
@@ -28806,10 +28809,7 @@ impl PrefillEngine {
         );
 
         if timing {
-            let glm5_has_data = self
-                .glm5_stage_calls
-                .iter()
-                .any(|calls| calls.get() > 0);
+            let glm5_has_data = self.glm5_stage_calls.iter().any(|calls| calls.get() > 0);
             let glm5_wall_total = if glm5_has_data {
                 self.t_glm5_stage_wall.iter().map(|cell| cell.get()).sum()
             } else {
@@ -30187,9 +30187,7 @@ impl PrefillEngine {
                     0,
                     token_ids.last().copied().unwrap_or(0) as usize,
                 )
-                .map_err(|error| {
-                    format!("GLM-5.3 prefill-logit layer {}: {}", layer_idx, error)
-                })?;
+                .map_err(|error| format!("GLM-5.3 prefill-logit layer {}: {}", layer_idx, error))?;
                 continue;
             }
 
@@ -37039,7 +37037,10 @@ impl PrefillEngine {
         } else {
             0
         };
-        let selected = window
+        let raw_width = window
+            .checked_add(self.config.deepseek_v4_vision_max_tokens)
+            .ok_or_else(|| format!("DeepSeek-V4 layer {} raw width overflow", layer_idx))?;
+        let selected = raw_width
             .checked_add(suffix_selected)
             .ok_or_else(|| format!("DeepSeek-V4 layer {} selected width overflow", layer_idx))?;
         let required_indices = m
@@ -37066,16 +37067,20 @@ impl PrefillEngine {
             ));
         }
         let index_threads = 256usize;
-        let index_blocks = window.div_ceil(index_threads);
+        let index_blocks = raw_width.div_ceil(index_threads);
         let mut wi0 = indices;
         let mut wi1 = positions;
-        let mut wi2 = i32::try_from(m)
+        let mut wi2 = self.external_vision_visible_left_ptr;
+        let mut wi3 = self.external_vision_visible_right_ptr;
+        let mut wi4 = i32::try_from(m)
             .map_err(|_| format!("DeepSeek-V4 layer {} rows exceed i32", layer_idx))?;
-        let mut wi3 = i32::try_from(window)
+        let mut wi5 = i32::try_from(window)
             .map_err(|_| format!("DeepSeek-V4 layer {} window exceeds i32", layer_idx))?;
-        let mut wi4 = i32::try_from(selected)
+        let mut wi6 = i32::try_from(raw_width)
+            .map_err(|_| format!("DeepSeek-V4 layer {} raw width exceeds i32", layer_idx))?;
+        let mut wi7 = i32::try_from(selected)
             .map_err(|_| format!("DeepSeek-V4 layer {} selected width exceeds i32", layer_idx))?;
-        let mut wi5 = 0i32;
+        let mut wi8 = 0i32;
         unsafe {
             launch(
                 self.kernels.deepseek_v4_window_indices,
@@ -37098,6 +37103,9 @@ impl PrefillEngine {
                     &mut wi3 as *mut _ as *mut std::ffi::c_void,
                     &mut wi4 as *mut _ as *mut std::ffi::c_void,
                     &mut wi5 as *mut _ as *mut std::ffi::c_void,
+                    &mut wi6 as *mut _ as *mut std::ffi::c_void,
+                    &mut wi7 as *mut _ as *mut std::ffi::c_void,
+                    &mut wi8 as *mut _ as *mut std::ffi::c_void,
                 ],
             )?;
         }
@@ -37116,7 +37124,7 @@ impl PrefillEngine {
                 let mut li5 = i32::try_from(selected).map_err(|_| {
                     format!("DeepSeek-V4 layer {} index stride exceeds i32", layer_idx)
                 })?;
-                let mut li6 = i32::try_from(window).map_err(|_| {
+                let mut li6 = i32::try_from(raw_width).map_err(|_| {
                     format!("DeepSeek-V4 layer {} index column exceeds i32", layer_idx)
                 })?;
                 let mut li7 = i32::try_from(end_pos).map_err(|_| {
@@ -37168,7 +37176,7 @@ impl PrefillEngine {
             let mut si4 = i32::try_from(selected).map_err(|_| {
                 format!("DeepSeek-V4 layer {} static stride exceeds i32", layer_idx)
             })?;
-            let mut si5 = i32::try_from(window).map_err(|_| {
+            let mut si5 = i32::try_from(raw_width).map_err(|_| {
                 format!("DeepSeek-V4 layer {} static column exceeds i32", layer_idx)
             })?;
             let mut si6 = i32::try_from(compressed_rows).map_err(|_| {
@@ -37997,9 +38005,7 @@ impl PrefillEngine {
             Glm5FfnKind::RoutedMoe => {
                 self.forward_moe_with_inputs(layer_idx, m, hidden, hidden, hidden)?
             }
-            Glm5FfnKind::Dense => {
-                self.forward_split_dense_mlp(layer_idx, hidden, hidden, m)?
-            }
+            Glm5FfnKind::Dense => self.forward_split_dense_mlp(layer_idx, hidden, hidden, m)?,
         }
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_FFN_SUBLAYER_LAST,
@@ -38013,15 +38019,7 @@ impl PrefillEngine {
         )?;
         self.glm5_timing_finish(GLM5_PREFILL_TIMING_STAGE_FFN, "glm5 ffn", ffn_timing)?;
         let ffn_hc_post_timing = self.glm5_timing_start("glm5 ffn_hc_post")?;
-        self.launch_deepseek_v4_hc_post(
-            state,
-            hidden,
-            temp_state,
-            ffn_post,
-            ffn_comb,
-            hc_mult,
-            m,
-        )?;
+        self.launch_deepseek_v4_hc_post(state, hidden, temp_state, ffn_post, ffn_comb, hc_mult, m)?;
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_OUTPUT_STATE_LAST,
             layer_idx,
@@ -38086,9 +38084,7 @@ impl PrefillEngine {
         };
         let shared_f32 = 3usize
             .checked_mul(desc.head_dim)
-            .and_then(|value| {
-                value.checked_add(if legacy_recurrent { threads } else { 2 })
-            })
+            .and_then(|value| value.checked_add(if legacy_recurrent { threads } else { 2 }))
             .ok_or_else(|| {
                 format!(
                     "GLM-5.3 layer {} recurrent-oracle shared-memory element overflow",
@@ -38181,7 +38177,11 @@ impl PrefillEngine {
         let chunks = m.div_ceil(block_tokens);
         let heads = desc.num_heads;
         let q_scale = (desc.head_dim as f32).sqrt().recip();
-        let g = *self.d_kda_g.as_ref().ok_or("no chunked KDA gate scratch")?.device_ptr();
+        let g = *self
+            .d_kda_g
+            .as_ref()
+            .ok_or("no chunked KDA gate scratch")?
+            .device_ptr();
         let aqk = *self
             .d_kda_aqk
             .as_ref()
@@ -38197,14 +38197,26 @@ impl PrefillEngine {
             .as_ref()
             .ok_or("no chunked KDA Akk scratch")?
             .device_ptr();
-        let w = *self.d_kda_w.as_ref().ok_or("no chunked KDA W scratch")?.device_ptr();
-        let u = *self.d_kda_u.as_ref().ok_or("no chunked KDA U scratch")?.device_ptr();
+        let w = *self
+            .d_kda_w
+            .as_ref()
+            .ok_or("no chunked KDA W scratch")?
+            .device_ptr();
+        let u = *self
+            .d_kda_u
+            .as_ref()
+            .ok_or("no chunked KDA U scratch")?
+            .device_ptr();
         let kg = *self
             .d_kda_kg
             .as_ref()
             .ok_or("no chunked KDA KG scratch")?
             .device_ptr();
-        let h = *self.d_kda_h.as_ref().ok_or("no chunked KDA state scratch")?.device_ptr();
+        let h = *self
+            .d_kda_h
+            .as_ref()
+            .ok_or("no chunked KDA state scratch")?
+            .device_ptr();
         let final_state = *self
             .d_kda_final_state
             .as_ref()
@@ -38236,8 +38248,11 @@ impl PrefillEngine {
             launch(
                 self.kernels.kimi_delta_chunk_prepare_bf16,
                 (
-                    u32::try_from(m.checked_mul(heads).ok_or("chunked KDA row grid overflow")?)
-                        .map_err(|_| "chunked KDA row grid exceeds u32")?,
+                    u32::try_from(
+                        m.checked_mul(heads)
+                            .ok_or("chunked KDA row grid overflow")?,
+                    )
+                    .map_err(|_| "chunked KDA row grid exceeds u32")?,
                     1,
                     1,
                 ),
@@ -38289,7 +38304,10 @@ impl PrefillEngine {
             )
         };
         if rc != 0 {
-            return Err(format!("GLM-5.3 layer {} KDA gate cumsum failed: {}", layer_idx, rc));
+            return Err(format!(
+                "GLM-5.3 layer {} KDA gate cumsum failed: {}",
+                layer_idx, rc
+            ));
         }
         let rc = unsafe {
             (fla.kda_intra)(
@@ -38310,7 +38328,10 @@ impl PrefillEngine {
             )
         };
         if rc != 0 {
-            return Err(format!("GLM-5.3 layer {} KDA intra solve failed: {}", layer_idx, rc));
+            return Err(format!(
+                "GLM-5.3 layer {} KDA intra solve failed: {}",
+                layer_idx, rc
+            ));
         }
         let rc = unsafe {
             (fla.kda_inter_solve)(
@@ -38332,7 +38353,10 @@ impl PrefillEngine {
             )
         };
         if rc != 0 {
-            return Err(format!("GLM-5.3 layer {} KDA inter solve failed: {}", layer_idx, rc));
+            return Err(format!(
+                "GLM-5.3 layer {} KDA inter solve failed: {}",
+                layer_idx, rc
+            ));
         }
         let rc = unsafe {
             (fla.kda_wy_repr)(
@@ -38356,7 +38380,10 @@ impl PrefillEngine {
             )
         };
         if rc != 0 {
-            return Err(format!("GLM-5.3 layer {} KDA WY representation failed: {}", layer_idx, rc));
+            return Err(format!(
+                "GLM-5.3 layer {} KDA WY representation failed: {}",
+                layer_idx, rc
+            ));
         }
         let rc = unsafe {
             (fla.kda_state_recurrence)(
@@ -38380,7 +38407,10 @@ impl PrefillEngine {
             )
         };
         if rc != 0 {
-            return Err(format!("GLM-5.3 layer {} KDA state recurrence failed: {}", layer_idx, rc));
+            return Err(format!(
+                "GLM-5.3 layer {} KDA state recurrence failed: {}",
+                layer_idx, rc
+            ));
         }
         let rc = unsafe {
             (fla.kda_output)(
@@ -38402,7 +38432,10 @@ impl PrefillEngine {
             )
         };
         if rc != 0 {
-            return Err(format!("GLM-5.3 layer {} KDA output failed: {}", layer_idx, rc));
+            return Err(format!(
+                "GLM-5.3 layer {} KDA output failed: {}",
+                layer_idx, rc
+            ));
         }
         let state_bytes = heads
             .checked_mul(desc.head_dim)
@@ -38633,11 +38666,12 @@ impl PrefillEngine {
                         ],
                     )?;
                 }
-                let copy_bytes = total
-                    .checked_mul(std::mem::size_of::<u16>())
-                    .ok_or_else(|| {
-                        format!("GLM-5.3 KDA layer {} convolution copy overflow", layer_idx)
-                    })?;
+                let copy_bytes =
+                    total
+                        .checked_mul(std::mem::size_of::<u16>())
+                        .ok_or_else(|| {
+                            format!("GLM-5.3 KDA layer {} convolution copy overflow", layer_idx)
+                        })?;
                 let copy_result = unsafe {
                     cuda_sys::lib().cuMemcpyDtoDAsync_v2(buffer, gate, copy_bytes, self.stream)
                 };
@@ -40431,11 +40465,7 @@ impl PrefillEngine {
                 desc.in_proj_ba.cols,
                 "in_proj_ba",
             )?;
-            self.hqq_row_major_dequant_to_bf16(
-                "in_proj_ba",
-                &desc.in_proj_ba,
-                in_proj_ba.ptr,
-            )?;
+            self.hqq_row_major_dequant_to_bf16("in_proj_ba", &desc.in_proj_ba, in_proj_ba.ptr)?;
             self.apply_hqq_prefill_sidecars(
                 layer_idx,
                 "in_proj_ba",
@@ -42401,7 +42431,7 @@ impl PrefillEngine {
                     })
                     .ok_or_else(|| {
                         format!("DSA MLA gathered-GEMM layer {layer_idx} gather work overflow")
-                })?;
+                    })?;
                 const GATHER_THREADS: usize = 256;
                 const GATHER_WARPS: usize = GATHER_THREADS / 32;
                 let flat_grid_blocks = gather_work.div_ceil(GATHER_THREADS);
@@ -42415,11 +42445,12 @@ impl PrefillEngine {
                             "DSA MLA gathered-GEMM layer {layer_idx} structured gather group count overflow"
                         )
                     })?;
-                let structured_grid_blocks = tile_rows.checked_mul(groups_per_row).ok_or_else(|| {
-                    format!(
+                let structured_grid_blocks =
+                    tile_rows.checked_mul(groups_per_row).ok_or_else(|| {
+                        format!(
                         "DSA MLA gathered-GEMM layer {layer_idx} structured gather grid overflow"
                     )
-                })?;
+                    })?;
                 let launch_gather = |mode: DsaMlaGatherMode| -> Result<(), String> {
                     let (kernel, grid_blocks) = match mode {
                         DsaMlaGatherMode::Auto => {
@@ -42427,9 +42458,7 @@ impl PrefillEngine {
                                 "DSA MLA gathered-GEMM layer {layer_idx} unresolved auto gather mode"
                             ));
                         }
-                        DsaMlaGatherMode::Flat => {
-                            (flat_gather_kernel.clone(), flat_grid_blocks)
-                        }
+                        DsaMlaGatherMode::Flat => (flat_gather_kernel.clone(), flat_grid_blocks),
                         DsaMlaGatherMode::Structured => {
                             (structured_gather_kernel.clone(), structured_grid_blocks)
                         }
@@ -42444,9 +42473,7 @@ impl PrefillEngine {
                     let mut g7 = selected.ptr;
                     let mut g8 = positions;
                     let mut g9 = i32::try_from(tile_start).map_err(|_| {
-                        format!(
-                            "DSA MLA gathered-GEMM layer {layer_idx} tile start exceeds i32"
-                        )
+                        format!("DSA MLA gathered-GEMM layer {layer_idx} tile start exceeds i32")
                     })?;
                     let mut g10 = tile_i32;
                     let mut g11 = heads_i32;
@@ -42456,21 +42483,15 @@ impl PrefillEngine {
                         )
                     })?;
                     let mut g13 = i32::try_from(nope_dim).map_err(|_| {
-                        format!(
-                            "DSA MLA gathered-GEMM layer {layer_idx} nope width exceeds i32"
-                        )
+                        format!("DSA MLA gathered-GEMM layer {layer_idx} nope width exceeds i32")
                     })?;
                     let mut g14 = i32::try_from(rope_dim).map_err(|_| {
-                        format!(
-                            "DSA MLA gathered-GEMM layer {layer_idx} rope width exceeds i32"
-                        )
+                        format!("DSA MLA gathered-GEMM layer {layer_idx} rope width exceeds i32")
                     })?;
                     let mut g15 = ckv_i32;
                     let mut g16 = selected_i32;
                     let mut g17 = i32::try_from(max_context).map_err(|_| {
-                        format!(
-                            "DSA MLA gathered-GEMM layer {layer_idx} context exceeds i32"
-                        )
+                        format!("DSA MLA gathered-GEMM layer {layer_idx} context exceeds i32")
                     })?;
                     unsafe {
                         launch(
@@ -43184,10 +43205,8 @@ impl PrefillEngine {
                 .len()
                 .checked_mul(std::mem::size_of::<f32>())
                 .ok_or_else(|| {
-                    format!(
-                        "DSA prefill owner {layer_idx} index-score cuBLAS workspace overflow"
-                    )
-            })?,
+                    format!("DSA prefill owner {layer_idx} index-score cuBLAS workspace overflow")
+                })?,
             workspace,
             selection_timing_events,
         )?;
@@ -43426,8 +43445,7 @@ impl PrefillEngine {
             ));
         }
 
-        if mla.kv_a_proj_with_mqa.n() != kv_a_width
-            || mla.kv_a_proj_with_mqa.k() != cfg.hidden_size
+        if mla.kv_a_proj_with_mqa.n() != kv_a_width || mla.kv_a_proj_with_mqa.k() != cfg.hidden_size
         {
             return Err(format!(
                 "HQQ MLA layer {} KV-A projection shape mismatch: registered {}x{}, expected {}x{}",
@@ -43584,13 +43602,7 @@ impl PrefillEngine {
         if qlr > 0 {
             let qa = mla.q_a_proj.as_ref().expect("validated q_a_proj");
             let qb = mla.q_b_proj.as_ref().expect("validated q_b_proj");
-            self.deepseek_v4_projection_prefill_gemm_bf16(
-                layer_idx,
-                qa,
-                hidden,
-                scratch1,
-                m,
-            )?;
+            self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, qa, hidden, scratch1, m)?;
             self.launch_rmsnorm_fp32w(scratch2, scratch1, mla.q_a_norm_ptr, m, qlr)?;
             finish_mla_stage!(HQQ_MLA_TIMING_Q_A_NORM);
             self.record_prefill_device_trace_bf16_row(
@@ -43621,13 +43633,7 @@ impl PrefillEngine {
                 self.execute_dsa_prefill_owner_selection(layer_idx, m, start_pos, scratch2)?;
             }
             finish_mla_stage!(HQQ_MLA_TIMING_OWNER_SELECT);
-            self.deepseek_v4_projection_prefill_gemm_bf16(
-                layer_idx,
-                qb,
-                scratch2,
-                q_raw,
-                m,
-            )?;
+            self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, qb, scratch2, q_raw, m)?;
             finish_mla_stage!(HQQ_MLA_TIMING_Q_B);
             self.record_prefill_device_trace_bf16_row(
                 PDT_LAYER_MLA_Q_RAW_LAST,
@@ -43657,13 +43663,7 @@ impl PrefillEngine {
                 ));
             }
             let q_proj = mla.q_proj.as_ref().expect("validated q_proj");
-            self.deepseek_v4_projection_prefill_gemm_bf16(
-                layer_idx,
-                q_proj,
-                hidden,
-                q_raw,
-                m,
-            )?;
+            self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, q_proj, hidden, q_raw, m)?;
             finish_mla_stage!(HQQ_MLA_TIMING_Q_A_NORM);
             finish_mla_stage!(HQQ_MLA_TIMING_OWNER_SELECT);
             finish_mla_stage!(HQQ_MLA_TIMING_Q_B);
@@ -44128,10 +44128,8 @@ impl PrefillEngine {
 
             let use_score_reuse = dsa_mla_score_reuse_enabled()?;
             let use_grouped_exact = dsa_mla_grouped_exact_enabled()?;
-            let native_dsa_registered = native_dsa_gathered_capability(
-                lw.dsa_prefill.is_some(),
-                lw.deepseek_v4.is_some(),
-            );
+            let native_dsa_registered =
+                native_dsa_gathered_capability(lw.dsa_prefill.is_some(), lw.deepseek_v4.is_some());
             let use_gathered_gemm =
                 dsa_mla_gathered_gemm_enabled(dsa_mla_gathered_default_enabled(
                     native_dsa_registered,
@@ -59075,21 +59073,24 @@ impl PrefillEngine {
             unsafe {
                 if scoring_func == 2 {
                     let mut p3 = self.layer_weights[layer_idx].moe_e_score_corr_ptr;
-                    let mut p4 = self.layer_weights[layer_idx].moe_hash_table_ptr;
-                    let mut p5 = *self.scratch.d_token_ids.device_ptr();
-                    let mut p6 = n_experts as i32;
-                    let mut p7 = topk as i32;
-                    let mut p8 = i32::try_from(self.layer_weights[layer_idx].moe_hash_vocab_size)
+                    let mut p4 = self.layer_weights[layer_idx].moe_vl_bias_ptr;
+                    let mut p5 = self.layer_weights[layer_idx].moe_hash_table_ptr;
+                    let mut p6 = *self.scratch.d_token_ids.device_ptr();
+                    let mut p7 = n_experts as i32;
+                    let mut p8 = topk as i32;
+                    let mut p9 = i32::try_from(self.layer_weights[layer_idx].moe_hash_vocab_size)
                         .map_err(|_| {
                         format!(
                             "DeepSeek-V4 hash vocab exceeds CUDA i32 ABI at layer {}: {}",
                             layer_idx, self.layer_weights[layer_idx].moe_hash_vocab_size
                         )
                     })?;
-                    if p4 != 0 && p8 <= 0 {
+                    let mut p10 = i32::try_from(self.config.vocab_size)
+                        .map_err(|_| "DeepSeek-V4 vocab exceeds CUDA i32 ABI".to_string())?;
+                    if p5 != 0 && p9 <= 0 {
                         return Err(format!(
                             "DeepSeek-V4 hash router layer {} has a table but invalid vocab size {}",
-                            layer_idx, p8
+                            layer_idx, p9
                         ));
                     }
                     launch(
@@ -59108,6 +59109,8 @@ impl PrefillEngine {
                             &mut p6 as *mut _ as *mut std::ffi::c_void,
                             &mut p7 as *mut _ as *mut std::ffi::c_void,
                             &mut p8 as *mut _ as *mut std::ffi::c_void,
+                            &mut p9 as *mut _ as *mut std::ffi::c_void,
+                            &mut p10 as *mut _ as *mut std::ffi::c_void,
                         ],
                     )?;
                 } else if scoring_func == 1 {
@@ -60904,15 +60907,13 @@ impl PrefillEngine {
             for &eid in &active {
                 // Try prefill cache + HCS first (zero copy — point directly into VRAM)
                 if !forced_active_hcs_experts.contains(&eid) {
-                    if let Some((hw1p, hw1s, hw2p, hw2s)) =
-                        self.expert_lookup(hcs_layer_idx, eid)
-                    {
-                    self.h_expert_w1_ptrs[eid] = hw1p;
-                    self.h_expert_w1s_ptrs[eid] = hw1s;
-                    self.h_expert_w2_ptrs[eid] = hw2p;
-                    self.h_expert_w2s_ptrs[eid] = hw2s;
-                    hcs_count += 1;
-                    continue;
+                    if let Some((hw1p, hw1s, hw2p, hw2s)) = self.expert_lookup(hcs_layer_idx, eid) {
+                        self.h_expert_w1_ptrs[eid] = hw1p;
+                        self.h_expert_w1s_ptrs[eid] = hw1s;
+                        self.h_expert_w2_ptrs[eid] = hw2p;
+                        self.h_expert_w2s_ptrs[eid] = hw2s;
+                        hcs_count += 1;
+                        continue;
                     }
                 }
 
@@ -67212,20 +67213,23 @@ impl PrefillEngine {
             unsafe {
                 if scoring_func == 2 {
                     let mut p3 = lw.moe_e_score_corr_ptr;
-                    let mut p4 = lw.moe_hash_table_ptr;
-                    let mut p5 = *self.scratch.d_token_ids.device_ptr();
-                    let mut p6 = n_experts as i32;
-                    let mut p7 = topk as i32;
-                    let mut p8 = i32::try_from(lw.moe_hash_vocab_size).map_err(|_| {
+                    let mut p4 = lw.moe_vl_bias_ptr;
+                    let mut p5 = lw.moe_hash_table_ptr;
+                    let mut p6 = *self.scratch.d_token_ids.device_ptr();
+                    let mut p7 = n_experts as i32;
+                    let mut p8 = topk as i32;
+                    let mut p9 = i32::try_from(lw.moe_hash_vocab_size).map_err(|_| {
                         format!(
                             "DeepSeek-V4 hash vocab exceeds CUDA i32 ABI at layer {}: {}",
                             layer_idx, lw.moe_hash_vocab_size
                         )
                     })?;
-                    if p4 != 0 && p8 <= 0 {
+                    let mut p10 = i32::try_from(self.config.vocab_size)
+                        .map_err(|_| "DeepSeek-V4 vocab exceeds CUDA i32 ABI".to_string())?;
+                    if p5 != 0 && p9 <= 0 {
                         return Err(format!(
                             "DeepSeek-V4 hash router layer {} has a table but invalid vocab size {}",
-                            layer_idx, p8
+                            layer_idx, p9
                         ));
                     }
                     launch(
@@ -67244,6 +67248,8 @@ impl PrefillEngine {
                             &mut p6 as *mut _ as *mut std::ffi::c_void,
                             &mut p7 as *mut _ as *mut std::ffi::c_void,
                             &mut p8 as *mut _ as *mut std::ffi::c_void,
+                            &mut p9 as *mut _ as *mut std::ffi::c_void,
+                            &mut p10 as *mut _ as *mut std::ffi::c_void,
                         ],
                     )?;
                 } else if scoring_func == 1 {
@@ -72697,8 +72703,25 @@ impl PrefillEngine {
                 .ok_or_else(|| "gate pre-scan absolute position overflow".to_string())?;
             self.upload_tokens_with_offset(&token_ids[chunk_start..chunk_end], absolute_start)
                 .map_err(|error| format!("prescan upload chunk {}: {}", chunk_idx, error))?;
-            self.launch_embedding(chunk_tokens)
-                .map_err(|error| format!("prescan embedding chunk {}: {}", chunk_idx, error))?;
+            if self.external_prefill_embeddings_ptr != 0 {
+                let src = self.external_prefill_embeddings_ptr
+                    + (chunk_start * self.config.hidden_size * std::mem::size_of::<u16>()) as u64;
+                let dst = *self.scratch.d_hidden.device_ptr();
+                let bytes = chunk_tokens
+                    .saturating_mul(self.config.hidden_size)
+                    .saturating_mul(std::mem::size_of::<u16>());
+                let err =
+                    unsafe { cuda_sys::lib().cuMemcpyDtoDAsync_v2(dst, src, bytes, self.stream) };
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "prescan external embeddings D2D chunk {}: {:?}",
+                        chunk_idx, err
+                    ));
+                }
+            } else {
+                self.launch_embedding(chunk_tokens)
+                    .map_err(|error| format!("prescan embedding chunk {}: {}", chunk_idx, error))?;
+            }
 
             let chunk_counts = self.gate_prescan(chunk_tokens, &[chunk_tokens])?;
             let chunk_active = std::mem::take(&mut self.prescan_active_experts);
@@ -72866,11 +72889,12 @@ impl PrefillEngine {
                 unsafe {
                     if scoring_func == 2 {
                         let mut p3 = self.layer_weights[layer_idx].moe_e_score_corr_ptr;
-                        let mut p4 = self.layer_weights[layer_idx].moe_hash_table_ptr;
-                        let mut p5 = *self.scratch.d_token_ids.device_ptr();
-                        let mut p6 = n_experts as i32;
-                        let mut p7 = topk as i32;
-                        let mut p8 = i32::try_from(
+                        let mut p4 = self.layer_weights[layer_idx].moe_vl_bias_ptr;
+                        let mut p5 = self.layer_weights[layer_idx].moe_hash_table_ptr;
+                        let mut p6 = *self.scratch.d_token_ids.device_ptr();
+                        let mut p7 = n_experts as i32;
+                        let mut p8 = topk as i32;
+                        let mut p9 = i32::try_from(
                             self.layer_weights[layer_idx].moe_hash_vocab_size,
                         )
                         .map_err(|_| {
@@ -72879,10 +72903,12 @@ impl PrefillEngine {
                                 layer_idx, self.layer_weights[layer_idx].moe_hash_vocab_size
                             )
                         })?;
-                        if p4 != 0 && p8 <= 0 {
+                        let mut p10 = i32::try_from(self.config.vocab_size)
+                            .map_err(|_| "DeepSeek-V4 vocab exceeds CUDA i32 ABI".to_string())?;
+                        if p5 != 0 && p9 <= 0 {
                             return Err(format!(
                                 "DeepSeek-V4 prescan hash router layer {} has a table but invalid vocab size {}",
-                                layer_idx, p8
+                                layer_idx, p9
                             ));
                         }
                         launch(
@@ -72901,6 +72927,8 @@ impl PrefillEngine {
                                 &mut p6 as *mut _ as *mut std::ffi::c_void,
                                 &mut p7 as *mut _ as *mut std::ffi::c_void,
                                 &mut p8 as *mut _ as *mut std::ffi::c_void,
+                                &mut p9 as *mut _ as *mut std::ffi::c_void,
+                                &mut p10 as *mut _ as *mut std::ffi::c_void,
                             ],
                         )?;
                     } else if scoring_func == 1 {
@@ -75613,6 +75641,48 @@ fn build_balanced_prefill_chunk_plan(total_tokens: usize, max_chunk_tokens: usiz
     plan
 }
 
+/// Build a request-scoped plan that never divides a contiguous image-sentinel
+/// block. DeepSeek-V4 image attention is bidirectional inside that block, so
+/// every image must be present in the same prefill pass.
+fn build_image_aware_prefill_chunk_plan(
+    token_ids: &[u32],
+    vocab_size: usize,
+    max_chunk_tokens: usize,
+) -> Result<Vec<usize>, String> {
+    if token_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let max_chunk = max_chunk_tokens.max(128);
+    let mut plan = Vec::new();
+    let mut start = 0usize;
+    while start < token_ids.len() {
+        let mut end = (start + max_chunk).min(token_ids.len());
+        if end < token_ids.len()
+            && token_ids[end - 1] as usize >= vocab_size
+            && token_ids[end] as usize >= vocab_size
+        {
+            while end > start && token_ids[end - 1] as usize >= vocab_size {
+                end -= 1;
+            }
+            if end == start {
+                let image_end = token_ids[start..]
+                    .iter()
+                    .position(|&token| (token as usize) < vocab_size)
+                    .map(|offset| start + offset)
+                    .unwrap_or(token_ids.len());
+                return Err(format!(
+                    "DeepSeek-V4 image span has {} tokens but runtime prefill chunk capacity is {}",
+                    image_end - start,
+                    max_chunk
+                ));
+            }
+        }
+        plan.push(end - start);
+        start = end;
+    }
+    Ok(plan)
+}
+
 /// Build the normal measured-safe chunk plan while forcing an exact internal
 /// boundary to be a chunk end. Each side is planned independently so neither
 /// side exceeds the runtime-derived maximum and no fixed prompt threshold is
@@ -75856,6 +75926,7 @@ fn deepseek_v4_selected_per_token(config: &PrefillModelConfig, prompt_tokens: us
     };
     config
         .deepseek_v4_sliding_window
+        .saturating_add(config.deepseek_v4_vision_max_tokens)
         .saturating_add(config.deepseek_v4_index_topk.max(static_selected))
 }
 
@@ -77829,18 +77900,12 @@ Set KRASIS_NO_FLA=1 only if you explicitly want the slower custom LA path."
                 "krasis_fla_chunk_kda_fwd_kernel_inter_solve_fused",
                 FlaKdaInterSolveFn
             ),
-            kda_wy_repr: load_fla_sym!(
-                "krasis_fla_recompute_w_u_fwd_kda_kernel",
-                FlaKdaWyReprFn
-            ),
+            kda_wy_repr: load_fla_sym!("krasis_fla_recompute_w_u_fwd_kda_kernel", FlaKdaWyReprFn),
             kda_state_recurrence: load_fla_sym!(
                 "krasis_fla_chunk_kda_state_recurrence",
                 FlaStateRecurrenceFn
             ),
-            kda_output: load_fla_sym!(
-                "krasis_fla_chunk_gla_fwd_kernel_o_kda",
-                FlaKdaOutputFn
-            ),
+            kda_output: load_fla_sym!("krasis_fla_chunk_gla_fwd_kernel_o_kda", FlaKdaOutputFn),
         };
 
         log::info!("Loaded FLA (Flash Linear Attention) kernels from {}", path);
@@ -77861,12 +77926,12 @@ Set KRASIS_NO_FLA=1 only if you explicitly want the slower custom LA path."
 mod chunk_plan_tests {
     use super::{
         build_balanced_prefill_chunk_plan, build_balanced_prefill_chunk_plan_at_boundary,
-        build_prefill_chunk_plan, build_prefill_chunk_plan_at_boundary,
-        glm5_hc_temp_state_elements_from_geometry,
-        kimi_delta_state_elements_from_geometry,
-        portable_predicted_w1_requires_exact_resize, prefill_chunk_guard_prompt_tokens,
-        project_prefill_runtime_reserve_bytes, shared_moe_inter_scratch_elements,
-        stage_exact_export_launch_scalars, stage_exact_export_range, PortablePredictedW1Policy,
+        build_image_aware_prefill_chunk_plan, build_prefill_chunk_plan,
+        build_prefill_chunk_plan_at_boundary, glm5_hc_temp_state_elements_from_geometry,
+        kimi_delta_state_elements_from_geometry, portable_predicted_w1_requires_exact_resize,
+        prefill_chunk_guard_prompt_tokens, project_prefill_runtime_reserve_bytes,
+        shared_moe_inter_scratch_elements, stage_exact_export_launch_scalars,
+        stage_exact_export_range, PortablePredictedW1Policy,
     };
 
     #[test]
@@ -77899,6 +77964,35 @@ mod chunk_plan_tests {
     #[test]
     fn uses_single_chunk_when_prompt_fits() {
         assert_eq!(build_prefill_chunk_plan(5_000, 16_000), vec![5_000]);
+    }
+
+    #[test]
+    fn deepseek_v4_image_chunk_plan_keeps_each_sentinel_block_whole() {
+        let vocab = 100u32;
+        let mut tokens = vec![1u32; 110];
+        tokens.extend([100u32; 40]);
+        tokens.extend([2u32; 150]);
+        let plan = build_image_aware_prefill_chunk_plan(&tokens, vocab as usize, 128).unwrap();
+        assert_eq!(plan.iter().sum::<usize>(), tokens.len());
+        let image_start = 110usize;
+        let image_end = 150usize;
+        let boundaries = plan
+            .iter()
+            .scan(0usize, |sum, &chunk| {
+                *sum += chunk;
+                Some(*sum)
+            })
+            .collect::<Vec<_>>();
+        assert!(boundaries
+            .iter()
+            .all(|&boundary| boundary <= image_start || boundary >= image_end));
+
+        let oversized = vec![100u32; 129];
+        assert!(
+            build_image_aware_prefill_chunk_plan(&oversized, vocab as usize, 128)
+                .unwrap_err()
+                .contains("image span has 129 tokens")
+        );
     }
 
     #[test]
@@ -78013,11 +78107,7 @@ mod chunk_plan_tests {
         let long_bytes = 3_198usize * 1024 * 1024;
         let points = [(500, short_bytes), (39_920, long_bytes)];
         assert_eq!(
-            project_prefill_runtime_reserve_bytes(
-                Some(&points),
-                short_bytes,
-                62_403,
-            ),
+            project_prefill_runtime_reserve_bytes(Some(&points), short_bytes, 62_403,),
             short_bytes,
         );
     }
@@ -78028,27 +78118,15 @@ mod chunk_plan_tests {
         let long_bytes = 200usize * 1024 * 1024;
         let points = [(100, short_bytes), (200, long_bytes)];
         assert_eq!(
-            project_prefill_runtime_reserve_bytes(
-                Some(&points),
-                long_bytes,
-                100,
-            ),
+            project_prefill_runtime_reserve_bytes(Some(&points), long_bytes, 100,),
             short_bytes,
         );
         assert_eq!(
-            project_prefill_runtime_reserve_bytes(
-                Some(&points),
-                long_bytes,
-                150,
-            ),
+            project_prefill_runtime_reserve_bytes(Some(&points), long_bytes, 150,),
             long_bytes,
         );
         assert_eq!(
-            project_prefill_runtime_reserve_bytes(
-                Some(&points),
-                long_bytes,
-                300,
-            ),
+            project_prefill_runtime_reserve_bytes(Some(&points), long_bytes, 300,),
             300usize * 1024 * 1024,
         );
     }
@@ -80299,10 +80377,13 @@ mod kernel_tests {
         let normalize = ctx.get_kernel("normalize_topk_weights_kernel");
         let logits = vec![-3.0f32, 1.0, 0.25, 2.5, -0.5, 1.75, 0.0, 3.0];
         let correction = vec![0.0f32, 0.0, 1.5, -0.25, 0.0, 0.0, 0.5, -1.0];
+        let vl_bias = vec![0.0f32, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0];
         let experts = logits.len();
         let topk = 3usize;
         let d_logits = ctx.dev.htod_copy(logits.clone()).unwrap();
         let d_correction = ctx.dev.htod_copy(correction.clone()).unwrap();
+        let d_vl_bias = ctx.dev.htod_copy(vl_bias.clone()).unwrap();
+        let d_text_token = ctx.dev.htod_copy(vec![0i32]).unwrap();
         let d_weights = ctx.alloc_f32(topk);
         let d_ids = ctx.alloc_i32(topk);
 
@@ -80312,11 +80393,17 @@ mod kernel_tests {
                 let mut p1 = *d_ids.device_ptr() as u64;
                 let mut p2 = *d_logits.device_ptr() as u64;
                 let mut p3 = *d_correction.device_ptr() as u64;
-                let mut p4 = hash_ptr;
-                let mut p5 = token_ids_ptr;
-                let mut p6 = experts as i32;
-                let mut p7 = topk as i32;
-                let mut p8 = hash_vocab_size;
+                let mut p4 = *d_vl_bias.device_ptr() as u64;
+                let mut p5 = hash_ptr;
+                let mut p6 = if token_ids_ptr == 0 {
+                    *d_text_token.device_ptr() as u64
+                } else {
+                    token_ids_ptr
+                };
+                let mut p7 = experts as i32;
+                let mut p8 = topk as i32;
+                let mut p9 = hash_vocab_size;
+                let mut p10 = 6i32;
                 unsafe {
                     launch(
                         router,
@@ -80334,6 +80421,8 @@ mod kernel_tests {
                             &mut p6 as *mut _ as *mut std::ffi::c_void,
                             &mut p7 as *mut _ as *mut std::ffi::c_void,
                             &mut p8 as *mut _ as *mut std::ffi::c_void,
+                            &mut p9 as *mut _ as *mut std::ffi::c_void,
+                            &mut p10 as *mut _ as *mut std::ffi::c_void,
                         ],
                     )
                     .unwrap();
@@ -80399,6 +80488,26 @@ mod kernel_tests {
         for (actual, expected) in hash_weights
             .iter()
             .zip(hash_raw.iter().map(|value| value / hash_sum))
+        {
+            assert!(
+                (actual - expected).abs() <= 2.0e-6,
+                "{actual} != {expected}"
+            );
+        }
+
+        let d_image_token = ctx.dev.htod_copy(vec![6i32]).unwrap();
+        let (image_weights, image_ids) = launch_router(
+            *d_hash.device_ptr() as u64,
+            *d_image_token.device_ptr() as u64,
+            vocab as i32,
+        );
+        let (image_raw, image_expected_ids) =
+            compute_router_topk_cpu_reference(&logits, topk, 2, None, Some(&vl_bias)).unwrap();
+        assert_eq!(image_ids, image_expected_ids);
+        let image_sum = image_raw.iter().sum::<f32>();
+        for (actual, expected) in image_weights
+            .iter()
+            .zip(image_raw.iter().map(|value| value / image_sum))
         {
             assert!(
                 (actual - expected).abs() <= 2.0e-6,
@@ -82803,10 +82912,13 @@ mod kernel_tests {
 
             let mut i0 = *d_indices.device_ptr() as u64;
             let mut i1 = *d_positions.device_ptr() as u64;
-            let mut i2 = index_rows as i32;
-            let mut i3 = window as i32;
-            let mut i4 = index_stride as i32;
-            let mut i5 = 0i32;
+            let mut i2 = 0u64;
+            let mut i3 = 0u64;
+            let mut i4 = index_rows as i32;
+            let mut i5 = window as i32;
+            let mut i6 = window as i32;
+            let mut i7 = index_stride as i32;
+            let mut i8 = 0i32;
             launch(
                 window_kernel,
                 (1, index_rows as u32, 1),
@@ -82820,6 +82932,9 @@ mod kernel_tests {
                     &mut i3 as *mut _ as *mut std::ffi::c_void,
                     &mut i4 as *mut _ as *mut std::ffi::c_void,
                     &mut i5 as *mut _ as *mut std::ffi::c_void,
+                    &mut i6 as *mut _ as *mut std::ffi::c_void,
+                    &mut i7 as *mut _ as *mut std::ffi::c_void,
+                    &mut i8 as *mut _ as *mut std::ffi::c_void,
                 ],
             )
             .unwrap();
@@ -82865,14 +82980,22 @@ mod kernel_tests {
             vec![0, 1, 2, -1, 4, 6, -1, 4, 5, 6, 7, 5, -1, -1]
         );
 
-        let d_ring_indices = ctx.alloc_i32(index_rows * window);
+        // Image rows additionally see the future members of their exact
+        // image block, while text rows retain the established causal window.
+        let vision_raw_width = window + 3;
+        let d_vision_indices = ctx.alloc_i32(index_rows * vision_raw_width);
+        let d_visible_left = ctx.dev.htod_copy(vec![0i32, 0, 1, 2, 3, 0, 0, 0]).unwrap();
+        let d_visible_right = ctx.dev.htod_copy(vec![0i32, 0, 2, 1, 0, 0, 0, 0]).unwrap();
         unsafe {
-            let mut i0 = *d_ring_indices.device_ptr() as u64;
+            let mut i0 = *d_vision_indices.device_ptr() as u64;
             let mut i1 = *d_positions.device_ptr() as u64;
-            let mut i2 = index_rows as i32;
-            let mut i3 = window as i32;
-            let mut i4 = window as i32;
-            let mut i5 = 1i32;
+            let mut i2 = *d_visible_left.device_ptr() as u64;
+            let mut i3 = *d_visible_right.device_ptr() as u64;
+            let mut i4 = index_rows as i32;
+            let mut i5 = window as i32;
+            let mut i6 = vision_raw_width as i32;
+            let mut i7 = vision_raw_width as i32;
+            let mut i8 = 0i32;
             launch(
                 window_kernel,
                 (1, index_rows as u32, 1),
@@ -82886,6 +83009,46 @@ mod kernel_tests {
                     &mut i3 as *mut _ as *mut std::ffi::c_void,
                     &mut i4 as *mut _ as *mut std::ffi::c_void,
                     &mut i5 as *mut _ as *mut std::ffi::c_void,
+                    &mut i6 as *mut _ as *mut std::ffi::c_void,
+                    &mut i7 as *mut _ as *mut std::ffi::c_void,
+                    &mut i8 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )
+            .unwrap();
+        }
+        ctx.dev.synchronize().unwrap();
+        assert_eq!(
+            ctx.dev.dtoh_sync_copy(&d_vision_indices).unwrap(),
+            vec![0, 1, 2, 3, 4, -1, -1, 4, 5, 6, 7, -1, -1, -1]
+        );
+
+        let d_ring_indices = ctx.alloc_i32(index_rows * window);
+        unsafe {
+            let mut i0 = *d_ring_indices.device_ptr() as u64;
+            let mut i1 = *d_positions.device_ptr() as u64;
+            let mut i2 = 0u64;
+            let mut i3 = 0u64;
+            let mut i4 = index_rows as i32;
+            let mut i5 = window as i32;
+            let mut i6 = window as i32;
+            let mut i7 = window as i32;
+            let mut i8 = 1i32;
+            launch(
+                window_kernel,
+                (1, index_rows as u32, 1),
+                (32, 1, 1),
+                0,
+                ctx.stream(),
+                &mut [
+                    &mut i0 as *mut _ as *mut std::ffi::c_void,
+                    &mut i1 as *mut _ as *mut std::ffi::c_void,
+                    &mut i2 as *mut _ as *mut std::ffi::c_void,
+                    &mut i3 as *mut _ as *mut std::ffi::c_void,
+                    &mut i4 as *mut _ as *mut std::ffi::c_void,
+                    &mut i5 as *mut _ as *mut std::ffi::c_void,
+                    &mut i6 as *mut _ as *mut std::ffi::c_void,
+                    &mut i7 as *mut _ as *mut std::ffi::c_void,
+                    &mut i8 as *mut _ as *mut std::ffi::c_void,
                 ],
             )
             .unwrap();
@@ -83254,10 +83417,7 @@ mod kernel_tests {
         assert_eq!(dsa_score_context_rows(303, 4), 75);
         assert_eq!(dsa_score_context_rows(304, 4), 76);
         assert_eq!(dsa_score_context_rows(303, 1), 303);
-        assert_eq!(
-            glm5_ffn_kind(true, false).unwrap(),
-            Glm5FfnKind::RoutedMoe
-        );
+        assert_eq!(glm5_ffn_kind(true, false).unwrap(), Glm5FfnKind::RoutedMoe);
         assert_eq!(glm5_ffn_kind(false, true).unwrap(), Glm5FfnKind::Dense);
         assert!(glm5_ffn_kind(true, true).is_err());
         assert!(glm5_ffn_kind(false, false).is_err());
@@ -83282,7 +83442,10 @@ mod kernel_tests {
             index_kpool_compress: true,
             index_kpool_always_select_tail: true,
         };
-        assert_eq!(pooled.workspace_selection_geometry().unwrap(), (512, 2051, 4));
+        assert_eq!(
+            pooled.workspace_selection_geometry().unwrap(),
+            (512, 2051, 4)
+        );
         assert_eq!(pooled.selection_context_divisor().unwrap(), 4);
         assert_eq!(
             DsaPrefillLayerDescriptor {
@@ -83963,9 +84126,7 @@ mod kernel_tests {
                 Some((0usize, 1usize, 4usize)),
             ),
         ] {
-            let position_divisor = causal_geometry
-                .map(|(_, divisor, _)| divisor)
-                .unwrap_or(1);
+            let position_divisor = causal_geometry.map(|(_, divisor, _)| divisor).unwrap_or(1);
             let causal_row_span = causal_geometry
                 .map(|(_, _, row_span)| row_span)
                 .unwrap_or(1);
@@ -84400,10 +84561,7 @@ mod kernel_tests {
                     .collect::<Vec<_>>(),
             )
             .unwrap();
-        let d_gather_indices = ctx
-            .dev
-            .htod_copy(vec![0i32, -1, 2, 1, 0, -1])
-            .unwrap();
+        let d_gather_indices = ctx.dev.htod_copy(vec![0i32, -1, 2, 1, 0, -1]).unwrap();
         let d_gather_positions = ctx.dev.htod_copy(vec![2i32, 1]).unwrap();
         let d_flat_gathered = ctx.alloc_f32(gathered_elements);
         let d_flat_query = ctx.alloc_f32(query_elements);
@@ -84412,11 +84570,10 @@ mod kernel_tests {
         let d_structured_query = ctx.alloc_f32(query_elements);
         let d_structured_scores = ctx.alloc_f32(score_elements);
         let flat_kernel = ctx.get_kernel("mla_prefill_gather_query_k6_f32_kernel");
-        let structured_kernel =
-            ctx.get_kernel("mla_prefill_gather_query_k6_f32_structured_kernel");
+        let structured_kernel = ctx.get_kernel("mla_prefill_gather_query_k6_f32_structured_kernel");
         let flat_work = gathered_elements + query_elements + score_elements;
-        let structured_blocks = gather_rows
-            * (gather_selected.div_ceil(8) + gather_heads.div_ceil(8) + 1);
+        let structured_blocks =
+            gather_rows * (gather_selected.div_ceil(8) + gather_heads.div_ceil(8) + 1);
         for (kernel, grid, gathered_ptr, query_ptr, score_ptr) in [
             (
                 flat_kernel,
@@ -84691,7 +84848,10 @@ mod kernel_tests {
                 .map(|&row| {
                     q_absorbed
                         .iter()
-                        .zip(decoded[row as usize * cache_dim..(row as usize + 1) * cache_dim].iter())
+                        .zip(
+                            decoded[row as usize * cache_dim..(row as usize + 1) * cache_dim]
+                                .iter(),
+                        )
                         .map(|(query, cached)| query * cached)
                         .sum::<f32>()
                         * sm_scale
@@ -84720,9 +84880,7 @@ mod kernel_tests {
                     ctx.dev.dtoh_sync_copy(&d_sparse_graph_out).unwrap(),
                 ),
             ] {
-                for (dim, (&actual, &expected)) in
-                    actual.iter().zip(expected.iter()).enumerate()
-                {
+                for (dim, (&actual, &expected)) in actual.iter().zip(expected.iter()).enumerate() {
                     assert!(
                         (actual - expected).abs() <= 2e-4,
                         "MLA sparse K6 {label} mismatch dim={dim}: actual={actual} expected={expected}"
@@ -86243,8 +86401,8 @@ mod kernel_tests {
                 ctx.get_kernel("mla_prefill_gather_query_k4_f32_structured_kernel");
             let softmax_kernel = ctx.get_kernel("mla_prefill_softmax_weights_warp_f32_kernel");
             let gather_work = gathered_elements + query_elements + score_elements;
-            let structured_blocks = prefill_rows
-                * (selected_per_row.div_ceil(8) + num_heads.div_ceil(8) + 1);
+            let structured_blocks =
+                prefill_rows * (selected_per_row.div_ceil(8) + num_heads.div_ceil(8) + 1);
             for (kernel, grid, gathered_ptr, query_ptr, score_ptr) in [
                 (
                     gather_kernel,
@@ -90981,10 +91139,7 @@ mod kernel_tests {
             for column in 0..dim {
                 let index = row_offset + column;
                 expected[index] = quantize(
-                    input[index]
-                        * inv_rms
-                        * norm_weight[column]
-                        / (1.0 + (-gate[index]).exp()),
+                    input[index] * inv_rms * norm_weight[column] / (1.0 + (-gate[index]).exp()),
                 );
             }
         }
@@ -91046,8 +91201,7 @@ mod kernel_tests {
     fn test_glm53_kda_recurrent_scan_matches_cpu_reference() {
         let ctx = GpuTestCtx::new();
         let kernel = ctx.get_decode_kernel("kimi_delta_recurrent_scan_bf16");
-        let tiled_kernel =
-            ctx.get_decode_kernel("kimi_delta_recurrent_scan_tiled_bf16");
+        let tiled_kernel = ctx.get_decode_kernel("kimi_delta_recurrent_scan_tiled_bf16");
         // Exercise the real GLM-5.3 KDA geometry. The earlier 2x8 fixture
         // launched only one value tile and could not detect cross-tile bugs.
         let tokens = 3usize;
@@ -91587,10 +91741,10 @@ mod kernel_tests {
             .chunks_exact(2)
             .zip(chunk_output.chunks_exact(2))
             .map(|(left, right)| {
-                let left = half::bf16::from_bits(u16::from_le_bytes(left.try_into().unwrap()))
-                    .to_f32();
-                let right = half::bf16::from_bits(u16::from_le_bytes(right.try_into().unwrap()))
-                    .to_f32();
+                let left =
+                    half::bf16::from_bits(u16::from_le_bytes(left.try_into().unwrap())).to_f32();
+                let right =
+                    half::bf16::from_bits(u16::from_le_bytes(right.try_into().unwrap())).to_f32();
                 (left - right).abs()
             })
             .fold(0.0f32, f32::max);
@@ -91728,10 +91882,10 @@ mod kernel_tests {
             .chunks_exact(2)
             .zip(chunk_next_output.chunks_exact(2))
             .map(|(left, right)| {
-                let left = half::bf16::from_bits(u16::from_le_bytes(left.try_into().unwrap()))
-                    .to_f32();
-                let right = half::bf16::from_bits(u16::from_le_bytes(right.try_into().unwrap()))
-                    .to_f32();
+                let left =
+                    half::bf16::from_bits(u16::from_le_bytes(left.try_into().unwrap())).to_f32();
+                let right =
+                    half::bf16::from_bits(u16::from_le_bytes(right.try_into().unwrap())).to_f32();
                 (left - right).abs()
             })
             .fold(0.0f32, f32::max);
