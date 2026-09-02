@@ -1273,6 +1273,41 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v4_template_nests_tool_result_images_in_user_turns() {
+        let config_path = write_tokenizer_config("{{ bos_token }}");
+        let config_dir = std::path::Path::new(&config_path).parent().unwrap();
+        fs::write(
+            config_dir.join("config.json"),
+            serde_json::json!({"model_type": "deepseek_v4"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            &config_path,
+            serde_json::json!({
+                "chat_template": null,
+                "bos_token": {"content": "<｜begin▁of▁sentence｜>"},
+                "eos_token": {"content": "<｜end▁of▁sentence｜>"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        let rendered = engine
+            .apply_multimodal_with_tools(
+                r#"[{"role":"assistant","content":"","tool_calls":[{"id":"call_vision","type":"function","function":{"name":"vision_analyze","arguments":"{\"image_url\":\"local.png\"}"}}]},{"role":"tool","tool_call_id":"call_vision","content":[{"type":"text","text":"Image loaded."},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}]}]"#,
+                "",
+                true,
+                false,
+            )
+            .unwrap();
+        assert!(rendered.contains(
+            "<｜User｜><tool_result>Image loaded.\n\n<｜deepseek_image｜></tool_result>"
+        ));
+        assert!(rendered.ends_with("<｜Assistant｜></think>"));
+    }
+
+    #[test]
     fn deepseek_v4_template_renders_openai_tool_calls() {
         let config_path = write_tokenizer_config("{{ bos_token }}");
         let config_dir = std::path::Path::new(&config_path).parent().unwrap();
