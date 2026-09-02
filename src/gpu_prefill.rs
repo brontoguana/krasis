@@ -83452,8 +83452,7 @@ mod kernel_tests {
         assert_eq!(dsa_score_context_rows(303, 4), 75);
         assert_eq!(dsa_score_context_rows(304, 4), 76);
         assert_eq!(dsa_score_context_rows(303, 1), 303);
-        let deepseek_v4 =
-            deepseek_v4_indexer_workspace_geometry(2, 4, 512, 64, 128).unwrap();
+        let deepseek_v4 = deepseek_v4_indexer_workspace_geometry(2, 4, 512, 64, 128).unwrap();
         assert_eq!(deepseek_v4.context_divisor, 4);
         assert_eq!(deepseek_v4.causal_context_row_span, 4);
         assert_eq!(deepseek_v4.index_topk, 512);
