@@ -1301,9 +1301,8 @@ mod tests {
                 false,
             )
             .unwrap();
-        assert!(rendered.contains(
-            "<｜User｜><tool_result>Image loaded.<｜deepseek_image｜></tool_result>"
-        ));
+        assert!(rendered
+            .contains("<｜User｜><tool_result>Image loaded.<｜deepseek_image｜></tool_result>"));
         assert!(rendered.ends_with("<｜Assistant｜></think>"));
     }
 
