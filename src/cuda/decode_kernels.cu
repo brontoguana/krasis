@@ -8017,7 +8017,8 @@ extern "C" __global__ void reduce_ksplits_bf16_batched(
     output[expert_idx * N + n] = *reinterpret_cast<unsigned short*>(&result);
 }
 
-// Batched fused silu_mul + w2 GEMV, writing to per-expert output buffers.
+// Batched fused gated activation + w2 GEMV, writing to per-expert output
+// buffers. swiglu_mode=3 selects the checkpoint's GELU(tanh)*up equation.
 // Grid: (n_tiles, 1, num_experts), Block: (256, 1, 1)
 // Each expert reads its own gate_up and w2 weights, writes to expert_outs[expert * N].
 // Does NOT accumulate into moe_out — that's done by multi_expert_weighted_add.
@@ -8047,13 +8048,24 @@ extern "C" __global__ void fused_silu_w2_batched(
 
     int tid = threadIdx.x;
 
-    // Apply silu_mul while loading gate_up into shared memory
+    // Apply the gated activation while loading gate_up into shared memory.
+    // Keep the GELU expression and BF16 boundary identical to gelu_tanh_mul;
+    // the verifier depends on bitwise equality with scalar target decode.
     for (int i = tid; i < K; i += 256) {
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
-        float silu_g = g / (1.0f + __expf(-g));
-        apply_swiglu_limit(g, silu_g, u, swiglu_limit, swiglu_mode);
-        __nv_bfloat16 val = __float2bfloat16(silu_g * u);
+        float activated;
+        if (swiglu_mode == 3) {
+            const float c = 0.7978845608028654f;
+            const float k = 0.044715f;
+            float gelu = 0.5f * g * (1.0f + tanhf(c * (g + k * g * g * g)));
+            activated = gelu * u;
+        } else {
+            float silu_g = g / (1.0f + __expf(-g));
+            apply_swiglu_limit(g, silu_g, u, swiglu_limit, swiglu_mode);
+            activated = silu_g * u;
+        }
+        __nv_bfloat16 val = __float2bfloat16(activated);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
     for (int i = tid; i < 1024; i += 256) s_inv_wperm[i] = inv_weight_perm[i];
