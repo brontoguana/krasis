@@ -181,6 +181,10 @@ class HFDownloaderTests(unittest.TestCase):
         self.assertEqual(len({m.local_dir_name for m in models}), len(models))
         repo_root = os.path.dirname(os.path.dirname(__file__))
         for model in models:
+            self.assertFalse(
+                hasattr(model, "max_context_tokens"),
+                f"{model.key} must not define a catalog-owned context cap",
+            )
             self.assertRegex(model.revision, r"^[0-9a-f]{40}$")
             if model.recommended_config:
                 self.assertTrue(
@@ -196,7 +200,6 @@ class HFDownloaderTests(unittest.TestCase):
             self.assertTrue(model.multi_gpu_modes)
 
         glm52 = next(model for model in models if model.key == "glm52")
-        self.assertEqual(glm52.max_context_tokens, 4096)
         self.assertEqual(
             glm52.attention_modes,
             hf_downloader.GENERIC_MIXED_HQQ_ATTENTION_MODES,

@@ -108,6 +108,36 @@ def _parse_extra_stop_ids(raw: dict, cfg: dict, gen_cfg: dict) -> tuple:
     return tuple(ids[1:]) if len(ids) > 1 else ()
 
 
+def _parse_checkpoint_context_limit(raw: dict, cfg: dict) -> int:
+    """Return the checkpoint-declared text context limit or fail closed.
+
+    Multimodal checkpoints commonly put the language model configuration under
+    ``text_config`` or ``language_config``. Prefer that text-owned value, then
+    accept an explicitly declared top-level value. Never invent a context
+    length when neither source provides one.
+    """
+    sources = [("text model config", cfg)]
+    if cfg is not raw:
+        sources.append(("top-level config", raw))
+
+    for source_name, source in sources:
+        if "max_position_embeddings" not in source:
+            continue
+        value = source["max_position_embeddings"]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(
+                f"{source_name} max_position_embeddings must be a positive integer, "
+                f"got {value!r}"
+            )
+        return value
+
+    raise ValueError(
+        "Checkpoint config must declare a positive integer "
+        "max_position_embeddings for the text model; Krasis does not invent "
+        "a context limit"
+    )
+
+
 def _parse_int_list(value: Any, field_name: str, *, max_len: Optional[int] = None) -> Optional[List[int]]:
     if value is None:
         return None
@@ -611,7 +641,7 @@ class ModelConfig:
     # RoPE
     rope_theta: float = 10000.0
     rope_scaling: Dict[str, Any] = field(default_factory=dict)
-    max_position_embeddings: int = 262144
+    max_position_embeddings: int = 0
     partial_rotary_factor: float = 1.0  # GLM-4.7 uses 0.5 (only half of head_dim gets RoPE)
     partial_rotary_factors: Optional[List[float]] = None  # Step per-layer partial rotary factors
     rope_theta_layers: Optional[List[float]] = None       # Step per-layer theta values
@@ -682,6 +712,7 @@ class ModelConfig:
 
         # Some models nest config: Kimi K2.5 → text_config, DeepSeek-VL2 → language_config
         cfg = raw.get("text_config", raw.get("language_config", raw))
+        max_position_embeddings = _parse_checkpoint_context_limit(raw, cfg)
 
         # Infer missing fields from weight shapes (VL models with incomplete config)
         cfg = _infer_from_weights(model_path, cfg)
@@ -1326,7 +1357,7 @@ class ModelConfig:
             hidden_act=cfg.get("hidden_activation", cfg.get("hidden_act", "silu")),
             rope_theta=rope_theta,
             rope_scaling=cfg.get("rope_scaling") or rope_params or {},
-            max_position_embeddings=cfg.get("max_position_embeddings", 131072),
+            max_position_embeddings=max_position_embeddings,
             partial_rotary_factor=partial_rotary,
             partial_rotary_factors=partial_rotary_factors,
             rope_theta_layers=rope_theta_layers,

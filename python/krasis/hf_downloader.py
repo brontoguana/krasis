@@ -129,7 +129,6 @@ class SupportedHFModel:
     multi_gpu_qualified: bool = False
     vision_modes: tuple[str, ...] = ()
     default_vision_quant: str = ""
-    max_context_tokens: int = 0
 
 GENERIC_MIXED_HQQ_ATTENTION_MODES = ("hqq4", "hqq46_auto", "hqq6", "hqq68_auto")
 
@@ -342,14 +341,13 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         local_dir_name="GLM-5.2",
         revision="b4734de4facf877f85769a911abafc5283eab3d9",
         recommended_config="tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf",
-        notes="Validated sparse-DSA production target; launcher context is capped to the qualified 4K mode.",
+        notes="Validated sparse-DSA production target.",
         default_attention="hqq4",
         default_kv="k4v4",
         attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
         kv_modes=("k4v4",),
         multi_gpu_modes=("auto", "peer"),
         multi_gpu_qualified=True,
-        max_context_tokens=4096,
     ),
     SupportedHFModel(
         key="glm53-flash",
@@ -359,7 +357,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         revision="3f1971b7b5f7a528c9c4ef6212c8785298a8c24a",
         recommended_config="tests/glm53-flash-hqq6-k6v6-a6000.conf",
         notes=(
-            "Validated HQQ6/k6v6/INT4 profile through 4K context; GLM vision "
+            "Validated HQQ6/k6v6/INT4 profile through 50K context; the launcher "
+            "still exposes the checkpoint-declared context limit. GLM vision "
             "uses the accuracy-qualified BF16 tower, and measured multi-GPU "
             "execution supports primary-plus-peer expert serving."
         ),
@@ -371,7 +370,6 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         multi_gpu_qualified=True,
         vision_modes=("bf16",),
         default_vision_quant="bf16",
-        max_context_tokens=4096,
     ),
 )
 

@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- Removed catalog qualification caps from the launcher context contract. Model
+  metadata and the interactive maximum now always use each checkpoint's
+  declared context limit. After model selection the terminal launcher and
+  Manager now display and serialize a model-derived numeric default: the larger
+  of 60,000 tokens or one-quarter of the declared limit, capped at the declared
+  limit for smaller-context models. Legacy configs and CLI input may still use
+  `0` as a pre-resolution sentinel. An explicit user-selected runtime cap
+  remains available, and an untouched default follows a newly selected model.
+  GLM-5.2 and GLM-5.3 no
+  longer inherit historical 4,096-token witness boundaries as launcher limits.
+  A failure within a checkpoint-declared context is treated as a runtime bug,
+  not hidden by reducing the launcher's selectable range. The shared model
+  parser now also fails closed when `max_position_embeddings` is absent,
+  non-integer, or non-positive instead of inventing a 131,072-token limit.
+  Nested text/language configs and flat configs retain their exact checkpoint
+  value. The standalone VRAM-budget API/CLI now uses the same normalized parser
+  and defaults `0` to the model limit instead of applying a separate 65,536-token
+  hint. Cross-checking all 16 pinned launcher models matched declared and parsed
+  limits exactly; launcher/downloader/planner gates passed `61/61 + 18/18 +
+  19/19`, and model/HQQ/vision configuration gates passed `27/27 + 2/2 +
+  18/18` with the startup-calibration suite exiting successfully. The Manager
+  contract passed `11/11` Rust and `6/6` launcher-wrapper tests. The exact
+  reviewed source built and installed successfully in 428 seconds; the live
+  Manager schema reports GLM's 1,048,576-token maximum separately from its
+  derived 262,144-token default.
+
 - Added complete image-and-text serving for the official
   `DeepSeek-V4-Flash-Vision-Exp` checkpoint, including checkpoint-native image
   preprocessing, strict weight validation, multimodal chat input, and a

@@ -31,7 +31,7 @@ from krasis.model import (
     _dsa_topk_candidate_capacity,
 )
 from krasis.server import _tileq_configuration_error
-from krasis.vram_budget import _kv_bytes_per_token_per_layer
+from krasis.vram_budget import compute_vram_budget, _kv_bytes_per_token_per_layer
 from krasis.weight_loader import WeightLoader
 
 
@@ -52,6 +52,7 @@ def _glm_dsa_config() -> dict:
         "num_attention_heads": 64,
         "num_key_value_heads": 64,
         "vocab_size": 154880,
+        "max_position_embeddings": 1_048_576,
         "q_lora_rank": 2048,
         "kv_lora_rank": 512,
         "qk_nope_head_dim": 192,
@@ -97,6 +98,7 @@ def _deepseek_v4_config() -> dict:
         "num_attention_heads": 64,
         "num_key_value_heads": 1,
         "vocab_size": 129280,
+        "max_position_embeddings": 1_048_576,
         "q_lora_rank": 1024,
         "o_lora_rank": 1024,
         "o_groups": 8,
@@ -130,6 +132,79 @@ def _deepseek_v4_config() -> dict:
 
 
 class ModelConfigContractTests(unittest.TestCase):
+    def test_context_limit_comes_only_from_checkpoint_metadata(self) -> None:
+        flat = _deepseek_v4_config()
+        flat["max_position_embeddings"] = 98_765
+        self.assertEqual(
+            ModelConfig.from_model_path(_write_config(self, flat)).max_position_embeddings,
+            98_765,
+        )
+
+        nested = _deepseek_v4_config()
+        nested["max_position_embeddings"] = 123_456
+        self.assertEqual(
+            ModelConfig.from_model_path(
+                _write_config(self, {"text_config": nested})
+            ).max_position_embeddings,
+            123_456,
+        )
+
+        for invalid in (0, -1, True, "131072", 131072.0):
+            with self.subTest(invalid=invalid):
+                bad = _deepseek_v4_config()
+                bad["max_position_embeddings"] = invalid
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "max_position_embeddings must be a positive integer",
+                ):
+                    ModelConfig.from_model_path(_write_config(self, bad))
+
+        missing = _deepseek_v4_config()
+        del missing["max_position_embeddings"]
+        root = tempfile.mkdtemp(prefix="krasis-model-config-missing-context-")
+        self.addCleanup(shutil.rmtree, root)
+        Path(root, "config.json").write_text(json.dumps(missing), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "Krasis does not invent a context limit"):
+            ModelConfig.from_model_path(root)
+
+    def test_standalone_budget_default_uses_checkpoint_context_limit(self) -> None:
+        raw = {
+            "model_type": "qwen3_next",
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "moe_intermediate_size": 64,
+            "num_hidden_layers": 4,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 32,
+            "vocab_size": 1024,
+            "full_attention_interval": 4,
+            "n_routed_experts": 8,
+            "num_experts_per_tok": 2,
+            "n_shared_experts": 1,
+            "first_k_dense_replace": 0,
+            "max_position_embeddings": 12_345,
+        }
+        model_path = _write_config(self, raw)
+        budget = compute_vram_budget(
+            model_path,
+            [4],
+            kv_cache_dtype="k6v6",
+            gpu_vram_bytes=64 * 1024**3,
+        )
+        self.assertEqual(budget["max_position_embeddings"], 12_345)
+        self.assertEqual(budget["requested_context"], 12_345)
+        self.assertEqual(budget["context_length"], 12_345)
+
+        with self.assertRaisesRegex(ValueError, "exceeds model limit 12345"):
+            compute_vram_budget(
+                model_path,
+                [4],
+                kv_cache_dtype="k6v6",
+                gpu_vram_bytes=64 * 1024**3,
+                requested_context=12_346,
+            )
+
     def test_qwen3_next_preserves_distinct_linear_key_value_geometry(self) -> None:
         raw = {
             "model_type": "qwen3_next",
@@ -141,6 +216,7 @@ class ModelConfigContractTests(unittest.TestCase):
             "num_attention_heads": 16,
             "num_key_value_heads": 2,
             "vocab_size": 151936,
+            "max_position_embeddings": 262144,
             "full_attention_interval": 4,
             "linear_conv_kernel_dim": 4,
             "linear_key_head_dim": 96,

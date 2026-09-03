@@ -147,6 +147,18 @@ def _unique_gpu_alias_match(spec: str, gpus: List[Dict[str, Any]]) -> Tuple[Opti
 
 
 INTERACTIVE_HQQ_AUTO_BUDGET_PCTS = (10.0, 15.0, 20.0)
+MIN_LAUNCHER_DEFAULT_CONTEXT_TOKENS = 60_000
+
+
+def _default_context_tokens(model_limit: int) -> int:
+    """Return the launcher default without exceeding the checkpoint limit."""
+    model_limit = int(model_limit)
+    if model_limit <= 0:
+        raise ValueError(f"Selected model has invalid context limit {model_limit}")
+    return min(
+        model_limit,
+        max(MIN_LAUNCHER_DEFAULT_CONTEXT_TOKENS, model_limit // 4),
+    )
 
 
 def _interactive_attention_choice(attention_quant: str, budget_pct: Optional[float] = None) -> str:
@@ -718,11 +730,11 @@ def _model_info_from_path(model_path: str, name: Optional[str] = None) -> Dict[s
         "ram_gb": estimate_int4_expert_cache_bytes(cfg) / (1024**3),
         "num_kv_layers": cfg.num_full_attention_layers,
         "kv_dim": max(kv_dims, default=0),
-        "max_context": (
-            min(cfg.max_position_embeddings, support_spec.max_context_tokens)
-            if support_spec and support_spec.max_context_tokens
-            else cfg.max_position_embeddings
-        ),
+        # A catalog entry describes executable modes, not a smaller context
+        # qualification envelope. Every supported architecture must remain
+        # usable through the checkpoint-declared limit; failures below that
+        # limit are runtime bugs, not launcher policy.
+        "max_context": cfg.max_position_embeddings,
         "support_key": support_spec.key if support_spec else "",
         "dspark_qualified": bool(
             pinned_catalog_provenance
@@ -903,7 +915,11 @@ class LauncherConfig:
         self.pp_partition: str = ""
         self.layer_group_size: int = 2  # expert layers per DMA group; 1 is valid
         self.kv_cache_mb: int = 1000
-        self.max_context_tokens: int = 0  # 0 = model-declared limit
+        # Unresolved until a checkpoint is selected. The launcher replaces this
+        # sentinel with its model-derived default before showing, budgeting, or
+        # serializing the selected model configuration.
+        self.max_context_tokens: int = 0
+        self._max_context_tokens_explicit: bool = False
         self.kv_dtype: str = "k6v6"
         self._kv_dtype_explicit: bool = False
         self.gpu_expert_bits: int = 4
@@ -1007,6 +1023,7 @@ class LauncherConfig:
                     "CFG_MAX_CONTEXT_TOKENS must be non-negative; "
                     "use 0 for the model-declared limit"
                 )
+            self._max_context_tokens_explicit = self.max_context_tokens > 0
         if "CFG_KV_DTYPE" in saved:
             if saved["CFG_KV_DTYPE"] in DEPRECATED_KV_CACHE_FORMAT_CHOICES:
                 raise ValueError(
@@ -1354,7 +1371,7 @@ OPTIONS = [
     ConfigOption("KV cache (MB)", "kv_cache_mb",
                  opt_type="number", min_val=200, max_val=65500, step=100, affects_budget=True),
     ConfigOption("Max context tokens", "max_context_tokens",
-                 opt_type="number", min_val=0, max_val=sys.maxsize, step=256,
+                 opt_type="number", min_val=1, max_val=sys.maxsize, step=256,
                  affects_budget=True, advanced=True),
     ConfigOption("KV format", "kv_dtype",
                  choices=["k4v4", "k6v6", "bf16"], affects_budget=True),
@@ -2178,15 +2195,16 @@ class Launcher:
         return []
 
     def _apply_model_recommended_defaults(self) -> None:
+        model_limit = (self.model_info or {}).get("max_context")
+        if not self.cfg._max_context_tokens_explicit and model_limit is not None:
+            self.cfg.max_context_tokens = _default_context_tokens(model_limit)
+
         spec = self._supported_model_spec()
         if spec is not None:
             if not self.cfg._attention_quant_explicit:
                 self._set_interactive_attention_quant(spec.default_attention)
             if not self.cfg._kv_dtype_explicit:
                 self.cfg.kv_dtype = spec.default_kv
-            if spec.max_context_tokens:
-                if not self.cfg.max_context_tokens:
-                    self.cfg.max_context_tokens = spec.max_context_tokens
             if spec.default_vision_quant and not self.cfg._vision_quant_explicit:
                 self.cfg.vision_quant = spec.default_vision_quant
         elif self._is_deepseek_v4():
@@ -2286,16 +2304,6 @@ class Launcher:
                     "D-Spark is launcher-qualified only with the measured INT8 "
                     "shared-expert, dense-MLP, and LM-head profile."
                 )
-        if (
-            spec is not None
-            and spec.max_context_tokens
-            and self.cfg.max_context_tokens > spec.max_context_tokens
-        ):
-            raise ValueError(
-                f"{spec.display_name} launcher support is qualified only through "
-                f"{spec.max_context_tokens:,} context tokens."
-            )
-
     def _validate_model_topology(self) -> None:
         selected_count = len(self.cfg.selected_gpu_indices)
         if self.cfg.dspark_mode != "off" and selected_count != 1:
@@ -2701,6 +2709,11 @@ class Launcher:
                 saved = _load_config(path)
                 if saved:
                     self.cfg.apply_saved(saved)
+                    # Resolve model-owned defaults against the loaded model,
+                    # including legacy CFG_MAX_CONTEXT_TOKENS=0 configs.
+                    if self.cfg.model_path:
+                        self._read_model_info()
+                        self._apply_model_recommended_defaults()
                     # Re-resolve GPUs and PP after loading
                     self._resolve_selected_gpus()
                     if self.model_info:
@@ -2709,9 +2722,6 @@ class Launcher:
                         needs_recompute = not pp_parts or len(pp_parts) != ngpus
                         if needs_recompute:
                             self.cfg.pp_partition = self._compute_default_pp(self.model_info["layers"])
-                    # Reload model info if model path changed
-                    if self.cfg.model_path:
-                        self._read_model_info()
                     self.budget = self._compute_budget()
                 return True
             elif key == KEY_ESCAPE or key == KEY_QUIT:
@@ -3156,6 +3166,8 @@ class Launcher:
                 max_val = int(self.model_info.get("max_context", max_val))
             new_val = max(opt.min_val, min(max_val, new_val))
             setattr(self.cfg, opt.key, new_val)
+            if opt.key == "max_context_tokens":
+                self.cfg._max_context_tokens_explicit = True
 
     def run_interactive(self) -> bool:
         """Run the interactive TUI. Returns True if user chose to launch."""
@@ -3758,6 +3770,7 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
                 "use 0 for the model-declared limit"
             )
         cfg.max_context_tokens = args.max_context_tokens
+        cfg._max_context_tokens_explicit = args.max_context_tokens > 0
     if args.vram_safety_margin is not None:
         cfg.vram_safety_margin = max(500, args.vram_safety_margin)
     if args.kv_dtype is not None:

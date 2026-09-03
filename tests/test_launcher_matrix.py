@@ -810,6 +810,7 @@ class LauncherMatrixTest(unittest.TestCase):
 
         for spec in supported_models():
             with self.subTest(model=spec.key):
+                declared_context = 262_144
                 launcher = Launcher.__new__(Launcher)
                 launcher.cfg = LauncherConfig()
                 launcher.model_info = {
@@ -817,6 +818,7 @@ class LauncherMatrixTest(unittest.TestCase):
                     "path": f"/models/{spec.local_dir_name}",
                     "arch": "catalog-test",
                     "support_key": spec.key,
+                    "max_context": declared_context,
                 }
                 launcher._apply_model_recommended_defaults()
                 self.assertEqual(launcher.cfg.attention_quant, spec.default_attention)
@@ -842,11 +844,11 @@ class LauncherMatrixTest(unittest.TestCase):
                     spec.multi_gpu_qualified,
                     spec.key in measured_topologies,
                 )
-                if spec.max_context_tokens:
-                    self.assertEqual(
-                        launcher.cfg.max_context_tokens,
-                        spec.max_context_tokens,
-                    )
+                self.assertEqual(
+                    launcher.cfg.max_context_tokens,
+                    declared_context // 4,
+                    "catalog defaults must derive from the model-declared context",
+                )
                 launcher._validate_model_capabilities()
                 for attention in spec.attention_modes:
                     for kv in spec.kv_modes:
@@ -945,19 +947,85 @@ class LauncherMatrixTest(unittest.TestCase):
                         selected = launcher._supported_hf_models_screen(candidates)
                 self.assertIs(selected, candidate)
 
-    def test_glm52_launcher_rejects_unqualified_context_before_load(self) -> None:
+    def test_glm52_launcher_allows_context_through_model_limit(self) -> None:
         launcher = Launcher.__new__(Launcher)
         launcher.cfg = LauncherConfig()
-        launcher.cfg.max_context_tokens = 8192
+        launcher.cfg.apply_saved({"CFG_MAX_CONTEXT_TOKENS": "1048576"})
         launcher.model_info = {
             "name": "GLM-5.2",
             "path": "/models/GLM-5.2",
             "arch": "glm_moe_dsa",
             "support_key": "glm52",
+            "max_context": 1_048_576,
         }
         launcher._apply_model_recommended_defaults()
-        with self.assertRaisesRegex(ValueError, "qualified only through 4,096"):
-            launcher._validate_model_capabilities()
+        launcher._validate_model_capabilities()
+        self.assertEqual(launcher.cfg.max_context_tokens, 1_048_576)
+
+    def test_launcher_derives_concrete_model_context_default(self) -> None:
+        declared_context = 123_456
+        model_info = {
+            "name": "Context fixture",
+            "arch": "fixture",
+            "max_context": declared_context,
+        }
+
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = LauncherConfig()
+        launcher.model_info = model_info
+        launcher._apply_model_recommended_defaults()
+        self.assertEqual(launcher.cfg.max_context_tokens, 60_000)
+        self.assertEqual(
+            launcher.cfg.to_save_dict()["CFG_MAX_CONTEXT_TOKENS"],
+            "60000",
+        )
+
+        launcher.model_info = dict(model_info, max_context=654_321)
+        launcher._apply_model_recommended_defaults()
+        self.assertEqual(
+            launcher.cfg.max_context_tokens,
+            654_321 // 4,
+            "an untouched default must follow a newly selected model",
+        )
+
+        explicit = LauncherConfig()
+        explicit.apply_saved({"CFG_MAX_CONTEXT_TOKENS": "32768"})
+        launcher.cfg = explicit
+        launcher._apply_model_recommended_defaults()
+        self.assertEqual(launcher.cfg.max_context_tokens, 32_768)
+
+        legacy_model_limit = LauncherConfig()
+        legacy_model_limit.apply_saved({"CFG_MAX_CONTEXT_TOKENS": "0"})
+        launcher.cfg = legacy_model_limit
+        launcher.model_info = model_info
+        launcher._apply_model_recommended_defaults()
+        self.assertEqual(launcher.cfg.max_context_tokens, 60_000)
+
+        context_option = next(
+            option for option in launcher_mod.OPTIONS
+            if option.key == "max_context_tokens"
+        )
+        self.assertEqual(context_option.min_val, 1)
+
+    def test_launcher_context_default_policy_boundaries(self) -> None:
+        cases = {
+            40_960: 40_960,
+            60_000: 60_000,
+            100_000: 60_000,
+            240_000: 60_000,
+            262_144: 65_536,
+            1_048_576: 262_144,
+        }
+        for model_limit, expected in cases.items():
+            with self.subTest(model_limit=model_limit):
+                self.assertEqual(
+                    launcher_mod._default_context_tokens(model_limit),
+                    expected,
+                )
+        for invalid in (0, -1):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "invalid context limit"):
+                    launcher_mod._default_context_tokens(invalid)
 
     def test_launcher_metadata_and_budget_use_normalized_step_and_nemotron_layers(self) -> None:
         step_cfg = {

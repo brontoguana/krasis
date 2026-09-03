@@ -3009,6 +3009,8 @@ mod tests {
             "attention_quant:attention.mode",
             "hqq_auto_budget_pct:attention.pct",
             "syncAttentionBudget",
+            "Defaults to the larger of 60,000 or one-quarter of the model limit, capped at that limit.",
+            "contextInput.max=String(modelLimit)",
         ] {
             assert!(html.contains(required), "missing {required}");
         }

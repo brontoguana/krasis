@@ -14,7 +14,7 @@ Usage (CLI):
         --pp-partition 20,21,20 \\
         --kv-cache-dtype fp8_e4m3 \\
         --quantization w8a8_int8 \\
-        --context-length 65536
+        --context-length 0
 
 Usage (Python):
     from krasis.vram_budget import compute_vram_budget
@@ -23,7 +23,7 @@ Usage (Python):
         pp_partition=[20, 21, 20],
         kv_cache_dtype="fp8_e4m3",
         quantization="w8a8_int8",
-        requested_context=65536,
+        requested_context=0,
     )
 """
 
@@ -1858,7 +1858,7 @@ def compute_vram_budget(
     gpu_vram_bytes: Optional[int] = None,
     headroom_mb: int = 500,
     num_gpu_experts: int = 0,
-    requested_context: int = 65536,
+    requested_context: int = 0,
     layer_group_size: int = 2,
     expert_group_size: int = 128,
 ) -> Dict[str, Any]:
@@ -1876,11 +1876,12 @@ def compute_vram_budget(
         gpu_vram_bytes: Per-GPU total VRAM in bytes (auto-detected if None).
         headroom_mb: Reserved VRAM for GPU prefill workspace + temporaries.
         num_gpu_experts: Number of pinned experts on GPU (default 0).
-        requested_context: Context length hint from user (tokens).
+        requested_context: Context length hint from user (tokens); zero uses
+            the checkpoint-declared model limit.
         layer_group_size: Layer group size for streaming (0=persistent, >=1=streaming).
         expert_group_size: INT4/INT8 expert quantization group size.
     """
-    cfg = _read_model_config(model_path)
+    cfg, model_cfg = _normalized_launcher_config(model_path)
 
     if gpu_vram_bytes is None:
         gpu_vram_bytes = _detect_gpu_vram_bytes()
@@ -1899,7 +1900,17 @@ def compute_vram_budget(
     else:
         first_k_dense = 0
 
-    max_position_embeddings = cfg.get("max_position_embeddings", 131072)
+    max_position_embeddings = int(model_cfg.max_position_embeddings)
+    if requested_context < 0:
+        raise ValueError(
+            f"requested_context must be non-negative, got {requested_context}"
+        )
+    if requested_context > max_position_embeddings:
+        raise ValueError(
+            f"requested_context {requested_context} exceeds model limit "
+            f"{max_position_embeddings}"
+        )
+    effective_requested_context = requested_context or max_position_embeddings
     headroom_bytes = headroom_mb * 1024 * 1024
     overhead_bytes = DEFAULT_CUDA_OVERHEAD_MB * 1024 * 1024
 
@@ -1995,13 +2006,18 @@ def compute_vram_budget(
     bottleneck_max = bottleneck_rank["max_tokens"]
 
     # Final context = min(user request, bottleneck capacity, model max)
-    context_length = min(requested_context, bottleneck_max, max_position_embeddings)
+    context_length = min(
+        effective_requested_context, bottleneck_max, max_position_embeddings
+    )
 
     # Was the user request satisfied?
-    if requested_context <= bottleneck_max:
+    if effective_requested_context <= bottleneck_max:
         context_note = "user request fits"
     else:
-        context_note = f"limited by rank {bottleneck_rank['rank']}, requested {requested_context:,d}"
+        context_note = (
+            f"limited by rank {bottleneck_rank['rank']}, requested "
+            f"{effective_requested_context:,d}"
+        )
 
     # Compute mem_fraction_static from actual weights + chosen KV allocation
     # Find the rank that needs the most VRAM (weights + its KV share)
@@ -2033,7 +2049,7 @@ def compute_vram_budget(
         "kv_cache_dtype": kv_cache_dtype,
         "max_position_embeddings": max_position_embeddings,
         "num_gpu_experts": num_gpu_experts,
-        "requested_context": requested_context,
+        "requested_context": effective_requested_context,
         "ranks": ranks,
         "bottleneck_rank": bottleneck_rank["rank"],
         "bottleneck_max_tokens": bottleneck_max,
@@ -2125,8 +2141,8 @@ def main():
                         help="Reserved VRAM for GPU prefill + temporaries (default: 500)")
     parser.add_argument("--gpu-experts", type=int, default=0,
                         help="Number of pinned experts on GPU")
-    parser.add_argument("--context-length", type=int, default=65536,
-                        help="Requested context length hint in tokens (default: 65536)")
+    parser.add_argument("--context-length", type=int, default=0,
+                        help="Requested context length hint in tokens (default: 0, checkpoint-declared model limit)")
     parser.add_argument("--layer-group-size", type=int, default=2,
                         help="Layer group size for streaming (0=persistent, default: 2)")
     parser.add_argument("--expert-group-size", type=int, default=128, choices=[32, 64, 128],
