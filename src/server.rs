@@ -1728,6 +1728,180 @@ fn fnv1a_token_hash(token_ids: &[u32]) -> u64 {
     hash
 }
 
+fn sha256_token_hash_le_u32(token_ids: &[u32]) -> String {
+    let mut hasher = Sha256::new();
+    for &token in token_ids {
+        hasher.update(token.to_le_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn sha256_u64_vector(values: &[u64]) -> String {
+    let mut hasher = Sha256::new();
+    for &value in values {
+        hasher.update(value.to_le_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn sha256_present_u64_vector(present: &[u8], values: &[u64]) -> Option<String> {
+    if present.len() != values.len() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    for (&is_present, &value) in present.iter().zip(values.iter()) {
+        hasher.update([is_present]);
+        hasher.update(value.to_le_bytes());
+    }
+    Some(
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
+fn json_exact_u64(value: &serde_json::Value, key: &str) -> Option<u64> {
+    match value.get(key) {
+        Some(serde_json::Value::Number(number)) if number.is_u64() => number.as_u64(),
+        _ => None,
+    }
+}
+
+fn json_exact_u64_vector(value: &serde_json::Value, key: &str) -> Option<Vec<u64>> {
+    let serde_json::Value::Array(entries) = value.get(key)? else {
+        return None;
+    };
+    entries
+        .iter()
+        .map(|entry| match entry {
+            serde_json::Value::Number(number) if number.is_u64() => number.as_u64(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn json_exact_true(value: &serde_json::Value, key: &str) -> bool {
+    matches!(value.get(key), Some(serde_json::Value::Bool(true)))
+}
+
+fn prompt_hcs_prefill_decode_cross_binding_exact(
+    prefill: &serde_json::Value,
+    decode_identity: &serde_json::Value,
+) -> bool {
+    if prefill.get("schema").and_then(|value| value.as_str())
+        != Some("krasis_prompt_hcs_prefill_authority_v1")
+        || !json_exact_true(prefill, "available")
+        || !json_exact_true(prefill, "collection_enabled")
+        || !json_exact_true(prefill, "layer_coverage_exact")
+        || !json_exact_true(prefill, "per_layer_route_sums_exact")
+        || !json_exact_true(prefill, "per_layer_call_counts_exact")
+        || !json_exact_true(prefill, "accounting_vectors_exact")
+        || !json_exact_true(prefill, "route_count_arithmetic_exact")
+        || !json_exact_true(prefill, "fresh_geometry_exact")
+    {
+        return false;
+    }
+
+    let Some(route_counts) = decode_identity.get("route_counts") else {
+        return false;
+    };
+    if route_counts.get("schema").and_then(|value| value.as_str())
+        != Some("krasis_prompt_hcs_route_counts_v1")
+        || !json_exact_true(route_counts, "valid")
+    {
+        return false;
+    }
+
+    let Some(per_layer_sums) = json_exact_u64_vector(route_counts, "per_layer_sums") else {
+        return false;
+    };
+    let Some(record_calls_per_layer) =
+        json_exact_u64_vector(route_counts, "record_calls_per_layer")
+    else {
+        return false;
+    };
+    if per_layer_sums.len() != record_calls_per_layer.len() {
+        return false;
+    }
+    let present: Vec<u8> = record_calls_per_layer
+        .iter()
+        .map(|&calls| u8::from(calls > 0))
+        .collect();
+    let mut present_hasher = Sha256::new();
+    present_hasher.update(&present);
+    let present_sha256: String = present_hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let Some(per_layer_route_sha256) = sha256_present_u64_vector(&present, &per_layer_sums) else {
+        return false;
+    };
+    let record_calls_sha256 = sha256_u64_vector(&record_calls_per_layer);
+
+    let checked_route_sum = per_layer_sums
+        .iter()
+        .try_fold(0u64, |sum, &value| sum.checked_add(value));
+    let checked_record_calls = record_calls_per_layer
+        .iter()
+        .try_fold(0u64, |sum, &value| sum.checked_add(value));
+    let route_prompt_tokens = json_exact_u64(route_counts, "prompt_tokens");
+    let route_layers = json_exact_u64(route_counts, "layers");
+    let route_experts = json_exact_u64(route_counts, "experts_per_layer");
+    let route_vector_len = json_exact_u64(route_counts, "vector_len");
+    let route_count_sum = json_exact_u64(route_counts, "count_sum");
+    let route_record_calls = json_exact_u64(route_counts, "record_calls");
+
+    let expected_vector_len = route_layers
+        .and_then(|layers| route_experts.and_then(|experts| layers.checked_mul(experts)));
+    route_prompt_tokens == json_exact_u64(prefill, "prompt_tokens")
+        && route_layers == json_exact_u64(prefill, "moe_layer_slots")
+        && route_experts == json_exact_u64(prefill, "experts_per_layer")
+        && route_vector_len == expected_vector_len
+        && route_vector_len == json_exact_u64(prefill, "count_vector_len")
+        && route_vector_len == json_exact_u64(prefill, "expected_count_vector_len")
+        && route_counts
+            .get("vector_sha256")
+            .and_then(|value| value.as_str())
+            == prefill
+                .get("count_sha256_le_u64")
+                .and_then(|value| value.as_str())
+        && route_count_sum == checked_route_sum
+        && route_count_sum == json_exact_u64(prefill, "count_sum")
+        && route_count_sum == json_exact_u64(prefill, "observed_route_count_sum")
+        && route_record_calls == checked_record_calls
+        && route_record_calls == json_exact_u64(prefill, "record_calls")
+        && route_record_calls == json_exact_u64(prefill, "observed_record_call_sum")
+        && prefill
+            .get("observed_layer_bitmap_sha256")
+            .and_then(|value| value.as_str())
+            == Some(present_sha256.as_str())
+        && prefill
+            .get("observed_per_layer_route_sum_sha256")
+            .and_then(|value| value.as_str())
+            == Some(per_layer_route_sha256.as_str())
+        && prefill
+            .get("observed_per_layer_record_calls_sha256")
+            .and_then(|value| value.as_str())
+            == Some(record_calls_sha256.as_str())
+        && prefill.get("chunk_plan").is_some_and(|chunk_plan| {
+            chunk_plan.get("schema").and_then(|value| value.as_str())
+                == Some("krasis_prefill_chunk_plan_authority_v1")
+                && json_exact_true(chunk_plan, "available")
+                && json_exact_true(chunk_plan, "complete")
+        })
+}
+
 fn mamba2_state_lifecycle_point(
     store: &GpuDecodeStore,
     phase: &str,
@@ -5639,6 +5813,26 @@ fn handle_teacher_forced_decode_logits(
 /// Handle /v1/internal/reference_test endpoint.
 /// Accepts raw input_token_ids, runs greedy prefill + decode, returns output tokens with logprobs.
 /// Used for comparing engine output against BF16 reference data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReferenceDecodeOutcomeError {
+    EngineFailure,
+    CallbackAccountingMismatch,
+}
+
+fn validate_reference_decode_outcome(
+    engine_failure: Option<&str>,
+    generated_decode_tokens: usize,
+    callback_decode_tokens: usize,
+) -> Result<(), ReferenceDecodeOutcomeError> {
+    if engine_failure.is_some() {
+        return Err(ReferenceDecodeOutcomeError::EngineFailure);
+    }
+    if generated_decode_tokens != callback_decode_tokens {
+        return Err(ReferenceDecodeOutcomeError::CallbackAccountingMismatch);
+    }
+    Ok(())
+}
+
 fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
     invalidate_active_sequence(state, "reference_test_request");
     let t_start = Instant::now();
@@ -6154,6 +6348,10 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         .get("debug_decode_state_trace")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let debug_dspark_hcs_identity_requested = req
+        .get("debug_dspark_hcs_identity")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let debug_decode_hcs_equiv_trace = req
         .get("debug_decode_hcs_equiv_trace")
         .and_then(|v| v.as_bool())
@@ -6199,11 +6397,28 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         || debug_decode_early_trace
         || debug_hcs_transition_trace
         || debug_mamba2_state_lifecycle_trace;
+    let debug_decode_state_capture =
+        debug_decode_state_trace || debug_dspark_hcs_identity_requested;
     let client_request_id = req
         .get("debug_request_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    if debug_dspark_hcs_identity_requested
+        && (client_request_id.is_empty()
+            || client_request_id.len() > 128
+            || !client_request_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte)))
+    {
+        let _ = send_json(
+            stream,
+            400,
+            r#"{"error":"debug_dspark_hcs_identity requires a non-empty debug_request_id of at most 128 ASCII letters, digits, '-', '_', '.', or ':'"}"#,
+        );
+        return;
+    }
     let input_token_hash = fnv1a_token_hash(&input_token_ids);
+    let input_token_sha256 = sha256_token_hash_le_u32(&input_token_ids);
 
     // Stop token IDs (from reference data's eos_token_ids)
     let stop_ids: Vec<usize> = match req.get("stop_token_ids") {
@@ -6619,6 +6834,12 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     }
 
     let prompt_hcs_snapshot = engine.prompt_hcs_shadow_snapshot();
+    let prompt_hcs_route_call_snapshot = engine.prompt_hcs_route_call_snapshot();
+    let prompt_hcs_proof_snapshot = if debug_dspark_hcs_identity_requested {
+        Some(engine.prompt_hcs_proof_snapshot_json())
+    } else {
+        None
+    };
 
     // Set KV position and swap to simple INT4 for decode
     {
@@ -6641,6 +6862,14 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
             experts,
         );
         store.install_prompt_hcs_counts(counts.clone(), *layers, *experts, *prompt_tokens);
+        if let Some((record_calls, record_calls_per_layer)) =
+            prompt_hcs_route_call_snapshot.as_ref()
+        {
+            store.install_prompt_hcs_route_call_authority(
+                *record_calls,
+                record_calls_per_layer.clone(),
+            );
+        }
     } else {
         log::warn!("reference_test: prompt-HCS snapshot missing before reload");
         store.clear_prompt_hcs_counts();
@@ -6717,7 +6946,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
 
     let decode_budget = max_tokens.saturating_sub(1);
     let reload_pending_at_decode_start = store.hcs_soft_reload_pending();
-    if debug_decode_state_trace {
+    if debug_decode_state_capture {
         store.set_debug_decode_state_trace_once(true);
     }
     if debug_decode_hcs_equiv_trace {
@@ -6732,7 +6961,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         store.set_debug_hcs_transition_trace_once(true);
     }
 
-    {
+    let generated_decode_tokens = {
         let mut on_token = |token_id: usize,
                             text: &str,
                             fr: Option<&str>,
@@ -6761,7 +6990,39 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
             top_logprobs,
             Some("reference_test".to_string()),
             on_token,
-        );
+        )
+    };
+    let engine_failure = store.last_stream_failure_rust().map(str::to_string);
+    let callback_decode_tokens = output_tokens.len().saturating_sub(1);
+    match validate_reference_decode_outcome(
+        engine_failure.as_deref(),
+        generated_decode_tokens,
+        callback_decode_tokens,
+    ) {
+        Ok(()) => {}
+        Err(ReferenceDecodeOutcomeError::EngineFailure) => {
+            log::error!(
+                "reference_test: decode engine failure: {}",
+                engine_failure
+                    .as_deref()
+                    .unwrap_or("unknown engine failure")
+            );
+            let _ = send_json(stream, 500, r#"{"error":"Reference decode failed"}"#);
+            return;
+        }
+        Err(ReferenceDecodeOutcomeError::CallbackAccountingMismatch) => {
+            log::error!(
+                "reference_test: decode callback accounting mismatch generated={} retained={}",
+                generated_decode_tokens,
+                callback_decode_tokens,
+            );
+            let _ = send_json(
+                stream,
+                500,
+                r#"{"error":"Reference decode accounting failed"}"#,
+            );
+            return;
+        }
     }
     if debug_mamba2_state_lifecycle_trace {
         debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
@@ -6781,6 +7042,82 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
                 "available": false,
                 "error": format!("decode state trace parse failed: {}", e),
                 "raw": raw,
+            })),
+        }
+    } else {
+        None
+    };
+    let debug_dspark_hcs_identity = if debug_dspark_hcs_identity_requested {
+        let raw = store.dspark_decode_start_hcs_identity_json(prompt_len);
+        match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(mut value) if value.is_object() => {
+                let prefill_authority = prompt_hcs_proof_snapshot
+                    .as_deref()
+                    .and_then(|proof| serde_json::from_str::<serde_json::Value>(proof).ok())
+                    .unwrap_or_else(|| {
+                        serde_json::json!({
+                            "schema": "krasis_prompt_hcs_prefill_authority_v1",
+                            "available": false,
+                            "error": "prefill_authority_unavailable",
+                        })
+                    });
+                let decode_schema_exact = value.get("schema").and_then(|entry| entry.as_str())
+                    == Some("krasis_dspark_decode_start_hcs_identity_v3");
+                let decode_available = json_exact_true(&value, "available");
+                let prefill_available = json_exact_true(&prefill_authority, "available");
+                let prefill_decode_cross_binding_exact =
+                    prompt_hcs_prefill_decode_cross_binding_exact(&prefill_authority, &value);
+                let request_binding_exact = json_exact_u64(&value, "prompt_len")
+                    == u64::try_from(input_token_ids.len()).ok()
+                    && json_exact_u64(&prefill_authority, "prompt_tokens")
+                        == u64::try_from(input_token_ids.len()).ok()
+                    && value
+                        .get("route_counts")
+                        .and_then(|route_counts| json_exact_u64(route_counts, "prompt_tokens"))
+                        == u64::try_from(input_token_ids.len()).ok()
+                    && !client_request_id.is_empty();
+                let request_binding = serde_json::json!({
+                    "schema": "krasis_reference_request_binding_v1",
+                    "route": "/v1/internal/reference_test",
+                    "request_order": reference_request_order,
+                    "client_request_id": client_request_id,
+                    "input_token_count": input_token_ids.len(),
+                    "input_token_hash_sha256_le_u32": input_token_sha256,
+                    "input_token_hash_fnv1a64": format!("0x{:016x}", input_token_hash),
+                    "raw_token_ids_exposed": false,
+                });
+                let identity_available = decode_schema_exact
+                    && decode_available
+                    && prefill_available
+                    && prefill_decode_cross_binding_exact
+                    && request_binding_exact;
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "available".to_string(),
+                        serde_json::json!(identity_available),
+                    );
+                    object.insert(
+                        "prefill_decode_cross_binding_exact".to_string(),
+                        serde_json::json!(prefill_decode_cross_binding_exact),
+                    );
+                    object.insert(
+                        "request_binding_exact".to_string(),
+                        serde_json::json!(request_binding_exact),
+                    );
+                    object.insert("request_binding".to_string(), request_binding);
+                    object.insert("prefill_authority".to_string(), prefill_authority);
+                }
+                Some(value)
+            }
+            Ok(_) => Some(serde_json::json!({
+                "schema": "krasis_dspark_decode_start_hcs_identity_v3",
+                "available": false,
+                "error": "D-Spark decode-start HCS identity was not a JSON object",
+            })),
+            Err(e) => Some(serde_json::json!({
+                "schema": "krasis_dspark_decode_start_hcs_identity_v3",
+                "available": false,
+                "error": format!("D-Spark decode-start HCS identity parse failed: {}", e),
             })),
         }
     } else {
@@ -7002,6 +7339,9 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     }
     if let Some(decode_state) = debug_decode_state.as_ref() {
         debug_json_suffix.push_str(&format!(r#","debug_decode_state_trace":{}"#, decode_state));
+    }
+    if let Some(hcs_identity) = debug_dspark_hcs_identity.as_ref() {
+        debug_json_suffix.push_str(&format!(r#","debug_dspark_hcs_identity":{}"#, hcs_identity));
     }
 
     if debug_reference_trace {
@@ -9061,11 +9401,14 @@ mod tests {
         format_completion, format_completion_with_debug, format_completion_with_tool_calls,
         format_models_response, format_sse_timing, format_sse_token, format_sse_tool_call_args,
         format_sse_tool_call_start, hide_synthetic_think_stop_text, internal_capture_boundary,
-        is_chat_completions_endpoint, is_models_endpoint, parse_tool_calls, push_tool_stream_text,
+        is_chat_completions_endpoint, is_models_endpoint, parse_tool_calls,
+        prompt_hcs_prefill_decode_cross_binding_exact, push_tool_stream_text,
         session_cache_multi_gpu_pending, session_cache_runtime_materialization_enabled,
-        validate_prefix_cache_ram_fraction, FairModelScheduler, ModelRequest, ParsedToolCall,
-        RequestOverhead, SessionCacheMetrics, SessionCacheMissReason, SessionLockKey,
-        SessionLockTable, StreamDetokenizer,
+        sha256_present_u64_vector, sha256_token_hash_le_u32, sha256_u64_vector,
+        validate_prefix_cache_ram_fraction, validate_reference_decode_outcome, FairModelScheduler,
+        ModelRequest, ParsedToolCall, ReferenceDecodeOutcomeError, RequestOverhead,
+        SessionCacheMetrics, SessionCacheMissReason, SessionLockKey, SessionLockTable,
+        StreamDetokenizer,
     };
     use crate::chat_template::{ChatTemplateEngine, ToolCallFormat};
     use std::fs;
@@ -9073,6 +9416,109 @@ mod tests {
     use std::sync::{mpsc, Arc};
 
     const WINDOWS_MODEL_PATH: &str = r#"C:\Users\stoate\.krasis\models\Qwen3.6-35B-A3B"#;
+
+    #[test]
+    fn reference_decode_outcome_rejects_engine_failure_before_accounting() {
+        assert_eq!(
+            validate_reference_decode_outcome(Some("forced pre-capture failure"), 0, 0),
+            Err(ReferenceDecodeOutcomeError::EngineFailure),
+        );
+        assert_eq!(
+            validate_reference_decode_outcome(None, 2, 1),
+            Err(ReferenceDecodeOutcomeError::CallbackAccountingMismatch),
+        );
+        assert_eq!(validate_reference_decode_outcome(None, 2, 2), Ok(()));
+    }
+
+    fn exact_hcs_cross_binding_fixture() -> (serde_json::Value, serde_json::Value) {
+        let layer_sums = vec![12u64, 12u64];
+        let calls = vec![2u64, 2u64];
+        let present = vec![1u8, 1u8];
+        let mut present_hasher = sha2::Sha256::new();
+        use sha2::Digest;
+        present_hasher.update(&present);
+        let present_sha: String = present_hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let route_sum_sha = sha256_present_u64_vector(&present, &layer_sums).unwrap();
+        let calls_sha = sha256_u64_vector(&calls);
+        let prefill = serde_json::json!({
+            "schema": "krasis_prompt_hcs_prefill_authority_v1",
+            "available": true,
+            "collection_enabled": true,
+            "prompt_tokens": 3,
+            "moe_layer_slots": 2,
+            "experts_per_layer": 4,
+            "count_vector_len": 8,
+            "expected_count_vector_len": 8,
+            "count_sum": 24,
+            "observed_route_count_sum": 24,
+            "count_sha256_le_u64": "route-vector",
+            "record_calls": 4,
+            "observed_record_call_sum": 4,
+            "observed_layer_bitmap_sha256": present_sha,
+            "observed_per_layer_route_sum_sha256": route_sum_sha,
+            "observed_per_layer_record_calls_sha256": calls_sha,
+            "layer_coverage_exact": true,
+            "per_layer_route_sums_exact": true,
+            "per_layer_call_counts_exact": true,
+            "accounting_vectors_exact": true,
+            "route_count_arithmetic_exact": true,
+            "fresh_geometry_exact": true,
+            "chunk_plan": {
+                "schema": "krasis_prefill_chunk_plan_authority_v1",
+                "available": true,
+                "complete": true,
+            },
+        });
+        let decode = serde_json::json!({
+            "route_counts": {
+                "schema": "krasis_prompt_hcs_route_counts_v1",
+                "valid": true,
+                "prompt_tokens": 3,
+                "layers": 2,
+                "experts_per_layer": 4,
+                "vector_len": 8,
+                "vector_sha256": "route-vector",
+                "count_sum": 24,
+                "per_layer_sums": layer_sums,
+                "record_calls": 4,
+                "record_calls_per_layer": calls,
+            }
+        });
+        (prefill, decode)
+    }
+
+    #[test]
+    fn hcs_cross_binding_rejects_prefill_decode_drift() {
+        let (prefill, decode) = exact_hcs_cross_binding_fixture();
+        assert!(prompt_hcs_prefill_decode_cross_binding_exact(
+            &prefill, &decode
+        ));
+        let mut changed = decode.clone();
+        changed["route_counts"]["per_layer_sums"] = serde_json::json!([13, 11]);
+        assert!(!prompt_hcs_prefill_decode_cross_binding_exact(
+            &prefill, &changed
+        ));
+    }
+
+    #[test]
+    fn token_sha256_is_order_and_width_sensitive() {
+        assert_eq!(
+            sha256_token_hash_le_u32(&[1, 2]),
+            sha256_token_hash_le_u32(&[1, 2])
+        );
+        assert_ne!(
+            sha256_token_hash_le_u32(&[1, 2]),
+            sha256_token_hash_le_u32(&[2, 1])
+        );
+        assert_ne!(
+            sha256_token_hash_le_u32(&[1, 2]),
+            sha256_token_hash_le_u32(&[1, 2, 0])
+        );
+    }
 
     #[test]
     fn terminal_snapshot_never_enters_internal_boundary_path() {
