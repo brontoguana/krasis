@@ -121,6 +121,284 @@ use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
+const LATENCY_BUCKETS: [f64; 14] = [
+    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 60.0,
+];
+
+#[derive(Clone, Default)]
+struct PromHistogram {
+    buckets: [u64; LATENCY_BUCKETS.len()],
+    count: u64,
+    sum: f64,
+}
+
+impl PromHistogram {
+    fn observe(&mut self, seconds: f64) {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return;
+        }
+        self.count = self.count.saturating_add(1);
+        self.sum += seconds;
+        for (index, upper) in LATENCY_BUCKETS.iter().enumerate() {
+            if seconds <= *upper {
+                self.buckets[index] = self.buckets[index].saturating_add(1);
+            }
+        }
+    }
+
+    fn render(&self, output: &mut String, name: &str) {
+        for (index, upper) in LATENCY_BUCKETS.iter().enumerate() {
+            output.push_str(&format!(
+                "{name}_bucket{{le=\"{upper}\"}} {}\n",
+                self.buckets[index]
+            ));
+        }
+        output.push_str(&format!("{name}_bucket{{le=\"+Inf\"}} {}\n", self.count));
+        output.push_str(&format!(
+            "{name}_sum {}\n{name}_count {}\n",
+            self.sum, self.count
+        ));
+    }
+}
+
+#[derive(Clone, Default)]
+struct ServingMetricsInner {
+    running: u64,
+    prompt_tokens: u64,
+    generation_tokens: u64,
+    prefix_cache_query_tokens: u64,
+    prefix_cache_hit_tokens: u64,
+    outcomes_stop: u64,
+    outcomes_length: u64,
+    outcomes_tool_calls: u64,
+    outcomes_error: u64,
+    outcomes_abort: u64,
+    active_kv_tokens: usize,
+    ttft: PromHistogram,
+    tpot: PromHistogram,
+    e2e: PromHistogram,
+    session_enabled: bool,
+    session_budget_bytes: usize,
+    session_resident_bytes: usize,
+    session_resident_snapshots: usize,
+    session_active_gpu_tokens: usize,
+    session_hits: u64,
+    session_misses: u64,
+    session_evictions: u64,
+    session_save_count: u64,
+    session_save_bytes: u64,
+    session_save_seconds: f64,
+    session_restore_count: u64,
+    session_restore_bytes: u64,
+    session_restore_seconds: f64,
+}
+
+struct ServingMetrics {
+    max_context_tokens: usize,
+    inner: Mutex<ServingMetricsInner>,
+}
+
+impl ServingMetrics {
+    fn new(max_context_tokens: usize) -> Self {
+        Self {
+            max_context_tokens,
+            inner: Mutex::new(ServingMetricsInner::default()),
+        }
+    }
+
+    fn with_inner(&self, update: impl FnOnce(&mut ServingMetricsInner)) {
+        match self.inner.lock() {
+            Ok(mut inner) => update(&mut inner),
+            Err(error) => log::error!("Serving metrics lock poisoned: {error}"),
+        }
+    }
+
+    fn request_started(&self) {
+        self.with_inner(|inner| inner.running = inner.running.saturating_add(1));
+    }
+
+    fn set_active_kv_tokens(&self, tokens: usize) {
+        self.with_inner(|inner| inner.active_kv_tokens = tokens);
+    }
+
+    fn observe_ttft(&self, seconds: f64) {
+        self.with_inner(|inner| inner.ttft.observe(seconds));
+    }
+
+    fn token_generated(&self, interval_seconds: f64, active_kv_tokens: usize) {
+        self.with_inner(|inner| {
+            inner.tpot.observe(interval_seconds);
+            inner.active_kv_tokens = active_kv_tokens;
+        });
+    }
+
+    fn request_finished(
+        &self,
+        elapsed_seconds: f64,
+        prompt_tokens: usize,
+        generated_tokens: usize,
+        reused_tokens: usize,
+        outcome: &str,
+    ) {
+        self.with_inner(|inner| {
+            inner.running = inner.running.saturating_sub(1);
+            inner.active_kv_tokens = 0;
+            inner.prompt_tokens = inner.prompt_tokens.saturating_add(prompt_tokens as u64);
+            inner.generation_tokens = inner
+                .generation_tokens
+                .saturating_add(generated_tokens as u64);
+            inner.prefix_cache_query_tokens = inner
+                .prefix_cache_query_tokens
+                .saturating_add(prompt_tokens as u64);
+            inner.prefix_cache_hit_tokens = inner
+                .prefix_cache_hit_tokens
+                .saturating_add(reused_tokens.min(prompt_tokens) as u64);
+            inner.e2e.observe(elapsed_seconds);
+            let counter = match outcome {
+                "stop" => &mut inner.outcomes_stop,
+                "length" => &mut inner.outcomes_length,
+                "tool_calls" => &mut inner.outcomes_tool_calls,
+                "abort" => &mut inner.outcomes_abort,
+                _ => &mut inner.outcomes_error,
+            };
+            *counter = counter.saturating_add(1);
+        });
+    }
+
+    fn render(&self, waiting: usize) -> String {
+        let inner = match self.inner.lock() {
+            Ok(inner) => inner.clone(),
+            Err(error) => return format!("# serving metrics unavailable: {error}\n"),
+        };
+        let kv_fraction = if self.max_context_tokens > 0 {
+            inner.active_kv_tokens as f64 / self.max_context_tokens as f64
+        } else {
+            0.0
+        };
+        let mut output = String::new();
+        output.push_str("# HELP vllm:num_requests_running Chat requests executing on the model worker.\n# TYPE vllm:num_requests_running gauge\n");
+        output.push_str(&format!("vllm:num_requests_running {}\n", inner.running));
+        output.push_str("# HELP vllm:num_requests_waiting Requests queued for the model worker.\n# TYPE vllm:num_requests_waiting gauge\n");
+        output.push_str(&format!("vllm:num_requests_waiting {waiting}\n"));
+        output.push_str("# HELP vllm:prompt_tokens_total Prompt tokens observed for terminal chat requests.\n# TYPE vllm:prompt_tokens_total counter\n");
+        output.push_str(&format!(
+            "vllm:prompt_tokens_total {}\n",
+            inner.prompt_tokens
+        ));
+        output.push_str("# HELP vllm:generation_tokens_total Generated tokens observed for terminal chat requests.\n# TYPE vllm:generation_tokens_total counter\n");
+        output.push_str(&format!(
+            "vllm:generation_tokens_total {}\n",
+            inner.generation_tokens
+        ));
+        output.push_str("# HELP vllm:prefix_cache_queries_total Prompt tokens checked for exact prefix reuse.\n# TYPE vllm:prefix_cache_queries_total counter\n");
+        output.push_str(&format!(
+            "vllm:prefix_cache_queries_total {}\n",
+            inner.prefix_cache_query_tokens
+        ));
+        output.push_str("# HELP vllm:prefix_cache_hits_total Prompt tokens reused from an exact prefix.\n# TYPE vllm:prefix_cache_hits_total counter\n");
+        output.push_str(&format!(
+            "vllm:prefix_cache_hits_total {}\n",
+            inner.prefix_cache_hit_tokens
+        ));
+        output.push_str("# HELP vllm:kv_cache_usage_perc Fraction of the configured logical context occupied by the active sequence.\n# TYPE vllm:kv_cache_usage_perc gauge\n");
+        output.push_str(&format!("vllm:kv_cache_usage_perc {kv_fraction}\n"));
+        output.push_str(&format!(
+            "krasis_active_kv_tokens {}\nkrasis_max_context_tokens {}\n",
+            inner.active_kv_tokens, self.max_context_tokens
+        ));
+        output.push_str("# TYPE vllm:time_to_first_token_seconds histogram\n");
+        inner
+            .ttft
+            .render(&mut output, "vllm:time_to_first_token_seconds");
+        output.push_str("# TYPE vllm:inter_token_latency_seconds histogram\n");
+        inner
+            .tpot
+            .render(&mut output, "vllm:inter_token_latency_seconds");
+        output.push_str("# TYPE vllm:e2e_request_latency_seconds histogram\n");
+        inner
+            .e2e
+            .render(&mut output, "vllm:e2e_request_latency_seconds");
+        output.push_str("# HELP vllm:request_success_total Completed chat requests by terminal outcome.\n# TYPE vllm:request_success_total counter\n");
+        for (reason, value) in [
+            ("stop", inner.outcomes_stop),
+            ("length", inner.outcomes_length),
+            ("tool_calls", inner.outcomes_tool_calls),
+            ("error", inner.outcomes_error),
+            ("abort", inner.outcomes_abort),
+        ] {
+            output.push_str(&format!(
+                "vllm:request_success_total{{finished_reason=\"{reason}\"}} {value}\n"
+            ));
+        }
+        output.push_str(&format!(
+            "krasis_session_cache_enabled {}\nkrasis_session_cache_budget_bytes {}\nkrasis_session_cache_resident_bytes {}\nkrasis_session_cache_resident_snapshots {}\nkrasis_session_cache_active_gpu_tokens {}\nkrasis_session_cache_hits_total {}\nkrasis_session_cache_misses_total {}\nkrasis_session_cache_evictions_total {}\nkrasis_session_cache_save_count_total {}\nkrasis_session_cache_save_bytes_total {}\nkrasis_session_cache_save_seconds_total {}\nkrasis_session_cache_restore_count_total {}\nkrasis_session_cache_restore_bytes_total {}\nkrasis_session_cache_restore_seconds_total {}\n",
+            usize::from(inner.session_enabled),
+            inner.session_budget_bytes,
+            inner.session_resident_bytes,
+            inner.session_resident_snapshots,
+            inner.session_active_gpu_tokens,
+            inner.session_hits,
+            inner.session_misses,
+            inner.session_evictions,
+            inner.session_save_count,
+            inner.session_save_bytes,
+            inner.session_save_seconds,
+            inner.session_restore_count,
+            inner.session_restore_bytes,
+            inner.session_restore_seconds,
+        ));
+        output
+    }
+}
+
+struct ServingRequestGuard {
+    metrics: Arc<ServingMetrics>,
+    started_at: Instant,
+    finished: bool,
+}
+
+impl ServingRequestGuard {
+    fn new(metrics: Arc<ServingMetrics>, started_at: Instant) -> Self {
+        metrics.request_started();
+        Self {
+            metrics,
+            started_at,
+            finished: false,
+        }
+    }
+
+    fn finish(
+        &mut self,
+        prompt_tokens: usize,
+        generated_tokens: usize,
+        reused_tokens: usize,
+        outcome: &str,
+    ) {
+        self.metrics.request_finished(
+            self.started_at.elapsed().as_secs_f64(),
+            prompt_tokens,
+            generated_tokens,
+            reused_tokens,
+            outcome,
+        );
+        self.finished = true;
+    }
+}
+
+impl Drop for ServingRequestGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.metrics.request_finished(
+                self.started_at.elapsed().as_secs_f64(),
+                0,
+                0,
+                0,
+                "error",
+            );
+        }
+    }
+}
+
 fn abort_if_cuda_context_poisoned(context: &str, err: &str) {
     if err.contains("CUDA_ERROR_ILLEGAL_ADDRESS")
         || err.to_ascii_lowercase().contains("illegal address")
@@ -196,6 +474,7 @@ struct ServerState {
     /// Rust-owned active GPU sequence boundary. Inactive RAM snapshots are
     /// added by the next phase; this entry is the zero-transfer fast path.
     session_cache: SessionCacheRuntime,
+    serving_metrics: Arc<ServingMetrics>,
 }
 
 #[derive(Default)]
@@ -868,6 +1147,7 @@ struct ServerInfo {
     model_name: String,
     max_context_tokens: usize,
     supports_vision: bool,
+    serving_metrics: Arc<ServingMetrics>,
 }
 
 fn drain_vram_pressure_for_state(
@@ -916,13 +1196,34 @@ fn drain_vram_pressure_for_state(
 }
 
 enum ModelRequest {
-    Chat { stream: TcpStream, body: String },
-    SessionCacheStats { stream: TcpStream },
-    PrefillLogits { stream: TcpStream, body: String },
-    TeacherForcedDecodeLogits { stream: TcpStream, body: String },
-    ReferenceTest { stream: TcpStream, body: String },
-    SequenceStateInventory { stream: TcpStream, body: String },
-    SequenceStateTransferMeasurement { stream: TcpStream, body: String },
+    Chat {
+        stream: TcpStream,
+        body: String,
+        received_at: Instant,
+    },
+    SessionCacheStats {
+        stream: TcpStream,
+    },
+    PrefillLogits {
+        stream: TcpStream,
+        body: String,
+    },
+    TeacherForcedDecodeLogits {
+        stream: TcpStream,
+        body: String,
+    },
+    ReferenceTest {
+        stream: TcpStream,
+        body: String,
+    },
+    SequenceStateInventory {
+        stream: TcpStream,
+        body: String,
+    },
+    SequenceStateTransferMeasurement {
+        stream: TcpStream,
+        body: String,
+    },
 }
 
 struct QueuedModelRequest {
@@ -984,6 +1285,10 @@ impl FairModelScheduler {
             previous - 1
         }
     }
+
+    fn queued(&self) -> usize {
+        self.queued.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1044,9 +1349,11 @@ impl Drop for SessionRequestLease {
 
 fn handle_model_request(request: ModelRequest, state: &mut ServerState) {
     match request {
-        ModelRequest::Chat { mut stream, body } => {
-            handle_chat_completion(&mut stream, &body, state)
-        }
+        ModelRequest::Chat {
+            mut stream,
+            body,
+            received_at,
+        } => handle_chat_completion(&mut stream, &body, state, received_at),
         ModelRequest::SessionCacheStats { mut stream } => {
             handle_session_cache_stats(&mut stream, state)
         }
@@ -1244,6 +1551,17 @@ fn send_json(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result
     stream.flush()
 }
 
+fn send_prometheus(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\n\
+         Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )?;
+    stream.flush()
+}
+
 fn is_models_endpoint(path: &str) -> bool {
     let path_no_query = path.split('?').next().unwrap_or(path);
     let normalized = path_no_query.trim_end_matches('/');
@@ -1339,6 +1657,11 @@ fn handle_front_connection(
             let _ = send_json(&mut tcp_stream, 200, &body);
         }
 
+        ("GET", "/metrics") => {
+            let body = server_info.serving_metrics.render(scheduler.queued());
+            let _ = send_prometheus(&mut tcp_stream, &body);
+        }
+
         ("GET", path) if is_models_endpoint(path) => {
             let body = format_models_response(
                 &server_info.model_name,
@@ -1363,6 +1686,7 @@ fn handle_front_connection(
             if let Err(error) = scheduler.enqueue(ModelRequest::Chat {
                 stream: tcp_stream,
                 body: request.body,
+                received_at: Instant::now(),
             }) {
                 log::error!(
                     "Model worker is not available for /v1/chat/completions: {}",
@@ -1594,6 +1918,53 @@ fn handle_session_cache_stats(stream: &mut TcpStream, state: &ServerState) {
         },
     });
     let _ = send_json(stream, 200, &body.to_string());
+}
+
+fn publish_session_cache_metrics(state: &ServerState) {
+    let metrics = &state.session_cache.metrics;
+    let ram = state
+        .session_cache
+        .ram_store
+        .as_ref()
+        .map(crate::session_cache::RamSessionStore::stats)
+        .unwrap_or_default();
+    let hits = checked_metric_sum(&[metrics.active_hits, metrics.ram_hits], "hits");
+    let misses = checked_metric_sum(
+        &[
+            metrics.no_match_misses,
+            metrics.signature_mismatch_misses,
+            metrics.evicted_misses,
+            metrics.restore_not_worth_it_misses,
+            metrics.divergence_misses,
+            metrics.request_disabled_misses,
+            metrics.image_input_misses,
+            metrics.multi_gpu_pending_misses,
+            metrics.speculative_decode_misses,
+            metrics.no_suffix_misses,
+            metrics.restore_failed_misses,
+        ],
+        "misses",
+    );
+    state.serving_metrics.with_inner(|inner| {
+        inner.session_enabled = state.session_cache.enabled;
+        inner.session_budget_bytes = ram.last_budget_bytes;
+        inner.session_resident_bytes = ram.resident_bytes;
+        inner.session_resident_snapshots = ram.resident_snapshots;
+        inner.session_active_gpu_tokens = state
+            .session_cache
+            .active
+            .as_ref()
+            .map_or(0, |active| active.consumed_token_ids.len());
+        inner.session_hits = hits;
+        inner.session_misses = misses;
+        inner.session_evictions = ram.evictions;
+        inner.session_save_count = metrics.save_count;
+        inner.session_save_bytes = metrics.save_bytes;
+        inner.session_save_seconds = metrics.save_total_ms / 1000.0;
+        inner.session_restore_count = metrics.restore_count;
+        inner.session_restore_bytes = metrics.restore_bytes;
+        inner.session_restore_seconds = metrics.restore_total_ms / 1000.0;
+    });
 }
 
 fn handle_sequence_state_inventory(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
@@ -2717,8 +3088,16 @@ struct MultimodalPrefillInputs {
 }
 
 /// Handle /v1/chat/completions request.
-fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
-    let t_request = Instant::now();
+fn handle_chat_completion(
+    stream: &mut TcpStream,
+    body: &str,
+    state: &mut ServerState,
+    received_at: Instant,
+) {
+    let t_request = received_at;
+    let serving_metrics = Arc::clone(&state.serving_metrics);
+    let mut metrics_guard = ServingRequestGuard::new(Arc::clone(&serving_metrics), received_at);
+    publish_session_cache_metrics(state);
 
     // Parse request
     let req: serde_json::Value = match serde_json::from_str(body) {
@@ -4784,6 +5163,8 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     let tokenizer = &state.tokenizer;
 
     // ── GPU decode: GIL-free Rust decode via GpuDecodeStore ──
+    serving_metrics.set_active_kv_tokens(prompt_len);
+    serving_metrics.observe_ttft(t_request.elapsed().as_secs_f64());
     crate::vram_monitor::report_event("decode_start");
     let decode_outcome = handle_gpu_decode(
         stream,
@@ -4808,6 +5189,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         enable_thinking,
         logprobs_top_n,
         chat_debug_payload,
+        &serving_metrics,
     );
     crate::vram_monitor::report_event("decode_end");
 
@@ -5005,6 +5387,20 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     log::info!(
         "Request {} complete: total={:.0}ms | parse={:.1}ms evict={:.1}ms prefill={:.0}ms reload={:.0}ms cleanup={:.1}ms",
         request_id, total_ms, parse_ms, evict_ms, prefill_gil_ms, reload_ms, cleanup_gil_ms
+    );
+    publish_session_cache_metrics(state);
+    let outcome = if decode_outcome.completed {
+        decode_outcome.finish_reason.as_str()
+    } else if decode_outcome.client_aborted {
+        "abort"
+    } else {
+        "error"
+    };
+    metrics_guard.finish(
+        prompt_len,
+        decode_outcome.generated_tokens,
+        cache_sequence_start,
+        outcome,
     );
 }
 
@@ -7115,6 +7511,9 @@ struct DecodeTransactionOutcome {
     consumed_generation_tokens: Vec<u32>,
     completed: bool,
     failure_reason: Option<String>,
+    generated_tokens: usize,
+    finish_reason: String,
+    client_aborted: bool,
 }
 
 impl DecodeTransactionOutcome {
@@ -7123,6 +7522,9 @@ impl DecodeTransactionOutcome {
             consumed_generation_tokens: Vec::new(),
             completed: false,
             failure_reason: Some(reason.into()),
+            generated_tokens: 0,
+            finish_reason: "error".to_string(),
+            client_aborted: false,
         }
     }
 }
@@ -7174,6 +7576,7 @@ fn handle_gpu_decode(
     enable_thinking: bool,
     logprobs_top_n: usize,
     chat_debug_payload: Option<serde_json::Value>,
+    serving_metrics: &Arc<ServingMetrics>,
 ) -> DecodeTransactionOutcome {
     let mut chat_debug_payload = chat_debug_payload;
     // Resolve thinking end token early — used by both streaming and non-streaming paths
@@ -7289,6 +7692,7 @@ fn handle_gpu_decode(
         });
 
         let decode_start = Instant::now();
+        let mut last_token_at = Instant::now();
         let mut decode_token_count = 0usize;
         let mut emitted_token_ids = Vec::new();
         let mut delivery_failed = false;
@@ -7315,6 +7719,8 @@ fn handle_gpu_decode(
         let mut tc_captured = String::new();
         let mut tc_found = false;
         let mut tc_finish = String::new();
+        let mut terminal_finish_reason = "length".to_string();
+        let mut emitted_tool_calls = false;
 
         if has_tools {
             let visible = push_tool_stream_text(
@@ -7338,6 +7744,14 @@ fn handle_gpu_decode(
                             finish_reason: Option<&str>,
                             token_logprobs: Option<&[(u32, f32)]>|
          -> bool {
+            let token_at = Instant::now();
+            serving_metrics.token_generated(
+                token_at.duration_since(last_token_at).as_secs_f64(),
+                prompt_len
+                    .saturating_add(decode_token_count)
+                    .saturating_add(1),
+            );
+            last_token_at = token_at;
             decode_token_count += 1;
             emitted_token_ids.push(token_id as u32);
 
@@ -7363,6 +7777,9 @@ fn handle_gpu_decode(
             } else {
                 None
             };
+            if let Some(reason) = effective_finish {
+                terminal_finish_reason = reason.to_string();
+            }
             let hide_text =
                 hide_synthetic_think_stop_text(token_id, effective_finish, hidden_think_stop_id);
             let visible_text = if hide_text { "" } else { text };
@@ -7500,6 +7917,7 @@ fn handle_gpu_decode(
                 }
             }
             if !tool_calls.is_empty() {
+                emitted_tool_calls = true;
                 for (i, tc) in tool_calls.iter().enumerate() {
                     let start_chunk = format_sse_tool_call_start(
                         request_id, model_name, i, &tc.id, &tc.name, created,
@@ -7628,6 +8046,13 @@ fn handle_gpu_decode(
             consumed_generation_tokens,
             completed,
             failure_reason,
+            generated_tokens: total_gen,
+            finish_reason: if emitted_tool_calls {
+                "tool_calls".to_string()
+            } else {
+                terminal_finish_reason
+            },
+            client_aborted: disconnected,
         }
     } else {
         // ── Non-streaming path ──
@@ -7643,6 +8068,7 @@ fn handle_gpu_decode(
         );
         all_text.push_str(&first_text);
         let mut total_tokens = 1usize;
+        let mut last_token_at = Instant::now();
         let mut emitted_token_ids = Vec::new();
         let decode_reported_generated;
         let mut finish = "length".to_string();
@@ -7680,6 +8106,12 @@ fn handle_gpu_decode(
                                 finish_reason: Option<&str>,
                                 token_logprobs: Option<&[(u32, f32)]>|
              -> bool {
+                let token_at = Instant::now();
+                serving_metrics.token_generated(
+                    token_at.duration_since(last_token_at).as_secs_f64(),
+                    prompt_len.saturating_add(total_tokens),
+                );
+                last_token_at = token_at;
                 emitted_token_ids.push(token_id as u32);
                 let hide_text =
                     hide_synthetic_think_stop_text(token_id, finish_reason, hidden_think_stop_id);
@@ -7867,6 +8299,14 @@ fn handle_gpu_decode(
         );
         let completed =
             engine_failure.is_none() && consumed_boundary.is_ok() && response_delivery.is_ok();
+        let client_aborted = response_delivery.as_ref().err().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            )
+        });
         let consumed_generation_tokens = if completed {
             consumed_boundary.as_ref().cloned().unwrap_or_default()
         } else {
@@ -7882,6 +8322,9 @@ fn handle_gpu_decode(
                         .map(|error| format!("send JSON response: {error}"))
                 })
                 .or_else(|| consumed_boundary.err()),
+            generated_tokens: total_tokens,
+            finish_reason: finish,
+            client_aborted,
         }
     }
 }
@@ -8235,6 +8678,7 @@ impl RustServer {
                 None
             };
 
+            let serving_metrics = Arc::new(ServingMetrics::new(max_context_tokens));
             let state = ServerState {
                 py_model,
                 model_name,
@@ -8262,12 +8706,16 @@ impl RustServer {
                     session_locks: Arc::new(SessionLockTable::default()),
                     metrics: SessionCacheMetrics::default(),
                 },
+                serving_metrics: Arc::clone(&serving_metrics),
             };
+
+            publish_session_cache_metrics(&state);
 
             let server_info = ServerInfo {
                 model_name: state.model_name.clone(),
                 max_context_tokens: state.max_context_tokens,
                 supports_vision: self.supports_vision,
+                serving_metrics,
             };
             let (model_tx, model_rx) = mpsc::channel::<QueuedModelRequest>();
             let scheduler = Arc::new(FairModelScheduler::new(model_tx));
@@ -9064,13 +9512,14 @@ mod tests {
         is_chat_completions_endpoint, is_models_endpoint, parse_tool_calls, push_tool_stream_text,
         session_cache_multi_gpu_pending, session_cache_runtime_materialization_enabled,
         validate_prefix_cache_ram_fraction, FairModelScheduler, ModelRequest, ParsedToolCall,
-        RequestOverhead, SessionCacheMetrics, SessionCacheMissReason, SessionLockKey,
-        SessionLockTable, StreamDetokenizer,
+        RequestOverhead, ServingMetrics, ServingRequestGuard, SessionCacheMetrics,
+        SessionCacheMissReason, SessionLockKey, SessionLockTable, StreamDetokenizer,
     };
     use crate::chat_template::{ChatTemplateEngine, ToolCallFormat};
     use std::fs;
     use std::net::{TcpListener, TcpStream};
     use std::sync::{mpsc, Arc};
+    use std::time::Instant;
 
     const WINDOWS_MODEL_PATH: &str = r#"C:\Users\stoate\.krasis\models\Qwen3.6-35B-A3B"#;
 
@@ -9240,6 +9689,7 @@ mod tests {
                     .enqueue(ModelRequest::Chat {
                         stream,
                         body: String::new(),
+                        received_at: Instant::now(),
                     })
                     .unwrap()
             }));
@@ -9254,6 +9704,42 @@ mod tests {
             assert_eq!(scheduler.mark_dequeued(), expected_remaining);
         }
         assert_eq!(tickets, (0..8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn serving_metrics_render_exact_cache_and_outcome_semantics() {
+        let metrics = ServingMetrics::new(1_000);
+        metrics.request_started();
+        metrics.set_active_kv_tokens(250);
+        metrics.observe_ttft(0.5);
+        metrics.token_generated(0.02, 250);
+        let live = metrics.render(3);
+        assert!(live.contains("vllm:num_requests_running 1\n"));
+        assert!(live.contains("vllm:num_requests_waiting 3\n"));
+        assert!(live.contains("vllm:kv_cache_usage_perc 0.25\n"));
+
+        metrics.request_finished(1.25, 100, 10, 40, "tool_calls");
+        let finished = metrics.render(0);
+        assert!(finished.contains("vllm:num_requests_running 0\n"));
+        assert!(finished.contains("vllm:prompt_tokens_total 100\n"));
+        assert!(finished.contains("vllm:generation_tokens_total 10\n"));
+        assert!(finished.contains("vllm:prefix_cache_queries_total 100\n"));
+        assert!(finished.contains("vllm:prefix_cache_hits_total 40\n"));
+        assert!(finished.contains("vllm:request_success_total{finished_reason=\"tool_calls\"} 1\n"));
+        assert!(finished.contains("vllm:time_to_first_token_seconds_count 1\n"));
+        assert!(finished.contains("vllm:inter_token_latency_seconds_count 1\n"));
+        assert!(finished.contains("vllm:e2e_request_latency_seconds_count 1\n"));
+    }
+
+    #[test]
+    fn unfinished_serving_request_is_recorded_as_error() {
+        let metrics = Arc::new(ServingMetrics::new(1_000));
+        {
+            let _guard = ServingRequestGuard::new(Arc::clone(&metrics), Instant::now());
+        }
+        let rendered = metrics.render(0);
+        assert!(rendered.contains("vllm:num_requests_running 0\n"));
+        assert!(rendered.contains("vllm:request_success_total{finished_reason=\"error\"} 1\n"));
     }
 
     #[test]
