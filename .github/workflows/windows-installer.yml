@@ -565,9 +565,10 @@ jobs:
 
       - name: Test Rust server response contracts
         env:
-          # Keep shipped wheels on the release profile's single codegen unit.
-          # Test binaries use Rust's non-incremental default to split LLVM work.
+          # Unit tests use Cargo's standard release codegen/LTO settings.
+          # Shipped wheels and launchers keep single-unit ThinLTO optimization.
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+          CARGO_PROFILE_RELEASE_LTO: "false"
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
