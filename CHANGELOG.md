@@ -2,9 +2,9 @@
 
 ## Unreleased
 
-- Windows CI now splits optimized server/Manager test compilation into the
-  standard codegen units, records build memory, and stops on native command
-  failure. Published wheel and launcher optimization settings are unchanged.
+- Windows CI now records compiler memory and stops on the first native command
+  failure. Release compilation settings are preserved; the current Windows
+  unit-test compiler memory failure remains under investigation.
 
 - Fixed an intermittent ADQ relay test failure by waiting for completed capture
   metadata with a bounded deadline before validating the captured request.

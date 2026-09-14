@@ -564,11 +564,6 @@ jobs:
           python scripts/build_sidecars.py verify-wheel --wheel-dir dist
 
       - name: Test Rust server response contracts
-        env:
-          # Unit tests use Cargo's standard release codegen/LTO settings.
-          # Shipped wheels and launchers keep single-unit ThinLTO optimization.
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-          CARGO_PROFILE_RELEASE_LTO: "false"
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
