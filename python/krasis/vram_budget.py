@@ -435,22 +435,26 @@ def _effective_marlin_group_size(
     return group_size
 
 
-def _marlin_int4_expert_bytes(
+def _marlin_expert_bytes(
     hidden_size: int,
     intermediate_size: int,
     group_size: int,
+    bits: int,
     *,
     gated: bool,
     pad_routed_w2: bool,
 ) -> int:
-    """Exact INT4 payload bytes for one Marlin expert.
+    """Exact INT4/INT8 payload bytes for one Marlin expert.
 
     Routed experts use the runtime's W2 padding contract. The combined shared
     expert uses the unpadded layout written by expected_marlin_cache_size().
     """
-    if hidden_size % 8 != 0 or intermediate_size % 8 != 0:
+    if bits not in (4, 8):
+        raise ValueError(f"Marlin expert precision must be INT4 or INT8, got INT{bits}")
+    divisor = 8 if bits == 4 else 4
+    if hidden_size % divisor != 0 or intermediate_size % divisor != 0:
         raise ValueError(
-            "Marlin INT4 expert dimensions must be divisible by 8: "
+            f"Marlin INT{bits} expert dimensions must be divisible by {divisor}: "
             f"hidden={hidden_size} intermediate={intermediate_size}"
         )
     w13_width = intermediate_size * (2 if gated else 1)
@@ -462,11 +466,30 @@ def _marlin_int4_expert_bytes(
     ):
         # Kernel-format contract mirrored from marlin_w2_padded_n().
         w2_width += 64
-    w13_packed = (hidden_size // 8) * w13_width * 4
+    w13_packed = (hidden_size // divisor) * w13_width * 4
     w13_scales = (hidden_size // group_size) * w13_width * 2
-    w2_packed = (intermediate_size // 8) * w2_width * 4
+    w2_packed = (intermediate_size // divisor) * w2_width * 4
     w2_scales = math.ceil(intermediate_size / group_size) * w2_width * 2
     return w13_packed + w13_scales + w2_packed + w2_scales
+
+
+def _marlin_int4_expert_bytes(
+    hidden_size: int,
+    intermediate_size: int,
+    group_size: int,
+    *,
+    gated: bool,
+    pad_routed_w2: bool,
+) -> int:
+    """Compatibility wrapper for existing exact INT4 budget callers."""
+    return _marlin_expert_bytes(
+        hidden_size,
+        intermediate_size,
+        group_size,
+        4,
+        gated=gated,
+        pad_routed_w2=pad_routed_w2,
+    )
 
 
 def _dspark_required_tensor_storage(
@@ -1361,6 +1384,7 @@ def compute_launcher_budget(
     layer_group_size: int = 1,
     kv_dtype: str = "k6v6",
     gpu_expert_bits: int = 4,
+    mixed_expert_manifest: Optional[str] = None,
     expert_group_size: int = 128,
     attention_quant: str = "bf16",
     hqq_cache_profile: str = "baseline",
@@ -1503,6 +1527,110 @@ def compute_launcher_budget(
     expert_buf_bytes = _expert_bytes_per_expert(
         cfg, gpu_expert_bits, expert_group_size,
     ) if n_experts > 0 else 0
+    mixed_layer_expert_bytes: Dict[int, int] = {}
+    mixed_expert_bytes_max = 0
+    if mixed_expert_manifest:
+        manifest_path = os.path.abspath(os.path.expanduser(mixed_expert_manifest))
+        with open(manifest_path, encoding="utf-8") as handle:
+            mixed_manifest = json.load(handle)
+        regions = mixed_manifest.get("regions")
+        if (
+            mixed_manifest.get("format") != "Krasis routed mixed Marlin INT4/INT8"
+            or mixed_manifest.get("schema_version") != 1
+            or mixed_manifest.get("default_bits") != 4
+            or mixed_manifest.get("experts_gated")
+            is not (model_cfg.mlp_hidden_act != "relu2")
+            or not isinstance(regions, list)
+            or len(regions) != len(moe_layer_indices) * n_experts
+        ):
+            raise ValueError("mixed routed-expert manifest has invalid budget geometry")
+        seen_regions = set()
+        mixed_baseline_bytes = 0
+        mixed_selected_bytes = 0
+        expected_model_layers = sorted(moe_layer_indices)
+        routed_hidden = cfg.get("moe_latent_size", 0) or cfg["hidden_size"]
+        routed_intermediate = cfg.get("moe_intermediate_size", 0)
+        mixed_group_size = _effective_marlin_group_size(
+            cfg["hidden_size"], routed_intermediate, expert_group_size
+        )
+        if int(mixed_manifest.get("group_size", -1)) != mixed_group_size:
+            raise ValueError("mixed routed-expert manifest group size is invalid")
+        expected_int4_bytes = _marlin_expert_bytes(
+            routed_hidden,
+            routed_intermediate,
+            mixed_group_size,
+            4,
+            gated=model_cfg.mlp_hidden_act != "relu2",
+            pad_routed_w2=True,
+        )
+        expected_int8_bytes = _marlin_expert_bytes(
+            routed_hidden,
+            routed_intermediate,
+            mixed_group_size,
+            8,
+            gated=model_cfg.mlp_hidden_act != "relu2",
+            pad_routed_w2=True,
+        )
+        for index, region in enumerate(regions):
+            if not isinstance(region, dict):
+                raise ValueError("mixed routed-expert manifest region is not an object")
+            expected_moe_layer, expected_expert = divmod(index, n_experts)
+            layer = int(region.get("model_layer", -1))
+            moe_layer = int(region.get("moe_layer", -1))
+            expert = int(region.get("expert", -1))
+            bits = int(region.get("bits", -1))
+            if (
+                expected_moe_layer >= len(expected_model_layers)
+                or layer != expected_model_layers[expected_moe_layer]
+                or moe_layer != expected_moe_layer
+                or expert != expected_expert
+                or bits not in (4, 8)
+                or (layer, expert) in seen_regions
+            ):
+                raise ValueError("mixed routed-expert manifest region identity is invalid")
+            seen_regions.add((layer, expert))
+            int4_bytes = int(region["int4_bytes"])
+            int8_bytes = int(region["int8_bytes"])
+            value = int4_bytes if bits == 4 else int8_bytes
+            if (
+                int4_bytes != expected_int4_bytes
+                or int8_bytes != expected_int8_bytes
+                or int8_bytes <= int4_bytes
+            ):
+                raise ValueError("mixed routed-expert manifest region has invalid byte size")
+            mixed_baseline_bytes += int4_bytes
+            mixed_selected_bytes += value
+            mixed_layer_expert_bytes[layer] = mixed_layer_expert_bytes.get(layer, 0) + value
+            mixed_expert_bytes_max = max(mixed_expert_bytes_max, value)
+        if any(
+            sum(1 for item in seen_regions if item[0] == layer) != n_experts
+            for layer in moe_layer_indices
+        ):
+            raise ValueError("mixed routed-expert manifest does not cover every routed expert")
+        mixed_budget = mixed_manifest.get("budget")
+        if not isinstance(mixed_budget, dict):
+            raise ValueError("mixed routed-expert manifest budget is not an object")
+        requested_basis_points = int(mixed_budget.get("requested_basis_points", -1))
+        maximum_added_bytes = (
+            mixed_baseline_bytes * requested_basis_points // 10_000
+            if requested_basis_points in (500, 1000, 1500, 2000)
+            else -1
+        )
+        achieved_added_bytes = mixed_selected_bytes - mixed_baseline_bytes
+        achieved_percent_millionths = (
+            achieved_added_bytes * 100_000_000 // mixed_baseline_bytes
+        )
+        if (
+            int(mixed_budget.get("baseline_int4_routed_bytes", -1))
+            != mixed_baseline_bytes
+            or int(mixed_budget.get("maximum_added_bytes", -1))
+            != maximum_added_bytes
+            or int(mixed_budget.get("achieved_added_bytes", -1))
+            != achieved_added_bytes
+            or int(mixed_budget.get("achieved_percent_millionths", -1))
+            != achieved_percent_millionths
+        ):
+            raise ValueError("mixed routed-expert manifest achieved-byte total is inconsistent")
 
     # Shared expert params per MoE layer
     hidden = cfg["hidden_size"]
@@ -1659,7 +1787,26 @@ def compute_launcher_budget(
         # When streaming with DMA pipelining, TWO groups are resident
         # simultaneously: current group computing + next group prefetching.
         if mn > 0 and n_experts > 0:
-            if layer_group_size == 0:
+            rank_moe_layers = [
+                layer for layer in range(rank_start, rank_end) if layer in moe_layer_indices
+            ]
+            if mixed_layer_expert_bytes:
+                if layer_group_size == 0:
+                    ebuf_bytes = sum(mixed_layer_expert_bytes[layer] for layer in rank_moe_layers)
+                else:
+                    resident_layer_count = min(len(rank_moe_layers), max(1, layer_group_size) * 2)
+                    ebuf_bytes = max(
+                        (
+                            sum(
+                                mixed_layer_expert_bytes[layer]
+                                for layer in rank_moe_layers[start:start + resident_layer_count]
+                            )
+                            for start in range(len(rank_moe_layers) - resident_layer_count + 1)
+                        ),
+                        default=0,
+                    )
+                emode = f"mixed-{('persistent' if layer_group_size == 0 else f'grouped({layer_group_size})')}"
+            elif layer_group_size == 0:
                 ebuf_bytes = expert_buf_bytes * n_experts * mn
                 emode = "persistent"
             elif layer_group_size >= 1:
@@ -1705,6 +1852,13 @@ def compute_launcher_budget(
         # exact nonlinear model is inverted rather than approximated per token.
         kv_per_rank = sum(kv_bytes_by_layer[rank_start:rank_end])
         if is_deepseek_v4:
+            kv_required_bytes = _deepseek_v4_rank_cache_bytes(
+                cfg,
+                rank_start,
+                rank_end,
+                effective_kv_capacity_tokens,
+                kv_dtype,
+            )
             kv_tokens = _deepseek_v4_tokens_for_rank_budget(
                 cfg,
                 rank_start,
@@ -1733,6 +1887,7 @@ def compute_launcher_budget(
                 else 0
             )
         else:
+            kv_required_bytes = effective_kv_capacity_tokens * kv_per_rank
             kv_tokens = (
                 min(
                     max(0, int(free_bytes // kv_per_rank)),
@@ -1744,6 +1899,7 @@ def compute_launcher_budget(
             kv_alloc_bytes = min(
                 kv_cache_mb * 1024 * 1024,
                 effective_kv_capacity_tokens * kv_per_rank,
+                max(0, int(free_bytes)),
             )
             kv_alloc_tokens = (
                 max(0, int(kv_alloc_bytes // kv_per_rank)) if kv_per_rank > 0 else 0
@@ -1777,6 +1933,8 @@ def compute_launcher_budget(
             "free_mb": free_bytes / MB,
             "kv_tokens": kv_tokens,
             "kv_alloc_tokens": kv_alloc_tokens,
+            "kv_capacity_relevant": bool(is_deepseek_v4 or kv_per_rank > 0),
+            "kv_required_mb": kv_required_bytes / MB,
             "total_with_kv_mb": total_with_kv / MB,
             "free_after_kv_mb": free_after_kv / MB,
         })
@@ -1795,7 +1953,9 @@ def compute_launcher_budget(
     # keeps prefill and decode host formats staged so VMM slots can be refreshed
     # without re-reading safetensors.
     target_expert_cache_bytes = (
-        expert_buf_bytes * n_experts * total_moe_layers if n_experts > 0 else 0
+        sum(mixed_layer_expert_bytes.values())
+        if mixed_layer_expert_bytes
+        else expert_buf_bytes * n_experts * total_moe_layers if n_experts > 0 else 0
     )
     dspark_host_cache_bytes = int(dspark["host_cache_bytes"]) if dspark is not None else 0
     ram_gpu_experts_bytes = target_expert_cache_bytes + dspark_host_cache_bytes
@@ -1827,11 +1987,14 @@ def compute_launcher_budget(
         "worst_rank": worst["rank"],
         "over_budget": over_budget,
         "kv_dtype": kv_dtype,
+        "kv_cache_mb": kv_cache_mb,
         "max_context_tokens": effective_context_limit,
         "hybrid": hybrid,
         "num_full_attention_layers": model_cfg.num_full_attention_layers,
         "num_moe_layers": total_moe_layers,
         "ram_gpu_experts_mb": ram_gpu_experts_mb,
+        "mixed_expert_manifest": mixed_expert_manifest,
+        "mixed_expert_max_record_bytes": mixed_expert_bytes_max,
         "ram_hqq_host_staging_mb": ram_hqq_host_staging_mb,
         "ram_total_mb": ram_total_mb,
         "ram_dspark_experts_mb": dspark_host_cache_bytes / MB,

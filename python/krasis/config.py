@@ -364,6 +364,7 @@ class QuantConfig:
     dense_mlp: str = "int8"        # "bf16" or "int8" ("bf16" remains an unvalidated debug path)
     gpu_expert_bits: int = 4       # 3 (TileQ), 4/8 (Marlin), or 16 (UNVALIDATED BF16 debug-only path)
     tileq_cache: Optional[str] = None  # explicit source-bound KTQ1 artifact when gpu_expert_bits=3
+    mixed_expert_manifest: Optional[str] = None  # validated routed INT4/INT8 precision manifest; baseline mode remains gpu_expert_bits=4
     expert_group_size: int = 128   # routed expert quantization group size; 32 matches Q8_0-style block scale granularity
     gpu_expert_int4_calib: str = "amax"  # "amax" or "search_rmse" for routed-expert GPU INT4 cache build
     cpu_expert_bits: int = 4       # 4 or 8 for CPU expert quantization
@@ -378,6 +379,15 @@ class QuantConfig:
     step_vision_group_size: int = 128  # lazy vision INT4 row group size; legacy field name
 
     def __post_init__(self):
+        if self.mixed_expert_manifest is not None:
+            manifest_path = str(self.mixed_expert_manifest).strip()
+            self.mixed_expert_manifest = os.path.expanduser(manifest_path) if manifest_path else None
+        if self.mixed_expert_manifest is not None and self.gpu_expert_bits != 4:
+            raise ValueError(
+                "mixed_expert_manifest requires gpu_expert_bits=4 as its INT4 baseline"
+            )
+        if self.mixed_expert_manifest is not None and self.tileq_cache is not None:
+            raise ValueError("mixed_expert_manifest cannot be combined with tileq_cache")
         kv_aliases = {
             "bf16": "bf16",
             "bfloat16": "bf16",

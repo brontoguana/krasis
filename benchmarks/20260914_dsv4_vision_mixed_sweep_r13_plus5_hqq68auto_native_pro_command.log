@@ -1,0 +1,1 @@
+KRASIS_EXPERT_INT4_CALIB_SAMPLES=/home/main/Documents/Claude/krasis/tests/dsv4_int4_calibration_318227_eight_corpora_v1_20260909.kic ./dev benchmark tests/deepseek-v4-flash-vision-exp-mixed-sweep-plus5.conf --heatmap-path /home/main/Documents/Claude/krasis-internal/adq/deepseek-v4-flash-vision-exp-mixed-sweep-plus5-r12-20260912/preregistered/runtime-heatmap.json

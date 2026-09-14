@@ -2,6 +2,701 @@
 
 ## Unreleased
 
+- Mixed routed-expert startup now fails closed unless exactly one GPU is
+  selected, including automatic discovery and direct-server starts. Launcher
+  topology checks also reject mixed multi-GPU configurations on models whose
+  homogeneous multi-GPU mode is qualified. Added automatic/explicit selection,
+  homogeneous-mode and actual server-start rejection tests; inference paths
+  and memory calibration are unchanged.
+- Validated the startup checks with model-configuration, Linux launcher,
+  native launcher unit and server suites, plus 15 mixed and 2 homogeneous
+  Rust library tests. The fixed QCN homogeneous speed
+  guard completed with no observed slowdown against its prior fixed run:
+  internal decode 58.82/58.89/57.88 tok/s. Archived every speed row separately
+  from the frozen precision sweep; this does not qualify mixed multi-GPU mode.
+- Archived the separate six-treatment instrumented PCIe diagnostic sweep.
+  Measured transfer/HCS rows are indexed separately from timing-disabled speed
+  results; all six diagnostics completed successfully before startup edits.
+
+- Archived the six-treatment DeepSeek V4 Flash Vision Exp precision benchmark
+  with every internal prefill/decode and HTTP row, reproducible logs, load
+  times, RAM and minimum free VRAM. Kept speed, numerical quality and VRAM
+  qualification separate. Documented that the benchmark's displayed HTTP rate
+  excludes time before first parsed content and is sensitive to buffering.
+
+- Fixed ADQ frozen-contract execution so copied `configure-adq.sh` and
+  `prepare-adq-network.sh` files are invoked explicitly through Bash rather
+  than depending on executable mode bits. Added harness coverage for both
+  call sites. The r11 mixed-precision scoring attempt is preserved as an
+  infrastructure failure before any scored task request; new source-bound
+  campaign identities are required.
+
+- Diagnosed the remaining large-model shutdown stall to unowned routed/shared
+  expert host registrations. Native tracing identified the terminal survivor
+  as a CUDA-driver thread, while source review showed successful
+  `cuMemHostRegister_v2` ranges had no matching ownership or unregister path.
+  The lifecycle correction is being implemented generically without changing
+  inference arithmetic, precision policy, or model-specific behavior.
+- Fixed that shutdown stall with exact per-decode-store ownership of every
+  successful ordinary expert host registration. Clean shutdown now
+  synchronizes the owning CUDA context and unregisters all routed/shared ranges
+  before their backing is destroyed, covering primary and arbitrary auxiliary
+  stores without duplicate release. Failures remain explicit and retained for
+  retry/Drop; peer-only stores remain unaffected.
+- Two independent full-INT8 lifecycle validations exited cleanly in 45.788 and
+  45.813 seconds under the unchanged 60-second contract. The terminal run
+  unregistered 215 regions and 282,452,951,040 bytes, exactly the validated
+  cache payload; focused built tests passed and no inference hot path changed.
+
+- Fixed clean server shutdown after linear-attention compilation. Krasis now
+  explicitly closes an already-created TorchInductor compile-worker pool before
+  CUDA teardown and its intentional hard exit, because `os._exit` bypasses the
+  pool's normal `atexit` cleanup. This prevents an Inductor reader thread and
+  worker subprocess from holding completed tmux server lifecycles open.
+- Fixed the remaining large-model exit stall by explicitly releasing a stopped
+  Rust server's prefill engine and retained model reference, then clearing all
+  primary and arbitrary-multi-GPU decode-store owners before CUDA cleanup and
+  hard exit. Full HCS/prefill allocations are now destroyed through their
+  normal Rust owners instead of being left to a dying process's CUDA context.
+- Fixed the final large-model lifecycle stall by returning from the server's
+  setup frame before its intentional `os._exit`. Setup-time locals can retain
+  the last inspected layer, KV cache, and prefill-only weight objects even
+  after the global model/store owners are cleared. Krasis now destroys that
+  frame first, then performs a final fail-closed CUDA cache cleanup before hard
+  exit; otherwise those late decrefs only move allocations into PyTorch's cache
+  after the earlier cleanup has already run.
+- Preserved shutdown diagnostics after Rust restores the Python signal handler.
+  A pending SIGTERM is now handled idempotently without redirecting stdout,
+  stderr, or logging, so resource-release and final CUDA-cleanup phases remain
+  observable and fail closed. This does not affect request execution.
+- Removed the unconditional normal-shutdown `os._exit()` inherited from the
+  retired Uvicorn server path so the current Rust server can use ordinary
+  interpreter cleanup after its strict post-frame CUDA purge. Follow-up
+  measurement showed this was not the cause of the remaining delay: both hard
+  and normal exit leave one native thread running beyond 60 seconds on the
+  full INT8 checkpoint. A phase trace now proves explicit Rust/Python/CUDA
+  cleanup completes first; native-thread ownership is being diagnosed before
+  any further behavioral change. Fatal startup and poisoned-context exits
+  remain hard.
+
+- ADQ campaign tooling now targets the exact launcher-registered Krasis PID for
+  clean SIGTERM shutdown, avoiding unreliable terminal Ctrl-C injection through
+  tmux shell pipelines. This changes test lifecycle control only, not runtime
+  inference behavior.
+
+- Started the design and measurement phase for generic heterogeneous routed
+  Marlin INT4/INT8 experts. Promotion budgets are defined as additional routed
+  bytes over full INT4 and will use source-bound measured expert-level quality
+  evidence. No public runtime capability is exposed yet; homogeneous behavior
+  remains unchanged while format, dispatch, HCS, identity, and launcher
+  contracts are implemented and validated.
+- Implemented the fail-closed mixed INT4/INT8 routed-expert manifest and
+  runtime path using existing Marlin formats/kernels, exact per-expert HCS/DMA
+  byte accounting, precision-bound heatmaps, and launcher budget validation.
+  Added reproducible excluded-input hashing and measured gain-per-added-byte
+  calibration tooling; no mixed treatment has been scored yet.
+- Made the referenced mixed-expert ranking evidence mandatory at launcher and
+  Rust load time, with exact SHA-256 verification and missing/corrupt artifact
+  regression coverage.
+- Hardened mixed-expert calibration identity and publication: immutable source
+  caches are hashed before measurement, all source/capture/config snapshots are
+  checked again before publication, and ranking plus all budget manifests are
+  staged and fsynced before atomic publication.
+- Extended mixed-expert calibration identity checking to the existing
+  multimodal corpus format by binding each image and prompt source hash. The
+  first six-text-corpus DeepSeek ranking failed closed on one unrouted region;
+  the measured calibration set now includes two independent visual corpora
+  whose existing eight-way route evidence covers every routed region, without
+  overlapping frozen evaluation inputs or inventing a missing score.
+- Completed the eight-corpus DeepSeek ranking across all 11,008 routed experts.
+  The +5/+10/+15/+20 byte caps selected nested prefixes of
+  567/1,135/1,702/2,270 INT8 experts and achieved
+  4.994714%/9.998238%/14.992952%/19.996476% added routed bytes. Full manifest
+  verification, runtime heatmaps, determinism gates, and scored ADQ remain
+  pending.
+- Made mixed routed-expert prefill pinning and DMA precision-aware. Persistent
+  HCS/pinning allocations and copies use actual manifest-derived record and
+  component sizes; fixed-slot cold staging reserves the maximum derived layout
+  it really allocates. Homogeneous selection behavior is retained, and CUDA
+  allocation/copy failures remain explicit with cleanup rather than fallback.
+- Fixed mixed full-GPU prefill's Marlin sparse-map dispatch: heterogeneous
+  launches now activate the existing negative-sentinel block filter, while
+  homogeneous INT4 and INT8 retain their prior launch path. Instrumented
+  source-byte verification localized the original illegal address to the first
+  mixed W1 launch; focused Rust coverage, the installed build, an all-layer
+  +5% warmup, and all six precision-specific heatmap builds passed.
+- Completed exact-parameter heatmaps for the INT4, +5%, +10%, +15%, +20%, and
+  INT8 ADQ treatments. Verification requires valid observed routes across all
+  routed layers and exact route-selection conservation; unobserved experts are
+  intentionally handled by the existing runtime backfill. Fresh campaign
+  identities are frozen and await their mandatory determinism gates.
+- Fixed the mixed-sweep live ADQ preflight to invoke frozen contract shell
+  assets through Bash, preserving their evidence-safe non-executable mode.
+  The defect occurred only after INT4 determinism comparisons passed and
+  before any productive task was scored; frozen r3 campaigns were preserved
+  and replaced with new campaign identities.
+- Hardened mixed calibration for nested-text checkpoints and reproducibility:
+  distinct corpus identities and the actual CUDA device properties are bound
+  into ranking evidence and checked by the offline verifier.
+- Tightened mixed-manifest validation before publication and load: negative
+  gains, duplicate calibration identities, inconsistent decimal/fixed-point
+  evidence, checkpoint-incompatible record sizes, and non-canonical layer
+  ordering are rejected. Launcher RAM/VRAM accounting now derives record costs
+  from normalized model geometry rather than trusting manifest byte fields.
+- Bound the aggregate calibration identity to the exact ordered capture hashes
+  and removed unnecessary materialization of the homogeneous source's shared
+  INT4 tail. Mixed routed mode continues to use the independently configured
+  shared INT8/BF16 path while validating both complete source-cache identities.
+- Made mixed-expert calibration route aggregation deterministic by keeping
+  weighted counting and stable grouping off CUDA atomics, while retaining CUDA
+  for the measured projection arithmetic.
+- Added a supported concurrent exact-state ADQ replay mode so preliminary
+  determinism gates can compare identical simultaneous requests at token and
+  retained numerical-output level. It preserves the guarded `./dev` entry
+  point and rejects concurrent tensor-trace instrumentation.
+- Added reusable mixed-sweep pre-score orchestration that validates cold/warm,
+  same-process, fresh-lifecycle, concurrent-request, explicit-greedy, template,
+  and tokenizer identity before any productive task is allowed to run. VRAM
+  safety remains independently reported.
+- Documented a mandatory preliminary runtime-determinism gate for every future
+  ADQ campaign. Identical explicit-greedy requests must match at rendered-token,
+  generated-token, and numerical-output level across same-process, fresh-server,
+  cold-first, and warmed/graph execution before productive tasks may be scored.
+  Future reports keep task quality, numerical fidelity, runtime determinism,
+  and VRAM safety separate. This is a documentation-only change; completed
+  campaigns and runtime code are unchanged.
+- Corrected the generic ADQ/OpenCode relay so every scored chat request carries
+  an explicit `temperature: 0`; a conflicting nonzero value now fails closed.
+  Retained raw requests record the forwarded body, and the suite verifies every
+  captured scored request before oracle classification. Added relay integration
+  coverage and a Rust greedy-path regression proving temperature zero selects
+  argmax without consuming RNG state.
+- Corrected ADQ worktree evidence collection so newly created files are included
+  in saved binary patches, patch hashes, test-file requirements, and forbidden-
+  path enforcement. Added functional coverage for tracked edits plus untracked
+  source, test, and forbidden files.
+- Completed the post-fix explicit-greedy DeepSeek comparison: routed INT4 passed
+  3/4 objective tasks while routed INT8 passed 4/4. Both passed exact greedy
+  replay and runtime-integrity gates; INT4 separately fell to 589 MiB against
+  the 600 MiB rule, while INT8's minimum was 601 MiB. The timing-disabled fixed
+  QCN gate showed no material regression at 2,548.4 tok/s best prefill and
+  57.81 tok/s best internal decode.
+
+- Fixed an INT8 first-request versus repeat numerical-consistency defect using
+  a generic runtime-path correction. Unsupported modes remain fail-closed and
+  no model, GPU, prompt-length, or hardware-specific exception was added.
+- Added focused coverage and validated exact output across five 128-token
+  same-process replays and ten 128-token requests spanning five fresh server
+  lifecycles, including the former token-7 and token-95 boundaries.
+- Corrected the prior Ledger reliability interpretation without changing its
+  frozen artifacts: OpenCode omitted `temperature`, `top_k`, and `top_p`, so
+  those trials used server sampling defaults and were not greedy. Three fresh
+  post-fix sampled Ledger trials remained 1/3, with 39/39 successful tools and
+  22/22 exact rendered-input counts. Exact greedy determinism is established
+  by the explicit temperature-zero replay gates, not the sampled tasks.
+- Preserved the independent VRAM failure: post-fix runs still reached 553 MiB
+  against the unchanged 600 MiB floor. No budget, fallback, or behavior-
+  masking workaround was introduced.
+- Passed the focused Rust test, `./dev server-test`, 13/13 ADQ harness tests,
+  final installed build, and timing-disabled `./dev speed-test`. QCN produced
+  1,303.8/2,356.6/2,534.6/2,553.1/2,499.5/2,463.7 tok/s prefill and
+  58.12/58.04/57.16 tok/s internal decode, with 100% HCS and 4,108 MiB free;
+  the fixed baseline comparison shows no material regression.
+- Preserved the complete private campaign report, machine result, and
+  439-entry evidence manifest at SHA-256 `ff504003...`, `3e527a8c...`, and
+  `70a56e15...`; every indexed file and all 91 JSON artifacts verify.
+
+- Began an immutable three-lifecycle diagnostic of the existing
+  full-routed-INT8 Ledger task path. It uses the unchanged supported server and
+  ADQ harness commands, exact template/tokenizer evidence, and fixed 600 MiB
+  policy; the completed INT8 ADQ remains unchanged and no runtime behavior was
+  altered.
+- Completed the diagnostic at 1/3 Ledger passes. All three first requests were
+  byte-identical and rendered to the same 3,364 tokens, but sampled outputs
+  diverged at token 7 before any tool response. One trial completed the repair
+  and all oracles; two independently designed it, announced the edit, then
+  stopped normally before invoking the editor. All 53 tools and 32 rendered
+  input equivalence checks passed. Runtime integrity remains failed: four
+  prefills crossed below the unchanged 600 MiB margin to 553 MiB. No runtime,
+  config, precision, threshold, or budget behavior changed.
+- Preserved the diagnostic human/machine reports and 432-file evidence
+  manifest with SHA-256 values `dd2e9668...`, `061ce3a9...`, and `f8dc0103...`.
+  Later raw-request audit established that OpenCode omitted all sampling fields
+  and Krasis used its server defaults; this immutable task result is therefore
+  not a greedy determinism experiment.
+
+- Added a test-only full-context routed-INT8 DeepSeek V4 Flash Vision Exp ADQ
+  control profile. It preserves the completed INT4 campaign's checkpoint,
+  HQQ6/HQQ8 10% attention profile, Native KV/context allocation, topology,
+  shared/dense/head/vision precision, thinking mode, and 600 MiB safety margin;
+  only routed GPU/CPU expert precision changes from INT4 to INT8.
+- Completed that immutable INT8 control at 3/4 productive tasks versus INT4
+  1/4 and Witness 4/4. INT8 recovered Config and exact-500K History, preserved
+  Scheduler, and retained Ledger's failure. All seven source-witness rows met
+  the frozen distributional envelope and the 131K maximum delta improved from
+  `1.554140` to `0.396868`, strongly supporting routed INT4 as a material—but
+  not sole proven—cause of the earlier task degradation.
+- The INT8 identity is not qualified: two frozen greedy replays diverged at
+  token 95, and nine measured prefills fell below the fixed 600 MiB safety
+  margin to a 577 MiB floor. Functional retrieval/isolation, session/cache,
+  exact maximum-context admission, overflow rejection, cancellation/recovery,
+  HCS/CUDA counters, and 3/4 vision gates otherwise completed. No mixed
+  precision, threshold change, fallback, hardcode, or production default was
+  introduced.
+
+- Completed the immutable DeepSeek V4 Flash Vision Exp INT4 ADQ-500K
+  characterization with independent outcomes: productive tasks failed at 1/4,
+  runtime integrity passed, numerical fidelity retained one localized 131K
+  warning, and vision scored 3/4. Exact-500K retrieval/isolation, all 12
+  operational checks, two deterministic replays, 31/31 rendered-input
+  equivalence checks, HCS health, and the 600 MiB VRAM contract passed; the
+  lowest measured floor was 601 MiB. No retry or threshold/oracle change was
+  used.
+
+- The split DeepSeek campaign's numerical/retrieval layers are complete: exact
+  500K numerical and retrieval/isolation pass, while the reproducible finite
+  131K INT4 delta is reported separately as `WARNING_OUTLIER`. Vision scored
+  3/4; the spatial response was semantically correct but missed strict frozen
+  phrases, so the separate multimodal verdict is failed without retry.
+- Completed the frozen DeepSeek INT4 productive matrix without retries.
+  The 500K-history task passed its public test but failed four of five hidden
+  cases; the final task score is 1/4 (ledger/config/history failed, scheduler
+  passed). All task sessions and exact rendered-input collection completed
+  normally, separating these model-task failures from runtime infrastructure.
+
+- Added Krasis-native `POST /apply-template` and `POST /tokenize` endpoints
+  using the exact immutable Rust chat-template engine and tokenizer shared with
+  inference. Both run outside the serialized GPU worker, return explicit
+  errors instead of estimates/fallbacks, and reject flat multimodal evidence
+  that cannot represent checkpoint-native image expansion exactly.
+- Refactored chat inference and rendered-input evidence collection through one
+  request-normalization/render function, including tools, `tool_choice`,
+  thinking mode, and generation-prompt behavior. The ADQ harness now
+  live-probes both routes before any scored task and requires each captured
+  token-array length to equal the prompt-token count from that exact inference
+  response.
+- Passed the installed-extension build, complete focused server/harness suites,
+  and the fixed timing-disabled QCN speed regression gate after the endpoint
+  change. QCN retained 2,562.5 tok/s best internal prefill, 58.69 tok/s best
+  internal decode, complete HCS coverage, and safe runtime-measured VRAM.
+- Live-proved the new APIs on the full-context DeepSeek INT4 candidate: the
+  exact tool-bearing request reconstructed 288 token IDs and real inference
+  independently reported 288 prompt tokens. The request retained 613 MiB free
+  against the unchanged 600 MiB runtime safety margin.
+- The new split-verdict productive ADQ run has so far produced two model-level
+  failures with healthy runtime/evidence infrastructure: ledger failed public
+  and hidden scoring, and config passed public but failed hidden scoring. Both
+  model sessions stopped after describing plausible repairs without applying
+  repository edits; the complete matrix remains in progress.
+- Scheduler repair then passed both public and hidden oracles through the same
+  frozen runtime, with a correct source/test change and no forbidden edits.
+- Started the new frozen split-verdict INT4 task campaign after its live
+  rendered-input preflight passed. Its ledger task failed objective public and
+  hidden scoring after a normal model exit: all tool calls succeeded, but the
+  model made no implementation edit. This is recorded as a task outcome rather
+  than an endpoint, runtime-integrity, or numerical-fidelity failure.
+- Closed the frozen source-bound Vision-Exp ADQ-500K campaign as `FAILED` and
+  not promotable. A required productive-work evidence endpoint returned HTTP
+  404 after scored requests, preventing public/hidden oracle completion and any
+  same-identity retry; independently, exact 131,072 numerical comparison
+  exceeded the frozen maximum selected-logprob delta (`1.554140 > 1.0`).
+- Retained the passing characterization: all six other numerical rows through
+  exact 500K, exact-500K retrieval/isolation, four Krasis-native vision gates,
+  12/12 operational/session checks, and two deterministic exact-state replays.
+  Request-prefill low-water stayed at or above 601 MiB with the unchanged
+  600 MiB policy and zero HCS budget, slot, or copy failures.
+- Froze one new test-only ADQ-500K identity for the source-bound g128
+  `search_rmse` routed-INT4 candidate after every witness/readiness and
+  timing-disabled cross-model gate passed. The campaign pins the exact native
+  build, runtime config, activation calibration, generated expert cache, and
+  immutable behavioural fixtures; production defaults remain unchanged.
+- Passed the final server/session/prefill contracts, focused activation-
+  calibration regression, repo-local build, ADQ harness, and timing-disabled
+  QCN cross-model speed gate. QCN retained 100% HCS coverage, 4,108 MiB free
+  during formal decode, and throughput equivalent to the preceding qualified
+  run; the reproducible evidence is archived in `benchmarks/BENCHMARKS.md`.
+- The activation-calibrated Vision-Exp candidate passes the live operational
+  parity matrix: exact accumulated/fresh/RAM-restored 500K equivalence,
+  active/RAM cache reuse, exact maximum-context admission, structured overflow
+  rejection, graceful cancellation and recovery, deterministic replay, all
+  network checks, and focused cache-control identity. Long prefills retained
+  at least 649 MiB free under the unchanged 600 MiB safety policy.
+- The calibrated Vision-Exp candidate passes exact 500,000-token
+  retrieval/isolation and all deterministic semantic, OCR, spatial, and
+  ordered multi-image gates while remaining above the 600 MiB safety margin.
+- The activation-calibrated Vision-Exp candidate passes the exact 500,000-token
+  numerical witness row with exact first-token agreement, a 12-token exact
+  prefix, complete comparable top-10 containment, and a 649 MiB measured floor
+  under the unchanged 600 MiB safety policy.
+- The activation-calibrated candidate now passes all six staged witness rows
+  from 3K through 262,144 with exact first-token agreement, complete comparable
+  top-10 containment, and a 673 MiB floor. Added a test-only full-context
+  profile for the remaining exact-500K gates without changing defaults.
+- Source-bound routed-activation calibration restored the held-out witness
+  first-token decisions at exact 32K and 131,072 while retaining a measured
+  673 MiB request floor. The candidate remains test-only pending the complete
+  staged, full-context, vision, operational, and cross-model gates.
+- Built and verification-loaded a distinct test-only g128 routed-INT4 cache
+  from the complete KIC1 activation artifact. Existing amax caches and runtime
+  defaults remain unchanged pending held-out 32K/131,072 correctness.
+- Completed an eight-corpus routed-activation calibration candidate from
+  318,227 real rows per layer. All experts are represented in all 43 routed
+  layers; the write-once KIC1 artifact and its payload passed independent hash,
+  range, and geometry verification. Rare route counts remain recorded rather
+  than replaced with defaults, and the candidate is not promoted pending
+  held-out runtime correctness.
+- Added a test-only Vision-Exp g128 `search_rmse` profile for that held-out
+  validation. Existing amax caches, defaults, launcher capabilities, and
+  runtime dispatch are unchanged.
+- Added a read-only routed-expert rank diagnostic for KTC1 captures. It replays
+  checkpoint router weights and correction biases over captured BF16 inputs,
+  validates the selected top-k sets, and reports target rank/cutoff evidence
+  without loading captured expert outputs.
+- Captured a measured cache/session/code tail corpus after route-rank analysis
+  identified the closest real domain. It added 64,766 rows/layer safely but
+  did not activate L30/E81, so calibration export remains fail-closed after
+  252,691 total rows/layer.
+- Added a second real-image routed-activation capture from eight independent
+  upstream visual/documentation domains. Six-way inspection reached 187,925
+  measured rows per layer and filled three of four outstanding routes; export
+  remains fail-closed on L30/E81 and sparse one-sample coverage is retained
+  explicitly rather than treated as adequate calibration.
+- Completed the first product-image routed-activation capture. It filled three
+  rare expert routes while four remain unseen after 172,032 measured rows per
+  layer, so calibration export remains fail-closed pending real coverage.
+- Added source-bound multimodal calibration corpus support for routed INT4.
+  Offline preparation and capture bind and revalidate exact real image/prompt
+  bytes while leaving the Rust/CUDA runtime path unchanged.
+- Added a fourth equal-contribution prose capture. Seven rare routes remain
+  unseen after 163,840 text rows per layer, so publication remains fail-closed
+  while the image-conditioned production domain is measured.
+- Added a larger independent code/design activation capture. Exact combined
+  inspection reduced missing expert routes to nine, while publication remains
+  fail-closed until all experts have measured coverage.
+- Added a second source-bound activation capture from byte-disjoint real
+  content. Combined coverage improved substantially but remains incomplete, so
+  calibration publication still fails closed pending measured coverage.
+- Completed the first source-bound activation capture for the new INT4
+  calibration path. It remained safe at the standard 600 MiB policy, but exact
+  inspection found incomplete expert coverage, so export is intentionally
+  blocked until independent captured data fills every route.
+- Added source-bound routed-expert activation calibration for INT4 cache
+  construction. A supported offline command converts complete KTC1 route
+  captures into a hashed write-once moment artifact, and the existing
+  `search_rmse` path validates model geometry and uses those measured moments
+  without changing ordinary amax caches or runtime dispatch.
+- The final routed-INT4 g32 discriminator also failed the 131,072-token source
+  choice. The measured default g128 path is better than both smaller supported
+  group sizes, closing that configuration branch without changing defaults.
+- The Vision-Exp routed-INT4 g64 discriminator remained memory-safe but did not
+  restore 131,072-token source agreement. Added a final test-only g32
+  discriminator using the existing generic Marlin group-size contract; neither
+  profile changes production defaults or launcher capabilities.
+- Added a test-only Vision-Exp routed-INT4 g64 profile for same-bit numerical
+  attribution. It preserves the production execution strategy and changes no
+  launcher capability or default.
+- Its supported validation preflight rebuilt and parsed the g64 configuration;
+  the legacy validator then reported that this checkpoint has no standard
+  named reference output. No model/scored request ran in that preflight.
+- The routed-INT8 diagnostic restored exact source agreement at the remaining
+  131,072-token Vision-Exp boundary while remaining VRAM-safe. This attributes
+  the mismatch to routed-expert INT4 quantization. INT8 is not promoted: it is
+  substantially slower and production remains INT4-only; follow-up work is on
+  generic same-bit INT4 quality.
+- Added a test-only routed INT8 attribution profile for the remaining 131,072
+  Vision-Exp numerical divergence. The launcher and production path remain
+  INT4-only.
+- The BF16 shared-expert diagnostic now has an explicit retained fail-closed
+  result: graph decode supports shared Marlin INT4/INT8, so no scored request
+  was run and no fallback was introduced.
+- Added a test-only BF16 shared-expert control for the remaining Vision-Exp
+  numerical attribution. BF16 experts remain validation-only and are not
+  exposed as a production fallback.
+- The one-variable BF16 LM-head control did not change the remaining 131,072
+  source disagreement, ruling out INT8 LM-head quantization as causal without
+  introducing a production fallback.
+- Added a test-only mixed-HQQ/BF16-LM-head profile for one-variable numerical
+  attribution. It is not exposed through the launcher or treated as an
+  accepted Vision-Exp mode.
+- The test-only Vision-Exp mixed-HQQ discriminator restored frozen 32K source
+  agreement but retained the independent 131,072 first-token disagreement.
+  Both requests remained safely above the 600 MiB runtime margin. No new mode
+  is exposed by the launcher while component isolation and multimodal gates
+  remain incomplete.
+- Added a test-only DeepSeek-V4-Flash-Vision-Exp mixed-HQQ discriminator using
+  the generic HQQ6/HQQ8 auto-selection path and standard 10% promotion budget.
+  It preserves production INT4 experts, Native cache, BF16 vision and measured
+  600 MiB safety policy; tensor promotions remain checkpoint-derived.
+- Current DeepSeek-V4-Flash-Vision-Exp parity completed the frozen staged
+  source ladder with measured VRAM safety, but first-token disagreements at
+  `32K` and `131,072` fail the registered numerical envelope. The evidence is
+  retained for general runtime diagnosis before any new qualification attempt.
+- The corresponding exact-500K numerical comparison passed with exact
+  first-token agreement, bounded source-relative distributions, and measured
+  safety above the configured `600 MiB` VRAM margin.
+- Completed the DeepSeek-V4-Flash-Vision-Exp source-witness upper-bound
+  matrix. The checkpoint passed all four frozen productive-development tasks,
+  all seven formal numerical stages through exact 500K, and exact-500K
+  retrieval/isolation. Source vision remains explicitly unsupported and must
+  be qualified independently by Krasis. The final 500K numerical run preserved
+  the full A6000/TF32-disabled profile and matched the retained token and
+  distribution evidence exactly.
+- Removed two completed diagnostic-only prefill environment selectors from the
+  production candidate. The established BF16 deterministic-map path and
+  production INT4/INT8 atomic-map path remain unchanged.
+- Rebuilt the candidate and passed the full server, template, session-cache,
+  prefill/session-boundary, reference-judgement, cache-gate, VRAM-pressure, and
+  ADQ harness contract suites.
+
+- Recorded a clean source-witness pass for exact-500K retrieval plus a fresh
+  isolation request under the fully explicit A6000 source profile. Both
+  responses matched their frozen pre-EOS strings exactly, isolation leaked no
+  retrieval code, and the retained sampled-token evidence shows normal EOS.
+
+- Extended the supported witness-capture path with a mutually exclusive raw
+  request input mode and added exact-token export for paired ADQ retrieval and
+  isolation prompts. The wrapper fails closed on ambiguous input sources, and
+  focused long-context preservation/hash tests pass 4/4.
+
+- Recorded a clean source-witness pass for the frozen exact-500K ADQ `history`
+  task: DeepSeek recovered the three distributed active policies, implemented
+  the generic normalization repair, added and passed nine focused regressions,
+  preserved protected/user-owned state, and passed both public and hidden
+  oracles with zero tool errors. Exact rendered inputs, original sampled output
+  IDs, tool exchanges, relay hashes, patch identity, and normal-stop evidence
+  are retained for Krasis parity work.
+
+- Recorded a clean source-witness pass for the frozen ADQ `ledger` task:
+  DeepSeek implemented the normalized duplicate-event contract, added and ran
+  five focused regressions, preserved protected/user-owned state, and passed
+  both public and hidden oracles with zero tool errors. Exact task/tool/token
+  evidence is retained for Krasis parity work.
+
+- Recorded a clean source-witness pass for the frozen ADQ `scheduler` task:
+  DeepSeek diagnosed the stale replacement entry, implemented a generic repair,
+  added and passed the incident regression, and passed both public and hidden
+  oracles. This provides an exact-token source path for Krasis parity work.
+
+- Recorded a clean source-witness pass for the frozen ADQ `config` task: the
+  checkpoint completed the implementation, added and ran regression tests,
+  preserved protected/user-owned state, and passed both public and hidden
+  oracles. Exact task/tool/token evidence is retained for Krasis parity work.
+
+- Witness-backed ADQ runs now retain an explicit `INCOMPLETE` evidence record
+  when external infrastructure interrupts a request before any model verdict;
+  the partial identity is never resumed or reclassified, and any permitted
+  infrastructure replacement uses a fresh write-once run root with the same
+  frozen contract.
+
+- Added a supported `./dev witness-server` path for running the pinned
+  source-precision llama witness behind an OpenAI-compatible endpoint. The
+  command resolves the checkpoint-bound BF16 GGUF, validates an optional
+  physical GPU UUID, builds the witness server in the selected witness build
+  directory, and requires explicit context size/port instead of assuming a
+  model- or host-specific configuration.
+- The witness server now requires a physical GPU UUID, binds it before CMake
+  configuration, derives that device's compute capability with NVML, and uses
+  an architecture-specific build directory by default. This prevents an
+  SM86-only binary from being launched on a Blackwell GPU.
+- Fresh witness build directories now discover and pass the actual `nvcc`
+  executable to CMake, covering hosts where the CUDA toolkit is installed but
+  its `bin` directory is not on `PATH`; discovery checks `PATH` and bounded
+  standard installation roots.
+- `./dev witness-server` now accepts repeated physical `--gpu` UUIDs and builds
+  for the measured set of CUDA compute capabilities, enabling one isolated
+  multi-GPU witness process without per-index or per-model device branches.
+- The ADQ relay now retains byte-exact request and response streams plus their
+  hashes for every model turn. Witness-backed runs can additionally require a
+  post-turn `/apply-template` and `/tokenize` capture, preserving the full
+  rendered prompt and exact input token IDs without changing model requests.
+- The frozen witness/Krasis task contract now requires these raw and rendered
+  artifacts for every turn; the source witness emits an ignored namespaced SSE
+  field with each original sampled token ID so output trajectories remain
+  exactly replayable even when chat syntax is buffered by the parser.
+
+- Fixed graceful SSE cancellation when a client half-closes its request side.
+  A dedicated Rust peer-read monitor now publishes FIN/error state through the
+  existing decode cancellation atomic without adding socket work or locks to
+  the token hot path. Focused socket tests passed, a live DeepSeek scheduler
+  request stopped after one decode token and recovered with zero cache
+  reservations, and two full post-cancel replays remained bitwise/numerically
+  deterministic. Removed the completed forced-token decode diagnostic from the
+  production candidate. The final timing-disabled QCN speed gate retained
+  2,558.2 tok/s best prefill, 58.70 tok/s best internal decode, full HCS, and
+  4,110 MiB minimum free VRAM.
+
+- Completed post-failure attribution for the immutable full-context DeepSeek
+  campaign without changing its `FAILED` verdict. The exact current scheduler
+  trajectory matched source precision at all 10 registered checkpoints and
+  produced the same productive 601-token edit path in 32/32 same-process
+  replays, including after HCS history exceeded the failed campaign. The
+  failed run did not retain original SSE output token IDs or its runnable
+  binary, so its 761-token no-edit trajectory cannot be reconstructed exactly;
+  another campaign would be an unjustified retry rather than qualification.
+
+- Added a separately measured DeepSeek-V4 full-context profile derived from
+  the checkpoint's native cache dimensions and declared 1,048,576-token
+  capacity. Exact-500K retrieval and isolation passed with 625 MiB
+  request-wide free VRAM against the unchanged 600 MiB margin, while three
+  exact failed-state replays were deterministic and safe at 601--645 MiB.
+  Final focused contracts passed, and the same binary retained QCN performance
+  at 2,558.0 tok/s best prefill and 58.96 tok/s best internal decode.
+
+- Added reproducible failed-agent-state capture and source-witness review for
+  ADQ investigations. A frozen DeepSeek-V4 Vision failure was compared at 14
+  teacher-forced checkpoints: source precision rejected the historical EOS,
+  while the repaired runtime matched all 14 source choices. Exact failed
+  campaign artifacts remain immutable and cannot be reclassified by the
+  diagnostic result.
+
+- Versioned the ledger productive-development contract so duplicate entries
+  are compared after declared-field normalization rather than by ambiguous raw
+  JSON bytes. Public and hidden tests now exercise differently serialized
+  equivalent events and declared-field conflicts, and ADQ results freeze the
+  task, fixture, contract, and hidden-oracle identities used for each attempt.
+
+- Added opt-in VRAM lifecycle diagnostics that record the physical CUDA UUID,
+  absolute sample time, monitor cadence, active-request/global scope, and
+  allocator/driver state around request cleanup. Runtime budgets and the
+  default 600 MiB safety margin are unchanged.
+
+- Resolved the retained 589 MiB versus 951--955 MiB VRAM discrepancy: the old
+  request summary ended before the short LM-head/sample tail. Request-scoped
+  monitoring now spans that tail and cleanup, uses the same conservative CUDA
+  Runtime free-memory surface as budgeting, and reports physical device and
+  lifecycle identity. Independent NVML observation corroborated the event.
+  Removed rejected in-stream calibration samplers; no extra reserve, fixed
+  allowance, or fallback was added. Four exact replays across two independently
+  calibrated DeepSeek startups were token/numerically identical and safe at
+  617--673 MiB with the unchanged 600 MiB margin. The final QCN timing-disabled
+  speed gate passed at 2,557.8 tok/s prefill and 58.66 tok/s internal decode.
+
+- Completed the automatic Marlin K-split and N16/N32 measurements before the
+  first uncaptured decode step. This keeps cold first-step and captured replay
+  arithmetic on the same runtime-measured dispatch policy for every loaded
+  shape and GPU. The fixed QCN `./dev speed-test` passed with 2,554.4 tok/s
+  best internal prefill, 58.91 tok/s best internal decode, 100% HCS residency,
+  and 4,108 MiB minimum free VRAM against the 600 MiB margin.
+
+- Repaired a DeepSeek-V4 correctness and determinism failure found by an exact
+  OpenCode state replay. Identical temperature-zero requests now produce the
+  same token and numerical sequence across cold and warm runs, configured
+  shared-expert precision is executed and validated explicitly, and malformed
+  or mismatched shared-weight caches fail closed. Focused cache tests and the
+  complete model/config, launcher, server, Manager, and ADQ-harness contract
+  suites pass. A fresh productive-development qualification attempt still
+  failed its first mandatory task, so this model/configuration is not declared
+  ADQ-500K qualified.
+
+- Completed an independent source-precision DeepSeek-V4 Vision numerical
+  comparison at exactly 500,000 input tokens. The CPU-anchored A6000 witness
+  and Krasis matched the first token and a 9-token greedy prefix; all 10
+  comparable identical-history witness tokens remained in Krasis's top ten,
+  and the pre-registered selected-token log-probability thresholds passed.
+  The Krasis replay retained 673 MiB minimum free VRAM against the 600 MiB
+  runtime margin. This passes the exact-500K numerical gate but does not change
+  the failed overall ADQ campaign or complete the outstanding intermediate
+  witness stages.
+
+- Completed the DeepSeek-V4 Vision exact-500K operational soak. Accumulated,
+  uncached-fresh, and pageable-RAM-restored requests returned the same objective
+  three-region answer; cache counters recorded three active-GPU hits and one
+  RAM hit. The server admitted 524,287 input tokens plus one output token,
+  rejected one token beyond capacity with HTTP 413, released a cancelled 64K
+  stream without committing it, and recovered cleanly. All 11 assertions
+  passed with 673 MiB minimum free VRAM against the 600 MiB margin.
+
+- Fixed the `./dev adq-session-soak` file entry point to add the repository root
+  before importing shared ADQ test helpers. The first live soak attempt failed
+  closed before issuing a model request because the isolated runner did not
+  otherwise expose the `tests` package.
+
+- Retained the deterministic Opencode ADQ task's 16,384-token output reserve
+  after measured 8,192- and 4,096-token experiments still crossed the
+  524,288-token service ceiling when the agent read the long history. Reducing
+  output further would weaken the productive-work gate rather than fix the
+  missing operational headroom. The recovered model outputs, source patches,
+  tests, and hidden oracles were correct, but the integration is recorded as
+  failed because Opencode retained nonzero status from rejected calls.
+
+- Corrected the ADQ witness comparator so autoregressive logit/rank metrics are
+  counted only while Krasis and witness token histories are identical, plus the
+  first divergent decision. Later rows are conditioned on different text and
+  are no longer mislabeled as comparable. First-token distribution evidence is
+  now reported separately, and two synthetic divergence contracts pass.
+
+- Strengthened the ADQ productive-work harness with enforceable network
+  isolation. A dedicated disposable worker is attached only to an internal
+  Podman network; a separate dual-homed relay accepts only GET/POST requests
+  for the fixed local Krasis `/v1/` endpoint. Startup proves that external and
+  direct-host probes fail while the fixed model probe succeeds. Added a fourth
+  task whose issue history is exactly 500,000 checkpoint-tokenizer tokens of
+  immutable real content, with current policy decisions distributed near 5%,
+  50%, and 95%. The history is injected directly into model context rather than
+  exposed only as a tool-readable file. A fixed relay retains every
+  server-reported prompt-token count and the gate requires an actual task
+  request at or above 500,000 tokens. The client uses a fixed session title and
+  no short SSE chunk timeout, avoiding title-generation noise and premature
+  aborts during measured 500K prefill. Its hidden oracle requires the model to
+  recover the decisions, implement them, add tests, and preserve protected/
+  dirty files. Builder, isolation, context-observation, and untouched-oracle
+  contracts pass locally; the long live task remains in progress.
+  Signal and normal-exit cleanup remove only the dedicated worker and relay so
+  interrupted harnesses cannot leave delayed client requests behind.
+- The first fully isolated mandatory ledger task completed its model request
+  but made no source or regression-test changes, so the public baseline passed
+  and hidden oracle failed. The raw first-attempt result is retained and the
+  current target cannot be reported ADQ-500K qualified; remaining gates
+  continue as characterization evidence.
+
+- Added `./dev adq-session-soak`, an exact-token ADQ operational gate for
+  long agent conversations. It constructs a 500,000-token accumulated
+  multi-turn prompt from immutable real repository/book content, compares its
+  objective multi-region result with an equivalent full fresh prefill and RAM
+  session restore, exercises the exact configured context boundary and visible
+  one-token overflow rejection, aborts an in-flight stream, and requires clean
+  reservation release plus a successful unrelated recovery request. Reports
+  retain exact token hashes, server-observed usage, cache counters, responses,
+  and every pass/fail assertion.
+
+- Added the first deterministic Agentic Development Qualification (ADQ)
+  Opencode suite. The pinned disposable Podman harness now supports an isolated
+  write-enabled engineering agent with networking denied, three multi-step
+  JavaScript repair/refactor/diagnostic tasks, public tests, hidden objective
+  oracles, required regression-test changes, protected-file and pre-existing
+  dirty-file checks, tool/error counts, wall time, and patch hashes. Added the
+  built `./dev adq-opencode <model-id>` entry point and kept the existing
+  minimal read-only tool smoke separate.
+
+- Fixed DeepSeek V4 Native-cache multi-chunk prefill correctness. The expanded
+  BF16 compressed-history buffer is shared scratch across layers and the main
+  and index compressors, so later chunks could consume a different
+  descriptor's history instead of their own persisted prefix. Every non-empty
+  prefix is now restored before each compressor invocation. A frozen 48,000-
+  token retrieval input that passed as one chunk but failed when forced into
+  two 24,000-token chunks now passes identically in the two-chunk path, followed
+  by a clean unrelated-request isolation probe.
+
+- Fixed the isolated Opencode harness configuration contract so its container-facing Krasis endpoint is distinct from the host-side endpoint used to validate the served model and context limit. This permits the pinned Podman client to use `host.containers.internal` without asking the host resolver to understand that container-only name.
+- Added an exact-500,000-token long-context correctness gate that embeds distinct authoritative and revoked records near the beginning, middle, and end of immutable real content, requires objective multi-region retrieval, checks a subsequent unrelated request for leaked state, retains exact token IDs and hashes, and rejects any measured VRAM low-water below the runtime safety margin.
+- Extended the live vision gate to accept multiple ordered images and
+  case-insensitive relationship regexes, and added a reproducible ADQ asset
+  builder for semantic, exact OCR, spatial-layout, and multi-image tests.
+  Assets retain the explicit font and SHA-256 provenance instead of relying on
+  generated or subjective imagery. This lets structured JSON answers be
+  checked without incorrectly requiring adjacent prose substrings.
+
+- Added a reproducible `./dev adq-witness-inputs` artifact builder for staged
+  long-context numerical qualification. It uses the checkpoint tokenizer,
+  immutable canonical Gutenberg prompts, and hashed repository source—not
+  repeated/generated filler—to create exact 3K, 16K, 32K, 64K, 128K, 256K,
+  and 500K raw-token cases with preserved DeepSeek chat framing and complete
+  source/tokenizer provenance.
+  `./dev adq-witness-compare` replays selected cases through a running
+  test-endpoint server, retains exact-prefix/top-k/log-probability metrics and
+  runtime timing, and fails on an absent or unsafe measured VRAM low-water.
+
+
 - Removed catalog qualification caps from the launcher context contract. Model
   metadata and the interactive maximum now always use each checkpoint's
   declared context limit. After model selection the terminal launcher and
@@ -12515,3 +13210,19 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
   but regressed decode and changed the deterministic hot/cold execution path;
   the candidate was rejected and reverted. The established runtime-derived
   chunk guards remain unchanged.
+- Fixed mixed routed-expert GPU prefill so precision-filtered Marlin W1/W2
+  launches enable the kernel's existing `-1` block-sentinel filter. This
+  prevents heterogeneous INT4/INT8 layers from indexing expert pointer `-1`
+  while leaving homogeneous INT4 and INT8 launches unchanged; added focused
+  regression coverage for the dispatch contract.
+- Fixed mixed routed-expert Dynamic HCS so a cold INT8 expert can reuse an
+  evictable exact-size soft slot owned by another layer when no compatible local
+  victim exists. Local replacement remains preferred, byte capacities stay
+  exact, cross-layer ownership is updated, and homogeneous INT4/INT8 behavior is
+  unchanged.
+- Made the ADQ relay regression independent of readiness-probe sequencing by
+  locating the unique captured chat-completions metadata record instead of
+  assuming it is always capture `0002`. Production relay behavior is unchanged.
+- Live +5% post-fix validation completed two exact deterministic replays with
+  zero Dynamic-HCS budget skips, no-slot events, or copy failures; request VRAM
+  lows were 625/649 MiB against the 600 MiB policy.

@@ -1,0 +1,9 @@
+Command: ./dev speed-test
+Working directory: /home/main/Documents/Claude/krasis
+tmux session: dsv4-cancel-final-speed-test-20260907
+Run directory: logs/dev-benchmark_20260907_151814
+Timing instrumentation: disabled
+Configuration selected by ./dev speed-test: tests/qcn-k4v4-hqq4-int4-benchmark.conf
+Physical GPU: GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab (NVIDIA RTX A6000)
+Native extension SHA-256: 8a551724a65350ccee02f0e4a27b378563dc6b99393d2803d08b30b1d1c501f7
+Exit status: 0

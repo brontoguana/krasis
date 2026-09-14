@@ -1759,6 +1759,34 @@ extern "C" __global__ void expert_classify_prepare(
     mapped_cold_buf[1] = 1;  // ready flag — CPU can now read
 }
 
+// Split a routed batch into disjoint INT4 and INT8 launch weights without
+// changing slot order. The final weighted reduction continues to consume the
+// original weights, so heterogeneous dispatch cannot reorder expert sums.
+extern "C" __global__ void partition_mixed_router_weights(
+    const int* __restrict__ expert_ids,
+    const float* __restrict__ weights,
+    const unsigned char* __restrict__ expert_bits,
+    float* __restrict__ int4_weights,
+    float* __restrict__ int8_weights,
+    int layer_idx,
+    int num_experts,
+    int topk
+) {
+    int slot = blockIdx.x * blockDim.x + threadIdx.x;
+    if (slot >= topk) return;
+    int eid = expert_ids[slot];
+    float weight = weights[slot];
+    float w4 = 0.0f;
+    float w8 = 0.0f;
+    if (eid >= 0 && eid < num_experts && weight != 0.0f) {
+        unsigned char bits = expert_bits[layer_idx * num_experts + eid];
+        if (bits == 4) w4 = weight;
+        if (bits == 8) w8 = weight;
+    }
+    int4_weights[slot] = w4;
+    int8_weights[slot] = w8;
+}
+
 // ── Fused Gate GEMV + TopK ─────────────────────────────────────────────
 //
 // Replaces: bf16_to_fp32 + cuBLAS gate GEMV + sigmoid_topk/softmax_topk

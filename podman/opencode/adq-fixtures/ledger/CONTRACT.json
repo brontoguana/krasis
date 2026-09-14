@@ -1,0 +1,18 @@
+{
+  "contract": "krasis-adq-ledger",
+  "contract_version": 2,
+  "duplicate_identity": {
+    "stage": "after parseEvent normalization",
+    "declared_fields": [
+      "account",
+      "amount",
+      "supersedes"
+    ],
+    "same_id_equal_when": "all declared normalized fields have equal presence and value",
+    "raw_json_whitespace_affects_identity": false,
+    "raw_json_property_order_affects_identity": false,
+    "numeric_spelling_affects_identity": false,
+    "undeclared_fields_affect_identity": false,
+    "declared_field_difference": "conflicting duplicate"
+  }
+}

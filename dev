@@ -45,6 +45,7 @@
 #   ./dev witness-inputs <model>    Build stored input_token_ids from fixed prompt-source JSON
 #   ./dev witness-model-check <model>  Check expected BF16 GGUF witness model readiness
 #   ./dev witness-build             Build the pinned llama-witness validator
+#   ./dev witness-server <model>    Run the source-precision llama-witness OpenAI server
 #   ./dev witness-gguf-preflight <model>  Preflight BF16 GGUF witness conversion readiness
 #   ./dev witness-gguf-convert <model>  Convert local safetensors to BF16 GGUF after preflight
 #   ./dev witness-capture <model>   Capture llama-witness JSON from stored input_token_ids
@@ -53,7 +54,7 @@
 #   ./dev hqq-self-calibrate <config>  Capture self-calibration evidence / candidates only
 #   ./dev hqq-gpu-search-probe       Prototype GPU HQQ candidate-search timing/quality
 #   ./dev expert-hqq-cache-generate <manifest.json>  Generate KRHQ cache from explicit manifest
-#   ./dev tileq-build <subcommand>  Plan/build/verify source-bound KTQ1 expert caches
+#   ./dev tileq-build <subcommand>  Plan/build/verify TileQ and mixed routed-expert artifacts
 #   ./dev expert-hqq-trace-compare <trace.json> <spec.json> <metrics.tsv>  Compare diagnostic HQQ trace export offline
 #   ./dev capture-box <subcommand>  ARCHIVED HF capture wrapper; requires explicit override
 #   ./dev capture-preflight         ARCHIVED HF capture host preflight; requires explicit override
@@ -62,6 +63,8 @@
 #   ./dev trace-diff <expected> <actual>  Diff two KRASIS_TRACE logs offline
 #   ./dev awq-calibrate <config>    Deprecated AWQ calibration command (disabled)
 #   ./dev test-kernels [name]       Run CUDA kernel unit tests (or filter by name)
+#   ./dev test-kernels-sanitize <name> Run an already-built CUDA test under racecheck
+#   ./dev rust-test [filter]         Run Rust library unit tests (optional exact filter)
 #   ./dev cpu-tail-calibrate <config> [options]
 #                                    Optimize/measure CPU-tail under live GPU DMA
 #   ./dev chat [args]               Run krasis chat from source
@@ -1775,6 +1778,10 @@ do_test_kernels() {
             filter="gpu_decode::dsa_registration_tests::dspark_"
         elif [[ "$1" == "split_expert_launch" ]]; then
             filter="gpu_decode::dsa_registration_tests::split_expert_launch_defaults_on_for_native_dsa_and_honors_overrides"
+        elif [[ "$1" == "canonical_expert_slot_order" ]]; then
+            filter="gpu_decode::dsa_registration_tests::canonical_graph_expert_slots_do_not_depend_on_residency"
+        elif [[ "$1" == "canonical_ungraphed_batch" ]]; then
+            filter="gpu_decode::dsa_registration_tests::canonical_ungraphed_batch_is_limited_to_standard_int4_silu_moe"
         elif [[ "$1" == "pcie_batch" ]]; then
             filter="pcie_batch::tests"
         elif [[ "$1" == "route_locality_global_lru" ]]; then
@@ -1823,6 +1830,8 @@ do_test_kernels() {
             filter="gpu_decode::vram_calibration_tests"
         elif [[ "$1" == "deepseek_v4_math" ]]; then
             filter="deepseek_v4_"
+        elif [[ "$1" == "deepseek_v4_parallel_qb_postprocess" ]]; then
+            filter="test_deepseek_v4_parallel_qb_runs_complete_query_postprocess"
         elif [[ "$1" == "deepseek_v4_grouped_wo_a" ]]; then
             filter="gpu_decode::dsa_registration_tests::deepseek_v4_grouped_wo_a_batched_gemv_matches_individual_within_one_bf16_ulp"
         elif [[ "$1" == "chunk_plan" ]]; then
@@ -1849,6 +1858,50 @@ do_test_kernels() {
         PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
             cargo test --release --lib kernel_tests -- --nocapture 2>&1
     fi
+}
+
+do_test_kernels_sanitize() {
+    [[ $# -ne 1 ]] && err "Usage: ./dev test-kernels-sanitize <name>"
+    local sanitizer="/usr/local/cuda/bin/compute-sanitizer"
+    [[ -x "$sanitizer" ]] || err "CUDA compute-sanitizer not found: $sanitizer"
+
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    export PYO3_PYTHON="$PYTHON"
+    export LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+    local test_binary
+    test_binary=$(find "$SCRIPT_DIR/target/release/deps" -maxdepth 1 -type f -perm -u+x \
+        -name 'krasis-*' -printf '%T@ %p\n' | sort -nr | awk 'NR == 1 { print $2 }')
+    [[ -n "$test_binary" && -x "$test_binary" ]] \
+        || err "No built Krasis unit-test binary found; run ./dev test-kernels $1 first"
+    local filter="gpu_prefill::kernel_tests::test_$1"
+    "$test_binary" --list | grep -Fqx "$filter: test" \
+        || err "Newest built unit-test binary does not contain $filter; rebuild it first"
+    info "Running CUDA racecheck: $filter"
+    "$sanitizer" --tool racecheck --racecheck-report all --print-level info \
+        --error-exitcode 99 \
+        "$test_binary" "$filter" --exact --nocapture
+}
+
+do_rust_test() {
+    [[ $# -le 1 ]] || err "Usage: ./dev rust-test [filter]"
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    local filter="${1:-}"
+    info "Building and running Rust library unit tests${filter:+ matching: $filter}"
+    (
+        cd "$SCRIPT_DIR"
+        PYO3_PYTHON="$PYTHON" \
+        LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
+            PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo test --release --lib ${filter:+"$filter"} -- --nocapture
+    )
 }
 
 do_glm53_check() {
@@ -1957,7 +2010,7 @@ do_expert_hqq_cache_generate() {
 
 do_tileq_build() {
     if [[ $# -eq 0 ]]; then
-        echo "Usage: ./dev tileq-build <plan|inspect-capture|prepare-corpus|capture-corpus|counterfactual-test|build|verify> [args...]"
+        echo "Usage: ./dev tileq-build <plan|inspect-capture|export-int4-calibration|verify-int4-calibration|prepare-corpus|prepare-excluded-inputs|capture-corpus|prepare-multimodal-corpus|capture-multimodal-corpus|counterfactual-test|build|verify|build-mixed-expert-manifests|verify-mixed-expert-manifest> [args...]"
         return 0
     fi
     cd "$SCRIPT_DIR"
@@ -2666,6 +2719,119 @@ do_witness_build() {
         cmake --build build --target llama-witness-validate -j "${WITNESS_BUILD_JOBS:-$(nproc)}"
     ) 2>&1 | tee "$run_dir/witness_build.log"
     ok "llama-witness validator build complete"
+}
+
+do_witness_server() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev witness-server <model-or-checkpoint-dir> --port N --ctx-size N --gpu UUID [--ngl N] [server args...]"
+        echo "  Builds and runs the pinned source-precision llama-witness OpenAI server."
+        echo "  A physical GPU UUID is required; no model-specific device ordinal is assumed."
+        return 0
+    fi
+    [[ $# -ge 1 ]] || err "Usage: ./dev witness-server <model-or-checkpoint-dir> --port N --ctx-size N --gpu UUID [--ngl N] [server args...]"
+    local model="$1"
+    shift
+    local port=""
+    local ctx_size=""
+    local ngl="${WITNESS_NGL:-0}"
+    local gpu_uuids=()
+    local server_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)
+                [[ $# -ge 2 ]] || err "--port requires a value"
+                port="$2"
+                shift 2
+                ;;
+            --ctx-size)
+                [[ $# -ge 2 ]] || err "--ctx-size requires a value"
+                ctx_size="$2"
+                shift 2
+                ;;
+            --ngl|--n-gpu-layers)
+                [[ $# -ge 2 ]] || err "$1 requires a value"
+                ngl="$2"
+                shift 2
+                ;;
+            --gpu)
+                [[ $# -ge 2 ]] || err "--gpu requires a physical CUDA UUID"
+                gpu_uuids+=("$2")
+                shift 2
+                ;;
+            *)
+                server_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+    [[ "$port" =~ ^[1-9][0-9]*$ ]] || err "--port must be a positive integer"
+    [[ "$ctx_size" =~ ^[1-9][0-9]*$ ]] || err "--ctx-size must be a positive integer"
+    [[ "$ngl" =~ ^[0-9]+$ ]] || err "--ngl must be a non-negative integer"
+    [[ "${#gpu_uuids[@]}" -gt 0 ]] || err "at least one --gpu physical UUID is required"
+    local gpu_inventory
+    gpu_inventory=$(nvidia-smi --query-gpu=uuid,compute_cap --format=csv,noheader,nounits)
+    local gpu_uuid gpu_compute_cap
+    local cuda_arches=()
+    local build_arches=()
+    for gpu_uuid in "${gpu_uuids[@]}"; do
+        [[ "$gpu_uuid" == GPU-* ]] || err "--gpu requires a physical UUID beginning GPU-"
+        gpu_compute_cap=$(awk -F ', ' -v uuid="$gpu_uuid" '$1 == uuid { print $2 }' <<< "$gpu_inventory")
+        [[ "$gpu_compute_cap" =~ ^[0-9]+\.[0-9]+$ ]] || err "GPU UUID is not present or has no CUDA compute capability: $gpu_uuid"
+        cuda_arches+=("${gpu_compute_cap/./}-real")
+        build_arches+=("${gpu_compute_cap/./}")
+    done
+    local cuda_visible cuda_arch build_arch
+    cuda_visible=$(IFS=,; echo "${gpu_uuids[*]}")
+    cuda_arch=$(IFS=';'; echo "${cuda_arches[*]}")
+    build_arch=$(IFS=-; echo "${build_arches[*]}")
+    export CUDA_VISIBLE_DEVICES="$cuda_visible"
+    [[ -d "$WITNESS_REPO" ]] || err "llama-witness repo not found: $WITNESS_REPO"
+    mapfile -t paths < <(witness_model_paths "$model")
+    local model_dir="${paths[0]}"
+    local model_gguf="${paths[2]}"
+    [[ -d "$model_dir" ]] || err "witness model dir not found: $model_dir"
+    [[ -f "$model_gguf" ]] || err "witness GGUF not found: $model_gguf"
+
+    local build_dir="${WITNESS_BUILD_DIR:-$WITNESS_REPO/build-cuda-$build_arch}"
+    local server_bin="$build_dir/bin/llama-server"
+    local cuda_compiler="${CUDACXX:-}"
+    if [[ -z "$cuda_compiler" ]]; then
+        cuda_compiler=$(command -v nvcc 2>/dev/null || true)
+    fi
+    if [[ -z "$cuda_compiler" ]]; then
+        cuda_compiler=$(find -L /usr/local /opt -maxdepth 4 -type f -name nvcc -perm -u+x -print 2>/dev/null \
+            | sort -V | tail -n 1)
+    fi
+    [[ -n "$cuda_compiler" && -x "$cuda_compiler" ]] || err "CUDA compiler nvcc was not discoverable"
+    local run_dir
+    run_dir=$(create_run_dir "witness-server")
+    info "Building source-precision llama-witness server"
+    info "Run dir: $run_dir"
+    (
+        cd "$WITNESS_REPO"
+        cmake -S . -B "$build_dir" \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_COMPILER="$cuda_compiler" \
+            -DCMAKE_CUDA_ARCHITECTURES="$cuda_arch"
+        cmake --build "$build_dir" --target llama-server -j "${WITNESS_BUILD_JOBS:-$(nproc)}"
+    ) 2>&1 | tee "$run_dir/witness_server_build.log"
+    [[ -x "$server_bin" ]] || err "llama-witness server was not built: $server_bin"
+
+    local model_alias="${KRASIS_WITNESS_SERVER_MODEL_ID:-$(basename "$model_dir")}"
+    local threads="${WITNESS_THREADS:-$(nproc)}"
+    info "Starting source-precision witness model=$model_alias ctx=$ctx_size ngl=$ngl port=$port"
+    exec "$server_bin" \
+        --model "$model_gguf" \
+        --alias "$model_alias" \
+        --host 0.0.0.0 \
+        --port "$port" \
+        --ctx-size "$ctx_size" \
+        --n-gpu-layers "$ngl" \
+        --threads "$threads" \
+        --threads-batch "$threads" \
+        --jinja \
+        --flash-attn on \
+        "${server_args[@]}"
 }
 
 do_witness_gguf_preflight() {
@@ -3385,19 +3551,21 @@ Use --force only if overwriting that witness artifact is intentional."
 
 do_witness_capture() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]"
+        echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH | --request-json PATH] [--profile ID] [--max-cases N] [validator args...]"
         echo "  Captures llama-witness JSON from stored input_token_ids only."
-        echo "  A direct local checkpoint directory is accepted with --reference for its frozen input-token source."
+        echo "  --reference reads witness/reference input-token artifacts; --request-json reads one frozen raw-token request."
+        echo "  A direct local checkpoint directory is accepted with either explicit input source."
         echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53"
         return 0
     fi
-    [[ $# -lt 1 ]] && err "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]
+    [[ $# -lt 1 ]] && err "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH | --request-json PATH] [--profile ID] [--max-cases N] [validator args...]
   Captures llama-witness JSON from stored input_token_ids only.
   Default profile: $WITNESS_PROFILE_ID"
     local model="$1"
     shift
     local output=""
     local reference_override=""
+    local request_override=""
     local profile="$WITNESS_PROFILE_ID"
     local validator_args=()
     while [[ $# -gt 0 ]]; do
@@ -3411,6 +3579,11 @@ do_witness_capture() {
             --reference)
                 [[ $# -ge 2 ]] || err "--reference requires a path"
                 reference_override="$2"
+                shift 2
+                ;;
+            --request-json)
+                [[ $# -ge 2 ]] || err "--request-json requires a path"
+                request_override="$2"
                 shift 2
                 ;;
             --output)
@@ -3443,9 +3616,16 @@ do_witness_capture() {
     local model_dir="${paths[0]}"
     local reference_json="${paths[1]}"
     local model_gguf="${paths[2]}"
+    [[ -z "$reference_override" || -z "$request_override" ]] \
+        || err "--reference and --request-json are mutually exclusive"
     [[ -n "$reference_override" ]] && reference_json="$reference_override"
+    local witness_input_mode="reference"
+    if [[ -n "$request_override" ]]; then
+        reference_json="$request_override"
+        witness_input_mode="request-json"
+    fi
     [[ -d "$model_dir" ]] || err "witness model dir not found: $model_dir"
-    [[ -f "$reference_json" ]] || err "input-token source reference not found: $reference_json"
+    [[ -f "$reference_json" ]] || err "input-token source not found: $reference_json"
 
     local run_dir
     run_dir=$(create_run_dir "witness-capture")
@@ -3462,6 +3642,7 @@ do_witness_capture() {
     (
         cd "$WITNESS_REPO"
         WITNESS_PROFILE_ID="$profile" \
+        WITNESS_INPUT_MODE="$witness_input_mode" \
         WITNESS_MAX_NEW_TOKENS="${KRASIS_WITNESS_MAX_NEW_TOKENS:-1}" \
         WITNESS_GENERATED_AT="${KRASIS_WITNESS_GENERATED_AT:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}" \
             "$script" "$model_dir" "$reference_json" "$model_gguf" \
@@ -3470,6 +3651,260 @@ do_witness_capture() {
             "${validator_args[@]}"
     ) 2>&1 | tee "$run_dir/witness_capture.log"
     ok "Witness capture complete: $output"
+}
+
+do_adq_witness_inputs() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-witness-inputs --model-dir PATH --output PATH [--targets CSV] [--profile ID]"
+        echo "  Builds staged exact-token ADQ inputs from immutable real books plus repository source."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "adq-witness-inputs")
+    info "Building staged ADQ witness input-token artifact"
+    info "Run dir: $run_dir"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-witness-inputs" \
+        run_repo_python "$SCRIPT_DIR/tests/adq_build_witness_inputs.py" \
+            --repo-root "$SCRIPT_DIR" "$@" 2>&1 | tee "$run_dir/adq_witness_inputs.log"
+}
+
+do_adq_witness_compare() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-witness-compare --reference PATH --output PATH [--targets CSV] [--port N]"
+        echo "  Compares staged raw-token inputs against a running test-endpoint server."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "adq-witness-compare")
+    info "Comparing staged ADQ inputs against llama-witness"
+    info "Run dir: $run_dir"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-witness-compare" \
+        run_repo_python "$SCRIPT_DIR/tests/adq_compare_witness.py" "$@" \
+        2>&1 | tee "$run_dir/adq_witness_compare.log"
+}
+
+do_adq_long_context() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-long-context --input-source PATH --model-dir PATH --output PATH [--target-tokens N] [--port N] [--build-only] [--witness-input-output PATH]"
+        echo "  Runs an objective exact-500K multi-region retrieval and request-isolation gate."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "adq-long-context")
+    info "Running exact-token ADQ long-context correctness gate"
+    info "Run dir: $run_dir"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-long-context" \
+        run_repo_python "$SCRIPT_DIR/tests/adq_long_context_live.py" "$@" \
+        2>&1 | tee "$run_dir/adq_long_context.log"
+}
+
+do_adq_session_soak() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-session-soak --model-dir PATH --input-source PATH --output PATH [--port N]"
+        echo "  Runs exact-500K accumulated/fresh/session equivalence, boundary, cancellation, and recovery gates."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "adq-session-soak")
+    info "Running exact-token ADQ session and operational soak gate"
+    info "Run dir: $run_dir"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-session-soak" \
+        run_repo_python "$SCRIPT_DIR/tests/adq_session_soak_live.py" "$@" \
+        2>&1 | tee "$run_dir/adq_session_soak.log"
+}
+
+do_adq_opencode() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || $# -ne 3 || "${2:-}" != "--model-dir" ]]; then
+        echo "Usage: ./dev adq-opencode <served-model-id> --model-dir PATH"
+        echo "  Runs the pinned disposable complex-development task suite and objective oracles."
+        [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && return 0
+        return 1
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "adq-opencode")
+    info "Running isolated ADQ Opencode development suite"
+    info "Run dir: $run_dir"
+    "$SCRIPT_DIR/podman/opencode/run-adq-suite.sh" "$1" "$3" \
+        2>&1 | tee "$run_dir/adq_opencode.log"
+}
+
+do_adq_opencode_history() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-opencode-history --model-dir PATH --output PATH --target-tokens N"
+        echo "  Builds an exact-token real-content issue history for the ADQ development suite."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "adq-opencode-history")
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-opencode-history" \
+        run_repo_python "$SCRIPT_DIR/tests/adq_build_opencode_history.py" "$@"
+}
+
+do_adq_ledger_replay_capture() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-ledger-replay-capture [--task NAME] --source-run PATH --source-campaign-manifest PATH --session-id ID --model-id ID --model-dir PATH --runtime-config PATH --native-extension PATH --output-dir PATH --port N --expected-prompt-tokens N --expected-generated-tokens N --expected-terminal-text-sha256 HEX"
+        echo "  Captures a copied OpenCode task session request and freezes the exact pre-stop token state."
+        return 0
+    fi
+    local source_run="" source_campaign_manifest="" session_id="" model_id="" model_dir=""
+    local runtime_config="" native_extension="" output_dir="" expected_terminal_text_sha256=""
+    local port="" expected_prompt_tokens="" expected_generated_tokens="" task="ledger"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --task) task="$2"; shift 2 ;;
+            --source-run) source_run="$2"; shift 2 ;;
+            --source-campaign-manifest) source_campaign_manifest="$2"; shift 2 ;;
+            --session-id) session_id="$2"; shift 2 ;;
+            --model-id) model_id="$2"; shift 2 ;;
+            --model-dir) model_dir="$2"; shift 2 ;;
+            --runtime-config) runtime_config="$2"; shift 2 ;;
+            --native-extension) native_extension="$2"; shift 2 ;;
+            --output-dir) output_dir="$2"; shift 2 ;;
+            --port) port="$2"; shift 2 ;;
+            --expected-prompt-tokens) expected_prompt_tokens="$2"; shift 2 ;;
+            --expected-generated-tokens) expected_generated_tokens="$2"; shift 2 ;;
+            --expected-terminal-text-sha256) expected_terminal_text_sha256="$2"; shift 2 ;;
+            *) err "Unknown adq-ledger-replay-capture argument: $1" ;;
+        esac
+    done
+    [[ -n "$source_run" && -n "$source_campaign_manifest" && -n "$session_id" && -n "$model_id" && -n "$model_dir" && -n "$runtime_config" && -n "$native_extension" && -n "$output_dir" && -n "$expected_terminal_text_sha256" ]] || \
+        err "adq-ledger-replay-capture requires source/session/model/output arguments"
+    [[ "$task" =~ ^[a-z][a-z0-9_-]*$ ]] || err "task must be a lowercase identifier"
+    [[ "$port" =~ ^[1-9][0-9]*$ && "$expected_prompt_tokens" =~ ^[1-9][0-9]*$ && "$expected_generated_tokens" =~ ^[1-9][0-9]*$ ]] || \
+        err "port and expected token counts must be positive integers"
+    local run_dir captured
+    run_dir=$(create_run_dir "adq-ledger-replay-capture")
+    info "Capturing retained OpenCode $task state from an isolated copied session"
+    info "Run dir: $run_dir"
+    captured=$("$SCRIPT_DIR/podman/opencode/capture-adq-replay.sh" \
+        "$source_run" "$task" "$session_id" "$model_id" "$output_dir" \
+        "localhost/krasis-opencode-test:1.18.12")
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-ledger-replay-capture" \
+        run_repo_python "$SCRIPT_DIR/tests/adq_extract_ledger_replay.py" \
+            --source-run "$source_run" \
+            --task "$task" \
+            --source-campaign-manifest "$source_campaign_manifest" \
+            --session-id "$session_id" \
+            --captured-request "$captured" \
+            --model-dir "$model_dir" \
+            --template-source "$SCRIPT_DIR/python/krasis/chat_templates/deepseek_v4.jinja" \
+            --runtime-config "$runtime_config" \
+            --native-extension "$native_extension" \
+            --output-dir "$output_dir" \
+            --port "$port" \
+            --expected-prompt-tokens "$expected_prompt_tokens" \
+            --expected-generated-tokens "$expected_generated_tokens" \
+            --expected-terminal-text-sha256 "$expected_terminal_text_sha256" \
+        2>&1 | tee "$run_dir/adq_ledger_replay_capture.log"
+}
+
+do_adq_ledger_replay() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-ledger-replay --state-dir PATH --output PATH [--port N] [--repeats N] [--probe-tokens N] [--concurrent] [--debug-early --debug-early-steps N --debug-reference --debug-hcs-transitions --debug-hcs-equiv-layer N]"
+        echo "  Repeats a frozen raw-token state through clean greedy Krasis requests."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "adq-ledger-replay")
+    info "Running clean exact-state Krasis ledger replays"
+    info "Run dir: $run_dir"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-ledger-replay" \
+        run_repo_python "$SCRIPT_DIR/tests/adq_replay_exact_state.py" "$@" \
+        2>&1 | tee "$run_dir/adq_ledger_replay.log"
+}
+
+do_adq_ledger_request_sequence() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-ledger-request-sequence --state-dir PATH --output PATH --expected-prompt-tokens CSV [--port N] [--probe-tokens N]"
+        echo "  Replays every frozen OpenCode request prefix in order before probing the failed terminal turn."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "adq-ledger-request-sequence")
+    info "Replaying frozen OpenCode request sequence through Krasis"
+    info "Run dir: $run_dir"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-ledger-request-sequence" \
+        run_repo_python "$SCRIPT_DIR/tests/adq_replay_request_sequence.py" "$@" \
+        2>&1 | tee "$run_dir/adq_ledger_request_sequence.log"
+}
+
+do_adq_ledger_witness_cases() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-ledger-witness-cases --state-dir PATH --trajectory-source deterministic-replay|deterministic-current-replay|accepted-retokenized-visible-text --output PATH --checkpoints CSV --profile ID [--replay-report PATH] [--terminal-only]"
+        echo "  Freezes accepted-output prefixes for source-precision teacher forcing and records whether original token boundaries exist."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "adq-ledger-witness-cases")
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-ledger-witness-cases" \
+        run_repo_python "$SCRIPT_DIR/tests/adq_build_ledger_witness_cases.py" "$@" \
+        2>&1 | tee "$run_dir/adq_ledger_witness_cases.log"
+}
+
+do_adq_ledger_witness_review() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-ledger-witness-review --inputs PATH --witness PATH --output PATH"
+        echo "  Reviews source-precision next-token decisions along frozen failed-trajectory checkpoints."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "adq-ledger-witness-review")
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-ledger-witness-review" \
+        run_repo_python "$SCRIPT_DIR/tests/adq_review_ledger_witness.py" "$@" \
+        2>&1 | tee "$run_dir/adq_ledger_witness_review.log"
+}
+
+do_adq_harness_test() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-harness-test"
+        echo "  Runs offline ADQ/OpenCode harness and exact-state replay contracts."
+        return 0
+    fi
+    [[ $# -eq 0 ]] || err "adq-harness-test takes no arguments"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_opencode_harness.py"
+}
+
+do_sse_disconnect_test() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev sse-disconnect-test --payload PATH --output PATH [--port N]"
+        echo "  Proves graceful SSE peer closure cancels generation and the model worker recovers."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "sse-disconnect-test")
+    info "Running graceful SSE disconnect and worker recovery contract"
+    info "Run dir: $run_dir"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="sse-disconnect-test" \
+        run_repo_python "$SCRIPT_DIR/tests/test_sse_disconnect.py" "$@" \
+        2>&1 | tee "$run_dir/sse_disconnect_test.log"
+}
+
+do_adq_vision_assets() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-vision-assets --output-dir PATH --font PATH"
+        echo "  Builds deterministic semantic, OCR, spatial, and multi-image PNG gates."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "adq-vision-assets")
+    info "Building deterministic ADQ vision assets"
+    info "Run dir: $run_dir"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-vision-assets" \
+        run_repo_python "$SCRIPT_DIR/tests/adq_build_vision_assets.py" "$@" \
+        2>&1 | tee "$run_dir/adq_vision_assets.log"
 }
 
 do_witness_inputs() {
@@ -3998,9 +4433,15 @@ do_server_test() {
         RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
             PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
             cargo test --release --lib gpu_prefill::chunk_plan_tests "$@"
+        PYO3_PYTHON="$PYTHON" \
+        LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
+            PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo test --release --lib gpu_decode::expert_host_registration_tests "$@"
         KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_reference_judgement
         KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_session_cache_gate
         KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_vram_pressure
+        KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest tests.test_server_shutdown
     )
 }
 
@@ -4071,8 +4512,23 @@ case "$cmd" in
     manager-test)   do_manager_test "$@" ;;
     reference-test) do_reference_test "$@" ;;
     witness-inputs) do_witness_inputs "$@" ;;
+    adq-witness-inputs) do_adq_witness_inputs "$@" ;;
+    adq-witness-compare) do_adq_witness_compare "$@" ;;
+    adq-long-context) do_adq_long_context "$@" ;;
+    adq-session-soak) do_adq_session_soak "$@" ;;
+    adq-opencode) do_adq_opencode "$@" ;;
+    adq-opencode-history) do_adq_opencode_history "$@" ;;
+    adq-ledger-replay-capture) do_adq_ledger_replay_capture "$@" ;;
+    adq-ledger-replay) do_adq_ledger_replay "$@" ;;
+    adq-ledger-request-sequence) do_adq_ledger_request_sequence "$@" ;;
+    adq-ledger-witness-cases) do_adq_ledger_witness_cases "$@" ;;
+    adq-ledger-witness-review) do_adq_ledger_witness_review "$@" ;;
+    adq-harness-test) do_adq_harness_test "$@" ;;
+    sse-disconnect-test) do_sse_disconnect_test "$@" ;;
+    adq-vision-assets) do_adq_vision_assets "$@" ;;
     witness-model-check) do_witness_model_check "$@" ;;
     witness-build) do_witness_build "$@" ;;
+    witness-server) do_witness_server "$@" ;;
     witness-gguf-preflight) do_witness_gguf_preflight "$@" ;;
     witness-gguf-convert) do_witness_gguf_convert "$@" ;;
     witness-capture) do_witness_capture "$@" ;;
@@ -4107,6 +4563,8 @@ case "$cmd" in
     expert-compression-gpu) do_expert_compression_gpu "$@" ;;
     expert-compression-build) do_expert_compression_build "$@" ;;
     test-kernels)   do_test_kernels "$@" ;;
+    test-kernels-sanitize) do_test_kernels_sanitize "$@" ;;
+    rust-test)      do_rust_test "$@" ;;
     glm53-check)    do_glm53_check ;;
     cpu-tail-calibrate) do_cpu_tail_calibrate "$@" ;;
     pcie-batch-probe) do_pcie_batch_probe "$@" ;;
@@ -4169,8 +4627,23 @@ case "$cmd" in
         echo "  vision-test <port> <image> ... Test live image understanding against exact expected text"
         echo "  reference-inventory            Inventory stored reference artifacts"
         echo "  witness-inputs <model>         Build stored input_token_ids from fixed prompt-source JSON"
+        echo "  adq-witness-inputs ...         Build staged exact-token ADQ inputs from frozen real content"
+        echo "  adq-witness-compare ...        Compare staged inputs with an authoritative witness artifact"
+        echo "  adq-long-context ...           Run exact-500K retrieval and request-isolation checks"
+        echo "  adq-session-soak ...            Run exact-500K session equivalence, boundary, and recovery checks"
+        echo "  adq-opencode <model-id> ...    Run deterministic complex-development tasks and hidden oracles"
+        echo "  adq-opencode-history ...       Build exact-token real-content ADQ issue history"
+        echo "  adq-ledger-replay-capture ...  Freeze an exact retained OpenCode ledger state"
+        echo "  adq-ledger-replay ...          Repeat a frozen state through clean Krasis requests"
+        echo "  adq-ledger-witness-cases ...   Build teacher-forced source-precision checkpoints"
+        echo "  adq-ledger-request-sequence ... Replay exact historical request prefixes in order"
+        echo "  adq-ledger-witness-review ...  Review source decisions along a failed trajectory"
+        echo "  adq-harness-test               Run offline ADQ/OpenCode harness contracts"
+        echo "  sse-disconnect-test ...        Test graceful SSE cancellation and worker recovery"
+        echo "  adq-vision-assets ...          Build deterministic ADQ multimodal test cards"
         echo "  witness-model-check <model>    Check expected BF16 GGUF witness model readiness"
         echo "  witness-build                  Build the pinned llama-witness validator"
+        echo "  witness-server <model> ...     Run the source-precision llama-witness OpenAI server"
         echo "  witness-gguf-preflight <model> Preflight BF16 GGUF witness conversion readiness"
         echo "  witness-gguf-convert <model>   Convert local safetensors to BF16 GGUF after preflight"
         echo "  witness-capture <model>        Capture llama-witness JSON from stored input_token_ids"
@@ -4178,7 +4651,7 @@ case "$cmd" in
         echo "  hqq-attn-diff <model>          Offline HQQ attention artifact diff against BF16 source"
         echo "  hqq-self-calibrate <config>    Capture HQQ self-calibration evidence/candidates"
         echo "  expert-hqq-cache-generate <manifest.json> Generate KRHQ cache from explicit manifest"
-        echo "  tileq-build <subcommand>       Plan/build/verify source-bound KTQ1 expert caches"
+        echo "  tileq-build <subcommand>       Plan/build/verify TileQ and mixed routed-expert artifacts"
         echo "  expert-hqq-trace-compare <trace.json> <spec.json> <metrics.tsv> Compare HQQ trace export offline"
         echo "  expert-hqq-row-attribution <response.json> <spec.json> <metrics.tsv> Attribute exact HQQ row capture"
         echo "  capture-box <subcommand>      ARCHIVED HF capture wrapper; requires explicit override"
@@ -4192,6 +4665,7 @@ case "$cmd" in
         echo ""
         echo "Maintenance commands:"
         echo "  test-kernels [name]            Run CUDA kernel unit tests (or filter by name)"
+        echo "  test-kernels-sanitize <name>   Run the newest built CUDA unit test under racecheck"
         echo "  glm53-check                    Compile-check GLM-5.3 Rust/CUDA integration"
         echo "  chat [args]                    Run krasis chat from source"
         echo "  sanity                         Run sanity test prompts against running server"

@@ -9,10 +9,11 @@
 //! libcudart. PyTorch normally loads it first, but native Windows builds may
 //! resolve the bundled CUDA runtime DLL from the package directory.
 
+use cudarc::driver::sys as cuda_sys;
 use pyo3::prelude::*;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -107,11 +108,140 @@ pub fn fatal_cuda_context_error(context: &str, err: &str) -> ! {
 // CUDA runtime function signatures (resolved dynamically)
 type CudaSetDeviceFn = unsafe extern "C" fn(i32) -> i32;
 type CudaMemGetInfoFn = unsafe extern "C" fn(*mut usize, *mut usize) -> i32;
+static CUDA_RUNTIME_FNS: OnceLock<(CudaSetDeviceFn, CudaMemGetInfoFn)> = OnceLock::new();
+
+// Startup calibration needs to observe brief CUDA allocation low-waters at the
+// scratch-release boundary. A millisecond polling cadence can miss those
+// transients, so the model thread opens a calibration-only precision window and
+// waits until this monitor thread is actively sampling before releasing scratch.
+static PRECISION_WINDOWS_ENABLED: AtomicBool = AtomicBool::new(false);
+static PRECISION_MONITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PRECISION_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static PRECISION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static PRECISION_REQUEST_GENERATION: AtomicU64 = AtomicU64::new(0);
+static PRECISION_READY_GENERATION: AtomicU64 = AtomicU64::new(0);
+static PRECISION_FINISH_GENERATION: AtomicU64 = AtomicU64::new(0);
+static PRECISION_DONE_GENERATION: AtomicU64 = AtomicU64::new(0);
+static PRECISION_DEVICE: AtomicU64 = AtomicU64::new(0);
+static PRECISION_MIN_FREE_BYTES: AtomicU64 = AtomicU64::new(u64::MAX);
+static PRECISION_SAMPLE_COUNT: AtomicU64 = AtomicU64::new(0);
+static PRECISION_QUERY_FAILED: AtomicBool = AtomicBool::new(false);
+static PRECISION_READY_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
+static PRECISION_DONE_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
+
+const PRECISION_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub struct PrecisionVramWindow {
+    generation: u64,
+    active: bool,
+}
+
+impl PrecisionVramWindow {
+    pub fn finish(mut self) -> Result<u64, String> {
+        let result = self.finish_inner();
+        self.active = false;
+        result
+    }
+
+    fn finish_inner(&mut self) -> Result<u64, String> {
+        PRECISION_FINISH_GENERATION.store(self.generation, Ordering::Release);
+        let deadline = Instant::now() + PRECISION_HANDSHAKE_TIMEOUT;
+        while PRECISION_DONE_GENERATION.load(Ordering::Acquire) != self.generation {
+            if Instant::now() >= deadline {
+                PRECISION_IN_FLIGHT.store(false, Ordering::Release);
+                return Err(format!(
+                    "VRAM precision monitor did not finish generation {}",
+                    self.generation
+                ));
+            }
+            thread::yield_now();
+        }
+        PRECISION_IN_FLIGHT.store(false, Ordering::Release);
+        if PRECISION_QUERY_FAILED.load(Ordering::Acquire) {
+            return Err(format!(
+                "VRAM precision monitor CUDA query failed for generation {}",
+                self.generation
+            ));
+        }
+        let samples = PRECISION_SAMPLE_COUNT.load(Ordering::Acquire);
+        let min_free_bytes = PRECISION_MIN_FREE_BYTES.load(Ordering::Acquire);
+        if samples == 0 || min_free_bytes == u64::MAX {
+            return Err(format!(
+                "VRAM precision monitor captured no samples for generation {}",
+                self.generation
+            ));
+        }
+        append_precision_window_dump(
+            self.generation,
+            PRECISION_DEVICE.load(Ordering::Relaxed) as i32,
+            PRECISION_READY_TIMESTAMP_MS.load(Ordering::Acquire),
+            PRECISION_DONE_TIMESTAMP_MS.load(Ordering::Acquire),
+            samples,
+            min_free_bytes / (1024 * 1024),
+        );
+        Ok(min_free_bytes)
+    }
+}
+
+impl Drop for PrecisionVramWindow {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.finish_inner();
+        }
+    }
+}
+
+pub fn begin_precision_vram_window(device_id: i32) -> Result<Option<PrecisionVramWindow>, String> {
+    if !PRECISION_WINDOWS_ENABLED.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    if device_id < 0 {
+        return Err(format!(
+            "VRAM precision monitor received invalid CUDA device {}",
+            device_id
+        ));
+    }
+    if !PRECISION_MONITOR_ACTIVE.load(Ordering::Acquire) {
+        return Err("VRAM precision monitor is not active".to_string());
+    }
+    PRECISION_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| "VRAM precision monitor already has an active window".to_string())?;
+
+    let generation = PRECISION_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1;
+    PRECISION_DEVICE.store(device_id as u64, Ordering::Relaxed);
+    PRECISION_MIN_FREE_BYTES.store(u64::MAX, Ordering::Relaxed);
+    PRECISION_SAMPLE_COUNT.store(0, Ordering::Relaxed);
+    PRECISION_QUERY_FAILED.store(false, Ordering::Relaxed);
+    PRECISION_READY_TIMESTAMP_MS.store(0, Ordering::Relaxed);
+    PRECISION_DONE_TIMESTAMP_MS.store(0, Ordering::Relaxed);
+    PRECISION_REQUEST_GENERATION.store(generation, Ordering::Release);
+
+    let deadline = Instant::now() + PRECISION_HANDSHAKE_TIMEOUT;
+    while PRECISION_READY_GENERATION.load(Ordering::Acquire) != generation {
+        if Instant::now() >= deadline {
+            PRECISION_FINISH_GENERATION.store(generation, Ordering::Release);
+            PRECISION_IN_FLIGHT.store(false, Ordering::Release);
+            return Err(format!(
+                "VRAM precision monitor did not acknowledge generation {}",
+                generation
+            ));
+        }
+        thread::yield_now();
+    }
+    Ok(Some(PrecisionVramWindow {
+        generation,
+        active: true,
+    }))
+}
 
 /// Load cudaSetDevice + cudaMemGetInfo from the already-loaded libcudart.
 /// Returns None if the library isn't loaded or symbols aren't found.
 #[cfg(unix)]
 fn load_cuda_fns() -> Option<(CudaSetDeviceFn, CudaMemGetInfoFn)> {
+    if let Some(funcs) = CUDA_RUNTIME_FNS.get() {
+        return Some(*funcs);
+    }
     unsafe {
         // Try common names — RTLD_NOLOAD means "only find already-loaded lib"
         let lib_names: &[&[u8]] = &[
@@ -137,10 +267,12 @@ fn load_cuda_fns() -> Option<(CudaSetDeviceFn, CudaMemGetInfoFn)> {
         if set_device.is_null() || mem_get_info.is_null() {
             return None;
         }
-        Some((
+        let funcs = (
             std::mem::transmute(set_device),
             std::mem::transmute(mem_get_info),
-        ))
+        );
+        let _ = CUDA_RUNTIME_FNS.set(funcs);
+        Some(funcs)
     }
 }
 
@@ -149,6 +281,9 @@ fn load_cuda_fns() -> Option<(CudaSetDeviceFn, CudaMemGetInfoFn)> {
 /// returned function pointers must remain valid for the process lifetime.
 #[cfg(windows)]
 fn load_cuda_fns() -> Option<(CudaSetDeviceFn, CudaMemGetInfoFn)> {
+    if let Some(funcs) = CUDA_RUNTIME_FNS.get() {
+        return Some(*funcs);
+    }
     let lib_names = ["cudart64_12.dll", "cudart64_110.dll"];
     for name in lib_names {
         let Ok(lib) = (unsafe { libloading::Library::new(name) }) else {
@@ -160,6 +295,7 @@ fn load_cuda_fns() -> Option<(CudaSetDeviceFn, CudaMemGetInfoFn)> {
             (*set_device, *mem_get_info)
         };
         std::mem::forget(lib);
+        let _ = CUDA_RUNTIME_FNS.set(funcs);
         return Some(funcs);
     }
     None
@@ -210,6 +346,7 @@ struct ActiveRequestVram {
 
 static CURRENT_EVENT: Mutex<String> = Mutex::new(String::new());
 static ACTIVE_REQUEST_VRAM: Mutex<Option<ActiveRequestVram>> = Mutex::new(None);
+static DEVICE_UUIDS: Mutex<Vec<(i32, String)>> = Mutex::new(Vec::new());
 
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
@@ -247,10 +384,64 @@ fn current_request_context() -> String {
         .unwrap_or_default()
 }
 
-fn update_active_request_low(device_id: i32, free_mb: u64) {
+/// Update the lifecycle label captured by any subsequent low-water dump
+/// without forcing an extra CUDA query. This keeps the production-disabled
+/// path cheap while allowing the opt-in VRAM report to bracket request
+/// teardown and worker-idle transitions precisely.
+pub fn set_lifecycle_event(event: &str) {
+    if let Ok(mut current) = CURRENT_EVENT.lock() {
+        *current = event.to_string();
+    }
+}
+
+fn format_cuda_uuid(bytes: &[u8; 16]) -> String {
+    format!(
+        "GPU-{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    )
+}
+
+fn cache_current_cuda_device_uuid(logical_device_id: i32) -> Option<String> {
+    let mut context_device = 0i32;
+    if unsafe { cuda_sys::lib().cuCtxGetDevice(&mut context_device) }
+        != cuda_sys::CUresult::CUDA_SUCCESS
+    {
+        return None;
+    }
+    let mut uuid = cuda_sys::CUuuid::default();
+    if unsafe { cuda_sys::lib().cuDeviceGetUuid_v2(&mut uuid, context_device) }
+        != cuda_sys::CUresult::CUDA_SUCCESS
+    {
+        return None;
+    }
+    let bytes: [u8; 16] = uuid.bytes.map(|value| value as u8);
+    let formatted = format_cuda_uuid(&bytes);
+    let mut cache = DEVICE_UUIDS.lock().unwrap();
+    if let Some((_, existing)) = cache
+        .iter_mut()
+        .find(|(device_id, _)| *device_id == logical_device_id)
+    {
+        *existing = formatted.clone();
+    } else {
+        cache.push((logical_device_id, formatted.clone()));
+    }
+    Some(formatted)
+}
+
+fn cached_cuda_device_uuid(device_id: i32) -> Option<String> {
+    DEVICE_UUIDS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(cached_device_id, _)| *cached_device_id == device_id)
+        .map(|(_, uuid)| uuid.clone())
+}
+
+fn update_active_request_low(device_id: i32, free_mb: u64) -> bool {
     let mut active = ACTIVE_REQUEST_VRAM.lock().unwrap();
     let Some(ref mut ctx) = *active else {
-        return;
+        return false;
     };
     if let Some((_, existing)) = ctx
         .lows_mb
@@ -263,28 +454,47 @@ fn update_active_request_low(device_id: i32, free_mb: u64) {
     } else {
         ctx.lows_mb.push((device_id, free_mb));
     }
+    true
 }
 
-fn append_safety_limit_dump(
+fn append_vram_dump(
+    file_name: &str,
     kind: &str,
     device_id: i32,
     free_mb: u64,
+    total_mb: Option<u64>,
     safety_margin_mb: u64,
     deficit_mb: u64,
+    poll_interval_ms: Option<u64>,
 ) {
     let Ok(run_dir) = std::env::var("KRASIS_RUN_DIR") else {
         return;
     };
-    let path = std::path::Path::new(&run_dir).join("below-vram-safety-limit.log");
+    let path = std::path::Path::new(&run_dir).join(file_name);
     let event = current_event();
     let request_context = current_request_context();
+    let device_uuid = cached_cuda_device_uuid(device_id).unwrap_or_default();
+    let thread_name = std::thread::current()
+        .name()
+        .unwrap_or("unnamed")
+        .to_string();
+    let sample_scope = if request_context.is_empty() {
+        "global"
+    } else {
+        "active_request"
+    };
     let line = format!(
-        "{{\"timestamp_ms\":{},\"kind\":\"{}\",\"pid\":{},\"device\":{},\"free_mb\":{},\"safety_margin_mb\":{},\"deficit_mb\":{},\"hard_exit_floor_mb\":{},\"current_event\":\"{}\",\"request_context\":\"{}\"}}\n",
+        "{{\"timestamp_ms\":{},\"kind\":\"{}\",\"pid\":{},\"thread\":\"{}\",\"sample_scope\":\"{}\",\"device\":{},\"device_uuid\":\"{}\",\"free_mb\":{},\"total_mb\":{},\"poll_interval_ms\":{},\"safety_margin_mb\":{},\"deficit_mb\":{},\"hard_exit_floor_mb\":{},\"current_event\":\"{}\",\"request_context\":\"{}\"}}\n",
         now_millis(),
         json_escape(kind),
         std::process::id(),
+        json_escape(&thread_name),
+        sample_scope,
         device_id,
+        json_escape(&device_uuid),
         free_mb,
+        total_mb.map_or_else(|| "null".to_string(), |value| value.to_string()),
+        poll_interval_ms.map_or_else(|| "null".to_string(), |value| value.to_string()),
         safety_margin_mb,
         deficit_mb,
         VRAM_HARD_EXIT_FLOOR_MB,
@@ -299,6 +509,65 @@ fn append_safety_limit_dump(
         let _ = f.write_all(line.as_bytes());
         let _ = f.flush();
     }
+}
+
+fn append_precision_window_dump(
+    generation: u64,
+    device_id: i32,
+    started_at_ms: u64,
+    completed_at_ms: u64,
+    samples: u64,
+    min_free_mb: u64,
+) {
+    if std::env::var_os("KRASIS_VRAM_LEDGER").is_none() {
+        return;
+    }
+    let Ok(run_dir) = std::env::var("KRASIS_RUN_DIR") else {
+        return;
+    };
+    let path = std::path::Path::new(&run_dir).join("vram-precision-windows.log");
+    let device_uuid = cached_cuda_device_uuid(device_id).unwrap_or_default();
+    let line = format!(
+        "{{\"generation\":{},\"device\":{},\"device_uuid\":\"{}\",\"source\":\"cuda_runtime_monitor\",\"started_at_ms\":{},\"completed_at_ms\":{},\"duration_ms\":{},\"samples\":{},\"min_free_mb\":{},\"current_event\":\"{}\"}}\n",
+        generation,
+        device_id,
+        json_escape(&device_uuid),
+        started_at_ms,
+        completed_at_ms,
+        completed_at_ms.saturating_sub(started_at_ms),
+        samples,
+        min_free_mb,
+        json_escape(&current_event()),
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(line.as_bytes());
+        let _ = f.flush();
+    }
+}
+
+fn append_safety_limit_dump(
+    kind: &str,
+    device_id: i32,
+    free_mb: u64,
+    total_mb: Option<u64>,
+    safety_margin_mb: u64,
+    deficit_mb: u64,
+    poll_interval_ms: Option<u64>,
+) {
+    append_vram_dump(
+        "below-vram-safety-limit.log",
+        kind,
+        device_id,
+        free_mb,
+        total_mb,
+        safety_margin_mb,
+        deficit_mb,
+        poll_interval_ms,
+    );
 }
 
 pub fn begin_request_context(context: &str) {
@@ -361,8 +630,10 @@ pub fn record_request_lows_below_safety(
                 "request_low_water_below_safety",
                 *device_id,
                 *free_mb,
+                None,
                 safety_margin_mb,
                 safety_margin_mb.saturating_sub(*free_mb),
+                None,
             );
             let mut active = ACTIVE_REQUEST_VRAM.lock().unwrap();
             *active = None;
@@ -564,6 +835,15 @@ impl VramMonitor {
             )
         })?;
 
+        PRECISION_WINDOWS_ENABLED.store(false, Ordering::Release);
+        PRECISION_MONITOR_ACTIVE.store(false, Ordering::Release);
+        PRECISION_IN_FLIGHT.store(false, Ordering::Release);
+        PRECISION_REQUEST_GENERATION.store(0, Ordering::Release);
+        PRECISION_READY_GENERATION.store(0, Ordering::Release);
+        PRECISION_FINISH_GENERATION.store(0, Ordering::Release);
+        PRECISION_DONE_GENERATION.store(0, Ordering::Release);
+        PRECISION_READY_TIMESTAMP_MS.store(0, Ordering::Release);
+        PRECISION_DONE_TIMESTAMP_MS.store(0, Ordering::Release);
         self.running.store(true, Ordering::Release);
 
         let devices = self.devices.clone();
@@ -590,6 +870,17 @@ impl VramMonitor {
                             if (mem_get_info)(&mut free, &mut total) == 0 {
                                 dev.total_bytes.store(total as u64, Ordering::Relaxed);
                                 dev.min_free_bytes.store(free as u64, Ordering::Relaxed);
+                                match cache_current_cuda_device_uuid(dev.device_id) {
+                                    Some(uuid) => log::info!(
+                                        "VRAM monitor logical cuda:{} is physical {}",
+                                        dev.device_id,
+                                        uuid,
+                                    ),
+                                    None => log::warn!(
+                                        "VRAM monitor could not resolve physical UUID for logical cuda:{}",
+                                        dev.device_id,
+                                    ),
+                                }
                             }
                         }
                     }
@@ -601,7 +892,10 @@ impl VramMonitor {
                     poll_interval_ms.load(Ordering::Relaxed),
                 );
 
+                PRECISION_MONITOR_ACTIVE.store(true, Ordering::Release);
+
                 let mut report_elapsed_ms = 0u64;
+                let mut handled_precision_generation = 0u64;
 
                 while running.load(Ordering::Acquire) {
                     let mut readings = Vec::with_capacity(devices.len());
@@ -630,6 +924,30 @@ impl VramMonitor {
                             if free_u64 < prev_min {
                                 dev.min_free_bytes.store(free_u64, Ordering::Relaxed);
 
+                                // The opt-in ledger preserves every observed new low
+                                // separately from the safety-violation log. This lets
+                                // calibration diagnostics attribute a safe-but-close
+                                // transient to a request phase without changing the
+                                // configured margin or adding CUDA calls to the model
+                                // thread.
+                                if std::env::var_os("KRASIS_VRAM_LEDGER").is_some() {
+                                    let margin_mb = safety_margin.load(Ordering::Relaxed)
+                                        / (1024 * 1024);
+                                    append_vram_dump(
+                                        "vram-low-water-events.log",
+                                        "new_low_water",
+                                        dev.device_id,
+                                        free_mb,
+                                        Some(
+                                            dev.total_bytes.load(Ordering::Relaxed)
+                                                / (1024 * 1024),
+                                        ),
+                                        margin_mb,
+                                        margin_mb.saturating_sub(free_mb),
+                                        Some(poll_interval_ms.load(Ordering::Relaxed)),
+                                    );
+                                }
+
                                 if free_u64 < VRAM_HARD_EXIT_FLOOR_MB * 1024 * 1024 {
                                     let margin_mb =
                                         safety_margin.load(Ordering::Relaxed) / (1024 * 1024);
@@ -637,8 +955,10 @@ impl VramMonitor {
                                         "critical_low_floor",
                                         dev.device_id,
                                         free_mb,
+                                        Some(dev.total_bytes.load(Ordering::Relaxed) / (1024 * 1024)),
                                         margin_mb,
                                         margin_mb.saturating_sub(free_mb),
+                                        Some(poll_interval_ms.load(Ordering::Relaxed)),
                                     );
                                     eprintln!(
                                         "\x1b[1;31mVRAM MONITOR: cuda:{} free VRAM dropped to {} MB, below critical floor {} MB. Marking pressure for immediate HCS drain.\x1b[0m",
@@ -660,8 +980,10 @@ impl VramMonitor {
                                             "below_safety_margin",
                                             dev.device_id,
                                             free_mb,
+                                            Some(dev.total_bytes.load(Ordering::Relaxed) / (1024 * 1024)),
                                             margin_mb,
                                             deficit_mb,
+                                            Some(poll_interval_ms.load(Ordering::Relaxed)),
                                         );
                                         eprintln!(
                                             "\x1b[1;33m⚠ VRAM MONITOR: new low on cuda:{} — \
@@ -679,6 +1001,52 @@ impl VramMonitor {
                         }
                     }
 
+                    let requested = PRECISION_REQUEST_GENERATION.load(Ordering::Acquire);
+                    if requested != 0 && requested != handled_precision_generation {
+                        let requested_device = PRECISION_DEVICE.load(Ordering::Relaxed) as i32;
+                        let target = devices
+                            .iter()
+                            .find(|dev| dev.device_id == requested_device);
+                        let capture_sample = |dev: &DeviceState| {
+                            match query_free_bytes(set_device, mem_get_info, dev.device_id) {
+                                Some(free) => {
+                                    let free_u64 = free as u64;
+                                    dev.min_free_bytes.fetch_min(free_u64, Ordering::Relaxed);
+                                    PRECISION_MIN_FREE_BYTES.fetch_min(free_u64, Ordering::Relaxed);
+                                    PRECISION_SAMPLE_COUNT.fetch_add(1, Ordering::Relaxed);
+                                }
+                                None => {
+                                    PRECISION_QUERY_FAILED.store(true, Ordering::Release);
+                                }
+                            }
+                        };
+                        if let Some(dev) = target {
+                            // Prove that this thread has entered the exact-device Runtime
+                            // sampling loop before releasing the model thread to launch.
+                            capture_sample(dev);
+                        } else {
+                            PRECISION_QUERY_FAILED.store(true, Ordering::Release);
+                        }
+                        PRECISION_READY_TIMESTAMP_MS
+                            .store(now_millis() as u64, Ordering::Release);
+                        PRECISION_READY_GENERATION.store(requested, Ordering::Release);
+                        while running.load(Ordering::Acquire)
+                            && PRECISION_FINISH_GENERATION.load(Ordering::Acquire) != requested
+                        {
+                            if let Some(dev) = target {
+                                capture_sample(dev);
+                            }
+                            std::hint::spin_loop();
+                        }
+                        if !running.load(Ordering::Acquire) {
+                            PRECISION_QUERY_FAILED.store(true, Ordering::Release);
+                        }
+                        handled_precision_generation = requested;
+                        PRECISION_DONE_TIMESTAMP_MS
+                            .store(now_millis() as u64, Ordering::Release);
+                        PRECISION_DONE_GENERATION.store(requested, Ordering::Release);
+                    }
+
                     // Record periodic sample for VRAM report (every ~200ms)
                     let poll_ms = poll_interval_ms.load(Ordering::Relaxed).clamp(1, 1000);
                     report_elapsed_ms = report_elapsed_ms.saturating_add(poll_ms);
@@ -686,10 +1054,10 @@ impl VramMonitor {
                         report_sample(readings);
                         report_elapsed_ms %= 200;
                     }
-
                     thread::sleep(Duration::from_millis(poll_ms));
                 }
 
+                PRECISION_MONITOR_ACTIVE.store(false, Ordering::Release);
                 log::info!("VRAM monitor stopped");
             })
             .map_err(|e| {
@@ -705,6 +1073,7 @@ impl VramMonitor {
 
     /// Stop the background monitoring thread.
     fn stop(&mut self) {
+        PRECISION_WINDOWS_ENABLED.store(false, Ordering::Release);
         self.running.store(false, Ordering::Release);
         if let Some(handle) = self.thread_handle.take() {
             let _ = handle.join();
@@ -816,6 +1185,30 @@ impl VramMonitor {
             .swap(poll_interval_ms, Ordering::AcqRel))
     }
 
+    /// Enable exact scratch-release allocation windows for startup calibration only.
+    fn enable_precision_windows(&self) -> PyResult<()> {
+        if !self.running.load(Ordering::Acquire)
+            || !PRECISION_MONITOR_ACTIVE.load(Ordering::Acquire)
+        {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "VRAM precision monitor is not active",
+            ));
+        }
+        PRECISION_WINDOWS_ENABLED.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Disable startup-only exact allocation windows before normal serving.
+    fn disable_precision_windows(&self) -> PyResult<()> {
+        if PRECISION_IN_FLIGHT.load(Ordering::Acquire) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "cannot disable VRAM precision windows while one is active",
+            ));
+        }
+        PRECISION_WINDOWS_ENABLED.store(false, Ordering::Release);
+        Ok(())
+    }
+
     // ── VRAM Report methods ──
 
     /// Enable VRAM reporting. Periodic samples (~200ms) and named events
@@ -846,5 +1239,22 @@ impl VramMonitor {
 impl Drop for VramMonitor {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_cuda_uuid;
+
+    #[test]
+    fn cuda_uuid_matches_nvidia_canonical_format() {
+        let bytes = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x10, 0x32, 0x54, 0x76, 0x98, 0xba,
+            0xdc, 0xfe,
+        ];
+        assert_eq!(
+            format_cuda_uuid(&bytes),
+            "GPU-01234567-89ab-cdef-1032-547698badcfe"
+        );
     }
 }

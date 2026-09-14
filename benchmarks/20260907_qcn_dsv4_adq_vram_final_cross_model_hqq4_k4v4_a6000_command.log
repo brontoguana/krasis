@@ -1,0 +1,14 @@
+Date: 2026-09-07
+Working directory: /home/main/Documents/Claude/krasis
+tmux log: /home/main/Documents/Claude/krasis-internal/dsv4_vram_final_qcn_speed_20260907.log
+Command: ./dev speed-test
+Run directory: logs/dev-benchmark_20260907_041709
+Timing/trace instrumentation: disabled
+Exit status: 0
+Native extension SHA-256: 969bc1a59973671c049d9ddafd080149103ef42eef68b57eea26fcbe1d3042a0
+
+SHA-256:
+benchmark_report  8b0b401ef87b8cc286633df6be1997f97f21537779fa9345d3b573e6bceb89a7
+benchmark_stdout  a5b53d0880c864e7568853b25d56e175321429b9b310edc6f96d6fbc736e7bdf
+runtime           a26b189b19c4374ae9dd72f05f91b340e1f59ef27e4259e1c6aafbb3425143b5
+outer             06f60d526e335dc69547cb01efee40351cd77d434ad3ed83ff2d27b350be9eb0

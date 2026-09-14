@@ -1,0 +1,9 @@
+Date (UTC): 2026-09-12
+Command: ./dev speed-test
+Working directory: /home/main/Documents/Claude/krasis
+Resolved config: tests/qcn-k4v4-hqq4-int4-benchmark.conf
+GPU: GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab (NVIDIA RTX A6000)
+Instrumentation: timing and trace disabled for speed measurement
+Purpose: fixed cross-model regression gate after true-greedy ADQ harness and evidence-collector corrections
+Exit status: 0
+Run directory: logs/dev-benchmark_20260912_004925

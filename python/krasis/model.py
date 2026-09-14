@@ -7468,23 +7468,30 @@ class KrasisModel:
 
         cpu_bits = self.quant_cfg.cpu_expert_bits
         gpu_bits = self.quant_cfg.gpu_expert_bits
+        shared_bits = {"int8": 8, "bf16": 16}.get(self.quant_cfg.shared_expert)
+        if shared_bits is None:
+            raise RuntimeError(
+                "Shared experts require shared_expert quantization int8 or bf16, "
+                f"got {self.quant_cfg.shared_expert!r}"
+            )
         tileq_cache = getattr(self.quant_cfg, "tileq_cache", None)
         if gpu_bits == 3:
             if not tileq_cache:
                 raise RuntimeError("TileQ GPU experts require an explicit tileq_cache artifact")
             os.environ["KRASIS_TILEQ_CACHE"] = os.path.abspath(os.path.expanduser(tileq_cache))
-            shared_bits = {"int8": 8, "bf16": 16}.get(self.quant_cfg.shared_expert)
-            if shared_bits is None:
-                raise RuntimeError(
-                    "TileQ shared experts require shared_expert quantization int8 or bf16, "
-                    f"got {self.quant_cfg.shared_expert!r}"
-                )
-            # TileQ replaces only the routed bank.  Keep a model's independent
-            # shared-expert path at the precision selected by the normal
-            # runtime config rather than implicitly changing it to INT3.
-            os.environ["KRASIS_TILEQ_SHARED_EXPERT_BITS"] = str(shared_bits)
         elif tileq_cache:
             raise RuntimeError("tileq_cache is valid only when gpu_expert_bits=3")
+        mixed_expert_manifest = getattr(self.quant_cfg, "mixed_expert_manifest", None)
+        if mixed_expert_manifest:
+            if gpu_bits != 4:
+                raise RuntimeError(
+                    "mixed_expert_manifest requires gpu_expert_bits=4 as its INT4 baseline"
+                )
+            if not gpu_only:
+                raise RuntimeError(
+                    "mixed_expert_manifest currently requires GPU-only Rust/CUDA decode"
+                )
+            mixed_expert_manifest = os.path.abspath(os.path.expanduser(mixed_expert_manifest))
 
         # If model has shared_expert_gate, Python/GPU handles shared expert with gate
         # → tell Rust engine to skip shared experts to avoid double-counting
@@ -7500,7 +7507,9 @@ class KrasisModel:
                 group_size=self.quant_cfg.expert_group_size,
                 cpu_num_bits=cpu_bits,
                 gpu_num_bits=gpu_bits,
+                shared_gpu_num_bits=shared_bits,
                 expert_int4_calib=self.quant_cfg.gpu_expert_int4_calib,
+                mixed_expert_manifest=mixed_expert_manifest,
                 gguf_path=self.gguf_path,
                 gguf_native=self.gguf_native,
                 expert_hqq_diagnostic_cache_spec=self.expert_hqq_diagnostic_cache_spec,
@@ -7511,7 +7520,9 @@ class KrasisModel:
                 group_size=self.quant_cfg.expert_group_size,
                 cpu_num_bits=cpu_bits,
                 gpu_num_bits=gpu_bits,
+                shared_gpu_num_bits=shared_bits,
                 expert_int4_calib=self.quant_cfg.gpu_expert_int4_calib,
+                mixed_expert_manifest=mixed_expert_manifest,
                 gpu_only=gpu_only,
                 expert_hqq_diagnostic_cache_spec=self.expert_hqq_diagnostic_cache_spec,
             )
@@ -13335,6 +13346,9 @@ class KrasisModel:
         Also handles single-slot AWQ: restore Marlin data into GPU slots
         for instant prefill on the next request.
         """
+        if _vram_ledger_enabled():
+            _vram_checkpoint("server-cleanup-before")
+
         # Single-slot AWQ: restore Marlin into slots
         gpu_store = getattr(self, '_gpu_decode_store', None)
         if gpu_store is not None:
@@ -13362,3 +13376,6 @@ class KrasisModel:
                 buffers['ssm_state'].zero_()
 
         self._rust_kv_refs = None
+
+        if _vram_ledger_enabled():
+            _vram_checkpoint("server-cleanup-after")

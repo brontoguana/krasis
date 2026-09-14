@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -207,6 +208,30 @@ def _validated_prefix_cache_ram_fraction(value: Any, label: str) -> float:
     if not math.isfinite(fraction) or not 0.0 < fraction <= 1.0:
         raise ValueError(f"{label} must be finite and in (0, 1]")
     return fraction
+
+
+def _validate_mixed_ranking_evidence(
+    manifest_path: str, calibration: Dict[str, Any]
+) -> None:
+    ranking_evidence_path = os.path.join(
+        os.path.dirname(manifest_path), "mixed-expert-ranking.json"
+    )
+    try:
+        with open(ranking_evidence_path, "rb") as handle:
+            ranking_evidence_raw = handle.read()
+    except OSError as exc:
+        raise ValueError(
+            "Mixed routed-expert ranking evidence is unavailable: "
+            f"{ranking_evidence_path}: {exc}"
+        ) from exc
+    if (
+        hashlib.sha256(ranking_evidence_raw).hexdigest()
+        != calibration.get("ranking_evidence_sha256")
+    ):
+        raise ValueError(
+            "Mixed routed-expert ranking evidence identity does not match "
+            "the precision manifest."
+        )
 
 
 def _visible_len(s: str) -> int:
@@ -923,6 +948,7 @@ class LauncherConfig:
         self.kv_dtype: str = "k6v6"
         self._kv_dtype_explicit: bool = False
         self.gpu_expert_bits: int = 4
+        self.mixed_expert_manifest: str = ""
         self.expert_group_size: int = 128
         self.gpu_expert_int4_calib: str = "amax"
         self.cpu_expert_bits: int = 4
@@ -1038,6 +1064,10 @@ class LauncherConfig:
                 self.gpu_expert_bits = int(saved["CFG_GPU_EXPERT_BITS"])
             except ValueError:
                 pass
+        if "CFG_MIXED_EXPERT_MANIFEST" in saved:
+            self.mixed_expert_manifest = os.path.expanduser(
+                saved["CFG_MIXED_EXPERT_MANIFEST"].strip()
+            )
         if "CFG_EXPERT_GROUP_SIZE" in saved:
             try:
                 val = int(saved["CFG_EXPERT_GROUP_SIZE"])
@@ -1279,6 +1309,7 @@ class LauncherConfig:
             "CFG_MAX_CONTEXT_TOKENS": str(self.max_context_tokens),
             "CFG_KV_DTYPE": self.kv_dtype,
             "CFG_GPU_EXPERT_BITS": str(self.gpu_expert_bits),
+            "CFG_MIXED_EXPERT_MANIFEST": self.mixed_expert_manifest,
             "CFG_EXPERT_GROUP_SIZE": str(self.expert_group_size),
             "CFG_GPU_EXPERT_INT4_CALIB": self.gpu_expert_int4_calib,
             "CFG_CPU_EXPERT_BITS": str(self.cpu_expert_bits),
@@ -1377,6 +1408,8 @@ OPTIONS = [
                  choices=["k4v4", "k6v6", "bf16"], affects_budget=True),
     ConfigOption("Model quantization", "gpu_expert_bits",
                  choices=[4], affects_budget=True),
+    ConfigOption("Mixed expert manifest", "mixed_expert_manifest",
+                 opt_type="text", affects_budget=True, advanced=True),
     ConfigOption("Expert group size", "expert_group_size",
                  choices=[32, 64, 128], affects_budget=True, advanced=True),
     ConfigOption("Expert INT4 calib", "gpu_expert_int4_calib",
@@ -2260,6 +2293,98 @@ class Launcher:
                 "The production launcher supports INT4 experts only; "
                 f"got GPU INT{self.cfg.gpu_expert_bits} / CPU INT{self.cfg.cpu_expert_bits}."
             )
+        if self.cfg.mixed_expert_manifest:
+            from krasis.checkpoint_identity import cache_namespace, checkpoint_identity
+
+            manifest_path = os.path.abspath(
+                os.path.expanduser(self.cfg.mixed_expert_manifest)
+            )
+            if not os.path.isfile(manifest_path):
+                raise ValueError(
+                    f"Mixed routed-expert manifest does not exist: {manifest_path}"
+                )
+            try:
+                with open(manifest_path, "rb") as handle:
+                    manifest_raw = handle.read()
+                manifest = json.loads(manifest_raw)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"Mixed routed-expert manifest is unreadable: {manifest_path}: {exc}"
+                ) from exc
+            if not isinstance(manifest, dict):
+                raise ValueError("Mixed routed-expert manifest root must be an object.")
+            if json.dumps(manifest, separators=(",", ":")).encode("utf-8") != manifest_raw:
+                raise ValueError(
+                    "Mixed routed-expert manifest must use canonical compact JSON."
+                )
+            budget = manifest.get("budget")
+            calibration = manifest.get("calibration")
+            source4 = manifest.get("source_int4")
+            source8 = manifest.get("source_int8")
+            checkpoint = checkpoint_identity(self.cfg.model_path)
+            model_config_path = os.path.join(self.cfg.model_path, "config.json")
+            with open(model_config_path, "rb") as handle:
+                model_config_raw = handle.read()
+            model_config_json = json.loads(model_config_raw)
+            model_text_config = model_config_json.get("text_config", model_config_json)
+            if not isinstance(model_text_config, dict):
+                raise ValueError("Selected model text_config must be an object.")
+            experts_gated = model_text_config.get("mlp_hidden_act") != "relu2"
+            if (
+                manifest.get("format") != "Krasis routed mixed Marlin INT4/INT8"
+                or manifest.get("schema_version") != 1
+                or manifest.get("checkpoint_sha256") != checkpoint["sha256"]
+                or manifest.get("cache_namespace") != cache_namespace(self.cfg.model_path)
+                or manifest.get("config_sha256")
+                != hashlib.sha256(model_config_raw).hexdigest()
+                or manifest.get("experts_gated") is not experts_gated
+                or manifest.get("default_bits") != 4
+                or not isinstance(budget, dict)
+                or budget.get("requested_basis_points") not in (500, 1000, 1500, 2000)
+                or not isinstance(calibration, dict)
+                or not isinstance(source4, dict)
+                or source4.get("bits") != 4
+                or not isinstance(source8, dict)
+                or source8.get("bits") != 8
+            ):
+                raise ValueError(
+                    "Mixed routed-expert manifest is not a validated contract for "
+                    "the selected checkpoint and supported +5/+10/+15/+20% budgets."
+                )
+            manifest_dir = os.path.dirname(manifest_path)
+            _validate_mixed_ranking_evidence(manifest_path, calibration)
+            for source, bits in ((source4, 4), (source8, 8)):
+                basename = source.get("basename")
+                expected_bytes = source.get("bytes")
+                if (
+                    not isinstance(basename, str)
+                    or basename != os.path.basename(basename)
+                    or not basename
+                    or not isinstance(expected_bytes, int)
+                    or expected_bytes <= 0
+                ):
+                    raise ValueError(
+                        f"Mixed routed-expert INT{bits} source identity is invalid."
+                    )
+                source_path = os.path.join(manifest_dir, basename)
+                if not os.path.isfile(source_path) or os.path.getsize(source_path) != expected_bytes:
+                    raise ValueError(
+                        f"Mixed routed-expert INT{bits} source is missing or has the wrong size: "
+                        f"{source_path}"
+                    )
+            if self.cfg.multi_gpu_mode == "peer" or self.cfg.dynamic_peer:
+                raise ValueError(
+                    "Mixed routed experts are not yet validated with peer expert serving."
+                )
+            if self.cfg.expert_compression:
+                raise ValueError(
+                    "Mixed routed experts are not yet validated with expert compression."
+                )
+            if self.cfg.dspark_mode != "off":
+                raise ValueError(
+                    "Mixed routed experts are not yet validated with D-Spark."
+                )
+            self.cfg.mixed_expert_manifest = manifest_path
         if self.cfg.dspark_mode != "off" and not bool(
             (self.model_info or {}).get("dspark_qualified", False)
         ):
@@ -2306,6 +2431,11 @@ class Launcher:
                 )
     def _validate_model_topology(self) -> None:
         selected_count = len(self.cfg.selected_gpu_indices)
+        if self.cfg.mixed_expert_manifest and selected_count != 1:
+            raise ValueError(
+                "Mixed routed experts require exactly one selected GPU; "
+                f"mixed multi-GPU execution is not live-qualified (got {selected_count})."
+            )
         if self.cfg.dspark_mode != "off" and selected_count != 1:
             raise ValueError(
                 "D-Spark is launcher-qualified on exactly one selected GPU; "
@@ -2395,6 +2525,7 @@ class Launcher:
                 layer_group_size=lgs,
                 kv_dtype=self.cfg.kv_dtype,
                 gpu_expert_bits=self.cfg.gpu_expert_bits,
+                mixed_expert_manifest=self.cfg.mixed_expert_manifest or None,
                 expert_group_size=self.cfg.expert_group_size,
                 attention_quant=self.cfg.attention_quant,
                 hqq_cache_profile=self.cfg.hqq_cache_profile,
@@ -3394,6 +3525,8 @@ class Launcher:
         print(f"  Max context:     {context_display}")
         print(f"  KV dtype:        {_format_kv_dtype_value(self.cfg.kv_dtype)}")
         print(f"  Quantization:    INT{self.cfg.gpu_expert_bits} g{self.cfg.expert_group_size}")
+        if self.cfg.mixed_expert_manifest:
+            print(f"  Mixed experts:   {self.cfg.mixed_expert_manifest}")
         if self.cfg.gpu_expert_bits == 4:
             print(f"  Expert INT4:     {self.cfg.gpu_expert_int4_calib}")
         attn_display = _format_attention_quant_value(

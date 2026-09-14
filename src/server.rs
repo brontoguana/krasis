@@ -115,11 +115,87 @@ fn decode_token_preserving_tool_specials(
 }
 use pyo3::prelude::*;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
+
+const SSE_IO_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+struct SsePeerDisconnectMonitor {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SsePeerDisconnectMonitor {
+    fn start(
+        stream: &TcpStream,
+        disconnected: Arc<AtomicBool>,
+        request_id: &str,
+    ) -> std::io::Result<Self> {
+        let probe_stream = stream.try_clone()?;
+        probe_stream.set_read_timeout(Some(SSE_IO_POLL_INTERVAL))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let label = request_id.to_string();
+        let handle = std::thread::Builder::new()
+            .name("krasis-sse-peer-monitor".to_string())
+            .spawn(move || {
+                let mut probe = [0u8; 1];
+                loop {
+                    if thread_stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    match probe_stream.peek(&mut probe) {
+                        Ok(0) => {
+                            if !thread_stop.load(Ordering::Acquire) {
+                                log::info!(
+                                    "Request {}: SSE peer closed its request stream; cancelling generation",
+                                    label
+                                );
+                                disconnected.store(true, Ordering::Release);
+                            }
+                            return;
+                        }
+                        Ok(_) => std::thread::sleep(SSE_IO_POLL_INTERVAL),
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock
+                                    | std::io::ErrorKind::TimedOut
+                                    | std::io::ErrorKind::Interrupted
+                            ) => {}
+                        Err(error) => {
+                            if !thread_stop.load(Ordering::Acquire) {
+                                log::info!(
+                                    "Request {}: SSE peer monitor observed {}; cancelling generation",
+                                    label,
+                                    error
+                                );
+                                disconnected.store(true, Ordering::Release);
+                            }
+                            return;
+                        }
+                    }
+                }
+            })?;
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    fn stop_and_join(mut self, stream: &TcpStream) {
+        self.stop.store(true, Ordering::Release);
+        // No further request bytes are consumed after dispatch. Shutting down
+        // the read half wakes a blocking peek without affecting SSE writes.
+        let _ = stream.shutdown(Shutdown::Read);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 fn abort_if_cuda_context_poisoned(context: &str, err: &str) {
     if err.contains("CUDA_ERROR_ILLEGAL_ADDRESS")
@@ -166,8 +242,8 @@ extern "C" fn shutdown_signal_handler(_sig: libc::c_int) {
 struct ServerState {
     py_model: Py<PyAny>,
     model_name: String,
-    tokenizer: tokenizers::Tokenizer,
-    chat_template: crate::chat_template::ChatTemplateEngine,
+    tokenizer: Arc<tokenizers::Tokenizer>,
+    chat_template: Arc<crate::chat_template::ChatTemplateEngine>,
     max_context_tokens: usize,
     default_enable_thinking: bool,
     /// Token ID for `</think>` — when set, thinking tokens are exempt from max_tokens.
@@ -868,6 +944,191 @@ struct ServerInfo {
     model_name: String,
     max_context_tokens: usize,
     supports_vision: bool,
+    tokenizer: Arc<tokenizers::Tokenizer>,
+    chat_template: Arc<crate::chat_template::ChatTemplateEngine>,
+    default_enable_thinking: bool,
+}
+
+struct RenderedChatInput {
+    messages_json: String,
+    has_images: bool,
+    tools_json: String,
+    has_tools: bool,
+    enable_thinking: bool,
+    rendered: String,
+}
+
+#[derive(Debug)]
+enum RenderedChatInputError {
+    InvalidRequest(String),
+    Template(String),
+}
+
+fn prepare_rendered_chat_input(
+    req: &serde_json::Value,
+    chat_template: &crate::chat_template::ChatTemplateEngine,
+    default_enable_thinking: bool,
+    add_generation_prompt: bool,
+) -> Result<RenderedChatInput, RenderedChatInputError> {
+    let messages = req
+        .get("messages")
+        .ok_or_else(|| RenderedChatInputError::InvalidRequest("Missing messages".to_string()))?;
+    let has_images = crate::text_only_messages::messages_have_image_parts(messages);
+    let validation = if has_images {
+        crate::text_only_messages::validate_image_only_messages(messages)
+    } else {
+        crate::text_only_messages::validate_text_only_messages(messages)
+    };
+    validation.map_err(RenderedChatInputError::InvalidRequest)?;
+    let messages_json = messages.to_string();
+
+    let enable_thinking = req
+        .get("enable_thinking")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(default_enable_thinking);
+    let tools_json = match req.get("tools") {
+        Some(tools) if tools.is_array() => {
+            let disabled = matches!(
+                req.get("tool_choice"),
+                Some(serde_json::Value::String(choice)) if choice == "none"
+            );
+            if disabled {
+                String::new()
+            } else {
+                tools.to_string()
+            }
+        }
+        _ => String::new(),
+    };
+    let has_tools = !tools_json.is_empty();
+    if has_tools && chat_template.tool_call_format().start_marker().is_none() {
+        return Err(RenderedChatInputError::InvalidRequest(
+            "The loaded chat template does not declare a supported native tool-call grammar"
+                .to_string(),
+        ));
+    }
+
+    let rendered_result = if has_images {
+        chat_template.apply_multimodal_with_tools(
+            &messages_json,
+            &tools_json,
+            add_generation_prompt,
+            enable_thinking,
+        )
+    } else {
+        chat_template.apply_with_tools(
+            &messages_json,
+            &tools_json,
+            add_generation_prompt,
+            enable_thinking,
+        )
+    };
+    let rendered = rendered_result.map_err(RenderedChatInputError::Template)?;
+    Ok(RenderedChatInput {
+        messages_json,
+        has_images,
+        tools_json,
+        has_tools,
+        enable_thinking,
+        rendered,
+    })
+}
+
+fn rendered_input_error_body(message: &str) -> String {
+    serde_json::json!({ "error": message }).to_string()
+}
+
+fn handle_apply_template(stream: &mut TcpStream, body: &str, server_info: &ServerInfo) {
+    let req: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(error) => {
+            let response = rendered_input_error_body(&format!("Invalid JSON: {error}"));
+            let _ = send_json(stream, 400, &response);
+            return;
+        }
+    };
+    let add_generation_prompt = match req.get("add_generation_prompt") {
+        Some(value) => match value.as_bool() {
+            Some(enabled) => enabled,
+            None => {
+                let response = rendered_input_error_body("add_generation_prompt must be a boolean");
+                let _ = send_json(stream, 400, &response);
+                return;
+            }
+        },
+        None => true,
+    };
+    let prepared = match prepare_rendered_chat_input(
+        &req,
+        server_info.chat_template.as_ref(),
+        server_info.default_enable_thinking,
+        add_generation_prompt,
+    ) {
+        Ok(prepared) => prepared,
+        Err(RenderedChatInputError::InvalidRequest(message)) => {
+            let response = rendered_input_error_body(&message);
+            let _ = send_json(stream, 400, &response);
+            return;
+        }
+        Err(RenderedChatInputError::Template(message)) => {
+            let response = rendered_input_error_body(&format!(
+                "Chat template failed: {message}. This indicates a broken model setup."
+            ));
+            let _ = send_json(stream, 500, &response);
+            return;
+        }
+    };
+    if prepared.has_images {
+        let response = rendered_input_error_body(
+            "/apply-template cannot represent checkpoint-native multimodal input IDs exactly",
+        );
+        let _ = send_json(stream, 400, &response);
+        return;
+    }
+    let response = serde_json::json!({ "prompt": prepared.rendered }).to_string();
+    let _ = send_json(stream, 200, &response);
+}
+
+fn handle_tokenize(stream: &mut TcpStream, body: &str, server_info: &ServerInfo) {
+    let req: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(error) => {
+            let response = rendered_input_error_body(&format!("Invalid JSON: {error}"));
+            let _ = send_json(stream, 400, &response);
+            return;
+        }
+    };
+    let content = match req.get("content").and_then(|value| value.as_str()) {
+        Some(content) => content,
+        None => {
+            let response = rendered_input_error_body("content must be a string");
+            let _ = send_json(stream, 400, &response);
+            return;
+        }
+    };
+    let add_special = match req.get("add_special") {
+        Some(value) => match value.as_bool() {
+            Some(enabled) => enabled,
+            None => {
+                let response = rendered_input_error_body("add_special must be a boolean");
+                let _ = send_json(stream, 400, &response);
+                return;
+            }
+        },
+        None => true,
+    };
+    let encoding = match server_info.tokenizer.encode(content, add_special) {
+        Ok(encoding) => encoding,
+        Err(error) => {
+            let response = rendered_input_error_body(&format!(
+                "Tokenizer failed: {error}. This indicates a broken model setup."
+            ));
+            let _ = send_json(stream, 500, &response);
+            return;
+        }
+    };
+    let response = serde_json::json!({ "tokens": encoding.get_ids() }).to_string();
+    let _ = send_json(stream, 200, &response);
 }
 
 fn drain_vram_pressure_for_state(
@@ -1065,7 +1326,8 @@ fn handle_model_request(request: ModelRequest, state: &mut ServerState) {
         ModelRequest::SequenceStateTransferMeasurement { mut stream, body } => {
             handle_sequence_state_transfer_measurement(&mut stream, &body, state)
         }
-    }
+    };
+    crate::vram_monitor::report_event("model_request_handler_returned");
 }
 
 fn reject_model_request(request: ModelRequest, message: &str) {
@@ -1108,6 +1370,7 @@ impl Drop for VramRequestContextGuard {
                 log::info!("Request VRAM low-water: {} lows={}", context, lows_text);
             }
         }
+        crate::vram_monitor::set_lifecycle_event("request_context_ended");
     }
 }
 
@@ -1346,6 +1609,14 @@ fn handle_front_connection(
                 server_info.supports_vision,
             );
             let _ = send_json(&mut tcp_stream, 200, &body);
+        }
+
+        ("POST", "/apply-template") => {
+            handle_apply_template(&mut tcp_stream, &request.body, &server_info);
+        }
+
+        ("POST", "/tokenize") => {
+            handle_tokenize(&mut tcp_stream, &request.body, &server_info);
         }
 
         ("GET", "/v1/session-cache/stats") => {
@@ -2778,10 +3049,6 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         .and_then(|v| v.as_u64())
         .unwrap_or(5) as usize;
     let logprobs_top_n = if req_logprobs { req_top_logprobs } else { 0 };
-    let enable_thinking = req
-        .get("enable_thinking")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(state.default_enable_thinking);
     let debug_first_token_boundary = req
         .get("debug_first_token_boundary")
         .and_then(|v| v.as_bool())
@@ -2811,6 +3078,18 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         s ^= s << 17;
         s
     });
+    log::info!(
+        "chat sampling contract: request_id={} temperature={} top_k={} top_p={} mode={}",
+        request_id,
+        temperature,
+        top_k,
+        top_p,
+        if temperature == 0.0 {
+            "greedy"
+        } else {
+            "sampled"
+        }
+    );
     crate::vram_monitor::begin_request_context(&format!(
         "route=/v1/chat/completions request_id={} model={} max_new={} stream={} phase=parse",
         request_id, state.model_name, max_tokens, is_stream,
@@ -2827,31 +3106,6 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         .unwrap_or_default()
         .as_secs();
 
-    // Extract messages JSON for Python
-    let (messages_json, has_images) = match req.get("messages") {
-        Some(m) => {
-            let has_images = crate::text_only_messages::messages_have_image_parts(m);
-            let validation = if has_images {
-                crate::text_only_messages::validate_image_only_messages(m)
-            } else {
-                crate::text_only_messages::validate_text_only_messages(m)
-            };
-            if let Err(e) = validation {
-                let _ = send_json(
-                    stream,
-                    400,
-                    &format!(r#"{{"error":"{}"}}"#, json_escape(&e)),
-                );
-                return;
-            }
-            (m.to_string(), has_images)
-        }
-        None => {
-            let _ = send_json(stream, 400, r#"{"error":"Missing messages"}"#);
-            return;
-        }
-    };
-
     // Custom stop tokens
     let stop_tokens: Vec<String> = match req.get("stop") {
         Some(serde_json::Value::String(s)) => vec![s.clone()],
@@ -2862,63 +3116,39 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         _ => vec![],
     };
 
-    // Tool use: extract tools array and tool_choice
-    // tool_choice can be a string ("auto", "none", "required") or an object
-    // {"type": "function", "function": {"name": "..."}} — we pass tools through
-    // unless tool_choice is explicitly "none".
-    let tools_json = match req.get("tools") {
-        Some(t) if t.is_array() => {
-            let is_none = match req.get("tool_choice") {
-                Some(serde_json::Value::String(s)) => s == "none",
-                _ => false, // object form or missing = allow tools
-            };
-            if is_none {
-                String::new()
-            } else {
-                t.to_string()
-            }
+    // Render and validate through the same function exposed by
+    // /apply-template. Evidence collection and inference therefore cannot
+    // silently disagree about messages, tools, or thinking mode.
+    let prepared = match prepare_rendered_chat_input(
+        &req,
+        state.chat_template.as_ref(),
+        state.default_enable_thinking,
+        true,
+    ) {
+        Ok(prepared) => prepared,
+        Err(RenderedChatInputError::InvalidRequest(message)) => {
+            let response = rendered_input_error_body(&message);
+            let _ = send_json(stream, 400, &response);
+            return;
         }
-        _ => String::new(),
-    };
-    let has_tools = !tools_json.is_empty();
-    let tool_call_format = state.chat_template.tool_call_format();
-    if has_tools && tool_call_format.start_marker().is_none() {
-        let _ = send_json(
-            stream,
-            400,
-            r#"{"error":"The loaded chat template does not declare a supported native tool-call grammar"}"#,
-        );
-        return;
-    }
-
-    // ── Render chat template (reused for both token estimation and Rust prefill) ──
-    let rendered_result = if has_images {
-        state.chat_template.apply_multimodal_with_tools(
-            &messages_json,
-            &tools_json,
-            true,
-            enable_thinking,
-        )
-    } else {
-        state
-            .chat_template
-            .apply_with_tools(&messages_json, &tools_json, true, enable_thinking)
-    };
-    let rendered = match rendered_result {
-        Ok(r) => r,
-        Err(e) => {
-            log::error!("Chat template failed: {}", e);
-            let _ = send_json(
-                stream,
-                500,
-                &format!(
-                    r#"{{"error":"Chat template failed: {}. This indicates a broken model setup."}}"#,
-                    e
-                ),
-            );
+        Err(RenderedChatInputError::Template(message)) => {
+            log::error!("Chat template failed: {}", message);
+            let response = rendered_input_error_body(&format!(
+                "Chat template failed: {message}. This indicates a broken model setup."
+            ));
+            let _ = send_json(stream, 500, &response);
             return;
         }
     };
+    let RenderedChatInput {
+        messages_json,
+        has_images,
+        tools_json,
+        has_tools,
+        enable_thinking,
+        rendered,
+    } = prepared;
+    let tool_call_format = state.chat_template.tool_call_format();
     // A later turn normally replaces the assistant-generation suffix rather
     // than appending after it. Templates whose disabled-thinking scaffold is
     // explicitly history-stable can safely capture the ordinary full prompt;
@@ -4812,6 +5042,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     crate::vram_monitor::report_event("decode_end");
 
     // ── Transactional sequence-state publication and cleanup ──
+    crate::vram_monitor::report_event("cleanup_start");
     let t_cleanup = Instant::now();
     if cache_request_eligible {
         if decode_outcome.completed {
@@ -6772,6 +7003,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     }
 
     let decode_ms = t_decode.elapsed().as_secs_f64() * 1000.0;
+    crate::vram_monitor::report_event("reference_decode_complete_before_cleanup");
     let mut debug_decode_state = if debug_decode_state_trace {
         let raw =
             store.config_validation_snapshot_json(prompt_len, true, reload_pending_at_decode_start);
@@ -6817,6 +7049,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     Python::with_gil(|py| {
         let _ = state.py_model.call_method0(py, "server_cleanup");
     });
+    crate::vram_monitor::report_event("reference_server_cleanup_returned");
     let server_cleanup_called = true;
     if debug_mamba2_state_lifecycle_trace {
         debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
@@ -7102,7 +7335,9 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         finish_reason
     );
 
+    crate::vram_monitor::report_event("reference_response_send_start");
     let _ = send_json(stream, 200, &response);
+    crate::vram_monitor::report_event("reference_response_send_complete");
 }
 
 /// GPU decode: GIL-free Rust decode loop via GpuDecodeStore.
@@ -7232,6 +7467,19 @@ fn handle_gpu_decode(
         let (tx, rx) = mpsc::channel::<String>();
         let writer_disconnected = Arc::new(AtomicBool::new(false));
         let writer_disc_clone = writer_disconnected.clone();
+        let peer_monitor = match SsePeerDisconnectMonitor::start(
+            stream,
+            Arc::clone(&writer_disconnected),
+            request_id,
+        ) {
+            Ok(monitor) => monitor,
+            Err(error) => {
+                log::error!("Failed to start SSE peer monitor: {}", error);
+                return DecodeTransactionOutcome::failed(format!(
+                    "start SSE peer monitor: {error}"
+                ));
+            }
+        };
 
         let mut writer_stream = match stream.try_clone() {
             Ok(s) => s,
@@ -7242,15 +7490,17 @@ fn handle_gpu_decode(
         };
 
         let writer_handle = std::thread::spawn(move || {
-            let flush_interval = std::time::Duration::from_millis(100);
             let mut buf = String::new();
             let mut last_flush = Instant::now();
             let mut is_first = true;
             loop {
-                match rx.recv_timeout(flush_interval) {
+                match rx.recv_timeout(SSE_IO_POLL_INTERVAL) {
                     Ok(chunk) => {
                         buf.push_str(&chunk);
-                        if is_first || last_flush.elapsed() >= flush_interval || buf.len() > 8192 {
+                        if is_first
+                            || last_flush.elapsed() >= SSE_IO_POLL_INTERVAL
+                            || buf.len() > 8192
+                        {
                             if writer_stream.write_all(buf.as_bytes()).is_err()
                                 || writer_stream.flush().is_err()
                             {
@@ -7475,6 +7725,7 @@ fn handle_gpu_decode(
                 &mut on_token,
             )
         };
+        peer_monitor.stop_and_join(stream);
 
         // Capture decode timing BEFORE post-generation processing (tool call parsing etc.)
         let decode_elapsed = decode_start.elapsed().as_secs_f64();
@@ -7898,7 +8149,7 @@ pub struct RustServer {
     /// Token ID for `</think>` passed from Python (0 = not available).
     thinking_end_token_id: usize,
     gpu_store_addr: usize,
-    py_model: Py<PyAny>,
+    py_model: Option<Py<PyAny>>,
     running: Arc<AtomicBool>,
     aux_gpu_store_addrs: Vec<usize>,
     multi_gpu_split_layers: Vec<usize>,
@@ -7914,6 +8165,17 @@ pub struct RustServer {
     prefix_cache: bool,
     /// Fraction of live cgroup-aware host availability admitted to the cache.
     prefix_cache_ram_fraction: f64,
+}
+
+fn unique_decode_store_addresses(primary: usize, auxiliary: &[usize]) -> Vec<usize> {
+    let mut addresses = Vec::with_capacity(auxiliary.len() + 1);
+    if primary != 0 {
+        addresses.push(primary);
+    }
+    addresses.extend(auxiliary.iter().copied().filter(|address| *address != 0));
+    addresses.sort_unstable();
+    addresses.dedup();
+    addresses
 }
 
 #[pymethods]
@@ -7979,7 +8241,7 @@ impl RustServer {
             default_enable_thinking: enable_thinking,
             thinking_end_token_id,
             gpu_store_addr,
-            py_model: py_model.into(),
+            py_model: Some(py_model.into()),
             running: Arc::new(AtomicBool::new(false)),
             aux_gpu_store_addrs,
             multi_gpu_split_layers,
@@ -7998,7 +8260,15 @@ impl RustServer {
         self.running.store(true, Ordering::Release);
 
         let addr = format!("{}:{}", self.host, self.port);
-        let py_model = self.py_model.clone_ref(py);
+        let py_model = self
+            .py_model
+            .as_ref()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "RustServer runtime resources were already released",
+                )
+            })?
+            .clone_ref(py);
         let model_name = self.model_name.clone();
         let tokenizer_path = self.tokenizer_path.clone();
         let max_context_tokens = self.max_context_tokens;
@@ -8235,11 +8505,13 @@ impl RustServer {
                 None
             };
 
+            let tokenizer = Arc::new(tokenizer);
+            let chat_template = Arc::new(chat_template);
             let state = ServerState {
                 py_model,
                 model_name,
-                tokenizer,
-                chat_template,
+                tokenizer: Arc::clone(&tokenizer),
+                chat_template: Arc::clone(&chat_template),
                 max_context_tokens,
                 default_enable_thinking,
                 thinking_end_token,
@@ -8268,6 +8540,9 @@ impl RustServer {
                 model_name: state.model_name.clone(),
                 max_context_tokens: state.max_context_tokens,
                 supports_vision: self.supports_vision,
+                tokenizer,
+                chat_template,
+                default_enable_thinking: state.default_enable_thinking,
             };
             let (model_tx, model_rx) = mpsc::channel::<QueuedModelRequest>();
             let scheduler = Arc::new(FairModelScheduler::new(model_tx));
@@ -8297,6 +8572,7 @@ impl RustServer {
                                         wait_ms,
                                         remaining,
                                     );
+                                    crate::vram_monitor::report_event("model_request_dispatch");
                                     handle_model_request(queued.request, &mut state);
                                 }
                                 expected_ticket = expected_ticket.checked_add(1).unwrap_or_else(|| {
@@ -8305,7 +8581,13 @@ impl RustServer {
                                 });
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => {
+                                crate::vram_monitor::set_lifecycle_event(
+                                    "model_worker_idle_before_pressure_drain",
+                                );
                                 drain_vram_pressure_for_state(&mut state, "idle", false);
+                                crate::vram_monitor::set_lifecycle_event(
+                                    "model_worker_idle_after_pressure_drain",
+                                );
                             }
                             Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         }
@@ -8700,7 +8982,14 @@ impl RustServer {
             let reload_ms = t_reload.elapsed().as_secs_f64() * 1000.0;
             crate::vram_monitor::report_event("hcs_soft_load_end");
 
-            self.py_model.call_method0(py, "server_cleanup")?;
+            self.py_model
+                .as_ref()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "RustServer runtime resources were already released",
+                    )
+                })?
+                .call_method0(py, "server_cleanup")?;
 
             let prefill_tok_s = if prefill_ms > 0.0 {
                 prompt_len as f64 / (prefill_ms / 1000.0)
@@ -8944,7 +9233,14 @@ impl RustServer {
         crate::vram_monitor::report_event("decode_end");
 
         // Cleanup
-        self.py_model.call_method0(py, "server_cleanup")?;
+        self.py_model
+            .as_ref()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "RustServer runtime resources were already released",
+                )
+            })?
+            .call_method0(py, "server_cleanup")?;
 
         let prefill_tok_s = if prefill_ms > 0.0 {
             prompt_len as f64 / (prefill_ms / 1000.0)
@@ -9047,6 +9343,57 @@ impl RustServer {
         self.running.store(false, Ordering::Release);
     }
 
+    /// Release resources owned by the stopped server before Python's
+    /// intentional hard exit. The prefill engine can hold most of a GPU's
+    /// memory, and the retained Python model reference otherwise keeps every
+    /// model-owned decode store and tensor alive. Leaving those objects for
+    /// `exit_group` makes the CUDA driver perform a very large implicit context
+    /// teardown from a dying thread.
+    fn release_runtime_resources(&mut self) -> PyResult<(usize, usize, usize)> {
+        if self.running.load(Ordering::Acquire) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "cannot release RustServer resources while the server is running",
+            ));
+        }
+        let prefill_engine = self
+            .prefill_engine
+            .lock()
+            .map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "RustServer prefill-engine lock is poisoned",
+                )
+            })?
+            .take();
+        drop(prefill_engine);
+
+        // The retained Python model keeps every WeightStore backing alive here.
+        // Release each store's CUDA-context-scoped expert page locks before
+        // dropping that model reference. Auxiliary addresses are deduplicated
+        // generically because compatibility attributes can alias list members.
+        let store_addresses =
+            unique_decode_store_addresses(self.gpu_store_addr, &self.aux_gpu_store_addrs);
+        let mut released_regions = 0usize;
+        let mut released_bytes = 0usize;
+        for address in store_addresses.iter().copied() {
+            let store = unsafe { &mut *(address as *mut GpuDecodeStore) };
+            let (regions, bytes) = store
+                .release_expert_host_registrations_rust()
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            released_regions = released_regions.saturating_add(regions);
+            released_bytes = released_bytes.saturating_add(bytes);
+        }
+        log::info!(
+            "RustServer released {} expert host registrations ({:.3} GiB) across {} decode stores",
+            released_regions,
+            released_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+            store_addresses.len(),
+        );
+        self.py_model.take();
+        self.gpu_store_addr = 0;
+        self.aux_gpu_store_addrs.clear();
+        Ok((released_regions, released_bytes, store_addresses.len()))
+    }
+
     /// Check if server is running.
     fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
@@ -9061,15 +9408,27 @@ mod tests {
         format_completion, format_completion_with_debug, format_completion_with_tool_calls,
         format_models_response, format_sse_timing, format_sse_token, format_sse_tool_call_args,
         format_sse_tool_call_start, hide_synthetic_think_stop_text, internal_capture_boundary,
-        is_chat_completions_endpoint, is_models_endpoint, parse_tool_calls, push_tool_stream_text,
-        session_cache_multi_gpu_pending, session_cache_runtime_materialization_enabled,
+        is_chat_completions_endpoint, is_models_endpoint, parse_tool_calls,
+        prepare_rendered_chat_input, push_tool_stream_text, session_cache_multi_gpu_pending,
+        session_cache_runtime_materialization_enabled, unique_decode_store_addresses,
         validate_prefix_cache_ram_fraction, FairModelScheduler, ModelRequest, ParsedToolCall,
-        RequestOverhead, SessionCacheMetrics, SessionCacheMissReason, SessionLockKey,
-        SessionLockTable, StreamDetokenizer,
+        RequestOverhead, ServerInfo, SessionCacheMetrics, SessionCacheMissReason, SessionLockKey,
+        SessionLockTable, SsePeerDisconnectMonitor, StreamDetokenizer,
     };
     use crate::chat_template::{ChatTemplateEngine, ToolCallFormat};
     use std::fs;
-    use std::net::{TcpListener, TcpStream};
+
+    #[test]
+    fn shutdown_store_traversal_deduplicates_primary_and_arbitrary_auxiliary_addresses() {
+        assert_eq!(
+            unique_decode_store_addresses(40, &[0, 30, 40, 20, 30, 10]),
+            vec![10, 20, 30, 40]
+        );
+        assert!(unique_decode_store_addresses(0, &[0, 0]).is_empty());
+    }
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc};
 
     const WINDOWS_MODEL_PATH: &str = r#"C:\Users\stoate\.krasis\models\Qwen3.6-35B-A3B"#;
@@ -9127,6 +9486,201 @@ mod tests {
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server, _) = listener.accept().unwrap();
         (server, client)
+    }
+
+    fn rendered_input_server_info() -> ServerInfo {
+        use tokenizers::models::wordlevel::WordLevel;
+        use tokenizers::Tokenizer;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "krasis_rendered_input_server_{}_{}",
+            std::process::id(),
+            nonce
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let template = concat!(
+            "{{ bos_token }}",
+            "{% for message in messages %}{{ message.role }}={{ message.content }}|{% endfor %}",
+            "{% for tool in tools %}tool={{ tool.function.name }}|{% endfor %}",
+            "{% if enable_thinking %}THINK|{% else %}NO_THINK|{% endif %}",
+            "{% if add_generation_prompt %}ASSISTANT|{% endif %}",
+            "{% set dsml_token = '｜DSML｜' %}<invoke name=\"tool\">"
+        );
+        fs::write(
+            dir.join("tokenizer_config.json"),
+            serde_json::json!({
+                "chat_template": template,
+                "bos_token": "<s>",
+                "eos_token": "</s>"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let chat_template =
+            ChatTemplateEngine::from_config(dir.join("tokenizer_config.json").to_str().unwrap())
+                .unwrap();
+        let _ = fs::remove_dir_all(dir);
+
+        let model = WordLevel::builder()
+            .vocab([("[UNK]".to_string(), 0u32)].into_iter().collect())
+            .unk_token("[UNK]".to_string())
+            .build()
+            .unwrap();
+        ServerInfo {
+            model_name: "rendered-input-test".to_string(),
+            max_context_tokens: 4096,
+            supports_vision: false,
+            tokenizer: Arc::new(Tokenizer::new(model)),
+            chat_template: Arc::new(chat_template),
+            default_enable_thinking: true,
+        }
+    }
+
+    fn front_post(path: &str, body: &serde_json::Value, server_info: ServerInfo) -> String {
+        let (server, mut client) = tcp_pair();
+        let request_body = body.to_string();
+        write!(
+            client,
+            "POST {path} HTTP/1.1\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+            request_body.len(),
+            request_body
+        )
+        .unwrap();
+        client.flush().unwrap();
+        let (sender, _receiver) = mpsc::channel();
+        super::handle_front_connection(
+            server,
+            server_info,
+            Arc::new(FairModelScheduler::new(sender)),
+            false,
+        );
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    fn http_json_body(response: &str) -> serde_json::Value {
+        let (_, body) = response
+            .split_once("\r\n\r\n")
+            .unwrap_or_else(|| panic!("invalid HTTP response: {response}"));
+        parse_response(body)
+    }
+
+    #[test]
+    fn rendered_input_routes_use_the_inference_renderer_and_tokenizer() {
+        let server_info = rendered_input_server_info();
+        let request = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": "rules"},
+                {"role": "user", "content": "work"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "probe",
+                    "description": "probe",
+                    "parameters": {"type": "object"}
+                }
+            }],
+            "tool_choice": "auto",
+            "enable_thinking": false,
+            "add_generation_prompt": true
+        });
+        let inference_input = prepare_rendered_chat_input(
+            &request,
+            server_info.chat_template.as_ref(),
+            server_info.default_enable_thinking,
+            true,
+        )
+        .unwrap();
+
+        let apply_response = front_post("/apply-template", &request, server_info.clone());
+        assert!(apply_response.starts_with("HTTP/1.1 200 OK"));
+        let apply_body = http_json_body(&apply_response);
+        assert_eq!(apply_body["prompt"], inference_input.rendered);
+        assert!(apply_body["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("tool=probe"));
+        assert!(apply_body["prompt"].as_str().unwrap().contains("NO_THINK"));
+        assert!(apply_body["prompt"].as_str().unwrap().contains("ASSISTANT"));
+
+        let tokenize_request = serde_json::json!({
+            "content": apply_body["prompt"],
+            "add_special": false
+        });
+        let tokenize_response = front_post("/tokenize", &tokenize_request, server_info.clone());
+        assert!(tokenize_response.starts_with("HTTP/1.1 200 OK"));
+        let tokenize_body = http_json_body(&tokenize_response);
+        let expected = server_info
+            .tokenizer
+            .encode(inference_input.rendered, false)
+            .unwrap();
+        assert_eq!(
+            tokenize_body["tokens"],
+            serde_json::json!(expected.get_ids())
+        );
+    }
+
+    #[test]
+    fn apply_template_fails_visibly_for_multimodal_evidence() {
+        let response = front_post(
+            "/apply-template",
+            &serde_json::json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+                    ]
+                }],
+                "add_generation_prompt": true
+            }),
+            rendered_input_server_info(),
+        );
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+        assert!(http_json_body(&response)["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot represent checkpoint-native multimodal input IDs exactly"));
+    }
+
+    #[test]
+    fn sse_peer_monitor_detects_orderly_request_half_close() {
+        let (server, client) = tcp_pair();
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let monitor = SsePeerDisconnectMonitor::start(
+            &server,
+            Arc::clone(&disconnected),
+            "orderly-close-test",
+        )
+        .unwrap();
+
+        client.shutdown(Shutdown::Write).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !disconnected.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(disconnected.load(Ordering::Acquire));
+        monitor.stop_and_join(&server);
+    }
+
+    #[test]
+    fn stopping_sse_peer_monitor_does_not_report_a_live_peer_as_disconnected() {
+        let (server, _client) = tcp_pair();
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let monitor =
+            SsePeerDisconnectMonitor::start(&server, Arc::clone(&disconnected), "live-peer-test")
+                .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(!disconnected.load(Ordering::Acquire));
+        monitor.stop_and_join(&server);
+        assert!(!disconnected.load(Ordering::Acquire));
     }
 
     #[test]

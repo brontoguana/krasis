@@ -121,6 +121,73 @@ class VramPressureSourceTests(unittest.TestCase):
         self.assertIn("engine.last_prepare_post_alloc_free_mb()", source)
         self.assertIn("crate::vram_monitor::current_request_lows()", source)
 
+    def test_startup_calibration_brackets_scratch_release_with_precision_monitor(self) -> None:
+        monitor = (ROOT / "src/vram_monitor.rs").read_text()
+        decode = (ROOT / "src/gpu_decode.rs").read_text()
+        server = (ROOT / "python/krasis/server.py").read_text()
+
+        self.assertIn("pub fn begin_precision_vram_window", monitor)
+        self.assertIn("PRECISION_READY_GENERATION.store", monitor)
+        self.assertIn("PRECISION_MIN_FREE_BYTES", monitor)
+        self.assertIn("capture_sample(dev);", monitor)
+        self.assertLess(
+            monitor.index("capture_sample(dev);"),
+            monitor.index("PRECISION_READY_GENERATION.store(requested"),
+        )
+        self.assertIn('join("vram-precision-windows.log")', monitor)
+        self.assertIn('\\"source\\":\\"cuda_runtime_monitor\\"', monitor)
+        bridge = decode.index("fn rust_prefill_tokens")
+        window = decode.index(
+            "begin_precision_vram_window(prefill_device_ordinal)", bridge
+        )
+        release = decode.index("let release_result = engine.release_scratch();", bridge)
+        finish = decode.index("window.finish().map(|_| ())", bridge)
+        self.assertLess(
+            decode.index('set_lifecycle_event("prefill_bridge_scratch_release_start")', bridge),
+            window,
+        )
+        self.assertLess(window, release)
+        self.assertLess(release, finish)
+        self.assertLess(
+            finish,
+            decode.index('"prefill_bridge_scratch_release_complete"', bridge),
+        )
+        self.assertLess(
+            server.index("vram_monitor.enable_precision_windows()"),
+            server.index("short_prompt = _make_startup_calibration_prompts"),
+        )
+        self.assertLess(
+            server.index("vram_monitor.disable_precision_windows()"),
+            server.index("short_prefill_delta ="),
+        )
+
+    def test_reference_summary_covers_prefill_tail_and_cleanup(self) -> None:
+        source = (ROOT / "src/server.rs").read_text()
+        handler = source[
+            source.index("fn handle_reference_test("):
+            source.index("/// GPU decode:", source.index("fn handle_reference_test("))
+        ]
+
+        self.assertLess(
+            handler.index("crate::vram_monitor::begin_request_context("),
+            handler.index("let prefill_result = loop"),
+        )
+        self.assertLess(
+            handler.index('report_event("reference_server_cleanup_returned")'),
+            handler.index("let vram_low_water = serde_json::Value::Array("),
+        )
+        self.assertIn(
+            "crate::vram_monitor::current_request_lows()",
+            handler[handler.index("let vram_low_water = serde_json::Value::Array("):],
+        )
+
+    def test_monitor_resolves_cuda_runtime_symbols_once(self) -> None:
+        source = (ROOT / "src/vram_monitor.rs").read_text()
+
+        self.assertIn("static CUDA_RUNTIME_FNS: OnceLock", source)
+        self.assertGreaterEqual(source.count("CUDA_RUNTIME_FNS.get()"), 2)
+        self.assertGreaterEqual(source.count("CUDA_RUNTIME_FNS.set(funcs)"), 2)
+
     def test_decode_timing_uses_copy_stream_events_for_graph_pcie_bandwidth(self) -> None:
         source = (ROOT / "src/gpu_decode.rs").read_text()
 

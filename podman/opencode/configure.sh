@@ -1,22 +1,31 @@
 #!/bin/bash
 set -euo pipefail
 
-[[ $# -eq 3 ]] || {
-    echo "Usage: ./configure.sh <http-base-url/v1> <served-model-id> <test-output-token-limit>" >&2
+[[ $# -eq 4 ]] || {
+    echo "Usage: ./configure.sh <container-http-base-url/v1> <host-probe-http-base-url/v1> <served-model-id> <test-output-token-limit>" >&2
     exit 1
 }
 
-BASE_URL="$1"
-MODEL_ID="$2"
-OUTPUT_LIMIT="$3"
+CONTAINER_BASE_URL="$1"
+HOST_PROBE_BASE_URL="$2"
+MODEL_ID="$3"
+OUTPUT_LIMIT="$4"
 DATA_DIR="${KRASIS_OPENCODE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/krasis-opencode-test}"
 CONFIG_PATH="$DATA_DIR/config/opencode.json"
 CONFIG_TEMP="$(mktemp "$DATA_DIR/config/opencode.json.XXXXXX")"
 
-case "$BASE_URL" in
+case "$CONTAINER_BASE_URL" in
     http://*/v1) ;;
     *)
-        echo "Base URL must be explicit plain HTTP and end in /v1: $BASE_URL" >&2
+        echo "Container base URL must be explicit plain HTTP and end in /v1: $CONTAINER_BASE_URL" >&2
+        exit 1
+        ;;
+esac
+
+case "$HOST_PROBE_BASE_URL" in
+    http://*/v1) ;;
+    *)
+        echo "Host probe base URL must be explicit plain HTTP and end in /v1: $HOST_PROBE_BASE_URL" >&2
         exit 1
         ;;
 esac
@@ -26,7 +35,7 @@ esac
     exit 1
 }
 
-MODELS_JSON="$(curl --fail --silent --show-error --max-time 10 "${BASE_URL%/}/models")"
+MODELS_JSON="$(curl --fail --silent --show-error --max-time 10 "${HOST_PROBE_BASE_URL%/}/models")"
 CONTEXT_LIMIT="$(jq -er --arg model_id "$MODEL_ID" \
     '.data[] | select(.id == $model_id) | .max_context_tokens' <<< "$MODELS_JSON")"
 [[ "$CONTEXT_LIMIT" =~ ^[1-9][0-9]*$ ]] || {
@@ -39,7 +48,7 @@ CONTEXT_LIMIT="$(jq -er --arg model_id "$MODEL_ID" \
 }
 
 jq -n \
-    --arg base_url "$BASE_URL" \
+    --arg base_url "$CONTAINER_BASE_URL" \
     --arg model_id "$MODEL_ID" \
     --argjson context_limit "$CONTEXT_LIMIT" \
     --argjson output_limit "$OUTPUT_LIMIT" \
@@ -97,4 +106,4 @@ jq -n \
     }' > "$CONFIG_TEMP"
 
 mv "$CONFIG_TEMP" "$CONFIG_PATH"
-echo "Configured krasis/$MODEL_ID at $BASE_URL (context=$CONTEXT_LIMIT, test output=$OUTPUT_LIMIT)"
+echo "Configured krasis/$MODEL_ID at $CONTAINER_BASE_URL (host probe=$HOST_PROBE_BASE_URL, context=$CONTEXT_LIMIT, test output=$OUTPUT_LIMIT)"

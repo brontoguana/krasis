@@ -319,6 +319,66 @@ fn split_expert_launch_enabled(
     }
 }
 
+#[inline(always)]
+fn canonical_ungraphed_quantized_moe_supported(
+    expert_bits: u8,
+    activation_type: u8,
+    gated: bool,
+    moe_input_size: usize,
+) -> bool {
+    matches!(expert_bits, 4 | 8) && activation_type == 0 && gated && moe_input_size == 0
+}
+
+/// `Some(bits)` means a manifest layer can use one homogeneous Marlin launch;
+/// `None` means it requires disjoint INT4 and INT8 launches.
+fn manifest_layer_uniform_bits(
+    mut bits: impl Iterator<Item = u8>,
+) -> Result<Option<u8>, String> {
+    let first = bits
+        .next()
+        .ok_or_else(|| "manifest routed expert table is empty".to_string())?;
+    if !matches!(first, 4 | 8) {
+        return Err(format!(
+            "manifest routed expert table contains unsupported INT{first}"
+        ));
+    }
+    let mut uniform = true;
+    for bits in bits {
+        if !matches!(bits, 4 | 8) {
+            return Err(format!(
+                "manifest routed expert table contains unsupported INT{bits}"
+            ));
+        }
+        uniform &= bits == first;
+    }
+    Ok(uniform.then_some(first))
+}
+
+fn uniform_aligned_expert_bytes(
+    mut expert_bytes: impl Iterator<Item = usize>,
+    alignment: usize,
+) -> Result<usize, String> {
+    if alignment == 0 || !alignment.is_power_of_two() {
+        return Err("expert slot alignment must be a nonzero power of two".to_string());
+    }
+    let first = expert_bytes
+        .next()
+        .ok_or_else(|| "expert slot accounting requires at least one expert".to_string())?;
+    if first == 0 {
+        return Err("expert slot accounting found a zero-byte expert".to_string());
+    }
+    if expert_bytes.any(|bytes| bytes != first) {
+        return Err(
+            "legacy scalar-slot HCS cannot account for heterogeneous expert sizes; use exact pool HCS"
+                .to_string(),
+        );
+    }
+    first
+        .checked_add(alignment - 1)
+        .map(|bytes| bytes & !(alignment - 1))
+        .ok_or_else(|| "expert slot alignment overflow".to_string())
+}
+
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -446,11 +506,60 @@ fn nonnegative_finite_env(name: &str, default: f64) -> Result<f64, String> {
     }
 }
 
+/// Select a reproducible geometry from runtime timing results. CUDA event
+/// medians that differ by less than the configured stability margin are not a
+/// meaningful ordering: choosing their absolute minimum lets measurement noise
+/// change reduction arithmetic between otherwise identical startups. Preserve
+/// the established geometry when it remains inside the measured performance
+/// envelope. If it is unavailable, choose the smallest geometry in that
+/// envelope so a near-tie still has one hardware/model-independent result.
+fn select_stable_timing_candidate(
+    results: &[(usize, f64)],
+    margin_pct: f64,
+    established_geometry: usize,
+) -> Option<(usize, f64, f64)> {
+    if !margin_pct.is_finite() || margin_pct < 0.0 {
+        return None;
+    }
+    let fastest_ms = results
+        .iter()
+        .filter_map(|&(_, elapsed_ms)| {
+            (elapsed_ms.is_finite() && elapsed_ms >= 0.0).then_some(elapsed_ms)
+        })
+        .min_by(|left, right| {
+            left.partial_cmp(right)
+                .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+    let stable_limit_ms = fastest_ms * (1.0 + margin_pct / 100.0);
+    if let Some(&(geometry, elapsed_ms)) = results.iter().find(|&&(geometry, elapsed_ms)| {
+        geometry == established_geometry
+            && elapsed_ms.is_finite()
+            && elapsed_ms >= 0.0
+            && elapsed_ms <= stable_limit_ms
+    }) {
+        return Some((geometry, elapsed_ms, fastest_ms));
+    }
+    let &(geometry, elapsed_ms) = results
+        .iter()
+        .filter(|(_, elapsed_ms)| {
+            elapsed_ms.is_finite() && *elapsed_ms >= 0.0 && *elapsed_ms <= stable_limit_ms
+        })
+        .min_by(|left, right| {
+            left.0.cmp(&right.0).then_with(|| {
+                left.1
+                    .partial_cmp(&right.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        })?;
+    Some((geometry, elapsed_ms, fastest_ms))
+}
+
 #[cfg(test)]
 mod kernel_tests {
     use super::{
         has_registered_sparse_prefill_topk, mla_sparse_attention_shared_floats,
         parse_mla_sparse_attention_threads, parse_nonnegative_finite_f64,
+        select_stable_timing_candidate, uniform_aligned_expert_bytes,
     };
 
     #[test]
@@ -469,6 +578,50 @@ mod kernel_tests {
                 "invalid value {invalid:?} must fail closed"
             );
         }
+    }
+
+    #[test]
+    fn timing_candidate_selection_is_stable_inside_measured_margin() {
+        let near_tie = [(2, 0.0251), (4, 0.0250), (8, 0.0252)];
+        assert_eq!(
+            select_stable_timing_candidate(&near_tie, 5.0, 8),
+            Some((8, 0.0252, 0.0250))
+        );
+        assert_eq!(
+            select_stable_timing_candidate(&near_tie, 5.0, 16),
+            Some((2, 0.0251, 0.0250))
+        );
+        let decisive = [(8, 0.0270), (2, 0.0300), (4, 0.0250)];
+        assert_eq!(
+            select_stable_timing_candidate(&decisive, 5.0, 8),
+            Some((4, 0.0250, 0.0250))
+        );
+        assert_eq!(
+            select_stable_timing_candidate(&[(8, f64::NAN), (4, 0.5)], 5.0, 8),
+            Some((4, 0.5, 0.5))
+        );
+        assert_eq!(select_stable_timing_candidate(&[], 5.0, 8), None);
+        assert_eq!(
+            select_stable_timing_candidate(&[(2, 0.5)], f64::NAN, 2),
+            None
+        );
+        assert_eq!(
+            select_stable_timing_candidate(&[(2, 0.5)], -1.0, 2),
+            None
+        );
+    }
+
+    #[test]
+    fn mixed_precision_legacy_hcs_scalar_slots_reject_heterogeneous_expert_sizes() {
+        assert_eq!(
+            uniform_aligned_expert_bytes([1_001, 1_001, 1_001].into_iter(), 512).unwrap(),
+            1_024
+        );
+        assert!(uniform_aligned_expert_bytes([1_001, 2_001].into_iter(), 512)
+            .unwrap_err()
+            .contains("heterogeneous"));
+        assert!(uniform_aligned_expert_bytes(std::iter::empty(), 512).is_err());
+        assert!(uniform_aligned_expert_bytes([1].into_iter(), 500).is_err());
     }
 
     #[test]
@@ -695,6 +848,50 @@ fn populate_measured_heatmap_flat(
         imported += 1;
     }
     Ok(imported)
+}
+
+/// Select whole routed experts under an exact byte budget. The flat size table
+/// is runtime-derived from loaded tensors and uses the caller's layer stride;
+/// zero/missing entries and duplicate ranking rows are contract errors.
+fn select_exact_hcs_slots(
+    ranking: &[(usize, usize)],
+    exact_slot_sizes: &[usize],
+    experts_per_layer: usize,
+    occupied: &std::collections::HashSet<(usize, usize)>,
+    budget_bytes: usize,
+) -> Result<Vec<(usize, usize, usize)>, String> {
+    if experts_per_layer == 0 && !ranking.is_empty() {
+        return Err("exact HCS selection requires a nonzero expert stride".to_string());
+    }
+    let mut seen = std::collections::HashSet::with_capacity(ranking.len());
+    let mut selected = Vec::new();
+    let mut used = 0usize;
+    for &(layer, expert) in ranking {
+        if !seen.insert((layer, expert)) {
+            return Err(format!("exact HCS ranking contains duplicate L{layer}E{expert}"));
+        }
+        let index = layer
+            .checked_mul(experts_per_layer)
+            .and_then(|base| base.checked_add(expert))
+            .ok_or_else(|| "exact HCS ranking index overflow".to_string())?;
+        let bytes = exact_slot_sizes.get(index).copied().unwrap_or(0);
+        if bytes == 0 {
+            return Err(format!(
+                "exact HCS ranking names missing routed expert L{layer}E{expert}"
+            ));
+        }
+        if occupied.contains(&(layer, expert)) {
+            continue;
+        }
+        let next = used
+            .checked_add(bytes)
+            .ok_or_else(|| "exact HCS selected-byte counter overflow".to_string())?;
+        if next <= budget_bytes {
+            selected.push((layer, expert, bytes));
+            used = next;
+        }
+    }
+    Ok(selected)
 }
 
 fn measured_entropy_dynamic_tail_mask(
@@ -1068,6 +1265,90 @@ mod dynamic_tail_tests {
         )
         .unwrap();
         assert_eq!(mask, vec![false, false, true, true]);
+    }
+
+    fn victim_test_hcs(
+        capacities: Vec<usize>,
+        mappings: Vec<Option<(usize, usize)>>,
+        layer_slots: Vec<Vec<usize>>,
+        evictable: Vec<bool>,
+        heterogeneous: bool,
+    ) -> HcsState {
+        let slot_count = capacities.len();
+        let mut hcs = HcsState::new();
+        hcs.soft_slot_sizes = capacities;
+        hcs.soft_slot_to_expert = mappings;
+        hcs.soft_num_slots = slot_count;
+        hcs.soft_total_chunks = 1;
+        hcs.soft_chunks_loaded = 1;
+        hcs.soft_chunk_slot_ranges = vec![(0, slot_count)];
+        hcs.dynamic_layer_slots = layer_slots;
+        hcs.dynamic_slot_evictable = evictable;
+        hcs.dynamic_tail_blocks = Some(1.0);
+        hcs.soft_heterogeneous_capacities = heterogeneous;
+        hcs.num_experts_per_layer = 8;
+        hcs.dynamic_last_used = vec![0; hcs.dynamic_layer_slots.len() * 8];
+        hcs.dynamic_freq = vec![0.0; hcs.dynamic_layer_slots.len() * 8];
+        hcs
+    }
+
+    #[test]
+    fn heterogeneous_victim_falls_back_to_global_exact_capacity() {
+        let hcs = victim_test_hcs(
+            vec![100, 200, 200],
+            vec![Some((0, 0)), Some((0, 1)), Some((1, 2))],
+            vec![vec![0, 1], vec![2]],
+            vec![true, false, true],
+            true,
+        );
+        assert_eq!(hcs.dynamic_victim_slot(0, 3, 200), Some(2));
+        assert_eq!(hcs.dynamic_victim_slot(0, 3, 300), None);
+    }
+
+    #[test]
+    fn heterogeneous_victim_preserves_local_preference_and_homogeneous_contract() {
+        let mut mixed = victim_test_hcs(
+            vec![100, 200, 200],
+            vec![Some((0, 0)), Some((0, 1)), Some((1, 2))],
+            vec![vec![0, 1], vec![2]],
+            vec![true, true, true],
+            true,
+        );
+        mixed.dynamic_last_used[1] = 9;
+        mixed.dynamic_last_used[10] = 1;
+        assert_eq!(
+            mixed.dynamic_victim_slot(0, 3, 200),
+            Some(1),
+            "a compatible local victim remains preferred over a colder global slot"
+        );
+
+        let homogeneous = victim_test_hcs(
+            vec![100, 100],
+            vec![Some((0, 0)), Some((1, 1))],
+            vec![vec![0], vec![1]],
+            vec![false, true],
+            false,
+        );
+        assert_eq!(
+            homogeneous.dynamic_victim_slot(0, 2, 100),
+            None,
+            "homogeneous HCS must retain its layer-local replacement behavior"
+        );
+    }
+
+    #[test]
+    fn cross_layer_victim_reassigns_dynamic_slot_ownership_once() {
+        let mut hcs = victim_test_hcs(
+            vec![100, 200, 200],
+            vec![Some((0, 0)), Some((0, 1)), Some((1, 2))],
+            vec![vec![0, 1], vec![2]],
+            vec![true, false, true],
+            true,
+        );
+        hcs.reassign_dynamic_layer_slot(2, 1, 0);
+        assert_eq!(hcs.dynamic_layer_slots, vec![vec![0, 1, 2], vec![]]);
+        hcs.reassign_dynamic_layer_slot(2, 1, 0);
+        assert_eq!(hcs.dynamic_layer_slots, vec![vec![0, 1, 2], vec![]]);
     }
 }
 
@@ -2710,6 +2991,48 @@ impl PromptHcsShadowStats {
             }
         }
 
+        // A mixed-precision soft pool has fixed byte capacities at each slot.
+        // Preserve the blend priority independently within each exact capacity
+        // class so a prompt reload can never place an INT8 payload into an
+        // INT4-sized slot or silently waste an INT8 slot on a smaller record.
+        if hcs.soft_slot_sizes.windows(2).any(|pair| pair[0] != pair[1]) {
+            let mut priority = ranking.clone();
+            let mut seen: std::collections::HashSet<(usize, usize)> =
+                priority.iter().copied().collect();
+            for &(_, layer, expert) in &prompt_ranked_candidates {
+                if seen.insert((layer, expert)) {
+                    priority.push((layer, expert));
+                }
+            }
+            for &pair in &heatmap_candidates {
+                if seen.insert(pair) {
+                    priority.push(pair);
+                }
+            }
+            let mut by_capacity: std::collections::HashMap<
+                usize,
+                std::collections::VecDeque<(usize, usize)>,
+            > = std::collections::HashMap::new();
+            for pair in priority {
+                let Some(capacity) = hcs.expert_slot_capacity(pair.0, pair.1) else {
+                    continue;
+                };
+                by_capacity.entry(capacity).or_default().push_back(pair);
+            }
+            let mut constrained = Vec::with_capacity(soft_capacity);
+            for slot in 0..soft_capacity {
+                let capacity = hcs.soft_slot_capacity(slot);
+                let pair = by_capacity.get_mut(&capacity)?.pop_front()?;
+                constrained.push(pair);
+            }
+            ranking = constrained;
+            candidate.clone_from(&hard);
+            for &(layer, expert) in &ranking {
+                let idx = layer * num_experts + expert;
+                candidate[idx] = true;
+            }
+        }
+
         Some(PromptHcsBlendPlan {
             retain_pct,
             heatmap_retained,
@@ -3021,23 +3344,20 @@ fn pack_soft_host_slot(
     layer_idx: usize,
     expert_idx: usize,
 ) -> bool {
-    let spc = hcs.soft_slots_per_chunk;
-    let slot_size = hcs.soft_slot_size;
-    if spc == 0 || slot_size == 0 || slot >= hcs.soft_num_slots {
+    if slot >= hcs.soft_num_slots {
         return false;
     }
+    let slot_size = hcs.soft_slot_capacity(slot);
     let Some(moe) = moe_layers.get(layer_idx).and_then(|m| m.as_ref()) else {
         return false;
     };
     let Some(expert) = moe.experts.get(expert_idx) else {
         return false;
     };
-    let chunk_idx = slot / spc;
+    let (chunk_idx, host_offset) = hcs.soft_slot_chunk_and_offset(slot);
     if chunk_idx >= hcs.soft_host_chunks.len() {
         return false;
     }
-    let offset_in_chunk = slot % spc;
-    let host_offset = offset_in_chunk * slot_size;
     let w13p_off = 0usize;
     let w13s_off = expert.w13_packed_bytes;
     let w2p_off = w13s_off + expert.w13_scales_bytes;
@@ -3093,21 +3413,27 @@ fn apply_prompt_hcs_reload_blend(
     if !prompt_hcs_reload_enabled()
         || counts.is_empty()
         || hcs.soft_num_slots == 0
-        || hcs.soft_slots_per_chunk == 0
+        || hcs.soft_total_chunks == 0
     {
         return 0;
     }
     let use_host_mirror = hcs.soft_host_mode == HcsSoftHostMode::Mirror;
     let retain_pct = prompt_hcs_reload_retain_pct();
-    let spc = hcs.soft_slots_per_chunk;
     let requested_retain_slots = (hcs.soft_num_slots.saturating_mul(retain_pct) + 99) / 100;
     let retain_chunks = if requested_retain_slots == 0 {
         0
     } else {
-        ((requested_retain_slots + spc - 1) / spc).min(hcs.soft_total_chunks)
+        (0..hcs.soft_total_chunks)
+            .find(|&chunk| hcs.soft_chunk_slot_range(chunk).1 >= requested_retain_slots)
+            .map(|chunk| chunk + 1)
+            .unwrap_or(hcs.soft_total_chunks)
     };
     let retained_chunks = retain_chunks.min(target_chunks);
-    let min_heatmap_slots = retained_chunks.saturating_mul(spc).min(hcs.soft_num_slots);
+    let min_heatmap_slots = if retained_chunks == 0 {
+        0
+    } else {
+        hcs.soft_chunk_slot_range(retained_chunks - 1).1
+    };
     let Some(plan) = PromptHcsShadowStats::build_blend_plan(
         counts,
         count_layers,
@@ -3138,14 +3464,13 @@ fn apply_prompt_hcs_reload_blend(
         );
     }
 
-    let loaded_slots = hcs
-        .soft_chunks_loaded
-        .saturating_mul(spc)
-        .min(hcs.soft_num_slots);
-    let target_slots = target_chunks
-        .saturating_mul(spc)
-        .min(hcs.soft_num_slots)
-        .min(plan.ranking.len());
+    let loaded_slots = hcs.soft_loaded_slots();
+    let target_slots = if target_chunks == 0 {
+        0
+    } else {
+        hcs.soft_chunk_slot_range(target_chunks.min(hcs.soft_total_chunks) - 1).1
+    }
+    .min(plan.ranking.len());
     if target_slots <= loaded_slots {
         return 0;
     }
@@ -4082,6 +4407,7 @@ const KERNEL_NAMES: &[&str] = &[
     "fused_silu_w2_batched_timed",
     "fused_silu_w2_int8_batched",
     "multi_expert_weighted_add_bf16",
+    "partition_mixed_router_weights",
     "marlin_gemv_int4_f32",
     "marlin_gemv_int8",
     "marlin_gemv_int8_f32",
@@ -4909,14 +5235,18 @@ struct HcsState {
     total_misses: u64,
     /// Whether heatmap collection is active.
     collecting: bool,
-    /// Per-expert VRAM size (bytes, same for all experts in a model).
+    /// Largest per-expert VRAM payload. Homogeneous runtimes have one size;
+    /// mixed runtimes use the exact slot size vectors below for accounting.
     expert_vram_bytes: usize,
 
     // ── Pool-based VRAM for dynamic eviction ──
-    /// One contiguous VRAM allocation divided into equal-sized expert slots.
+    /// One contiguous VRAM allocation containing tightly packed expert slots.
     pool_buf: Option<AlignedGpuBuffer>,
-    /// Bytes per slot (aligned).
+    /// Largest slot size, retained for homogeneous reporting compatibility.
     pool_slot_size: usize,
+    /// Byte offset and aligned capacity for every hard-pool slot.
+    pool_slot_offsets: Vec<usize>,
+    pool_slot_sizes: Vec<usize>,
     /// Total number of slots in the pool.
     pool_num_slots: usize,
     /// Stack of available slot indices (pop to allocate, push to free).
@@ -4929,7 +5259,8 @@ struct HcsState {
     /// Each chunk is ~1 GB (proportional to total VRAM). Chunk 0 = hottest experts.
     /// Eviction drops chunks from the tail (coldest first), proportional to scratch needs.
     soft_chunks: Vec<AlignedGpuBuffer>,
-    /// Number of expert slots per chunk (all chunks same size except possibly the last).
+    /// Legacy homogeneous slots-per-chunk reporting value. Mixed layouts use
+    /// `soft_chunk_slot_ranges` and exact per-slot offsets/sizes.
     soft_slots_per_chunk: usize,
     /// Total number of chunks when fully loaded.
     soft_total_chunks: usize,
@@ -4940,8 +5271,19 @@ struct HcsState {
     soft_pressure_cap_chunks: Option<usize>,
     /// Number of slots in the soft pool.
     soft_num_slots: usize,
-    /// Bytes per soft slot (same as pool_slot_size).
+    /// Largest soft slot size, retained for homogeneous reporting compatibility.
     soft_slot_size: usize,
+    /// Per-slot chunk index, byte offset inside that chunk, and aligned capacity.
+    soft_slot_chunks: Vec<usize>,
+    soft_slot_offsets: Vec<usize>,
+    soft_slot_sizes: Vec<usize>,
+    /// Whether the soft pool contains more than one exact payload capacity.
+    /// Only heterogeneous pools may use cross-layer capacity-class victims;
+    /// homogeneous HCS retains its established layer-local replacement path.
+    soft_heterogeneous_capacities: bool,
+    /// Half-open slot ranges and exact allocated bytes for every chunk.
+    soft_chunk_slot_ranges: Vec<(usize, usize)>,
+    soft_chunk_bytes: Vec<usize>,
     /// Reverse mapping: soft slot index → (layer, expert).
     soft_slot_to_expert: Vec<Option<(usize, usize)>>,
     /// Ordered list of experts in the soft tier (for reload after eviction).
@@ -4982,6 +5324,9 @@ struct HcsState {
 
     /// Max experts per layer (stride for flat indexing in cache_fast, heatmap, etc.).
     num_experts_per_layer: usize,
+    /// Exact aligned payload capacity for every loaded routed expert, using the
+    /// same flat indexing as `cache_fast`.
+    expert_slot_sizes: Vec<usize>,
 
     // ── GPU-side expert pointer table (for CUDA graph capture) ──
     /// Flat GPU buffer: [num_layers * num_experts * 4] u64 pointers.
@@ -5051,6 +5396,8 @@ impl HcsState {
             expert_vram_bytes: 0,
             pool_buf: None,
             pool_slot_size: 0,
+            pool_slot_offsets: Vec::new(),
+            pool_slot_sizes: Vec::new(),
             pool_num_slots: 0,
             pool_free_slots: Vec::new(),
             pool_slot_to_expert: Vec::new(),
@@ -5061,6 +5408,12 @@ impl HcsState {
             soft_pressure_cap_chunks: None,
             soft_num_slots: 0,
             soft_slot_size: 0,
+            soft_slot_chunks: Vec::new(),
+            soft_slot_offsets: Vec::new(),
+            soft_slot_sizes: Vec::new(),
+            soft_heterogeneous_capacities: false,
+            soft_chunk_slot_ranges: Vec::new(),
+            soft_chunk_bytes: Vec::new(),
             soft_slot_to_expert: Vec::new(),
             soft_ranking: Vec::new(),
             soft_heatmap_ranking: Vec::new(),
@@ -5077,6 +5430,7 @@ impl HcsState {
             hard_budget_mb: 0,
             soft_max_mb: 0,
             num_experts_per_layer: 0,
+            expert_slot_sizes: Vec::new(),
             d_expert_ptrs: None,
             d_expert_ptrs_ne: 0,
             d_expert_ptrs_nl: 0,
@@ -5114,12 +5468,113 @@ impl HcsState {
     /// Get the GPU base pointer for a soft slot, resolving chunk index.
     #[inline]
     fn soft_slot_ptr(&self, slot: usize) -> u64 {
-        let spc = self.soft_slots_per_chunk;
-        debug_assert!(spc > 0);
-        let chunk_idx = slot / spc;
-        let offset = slot % spc;
-        let base = self.soft_chunks[chunk_idx].device_ptr();
-        base + (offset as u64 * self.soft_slot_size as u64)
+        let chunk_idx = *self
+            .soft_slot_chunks
+            .get(slot)
+            .expect("soft HCS slot is missing its chunk identity");
+        let offset = *self
+            .soft_slot_offsets
+            .get(slot)
+            .expect("soft HCS slot is missing its byte offset");
+        self.soft_chunks
+            .get(chunk_idx)
+            .expect("soft HCS slot names an unavailable chunk")
+            .device_ptr()
+            + offset as u64
+    }
+
+    #[inline]
+    fn soft_slot_capacity(&self, slot: usize) -> usize {
+        *self
+            .soft_slot_sizes
+            .get(slot)
+            .expect("soft HCS slot is missing its exact capacity")
+    }
+
+    #[inline]
+    fn soft_chunk_slot_range(&self, chunk_idx: usize) -> (usize, usize) {
+        *self
+            .soft_chunk_slot_ranges
+            .get(chunk_idx)
+            .expect("soft HCS chunk is missing its exact slot range")
+    }
+
+    #[inline]
+    fn soft_chunk_bytes_at(&self, chunk_idx: usize) -> usize {
+        *self
+            .soft_chunk_bytes
+            .get(chunk_idx)
+            .expect("soft HCS chunk is missing its exact byte size")
+    }
+
+    #[inline]
+    fn soft_loaded_slots(&self) -> usize {
+        if self.soft_chunks_loaded == 0 {
+            0
+        } else {
+            self.soft_chunk_slot_range(self.soft_chunks_loaded - 1).1
+        }
+    }
+
+    #[inline]
+    fn soft_slot_chunk_and_offset(&self, slot: usize) -> (usize, usize) {
+        (
+            *self
+                .soft_slot_chunks
+                .get(slot)
+                .expect("soft HCS slot is missing its chunk identity"),
+            *self
+                .soft_slot_offsets
+                .get(slot)
+                .expect("soft HCS slot is missing its byte offset"),
+        )
+    }
+
+    fn soft_prefix_chunks_for_bytes(&self, budget_bytes: usize) -> usize {
+        let mut chunks = 0usize;
+        let mut bytes = 0usize;
+        for chunk in 0..self.soft_total_chunks {
+            let next = bytes.saturating_add(self.soft_chunk_bytes_at(chunk));
+            if next > budget_bytes {
+                break;
+            }
+            bytes = next;
+            chunks += 1;
+        }
+        chunks
+    }
+
+    fn soft_chunks_covering_slots(&self, slots: usize) -> usize {
+        if slots == 0 {
+            return 0;
+        }
+        (0..self.soft_total_chunks)
+            .find(|&chunk| self.soft_chunk_slot_range(chunk).1 >= slots)
+            .map(|chunk| chunk + 1)
+            .unwrap_or(self.soft_total_chunks)
+    }
+
+    #[inline]
+    fn pool_slot_ptr(&self, slot: usize) -> Option<u64> {
+        let base = *self.pool_buf.as_ref()?.device_ptr();
+        let offset = *self.pool_slot_offsets.get(slot)?;
+        Some(base + offset as u64)
+    }
+
+    #[inline]
+    fn pool_slot_capacity(&self, slot: usize) -> usize {
+        *self
+            .pool_slot_sizes
+            .get(slot)
+            .expect("hard HCS slot is missing its exact capacity")
+    }
+
+    #[inline]
+    fn expert_slot_capacity(&self, layer: usize, expert: usize) -> Option<usize> {
+        let index = layer
+            .checked_mul(self.num_experts_per_layer)?
+            .checked_add(expert)?;
+        self.expert_slot_sizes.get(index).copied().filter(|&size| size > 0)
     }
 
     /// Drop loaded soft chunks down to target_chunks, freeing VRAM and clearing cache entries.
@@ -5132,7 +5587,6 @@ impl HcsState {
             return (0, 0);
         }
 
-        let spc = self.soft_slots_per_chunk;
         let mut evicted = 0usize;
         let mut freed_bytes = 0usize;
         if let Some(device) = route_sync_device {
@@ -5140,15 +5594,9 @@ impl HcsState {
         }
 
         for drop_idx in target_chunks..self.soft_chunks_loaded {
-            let slots_this = if drop_idx == self.soft_total_chunks.saturating_sub(1) {
-                self.soft_num_slots.saturating_sub(drop_idx * spc)
-            } else {
-                spc
-            };
-            freed_bytes += slots_this * self.soft_slot_size;
+            let (slot_start, slot_end) = self.soft_chunk_slot_range(drop_idx);
+            freed_bytes += self.soft_chunk_bytes_at(drop_idx);
 
-            let slot_start = drop_idx * spc;
-            let slot_end = std::cmp::min(slot_start + spc, self.soft_num_slots);
             for slot in slot_start..slot_end {
                 if let Some((layer_idx, expert_idx)) = self.soft_slot_to_expert[slot].take() {
                     self.cache_fast_clear(layer_idx, expert_idx);
@@ -5181,18 +5629,13 @@ impl HcsState {
 
     #[inline]
     fn soft_slots_in_chunk(&self, chunk_idx: usize) -> usize {
-        if chunk_idx == self.soft_total_chunks.saturating_sub(1) {
-            self.soft_num_slots
-                .saturating_sub(chunk_idx.saturating_mul(self.soft_slots_per_chunk))
-        } else {
-            self.soft_slots_per_chunk
-        }
+        let (start, end) = self.soft_chunk_slot_range(chunk_idx);
+        end.saturating_sub(start)
     }
 
     #[inline]
     fn soft_full_chunk_bytes(&self) -> usize {
-        self.soft_slots_per_chunk
-            .saturating_mul(self.soft_slot_size)
+        self.soft_chunk_bytes.iter().copied().max().unwrap_or(0)
     }
 
     fn apply_pressure_cap(&mut self, target_chunks: usize) {
@@ -5599,10 +6042,7 @@ impl HcsState {
         if !self.dynamic_enabled {
             return;
         }
-        let loaded_slots = self
-            .soft_chunks_loaded
-            .saturating_mul(self.soft_slots_per_chunk)
-            .min(self.soft_num_slots);
+        let loaded_slots = self.soft_loaded_slots();
         let evictable_slots = if self.dynamic_tail_blocks.is_some() {
             self.dynamic_slot_evictable
                 .iter()
@@ -5664,10 +6104,7 @@ impl HcsState {
         self.dynamic_tail_slots = 0;
         self.dynamic_protected_slots = 0;
 
-        let loaded_slots = self
-            .soft_chunks_loaded
-            .saturating_mul(self.soft_slots_per_chunk)
-            .min(self.soft_num_slots);
+        let loaded_slots = self.soft_loaded_slots();
         if loaded_slots == 0 {
             return;
         }
@@ -5732,14 +6169,16 @@ impl HcsState {
         self.dynamic_freq[idx] = (self.dynamic_freq[idx] + 1.0).min(1_000_000.0);
     }
 
-    fn dynamic_victim_slot(&self, layer: usize, incoming_expert: usize) -> Option<usize> {
-        if layer >= self.dynamic_layer_slots.len() || self.soft_slots_per_chunk == 0 {
+    fn dynamic_victim_slot(
+        &self,
+        layer: usize,
+        incoming_expert: usize,
+        required_bytes: usize,
+    ) -> Option<usize> {
+        if layer >= self.dynamic_layer_slots.len() || self.soft_num_slots == 0 {
             return None;
         }
-        let loaded_slots = self
-            .soft_chunks_loaded
-            .saturating_mul(self.soft_slots_per_chunk)
-            .min(self.soft_num_slots);
+        let loaded_slots = self.soft_loaded_slots();
         let mut best: Option<(usize, u64, f32)> = None;
         for &slot in &self.dynamic_layer_slots[layer] {
             if slot >= loaded_slots {
@@ -5762,6 +6201,9 @@ impl HcsState {
             if resident_layer != layer || resident_expert == incoming_expert {
                 continue;
             }
+            if self.soft_slot_capacity(slot) != required_bytes {
+                continue;
+            }
             let idx = self.dynamic_flat_idx(resident_layer, resident_expert);
             let last = self.dynamic_last_used.get(idx).copied().unwrap_or(0);
             let freq = self.dynamic_freq.get(idx).copied().unwrap_or(0.0);
@@ -5779,7 +6221,172 @@ impl HcsState {
                 }
             }
         }
-        best.map(|(slot, _last, _freq)| slot)
+        if let Some((slot, _last, _freq)) = best {
+            return Some(slot);
+        }
+
+        // Prompt-HCS already treats exact-capacity soft slots as a global pool:
+        // after each prefill, a slot can hold an expert from any routed layer.
+        // A heterogeneous pool can therefore legitimately have no matching
+        // capacity in the incoming layer, or have all local matches protected,
+        // while another layer owns compatible evictable capacity. Preserve the
+        // established layer-local preference above, then use the same global
+        // exact-capacity/LRU contract only for heterogeneous layouts.
+        if !self.soft_heterogeneous_capacities {
+            return None;
+        }
+        let mut global_best: Option<(usize, u64, f32)> = None;
+        for slot in 0..loaded_slots {
+            if self.dynamic_tail_blocks.is_some()
+                && !self
+                    .dynamic_slot_evictable
+                    .get(slot)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some((resident_layer, resident_expert)) =
+                self.soft_slot_to_expert.get(slot).and_then(|value| *value)
+            else {
+                continue;
+            };
+            if (resident_layer == layer && resident_expert == incoming_expert)
+                || self.soft_slot_capacity(slot) != required_bytes
+            {
+                continue;
+            }
+            let index = self.dynamic_flat_idx(resident_layer, resident_expert);
+            let last = self.dynamic_last_used.get(index).copied().unwrap_or(0);
+            let freq = self.dynamic_freq.get(index).copied().unwrap_or(0.0);
+            match global_best {
+                None => global_best = Some((slot, last, freq)),
+                Some((best_slot, best_last, best_freq)) => {
+                    if last < best_last
+                        || (last == best_last && freq < best_freq)
+                        || (last == best_last
+                            && (freq - best_freq).abs() < f32::EPSILON
+                            && slot < best_slot)
+                    {
+                        global_best = Some((slot, last, freq));
+                    }
+                }
+            }
+        }
+        global_best.map(|(slot, _last, _freq)| slot)
+    }
+
+    fn debug_dynamic_victim_class_evidence(
+        &self,
+        layer: usize,
+        incoming_expert: usize,
+        required_bytes: usize,
+    ) -> serde_json::Value {
+        let loaded_slots = self.soft_loaded_slots();
+        let layer_slots = self
+            .dynamic_layer_slots
+            .get(layer)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut loaded_layer_slots = 0usize;
+        let mut matching_slots = 0usize;
+        let mut matching_evictable = 0usize;
+        let mut matching_protected = 0usize;
+        let mut layer_capacity_counts = std::collections::BTreeMap::<usize, usize>::new();
+        let mut matching_slot_rows = Vec::new();
+        for &slot in layer_slots {
+            if slot >= loaded_slots {
+                continue;
+            }
+            loaded_layer_slots += 1;
+            let capacity = self.soft_slot_capacity(slot);
+            *layer_capacity_counts.entry(capacity).or_default() += 1;
+            if capacity != required_bytes {
+                continue;
+            }
+            matching_slots += 1;
+            let evictable = self
+                .dynamic_slot_evictable
+                .get(slot)
+                .copied()
+                .unwrap_or(false);
+            matching_evictable += usize::from(evictable);
+            matching_protected += usize::from(!evictable);
+            matching_slot_rows.push(serde_json::json!({
+                "slot": slot,
+                "evictable": evictable,
+                "resident": self.soft_slot_to_expert.get(slot).and_then(|value| *value),
+            }));
+        }
+
+        let layer_base = layer.saturating_mul(self.num_experts_per_layer);
+        let mut class_experts = 0usize;
+        let mut class_resident = 0usize;
+        let mut class_cold = 0usize;
+        for expert in 0..self.num_experts_per_layer {
+            let index = layer_base.saturating_add(expert);
+            if self.expert_slot_sizes.get(index).copied().unwrap_or(0) != required_bytes {
+                continue;
+            }
+            class_experts += 1;
+            if self.get_fast(layer, expert).is_some() {
+                class_resident += 1;
+            } else {
+                class_cold += 1;
+            }
+        }
+
+        let mut global_matching_loaded = 0usize;
+        let mut global_matching_evictable = 0usize;
+        for slot in 0..loaded_slots {
+            if self.soft_slot_capacity(slot) == required_bytes {
+                global_matching_loaded += 1;
+                global_matching_evictable += usize::from(
+                    self.dynamic_slot_evictable
+                        .get(slot)
+                        .copied()
+                        .unwrap_or(false),
+                );
+            }
+        }
+
+        serde_json::json!({
+            "incoming_layer": layer,
+            "incoming_expert": incoming_expert,
+            "required_capacity": required_bytes,
+            "loaded_soft_slots": loaded_slots,
+            "layer_slots_total": layer_slots.len(),
+            "layer_slots_loaded": loaded_layer_slots,
+            "layer_capacity_counts": layer_capacity_counts,
+            "matching_layer_slots": matching_slots,
+            "matching_layer_evictable": matching_evictable,
+            "matching_layer_protected": matching_protected,
+            "matching_layer_slot_rows": matching_slot_rows,
+            "class_experts_in_layer": class_experts,
+            "class_resident_in_layer": class_resident,
+            "class_cold_in_layer": class_cold,
+            "matching_global_loaded": global_matching_loaded,
+            "matching_global_evictable": global_matching_evictable,
+        })
+    }
+
+    fn reassign_dynamic_layer_slot(
+        &mut self,
+        slot: usize,
+        victim_layer: usize,
+        incoming_layer: usize,
+    ) {
+        if victim_layer == incoming_layer {
+            return;
+        }
+        if let Some(slots) = self.dynamic_layer_slots.get_mut(victim_layer) {
+            slots.retain(|&candidate| candidate != slot);
+        }
+        if let Some(slots) = self.dynamic_layer_slots.get_mut(incoming_layer) {
+            if !slots.contains(&slot) {
+                slots.push(slot);
+            }
+        }
     }
 
     fn dynamic_promote_from_device(
@@ -5818,19 +6425,43 @@ impl HcsState {
             }
             return Ok(false);
         }
-        let Some(slot) = self.dynamic_victim_slot(promo.layer_idx, promo.expert_idx) else {
+        let needed = promo
+            .w13p_bytes
+            .saturating_add(promo.w13s_bytes)
+            .saturating_add(promo.w2p_bytes)
+            .saturating_add(promo.w2s_bytes);
+        let required_capacity = needed.saturating_add(511) & !511usize;
+        let Some(slot) = self.dynamic_victim_slot(
+            promo.layer_idx,
+            promo.expert_idx,
+            required_capacity,
+        ) else {
             self.dynamic_no_slot += 1;
-            if self.debug_hcs_transition_trace_active {
-                self.debug_hcs_transition_record(serde_json::json!({
-                    "phase": "dynamic_promotion_skip",
-                    "reason": "no_victim_slot",
-                    "incoming_layer": promo.layer_idx,
-                    "incoming_expert": promo.expert_idx,
-                }));
+            let debug_no_slot_classes = env_truthy("KRASIS_DEBUG_HCS_NO_SLOT_CLASSES");
+            if self.debug_hcs_transition_trace_active || debug_no_slot_classes {
+                let mut evidence = self.debug_dynamic_victim_class_evidence(
+                    promo.layer_idx,
+                    promo.expert_idx,
+                    required_capacity,
+                );
+                let object = evidence
+                    .as_object_mut()
+                    .expect("dynamic HCS victim evidence must be a JSON object");
+                object.insert(
+                    "phase".to_string(),
+                    serde_json::json!("dynamic_promotion_skip"),
+                );
+                object.insert("reason".to_string(), serde_json::json!("no_victim_slot"));
+                if debug_no_slot_classes {
+                    log::warn!("DYNAMIC_HCS_NO_SLOT_CLASS {}", evidence);
+                }
+                if self.debug_hcs_transition_trace_active {
+                    self.debug_hcs_transition_record(evidence);
+                }
             }
             return Ok(false);
         };
-        if slot >= self.soft_num_slots || self.soft_slots_per_chunk == 0 {
+        if slot >= self.soft_num_slots {
             self.dynamic_no_slot += 1;
             if self.debug_hcs_transition_trace_active {
                 self.debug_hcs_transition_record(serde_json::json!({
@@ -5877,7 +6508,8 @@ impl HcsState {
         let dst_w2p_off = dst_w13s_off.saturating_add(promo.w13s_bytes);
         let dst_w2s_off = dst_w2p_off.saturating_add(promo.w2p_bytes);
         let needed = dst_w2s_off.saturating_add(promo.w2s_bytes);
-        if needed > self.soft_slot_size {
+        let slot_capacity = self.soft_slot_capacity(slot);
+        if needed > slot_capacity || required_capacity != slot_capacity {
             self.dynamic_copy_failures += 1;
             if self.debug_hcs_transition_trace_active {
                 self.debug_hcs_transition_record(serde_json::json!({
@@ -5887,15 +6519,16 @@ impl HcsState {
                     "incoming_expert": promo.expert_idx,
                     "slot": slot,
                     "needed_bytes": needed,
-                    "soft_slot_size": self.soft_slot_size,
+                    "soft_slot_size": slot_capacity,
                 }));
             }
             return Err(format!(
-                "dynamic HCS promotion L{}E{} needs {} bytes > soft_slot_size {}",
-                promo.layer_idx, promo.expert_idx, needed, self.soft_slot_size
+                "dynamic HCS promotion L{}E{} needs {} bytes but selected slot capacity is {}",
+                promo.layer_idx, promo.expert_idx, needed, slot_capacity
             ));
         }
 
+        let mut cross_layer_victim = None;
         if let Some((victim_layer, victim_expert)) = self.soft_slot_to_expert[slot] {
             self.cache_fast_clear_on_stream(victim_layer, victim_expert, stream);
             self.cache.remove(&(victim_layer, victim_expert));
@@ -5905,6 +6538,9 @@ impl HcsState {
                 self.dynamic_freq[victim_idx] = 0.0;
             }
             self.dynamic_evictions += 1;
+            if victim_layer != promo.layer_idx {
+                cross_layer_victim = Some(victim_layer);
+            }
         }
 
         let copy_part = |dst_off: usize, src_off: usize, bytes: usize| -> Result<(), String> {
@@ -6029,10 +6665,9 @@ impl HcsState {
             None
         };
 
-        let chunk_idx = slot / self.soft_slots_per_chunk;
+        let (chunk_idx, host_offset) = self.soft_slot_chunk_and_offset(slot);
         if chunk_idx < self.soft_host_chunks.len() {
             let host_mirror_start = timing.then(std::time::Instant::now);
-            let host_offset = (slot % self.soft_slots_per_chunk) * self.soft_slot_size;
             unsafe {
                 let dst_host = self.soft_host_chunks[chunk_idx]
                     .as_mut_ptr()
@@ -6081,6 +6716,9 @@ impl HcsState {
             pool_slot: None,
         };
         self.soft_slot_to_expert[slot] = Some((promo.layer_idx, promo.expert_idx));
+        if let Some(victim_layer) = cross_layer_victim {
+            self.reassign_dynamic_layer_slot(slot, victim_layer, promo.layer_idx);
+        }
         if slot < self.soft_ranking.len() {
             self.soft_ranking[slot] = (promo.layer_idx, promo.expert_idx);
         }
@@ -6099,7 +6737,7 @@ impl HcsState {
                 "incoming_layer": promo.layer_idx,
                 "incoming_expert": promo.expert_idx,
                 "slot": slot,
-                "chunk": if self.soft_slots_per_chunk > 0 { slot / self.soft_slots_per_chunk } else { 0 },
+                "chunk": self.soft_slot_chunk_and_offset(slot).0,
                 "slot_evictable": self.dynamic_slot_evictable.get(slot).copied().unwrap_or(false),
                 "victim": victim_trace,
                 "incoming_last_before": incoming_last_before,
@@ -6139,10 +6777,7 @@ impl HcsState {
     fn debug_hcs_summary_json(&self, phase: &str) -> serde_json::Value {
         let resident = self.validation_sorted_resident_experts();
         let (cache_fast_nonzero, hashmap_count, dupes, soft_dupes) = self.validation_counts();
-        let loaded_slots = self
-            .soft_chunks_loaded
-            .saturating_mul(self.soft_slots_per_chunk)
-            .min(self.soft_num_slots);
+        let loaded_slots = self.soft_loaded_slots();
         let evictable_slots = self
             .dynamic_slot_evictable
             .iter()
@@ -6318,6 +6953,78 @@ fn debug_hash_device_region_json(label: &str, ptr: u64, bytes: usize) -> serde_j
         "ptr": format!("0x{:x}", ptr),
         "hash": format!("{:016x}", validation_fnv1a_u64(&buf)),
         "first16_hex": buf.iter().take(16).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""),
+    })
+}
+
+fn debug_hash_device_rows_json(
+    label: &str,
+    ptr: u64,
+    rows: usize,
+    row_bytes: usize,
+) -> serde_json::Value {
+    let bytes = match rows.checked_mul(row_bytes) {
+        Some(bytes) => bytes,
+        None => {
+            return serde_json::json!({
+                "label": label,
+                "available": false,
+                "reason": "row_byte_count_overflow",
+                "rows": rows,
+                "row_bytes": row_bytes,
+                "ptr": format!("0x{:x}", ptr),
+            });
+        }
+    };
+    if bytes == 0 {
+        return serde_json::json!({
+            "label": label,
+            "available": true,
+            "bytes": bytes,
+            "rows": rows,
+            "row_bytes": row_bytes,
+            "ptr": format!("0x{:x}", ptr),
+            "row_hashes": Vec::<String>::new(),
+        });
+    }
+    if ptr == 0 {
+        return serde_json::json!({
+            "label": label,
+            "available": false,
+            "reason": "null_device_ptr",
+            "bytes": bytes,
+            "rows": rows,
+            "row_bytes": row_bytes,
+            "ptr": "0x0",
+        });
+    }
+    let mut buf = vec![0u8; bytes];
+    let err = unsafe {
+        cuda_sys::lib().cuMemcpyDtoH_v2(buf.as_mut_ptr() as *mut std::ffi::c_void, ptr, bytes)
+    };
+    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+        return serde_json::json!({
+            "label": label,
+            "available": false,
+            "reason": format!("cuMemcpyDtoH_v2_failed:{:?}", err),
+            "bytes": bytes,
+            "rows": rows,
+            "row_bytes": row_bytes,
+            "ptr": format!("0x{:x}", ptr),
+        });
+    }
+    let row_hashes = buf
+        .chunks_exact(row_bytes)
+        .map(|row| format!("{:016x}", validation_fnv1a_u64(row)))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "label": label,
+        "available": true,
+        "bytes": bytes,
+        "rows": rows,
+        "row_bytes": row_bytes,
+        "ptr": format!("0x{:x}", ptr),
+        "hash": format!("{:016x}", validation_fnv1a_u64(&buf)),
+        "row_hashes": row_hashes,
     })
 }
 
@@ -8077,6 +8784,9 @@ fn validation_record_cold_load(
 /// Describes one expert's Marlin-format weights in system RAM for DMA.
 #[derive(Debug, Clone)]
 struct ExpertDataPtr {
+    /// Per-expert Marlin precision. Routed mixed caches use 4 or 8; homogeneous
+    /// caches retain the graph-wide value for every entry.
+    bits: u8,
     w13_packed_ptr: usize,
     w13_packed_bytes: usize,
     w13_scales_ptr: usize,
@@ -9387,7 +10097,8 @@ pub(crate) mod dsa_registration_tests {
         graph_w13_path, layer_split_sequence_state_contract, marlin_dispatch_for_bits,
         measured_peer_route_admission, occupancy_active_blocks_per_multiprocessor,
         peer_selector_check_message, plan_dsa_topk, route_prep_rmsnorm_threads,
-        split_expert_launch_enabled, validate_dsa_indexer_registration,
+        canonical_ungraphed_quantized_moe_supported, manifest_layer_uniform_bits,
+        select_exact_hcs_slots, split_expert_launch_enabled, validate_dsa_indexer_registration,
         validate_dsa_owner_weight_contract, validate_dsa_runtime_registration,
         validate_dspark_residency_contract, validate_stream_probe_outcome, CudaEvent, CudaStream,
         DsaGraphScoreBackend, DsaIndexerOwnerResource, DsaIndexerOwnerWeightIds,
@@ -9398,6 +10109,58 @@ pub(crate) mod dsa_registration_tests {
     };
 
     static DSA_CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn mixed_manifest_layer_dispatch_distinguishes_uniform_and_heterogeneous_bits() {
+        assert_eq!(manifest_layer_uniform_bits([4, 4, 4].into_iter()).unwrap(), Some(4));
+        assert_eq!(manifest_layer_uniform_bits([8, 8].into_iter()).unwrap(), Some(8));
+        assert_eq!(manifest_layer_uniform_bits([4, 8, 4].into_iter()).unwrap(), None);
+        assert!(manifest_layer_uniform_bits([4, 6].into_iter())
+            .unwrap_err()
+            .contains("unsupported INT6"));
+        assert!(manifest_layer_uniform_bits(std::iter::empty())
+            .unwrap_err()
+            .contains("empty"));
+    }
+
+    #[test]
+    fn mixed_hcs_selection_uses_exact_capacities_and_runtime_layer_stride() {
+        let sizes = vec![100, 200, 0, 0, 0, 0, 0, 0, 120, 0, 0, 180];
+        let ranking = vec![(2, 3), (0, 1), (2, 0), (0, 0)];
+        let selected = select_exact_hcs_slots(
+            &ranking,
+            &sizes,
+            4,
+            &std::collections::HashSet::new(),
+            400,
+        )
+        .unwrap();
+        assert_eq!(selected, vec![(2, 3, 180), (0, 1, 200)]);
+
+        let occupied = std::collections::HashSet::from([(2, 3)]);
+        assert_eq!(
+            select_exact_hcs_slots(&ranking, &sizes, 4, &occupied, 320).unwrap(),
+            vec![(0, 1, 200), (2, 0, 120)],
+        );
+        assert!(select_exact_hcs_slots(
+            &[(2, 3), (2, 3)],
+            &sizes,
+            4,
+            &std::collections::HashSet::new(),
+            usize::MAX,
+        )
+        .unwrap_err()
+        .contains("duplicate"));
+        assert!(select_exact_hcs_slots(
+            &[(1, 0)],
+            &sizes,
+            4,
+            &std::collections::HashSet::new(),
+            usize::MAX,
+        )
+        .unwrap_err()
+        .contains("missing routed expert"));
+    }
 
     #[test]
     fn route_locality_global_lru_tracks_cross_layer_capacity() {
@@ -9613,6 +10376,18 @@ pub(crate) mod dsa_registration_tests {
         assert!(!split_expert_launch_enabled(true, Some("0")).unwrap());
         assert!(split_expert_launch_enabled(false, Some("yes")).unwrap());
         assert!(split_expert_launch_enabled(false, Some("maybe")).is_err());
+    }
+
+    #[test]
+    fn canonical_ungraphed_batch_covers_supported_marlin_silu_moe_precisions() {
+        assert!(canonical_ungraphed_quantized_moe_supported(4, 0, true, 0));
+        assert!(canonical_ungraphed_quantized_moe_supported(8, 0, true, 0));
+        assert!(!canonical_ungraphed_quantized_moe_supported(16, 0, true, 0));
+        assert!(!canonical_ungraphed_quantized_moe_supported(3, 0, true, 0));
+        assert!(!canonical_ungraphed_quantized_moe_supported(4, 1, true, 0));
+        assert!(!canonical_ungraphed_quantized_moe_supported(4, 2, true, 0));
+        assert!(!canonical_ungraphed_quantized_moe_supported(4, 0, false, 0));
+        assert!(!canonical_ungraphed_quantized_moe_supported(4, 0, true, 4096));
     }
 
     #[test]
@@ -9841,6 +10616,7 @@ pub(crate) mod dsa_registration_tests {
         let w2_packed = [6_u8, 7, 8, 9];
         let w2_scales = [10_u8];
         let expert = ExpertDataPtr {
+            bits: 4,
             w13_packed_ptr: w13_packed.as_ptr() as usize,
             w13_packed_bytes: w13_packed.len(),
             w13_scales_ptr: w13_scales.as_ptr() as usize,
@@ -16901,6 +17677,7 @@ struct CachedKernels {
     fused_silu_w2_int8_batched: cudarc::driver::CudaFunction,
     relu2_w2_batched_coalesced: cudarc::driver::CudaFunction,
     multi_expert_weighted_add_bf16: cudarc::driver::CudaFunction,
+    partition_mixed_router_weights: cudarc::driver::CudaFunction,
     // Graphable kernel variants (read position/token from GPU pointers)
     embedding_lookup_g: cudarc::driver::CudaFunction,
     apply_rope_g: cudarc::driver::CudaFunction,
@@ -17000,6 +17777,11 @@ struct GpuDecodeGraph {
     group_size: usize,
     /// Expert quantization bits: 3 (TileQ), 4 (INT4 Marlin), or 8 (INT8 Marlin).
     expert_bits: u8,
+    /// True only when routed experts in the same runtime layer may use both
+    /// validated INT4 and INT8 Marlin records.
+    mixed_expert_precision: bool,
+    /// Flat per-layer/per-expert precision table used by captured routing.
+    d_mixed_expert_bits: Option<cudarc::driver::CudaSlice<u8>>,
     /// Shared expert quantization bits (may differ from expert_bits, e.g. INT8 shared with INT4 routed).
     shared_expert_bits: u8,
 
@@ -17117,6 +17899,8 @@ struct GpuDecodeGraph {
     d_batch_w2_scales_ptrs: cudarc::driver::CudaSlice<u64>,
     // Device array for batched routing weights: [max_experts_per_tok] FP32
     d_batch_weights: cudarc::driver::CudaSlice<f32>,
+    /// Two disjoint per-slot weight masks: INT4 followed by INT8.
+    d_mixed_weights: cudarc::driver::CudaSlice<f32>,
     // Host staging buffers for pointer upload
     h_batch_w13_packed_ptrs: Vec<u64>,
     h_batch_w13_scales_ptrs: Vec<u64>,
@@ -17124,6 +17908,10 @@ struct GpuDecodeGraph {
     h_batch_w2_scales_ptrs: Vec<u64>,
     h_batch_weights: Vec<f32>,
     h_batch_expert_ids: Vec<i32>,
+    /// Per-slot split-launch mask. One means the expert weights are already
+    /// resident (HCS/APFL) and may execute before demand DMA completes. This
+    /// is independent of slot order so residency cannot change arithmetic.
+    h_batch_hot_flags: Vec<u8>,
     max_experts_per_tok: usize,
     // Contiguous upload buffer: four pointer arrays followed by ordinary,
     // split-full/split-hot weights, then routed expert IDs.
@@ -17854,12 +18642,11 @@ struct GpuDecodeGraph {
     /// Host staging for the split-mode weight uploads.
     h_wts_full: Vec<f32>,
     h_wts_hot: Vec<f32>,
-
     // ── Marlin w13 ksplit autotune. Measured at
     //    graph-capture time on the real loaded expert shape; overrides the
     //    occupancy formula per (k, n, batch_z, is_int8). ──
     ksplit_autotune: std::collections::HashMap<(usize, usize, usize, bool), usize>,
-    /// Default-off shared-W2 K-split diagnostic selection.
+    /// Runtime-measured shared-W2 K-split selection by exact tensor shape/format.
     shared_w2_ksplit_autotune: std::collections::HashMap<(usize, usize, bool), usize>,
     /// Runtime-measured INT4 routed-expert tile geometry. Both outcomes are
     /// stored so a completed measurement can never be confused with a missing
@@ -17920,6 +18707,35 @@ fn select_w13_ksplits_batched(
     batch_z: usize,
 ) -> usize {
     select_w13_ksplits_for_weights(graph, expert_hs, w13_n, batch_z, graph.expert_bits == 8)
+}
+
+/// Shared-expert W13 dispatch must be identical in captured and uncaptured
+/// decode. Keeping the format and batch geometry here prevents either path
+/// from silently selecting different arithmetic for the same loaded tensor.
+fn select_shared_w13_ksplits(graph: &GpuDecodeGraph, w13_n: usize) -> usize {
+    select_w13_ksplits_for_weights(
+        graph,
+        graph.hidden_size,
+        w13_n,
+        1,
+        graph.shared_expert_bits == 8,
+    )
+}
+
+/// Return the measured shared-expert W2 dispatch for this exact loaded
+/// shape/format.  Both captured and uncaptured decode must consult the same
+/// result: otherwise the first decode step uses different reduction arithmetic
+/// from subsequent graph replays whenever calibration selects K-split W2.
+fn select_shared_w2_ksplits(
+    graph: &GpuDecodeGraph,
+    intermediate: usize,
+    hidden_size: usize,
+    is_int8: bool,
+) -> Option<usize> {
+    graph
+        .shared_w2_ksplit_autotune
+        .get(&(intermediate, hidden_size, is_int8))
+        .copied()
 }
 
 fn select_int4_w13_n32(
@@ -22222,6 +23038,56 @@ struct DsparkGraphRegistration {
     confidence_wid: usize,
 }
 
+/// One CUDA-context-scoped page lock over model-owned expert backing.
+///
+/// The pointer remains valid while the Python model's WeightStore is alive.
+/// GpuDecodeStore owns the registration contract and explicitly unregisters
+/// every successful range before that backing can be destroyed.
+#[derive(Debug)]
+struct ExpertHostRegistration {
+    ptr: *mut std::ffi::c_void,
+    bytes: usize,
+}
+
+unsafe impl Send for ExpertHostRegistration {}
+unsafe impl Sync for ExpertHostRegistration {}
+
+fn expert_host_registration_totals(
+    registrations: &[ExpertHostRegistration],
+) -> (usize, usize) {
+    registrations.iter().filter(|entry| !entry.ptr.is_null()).fold(
+        (0usize, 0usize),
+        |(count, bytes), entry| (count + 1, bytes.saturating_add(entry.bytes)),
+    )
+}
+
+#[cfg(test)]
+mod expert_host_registration_tests {
+    use super::{expert_host_registration_totals, ExpertHostRegistration};
+
+    #[test]
+    fn ownership_ledger_counts_only_live_ranges_and_exact_tensor_bytes() {
+        let registrations = [
+            ExpertHostRegistration {
+                ptr: 1usize as *mut std::ffi::c_void,
+                bytes: 12_582_912,
+            },
+            ExpertHostRegistration {
+                ptr: std::ptr::null_mut(),
+                bytes: 99,
+            },
+            ExpertHostRegistration {
+                ptr: 2usize as *mut std::ffi::c_void,
+                bytes: 25_559_040,
+            },
+        ];
+        assert_eq!(
+            expert_host_registration_totals(&registrations),
+            (2, 38_141_952)
+        );
+    }
+}
+
 #[pyclass]
 pub struct GpuDecodeStore {
     device: Arc<CudaDevice>,
@@ -22393,6 +23259,11 @@ pub struct GpuDecodeStore {
     /// canonical host weights per token, so it must not duplicate host-memory
     /// registration or instantiate a compression sidecar.
     expert_only_peer_store: bool,
+    /// Exact ownership ledger for ordinary routed/shared expert host ranges
+    /// registered in this store's CUDA context. Peer-only stores intentionally
+    /// remain empty. The model WeightStore outlives this store during explicit
+    /// server shutdown, so unregister always precedes backing destruction.
+    expert_host_registrations: Vec<ExpertHostRegistration>,
     /// Completion event for one in-flight peer-expert response on this store.
     /// Only expert-only auxiliary stores use it.
     peer_service_ready_event: Option<CudaEvent>,
@@ -22402,6 +23273,71 @@ pub struct GpuDecodeStore {
 }
 
 impl GpuDecodeStore {
+    /// Release every ordinary expert page lock owned by this CUDA context.
+    ///
+    /// This is deliberately Rust-internal: callers must first stop all request
+    /// execution and drop the prefill engine, while retaining the Python model
+    /// that owns the registered backing. Failed ranges remain in the ledger so
+    /// a retry or Drop can attempt them again rather than silently forgetting
+    /// a live CUDA registration.
+    pub(crate) fn release_expert_host_registrations_rust(
+        &mut self,
+    ) -> Result<(usize, usize), String> {
+        let (registered_count, registered_bytes) =
+            expert_host_registration_totals(&self.expert_host_registrations);
+        if registered_count == 0 {
+            return Ok((0, 0));
+        }
+        self.device
+            .bind_to_thread()
+            .map_err(|error| format!("bind CUDA context before expert host unregister: {error:?}"))?;
+        self.device
+            .synchronize()
+            .map_err(|error| format!("synchronize CUDA before expert host unregister: {error:?}"))?;
+
+        let started = std::time::Instant::now();
+        let mut released_count = 0usize;
+        let mut released_bytes = 0usize;
+        let mut failures = Vec::new();
+        for (index, registration) in self.expert_host_registrations.iter_mut().enumerate().rev() {
+            if registration.ptr.is_null() {
+                continue;
+            }
+            let result = unsafe { cuda_sys::lib().cuMemHostUnregister(registration.ptr) };
+            if result == cuda_sys::CUresult::CUDA_SUCCESS {
+                released_count += 1;
+                released_bytes = released_bytes.saturating_add(registration.bytes);
+                registration.ptr = std::ptr::null_mut();
+            } else {
+                failures.push(format!(
+                    "index={index} ptr={:#x} bytes={} result={result:?}",
+                    registration.ptr as usize, registration.bytes,
+                ));
+            }
+        }
+        self.expert_host_registrations
+            .retain(|registration| !registration.ptr.is_null());
+        log::info!(
+            "Expert host unregister: released {}/{} regions ({:.3}/{:.3} GiB) in {:.3}s; failures={}",
+            released_count,
+            registered_count,
+            released_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+            registered_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+            started.elapsed().as_secs_f64(),
+            failures.len(),
+        );
+        if failures.is_empty() {
+            Ok((released_count, released_bytes))
+        } else {
+            Err(format!(
+                "failed to unregister {} of {} expert host regions: {}",
+                failures.len(),
+                registered_count,
+                failures.join("; "),
+            ))
+        }
+    }
+
     /// Native decode status consumed by the transactional session-cache path.
     /// A cache transaction must never publish state after an engine failure,
     /// and speculative decoding currently has different rollback semantics.
@@ -26081,11 +27017,11 @@ impl GpuDecodeStore {
                 results.push((candidate, samples[sample_blocks / 2]));
             }
 
-            let Some(&(best_warps, best_ms)) = results.iter().min_by(|left, right| {
-                left.1
-                    .partial_cmp(&right.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            }) else {
+            let margin_pct =
+                nonnegative_finite_env("KRASIS_HQQ4_WARP_AUTOTUNE_MARGIN_PCT", 5.0)?;
+            let Some((best_warps, best_ms, fastest_ms)) =
+                select_stable_timing_candidate(&results, margin_pct, established_warps)
+            else {
                 destroy_events(ev_start, ev_stop);
                 return Err(format!(
                     "HQQ4 warp autotune produced no candidates for {} shape {}x{}",
@@ -26100,8 +27036,8 @@ impl GpuDecodeStore {
             self.hqq4_decode_warps_per_block
                 .insert((desc.rows, desc.cols, false), best_warps);
             eprintln!(
-                "[hqq4-warp-autotune] tensor={} shape={}x{} candidates [{}] -> {} warps ({:.4} ms median)",
-                tensor_name, desc.rows, desc.cols, details, best_warps, best_ms
+                "[hqq4-warp-autotune] tensor={} shape={}x{} candidates [{}] -> stable {} warps ({:.4} ms median; fastest {:.4} ms, margin={:.1}%)",
+                tensor_name, desc.rows, desc.cols, details, best_warps, best_ms, fastest_ms, margin_pct
             );
             // Keep the output alive through the last event synchronization.
             let _ = &mut output;
@@ -26486,11 +27422,9 @@ impl GpuDecodeStore {
                 results.push((candidate, elapsed));
             }
 
-            let Some(&(best_warps, best_ms)) = results.iter().min_by(|left, right| {
-                left.1
-                    .partial_cmp(&right.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            }) else {
+            let Some((best_warps, best_ms, fastest_ms)) =
+                select_stable_timing_candidate(&results, margin_pct, established_warps)
+            else {
                 destroy_events(ev_start, ev_stop);
                 return Err(format!(
                     "HQQ6 decode autotune produced no candidates for {} shape {}x{}",
@@ -26506,7 +27440,7 @@ impl GpuDecodeStore {
                 self.hqq6_decode_vec4_warps_per_block
                     .insert(key, best_warps);
                 eprintln!(
-                    "[hqq6-decode-autotune] tensor={} shape={}x{} scalar={:.4}ms vec4 [{}] -> vec4 {} at {:.4}ms (forced={} margin={:.1}%)",
+                    "[hqq6-decode-autotune] tensor={} shape={}x{} scalar={:.4}ms vec4 [{}] -> stable vec4 {} at {:.4}ms (fastest {:.4}ms forced={} margin={:.1}%)",
                     tensor_name,
                     desc.rows,
                     desc.cols,
@@ -26514,13 +27448,14 @@ impl GpuDecodeStore {
                     details,
                     best_warps,
                     best_ms,
+                    fastest_ms,
                     force_vec4,
                     margin_pct,
                 );
             } else {
                 self.hqq6_decode_vec4_warps_per_block.remove(&key);
                 eprintln!(
-                    "[hqq6-decode-autotune] tensor={} shape={}x{} scalar={:.4}ms vec4 [{}] -> scalar (best vec4 {} at {:.4}ms is within {:.1}% margin)",
+                    "[hqq6-decode-autotune] tensor={} shape={}x{} scalar={:.4}ms vec4 [{}] -> scalar (stable vec4 {} at {:.4}ms; fastest {:.4}ms; margin={:.1}%)",
                     tensor_name,
                     desc.rows,
                     desc.cols,
@@ -26528,6 +27463,7 @@ impl GpuDecodeStore {
                     details,
                     best_warps,
                     best_ms,
+                    fastest_ms,
                     margin_pct,
                 );
             }
@@ -27621,6 +28557,7 @@ impl GpuDecodeStore {
             sequence_state_staging: Vec::new(),
             active_sequence_device_checkpoint: None,
             expert_only_peer_store: false,
+            expert_host_registrations: Vec::new(),
             peer_service_ready_event: None,
             peer_service_pending: false,
             peer_dynamic_tier: None,
@@ -28179,6 +29116,13 @@ impl GpuDecodeStore {
                 .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         }
 
+        let prefill_device_ordinal = i32::try_from(self.device.ordinal()).map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "prefill VRAM precision device ordinal {} exceeds CUDA i32 range",
+                self.device.ordinal()
+            ))
+        })?;
+
         let prefill_hcs_guard_store_addr = self as *mut Self as usize;
         let (first_token, prompt_len, kv_overflow, prefill_time_ms, retry_attempts) = {
             let engine = self.prefill_engine_slot.as_mut().ok_or_else(|| {
@@ -28224,6 +29168,11 @@ impl GpuDecodeStore {
 
                 match engine.run_prefill(&token_ids, temperature, &[]) {
                     Ok(r) => {
+                        if env_truthy("KRASIS_VRAM_LEDGER") {
+                            crate::vram_monitor::set_lifecycle_event(
+                                "prefill_bridge_run_complete",
+                            );
+                        }
                         if let Err(e) = engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
                             engine.clear_prefill_hcs_guard_store_addr();
                             engine.set_prefill_pinning_disabled(false);
@@ -28235,6 +29184,11 @@ impl GpuDecodeStore {
                                 "KV stage export failed: {}",
                                 e
                             )));
+                        }
+                        if env_truthy("KRASIS_VRAM_LEDGER") {
+                            crate::vram_monitor::set_lifecycle_event(
+                                "prefill_bridge_exact_kv_finalized",
+                            );
                         }
                         break r;
                     }
@@ -28323,13 +29277,28 @@ impl GpuDecodeStore {
                 ),
             );
 
-            if let Err(e) = engine.release_scratch() {
-                log::error!("rust_prefill_tokens: failed to release scratch: {}", e);
+            if env_truthy("KRASIS_VRAM_LEDGER") {
+                crate::vram_monitor::set_lifecycle_event("prefill_bridge_scratch_release_start");
+            }
+            let precision_window =
+                crate::vram_monitor::begin_precision_vram_window(prefill_device_ordinal)
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            let release_result = engine.release_scratch();
+            let precision_result = match precision_window {
+                Some(window) => window.finish().map(|_| ()),
+                None => Ok(()),
+            };
+            if env_truthy("KRASIS_VRAM_LEDGER") {
+                crate::vram_monitor::set_lifecycle_event(
+                    "prefill_bridge_scratch_release_complete",
+                );
             }
             engine.clear_prefill_hcs_guard_store_addr();
             engine.set_prefill_pinning_disabled(false);
             engine.set_optional_pinning_budget_mb(None);
             engine.clear_prefill_runtime_chunk_cap();
+            release_result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            precision_result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
             (
                 prefill_result.first_token as usize,
@@ -28343,8 +29312,14 @@ impl GpuDecodeStore {
         self.initialize_dspark_context_from_capture(prompt_len)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         self.set_kv_position_rust(prompt_len);
+        if env_truthy("KRASIS_VRAM_LEDGER") {
+            crate::vram_monitor::set_lifecycle_event("prefill_bridge_decode_prepare_start");
+        }
         self.prepare_runtime_for_decode_rust()
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        if env_truthy("KRASIS_VRAM_LEDGER") {
+            crate::vram_monitor::set_lifecycle_event("prefill_bridge_decode_prepare_complete");
+        }
         self.last_rust_prefill_measurement = Some((prompt_len, prefill_time_ms, retry_attempts));
 
         Ok((first_token, prompt_len, kv_overflow))
@@ -28584,6 +29559,10 @@ impl GpuDecodeStore {
             .device
             .alloc_zeros::<f32>(max_ept)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+        let d_mixed_weights = self
+            .device
+            .alloc_zeros::<f32>(max_ept * 2)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
         // Contiguous upload buffer: four pointer arrays followed by ordinary,
         // split-full, and split-hot f32 weights, then routed expert IDs. Legacy
         // replay uploads the ordinary prefix plus IDs; GPU route classification
@@ -28716,6 +29695,8 @@ impl GpuDecodeStore {
             shared_expert_intermediate_size: shared_inter,
             group_size,
             expert_bits,
+            mixed_expert_precision: false,
+            d_mixed_expert_bits: None,
             shared_expert_bits: expert_bits, // default: same as routed; overridden when shared expert is registered
             weights: Vec::with_capacity(num_layers * 8),
             layers: Vec::with_capacity(num_layers),
@@ -28771,12 +29752,14 @@ impl GpuDecodeStore {
             d_batch_w2_packed_ptrs,
             d_batch_w2_scales_ptrs,
             d_batch_weights,
+            d_mixed_weights,
             h_batch_w13_packed_ptrs: vec![0u64; max_ept],
             h_batch_w13_scales_ptrs: vec![0u64; max_ept],
             h_batch_w2_packed_ptrs: vec![0u64; max_ept],
             h_batch_w2_scales_ptrs: vec![0u64; max_ept],
             h_batch_weights: vec![0.0f32; max_ept],
             h_batch_expert_ids: vec![0i32; max_ept],
+            h_batch_hot_flags: vec![0u8; max_ept],
             max_experts_per_tok: max_ept,
             d_batch_upload,
             h_batch_upload,
@@ -29482,6 +30465,7 @@ impl GpuDecodeStore {
                 fused_silu_w2_batched_timed: get("fused_silu_w2_batched_timed")?,
                 fused_silu_w2_int8_batched: get("fused_silu_w2_int8_batched")?,
                 multi_expert_weighted_add_bf16: get("multi_expert_weighted_add_bf16")?,
+                partition_mixed_router_weights: get("partition_mixed_router_weights")?,
                 // Graphable variants
                 embedding_lookup_g: get("embedding_lookup_g")?,
                 apply_rope_g: get("apply_rope_g")?,
@@ -31400,15 +32384,30 @@ impl GpuDecodeStore {
             .as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
 
-        // Compute proper double-buffer layout from the first registered MoE layer's expert sizes.
-        // All experts in a model have identical weight dimensions.
+        // Compute one safe staging layout from the largest loaded component.
+        // Homogeneous caches naturally produce the old layout; mixed caches
+        // require the INT8 maxima even when the first expert is INT4.
         if let Some(first_moe) = graph.moe_layers.iter().find_map(|m| m.as_ref()) {
-            let e = &first_moe.experts[0];
+            let mut max_w13p = 0usize;
+            let mut max_w13s = 0usize;
+            let mut max_w2p = 0usize;
+            let mut max_w2s = 0usize;
+            for expert in graph
+                .moe_layers
+                .iter()
+                .filter_map(Option::as_ref)
+                .flat_map(|layer| layer.experts.iter())
+            {
+                max_w13p = max_w13p.max(expert.w13_packed_bytes);
+                max_w13s = max_w13s.max(expert.w13_scales_bytes);
+                max_w2p = max_w2p.max(expert.w2_packed_bytes);
+                max_w2s = max_w2s.max(expert.w2_scales_bytes);
+            }
             let align = 256usize; // CUDA DMA alignment
-            let w13p_aligned = (e.w13_packed_bytes + align - 1) & !(align - 1);
-            let w13s_aligned = (e.w13_scales_bytes + align - 1) & !(align - 1);
-            let w2p_aligned = (e.w2_packed_bytes + align - 1) & !(align - 1);
-            let w2s_aligned = (e.w2_scales_bytes + align - 1) & !(align - 1);
+            let w13p_aligned = (max_w13p + align - 1) & !(align - 1);
+            let w13s_aligned = (max_w13s + align - 1) & !(align - 1);
+            let w2p_aligned = (max_w2p + align - 1) & !(align - 1);
+            let w2s_aligned = (max_w2s + align - 1) & !(align - 1);
             let total = w13p_aligned + w13s_aligned + w2p_aligned + w2s_aligned;
 
             graph.expert_buf_w13p_offset = 0;
@@ -31463,6 +32462,11 @@ impl GpuDecodeStore {
                         graph.expert_bits
                     )));
                 }
+                let e = first_moe.experts.first().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "synthetic repack requires at least one routed expert",
+                    )
+                })?;
                 let moe_input_size = first_moe.moe_input_size.max(graph.hidden_size);
                 let w13_n = e
                     .w13_packed_bytes
@@ -31536,8 +32540,7 @@ impl GpuDecodeStore {
                 graph.d_graph_expert_bufs.len(),
                 total as f64 * graph.d_graph_expert_bufs.len() as f64 / (1024.0 * 1024.0),
                 expert_size_bytes as f64 * 4.0 / (1024.0 * 1024.0),
-                e.w13_packed_bytes, e.w13_scales_bytes,
-                e.w2_packed_bytes, e.w2_scales_bytes,
+                max_w13p, max_w13s, max_w2p, max_w2s,
             );
         } else {
             // No registered MoE layer yet: keep the legacy fallback buffers valid.
@@ -33651,21 +34654,25 @@ impl GpuDecodeStore {
             .as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("HCS not initialized"))?;
 
-        let slot_size = hcs.pool_slot_size;
-        if slot_size == 0 {
-            return Ok(result);
-        }
+        let align = 512usize;
+        let soft_budget_bytes = soft_budget_mb
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("soft HCS budget overflow"))?;
 
-        let soft_budget_bytes = soft_budget_mb * 1024 * 1024;
-        let soft_num_slots = soft_budget_bytes / slot_size;
-        if soft_num_slots == 0 {
-            return Ok(format!("{} | soft: 0 slots (budget too small)", result));
-        }
-
-        // Count how many experts actually need soft tier (not already in hard pool)
+        // Validate the complete ranking and select whole experts by their
+        // exact loaded capacity before deciding whether the soft tier is empty.
+        let occupied = hcs.cache.keys().copied().collect::<std::collections::HashSet<_>>();
+        let mut soft_plan = select_exact_hcs_slots(
+            &ranking,
+            &hcs.expert_slot_sizes,
+            hcs.num_experts_per_layer,
+            &occupied,
+            soft_budget_bytes,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         let soft_experts_available: usize = ranking
             .iter()
-            .filter(|&&(l, e)| !hcs.cache.contains_key(&(l, e)))
+            .filter(|&&(layer, expert)| !occupied.contains(&(layer, expert)))
             .count();
         if soft_experts_available == 0 {
             log::info!("HCS soft tier: skipping allocation — all experts already in hard pool (100% coverage)");
@@ -33690,8 +34697,12 @@ impl GpuDecodeStore {
             ));
         }
 
-        // Only allocate for the experts that actually need soft slots
-        let mut soft_num_slots = std::cmp::min(soft_num_slots, soft_experts_available);
+        let mut soft_alloc_bytes = soft_plan.iter().try_fold(0usize, |total, item| {
+            total
+                .checked_add(item.2)
+                .ok_or_else(|| "soft HCS packed byte overflow".to_string())
+        })
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
         // Query actual VRAM and cap allocation to what's really available.
         // The Python-side budget was measured before reaching this point;
@@ -33700,20 +34711,25 @@ impl GpuDecodeStore {
         let safety_bytes = safety_margin_mb * 1024 * 1024;
         if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
             let usable = actual_free.saturating_sub(safety_bytes);
-            let max_slots = usable / slot_size;
-            if max_slots < soft_num_slots {
+            let before = soft_plan.len();
+            while soft_alloc_bytes > usable {
+                let Some((_, _, removed_bytes)) = soft_plan.pop() else {
+                    break;
+                };
+                soft_alloc_bytes = soft_alloc_bytes.saturating_sub(removed_bytes);
+            }
+            if soft_plan.len() < before {
                 log::warn!(
-                    "HCS soft tier: capping from {} to {} slots ({:.0} MB free, {:.0} MB safety)",
-                    soft_num_slots,
-                    max_slots,
+                    "HCS soft tier: capping from {} to {} exact-size slots ({:.0} MB free, {:.0} MB safety)",
+                    before,
+                    soft_plan.len(),
                     actual_free as f64 / (1024.0 * 1024.0),
                     safety_bytes as f64 / (1024.0 * 1024.0),
                 );
-                soft_num_slots = max_slots;
             }
         }
 
-        if soft_num_slots == 0 {
+        if soft_plan.is_empty() {
             log::warn!("HCS soft tier: no VRAM available for soft experts after safety margin");
             hcs.soft_loaded = true;
             hcs.soft_num_slots = 0;
@@ -33730,16 +34746,44 @@ impl GpuDecodeStore {
             let target = total_vram / 256;
             target.max(64 * 1024 * 1024).min(256 * 1024 * 1024)
         };
-        let slots_per_chunk = (chunk_target_bytes / slot_size).max(1);
-        let planned_num_chunks = (soft_num_slots + slots_per_chunk - 1) / slots_per_chunk;
-
-        let soft_alloc_bytes = soft_num_slots * slot_size;
+        let mut soft_slot_chunks = Vec::with_capacity(soft_plan.len());
+        let mut soft_slot_offsets = Vec::with_capacity(soft_plan.len());
+        let mut soft_slot_sizes = Vec::with_capacity(soft_plan.len());
+        let mut soft_chunk_slot_ranges = Vec::new();
+        let mut soft_chunk_bytes = Vec::new();
+        let mut chunk_start = 0usize;
+        let mut chunk_bytes = 0usize;
+        let mut chunk_index = 0usize;
+        for (slot, &(_, _, slot_bytes)) in soft_plan.iter().enumerate() {
+            if slot > chunk_start && chunk_bytes.saturating_add(slot_bytes) > chunk_target_bytes {
+                soft_chunk_slot_ranges.push((chunk_start, slot));
+                soft_chunk_bytes.push(chunk_bytes);
+                chunk_start = slot;
+                chunk_bytes = 0;
+                chunk_index += 1;
+            }
+            soft_slot_chunks.push(chunk_index);
+            soft_slot_offsets.push(chunk_bytes);
+            soft_slot_sizes.push(slot_bytes);
+            chunk_bytes = chunk_bytes.checked_add(slot_bytes).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("soft HCS chunk byte overflow")
+            })?;
+        }
+        soft_chunk_slot_ranges.push((chunk_start, soft_plan.len()));
+        soft_chunk_bytes.push(chunk_bytes);
+        let planned_num_chunks = soft_chunk_bytes.len();
+        let slots_per_chunk = soft_chunk_slot_ranges
+            .iter()
+            .map(|&(start, end)| end - start)
+            .max()
+            .unwrap_or(0);
+        let slot_size = soft_slot_sizes.iter().copied().max().unwrap_or(0);
         let soft_host_mode = resolve_hcs_soft_host_mode(soft_alloc_bytes);
         let use_host_mirror = soft_host_mode == HcsSoftHostMode::Mirror;
-        log::info!("HCS soft tier: allocating {:.1} MB in {} chunks of {:.0} MB ({} slots/chunk, {} slots for {} available experts, host_mode={})",
+        log::info!("HCS soft tier: allocating {:.1} MB in {} exact-size chunks (up to {} slots/chunk, {} slots for {} available experts, largest slot {:.1} KB, host_mode={})",
             soft_alloc_bytes as f64 / (1024.0 * 1024.0), planned_num_chunks,
-            (slots_per_chunk * slot_size) as f64 / (1024.0 * 1024.0),
-            slots_per_chunk, soft_num_slots, soft_experts_available, soft_host_mode.label());
+            slots_per_chunk, soft_plan.len(), soft_experts_available,
+            slot_size as f64 / 1024.0, soft_host_mode.label());
 
         // Allocate GPU chunks and, in fast mode, pinned host mirrors for batch DMA reload.
         let mut soft_chunks: Vec<AlignedGpuBuffer> = Vec::with_capacity(planned_num_chunks);
@@ -33753,8 +34797,9 @@ impl GpuDecodeStore {
             .as_ref()
             .map(|cal| cal.required_idle_free_mb(cal.short_tokens) as usize)
             .unwrap_or(safety_margin_mb);
+        let max_chunk_bytes = soft_chunk_bytes.iter().copied().max().unwrap_or(0);
         let startup_reload_guard_mb =
-            ((slots_per_chunk.saturating_mul(slot_size)) + (1024 * 1024) - 1) / (1024 * 1024);
+            (max_chunk_bytes + (1024 * 1024) - 1) / (1024 * 1024);
         let startup_idle_floor_mb =
             startup_base_idle_floor_mb.saturating_add(startup_reload_guard_mb);
         log::info!(
@@ -33765,12 +34810,9 @@ impl GpuDecodeStore {
         );
         let mut actual_soft_slots = 0usize;
         for c in 0..planned_num_chunks {
-            let slots_this_chunk = if c == planned_num_chunks - 1 {
-                soft_num_slots - c * slots_per_chunk
-            } else {
-                slots_per_chunk
-            };
-            let chunk_bytes = slots_this_chunk * slot_size;
+            let (slot_start, slot_end) = soft_chunk_slot_ranges[c];
+            let slots_this_chunk = slot_end - slot_start;
+            let chunk_bytes = soft_chunk_bytes[c];
             if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
                 let actual_free_mb = actual_free / (1024 * 1024);
                 let chunk_mb = (chunk_bytes + (1024 * 1024) - 1) / (1024 * 1024);
@@ -33823,9 +34865,15 @@ impl GpuDecodeStore {
             soft_chunks.push(chunk_buf);
             actual_soft_slots += slots_this_chunk;
         }
-        soft_num_slots = actual_soft_slots;
-        let actual_soft_alloc_bytes = soft_num_slots * slot_size;
+        let mut soft_num_slots = actual_soft_slots;
+        soft_plan.truncate(soft_num_slots);
+        soft_slot_chunks.truncate(soft_num_slots);
+        soft_slot_offsets.truncate(soft_num_slots);
+        soft_slot_sizes.truncate(soft_num_slots);
         let num_chunks = soft_chunks.len();
+        soft_chunk_slot_ranges.truncate(num_chunks);
+        soft_chunk_bytes.truncate(num_chunks);
+        let actual_soft_alloc_bytes: usize = soft_chunk_bytes.iter().sum();
         if num_chunks == 0 || soft_num_slots == 0 {
             log::warn!("HCS soft tier: no chunks loaded after decode guardrail");
             hcs.soft_loaded = true;
@@ -33862,13 +34910,8 @@ impl GpuDecodeStore {
         let mut dma_ok = true;
         let mut experts_per_slot: Vec<Option<(usize, usize, u64, u64, u64, u64)>> =
             vec![None; soft_num_slots];
-        for &(layer_idx, expert_idx) in &ranking {
-            if soft_slot >= soft_num_slots {
-                break;
-            }
-            if hcs.cache.contains_key(&(layer_idx, expert_idx)) {
-                continue;
-            }
+        for (planned_slot, &(layer_idx, expert_idx, _)) in soft_plan.iter().enumerate() {
+            debug_assert_eq!(planned_slot, soft_slot);
             let moe = match graph.moe_layers.get(layer_idx).and_then(|m| m.as_ref()) {
                 Some(m) => m,
                 None => continue,
@@ -33878,9 +34921,8 @@ impl GpuDecodeStore {
             }
 
             let expert = &moe.experts[expert_idx];
-            let chunk_idx = soft_slot / slots_per_chunk;
-            let offset_in_chunk = soft_slot % slots_per_chunk;
-            let host_offset = offset_in_chunk * slot_size;
+            let chunk_idx = soft_slot_chunks[soft_slot];
+            let host_offset = soft_slot_offsets[soft_slot];
 
             let w13p_off = 0usize;
             let w13s_off = expert.w13_packed_bytes;
@@ -33912,8 +34954,7 @@ impl GpuDecodeStore {
                     );
                 }
             } else {
-                let dst = soft_chunks[chunk_idx].device_ptr()
-                    + (offset_in_chunk as u64 * slot_size as u64);
+                let dst = soft_chunks[chunk_idx].device_ptr() + host_offset as u64;
                 if !copy_expert_to_hcs_slot_sync(dst, expert) {
                     dma_ok = false;
                     break;
@@ -33937,12 +34978,7 @@ impl GpuDecodeStore {
         // Second pass: mirror mode batch-DMAs each host chunk to GPU in one call.
         if use_host_mirror {
             for c in 0..num_chunks {
-                let slots_this_chunk = if c == num_chunks - 1 {
-                    soft_num_slots - c * slots_per_chunk
-                } else {
-                    slots_per_chunk
-                };
-                let chunk_bytes = slots_this_chunk * slot_size;
+                let chunk_bytes = soft_chunk_bytes[c];
                 unsafe {
                     let err = cuda_sys::lib().cuMemcpyHtoD_v2(
                         *soft_chunks[c].device_ptr(),
@@ -33973,10 +35009,8 @@ impl GpuDecodeStore {
             if let Some((layer_idx, expert_idx, w13p_off, w13s_off, w2p_off, w2s_off)) =
                 experts_per_slot[slot]
             {
-                let chunk_idx = slot / slots_per_chunk;
-                let offset_in_chunk = slot % slots_per_chunk;
-                let dst = soft_chunks[chunk_idx].device_ptr()
-                    + (offset_in_chunk as u64 * slot_size as u64);
+                let chunk_idx = soft_slot_chunks[slot];
+                let dst = soft_chunks[chunk_idx].device_ptr() + soft_slot_offsets[slot] as u64;
                 let entry = HcsCacheEntry {
                     d_buf: None,
                     w13_packed_offset: 0,
@@ -34003,9 +35037,16 @@ impl GpuDecodeStore {
         hcs.soft_host_chunks = soft_host_chunks;
         hcs.soft_host_mode = soft_host_mode;
         hcs.soft_slots_per_chunk = slots_per_chunk;
+        hcs.soft_slot_chunks = soft_slot_chunks;
+        hcs.soft_slot_offsets = soft_slot_offsets;
+        hcs.soft_heterogeneous_capacities =
+            soft_slot_sizes.windows(2).any(|pair| pair[0] != pair[1]);
+        hcs.soft_slot_sizes = soft_slot_sizes;
+        hcs.soft_chunk_slot_ranges = soft_chunk_slot_ranges;
+        hcs.soft_chunk_bytes = soft_chunk_bytes;
         hcs.soft_total_chunks = num_chunks;
         hcs.soft_chunks_loaded = num_chunks;
-        hcs.soft_max_mb = (soft_num_slots * slot_size) / (1024 * 1024);
+        hcs.soft_max_mb = actual_soft_alloc_bytes / (1024 * 1024);
         hcs.soft_num_slots = soft_num_slots;
         hcs.soft_slot_size = slot_size;
         hcs.soft_slot_to_expert = soft_slot_to_expert;
@@ -34077,15 +35118,10 @@ impl GpuDecodeStore {
             .sum();
         let total_cached = hcs.num_cached;
         let soft_cached = hcs.soft_num_cached;
-        let soft_loaded_slots = if hcs.soft_chunks_loaded >= hcs.soft_total_chunks {
-            hcs.soft_num_slots
-        } else {
-            hcs.soft_chunks_loaded
-                .saturating_mul(hcs.soft_slots_per_chunk)
-                .min(hcs.soft_num_slots)
-        };
-        let soft_loaded_mb =
-            soft_loaded_slots.saturating_mul(hcs.soft_slot_size) as f64 / (1024.0 * 1024.0);
+        let soft_loaded_mb = (0..hcs.soft_chunks_loaded)
+            .map(|chunk| hcs.soft_chunk_bytes_at(chunk))
+            .sum::<usize>() as f64
+            / (1024.0 * 1024.0);
         let total_pct = if total_experts > 0 {
             total_cached as f64 / total_experts as f64 * 100.0
         } else {
@@ -41172,6 +42208,7 @@ impl GpuDecodeStore {
                     Some(*graph.d_hidden.device_ptr()),
                     Some(weights_ptr),
                     Some(count),
+                    None,
                     "peer calibration",
                 )
                 .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -42101,30 +43138,30 @@ impl GpuDecodeStore {
             .as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("HCS not initialized"))?;
 
-        if hcs.soft_slot_size == 0 || hcs.soft_num_slots == 0 || hcs.soft_slots_per_chunk == 0 {
+        if hcs.soft_num_slots == 0 || hcs.soft_total_chunks == 0 {
             hcs.soft_max_mb = 0;
             return Ok((0, 0));
         }
 
-        let slot_size = hcs.soft_slot_size;
-        let spc = hcs.soft_slots_per_chunk;
         let target_soft_bytes = target_soft_mb.saturating_mul(1024 * 1024);
-        let target_soft_slots = (target_soft_bytes / slot_size).min(hcs.soft_num_slots);
-        let target_chunks = if target_soft_slots == 0 {
-            0
-        } else {
-            ((target_soft_slots + spc - 1) / spc).min(hcs.soft_total_chunks)
-        };
+        let mut target_chunks = 0usize;
+        let mut target_bytes = 0usize;
+        for chunk in 0..hcs.soft_total_chunks {
+            let next = target_bytes.saturating_add(hcs.soft_chunk_bytes_at(chunk));
+            if next > target_soft_bytes {
+                break;
+            }
+            target_bytes = next;
+            target_chunks += 1;
+        }
 
         let (_evicted, _freed_bytes) =
             hcs.trim_soft_chunks_to(target_chunks, sync_route_ptrs.then_some(&route_sync_device));
 
-        let loaded_slots = if hcs.soft_chunks_loaded >= hcs.soft_total_chunks {
-            hcs.soft_num_slots
-        } else {
-            (hcs.soft_chunks_loaded * spc).min(hcs.soft_num_slots)
-        };
-        let loaded_soft_mb = (loaded_slots * slot_size) / (1024 * 1024);
+        let loaded_soft_mb = (0..hcs.soft_chunks_loaded)
+            .map(|chunk| hcs.soft_chunk_bytes_at(chunk))
+            .sum::<usize>()
+            / (1024 * 1024);
         hcs.soft_max_mb = loaded_soft_mb;
         hcs.soft_loaded = hcs.soft_chunks_loaded == hcs.soft_total_chunks;
 
@@ -43175,39 +44212,45 @@ impl GpuDecodeStore {
         })?;
         let stream = *self.device.cu_stream();
         unsafe {
-            let token_result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+            // These scalars feed the same stream immediately below. Do not
+            // enqueue H2D reads from local stack variables: their storage is
+            // no longer valid once this function returns, while CUDA is free
+            // to consume an asynchronous source later. A one-element D32 fill
+            // carries the exact i32 bit pattern without host-memory lifetime
+            // or synchronization costs.
+            let token_result = cuda_sys::lib().cuMemsetD32Async(
                 *d_token_id.device_ptr(),
-                &token_id_i32 as *const i32 as *const std::ffi::c_void,
-                std::mem::size_of::<i32>(),
+                token_id_i32 as u32,
+                1,
                 stream,
             );
             if token_result != cuda_sys::CUresult::CUDA_SUCCESS {
                 return Err(format!(
-                    "Ungraphed decode token-ID upload: {:?}",
+                    "Ungraphed decode token-ID device fill: {:?}",
                     token_result
                 ));
             }
-            let position_result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+            let position_result = cuda_sys::lib().cuMemsetD32Async(
                 *d_position.device_ptr(),
-                &position_i32 as *const i32 as *const std::ffi::c_void,
-                std::mem::size_of::<i32>(),
+                position_i32 as u32,
+                1,
                 stream,
             );
             if position_result != cuda_sys::CUresult::CUDA_SUCCESS {
                 return Err(format!(
-                    "Ungraphed decode position upload: {:?}",
+                    "Ungraphed decode position device fill: {:?}",
                     position_result
                 ));
             }
-            let sequence_result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+            let sequence_result = cuda_sys::lib().cuMemsetD32Async(
                 *d_seq_len.device_ptr(),
-                &sequence_length_i32 as *const i32 as *const std::ffi::c_void,
-                std::mem::size_of::<i32>(),
+                sequence_length_i32 as u32,
+                1,
                 stream,
             );
             if sequence_result != cuda_sys::CUresult::CUDA_SUCCESS {
                 return Err(format!(
-                    "Ungraphed decode sequence-length upload: {:?}",
+                    "Ungraphed decode sequence-length device fill: {:?}",
                     sequence_result
                 ));
             }
@@ -44066,6 +45109,35 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    fn join_deepseek_v4_parallel_wkv_stream(&self, label: &str) -> Result<(), String> {
+        if self.deepseek_v4_parallel_wkv_stream.0.is_null() {
+            return Err(format!(
+                "{} requested a parallel WKV join without an auxiliary stream",
+                label
+            ));
+        }
+        let join_record = unsafe {
+            cuda_sys::lib().cuEventRecord(
+                self.deepseek_v4_parallel_wkv_join_event.0,
+                self.deepseek_v4_parallel_wkv_stream.0,
+            )
+        };
+        if join_record != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("{} parallel WKV join record: {:?}", label, join_record));
+        }
+        let join_wait = unsafe {
+            cuda_sys::lib().cuStreamWaitEvent(
+                *self.device.cu_stream(),
+                self.deepseek_v4_parallel_wkv_join_event.0,
+                0,
+            )
+        };
+        if join_wait != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("{} parallel WKV join wait: {:?}", label, join_wait));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_deepseek_v4_compressor_decode_for_graph(
         &self,
@@ -44896,7 +45968,7 @@ impl GpuDecodeStore {
             if join_wait != cuda_sys::CUresult::CUDA_SUCCESS {
                 return Err(format!("{} parallel WKV join wait: {:?}", label, join_wait));
             }
-        } else {
+        } else if !parallel_wkv {
             self.deepseek_v4_projection_gemv_bf16(
                 &v4,
                 "wkv",
@@ -45378,7 +46450,10 @@ impl GpuDecodeStore {
         position_ptr: u64,
         selection_end_ptr: Option<u64>,
         path_clock_graph_idx: Option<usize>,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let mut diagnostic_entries = Vec::new();
+        let diagnostic_active = graph.debug_decode_early_trace_active
+            && graph.validation_decode_steps < graph.debug_decode_early_max_steps;
         let layer = graph
             .layers
             .get(layer_idx)
@@ -45422,6 +46497,18 @@ impl GpuDecodeStore {
         };
 
         mark_prefix(0, "deepseek-v4-prefix-start")?;
+        if diagnostic_active {
+            diagnostic_entries.push(serde_json::json!({
+                "phase": "deepseek_v4_state_before_attention_prepare",
+                "decode_step_zero_indexed": graph.validation_decode_steps,
+                "layer": layer_idx,
+                "state": debug_decode_bf16_summary_json(
+                    &format!("layer{}_state_before_attention_prepare", layer_idx),
+                    state_ptr,
+                    graph.hidden_size * hc.mult,
+                ),
+            }));
+        }
         self.launch_deepseek_v4_hc_prepare_for_graph(
             graph,
             state_ptr,
@@ -45435,6 +46522,23 @@ impl GpuDecodeStore {
             path_clock_base,
             &format!("DeepSeek-V4 layer {} attention", layer_idx),
         )?;
+        if diagnostic_active {
+            diagnostic_entries.push(serde_json::json!({
+                "phase": "deepseek_v4_hidden_after_attention_prepare",
+                "decode_step_zero_indexed": graph.validation_decode_steps,
+                "layer": layer_idx,
+                "hidden": debug_decode_bf16_summary_json(
+                    &format!("layer{}_hidden_after_attention_prepare", layer_idx),
+                    *graph.d_hidden.device_ptr(),
+                    graph.hidden_size,
+                ),
+                "next_state": debug_decode_bf16_summary_json(
+                    &format!("layer{}_next_state_after_attention_prepare", layer_idx),
+                    next_ptr,
+                    graph.hidden_size * hc.mult,
+                ),
+            }));
+        }
         self.launch_deepseek_v4_rmsnorm_for_graph(
             graph,
             *graph.d_hidden.device_ptr(),
@@ -45443,7 +46547,136 @@ impl GpuDecodeStore {
             graph.hidden_size,
             &format!("DeepSeek-V4 layer {} input", layer_idx),
         )?;
+        if diagnostic_active {
+            diagnostic_entries.push(serde_json::json!({
+                "phase": "deepseek_v4_hidden_before_attention",
+                "decode_step_zero_indexed": graph.validation_decode_steps,
+                "layer": layer_idx,
+                "hidden": debug_decode_bf16_summary_json(
+                    &format!("layer{}_hidden_before_attention", layer_idx),
+                    *graph.d_hidden.device_ptr(),
+                    graph.hidden_size,
+                ),
+            }));
+        }
         mark_prefix(5, "deepseek-v4-hc-input-norm-end")?;
+        if diagnostic_active && graph.validation_decode_steps == 0 {
+            let native_plane_hashes =
+                |prefix: &str,
+                 cache: &DeepseekV4NativeCacheRegistration,
+                 rows: usize|
+                 -> serde_json::Value {
+                    let rows = rows.min(cache.rows);
+                    let code_stride = if cache.code_bits == 8 {
+                        cache.quant_cols
+                    } else {
+                        cache.width.div_ceil(2)
+                    };
+                    let scale_stride = cache.quant_cols.div_ceil(cache.block_size);
+                    let tail_stride = if cache.code_bits == 8 {
+                        cache.width.saturating_sub(cache.quant_cols)
+                    } else {
+                        0
+                    };
+                    serde_json::json!({
+                        "rows": rows,
+                        "codes": debug_hash_device_region_json(
+                            &format!("{}_codes", prefix),
+                            cache.codes_ptr,
+                            rows.saturating_mul(code_stride),
+                        ),
+                        "scale_exponents": debug_hash_device_region_json(
+                            &format!("{}_scale_exponents", prefix),
+                            cache.scale_exponents_ptr,
+                            rows.saturating_mul(scale_stride),
+                        ),
+                        "tail": debug_hash_device_region_json(
+                            &format!("{}_tail", prefix),
+                            cache.tail_ptr,
+                            rows
+                                .saturating_mul(tail_stride)
+                                .saturating_mul(std::mem::size_of::<u16>()),
+                        ),
+                    })
+                };
+            let raw_rows = graph.kv_current_pos.min(v4.sliding_window);
+            let compressed_rows = if v4.compress_ratio == 0 {
+                0
+            } else {
+                graph.kv_current_pos / v4.compress_ratio
+            };
+            let raw_cache = if let Some(native) = v4.raw_native_cache.as_ref() {
+                native_plane_hashes(
+                    &format!("layer{}_raw_native_before_attention", layer_idx),
+                    native,
+                    raw_rows,
+                )
+            } else {
+                debug_hash_device_region_json(
+                    &format!("layer{}_raw_bf16_before_attention", layer_idx),
+                    v4.raw_cache_ptr,
+                    raw_rows
+                        .saturating_mul(v4.head_dim)
+                        .saturating_mul(std::mem::size_of::<u16>()),
+                )
+            };
+            let compressor = v4.compressor.as_ref().map(|compressor| {
+                let cache = if let Some(native) = compressor.native_cache.as_ref() {
+                    let planes = native_plane_hashes(
+                        &format!("layer{}_compressed_native_before_attention", layer_idx),
+                        native,
+                        compressed_rows,
+                    );
+                    let rows = compressed_rows.min(native.rows);
+                    let code_stride = if native.code_bits == 8 {
+                        native.quant_cols
+                    } else {
+                        native.width.div_ceil(2)
+                    };
+                    serde_json::json!({
+                        "planes": planes,
+                        "code_rows": debug_hash_device_rows_json(
+                            &format!("layer{}_compressed_native_code_rows_before_attention", layer_idx),
+                            native.codes_ptr,
+                            rows,
+                            code_stride,
+                        ),
+                    })
+                } else {
+                    debug_hash_device_region_json(
+                        &format!("layer{}_compressed_bf16_before_attention", layer_idx),
+                        compressor.cache_ptr,
+                        compressed_rows
+                            .min(compressor.cache_rows)
+                            .saturating_mul(v4.head_dim)
+                            .saturating_mul(std::mem::size_of::<u16>()),
+                    )
+                };
+                serde_json::json!({
+                    "ratio": v4.compress_ratio,
+                    "complete_rows": compressed_rows.min(compressor.cache_rows),
+                    "cache": cache,
+                    "kv_state": debug_decode_f32_summary_json(
+                        &format!("layer{}_compressor_kv_state_before_attention", layer_idx),
+                        compressor.kv_state_ptr,
+                        compressor.kv_state_elems,
+                    ),
+                    "score_state": debug_decode_f32_summary_json(
+                        &format!("layer{}_compressor_score_state_before_attention", layer_idx),
+                        compressor.score_state_ptr,
+                        compressor.score_state_elems,
+                    ),
+                })
+            });
+            diagnostic_entries.push(serde_json::json!({
+                "phase": "deepseek_v4_attention_cache_before_decode",
+                "decode_step_zero_indexed": graph.validation_decode_steps,
+                "layer": layer_idx,
+                "absolute_position": graph.kv_current_pos,
+                "raw_cache": raw_cache,
+                "compressor": compressor,
+            }));
+        }
         self.run_deepseek_v4_attention_decode_for_graph(
             graph,
             layer_idx,
@@ -45451,6 +46684,83 @@ impl GpuDecodeStore {
             selection_end_ptr,
             path_clock_base,
         )?;
+        if diagnostic_active {
+            diagnostic_entries.push(serde_json::json!({
+                "phase": "deepseek_v4_hidden_after_attention",
+                "decode_step_zero_indexed": graph.validation_decode_steps,
+                "layer": layer_idx,
+                "hidden": debug_decode_bf16_summary_json(
+                    &format!("layer{}_hidden_after_attention", layer_idx),
+                    *graph.d_hidden.device_ptr(),
+                    graph.hidden_size,
+                ),
+            }));
+        }
+        if diagnostic_active && graph.validation_decode_steps == 0 {
+            let compressed_rows = if v4.compress_ratio == 0 {
+                0
+            } else {
+                graph.kv_current_pos / v4.compress_ratio
+            };
+            let suffix_active = if let Some(indexer) = v4.indexer.as_ref() {
+                indexer.index_topk.min(compressed_rows)
+            } else if let Some(compressor) = v4.compressor.as_ref() {
+                compressor.cache_rows.min(compressed_rows)
+            } else {
+                0
+            };
+            let active_selected = v4.sliding_window.saturating_add(suffix_active);
+            let selected_capacity = v4.sliding_window.saturating_add(
+                v4.indexer
+                    .as_ref()
+                    .map(|indexer| indexer.index_topk)
+                    .or_else(|| v4.compressor.as_ref().map(|compressor| compressor.cache_rows))
+                    .unwrap_or(0),
+            );
+            diagnostic_entries.push(serde_json::json!({
+                "phase": "deepseek_v4_attention_intermediates_after_decode",
+                "decode_step_zero_indexed": graph.validation_decode_steps,
+                "layer": layer_idx,
+                "absolute_position": graph.kv_current_pos,
+                "active_selected": active_selected,
+                "selected_capacity": selected_capacity,
+                "query": debug_decode_bf16_summary_json(
+                    &format!("layer{}_query_after_attention", layer_idx),
+                    *workspace.d_query.device_ptr(),
+                    v4.num_heads.saturating_mul(v4.head_dim),
+                ),
+                "kv": debug_decode_bf16_summary_json(
+                    &format!("layer{}_kv_after_attention", layer_idx),
+                    *workspace.d_kv.device_ptr(),
+                    v4.head_dim,
+                ),
+                "compressor_pooled": debug_decode_f32_summary_json(
+                    &format!("layer{}_compressor_pooled_after_attention", layer_idx),
+                    *workspace.d_compressor_pooled.device_ptr(),
+                    v4.head_dim,
+                ),
+                "indices": debug_hash_device_region_json(
+                    &format!("layer{}_indices_after_attention", layer_idx),
+                    *workspace.d_indices.device_ptr(),
+                    selected_capacity.saturating_mul(std::mem::size_of::<i32>()),
+                ),
+                "selected_kv_active": debug_decode_bf16_summary_json(
+                    &format!("layer{}_selected_kv_active_after_attention", layer_idx),
+                    *workspace.d_selected_kv.device_ptr(),
+                    active_selected.saturating_mul(v4.head_dim),
+                ),
+                "attention_scores": debug_decode_f32_summary_json(
+                    &format!("layer{}_attention_scores_after_attention", layer_idx),
+                    *workspace.d_attention_scores.device_ptr(),
+                    v4.num_heads.saturating_mul(selected_capacity),
+                ),
+                "attention_output": debug_decode_bf16_summary_json(
+                    &format!("layer{}_attention_output_after_attention", layer_idx),
+                    *workspace.d_attention.device_ptr(),
+                    v4.num_heads.saturating_mul(v4.head_dim),
+                ),
+            }));
+        }
         self.launch_deepseek_v4_hc_post_for_graph(
             graph,
             next_ptr,
@@ -45459,6 +46769,18 @@ impl GpuDecodeStore {
             hc.mult,
             &format!("DeepSeek-V4 layer {} attention", layer_idx),
         )?;
+        if diagnostic_active {
+            diagnostic_entries.push(serde_json::json!({
+                "phase": "deepseek_v4_next_state_after_attention_post",
+                "decode_step_zero_indexed": graph.validation_decode_steps,
+                "layer": layer_idx,
+                "next_state": debug_decode_bf16_summary_json(
+                    &format!("layer{}_next_state_after_attention_post", layer_idx),
+                    next_ptr,
+                    graph.hidden_size * hc.mult,
+                ),
+            }));
+        }
         self.launch_deepseek_v4_hc_prepare_for_graph(
             graph,
             next_ptr,
@@ -45481,7 +46803,7 @@ impl GpuDecodeStore {
             &format!("DeepSeek-V4 layer {} post-attention", layer_idx),
         )?;
         mark_path(6, "deepseek-v4-hc-post-end")?;
-        Ok(())
+        Ok(diagnostic_entries)
     }
 
     fn execute_dsa_owner_scores_for_graph(
@@ -48610,8 +49932,12 @@ impl GpuDecodeStore {
         let mut routed_sf = 1.0f32;
         let mut moe_gated = true;
         let mut moe_activation = 0u8;
+        let mut max_expert_bits = graph.expert_bits;
         for ml in target_moe_layers {
             if let Some(m) = ml {
+                for expert in &m.experts {
+                    max_expert_bits = max_expert_bits.max(expert.bits);
+                }
                 n_routed = m.num_experts;
                 n_topk = m.topk;
                 scoring_func = m.scoring_func;
@@ -48645,6 +49971,7 @@ impl GpuDecodeStore {
             n_routed_experts: n_routed,
             num_experts_per_tok: n_topk,
             expert_bits: graph.expert_bits,
+            max_expert_bits,
             shared_expert_bits: graph.shared_expert_bits,
             group_size: graph.group_size,
             sms: graph.num_sms,
@@ -50097,6 +51424,7 @@ impl GpuDecodeStore {
                     .experts
                     .iter()
                     .map(|e| ExpertWeightPtrs {
+                        bits: e.bits,
                         w13_packed_ptr: e.w13_packed_ptr,
                         w13_packed_bytes: e.w13_packed_bytes,
                         w13_scales_ptr: e.w13_scales_ptr,
@@ -50110,6 +51438,7 @@ impl GpuDecodeStore {
                     })
                     .collect();
                 let shared = m.shared.as_ref().map(|e| ExpertWeightPtrs {
+                    bits: e.bits,
                     w13_packed_ptr: e.w13_packed_ptr,
                     w13_packed_bytes: e.w13_packed_bytes,
                     w13_scales_ptr: e.w13_scales_ptr,
@@ -50377,7 +51706,7 @@ impl GpuDecodeStore {
         let moe_inter = config.moe_intermediate_size;
         let h = graph.hidden_size;
         let gs = config.group_size;
-        let bits = config.expert_bits as usize;
+        let bits = config.max_expert_bits as usize;
 
         let w1_n = if config.moe_gated {
             2 * moe_inter
@@ -52918,9 +54247,10 @@ impl GpuDecodeStore {
                 results.push((ks, samples[blocks / 2]));
             }
 
-            let Some(&(best_ks, best_ms)) = results
-                .iter()
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            let margin_pct =
+                nonnegative_finite_env("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0)?;
+            let Some((best_ks, best_ms, _fastest_ms)) =
+                select_stable_timing_candidate(&results, margin_pct, formula)
             else {
                 continue;
             };
@@ -52933,7 +54263,6 @@ impl GpuDecodeStore {
             // candidates on flat shapes is a few percent); it is relative to
             // the formula candidate's own median, so it needs no per-model or
             // per-GPU constants.
-            let margin_pct = env_f64("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0).max(0.0);
             let formula_ms = results
                 .iter()
                 .find(|&&(ks, _)| ks == formula)
@@ -53139,9 +54468,10 @@ impl GpuDecodeStore {
                 results.push((ks, samples[blocks / 2]));
             }
 
-            let Some(&(best_ks, best_ms)) = results
-                .iter()
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            let margin_pct =
+                nonnegative_finite_env("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0)?;
+            let Some((best_ks, best_ms, _fastest_ms)) =
+                select_stable_timing_candidate(&results, margin_pct, formula)
             else {
                 continue;
             };
@@ -53153,7 +54483,6 @@ impl GpuDecodeStore {
                 .iter()
                 .map(|(ks, ms)| format!("{}:{:.4}ms", ks, ms))
                 .collect();
-            let margin_pct = env_f64("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0).max(0.0);
             match formula_ms {
                 Some(f_ms) if best_ks != formula && best_ms < f_ms * (1.0 - margin_pct / 100.0) => {
                     eprintln!(
@@ -53395,9 +54724,10 @@ impl GpuDecodeStore {
                     };
                     results.push((ks, elapsed));
                 }
-                let Some(&(best_ks, best_ms)) = results
-                    .iter()
-                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                let margin_pct =
+                    nonnegative_finite_env("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0)?;
+                let Some((best_ks, best_ms, fastest_ms)) =
+                    select_stable_timing_candidate(&results, margin_pct, 2)
                 else {
                     continue;
                 };
@@ -53406,19 +54736,18 @@ impl GpuDecodeStore {
                     .map(|(ks, ms)| format!("{}:{:.4}ms", ks, ms))
                     .collect::<Vec<_>>()
                     .join(" ");
-                let margin_pct = env_f64("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0).max(0.0);
                 if best_ms < v1_ms * (1.0 - margin_pct / 100.0) {
                     eprintln!(
-                        "[shared-w2-autotune] layer={} shape k={} n={} int8={} v1={:.4}ms candidates [{}] -> K-split {} at {:.4}ms (>{:.1}% margin)",
-                        layer_idx, w2_k, w2_n, shared_is_int8, v1_ms, details, best_ks, best_ms, margin_pct
+                        "[shared-w2-autotune] layer={} shape k={} n={} int8={} v1={:.4}ms candidates [{}] -> stable K-split {} at {:.4}ms (fastest {:.4}ms, >{:.1}% margin)",
+                        layer_idx, w2_k, w2_n, shared_is_int8, v1_ms, details, best_ks, best_ms, fastest_ms, margin_pct
                     );
                     graph
                         .shared_w2_ksplit_autotune
                         .insert((w2_k, w2_n, shared_is_int8), best_ks);
                 } else {
                     eprintln!(
-                        "[shared-w2-autotune] layer={} shape k={} n={} int8={} v1={:.4}ms candidates [{}] -> keeping v1 (best {} at {:.4}ms is within {:.1}% margin)",
-                        layer_idx, w2_k, w2_n, shared_is_int8, v1_ms, details, best_ks, best_ms, margin_pct
+                        "[shared-w2-autotune] layer={} shape k={} n={} int8={} v1={:.4}ms candidates [{}] -> keeping v1 (stable {} at {:.4}ms; fastest {:.4}ms; margin={:.1}%)",
+                        layer_idx, w2_k, w2_n, shared_is_int8, v1_ms, details, best_ks, best_ms, fastest_ms, margin_pct
                     );
                 }
             }
@@ -53684,7 +55013,7 @@ impl GpuDecodeStore {
             samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             Ok(samples[blocks / 2])
         };
-        let margin_pct = env_f64("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0).max(0.0);
+        let margin_pct = nonnegative_finite_env("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0)?;
 
         for &(expert_hs, w13_n, topk, ksplits, layer_idx) in w13_shapes.iter() {
             if let Err(error) = stage_layer(layer_idx) {
@@ -53878,6 +55207,46 @@ impl GpuDecodeStore {
             graph.int4_w2_n32_autotune.len(),
         );
         Ok(())
+    }
+
+    /// Complete every measured Marlin dispatch decision before the first
+    /// uncaptured decode step consumes it. CUDA-graph capture uses the same
+    /// maps later, so first-step and replay arithmetic cannot depend on
+    /// whether graph capture has already happened.
+    fn ensure_marlin_dispatch_autotuned_for_graph(
+        &self,
+        graph: &mut GpuDecodeGraph,
+    ) -> Result<(), String> {
+        let has_routed_moe = graph
+            .moe_layers
+            .iter()
+            .take(graph.num_layers)
+            .any(|moe| moe.as_ref().is_some_and(|moe| !moe.experts.is_empty()));
+        if has_routed_moe
+            && graph.deepseek_v4_decode_policy.marlin_autotune
+            && graph.ksplit_autotune.is_empty()
+        {
+            self.autotune_w13_ksplits(graph)
+                .map_err(|error| format!("ksplit autotune failed: {error}"))?;
+        }
+        if !graph.int4_n32_autotune_complete
+            && (graph.deepseek_v4_decode_policy.int4_w13_n32.is_none()
+                || graph.deepseek_v4_decode_policy.int4_w2_n32.is_none())
+        {
+            self.autotune_int4_n32(graph)
+                .map_err(|error| format!("INT4 N32 autotune failed: {error}"))?;
+        }
+        Ok(())
+    }
+
+    fn ensure_marlin_dispatch_autotuned(&mut self) -> Result<(), String> {
+        let mut graph = self
+            .graph
+            .take()
+            .ok_or_else(|| "Call configure first".to_string())?;
+        let result = self.ensure_marlin_dispatch_autotuned_for_graph(&mut graph);
+        self.graph = Some(graph);
+        result
     }
 
     /// Measure sparse native-MLA launch geometry on the real first-token
@@ -54277,21 +55646,11 @@ impl GpuDecodeStore {
         let num_moe = moe_indices.len();
         let num_graphs = num_moe + 1; // routing(0) + (num_moe-1) combined + final
 
-        // ── Measured w13 ksplit autotune (before any graph bakes a ksplit) ──
-        if self.deepseek_v4_decode_policy.marlin_autotune && graph.ksplit_autotune.is_empty() {
-            if let Err(e) = self.autotune_w13_ksplits(&mut graph) {
-                self.graph = Some(graph);
-                return Err(format!("ksplit autotune failed: {}", e));
-            }
-        }
-        if !graph.int4_n32_autotune_complete
-            && (graph.deepseek_v4_decode_policy.int4_w13_n32.is_none()
-                || graph.deepseek_v4_decode_policy.int4_w2_n32.is_none())
-        {
-            if let Err(error) = self.autotune_int4_n32(&mut graph) {
-                self.graph = Some(graph);
-                return Err(format!("INT4 N32 autotune failed: {}", error));
-            }
+        // The first uncaptured step normally completes these measurements.
+        // Keep this check for direct graph-capture callers and invalidations.
+        if let Err(error) = self.ensure_marlin_dispatch_autotuned_for_graph(&mut graph) {
+            self.graph = Some(graph);
+            return Err(error);
         }
 
         // ── Split hot/cold expert launch capture setup ──
@@ -54307,6 +55666,7 @@ impl GpuDecodeStore {
         let split_requested =
             split_expert_launch_enabled(graph.dsa_runtime_registered, split_override.as_deref())?;
         graph.split_expert_launch = split_requested;
+        log::info!("Decode expert batch slot order: canonical router order");
         if graph.gpu_route_sync {
             let Some(mapped) = graph.mapped_cold_buf.as_ref() else {
                 self.graph = Some(graph);
@@ -55420,7 +56780,10 @@ impl GpuDecodeStore {
                     Some(GRAPH_SEG_ROUTE_GQA) | Some(GRAPH_SEG_ROUTE_LA)
                 ));
         let mixed_segment_clock_base = graph_idx * 5;
-        let moe_route_clock_active = graph.graph_moe_route_clock_enabled
+        // Homogeneous sub-stage clocks do not describe the two-dispatch mixed
+        // stack. The enclosing mixed-segment clock remains the truthful total.
+        let moe_route_clock_active = !graph.mixed_expert_precision
+            && graph.graph_moe_route_clock_enabled
             && expert_layer.is_some()
             && routing_range.is_some()
             && matches!(
@@ -55471,13 +56834,7 @@ impl GpuDecodeStore {
         // Single-expert shared path.  Shared and routed weights may have
         // different bit widths, so consult the format-specific measured
         // override rather than the routed-expert selector.
-        let w13_ksplits = select_w13_ksplits_for_weights(
-            graph,
-            hs,
-            shared_w13_n,
-            1,
-            graph.shared_expert_bits == 8,
-        );
+        let w13_ksplits = select_shared_w13_ksplits(graph, shared_w13_n);
         let w13_k_tiles = hs / 16;
         let w13_max_ksplits = w13_k_tiles / 16;
         // Batched expert ksplits: topk in z-dim already provides block parallelism
@@ -55578,6 +56935,23 @@ impl GpuDecodeStore {
                 let d_w2p = d_upload_base + (ptr_stride * 2) as u64;
                 let d_w2s = d_upload_base + (ptr_stride * 3) as u64;
                 let d_wts = d_upload_base + (ptr_stride * 4) as u64;
+                let shared_vram_opt = graph
+                    .shared_expert_vram
+                    .get(layer_idx)
+                    .and_then(|shared| shared.as_ref());
+                let shared_expert_will_run = shared_vram_opt.is_some();
+                if graph.mixed_expert_precision {
+                    let d_ids = d_upload_base + (ptr_stride * 4 + max_ept * 4 * 3) as u64;
+                    Self::launch_manifest_expert_stack(
+                        graph,
+                        layer_idx,
+                        Some(expert_input_ptr),
+                        d_ids,
+                        d_wts,
+                        topk,
+                        "captured manifest routed stack",
+                    )?;
+                } else {
                 let direct_w13_bf16 =
                     graph.direct_w13_bf16_enabled_for_moe(moe, expert_bits, w13_ksplits_batched);
                 let graph_w13_path = graph_w13_path(expert_bits, direct_w13_bf16);
@@ -55595,11 +56969,6 @@ impl GpuDecodeStore {
                         ));
                     }
                 }
-                let shared_vram_opt = graph
-                    .shared_expert_vram
-                    .get(layer_idx)
-                    .and_then(|shared| shared.as_ref());
-                let shared_expert_will_run = shared_vram_opt.is_some();
                 // Batched w13 GEMV v2
                 let w13_n32 = graph_w13_path == GraphW13Path::Marlin
                     && !is_int8
@@ -55621,6 +56990,7 @@ impl GpuDecodeStore {
                         Some(expert_input_ptr),
                         Some(d_wts),
                         Some(topk),
+                        None,
                         "graph TileQ",
                     )?;
                 } else if graph_w13_path == GraphW13Path::DirectBf16 {
@@ -55926,6 +57296,7 @@ impl GpuDecodeStore {
                                 .map_err(|e| format!("batched silu_w2[{}]: {:?}", layer_idx, e,))?;
                         }
                     }
+                }
                 }
                 if moe_route_clock_active {
                     let clocks = graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
@@ -56266,11 +57637,12 @@ impl GpuDecodeStore {
                         0
                     };
 
-                    if let Some(&w2_ksplits) = graph.shared_w2_ksplit_autotune.get(&(
+                    if let Some(w2_ksplits) = select_shared_w2_ksplits(
+                        graph,
                         shared_intermediate,
                         hs,
                         shared_is_int8,
-                    )) {
+                    ) {
                         self.launch_fused_silu_accum_v2(
                             sw2p,
                             sw2s,
@@ -61912,6 +63284,121 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    fn partition_mixed_router_weights(
+        graph: &GpuDecodeGraph,
+        layer_idx: usize,
+        expert_ids: u64,
+        weights: u64,
+        topk: usize,
+        label: &str,
+    ) -> Result<(u64, u64), String> {
+        use cudarc::driver::LaunchConfig;
+        if !graph.mixed_expert_precision {
+            return Err(format!("{label}: mixed precision is not active"));
+        }
+        let moe = graph
+            .moe_layers
+            .get(layer_idx)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| format!("{label}: missing MoE layer {layer_idx}"))?;
+        if topk == 0 || topk > graph.max_experts_per_tok || topk > moe.topk {
+            return Err(format!("{label}: invalid top-k {topk}"));
+        }
+        let bits = graph.d_mixed_expert_bits.as_ref().ok_or_else(|| {
+            format!("{label}: mixed routed-expert precision table is unavailable")
+        })?;
+        let int4_weights = *graph.d_mixed_weights.device_ptr();
+        let int8_weights = int4_weights
+            + (graph.max_experts_per_tok * std::mem::size_of::<f32>()) as u64;
+        let kernels = graph
+            .kernels
+            .as_ref()
+            .ok_or_else(|| format!("{label}: kernels are not cached"))?;
+        unsafe {
+            kernels
+                .partition_mixed_router_weights
+                .clone()
+                .launch(
+                    LaunchConfig::for_num_elems(topk as u32),
+                    (
+                        expert_ids,
+                        weights,
+                        *bits.device_ptr(),
+                        int4_weights,
+                        int8_weights,
+                        layer_idx as i32,
+                        moe.num_experts as i32,
+                        topk as i32,
+                    ),
+                )
+                .map_err(|error| format!("{label}: partition launch failed: {error:?}"))?;
+        }
+        Ok((int4_weights, int8_weights))
+    }
+
+    /// Execute one manifest-bound routed layer. Uniform layers keep the normal
+    /// single-launch path; only genuinely heterogeneous layers pay for the two
+    /// precision-filtered launches. This matters for small budgets whose
+    /// measured ranking may leave some layers entirely INT4 or entirely INT8.
+    fn launch_manifest_expert_stack(
+        graph: &GpuDecodeGraph,
+        layer_idx: usize,
+        expert_input_override: Option<u64>,
+        expert_ids: u64,
+        expert_weights: u64,
+        topk: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        if !graph.mixed_expert_precision {
+            return Err(format!("{label}: mixed precision is not active"));
+        }
+        let moe = graph
+            .moe_layers
+            .get(layer_idx)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| format!("{label}: missing MoE layer {layer_idx}"))?;
+        let uniform = manifest_layer_uniform_bits(moe.experts.iter().map(|expert| expert.bits))
+            .map_err(|error| format!("{label}: layer {layer_idx}: {error}"))?;
+        if let Some(bits) = uniform {
+            return Self::launch_batched_expert_stack(
+                graph,
+                layer_idx,
+                expert_input_override,
+                Some(expert_weights),
+                Some(topk),
+                Some(bits),
+                label,
+            );
+        }
+
+        let (w4, w8) = Self::partition_mixed_router_weights(
+            graph,
+            layer_idx,
+            expert_ids,
+            expert_weights,
+            topk,
+            label,
+        )?;
+        Self::launch_batched_expert_stack(
+            graph,
+            layer_idx,
+            expert_input_override,
+            Some(w4),
+            Some(topk),
+            Some(4),
+            "manifest heterogeneous INT4",
+        )?;
+        Self::launch_batched_expert_stack(
+            graph,
+            layer_idx,
+            expert_input_override,
+            Some(w8),
+            Some(topk),
+            Some(8),
+            "manifest heterogeneous INT8",
+        )
+    }
+
     /// Split-launch hot phase: launch the batched expert stack (w13 GEMV,
     /// ksplit reduce, activation+w2) directly on the replay stream for the
     /// hot/staged slots of the current boundary, reading weights from d_wts_hot
@@ -61924,6 +63411,7 @@ impl GpuDecodeStore {
         expert_input_override: Option<u64>,
         expert_weights_override: Option<u64>,
         expert_count_override: Option<usize>,
+        expert_bits_override: Option<u8>,
         label: &str,
     ) -> Result<(), String> {
         use cudarc::driver::LaunchConfig;
@@ -61940,7 +63428,11 @@ impl GpuDecodeStore {
         let hs = graph.hidden_size;
         let intermediate = graph.moe_intermediate_size;
         let gs = graph.group_size;
-        let is_int8 = graph.expert_bits == 8;
+        let expert_bits = expert_bits_override.unwrap_or(graph.expert_bits);
+        if !matches!(expert_bits, 3 | 4 | 8) {
+            return Err(format!("{label}: unsupported routed expert INT{expert_bits}"));
+        }
+        let is_int8 = expert_bits == 8;
         let inv_wp = if is_int8 {
             *graph.d_inv_weight_perm_int8.device_ptr()
         } else {
@@ -61980,13 +63472,19 @@ impl GpuDecodeStore {
         } else {
             intermediate
         };
-        let w13_ksplits_batched = select_w13_ksplits_batched(graph, expert_hs, w13_n, topk.max(1));
+        let w13_ksplits_batched = select_w13_ksplits_for_weights(
+            graph,
+            expert_hs,
+            w13_n,
+            topk.max(1),
+            is_int8,
+        );
         let direct_w13_bf16 =
-            graph.direct_w13_bf16_enabled_for_moe(moe, graph.expert_bits, w13_ksplits_batched);
-        if direct_w13_bf16 && (is_int8 || graph.expert_bits != 4 || w13_ksplits_batched != 1) {
+            graph.direct_w13_bf16_enabled_for_moe(moe, expert_bits, w13_ksplits_batched);
+        if direct_w13_bf16 && (is_int8 || expert_bits != 4 || w13_ksplits_batched != 1) {
             return Err(format!(
                 "split hot direct W13 contract invalid at layer {}: expert_bits={} k_splits={}",
-                layer_idx, graph.expert_bits, w13_ksplits_batched,
+                layer_idx, expert_bits, w13_ksplits_batched,
             ));
         }
         let max_ept = graph.max_experts_per_tok;
@@ -62008,7 +63506,7 @@ impl GpuDecodeStore {
                 .device_ptr()
         };
 
-        if graph.expert_bits == 3 {
+        if expert_bits == 3 {
             let factors = moe
                 .tileq
                 .ok_or_else(|| format!("{label}: TileQ factors missing at layer {layer_idx}"))?;
@@ -62178,7 +63676,7 @@ impl GpuDecodeStore {
 
         let w13_n32 = !direct_w13_bf16
             && !is_int8
-            && graph.expert_bits == 4
+            && expert_bits == 4
             && select_int4_w13_n32(graph, expert_hs, w13_n, topk.max(1), w13_ksplits_batched)?;
         let w13_tile_width = if w13_n32 { 32 } else { 16 };
         let w13_threads = if w13_n32 { 512 } else { 256 };
@@ -62262,7 +63760,7 @@ impl GpuDecodeStore {
         let w2_n32 = gated
             && !is_relu2
             && !is_int8
-            && graph.expert_bits == 4
+            && expert_bits == 4
             && select_int4_w2_n32(
                 graph,
                 intermediate,
@@ -62276,11 +63774,11 @@ impl GpuDecodeStore {
         let w2_n_tiles = expert_hs.div_ceil(w2_tile_width);
         let w2_input_k = intermediate;
         let relu2_w2_coalesced =
-            graph.relu2_w2_coalesced_enabled_for_moe(moe, graph.expert_bits, w2_n16_tiles);
-        if relu2_w2_coalesced && (!is_relu2 || is_int8 || graph.expert_bits != 4) {
+            graph.relu2_w2_coalesced_enabled_for_moe(moe, expert_bits, w2_n16_tiles);
+        if relu2_w2_coalesced && (!is_relu2 || is_int8 || expert_bits != 4) {
             return Err(format!(
                 "split hot coalesced W2 contract invalid at layer {}: relu2={} expert_bits={}",
-                layer_idx, is_relu2, graph.expert_bits,
+                layer_idx, is_relu2, expert_bits,
             ));
         }
         let w2_smem = if relu2_w2_coalesced {
@@ -62364,7 +63862,44 @@ impl GpuDecodeStore {
         graph: &GpuDecodeGraph,
         layer_idx: usize,
     ) -> Result<(), String> {
-        Self::launch_batched_expert_stack(graph, layer_idx, None, None, None, "split hot")
+        if !graph.mixed_expert_precision {
+            return Self::launch_batched_expert_stack(
+                graph,
+                layer_idx,
+                None,
+                None,
+                None,
+                None,
+                "split hot",
+            );
+        }
+        let moe = graph
+            .moe_layers
+            .get(layer_idx)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| format!("split hot: missing MoE layer {layer_idx}"))?;
+        let max_ept = graph.max_experts_per_tok;
+        let ptr_stride = max_ept * std::mem::size_of::<u64>();
+        let upload = *graph.d_batch_upload.device_ptr();
+        let ids = upload + (ptr_stride * 4 + max_ept * 4 * 3) as u64;
+        let hot_weights = if graph.gpu_route_sync {
+            upload + (ptr_stride * 4 + max_ept * 4 * 2) as u64
+        } else {
+            *graph
+                .d_wts_hot
+                .as_ref()
+                .ok_or_else(|| "split hot: d_wts_hot is unavailable".to_string())?
+                .device_ptr()
+        };
+        Self::launch_manifest_expert_stack(
+            graph,
+            layer_idx,
+            None,
+            ids,
+            hot_weights,
+            moe.topk,
+            "split hot mixed",
+        )
     }
 
     fn disable_peer_dynamic(&mut self, reason: String) {
@@ -62414,11 +63949,9 @@ impl GpuDecodeStore {
                 pending.slot,
             ));
         }
-        let pool = hcs
-            .pool_buf
-            .as_ref()
+        let dst = hcs
+            .pool_slot_ptr(pending.slot)
             .ok_or_else(|| "dynamic peer hard pool is unavailable".to_string())?;
-        let dst = *pool.device_ptr() + pending.slot as u64 * hcs.pool_slot_size as u64;
         let expert = graph
             .moe_layers
             .get(pending.incoming.0)
@@ -62635,17 +64168,16 @@ impl GpuDecodeStore {
                     victim.0, victim.1
                 )
             })?;
-            if entry.pool_slot != Some(slot) || payload_bytes > hcs.pool_slot_size {
+            let slot_capacity = hcs.pool_slot_capacity(slot);
+            if entry.pool_slot != Some(slot) || payload_bytes > slot_capacity {
                 return Err(format!(
                     "dynamic peer victim slot mismatch slot={} entry={:?} payload={} capacity={}",
-                    slot, entry.pool_slot, payload_bytes, hcs.pool_slot_size,
+                    slot, entry.pool_slot, payload_bytes, slot_capacity,
                 ));
             }
-            let pool = hcs
-                .pool_buf
-                .as_ref()
+            let dst = hcs
+                .pool_slot_ptr(slot)
                 .ok_or_else(|| "dynamic peer hard pool is unavailable".to_string())?;
-            let dst = *pool.device_ptr() + slot as u64 * hcs.pool_slot_size as u64;
             hcs.cache_fast_clear_on_stream(victim.0, victim.1, swap_stream);
             hcs.cache.remove(&victim);
             hcs.pool_slot_to_expert[slot] = None;
@@ -63223,6 +64755,7 @@ impl GpuDecodeStore {
             Some(*graph.d_hidden.device_ptr()),
             Some(weights_ptr),
             Some(routes.len()),
+            None,
             "peer expert",
         )?;
         let kernels = graph
@@ -64511,6 +66044,28 @@ impl GpuDecodeStore {
                         None
                     };
 
+                    if topk > max_ept {
+                        return Err(format!(
+                            "graph replay topk {} exceeds max_experts_per_tok {} at layer {}",
+                            topk, max_ept, moe_layer_idx
+                        ));
+                    }
+                    graph.h_batch_hot_flags[..topk].fill(0);
+                    if graph.h_dummy_ptrs.iter().any(|&ptr| ptr == 0) {
+                        return Err(
+                            "canonical expert slot order requires initialized dummy expert pointers"
+                                .to_string(),
+                        );
+                    }
+                    for slot in 0..topk {
+                        graph.h_batch_w13_packed_ptrs[slot] = graph.h_dummy_ptrs[0];
+                        graph.h_batch_w13_scales_ptrs[slot] = graph.h_dummy_ptrs[1];
+                        graph.h_batch_w2_packed_ptrs[slot] = graph.h_dummy_ptrs[2];
+                        graph.h_batch_w2_scales_ptrs[slot] = graph.h_dummy_ptrs[3];
+                        graph.h_batch_weights[slot] = 0.0;
+                        graph.h_batch_expert_ids[slot] = 0;
+                    }
+
                     for i in 0..topk {
                         let eid = graph.h_topk_ids[i];
                         if eid < 0 {
@@ -64532,12 +66087,14 @@ impl GpuDecodeStore {
 
                         if let Some((w13p, w13s, w2p, w2s)) = hcs_ptrs {
                             if batch_count < max_ept {
-                                graph.h_batch_w13_packed_ptrs[batch_count] = w13p;
-                                graph.h_batch_w13_scales_ptrs[batch_count] = w13s;
-                                graph.h_batch_w2_packed_ptrs[batch_count] = w2p;
-                                graph.h_batch_w2_scales_ptrs[batch_count] = w2s;
-                                graph.h_batch_weights[batch_count] = weight;
-                                graph.h_batch_expert_ids[batch_count] = eid as i32;
+                                let batch_slot = i;
+                                graph.h_batch_w13_packed_ptrs[batch_slot] = w13p;
+                                graph.h_batch_w13_scales_ptrs[batch_slot] = w13s;
+                                graph.h_batch_w2_packed_ptrs[batch_slot] = w2p;
+                                graph.h_batch_w2_scales_ptrs[batch_slot] = w2s;
+                                graph.h_batch_weights[batch_slot] = weight;
+                                graph.h_batch_expert_ids[batch_slot] = eid as i32;
+                                graph.h_batch_hot_flags[batch_slot] = 1;
                                 batch_count += 1;
                                 graph.dma_hcs_experts += 1;
                             }
@@ -64575,12 +66132,14 @@ impl GpuDecodeStore {
                             };
                             if let Some((w13p, w13s, w2p, w2s)) = apfl_ptrs {
                                 if batch_count < max_ept {
-                                    graph.h_batch_w13_packed_ptrs[batch_count] = w13p;
-                                    graph.h_batch_w13_scales_ptrs[batch_count] = w13s;
-                                    graph.h_batch_w2_packed_ptrs[batch_count] = w2p;
-                                    graph.h_batch_w2_scales_ptrs[batch_count] = w2s;
-                                    graph.h_batch_weights[batch_count] = weight;
-                                    graph.h_batch_expert_ids[batch_count] = eid as i32;
+                                    let batch_slot = i;
+                                    graph.h_batch_w13_packed_ptrs[batch_slot] = w13p;
+                                    graph.h_batch_w13_scales_ptrs[batch_slot] = w13s;
+                                    graph.h_batch_w2_packed_ptrs[batch_slot] = w2p;
+                                    graph.h_batch_w2_scales_ptrs[batch_slot] = w2s;
+                                    graph.h_batch_weights[batch_slot] = weight;
+                                    graph.h_batch_expert_ids[batch_slot] = eid as i32;
+                                    graph.h_batch_hot_flags[batch_slot] = 1;
                                     batch_count += 1;
                                     apfl_hits += 1;
                                 }
@@ -64604,10 +66163,9 @@ impl GpuDecodeStore {
                     let mut peer_served_count = 0usize;
                     let mut pending_peers: Vec<PendingPeerDispatch> = Vec::new();
 
-                    // HCS and already-complete APFL slots occupy the current
-                    // prefix. Preserve that exact boundary before demand-cold
-                    // slots are appended so split launch can steer the two
-                    // disjoint weight masks.
+                    // Count HCS and already-complete APFL routes before demand-cold
+                    // materialization. Slot identity is tracked independently by
+                    // h_batch_hot_flags so canonical router order is preserved.
                     hot_batch_count = batch_count;
 
                     let (moe_input_size, moe_gated_experts, moe_activation_type, moe_swiglu_limit) = {
@@ -64717,12 +66275,6 @@ impl GpuDecodeStore {
                         None
                     };
 
-                    if topk > max_ept {
-                        return Err(format!(
-                            "graph replay topk {} exceeds max_experts_per_tok {} at layer {}",
-                            topk, max_ept, moe_layer_idx
-                        ));
-                    }
                     if cold_experts.len() > graph_buf_base.len() {
                         return Err(format!(
                             "graph replay cold expert overflow layer={} cold_count={} graph_buffers={} topk={}",
@@ -64903,7 +66455,7 @@ impl GpuDecodeStore {
                                 let depth_bucket = effective_depth.min(9) - 2;
                                 let claim_started =
                                     graph.timing_enabled.then(std::time::Instant::now);
-                                let (_topk_pos, eid, weight) = cold_experts[candidate_index];
+                                let (topk_pos, eid, weight) = cold_experts[candidate_index];
                                 if moe_input_size != 0
                                     || !moe_gated_experts
                                     || moe_activation_type != 0
@@ -65049,7 +66601,7 @@ impl GpuDecodeStore {
                                     format: cpu_format,
                                     layer_idx: moe_layer_idx,
                                     expert_idx: eid,
-                                    batch_slot: hot_batch_count + candidate_index,
+                                    batch_slot: topk_pos,
                                     weight,
                                     staging_base: base,
                                     dma_bytes,
@@ -65429,15 +66981,16 @@ impl GpuDecodeStore {
                     };
 
                     // Add cold experts to batch with their VRAM pointers
-                    for (ci, &(_topk_pos, eid, weight)) in cold_experts.iter().enumerate() {
+                    for (ci, &(topk_pos, eid, weight)) in cold_experts.iter().enumerate() {
                         let (w13p, w13s, w2p, w2s) = cold_ptrs_list[ci];
                         if batch_count < max_ept {
-                            graph.h_batch_w13_packed_ptrs[batch_count] = w13p;
-                            graph.h_batch_w13_scales_ptrs[batch_count] = w13s;
-                            graph.h_batch_w2_packed_ptrs[batch_count] = w2p;
-                            graph.h_batch_w2_scales_ptrs[batch_count] = w2s;
-                            graph.h_batch_weights[batch_count] = weight;
-                            graph.h_batch_expert_ids[batch_count] = eid as i32;
+                            let batch_slot = topk_pos;
+                            graph.h_batch_w13_packed_ptrs[batch_slot] = w13p;
+                            graph.h_batch_w13_scales_ptrs[batch_slot] = w13s;
+                            graph.h_batch_w2_packed_ptrs[batch_slot] = w2p;
+                            graph.h_batch_w2_scales_ptrs[batch_slot] = w2s;
+                            graph.h_batch_weights[batch_slot] = weight;
+                            graph.h_batch_expert_ids[batch_slot] = eid as i32;
                             batch_count += 1;
                         }
                     }
@@ -65459,12 +67012,6 @@ impl GpuDecodeStore {
                                     .to_string(),
                             );
                         }
-                        graph.h_batch_w13_packed_ptrs[batch_count] = graph.h_dummy_ptrs[0];
-                        graph.h_batch_w13_scales_ptrs[batch_count] = graph.h_dummy_ptrs[1];
-                        graph.h_batch_w2_packed_ptrs[batch_count] = graph.h_dummy_ptrs[2];
-                        graph.h_batch_w2_scales_ptrs[batch_count] = graph.h_dummy_ptrs[3];
-                        graph.h_batch_weights[batch_count] = 0.0;
-                        graph.h_batch_expert_ids[batch_count] = 0;
                         batch_count += 1;
                     }
 
@@ -65473,6 +67020,26 @@ impl GpuDecodeStore {
                             "graph replay materialized {} routed experts but expected topk={} at layer {}",
                             batch_count, topk, moe_layer_idx
                         ));
+                    }
+                    if graph.debug_decode_hcs_equiv_trace_active
+                        && graph.debug_decode_hcs_equiv_layer == Some(moe_layer_idx)
+                        && graph.validation_decode_steps < graph.debug_decode_early_max_steps
+                    {
+                        graph.debug_decode_hcs_equiv_entries.push(serde_json::json!({
+                            "phase": "graph_replay_expert_slot_order",
+                            "decode_step_zero_indexed": graph.validation_decode_steps,
+                            "layer": moe_layer_idx,
+                            "canonical_route_order": true,
+                            "router_topk_ids": graph.h_topk_ids[..topk].to_vec(),
+                            "router_topk_weights": graph.h_topk_weights[..topk].to_vec(),
+                            "batch_expert_ids": graph.h_batch_expert_ids[..topk].to_vec(),
+                            "batch_weights": graph.h_batch_weights[..topk].to_vec(),
+                            "batch_hot_flags": graph.h_batch_hot_flags[..topk].to_vec(),
+                            "hot_count": hot_batch_count,
+                            "demand_cold_count": cold_experts.len(),
+                            "adaptive_cold_drop_count": adaptive_cold_drop_count,
+                            "peer_served_count": peer_served_count,
+                        }));
                     }
                     let ptr_stride = max_ept * 8;
                     let fill_count = topk.min(max_ept);
@@ -65512,8 +67079,8 @@ impl GpuDecodeStore {
                         if split_launch {
                             // Split weight steering:
                             //   d_batch_upload weights (in-graph batched kernels)
-                            //     = demand-cold slots only (hot prefix zeroed)
-                            //   d_wts_hot (direct pre-launch)  = hot/staged prefix only
+                            //     = demand-cold slots only (hot slots zeroed)
+                            //   d_wts_hot (direct pre-launch)  = hot/staged slots only
                             //   d_wts_full (in-graph final add) = all routed weights
                             for i in 0..max_ept {
                                 let w = if i < fill_count {
@@ -65522,11 +67089,24 @@ impl GpuDecodeStore {
                                     0.0
                                 };
                                 graph.h_wts_full[i] = w;
-                                graph.h_wts_hot[i] = if i < hot_batch_count { w } else { 0.0 };
+                                graph.h_wts_hot[i] = if graph.h_batch_hot_flags[i] != 0 {
+                                    w
+                                } else {
+                                    0.0
+                                };
                             }
-                            // Zero the hot prefix in the upload staging so the
-                            // captured batched kernels skip already-computed slots.
-                            std::ptr::write_bytes(h.add(ptr_stride * 4), 0, hot_batch_count * 4);
+                            // Zero every hot slot in the upload staging so the
+                            // captured kernels skip already-computed experts
+                            // without changing their reduction order.
+                            for i in 0..fill_count {
+                                if graph.h_batch_hot_flags[i] != 0 {
+                                    std::ptr::write_bytes(
+                                        h.add(ptr_stride * 4 + i * 4),
+                                        0,
+                                        4,
+                                    );
+                                }
+                            }
                             for pending in &cpu_tail_pending {
                                 // A CPU result, if accepted, is placed directly
                                 // in d_batch_expert_outs. Keeping its ordinary
@@ -66034,6 +67614,249 @@ impl GpuDecodeStore {
             }
             if let Some(t) = t_launch_start {
                 graph.t_graph_launch += t.elapsed().as_secs_f64();
+            }
+            // Root-cause diagnostics only: make the otherwise opaque captured
+            // segment observable at the same layer boundary as the canonical
+            // ungraphed path. The explicit synchronization and host copies are
+            // strictly gated by the request-scoped early trace and never
+            // execute in production or benchmark requests.
+            if graph.debug_decode_early_trace_active
+                && graph.validation_decode_steps < graph.debug_decode_early_max_steps
+                && graph.deepseek_v4_head.is_some()
+            {
+                let sync_err = unsafe { cuda_sys::lib().cuStreamSynchronize(replay_stream) };
+                if sync_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "DeepSeek-V4 graph boundary sync graph_idx={}: {:?}",
+                        graph_idx, sync_err
+                    ));
+                }
+                let expert_layer = graph_idx
+                    .checked_sub(1)
+                    .and_then(|index| moe_indices.get(index).copied());
+                let routing_layer = moe_indices.get(graph_idx).copied();
+                let (hc_mult, hc_state_ptr, hc_next_ptr) = graph
+                    .deepseek_v4_decode_workspace
+                    .as_ref()
+                    .map(|workspace| {
+                        (
+                            workspace.hc_mult,
+                            *workspace.d_hc_state.device_ptr(),
+                            *workspace.d_hc_next.device_ptr(),
+                        )
+                    })
+                    .ok_or("DeepSeek-V4 decode workspace is not finalized")?;
+                let hc_elems = hs
+                    .checked_mul(hc_mult)
+                    .ok_or("DeepSeek-V4 graph-boundary HC size overflow")?;
+                if let Some(layer_idx) = expert_layer.filter(|&layer_idx| {
+                    graph.debug_decode_hcs_equiv_trace_active
+                        && graph.debug_decode_hcs_equiv_layer == Some(layer_idx)
+                }) {
+                    let moe = graph
+                        .moe_layers
+                        .get(layer_idx)
+                        .and_then(Option::as_ref)
+                        .ok_or_else(|| {
+                            format!(
+                                "DeepSeek-V4 graph-boundary trace has no MoE metadata for layer {}",
+                                layer_idx,
+                            )
+                        })?;
+                    let topk = moe.topk;
+                    let expert_hs = if moe.moe_input_size > 0 {
+                        moe.moe_input_size
+                    } else {
+                        hs
+                    };
+                    let gate_stride = if moe.gated_experts {
+                        graph.moe_intermediate_size.saturating_mul(2)
+                    } else {
+                        graph.moe_intermediate_size
+                    };
+                    let gate_base = *graph.d_batch_gate_ups.device_ptr();
+                    let output_base = *graph.d_batch_expert_outs.device_ptr();
+                    let ptr_stride = graph.max_experts_per_tok
+                        * std::mem::size_of::<u64>();
+                    let ordinary_weights_ptr = *graph.d_batch_upload.device_ptr()
+                        + (ptr_stride * 4) as u64;
+                    let final_weights_ptr = if graph.split_expert_launch {
+                        if graph.gpu_route_sync {
+                            ordinary_weights_ptr
+                                + (graph.max_experts_per_tok
+                                    * std::mem::size_of::<f32>()) as u64
+                        } else {
+                            *graph
+                                .d_wts_full
+                                .as_ref()
+                                .ok_or("split expert graph trace has no full-weight buffer")?
+                                .device_ptr()
+                        }
+                    } else {
+                        ordinary_weights_ptr
+                    };
+                    let slot_summaries = (0..topk)
+                        .map(|slot| {
+                            serde_json::json!({
+                                "slot": slot,
+                                "expert_id": graph.h_batch_expert_ids[slot],
+                                "weight": graph.h_batch_weights[slot],
+                                "hot": graph.h_batch_hot_flags[slot] != 0,
+                                "gate_up": debug_decode_bf16_summary_json(
+                                    &format!("graph_layer{}_slot{}_gate_up", layer_idx, slot),
+                                    gate_base + (slot * gate_stride * std::mem::size_of::<u16>()) as u64,
+                                    gate_stride,
+                                ),
+                                "expert_out": debug_decode_bf16_summary_json(
+                                    &format!("graph_layer{}_slot{}_expert_out", layer_idx, slot),
+                                    output_base + (slot * expert_hs * std::mem::size_of::<u16>()) as u64,
+                                    expert_hs,
+                                ),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    // Re-run only the fixed-order routed reduction into an
+                    // otherwise disposable expert scratch vector. This keeps
+                    // the captured graph's logical state untouched while
+                    // separating device-weight/reduction differences from the
+                    // shared-expert branch that follows inside the graph.
+                    unsafe {
+                        graph
+                            .kernels
+                            .as_ref()
+                            .ok_or("kernels not cached")?
+                            .multi_expert_weighted_add_bf16
+                            .clone()
+                            .launch(
+                                LaunchConfig::for_num_elems(expert_hs as u32),
+                                (
+                                    *graph.d_expert_out.device_ptr(),
+                                    output_base,
+                                    final_weights_ptr,
+                                    expert_hs as i32,
+                                    topk as i32,
+                                    1i32,
+                                ),
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "DeepSeek-V4 graph-boundary diagnostic reduction layer {}: {:?}",
+                                    layer_idx, error,
+                                )
+                            })?;
+                    }
+                    let diagnostic_sync = unsafe {
+                        cuda_sys::lib().cuStreamSynchronize(replay_stream)
+                    };
+                    if diagnostic_sync != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "DeepSeek-V4 graph-boundary diagnostic reduction sync layer {}: {:?}",
+                            layer_idx, diagnostic_sync,
+                        ));
+                    }
+                    let routed_reduction = debug_decode_bf16_summary_json(
+                        &format!("graph_layer{}_routed_reduction", layer_idx),
+                        *graph.d_expert_out.device_ptr(),
+                        expert_hs,
+                    );
+                    let routed_scaling_factor = moe.routed_scaling_factor;
+                    let routed_scaled = if routed_scaling_factor != 1.0 {
+                        unsafe {
+                            graph
+                                .kernels
+                                .as_ref()
+                                .ok_or("kernels not cached")?
+                                .scale_bf16
+                                .clone()
+                                .launch(
+                                    LaunchConfig::for_num_elems(expert_hs as u32),
+                                    (
+                                        *graph.d_expert_out.device_ptr(),
+                                        *graph.d_expert_out.device_ptr(),
+                                        routed_scaling_factor,
+                                        expert_hs as i32,
+                                    ),
+                                )
+                                .map_err(|error| {
+                                    format!(
+                                        "DeepSeek-V4 graph-boundary diagnostic routed scale layer {}: {:?}",
+                                        layer_idx, error,
+                                    )
+                                })?;
+                        }
+                        let scale_sync = unsafe {
+                            cuda_sys::lib().cuStreamSynchronize(replay_stream)
+                        };
+                        if scale_sync != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!(
+                                "DeepSeek-V4 graph-boundary diagnostic routed scale sync layer {}: {:?}",
+                                layer_idx, scale_sync,
+                            ));
+                        }
+                        debug_decode_bf16_summary_json(
+                            &format!("graph_layer{}_routed_scaled", layer_idx),
+                            *graph.d_expert_out.device_ptr(),
+                            expert_hs,
+                        )
+                    } else {
+                        routed_reduction.clone()
+                    };
+                    graph.debug_decode_hcs_equiv_entries.push(serde_json::json!({
+                        "phase": "graph_replay_expert_slot_outputs",
+                        "decode_step_zero_indexed": graph.validation_decode_steps,
+                        "layer": layer_idx,
+                        "graph_idx": graph_idx,
+                        "ordinary_device_weights": debug_decode_f32_summary_json(
+                            &format!("graph_layer{}_ordinary_device_weights", layer_idx),
+                            ordinary_weights_ptr,
+                            topk,
+                        ),
+                        "final_device_weights": debug_decode_f32_summary_json(
+                            &format!("graph_layer{}_final_device_weights", layer_idx),
+                            final_weights_ptr,
+                            topk,
+                        ),
+                        "routed_reduction": routed_reduction,
+                        "routed_scaling_factor": routed_scaling_factor,
+                        "routed_scaled": routed_scaled,
+                        "slot_summaries": slot_summaries,
+                    }));
+                }
+                graph.debug_decode_early_entries.push(serde_json::json!({
+                    "phase": "deepseek_v4_graph_segment_complete",
+                    "decode_step_zero_indexed": graph.validation_decode_steps,
+                    "decode_step_counter": decode_step_counter,
+                    "token_id": token_id,
+                    "position": position,
+                    "graph_idx": graph_idx,
+                    "expert_layer": expert_layer,
+                    "routing_layer": routing_layer,
+                    "hidden": debug_decode_bf16_summary_json(
+                        &format!("graph{}_hidden", graph_idx),
+                        *graph.d_hidden.device_ptr(),
+                        hs,
+                    ),
+                    "residual": debug_decode_bf16_summary_json(
+                        &format!("graph{}_residual", graph_idx),
+                        *graph.d_residual.device_ptr(),
+                        hs,
+                    ),
+                    "moe_out": debug_decode_bf16_summary_json(
+                        &format!("graph{}_moe_out", graph_idx),
+                        *graph.d_moe_out.device_ptr(),
+                        hs,
+                    ),
+                    "hc_state": debug_decode_bf16_summary_json(
+                        &format!("graph{}_hc_state", graph_idx),
+                        hc_state_ptr,
+                        hc_elems,
+                    ),
+                    "hc_next": debug_decode_bf16_summary_json(
+                        &format!("graph{}_hc_next", graph_idx),
+                        hc_next_ptr,
+                        hc_elems,
+                    ),
+                }));
             }
             // ── APFL graph-replay lookahead: consume the spec results queued
             // above and prefetch predicted cold experts on prefetch_stream
@@ -67377,13 +69200,16 @@ impl GpuDecodeStore {
             } else {
                 None
             };
-            self.run_deepseek_v4_routing_prefix_for_graph(
+            let diagnostic_entries = self.run_deepseek_v4_routing_prefix_for_graph(
                 graph,
                 layer_idx,
                 position_ptr,
                 None,
                 None,
             )?;
+            graph
+                .debug_decode_early_entries
+                .extend(diagnostic_entries);
             if let Some(start) = stage_start {
                 self.device
                     .synchronize()
@@ -67428,6 +69254,44 @@ impl GpuDecodeStore {
                 hc_mult,
                 &format!("DeepSeek-V4 layer {} FFN", layer_idx),
             )?;
+            if graph.debug_decode_early_trace_active
+                && graph.validation_decode_steps < graph.debug_decode_early_max_steps
+            {
+                let hc_elems = graph
+                    .hidden_size
+                    .checked_mul(hc_mult)
+                    .ok_or("DeepSeek-V4 ungraphed-boundary HC size overflow")?;
+                graph.debug_decode_early_entries.push(serde_json::json!({
+                    "phase": "deepseek_v4_ungraphed_layer_complete",
+                    "decode_step_zero_indexed": graph.validation_decode_steps,
+                    "layer": layer_idx,
+                    "hidden": debug_decode_bf16_summary_json(
+                        &format!("ungraphed_layer{}_hidden", layer_idx),
+                        *graph.d_hidden.device_ptr(),
+                        graph.hidden_size,
+                    ),
+                    "residual": debug_decode_bf16_summary_json(
+                        &format!("ungraphed_layer{}_residual", layer_idx),
+                        *graph.d_residual.device_ptr(),
+                        graph.hidden_size,
+                    ),
+                    "moe_out": debug_decode_bf16_summary_json(
+                        &format!("ungraphed_layer{}_moe_out", layer_idx),
+                        *graph.d_moe_out.device_ptr(),
+                        graph.hidden_size,
+                    ),
+                    "hc_state": debug_decode_bf16_summary_json(
+                        &format!("ungraphed_layer{}_hc_state", layer_idx),
+                        state_ptr,
+                        hc_elems,
+                    ),
+                    "hc_next": debug_decode_bf16_summary_json(
+                        &format!("ungraphed_layer{}_hc_next", layer_idx),
+                        next_ptr,
+                        hc_elems,
+                    ),
+                }));
+            }
             self.capture_dspark_decode_target_state(graph, layer_idx, position_ptr)?;
             if let Some(start) = moe_start {
                 self.device
@@ -79568,7 +81432,9 @@ impl GpuDecodeStore {
             if !hcs.soft_chunks.is_empty() {
                 let extra_chunks = hcs.soft_chunks.len().saturating_sub(hcs.soft_chunks_loaded);
                 if extra_chunks > 0 {
-                    let freed_bytes = extra_chunks * hcs.soft_slots_per_chunk * hcs.soft_slot_size;
+                    let freed_bytes = (hcs.soft_chunks_loaded..hcs.soft_chunks.len())
+                        .map(|chunk| hcs.soft_chunk_bytes_at(chunk))
+                        .sum::<usize>();
                     hcs.soft_chunks.truncate(hcs.soft_chunks_loaded);
                     hcs.vram_bytes = hcs.vram_bytes.saturating_sub(freed_bytes);
                     trace_emit_global_mark(
@@ -79596,7 +81462,9 @@ impl GpuDecodeStore {
         }
         // If soft chunks are allocated but empty (0 cached experts), still free them
         if hcs.soft_num_cached == 0 {
-            let freed_bytes = hcs.soft_num_slots * hcs.soft_slot_size;
+            let freed_bytes = (0..hcs.soft_chunks.len())
+                .map(|chunk| hcs.soft_chunk_bytes_at(chunk))
+                .sum::<usize>();
             if freed_bytes > 0 {
                 hcs.soft_chunks.clear();
                 hcs.soft_chunks_loaded = 0;
@@ -79716,8 +81584,6 @@ impl GpuDecodeStore {
                 hcs.soft_slot_size as f64 / (1024.0 * 1024.0),
             );
         }
-        let spc = hcs.soft_slots_per_chunk;
-
         let mut chunks_to_drop = 0usize;
         let mut freed_bytes = 0usize;
         let mut evicted = 0usize;
@@ -79731,19 +81597,12 @@ impl GpuDecodeStore {
             if freed_bytes >= deficit {
                 break;
             }
-            // Compute chunk size from slot layout
-            let slots_this = if drop_idx == hcs.soft_total_chunks - 1 {
-                hcs.soft_num_slots - drop_idx * spc
-            } else {
-                spc
-            };
-            let chunk_bytes = slots_this * hcs.soft_slot_size;
+            let chunk_bytes = hcs.soft_chunk_bytes_at(drop_idx);
 
             // Remove cache entries for experts in this chunk.
             // Use cache_fast_clear to also update GPU-side d_expert_ptrs table
             // (reverts to mapped fallback or zeros, preventing stale pointers).
-            let slot_start = drop_idx * spc;
-            let slot_end = std::cmp::min(slot_start + spc, hcs.soft_num_slots);
+            let (slot_start, slot_end) = hcs.soft_chunk_slot_range(drop_idx);
             for slot in slot_start..slot_end {
                 if let Some((layer_idx, expert_idx)) = hcs.soft_slot_to_expert[slot] {
                     hcs.cache_fast_clear(layer_idx, expert_idx);
@@ -79916,7 +81775,9 @@ impl GpuDecodeStore {
             if !hcs.soft_chunks.is_empty() {
                 let extra_chunks = hcs.soft_chunks.len().saturating_sub(hcs.soft_chunks_loaded);
                 if extra_chunks > 0 {
-                    let freed_bytes = extra_chunks * hcs.soft_slots_per_chunk * hcs.soft_slot_size;
+                    let freed_bytes = (hcs.soft_chunks_loaded..hcs.soft_chunks.len())
+                        .map(|chunk| hcs.soft_chunk_bytes_at(chunk))
+                        .sum::<usize>();
                     hcs.soft_chunks.truncate(hcs.soft_chunks_loaded);
                     hcs.vram_bytes = hcs.vram_bytes.saturating_sub(freed_bytes);
                     trace_emit_global_mark(
@@ -79937,7 +81798,6 @@ impl GpuDecodeStore {
         }
 
         let t0 = std::time::Instant::now();
-        let spc = hcs.soft_slots_per_chunk;
         let total_chunks = hcs.soft_chunks_loaded;
         let mut chunks_to_drop = 0usize;
         let mut freed_bytes = 0usize;
@@ -79954,14 +81814,8 @@ impl GpuDecodeStore {
             if freed_bytes >= additional_needed_bytes {
                 break;
             }
-            let slots_this = if drop_idx == hcs.soft_total_chunks - 1 {
-                hcs.soft_num_slots - drop_idx * spc
-            } else {
-                spc
-            };
-            let chunk_bytes = slots_this * hcs.soft_slot_size;
-            let slot_start = drop_idx * spc;
-            let slot_end = std::cmp::min(slot_start + spc, hcs.soft_num_slots);
+            let chunk_bytes = hcs.soft_chunk_bytes_at(drop_idx);
+            let (slot_start, slot_end) = hcs.soft_chunk_slot_range(drop_idx);
             for slot in slot_start..slot_end {
                 if let Some((layer_idx, expert_idx)) = hcs.soft_slot_to_expert[slot] {
                     hcs.cache_fast_clear(layer_idx, expert_idx);
@@ -80186,7 +82040,7 @@ impl GpuDecodeStore {
         let target_floor_mb = pressure_floor_mb.max(safety_mb.saturating_add(soft_chunk_guard_mb));
         if observed_free_mb >= target_floor_mb {
             crate::vram_monitor::clear_pressure(device_id);
-            let reload_room_mb = if hcs.soft_slots_per_chunk > 0 && hcs.soft_slot_size > 0 {
+            let reload_room_mb = if hcs.soft_total_chunks > 0 {
                 let chunk_mb = (hcs.soft_full_chunk_bytes() + (1024 * 1024) - 1) / (1024 * 1024);
                 target_floor_mb.saturating_add(chunk_mb)
             } else {
@@ -80251,7 +82105,7 @@ impl GpuDecodeStore {
 
         if final_free_mb >= target_floor_mb {
             crate::vram_monitor::clear_pressure(device_id);
-            let reload_room_mb = if hcs.soft_slots_per_chunk > 0 && hcs.soft_slot_size > 0 {
+            let reload_room_mb = if hcs.soft_total_chunks > 0 {
                 let chunk_mb = (hcs.soft_full_chunk_bytes() + (1024 * 1024) - 1) / (1024 * 1024);
                 target_floor_mb.saturating_add(chunk_mb)
             } else {
@@ -80348,7 +82202,6 @@ impl GpuDecodeStore {
             return (0, 0.0);
         }
 
-        let spc = hcs.soft_slots_per_chunk;
         let decode_budget_mb = decode_calibration
             .map(|(budget, _)| budget)
             .unwrap_or(hcs.hard_budget_mb + hcs.soft_max_mb);
@@ -80364,12 +82217,7 @@ impl GpuDecodeStore {
             .saturating_sub(hcs.hard_budget_mb)
             .min(hcs.soft_max_mb);
         let target_soft_bytes = target_soft_mb.saturating_mul(1024 * 1024);
-        let target_soft_slots = (target_soft_bytes / slot_size).min(hcs.soft_num_slots);
-        let mut target_chunks = if target_soft_slots == 0 {
-            0
-        } else {
-            ((target_soft_slots + spc - 1) / spc).min(hcs.soft_total_chunks)
-        };
+        let mut target_chunks = hcs.soft_prefix_chunks_for_bytes(target_soft_bytes);
         let uncapped_target_chunks = target_chunks;
         target_chunks = hcs.pressure_capped_target_chunks(target_chunks);
         if target_chunks < uncapped_target_chunks {
@@ -80403,12 +82251,9 @@ impl GpuDecodeStore {
         {
             let retain_pct = prompt_hcs_reload_retain_pct();
             let retain_slots = (hcs.soft_num_slots.saturating_mul(retain_pct) + 99) / 100;
-            let retain_chunks = if retain_slots == 0 {
-                0
-            } else {
-                ((retain_slots + spc - 1) / spc).min(hcs.soft_total_chunks)
-            }
-            .min(target_chunks);
+            let retain_chunks = hcs
+                .soft_chunks_covering_slots(retain_slots)
+                .min(target_chunks);
             if target_chunks > retain_chunks && hcs.soft_chunks_loaded > retain_chunks {
                 let (evicted, freed_bytes) = hcs.trim_soft_chunks_to(
                     retain_chunks,
@@ -80455,7 +82300,61 @@ impl GpuDecodeStore {
         // Reallocate and batch-DMA only the missing chunks
         for c in already_loaded..target_chunks {
             let slots_this_chunk = hcs.soft_slots_in_chunk(c);
-            let chunk_bytes = slots_this_chunk * slot_size;
+            let chunk_bytes = hcs.soft_chunk_bytes_at(c);
+            let (slot_start, slot_end) = hcs.soft_chunk_slot_range(c);
+            debug_assert_eq!(slot_end - slot_start, slots_this_chunk);
+            let mut chunk_layout = Vec::with_capacity(slots_this_chunk);
+            let mut chunk_layout_valid = true;
+            for slot in slot_start..slot_end {
+                let Some(&(layer_idx, expert_idx)) = hcs.soft_ranking.get(slot) else {
+                    log::warn!(
+                        "HCS soft async reload: chunk {} slot {} has no ranking entry",
+                        c,
+                        slot,
+                    );
+                    chunk_layout_valid = false;
+                    break;
+                };
+                let Some(expert) = graph
+                    .moe_layers
+                    .get(layer_idx)
+                    .and_then(Option::as_ref)
+                    .and_then(|moe| moe.experts.get(expert_idx))
+                else {
+                    log::warn!(
+                        "HCS soft async reload: chunk {} slot {} has invalid L{}E{}",
+                        c,
+                        slot,
+                        layer_idx,
+                        expert_idx,
+                    );
+                    chunk_layout_valid = false;
+                    break;
+                };
+                let w13p_off = 0u64;
+                let w13s_off = expert.w13_packed_bytes as u64;
+                let w2p_off = w13s_off + expert.w13_scales_bytes as u64;
+                let w2s_off = w2p_off + expert.w2_packed_bytes as u64;
+                let payload = (w2s_off as usize).saturating_add(expert.w2_scales_bytes);
+                if payload > hcs.soft_slot_capacity(slot) {
+                    log::warn!(
+                        "HCS soft async reload: L{}E{} payload {} exceeds slot {} capacity {}",
+                        layer_idx,
+                        expert_idx,
+                        payload,
+                        slot,
+                        hcs.soft_slot_capacity(slot),
+                    );
+                    chunk_layout_valid = false;
+                    break;
+                }
+                chunk_layout.push((
+                    slot, layer_idx, expert_idx, w13p_off, w13s_off, w2p_off, w2s_off,
+                ));
+            }
+            if !chunk_layout_valid {
+                break;
+            }
             if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
                 let actual_free_mb = actual_free / (1024 * 1024);
                 let chunk_mb = (chunk_bytes + (1024 * 1024) - 1) / (1024 * 1024);
@@ -80535,8 +82434,8 @@ impl GpuDecodeStore {
             }
 
             // Rebuild cache entries from GPU pointers
-            let slot_start = c * spc;
-            let slot_end = slot_start + slots_this_chunk;
+            let (slot_start, slot_end) = hcs.soft_chunk_slot_range(c);
+            debug_assert_eq!(slot_end - slot_start, slots_this_chunk);
             let mut chunk_ok = true;
             let mut chunk_loaded = 0usize;
             for slot in slot_start..slot_end {
@@ -80553,13 +82452,25 @@ impl GpuDecodeStore {
                 }
 
                 let expert = &moe.experts[expert_idx];
-                let offset_in_chunk = slot - slot_start;
-                let dst = chunk_base + (offset_in_chunk as u64 * slot_size as u64);
+                let dst = chunk_base + hcs.soft_slot_offsets[slot] as u64;
 
                 let w13p_off = 0u64;
                 let w13s_off = expert.w13_packed_bytes as u64;
                 let w2p_off = w13s_off + expert.w13_scales_bytes as u64;
                 let w2s_off = w2p_off + expert.w2_packed_bytes as u64;
+                let payload = (w2s_off as usize).saturating_add(expert.w2_scales_bytes);
+                if payload > hcs.soft_slot_capacity(slot) {
+                    log::warn!(
+                        "HCS soft reload: L{}E{} payload {} exceeds slot {} capacity {}",
+                        layer_idx,
+                        expert_idx,
+                        payload,
+                        slot,
+                        hcs.soft_slot_capacity(slot),
+                    );
+                    chunk_ok = false;
+                    break;
+                }
 
                 if !use_host_mirror && !copy_expert_to_hcs_slot_sync(dst, expert) {
                     log::warn!(
@@ -80777,7 +82688,6 @@ impl GpuDecodeStore {
             return (0, 0.0);
         }
 
-        let spc = hcs.soft_slots_per_chunk;
         let decode_budget_mb = decode_calibration
             .map(|(budget, _)| budget)
             .unwrap_or(hcs.hard_budget_mb + hcs.soft_max_mb);
@@ -80793,12 +82703,7 @@ impl GpuDecodeStore {
             .saturating_sub(hcs.hard_budget_mb)
             .min(hcs.soft_max_mb);
         let target_soft_bytes = target_soft_mb.saturating_mul(1024 * 1024);
-        let target_soft_slots = (target_soft_bytes / slot_size).min(hcs.soft_num_slots);
-        let mut target_chunks = if target_soft_slots == 0 {
-            0
-        } else {
-            ((target_soft_slots + spc - 1) / spc).min(hcs.soft_total_chunks)
-        };
+        let mut target_chunks = hcs.soft_prefix_chunks_for_bytes(target_soft_bytes);
         let uncapped_target_chunks = target_chunks;
         target_chunks = hcs.pressure_capped_target_chunks(target_chunks);
         if target_chunks < uncapped_target_chunks {
@@ -80832,12 +82737,9 @@ impl GpuDecodeStore {
         {
             let retain_pct = prompt_hcs_reload_retain_pct();
             let retain_slots = (hcs.soft_num_slots.saturating_mul(retain_pct) + 99) / 100;
-            let retain_chunks = if retain_slots == 0 {
-                0
-            } else {
-                ((retain_slots + spc - 1) / spc).min(hcs.soft_total_chunks)
-            }
-            .min(target_chunks);
+            let retain_chunks = hcs
+                .soft_chunks_covering_slots(retain_slots)
+                .min(target_chunks);
             if target_chunks > retain_chunks && hcs.soft_chunks_loaded > retain_chunks {
                 let (evicted, freed_bytes) = hcs.trim_soft_chunks_to(
                     retain_chunks,
@@ -80913,7 +82815,61 @@ impl GpuDecodeStore {
 
         for c in already_loaded..target_chunks {
             let slots_this_chunk = hcs.soft_slots_in_chunk(c);
-            let chunk_bytes = slots_this_chunk * slot_size;
+            let chunk_bytes = hcs.soft_chunk_bytes_at(c);
+            let (slot_start, slot_end) = hcs.soft_chunk_slot_range(c);
+            debug_assert_eq!(slot_end - slot_start, slots_this_chunk);
+            let mut chunk_layout = Vec::with_capacity(slots_this_chunk);
+            let mut chunk_layout_valid = true;
+            for slot in slot_start..slot_end {
+                let Some(&(layer_idx, expert_idx)) = hcs.soft_ranking.get(slot) else {
+                    log::warn!(
+                        "HCS soft async reload: chunk {} slot {} has no ranking entry",
+                        c,
+                        slot,
+                    );
+                    chunk_layout_valid = false;
+                    break;
+                };
+                let Some(expert) = graph
+                    .moe_layers
+                    .get(layer_idx)
+                    .and_then(Option::as_ref)
+                    .and_then(|moe| moe.experts.get(expert_idx))
+                else {
+                    log::warn!(
+                        "HCS soft async reload: chunk {} slot {} has invalid L{}E{}",
+                        c,
+                        slot,
+                        layer_idx,
+                        expert_idx,
+                    );
+                    chunk_layout_valid = false;
+                    break;
+                };
+                let w13p_off = 0u64;
+                let w13s_off = expert.w13_packed_bytes as u64;
+                let w2p_off = w13s_off + expert.w13_scales_bytes as u64;
+                let w2s_off = w2p_off + expert.w2_packed_bytes as u64;
+                let payload = (w2s_off as usize).saturating_add(expert.w2_scales_bytes);
+                if payload > hcs.soft_slot_capacity(slot) {
+                    log::warn!(
+                        "HCS soft async reload: L{}E{} payload {} exceeds slot {} capacity {}",
+                        layer_idx,
+                        expert_idx,
+                        payload,
+                        slot,
+                        hcs.soft_slot_capacity(slot),
+                    );
+                    chunk_layout_valid = false;
+                    break;
+                }
+                chunk_layout.push((
+                    slot, layer_idx, expert_idx, w13p_off, w13s_off, w2p_off, w2s_off,
+                ));
+            }
+            if !chunk_layout_valid {
+                break;
+            }
             if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
                 let actual_free_mb = actual_free / (1024 * 1024);
                 let chunk_mb = (chunk_bytes + (1024 * 1024) - 1) / (1024 * 1024);
@@ -80994,30 +82950,12 @@ impl GpuDecodeStore {
                 }
             }
 
-            // Build pending cache entries (activated after DMA completes)
-            let slot_start = c * spc;
-            let slot_end = slot_start + slots_this_chunk;
-            for slot in slot_start..slot_end {
-                if slot >= hcs.soft_ranking.len() {
-                    break;
-                }
-                let (layer_idx, expert_idx) = hcs.soft_ranking[slot];
-                let moe = match graph.moe_layers.get(layer_idx).and_then(|m| m.as_ref()) {
-                    Some(m) => m,
-                    None => continue,
-                };
-                if expert_idx >= moe.experts.len() {
-                    continue;
-                }
-
-                let expert = &moe.experts[expert_idx];
-                let offset_in_chunk = slot - slot_start;
-                let dst = chunk_base + (offset_in_chunk as u64 * slot_size as u64);
-
-                let w13p_off = 0u64;
-                let w13s_off = expert.w13_packed_bytes as u64;
-                let w2p_off = w13s_off + expert.w13_scales_bytes as u64;
-                let w2s_off = w2p_off + expert.w2_packed_bytes as u64;
+            // Build pending cache entries only after the entire immutable
+            // chunk layout has been validated and its DMA was accepted.
+            for (slot, layer_idx, expert_idx, w13p_off, w13s_off, w2p_off, w2s_off) in
+                chunk_layout
+            {
+                let dst = chunk_base + hcs.soft_slot_offsets[slot] as u64;
 
                 let entry = HcsCacheEntry {
                     d_buf: None,
@@ -81329,6 +83267,126 @@ impl GpuDecodeStore {
         };
 
         for (layer_idx, layer) in graph.layers.iter().enumerate() {
+            if let Some(v4) = layer.deepseek_v4.as_ref() {
+                let native_plane_hashes =
+                    |prefix: &str,
+                     cache: &DeepseekV4NativeCacheRegistration,
+                     rows: usize|
+                     -> serde_json::Value {
+                        let rows = rows.min(cache.rows);
+                        let code_stride = if cache.code_bits == 8 {
+                            cache.quant_cols
+                        } else {
+                            cache.width.div_ceil(2)
+                        };
+                        let scale_stride = cache.quant_cols.div_ceil(cache.block_size);
+                        let tail_stride = if cache.code_bits == 8 {
+                            cache.width.saturating_sub(cache.quant_cols)
+                        } else {
+                            0
+                        };
+                        serde_json::json!({
+                            "rows": rows,
+                            "codes": debug_hash_device_region_json(
+                                &format!("{}_codes", prefix),
+                                cache.codes_ptr,
+                                rows.saturating_mul(code_stride),
+                            ),
+                            "scale_exponents": debug_hash_device_region_json(
+                                &format!("{}_scale_exponents", prefix),
+                                cache.scale_exponents_ptr,
+                                rows.saturating_mul(scale_stride),
+                            ),
+                            "tail": debug_hash_device_region_json(
+                                &format!("{}_tail", prefix),
+                                cache.tail_ptr,
+                                rows
+                                    .saturating_mul(tail_stride)
+                                    .saturating_mul(std::mem::size_of::<u16>()),
+                            ),
+                        })
+                    };
+                let raw_rows = carry_position.min(v4.sliding_window);
+                let compressed_rows = if v4.compress_ratio == 0 {
+                    0
+                } else {
+                    carry_position / v4.compress_ratio
+                };
+                let raw_cache = if let Some(native) = v4.raw_native_cache.as_ref() {
+                    native_plane_hashes(
+                        &format!("layer{}_{}_raw_native", layer_idx, phase),
+                        native,
+                        raw_rows,
+                    )
+                } else {
+                    debug_hash_device_region_json(
+                        &format!("layer{}_{}_raw_bf16", layer_idx, phase),
+                        v4.raw_cache_ptr,
+                        raw_rows
+                            .saturating_mul(v4.head_dim)
+                            .saturating_mul(std::mem::size_of::<u16>()),
+                    )
+                };
+                let compressor = v4.compressor.as_ref().map(|compressor| {
+                    let cache = if let Some(native) = compressor.native_cache.as_ref() {
+                        let rows = compressed_rows.min(native.rows);
+                        let code_stride = if native.code_bits == 8 {
+                            native.quant_cols
+                        } else {
+                            native.width.div_ceil(2)
+                        };
+                        serde_json::json!({
+                            "planes": native_plane_hashes(
+                                &format!("layer{}_{}_compressed_native", layer_idx, phase),
+                                native,
+                                compressed_rows,
+                            ),
+                            "code_rows": debug_hash_device_rows_json(
+                                &format!("layer{}_{}_compressed_native_code_rows", layer_idx, phase),
+                                native.codes_ptr,
+                                rows,
+                                code_stride,
+                            ),
+                        })
+                    } else {
+                        debug_hash_device_region_json(
+                            &format!("layer{}_{}_compressed_bf16", layer_idx, phase),
+                            compressor.cache_ptr,
+                            compressed_rows
+                                .min(compressor.cache_rows)
+                                .saturating_mul(v4.head_dim)
+                                .saturating_mul(std::mem::size_of::<u16>()),
+                        )
+                    };
+                    serde_json::json!({
+                        "ratio": v4.compress_ratio,
+                        "complete_rows": compressed_rows.min(compressor.cache_rows),
+                        "cache": cache,
+                        "kv_state": debug_decode_f32_summary_json(
+                            &format!("layer{}_{}_compressor_kv_state", layer_idx, phase),
+                            compressor.kv_state_ptr,
+                            compressor.kv_state_elems,
+                        ),
+                        "score_state": debug_decode_f32_summary_json(
+                            &format!("layer{}_{}_compressor_score_state", layer_idx, phase),
+                            compressor.score_state_ptr,
+                            compressor.score_state_elems,
+                        ),
+                    })
+                });
+                states.push(serde_json::json!({
+                    "layer": layer_idx,
+                    "attn_kind": "deepseek_v4",
+                    "state_owner": "registered_decode_buffers",
+                    "logical_position": position,
+                    "carry_position": carry_position,
+                    "raw_rows": raw_rows,
+                    "compressed_rows": compressed_rows,
+                    "raw_cache": raw_cache,
+                    "compressor": compressor,
+                }));
+                continue;
+            }
             match &layer.attn {
                 GpuAttnConfig::KimiDeltaAttention(kda) => {
                     states.push(serde_json::json!({
@@ -81731,6 +83789,17 @@ impl GpuDecodeStore {
         // the server thread (which differs from the setup thread).
         if let Err(e) = self.device.bind_to_thread() {
             let failure = format!("failed to bind CUDA context: {:?}", e);
+            log::error!("gpu_generate_stream: {}", failure);
+            self.last_stream_failure = Some(failure);
+            return 0;
+        }
+
+        // Automatic Marlin dispatch choices are runtime measurements over the
+        // exact loaded shapes and GPU. They must exist before the canonical
+        // uncaptured first step, not first appear while capturing graphs after
+        // that step, or first-step and replay arithmetic can disagree.
+        if let Err(error) = self.ensure_marlin_dispatch_autotuned() {
+            let failure = format!("decode dispatch autotune failed: {error}");
             log::error!("gpu_generate_stream: {}", failure);
             self.last_stream_failure = Some(failure);
             return 0;
@@ -86732,6 +88801,9 @@ impl GpuDecodeStore {
             .as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
 
+        let routed_bits = graph.expert_bits;
+        let registered_shared_bits = shared_bits.unwrap_or(graph.shared_expert_bits);
+
         // Ensure moe_layers is big enough
         while graph.moe_layers.len() <= layer_idx {
             graph.moe_layers.push(None);
@@ -86741,6 +88813,7 @@ impl GpuDecodeStore {
             .iter()
             .map(
                 |&(w13p, w13pb, w13s, w13sb, w2p, w2pb, w2s, w2sb)| ExpertDataPtr {
+                    bits: routed_bits,
                     w13_packed_ptr: w13p,
                     w13_packed_bytes: w13pb,
                     w13_scales_ptr: w13s,
@@ -86768,6 +88841,7 @@ impl GpuDecodeStore {
         let shared =
             shared_ptrs.map(
                 |(w13p, w13pb, w13s, w13sb, w2p, w2pb, w2s, w2sb)| ExpertDataPtr {
+                    bits: registered_shared_bits,
                     w13_packed_ptr: w13p,
                     w13_packed_bytes: w13pb,
                     w13_scales_ptr: w13s,
@@ -88819,10 +90893,15 @@ impl GpuDecodeStore {
         };
         let early_trace_active = graph.debug_decode_early_trace_active
             && graph.validation_decode_steps < graph.debug_decode_early_max_steps;
-        let trace_moe_detail_active = early_trace_active
-            && (matches!(layer_idx, 1 | 3)
-                || graph.debug_decode_hcs_equiv_layer == Some(layer_idx));
-        let trace_moe_prefix = format!("layer{}", layer_idx);
+        // The early trace is an explicit diagnostic-only request. Capture every
+        // MoE boundary so a cross-request mismatch can be localized to the first
+        // layer in one run instead of perturbing HCS state with many reruns.
+        let trace_moe_detail_active = early_trace_active;
+        let trace_moe_prefix = if trace_moe_detail_active {
+            format!("layer{}", layer_idx)
+        } else {
+            String::new()
+        };
         if trace_moe_detail_active {
             graph.debug_decode_early_entries.push(serde_json::json!({
                 "phase": format!("{}_router_input_before_gate", trace_moe_prefix),
@@ -90172,11 +92251,26 @@ impl GpuDecodeStore {
             }
         }
 
+        let canonical_ungraphed_batch = canonical_ungraphed_quantized_moe_supported(
+            expert_bits,
+            act_type,
+            gated,
+            moe_input_size,
+        );
+        if canonical_ungraphed_batch && graph.d_graph_expert_bufs.len() < topk {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "canonical ungraphed MoE needs {} router-slot buffers at layer {}, found {}",
+                topk,
+                layer_idx,
+                graph.d_graph_expert_bufs.len(),
+            )));
+        }
+
         // ── Pre-queue first 2 cold expert DMAs for DMA/compute overlap ──
         // Start DMA on copy_stream before Phase 2 so the PCIe copy engine works
         // while GPU SMs run HCS batch compute.  This hides up to 2 cold expert
         // transfers (~134 us) behind the HCS+shared compute window (~96 us).
-        let pre_dma_count = if use_double_buf && dma_count > 0 {
+        let pre_dma_count = if !canonical_ungraphed_batch && use_double_buf && dma_count > 0 {
             dma_count.min(2)
         } else {
             0
@@ -90239,7 +92333,325 @@ impl GpuDecodeStore {
 
         // ── Phase 2: Batched HCS expert compute (4 launches instead of 3*N) ──
         // Runs on default_stream while pre-queued cold DMAs proceed on copy_stream.
-        if !is_bf16_expert && !is_tileq && hcs_batch_count >= 2 && act_type != 2 {
+        if canonical_ungraphed_batch {
+            // The captured graph always evaluates every router slot with the same
+            // batched W13/W2 stack and performs one canonical final reduction.
+            // Ungraphed decode historically evaluated resident experts with that
+            // stack but demand-cold experts with sequential fused accumulation,
+            // making arithmetic depend on mutable HCS residency. Stage only the
+            // cold slots, then run the exact graph arithmetic over all router slots.
+            let resident_records: Vec<(usize, u64, u64, u64, u64, f32, usize)> =
+                (0..hcs_batch_count)
+                    .map(|batch_slot| {
+                        (
+                            batch_topk_positions[batch_slot],
+                            graph.h_batch_w13_packed_ptrs[batch_slot],
+                            graph.h_batch_w13_scales_ptrs[batch_slot],
+                            graph.h_batch_w2_packed_ptrs[batch_slot],
+                            graph.h_batch_w2_scales_ptrs[batch_slot],
+                            graph.h_batch_weights[batch_slot],
+                            batch_expert_ids[batch_slot],
+                        )
+                    })
+                    .collect();
+
+            for slot in 0..topk {
+                let base = *graph.d_graph_expert_bufs[slot].device_ptr();
+                graph.h_batch_w13_packed_ptrs[slot] = base + w13p_off as u64;
+                graph.h_batch_w13_scales_ptrs[slot] = base + w13s_off as u64;
+                graph.h_batch_w2_packed_ptrs[slot] = base + w2p_off as u64;
+                graph.h_batch_w2_scales_ptrs[slot] = base + w2s_off as u64;
+                graph.h_batch_weights[slot] = 0.0;
+                graph.h_batch_expert_ids[slot] = graph.h_topk_ids[slot];
+            }
+            for &(slot, w13p, w13s, w2p, w2s, weight, eid) in &resident_records {
+                graph.h_batch_w13_packed_ptrs[slot] = w13p;
+                graph.h_batch_w13_scales_ptrs[slot] = w13s;
+                graph.h_batch_w2_packed_ptrs[slot] = w2p;
+                graph.h_batch_w2_scales_ptrs[slot] = w2s;
+                graph.h_batch_weights[slot] = weight;
+                graph.h_batch_expert_ids[slot] = eid as i32;
+            }
+
+            if dma_count > 0 {
+                let record = unsafe { cuda_sys::lib().cuEventRecord(ev_compute[0], default_stream) };
+                if record != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "canonical cold staging compute event[{}]: {:?}",
+                        layer_idx, record,
+                    )));
+                }
+                let wait = unsafe {
+                    cuda_sys::lib().cuStreamWaitEvent(copy_stream, ev_compute[0], 0)
+                };
+                if wait != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "canonical cold staging stream wait[{}]: {:?}",
+                        layer_idx, wait,
+                    )));
+                }
+            }
+
+            for &(slot, _) in dma_experts.iter().take(dma_count) {
+                let eid = graph.h_topk_ids[slot] as usize;
+                let expert = &moe.experts[eid];
+                let base = *graph.d_graph_expert_bufs[slot].device_ptr();
+                if expert.contiguous_bytes > graph.expert_buf_total_size
+                    || expert.w13_packed_bytes > graph.expert_buf_total_size
+                    || expert.w13_scales_bytes
+                        > graph.expert_buf_total_size.saturating_sub(w13s_off)
+                    || expert.w2_packed_bytes
+                        > graph.expert_buf_total_size.saturating_sub(w2p_off)
+                    || expert.w2_scales_bytes
+                        > graph.expert_buf_total_size.saturating_sub(w2s_off)
+                {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "canonical cold staging buffer too small at layer {} expert {}",
+                        layer_idx, eid,
+                    )));
+                }
+                let copy = |dst: u64, src: usize, bytes: usize, region: &str| -> PyResult<()> {
+                    let result = unsafe {
+                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            dst,
+                            src as *const std::ffi::c_void,
+                            bytes,
+                            copy_stream,
+                        )
+                    };
+                    if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "canonical cold staging {} layer {} expert {}: {:?}",
+                            region, layer_idx, eid, result,
+                        )));
+                    }
+                    Ok(())
+                };
+                if expert.contiguous_ptr != 0 {
+                    copy(base, expert.contiguous_ptr, expert.contiguous_bytes, "contiguous")?;
+                    graph.dma_call_count += 1;
+                } else {
+                    copy(
+                        base + w13p_off as u64,
+                        expert.w13_packed_ptr,
+                        expert.w13_packed_bytes,
+                        "w13_packed",
+                    )?;
+                    copy(
+                        base + w13s_off as u64,
+                        expert.w13_scales_ptr,
+                        expert.w13_scales_bytes,
+                        "w13_scales",
+                    )?;
+                    copy(
+                        base + w2p_off as u64,
+                        expert.w2_packed_ptr,
+                        expert.w2_packed_bytes,
+                        "w2_packed",
+                    )?;
+                    copy(
+                        base + w2s_off as u64,
+                        expert.w2_scales_ptr,
+                        expert.w2_scales_bytes,
+                        "w2_scales",
+                    )?;
+                    graph.dma_call_count += 4;
+                }
+                graph.h_batch_weights[slot] = graph.h_topk_weights[slot];
+                graph.dma_cold_experts += 1;
+                graph.dma_bytes_total += (expert.w13_packed_bytes
+                    + expert.w13_scales_bytes
+                    + expert.w2_packed_bytes
+                    + expert.w2_scales_bytes) as u64;
+                apfl_misses += 1;
+            }
+
+            if dma_count > 0 {
+                let record = unsafe { cuda_sys::lib().cuEventRecord(ev_dma[0], copy_stream) };
+                if record != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "canonical cold staging ready event[{}]: {:?}",
+                        layer_idx, record,
+                    )));
+                }
+                let wait = unsafe {
+                    cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[0], 0)
+                };
+                if wait != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "canonical cold staging compute wait[{}]: {:?}",
+                        layer_idx, wait,
+                    )));
+                }
+            }
+
+            let max_ept = graph.max_experts_per_tok;
+            let ptr_stride = max_ept * std::mem::size_of::<u64>();
+            graph.h_batch_upload.fill(0);
+            unsafe {
+                let upload = graph.h_batch_upload.as_mut_ptr();
+                std::ptr::copy_nonoverlapping(
+                    graph.h_batch_w13_packed_ptrs.as_ptr() as *const u8,
+                    upload,
+                    topk * 8,
+                );
+                std::ptr::copy_nonoverlapping(
+                    graph.h_batch_w13_scales_ptrs.as_ptr() as *const u8,
+                    upload.add(ptr_stride),
+                    topk * 8,
+                );
+                std::ptr::copy_nonoverlapping(
+                    graph.h_batch_w2_packed_ptrs.as_ptr() as *const u8,
+                    upload.add(ptr_stride * 2),
+                    topk * 8,
+                );
+                std::ptr::copy_nonoverlapping(
+                    graph.h_batch_w2_scales_ptrs.as_ptr() as *const u8,
+                    upload.add(ptr_stride * 3),
+                    topk * 8,
+                );
+                std::ptr::copy_nonoverlapping(
+                    graph.h_batch_weights.as_ptr() as *const u8,
+                    upload.add(ptr_stride * 4),
+                    topk * 4,
+                );
+                std::ptr::copy_nonoverlapping(
+                    graph.h_batch_expert_ids.as_ptr() as *const u8,
+                    upload.add(ptr_stride * 4 + max_ept * 4 * 3),
+                    topk * 4,
+                );
+                let upload_bytes = ptr_stride * 4 + max_ept * 4 * 4;
+                let result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    *graph.d_batch_upload.device_ptr(),
+                    upload as *const std::ffi::c_void,
+                    upload_bytes,
+                    default_stream,
+                );
+                if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "canonical ungraphed pointer upload[{}]: {:?}",
+                        layer_idx, result,
+                    )));
+                }
+            }
+            let d_weights = *graph.d_batch_upload.device_ptr() + (ptr_stride * 4) as u64;
+            if graph.mixed_expert_precision {
+                let d_ids = *graph.d_batch_upload.device_ptr()
+                    + (ptr_stride * 4 + max_ept * 4 * 3) as u64;
+                Self::launch_manifest_expert_stack(
+                    graph,
+                    layer_idx,
+                    Some(expert_input_ptr),
+                    d_ids,
+                    d_weights,
+                    topk,
+                    "canonical ungraphed manifest",
+                )
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            } else {
+                Self::launch_batched_expert_stack(
+                    graph,
+                    layer_idx,
+                    Some(expert_input_ptr),
+                    Some(d_weights),
+                    Some(topk),
+                    None,
+                    "canonical ungraphed",
+                )
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            }
+            unsafe {
+                k.multi_expert_weighted_add_bf16
+                    .clone()
+                    .launch(
+                        LaunchConfig::for_num_elems(expert_hs as u32),
+                        (
+                            *graph.d_moe_out.device_ptr(),
+                            *graph.d_batch_expert_outs.device_ptr(),
+                            d_weights,
+                            expert_hs as i32,
+                            topk as i32,
+                            1i32,
+                        ),
+                    )
+                    .map_err(|error| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "canonical ungraphed weighted reduction[{}]: {:?}",
+                            layer_idx, error,
+                        ))
+                    })?;
+            }
+
+            for &(slot, _) in dma_experts.iter().take(dma_count) {
+                let eid = graph.h_topk_ids[slot] as usize;
+                let expert = &moe.experts[eid];
+                let base = *graph.d_graph_expert_bufs[slot].device_ptr();
+                if let Some(ref mut hcs) = graph.hcs {
+                    if hcs.dynamic_enabled {
+                        let promotion = DynamicHcsPromotion {
+                            source_path: "ungraphed_decode_canonical_router_slot",
+                            layer_idx,
+                            expert_idx: eid,
+                            src_base: base,
+                            src_w13p_off: w13p_off,
+                            src_w13s_off: w13s_off,
+                            src_w2p_off: w2p_off,
+                            src_w2s_off: w2s_off,
+                            w13p_host: expert.w13_packed_ptr,
+                            w13s_host: expert.w13_scales_ptr,
+                            w2p_host: expert.w2_packed_ptr,
+                            w2s_host: expert.w2_scales_ptr,
+                            w13p_bytes: expert.w13_packed_bytes,
+                            w13s_bytes: expert.w13_scales_bytes,
+                            w2p_bytes: expert.w2_packed_bytes,
+                            w2s_bytes: expert.w2_scales_bytes,
+                        };
+                        hcs.dynamic_promote_from_device(&promotion, default_stream, timing)
+                            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                    }
+                }
+            }
+            if hcs_equiv_trace_active {
+                let gate_stride = if gated {
+                    intermediate.saturating_mul(2)
+                } else {
+                    intermediate
+                };
+                let gate_base = *graph.d_batch_gate_ups.device_ptr();
+                let output_base = *graph.d_batch_expert_outs.device_ptr();
+                let slot_summaries = (0..topk)
+                    .map(|slot| {
+                        serde_json::json!({
+                            "slot": slot,
+                            "expert_id": graph.h_batch_expert_ids[slot],
+                            "weight": graph.h_batch_weights[slot],
+                            "gate_up": debug_decode_bf16_summary_json(
+                                &format!("canonical_ungraphed_layer{}_slot{}_gate_up", layer_idx, slot),
+                                gate_base + (slot * gate_stride * std::mem::size_of::<u16>()) as u64,
+                                gate_stride,
+                            ),
+                            "expert_out": debug_decode_bf16_summary_json(
+                                &format!("canonical_ungraphed_layer{}_slot{}_expert_out", layer_idx, slot),
+                                output_base + (slot * expert_hs * std::mem::size_of::<u16>()) as u64,
+                                expert_hs,
+                            ),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                graph.debug_decode_hcs_equiv_entries.push(serde_json::json!({
+                    "phase": "canonical_ungraphed_mixed_batch",
+                    "decode_step_zero_indexed": graph.validation_decode_steps,
+                    "layer": layer_idx,
+                    "topk": topk,
+                    "resident_or_prefetched": hcs_batch_count,
+                    "staged_cold": dma_count,
+                    "expert_ids": graph.h_topk_ids[..topk].to_vec(),
+                    "weights": graph.h_batch_weights[..topk].to_vec(),
+                    "slot_summaries": slot_summaries,
+                    "arithmetic_contract": "graph_batched_stack_then_router_slot_reduction",
+                }));
+            }
+        } else if !is_bf16_expert && !is_tileq && hcs_batch_count >= 2 && act_type != 2 {
             let t_w13 = Instant::now();
 
             // Pack all pointer arrays + weights into contiguous host buffer, then single H2D
@@ -91075,6 +93487,7 @@ impl GpuDecodeStore {
         // ── Phase 3: Cold expert compute (DMA/compute overlap for pre-queued experts) ──
         // Experts 0..pre_dma_count already have DMAs in flight from before Phase 2.
         // Their ev_dma events may already be signaled, giving near-zero wait.
+        if !canonical_ungraphed_batch {
         for di in 0..dma_count {
             let (i, _weight) = dma_experts[di];
             let eid = graph.h_topk_ids[i] as usize;
@@ -91844,6 +94257,7 @@ impl GpuDecodeStore {
                 }
             }
         }
+        }
 
         if is_bf16_expert && !bf16_pending_adds.is_empty() {
             let mut add_order: Vec<usize> = (0..bf16_pending_adds.len()).collect();
@@ -92126,18 +94540,49 @@ impl GpuDecodeStore {
             };
             if !shared_is_bf16 {
                 let (shared_inv_wp, shared_is_int8) = shared_marlin_dispatch.unwrap();
-                self.launch_marlin_gemv_raw(
-                    w13p,
-                    w13s,
-                    *graph.d_hidden.device_ptr(),
-                    *graph.d_expert_gate_up.device_ptr(),
-                    shared_inv_wp,
-                    inv_sp,
-                    hs,
-                    shared_w13_n,
-                    gs,
-                    shared_is_int8,
-                )?;
+                // The uncaptured first decode step and captured graph replay
+                // must execute identical shared-expert arithmetic. Graph
+                // capture already uses this runtime-measured, shape-specific
+                // selector; using the raw single-split kernel here made the
+                // first request numerically different whenever calibration
+                // selected K-split execution.
+                let shared_w13_ksplits = select_shared_w13_ksplits(graph, shared_w13_n);
+                if shared_w13_ksplits > 1 {
+                    self.launch_marlin_gemv_v2(
+                        w13p,
+                        w13s,
+                        *graph.d_hidden.device_ptr(),
+                        partial_ptr,
+                        shared_inv_wp,
+                        inv_sp,
+                        hs,
+                        shared_w13_n,
+                        gs,
+                        shared_w13_ksplits,
+                        &k,
+                        shared_is_int8,
+                    )?;
+                    self.launch_reduce_ksplits_bf16(
+                        *graph.d_expert_gate_up.device_ptr(),
+                        partial_ptr,
+                        shared_w13_n,
+                        shared_w13_ksplits,
+                        &k,
+                    )?;
+                } else {
+                    self.launch_marlin_gemv_raw(
+                        w13p,
+                        w13s,
+                        *graph.d_hidden.device_ptr(),
+                        *graph.d_expert_gate_up.device_ptr(),
+                        shared_inv_wp,
+                        inv_sp,
+                        hs,
+                        shared_w13_n,
+                        gs,
+                        shared_is_int8,
+                    )?;
+                }
             }
 
             // w2: DMA fallback path needs separate DMA for w2
@@ -92251,23 +94696,56 @@ impl GpuDecodeStore {
                 // Fused: silu_mul + w2 GEMV + add to accumulator.
                 // When gate_weight_ptr != 0, kernel reads sigmoid(*gate_weight_ptr).
                 let (shared_inv_wp, shared_is_int8) = shared_marlin_dispatch.unwrap();
-                self.launch_fused_silu_accum(
-                    w2p,
-                    w2s,
-                    *graph.d_expert_gate_up.device_ptr(),
-                    *graph.d_moe_out.device_ptr(),
-                    shared_inv_wp,
-                    inv_sp,
+                if let Some(w2_ksplits) = select_shared_w2_ksplits(
+                    graph,
                     graph.shared_expert_intermediate_size,
                     hs,
-                    gs,
-                    shared_weight,
-                    gate_weight_ptr,
-                    moe.shared_swiglu_limit,
-                    if moe.deepseek_v4_activation { 2 } else { 0 },
-                    &k,
                     shared_is_int8,
-                )?;
+                ) {
+                    self.launch_fused_silu_accum_v2(
+                        w2p,
+                        w2s,
+                        *graph.d_expert_gate_up.device_ptr(),
+                        partial_ptr,
+                        shared_inv_wp,
+                        inv_sp,
+                        graph.shared_expert_intermediate_size,
+                        hs,
+                        gs,
+                        w2_ksplits,
+                        moe.shared_swiglu_limit,
+                        if moe.deepseek_v4_activation { 2 } else { 0 },
+                        &k,
+                        shared_is_int8,
+                    )?;
+                    self.launch_reduce_ksplits_sigmoid_accum(
+                        *graph.d_moe_out.device_ptr(),
+                        partial_ptr,
+                        hs,
+                        w2_ksplits,
+                        shared_weight,
+                        gate_weight_ptr,
+                        &k,
+                    )?;
+                } else {
+                    self.launch_fused_silu_accum(
+                        w2p,
+                        w2s,
+                        *graph.d_expert_gate_up.device_ptr(),
+                        *graph.d_moe_out.device_ptr(),
+                        shared_inv_wp,
+                        inv_sp,
+                        graph.shared_expert_intermediate_size,
+                        hs,
+                        gs,
+                        shared_weight,
+                        gate_weight_ptr,
+                        moe.shared_swiglu_limit,
+                        if moe.deepseek_v4_activation { 2 } else { 0 },
+                        &k,
+                        shared_is_int8,
+                    )?;
+                }
             }
         }
 
@@ -92560,6 +95038,12 @@ impl GpuDecodeStore {
     fn setup_from_engine_internal(&mut self, engine: &crate::moe::KrasisEngine) -> PyResult<()> {
         use crate::weights::marlin::bf16_to_f32;
 
+        if !self.expert_host_registrations.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "setup_from_engine called with live expert host registrations",
+            ));
+        }
+
         let store = engine.get_weight_store().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("KrasisEngine has no loaded weights")
         })?;
@@ -92609,6 +95093,18 @@ impl GpuDecodeStore {
             }
         }
         if let Some(graph) = self.graph.as_mut() {
+            let mixed = store.mixed_precision_manifest.is_some();
+            if mixed
+                && (self.expert_only_peer_store
+                    || !graph.cpu_tail_workers.is_empty()
+                    || graph.synthetic_repack.is_some()
+                    || std::env::var_os("KRASIS_EXPERT_COMPRESSION_SIDECAR").is_some())
+            {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "mixed routed experts are not validated with peer serving, CPU-tail, synthetic repack, or expert compression",
+                ));
+            }
+            graph.mixed_expert_precision = mixed;
             graph.expert_hqq_cache = store
                 .expert_hqq_cache
                 .as_ref()
@@ -92894,6 +95390,22 @@ impl GpuDecodeStore {
 
             if let Some(ref mut graph) = self.graph {
                 if let Some(ref mut moe_layer) = graph.moe_layers[abs_layer_idx] {
+                    for (expert_idx, (runtime, loaded)) in moe_layer
+                        .experts
+                        .iter_mut()
+                        .zip(gpu_experts.iter())
+                        .enumerate()
+                    {
+                        if loaded.num_bits != loaded.w2_bits
+                            || !matches!(loaded.num_bits, 4 | 8)
+                        {
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "routed Marlin expert L{}E{} requires matching INT4/INT8 W13/W2 precision, got {}/{}",
+                                abs_layer_idx, expert_idx, loaded.num_bits, loaded.w2_bits,
+                            )));
+                        }
+                        runtime.bits = loaded.num_bits;
+                    }
                     moe_layer.deepseek_v4_activation =
                         config.swiglu_mode == crate::weights::SwiGluMode::DeepSeekClamp;
                     if moe_layer.deepseek_v4_activation {
@@ -92920,12 +95432,40 @@ impl GpuDecodeStore {
             }
         }
 
-        // Step 3: size expert DMA buffers (need to hold largest packed + scales)
-        // We use buf_a for packed data, buf_b for scales data.
-        // The largest packed buffer is max_expert_bytes.
-        // Add 20% headroom for alignment.
-        let buf_size = ((max_expert_bytes as f64) * 1.2) as usize;
-        self.resize_expert_buffers(buf_size.max(1024))?;
+        if store.mixed_precision_manifest.is_some() {
+            let precision_table = {
+                let graph = self.graph.as_ref().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err("mixed precision graph missing")
+                })?;
+                let mut table = vec![0u8; graph.moe_layers.len() * n_experts];
+                for (layer_idx, layer) in graph.moe_layers.iter().enumerate() {
+                    let Some(layer) = layer.as_ref() else { continue };
+                    if layer.experts.len() != n_experts {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "mixed precision layer {layer_idx} has {} experts, expected {n_experts}",
+                            layer.experts.len(),
+                        )));
+                    }
+                    for (expert_idx, expert) in layer.experts.iter().enumerate() {
+                        if !matches!(expert.bits, 4 | 8) {
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "mixed precision layer {layer_idx} expert {expert_idx} has INT{}",
+                                expert.bits,
+                            )));
+                        }
+                        table[layer_idx * n_experts + expert_idx] = expert.bits;
+                    }
+                }
+                table
+            };
+            let device_table = self.device.htod_copy(precision_table).map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "upload mixed routed-expert precision table: {error:?}"
+                ))
+            })?;
+            self.graph.as_mut().unwrap().d_mixed_expert_bits = Some(device_table);
+        }
+
         if self.expert_only_peer_store {
             log::info!(
                 "Peer expert store registered {} MoE layers without duplicate host pinning or compression runtime",
@@ -92976,6 +95516,10 @@ impl GpuDecodeStore {
                     }
                     pinned_regions += 1;
                     pinned_bytes += size;
+                    self.expert_host_registrations.push(ExpertHostRegistration {
+                        ptr: ptr as *mut std::ffi::c_void,
+                        bytes: size,
+                    });
                 }
             } else if moe_idx < store.layer_backings_gpu.len() {
                 // Per-layer backing: pin 4 contiguous buffers per layer
@@ -93000,6 +95544,10 @@ impl GpuDecodeStore {
                     if err == cuda_sys::CUresult::CUDA_SUCCESS {
                         pinned_regions += 1;
                         pinned_bytes += buf.len();
+                        self.expert_host_registrations.push(ExpertHostRegistration {
+                            ptr: buf.as_ptr() as *mut std::ffi::c_void,
+                            bytes: buf.len(),
+                        });
                     } else {
                         pin_failures += 1;
                         if pin_failures == 1 {
@@ -93009,6 +95557,38 @@ impl GpuDecodeStore {
                                 label,
                                 err,
                                 buf.len()
+                            );
+                        }
+                    }
+                }
+            } else if moe_idx < store.mixed_layer_backings_gpu.len() {
+                // Mixed cache: one variable-record layer payload. The u64 owner
+                // guarantees alignment and one registration covers every expert.
+                let backing = &store.mixed_layer_backings_gpu[moe_idx];
+                let bytes = backing.logical_bytes;
+                if bytes > 0 {
+                    let err = unsafe {
+                        cuda_sys::lib().cuMemHostRegister_v2(
+                            backing.payload.as_ptr() as *mut std::ffi::c_void,
+                            bytes,
+                            0,
+                        )
+                    };
+                    if err == cuda_sys::CUresult::CUDA_SUCCESS {
+                        pinned_regions += 1;
+                        pinned_bytes += bytes;
+                        self.expert_host_registrations.push(ExpertHostRegistration {
+                            ptr: backing.payload.as_ptr() as *mut std::ffi::c_void,
+                            bytes,
+                        });
+                    } else {
+                        pin_failures += 1;
+                        if pin_failures == 1 {
+                            log::warn!(
+                                "First mixed-cache pin failure at moe_idx={}: {:?} (size={})",
+                                moe_idx,
+                                err,
+                                bytes,
                             );
                         }
                     }
@@ -93029,6 +95609,10 @@ impl GpuDecodeStore {
                         if err == cuda_sys::CUresult::CUDA_SUCCESS {
                             pinned_regions += 1;
                             pinned_bytes += backing.len();
+                            self.expert_host_registrations.push(ExpertHostRegistration {
+                                ptr: backing.as_ptr() as *mut std::ffi::c_void,
+                                bytes: backing.len(),
+                            });
                         } else {
                             pin_failures += 1;
                         }
@@ -93065,6 +95649,10 @@ impl GpuDecodeStore {
                             if err == cuda_sys::CUresult::CUDA_SUCCESS {
                                 pinned_regions += 1;
                                 pinned_bytes += size;
+                                self.expert_host_registrations.push(ExpertHostRegistration {
+                                    ptr: ptr as *mut std::ffi::c_void,
+                                    bytes: size,
+                                });
                             } else {
                                 pin_failures += 1;
                             }
@@ -93087,6 +95675,10 @@ impl GpuDecodeStore {
                     if err == cuda_sys::CUresult::CUDA_SUCCESS {
                         pinned_regions += 1;
                         pinned_bytes += backing.len();
+                        self.expert_host_registrations.push(ExpertHostRegistration {
+                            ptr: backing.as_ptr() as *mut std::ffi::c_void,
+                            bytes: backing.len(),
+                        });
                     } else {
                         pin_failures += 1;
                     }
@@ -93111,6 +95703,10 @@ impl GpuDecodeStore {
                         if err == cuda_sys::CUresult::CUDA_SUCCESS {
                             pinned_regions += 1;
                             pinned_bytes += size;
+                            self.expert_host_registrations.push(ExpertHostRegistration {
+                                ptr: ptr as *mut std::ffi::c_void,
+                                bytes: size,
+                            });
                         } else {
                             pin_failures += 1;
                         }
@@ -93127,17 +95723,21 @@ impl GpuDecodeStore {
             pin_elapsed,
             pin_failures,
         );
+        if store.mixed_precision_manifest.is_some() && pin_failures != 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "mixed routed-expert host registration failed for {pin_failures} regions; pageable-DMA degradation is not an accepted fallback"
+            )));
+        }
 
         // Step 4: size expert DMA buffers (need to hold largest packed + scales)
         // We use buf_a for packed data, buf_b for scales data.
         // The largest packed buffer is max_expert_bytes.
-        // Add 20% headroom for alignment.
         // Must run AFTER Step 3 pinning: resize_expert_buffers runs the route
         // prefetch H2D bandwidth probe against the expert host allocations, and
         // probing before page-locking measures pageable-copy bandwidth (~2x
         // low), which then feeds a wrong value into the prefetch byte budget.
-        let buf_size = ((max_expert_bytes as f64) * 1.2) as usize;
-        self.resize_expert_buffers(buf_size.max(1024))?;
+        let buf_size = max_expert_bytes.max(1);
+        self.resize_expert_buffers(buf_size)?;
 
         // Initialize APFL (speculative prefetch) if requested via env var.
         // KRASIS_APFL_PREFETCH=N (default 0 = disabled). N = number of experts
@@ -93424,6 +96024,7 @@ impl GpuDecodeStore {
             None,
             4,
             4,
+            8,
             crate::weights::ExpertInt4CalibMode::Amax,
             false,
         )
@@ -93681,6 +96282,7 @@ impl GpuDecodeStore {
             None,
             4,
             4,
+            8,
             crate::weights::ExpertInt4CalibMode::Amax,
             false,
         )
@@ -93972,20 +96574,26 @@ impl GpuDecodeStore {
             ));
         }
 
-        // Calculate per-expert VRAM size from the first registered MoE layer
-        let first_moe = graph
-            .moe_layers
-            .iter()
-            .find_map(|m| m.as_ref())
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No MoE layers found"))?;
-        let first_expert = &first_moe.experts[0];
-        let expert_bytes = first_expert.w13_packed_bytes
-            + first_expert.w13_scales_bytes
-            + first_expert.w2_packed_bytes
-            + first_expert.w2_scales_bytes;
-        // Align to 512 bytes
+        // This legacy entry point has a scalar slot-size contract. Reject a
+        // heterogeneous manifest rather than budgeting every slot from whichever
+        // expert happens to be first; production mixed precision uses exact pool
+        // slot sizes derived from every loaded expert.
         let align = 512usize;
-        let expert_vram_bytes = (expert_bytes + align - 1) & !(align - 1);
+        let expert_vram_bytes = uniform_aligned_expert_bytes(
+            graph
+                .moe_layers
+                .iter()
+                .filter_map(Option::as_ref)
+                .flat_map(|moe| moe.experts.iter())
+                .map(|expert| {
+                    expert.w13_packed_bytes
+                        + expert.w13_scales_bytes
+                        + expert.w2_packed_bytes
+                        + expert.w2_scales_bytes
+                }),
+            align,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
         // Determine budget
         let budget_bytes = if budget_mb > 0 {
@@ -94088,26 +96696,13 @@ impl GpuDecodeStore {
             ));
         }
 
-        // Calculate per-expert VRAM size
-        let first_moe = graph
-            .moe_layers
-            .iter()
-            .find_map(|m| m.as_ref())
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No MoE layers found"))?;
-        let first_expert = &first_moe.experts[0];
-        let expert_bytes = first_expert.w13_packed_bytes
-            + first_expert.w13_scales_bytes
-            + first_expert.w2_packed_bytes
-            + first_expert.w2_scales_bytes;
+        // Select ranked experts using their actual loaded payload sizes. This is
+        // identical to fixed-slot selection for homogeneous caches and packs
+        // heterogeneous INT4/INT8 records without charging every expert at INT8.
         let align = 512usize;
-        let slot_size = (expert_bytes + align - 1) & !(align - 1);
-
-        // Determine budget (0 = empty pool, used by tiered init for no-hard-pool case)
-        let budget_bytes = budget_mb * 1024 * 1024;
-        let num_slots = budget_bytes / slot_size;
-        let pool_alloc_bytes = num_slots * slot_size;
-
-        // Determine max experts per layer for bitset indexing
+        let budget_bytes = budget_mb
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("HCS budget overflow"))?;
         let num_experts_per_layer = graph
             .moe_layers
             .iter()
@@ -94116,6 +96711,61 @@ impl GpuDecodeStore {
             .max()
             .unwrap_or(0);
         let num_layers = graph.moe_layers.len();
+        let mut expert_slot_sizes = vec![0usize; num_layers.saturating_mul(num_experts_per_layer)];
+        for (layer_idx, layer) in graph.moe_layers.iter().enumerate() {
+            let Some(moe) = layer.as_ref() else {
+                continue;
+            };
+            for (expert_idx, expert) in moe.experts.iter().enumerate() {
+                let payload = expert
+                    .payload_bytes()
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                let aligned = payload
+                    .checked_add(align - 1)
+                    .map(|value| value & !(align - 1))
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "HCS expert size overflow for L{}E{}",
+                            layer_idx, expert_idx
+                        ))
+                    })?;
+                expert_slot_sizes[layer_idx * num_experts_per_layer + expert_idx] = aligned;
+            }
+        }
+        let mut selected = select_exact_hcs_slots(
+            &ranking,
+            &expert_slot_sizes,
+            num_experts_per_layer,
+            &std::collections::HashSet::new(),
+            budget_bytes,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let pool_alloc_bytes = selected.iter().try_fold(0usize, |total, item| {
+            total
+                .checked_add(item.2)
+                .ok_or_else(|| "HCS packed pool byte overflow".to_string())
+        })
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        // Preserve ranking selection, then place same-layer experts adjacently.
+        selected.sort_unstable_by_key(|&(layer, expert, _)| (layer, expert));
+        let num_slots = selected.len();
+        let slot_size = selected
+            .iter()
+            .map(|&(_, _, bytes)| bytes)
+            .max()
+            .unwrap_or(0);
+        let mut pool_slot_offsets = Vec::with_capacity(num_slots);
+        let mut pool_slot_sizes = Vec::with_capacity(num_slots);
+        let mut offset = 0usize;
+        for &(_, _, bytes) in &selected {
+            pool_slot_offsets.push(offset);
+            pool_slot_sizes.push(bytes);
+            offset = offset.checked_add(bytes).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("HCS pool offset overflow")
+            })?;
+        }
+        debug_assert_eq!(offset, pool_alloc_bytes);
+
         // Total unique experts
         let total_experts: usize = graph
             .moe_layers
@@ -94127,7 +96777,7 @@ impl GpuDecodeStore {
         // Allocate the pool (skip if 0 budget — empty hard pool for tiered init)
         let (pool_buf_opt, pool_base) = if num_slots > 0 {
             log::info!(
-                "HCS pool: allocating {:.1} MB ({} slots x {:.1} KB/slot)",
+                "HCS pool: allocating {:.1} MB ({} exact-size slots, largest {:.1} KB)",
                 pool_alloc_bytes as f64 / (1024.0 * 1024.0),
                 num_slots,
                 slot_size as f64 / 1024.0
@@ -94149,25 +96799,6 @@ impl GpuDecodeStore {
 
         let mut slot_to_expert: Vec<Option<(usize, usize)>> = vec![None; num_slots];
 
-        // Two-pass allocation: select experts by ranking, then sort by (layer, expert)
-        // so same-layer experts are physically contiguous in the pool for better L2 cache.
-        let mut to_load: Vec<(usize, usize)> = Vec::new();
-        for &(layer_idx, expert_idx) in &ranking {
-            if to_load.len() >= num_slots {
-                break;
-            }
-            let moe = match graph.moe_layers.get(layer_idx).and_then(|m| m.as_ref()) {
-                Some(m) => m,
-                None => continue,
-            };
-            if expert_idx >= moe.experts.len() {
-                continue;
-            }
-            to_load.push((layer_idx, expert_idx));
-        }
-        // Sort by layer then expert so same-layer experts get adjacent slots
-        to_load.sort_unstable();
-
         // Remaining slots after loading become the free list
         let mut next_slot = 0usize;
 
@@ -94176,12 +96807,12 @@ impl GpuDecodeStore {
         let mut loaded = 0usize;
         let mut cache = std::collections::HashMap::new();
 
-        for &(layer_idx, expert_idx) in &to_load {
+        for &(layer_idx, expert_idx, _) in &selected {
             let moe = &graph.moe_layers[layer_idx].as_ref().unwrap();
             let slot = next_slot;
             next_slot += 1;
             let expert = &moe.experts[expert_idx];
-            let dst = pool_base + (slot as u64 * slot_size as u64);
+            let dst = pool_base + pool_slot_offsets[slot] as u64;
 
             // Contiguous layout: w13p | w13s | w2p | w2s
             let w13p_off = 0u64;
@@ -94215,6 +96846,12 @@ impl GpuDecodeStore {
                 }
                 if !ok {
                     slot_to_expert[slot] = None;
+                    if graph.mixed_expert_precision {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "mixed routed-expert HCS hard-pool load failed for L{}E{}; refusing cold-DMA degradation",
+                            layer_idx, expert_idx,
+                        )));
+                    }
                     continue;
                 }
             }
@@ -94293,6 +96930,7 @@ impl GpuDecodeStore {
         // Create HCS state with pool
         let mut hcs = HcsState::new();
         hcs.num_experts_per_layer = num_experts_per_layer;
+        hcs.expert_slot_sizes = expert_slot_sizes;
         hcs.init_cache_fast(num_layers);
         // Initialize GPU-side expert pointer table for CUDA graph support
         hcs.init_gpu_expert_ptrs(&self.device, num_layers, num_experts_per_layer);
@@ -94306,6 +96944,8 @@ impl GpuDecodeStore {
         hcs.num_cached = loaded;
         hcs.pool_buf = pool_buf_opt;
         hcs.pool_slot_size = slot_size;
+        hcs.pool_slot_offsets = pool_slot_offsets;
+        hcs.pool_slot_sizes = pool_slot_sizes;
         hcs.pool_num_slots = num_slots;
         // Build free slot stack from unassigned slots (above next_slot + any failed slots)
         let mut free_slots: Vec<usize> = (next_slot..num_slots).rev().collect();
@@ -94773,6 +97413,7 @@ impl GpuDecodeStore {
             None,
             4,
             4,
+            8,
             crate::weights::ExpertInt4CalibMode::Amax,
             false,
         )
@@ -95054,6 +97695,7 @@ impl GpuDecodeStore {
             None,
             4,
             4,
+            8,
             crate::weights::ExpertInt4CalibMode::Amax,
             false,
         )
@@ -95498,6 +98140,7 @@ impl GpuDecodeStore {
             None,
             4,
             4,
+            8,
             crate::weights::ExpertInt4CalibMode::Amax,
             false,
         )
@@ -96465,6 +99108,9 @@ impl GpuDecodeStore {
 
 impl Drop for GpuDecodeStore {
     fn drop(&mut self) {
+        if let Err(error) = self.release_expert_host_registrations_rust() {
+            log::error!("GpuDecodeStore drop could not release expert host registrations: {error}");
+        }
         // Dynamic peer copies may wait on the peer service event. Drain and
         // destroy their stream before destroying that dependency below.
         if let Some(mut dynamic) = self.peer_dynamic_tier.take() {

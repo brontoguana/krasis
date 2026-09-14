@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -20,6 +21,9 @@ from krasis import launcher as launcher_mod
 from krasis import nvidia_smi as nvidia_smi_mod
 from krasis import vram_budget as vram_budget_mod
 from krasis.launcher import Launcher, LauncherConfig
+
+with mock.patch.dict(os.environ, {"KRASIS_DEV_SCRIPT": "1"}):
+    from scripts.tileq_build import mixed_calibration_entry_hashes
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -164,6 +168,126 @@ def _run_server_start_smoke(config_path: Path, scenario: str, expected_fragments
 
 
 class LauncherMatrixTest(unittest.TestCase):
+    def test_mixed_topology_is_not_inherited_from_homogeneous_model_qualification(self) -> None:
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = LauncherConfig()
+        launcher.model_info = {
+            "name": "GLM-5.3-Flash", "arch": "glm5_next_text",
+            "support_key": "glm53-flash",
+        }
+        for indices in ([], [1, 7], [2, 4, 9]):
+            for mode in ("auto", "layer-split", "peer"):
+                with self.subTest(indices=indices, mode=mode):
+                    launcher.cfg.selected_gpu_indices = indices
+                    launcher.cfg.multi_gpu_mode = mode
+                    launcher.cfg.mixed_expert_manifest = "mixed.json"
+                    with self.assertRaisesRegex(ValueError, "not live-qualified"):
+                        launcher._validate_model_topology()
+        launcher.cfg.selected_gpu_indices = [7]
+        launcher.cfg.multi_gpu_mode = "auto"
+        launcher._validate_model_topology()
+        launcher.cfg.mixed_expert_manifest = ""
+        launcher.cfg.selected_gpu_indices = [1, 7]
+        for mode in ("auto", "peer"):
+            launcher.cfg.multi_gpu_mode = mode
+            launcher._validate_model_topology()
+
+    def test_direct_server_mixed_multi_gpu_rejects_before_weight_loading(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="krasis-mixed-topology-") as root:
+            root_path = Path(root)
+            model_path = root_path / "model"
+            model_path.mkdir()
+            (model_path / "config.json").write_text(json.dumps(_minimal_qwen3_config()))
+            manifest_path = root_path / "mixed.json"
+            manifest_path.write_text("{}")
+            for mode in ("auto", "layer-split"):
+                with self.subTest(mode=mode):
+                    config_path = root_path / f"{mode}.conf"
+                    config_path.write_text(
+                        f'MODEL_PATH="{model_path}"\n'
+                        f'CFG_MIXED_EXPERT_MANIFEST="{manifest_path}"\n'
+                        'CFG_GPU_EXPERT_BITS="4"\n'
+                        'CFG_NUM_GPUS="2"\n'
+                        f'CFG_MULTI_GPU_MODE="{mode}"\n'
+                    )
+                    env = os.environ.copy()
+                    env["CUDA_VISIBLE_DEVICES"] = ""
+                    env["KRASIS_RUN_DIR"] = str(root_path / f"run-{mode}")
+                    env["KRASIS_RUN_TYPE"] = "mixed-topology-rejection"
+                    proc = subprocess.run(
+                        [sys.executable, "-m", "krasis.server", "--config", str(config_path)],
+                        cwd=REPO_ROOT, env=env, text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        timeout=30, check=False,
+                    )
+                    self.assertEqual(proc.returncode, 2, proc.stdout)
+                    self.assertIn("mixed multi-GPU execution is not live-qualified", proc.stdout)
+                    self.assertNotIn("Loading model weights", proc.stdout)
+
+    def test_mixed_calibration_input_hashes_are_schema_bound(self) -> None:
+        a = "a" * 64
+        b = "b" * 64
+        manifest_path = Path("fixture-manifest.json")
+        self.assertEqual(
+            mixed_calibration_entry_hashes(
+                {
+                    "format": "Krasis TileQ calibration corpus",
+                    "entries": [{"source_sha256": a, "slice_sha256": b}],
+                },
+                manifest_path,
+            ),
+            {a, b},
+        )
+        self.assertEqual(
+            mixed_calibration_entry_hashes(
+                {
+                    "format": "Krasis TileQ multimodal calibration corpus",
+                    "entries": [
+                        {"image_source_sha256": a, "prompt_source_sha256": b}
+                    ],
+                },
+                manifest_path,
+            ),
+            {a, b},
+        )
+        with self.assertRaisesRegex(RuntimeError, "unsupported.*format"):
+            mixed_calibration_entry_hashes(
+                {"format": "unknown", "entries": [{}]}, manifest_path
+            )
+        with self.assertRaisesRegex(RuntimeError, "invalid prompt_source_sha256"):
+            mixed_calibration_entry_hashes(
+                {
+                    "format": "Krasis TileQ multimodal calibration corpus",
+                    "entries": [
+                        {"image_source_sha256": a, "prompt_source_sha256": "bad"}
+                    ],
+                },
+                manifest_path,
+            )
+
+    def test_mixed_ranking_evidence_identity_fails_closed(self) -> None:
+        evidence = b'{"format":"ranking-fixture"}'
+        calibration = {"ranking_evidence_sha256": hashlib.sha256(evidence).hexdigest()}
+        with tempfile.TemporaryDirectory(prefix="krasis-mixed-evidence-") as root:
+            manifest_path = Path(root) / "mixed.json"
+            manifest_path.write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                launcher_mod._validate_mixed_ranking_evidence(
+                    str(manifest_path), calibration
+                )
+
+            evidence_path = Path(root) / "mixed-expert-ranking.json"
+            evidence_path.write_bytes(evidence)
+            launcher_mod._validate_mixed_ranking_evidence(
+                str(manifest_path), calibration
+            )
+
+            evidence_path.write_bytes(b"corrupt")
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                launcher_mod._validate_mixed_ranking_evidence(
+                    str(manifest_path), calibration
+                )
+
     def test_model_scan_surfaces_unvalidated_incomplete_and_invalid_checkpoints(self) -> None:
         with tempfile.TemporaryDirectory(prefix="krasis-model-scan-") as root:
             root_path = Path(root)
@@ -1154,6 +1278,100 @@ class LauncherMatrixTest(unittest.TestCase):
             vram_budget_mod._persistent_recurrent_state_bytes(cfg, 0, 1),
             expected_conv_bytes + expected_recurrent_bytes,
         )
+
+    def test_mixed_expert_budget_uses_manifest_tensor_bytes_and_exact_order(self) -> None:
+        config = {
+            "model_type": "qwen3_next",
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "moe_intermediate_size": 64,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 32,
+            "vocab_size": 1024,
+            "max_position_embeddings": 4096,
+            "full_attention_interval": 1,
+            "n_routed_experts": 8,
+            "num_experts_per_tok": 2,
+            "n_shared_experts": 0,
+            "first_k_dense_replace": 0,
+            "tie_word_embeddings": True,
+        }
+        with tempfile.TemporaryDirectory(prefix="krasis-mixed-budget-") as root:
+            model_dir = Path(root) / "model"
+            model_dir.mkdir()
+            (model_dir / "config.json").write_text(
+                json.dumps(config), encoding="utf-8"
+            )
+            int4_bytes = vram_budget_mod._marlin_expert_bytes(
+                128, 64, 64, 4, gated=True, pad_routed_w2=True
+            )
+            int8_bytes = vram_budget_mod._marlin_expert_bytes(
+                128, 64, 64, 8, gated=True, pad_routed_w2=True
+            )
+            delta = int8_bytes - int4_bytes
+            regions = []
+            for moe_layer, model_layer in enumerate((0, 1)):
+                for expert in range(8):
+                    regions.append(
+                        {
+                            "model_layer": model_layer,
+                            "moe_layer": moe_layer,
+                            "expert": expert,
+                            "bits": 8 if (moe_layer, expert) == (0, 0) else 4,
+                            "int4_bytes": int4_bytes,
+                            "int8_bytes": int8_bytes,
+                        }
+                    )
+            baseline = len(regions) * int4_bytes
+            achieved = delta
+            manifest = {
+                "format": "Krasis routed mixed Marlin INT4/INT8",
+                "schema_version": 1,
+                "default_bits": 4,
+                "experts_gated": True,
+                "group_size": 64,
+                "budget": {
+                    "requested_basis_points": 1000,
+                    "baseline_int4_routed_bytes": baseline,
+                    "maximum_added_bytes": baseline * 1000 // 10_000,
+                    "achieved_added_bytes": achieved,
+                    "achieved_percent_millionths": achieved * 100_000_000 // baseline,
+                },
+                "regions": regions,
+            }
+            manifest_path = Path(root) / "mixed.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            budget = vram_budget_mod.compute_launcher_budget(
+                str(model_dir),
+                [2],
+                attention_quant="bf16",
+                kv_dtype="k4v4",
+                gpu_vram_mb=24_000,
+                total_ram_gb=128,
+                kv_cache_mb=200,
+                mixed_expert_manifest=str(manifest_path),
+            )
+            self.assertEqual(budget["mixed_expert_max_record_bytes"], int8_bytes)
+            self.assertEqual(
+                budget["hcs_cacheable_experts_mb"],
+                (baseline + achieved) / (1024 * 1024),
+            )
+
+            regions[0]["int4_bytes"] += 1
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid byte size"):
+                vram_budget_mod.compute_launcher_budget(
+                    str(model_dir),
+                    [2],
+                    attention_quant="bf16",
+                    kv_dtype="k4v4",
+                    gpu_vram_mb=24_000,
+                    total_ram_gb=128,
+                    kv_cache_mb=200,
+                    mixed_expert_manifest=str(manifest_path),
+                )
 
     def test_deepseek_v4_native_budget_uses_exact_nonlinear_layout(self) -> None:
         cfg = {

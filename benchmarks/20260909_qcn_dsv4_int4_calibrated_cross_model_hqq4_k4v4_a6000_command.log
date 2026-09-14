@@ -1,0 +1,15 @@
+Date: 2026-09-09
+Working directory: /home/main/Documents/Claude/krasis
+Command: ./dev speed-test
+Arguments: none
+Exit status: 0
+Instrumentation: timing/trace/diagnostic environment unset
+Resolved config: tests/qcn-k4v4-hqq4-int4-benchmark.conf
+Run directory: logs/dev-benchmark_20260909_194918
+Selected physical GPU: GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab (NVIDIA RTX A6000)
+Native extension SHA-256: 2eba770603c2c8bfe8f841509b8868d3deaed5f1a499ecb04682ba51487efa89
+Outer-log SHA-256: a8a2144e88c14a80565a880b651fde7a4952cdac017402fd5b80de3dc46a6e14
+Benchmark-stdout SHA-256: 3bd034b833d2b497ddd05bd9c819d9ed0b53d69fec64a5dd2a51a708ca6cefec
+Runtime-log SHA-256: be628fa9445fa118cf90a1c3d7ea6a459fedb60f09b55b9f734b0aff5df108bd
+Report SHA-256: 401cf73b95e0eadef49552e3f2188c3edd5a16e17714e2e19eb58c6ebf98c174
+Note: the runtime logger labels PyTorch's TF32-disabled UserWarning at ERROR severity; there was no runtime error, traceback, CUDA failure, OOM, or failed benchmark assertion.

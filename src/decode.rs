@@ -5287,6 +5287,22 @@ fn sample_from_logits(
     top_slice[cutoff - 1]
 }
 
+#[cfg(test)]
+mod sampling_tests {
+    use super::sample_from_logits;
+
+    #[test]
+    fn temperature_zero_selects_argmax_without_rng() {
+        let mut logits = vec![-2.0, 7.5, 3.0, 7.0];
+        let mut rng = || -> u64 { panic!("greedy sampling must not read RNG state") };
+        assert_eq!(
+            sample_from_logits(&mut logits, 4, 0.0, 50, 0.95, &mut rng),
+            1
+        );
+        assert_eq!(logits, vec![-2.0, 7.5, 3.0, 7.0]);
+    }
+}
+
 // ── Helper: LA conv (factored out for clarity) ──
 
 fn decode_la_conv(

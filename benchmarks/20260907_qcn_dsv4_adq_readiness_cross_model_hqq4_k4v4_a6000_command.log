@@ -1,0 +1,15 @@
+Date: 2026-09-07
+Working directory: /home/main/Documents/Claude/krasis
+tmux session: dsv4-adq-final-speed-test-20260907
+tmux log: /home/main/Documents/Claude/krasis-internal/dsv4_adq_final_speed_test_20260907.log
+Command: ./dev speed-test
+Run directory: logs/dev-benchmark_20260907_113825
+Timing/trace instrumentation: disabled
+Exit status: 0
+Native extension SHA-256: bae441b526ea732bc3415c95a26d1d15bc9e63f1a879a77064e9738ccfb5260c
+
+SHA-256:
+benchmark_report  1101571987c2464de6510b5b5b7c5788d35af5c62c03bbe171897bb8523b5d35
+benchmark_stdout  1a8aeeda3ea2e58824de92cb0503cf64b90d06e4f88b86ff54315883302c0475
+runtime           047bb43b5f559c3711f1395da98cd050607587fb95e8361dbd9a4a1e1e479dd5
+outer             0fc3435fba1e615667273dda7af6485ba4b89e0394a242e34851db25b4c8f349

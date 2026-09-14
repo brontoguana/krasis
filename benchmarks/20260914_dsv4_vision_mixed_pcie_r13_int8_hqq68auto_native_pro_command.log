@@ -1,0 +1,1 @@
+./dev benchmark tests/deepseek-v4-flash-vision-exp-mixed-sweep-int8.conf --timing --heatmap-path /home/main/Documents/Claude/krasis-internal/adq/deepseek-v4-flash-vision-exp-mixed-sweep-int8-r12-20260912/preregistered/runtime-heatmap.json

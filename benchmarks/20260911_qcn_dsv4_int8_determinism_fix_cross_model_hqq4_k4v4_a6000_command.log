@@ -1,0 +1,15 @@
+Date: 2026-09-11
+Working directory: /home/main/Documents/Claude/krasis
+Command: ./dev speed-test
+Arguments: none
+Exit status: 0
+Instrumentation: timing/trace/diagnostic environment unset
+Resolved config: tests/qcn-k4v4-hqq4-int4-benchmark.conf
+Run directory: logs/dev-benchmark_20260911_093440
+Selected physical GPU: GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab (NVIDIA RTX A6000)
+Repository HEAD: 9d25fb3a490499f1be78952079d361acfdb5c05c
+Native extension SHA-256: 69e539e303b107589aba072639746d84ad8e496b269c9cea2af44159631e75b8
+Outer-log SHA-256: dafd588bb39a94affd2ef999c9bb8901aebba35032b2928a23131058e20d6745
+Benchmark-stdout SHA-256: 09d46a40f84f60ea881b38abe93fa73c4ba02d02fb177e4744a3124b3d738d4c
+Runtime-log SHA-256: 00524a09fad8e1877f31e089a3f2190dd2a4b0a9422b35bbaf6dc259d39dc06d
+Report-log SHA-256: 63602c87a15b2279aacc36d9b1240296c6e9bd5ff3b98f18e64ff949574b1a5d

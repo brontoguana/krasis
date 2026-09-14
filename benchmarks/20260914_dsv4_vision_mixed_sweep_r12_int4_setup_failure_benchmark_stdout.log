@@ -1,0 +1,32 @@
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d
+Loaded config from tests/deepseek-v4-flash-vision-exp-mixed-sweep-int4.conf: {'model_path': '/home/main/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d', 'num_gpus': 1, 'layer_group_size': 1, 'kv_cache_mb': 3524, 'max_context_tokens': 1048576, 'kv_dtype': 'native', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'gpu_expert_int4_calib': 'search_rmse', 'attention_quant': 'hqq68_auto', 'hqq_auto_budget_pct': 10, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'step_vision_quant': 'bf16', 'krasis_threads': 40, 'host': '127.0.0.1', 'port': 18224, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — DeepSeek-V4-Flash-Vision-Exp[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (config; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d)[0m
+  [32mExperts: GPU INT4 g128 (search_rmse)  |  Attention: hqq68_auto  |  KV: native[0m
+  [32mLayer groups: 1  |  KV cache: 3524 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=570 MB, free=96687 MB, total=97258 MB
+
+[1m[36m▸ Loading GPU weights[0m
+DeepSeek-V4 checkpoint namespace inventory: 67652 layers.* main tensors across 43 layers; 4708 mtp.* auxiliary tensors across blocks [0, 1, 2] inventoried; 6 root main tensors; unexpected=0
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=2984 MB, reserved=3004 MB, used=3682 MB, free=93575 MB, total=97258 MB
+  [0;32mHQQ attention artifacts validated (2518 MB cached), 93575 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/main/Documents/Claude/krasis/python/krasis/server.py", line 6347, in <module>
+    main()
+  File "/home/main/Documents/Claude/krasis/python/krasis/server.py", line 3712, in main
+    _model.load(gpu_only=gpu_only)
+  File "/home/main/Documents/Claude/krasis/python/krasis/model.py", line 2895, in load
+    self._load_cpu_experts(gpu_only=gpu_only)
+  File "/home/main/Documents/Claude/krasis/python/krasis/model.py", line 7518, in _load_cpu_experts
+    engine.load(
+RuntimeError: KRASIS_EXPERT_INT4_CALIB_SAMPLES must point to routed expert calibration samples when gpu_expert_int4_calib=search_rmse

@@ -8,6 +8,7 @@
 
 pub mod expert_hqq;
 pub mod marlin;
+pub mod mixed_precision;
 pub mod safetensors_io;
 pub mod tileq;
 
@@ -19,10 +20,144 @@ use crate::weights::safetensors_io::{Dtype, MmapSafetensors};
 use memmap2::{Mmap, MmapMut};
 use pyo3::prelude::*;
 use rayon::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MarlinSha256Cache {
+    format: String,
+    format_version: u32,
+    size: u64,
+    mtime_ns: u64,
+    sha256: String,
+}
+
+static MARLIN_SHA256_CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn marlin_sha256_cache_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(".sha256.json");
+    PathBuf::from(value)
+}
+
+fn marlin_file_stat_identity(path: &Path) -> Result<(u64, u64), String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("stat Marlin source {}: {error}", path.display()))?;
+    let modified = metadata
+        .modified()
+        .map_err(|error| format!("read Marlin source mtime {}: {error}", path.display()))?
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| format!("Marlin source mtime predates Unix epoch: {}", path.display()))?;
+    let mtime_ns = u64::try_from(modified.as_nanos())
+        .map_err(|_| format!("Marlin source mtime exceeds u64: {}", path.display()))?;
+    Ok((metadata.len(), mtime_ns))
+}
+
+fn verified_marlin_source_sha256(
+    path: &Path,
+    mmap: &[u8],
+    expected_sha256: &str,
+) -> Result<String, String> {
+    let lock = MARLIN_SHA256_CACHE_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .map_err(|_| "Marlin SHA-256 cache lock is poisoned".to_string())?;
+    let before = marlin_file_stat_identity(path)?;
+    if before.0 != mmap.len() as u64 {
+        return Err(format!(
+            "Marlin source mapping/stat size mismatch for {}: {} != {}",
+            path.display(),
+            mmap.len(),
+            before.0,
+        ));
+    }
+    let cache_path = marlin_sha256_cache_path(path);
+    if let Ok(raw) = std::fs::read(&cache_path) {
+        if let Ok(cache) = serde_json::from_slice::<MarlinSha256Cache>(&raw) {
+            if cache.format == "krasis_marlin_sha256_cache"
+                && cache.format_version == 1
+                && cache.size == before.0
+                && cache.mtime_ns == before.1
+                && cache.sha256 == expected_sha256
+            {
+                return Ok(cache.sha256);
+            }
+        }
+    }
+
+    let actual = format!("{:x}", Sha256::digest(mmap));
+    let after = marlin_file_stat_identity(path)?;
+    if after != before {
+        return Err(format!(
+            "Marlin source changed while hashing: {}",
+            path.display()
+        ));
+    }
+    if actual != expected_sha256 {
+        return Err(format!(
+            "Marlin source SHA-256 mismatch for {}",
+            path.display()
+        ));
+    }
+    let cache = MarlinSha256Cache {
+        format: "krasis_marlin_sha256_cache".to_string(),
+        format_version: 1,
+        size: before.0,
+        mtime_ns: before.1,
+        sha256: actual.clone(),
+    };
+    let mut encoded = serde_json::to_vec(&cache)
+        .map_err(|error| format!("serialize Marlin SHA-256 cache: {error}"))?;
+    encoded.push(b'\n');
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock predates Unix epoch".to_string())?
+        .as_nanos();
+    let mut temporary_name = cache_path.as_os_str().to_os_string();
+    temporary_name.push(format!(".{}.{nonce}.tmp", std::process::id()));
+    let temporary = PathBuf::from(temporary_name);
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| {
+                format!(
+                    "create Marlin SHA-256 cache temporary {}: {error}",
+                    temporary.display()
+                )
+            })?;
+        file.write_all(&encoded)
+            .map_err(|error| format!("write Marlin SHA-256 cache: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync Marlin SHA-256 cache: {error}"))?;
+    }
+    #[cfg(windows)]
+    if cache_path.exists() {
+        // Windows rename does not replace an existing destination. The digest
+        // sidecar is only an optimization: removing this exact file cannot
+        // affect the source cache and a crash here merely forces a full rehash.
+        std::fs::remove_file(&cache_path)
+            .map_err(|error| format!("replace Marlin SHA-256 cache: {error}"))?;
+    }
+    if let Err(error) = std::fs::rename(&temporary, &cache_path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("publish Marlin SHA-256 cache: {error}"));
+    }
+    #[cfg(unix)]
+    if let Some(parent) = cache_path.parent() {
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync Marlin SHA-256 cache directory: {error}"))?;
+    }
+    Ok(actual)
+}
 
 #[cfg(unix)]
 fn advise_consumed_mmap_range_dontneed(mmap: &Mmap, start: usize, end: usize) {
@@ -1531,6 +1666,15 @@ pub struct LayerExpertBacking {
     pub num_experts: usize,
 }
 
+/// One routed layer from an immutable mixed cache. Expert records have
+/// heterogeneous byte lengths, so the owner remains a single layer payload
+/// while `UnifiedExpertWeights` holds borrowed component views into it.
+pub struct MixedLayerExpertBacking {
+    /// U64 ownership guarantees alignment for borrowed u32/u16 component views.
+    pub payload: Vec<u64>,
+    pub logical_bytes: usize,
+}
+
 /// Bounded private TileQ component mappings for one routed layer.  Individual
 /// `UnifiedExpertWeights` are borrowed views into these four owners.
 pub struct TileQLayerBacking {
@@ -1546,6 +1690,14 @@ pub struct GpuCacheIdentity {
     pub source_bytes: u64,
     pub header: [u8; 64],
     pub routed_expert_sha256: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MixedGpuCacheIdentity {
+    pub manifest_path: PathBuf,
+    pub manifest_sha256: String,
+    pub source_int4_path: PathBuf,
+    pub source_int8_path: PathBuf,
 }
 
 /// Manages loaded expert weights for all MoE layers.
@@ -1566,7 +1718,9 @@ pub struct WeightStore {
     pub shared_experts_cpu: Vec<UnifiedExpertWeights>,
 
     /// GPU prefill weights — Marlin tile-permuted layout for fused_marlin_moe.
-    /// Always INT4 Marlin format. Empty if GPU prefill not enabled.
+    /// Homogeneous stores use one configured precision; a mixed manifest may
+    /// select INT4 or INT8 independently for each routed expert. Empty if GPU
+    /// prefill is not enabled.
     /// With LayerExpertBacking, individual experts are borrowed views into the backing.
     pub experts_gpu: Vec<Vec<UnifiedExpertWeights>>,
     /// GPU shared expert weights (Marlin).
@@ -1576,6 +1730,14 @@ pub struct WeightStore {
     /// Each entry owns the memory that experts_gpu[layer_idx] elements borrow from.
     /// Must be kept alive as long as experts_gpu references exist.
     pub layer_backings_gpu: Vec<LayerExpertBacking>,
+
+    /// Variable-record routed layer owners for a mixed INT4/INT8 cache.
+    pub mixed_layer_backings_gpu: Vec<MixedLayerExpertBacking>,
+
+    /// Validated immutable mixed precision contract, absent for homogeneous
+    /// Marlin, TileQ, BF16, and GGUF paths.
+    pub mixed_precision_manifest: Option<Arc<mixed_precision::MixedPrecisionManifest>>,
+    pub mixed_gpu_cache_identity: Option<MixedGpuCacheIdentity>,
 
     /// Source-backed TileQ component VMAs. Empty for Marlin/BF16 modes.
     pub tileq_layer_backings: Vec<TileQLayerBacking>,
@@ -1634,6 +1796,8 @@ struct SafetensorsIndex {
 //   down_scales [N_down * ceil(K_down/group_size) u16s as bytes]
 
 const CACHE_MAGIC: &[u8; 4] = b"KRAS";
+const SHARED_MARLIN_CACHE_MAGIC: &[u8; 4] = b"KRSH";
+const SHARED_MARLIN_CACHE_VERSION: u32 = 1;
 #[allow(dead_code)]
 const CACHE_VERSION: u32 = 1;
 const CACHE_VERSION_MARLIN: u32 = 7;
@@ -1697,6 +1861,16 @@ fn cache_path_marlin(
     };
     cache_dir_for_model(model_dir).join(format!(
         "experts_marlin_int{gpu_bits}_g{group_size}{calib_suffix}.bin"
+    ))
+}
+
+fn cache_path_shared_marlin(
+    model_dir: &Path,
+    group_size: usize,
+    gpu_bits: u8,
+) -> PathBuf {
+    cache_dir_for_model(model_dir).join(format!(
+        "shared_experts_marlin_int{gpu_bits}_g{group_size}.bin"
     ))
 }
 
@@ -2390,6 +2564,43 @@ struct ExpertInt4CalibTraceFile {
     samples: Vec<ExpertInt4CalibSample>,
 }
 
+const EXPERT_INT4_CALIB_MAGIC: &[u8; 4] = b"KIC1";
+const EXPERT_INT4_CALIB_VERSION: u32 = 1;
+const EXPERT_INT4_CALIB_HEADER_BYTES: usize = 64;
+
+#[derive(Debug, Clone, Deserialize)]
+struct ExpertInt4CalibRange {
+    offset: u64,
+    len: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ExpertInt4CalibMomentLayer {
+    model_layer: usize,
+    input_second_moment_f32: ExpertInt4CalibRange,
+    down_second_moment_f32: ExpertInt4CalibRange,
+    route_count_min: usize,
+    route_count_max: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ExpertInt4CalibMomentManifest {
+    schema_version: u32,
+    format: String,
+    objective: String,
+    hidden_size: usize,
+    intermediate_size: usize,
+    routed_experts: usize,
+    topk: usize,
+    routed_layers: usize,
+    calibration_sha256: String,
+    capture_corpora_sha256: Vec<String>,
+    capture_artifact_sha256: Vec<String>,
+    payload_bytes: u64,
+    payload_sha256: String,
+    layers: Vec<ExpertInt4CalibMomentLayer>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ExpertInt4CalibSample {
     layer_idx: usize,
@@ -2414,7 +2625,19 @@ struct ExpertInt4CalibKey {
 struct ExpertInt4CalibData {
     source_path: PathBuf,
     source_hash: u64,
-    samples_by_key: HashMap<ExpertInt4CalibKey, Vec<ExpertInt4CalibSample>>,
+    storage: ExpertInt4CalibStorage,
+}
+
+#[derive(Debug, Clone)]
+enum ExpertInt4CalibStorage {
+    Legacy {
+        samples_by_key: HashMap<ExpertInt4CalibKey, Vec<ExpertInt4CalibSample>>,
+    },
+    ActivationMoments {
+        manifest: ExpertInt4CalibMomentManifest,
+        moments: Vec<f32>,
+        layer_offsets: HashMap<usize, (usize, usize)>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -2437,6 +2660,14 @@ impl ExpertInt4CalibData {
                 source_path.display()
             )
         })?;
+        Self::from_bytes(source_path, raw).map(Some)
+    }
+
+    fn from_bytes(source_path: PathBuf, raw: Vec<u8>) -> Result<Self, String> {
+        let source_hash = fnv1a(&raw);
+        if raw.starts_with(EXPERT_INT4_CALIB_MAGIC) {
+            return Self::from_moment_artifact(source_path, source_hash, &raw);
+        }
         let parsed: ExpertInt4CalibTraceFile = serde_json::from_slice(&raw).map_err(|e| {
             format!(
                 "Failed to parse KRASIS_EXPERT_INT4_CALIB_SAMPLES {}: {e}",
@@ -2473,14 +2704,309 @@ impl ExpertInt4CalibData {
             };
             samples_by_key.entry(key).or_default().push(sample);
         }
-        Ok(Some(Self {
+        Ok(Self {
             source_path,
-            source_hash: fnv1a(&raw),
-            samples_by_key,
-        }))
+            source_hash,
+            storage: ExpertInt4CalibStorage::Legacy { samples_by_key },
+        })
     }
 
-    fn context_for(
+    fn from_moment_artifact(
+        source_path: PathBuf,
+        source_hash: u64,
+        raw: &[u8],
+    ) -> Result<Self, String> {
+        if !cfg!(target_endian = "little") {
+            return Err("KIC1 expert INT4 calibration requires a little-endian host".to_string());
+        }
+        if raw.len() < EXPERT_INT4_CALIB_HEADER_BYTES {
+            return Err(format!(
+                "KIC1 expert INT4 calibration {} is truncated",
+                source_path.display()
+            ));
+        }
+        let read_u32 = |offset: usize| -> u32 {
+            u32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap())
+        };
+        let read_u64 = |offset: usize| -> u64 {
+            u64::from_le_bytes(raw[offset..offset + 8].try_into().unwrap())
+        };
+        let version = read_u32(4);
+        if version != EXPERT_INT4_CALIB_VERSION {
+            return Err(format!(
+                "KIC1 expert INT4 calibration {} has version {}, expected {}",
+                source_path.display(),
+                version,
+                EXPERT_INT4_CALIB_VERSION
+            ));
+        }
+        let manifest_len = usize::try_from(read_u64(8))
+            .map_err(|_| "KIC1 manifest length does not fit usize".to_string())?;
+        let payload_offset = usize::try_from(read_u64(16))
+            .map_err(|_| "KIC1 payload offset does not fit usize".to_string())?;
+        let payload_len = usize::try_from(read_u64(24))
+            .map_err(|_| "KIC1 payload length does not fit usize".to_string())?;
+        let manifest_end = EXPERT_INT4_CALIB_HEADER_BYTES
+            .checked_add(manifest_len)
+            .ok_or_else(|| "KIC1 manifest range overflow".to_string())?;
+        let payload_end = payload_offset
+            .checked_add(payload_len)
+            .ok_or_else(|| "KIC1 payload range overflow".to_string())?;
+        if manifest_end > raw.len()
+            || payload_offset < manifest_end
+            || payload_end != raw.len()
+            || payload_offset % std::mem::align_of::<f32>() != 0
+            || payload_len % std::mem::size_of::<f32>() != 0
+        {
+            return Err(format!(
+                "KIC1 expert INT4 calibration {} has invalid ranges",
+                source_path.display()
+            ));
+        }
+        let manifest_bytes = &raw[EXPERT_INT4_CALIB_HEADER_BYTES..manifest_end];
+        if Sha256::digest(manifest_bytes).as_slice() != &raw[32..64] {
+            return Err(format!(
+                "KIC1 expert INT4 calibration {} manifest SHA-256 mismatch",
+                source_path.display()
+            ));
+        }
+        let manifest: ExpertInt4CalibMomentManifest = serde_json::from_slice(manifest_bytes)
+            .map_err(|e| {
+                format!(
+                    "Failed to parse KIC1 expert INT4 calibration manifest {}: {e}",
+                    source_path.display()
+                )
+            })?;
+        if manifest.schema_version != EXPERT_INT4_CALIB_VERSION
+            || manifest.format != "Krasis expert INT4 activation moments"
+            || manifest.objective
+                != "router_weight_squared_diagonal_activation_second_moment_v1"
+            || manifest.payload_bytes != payload_len as u64
+            || manifest.routed_layers != manifest.layers.len()
+            || manifest.capture_corpora_sha256.is_empty()
+            || manifest.capture_corpora_sha256.len() != manifest.capture_artifact_sha256.len()
+            || manifest.hidden_size == 0
+            || manifest.intermediate_size == 0
+            || manifest.routed_experts == 0
+            || manifest.topk == 0
+            || !Self::is_sha256(&manifest.calibration_sha256)
+            || !Self::is_sha256(&manifest.payload_sha256)
+            || manifest
+                .capture_corpora_sha256
+                .iter()
+                .chain(manifest.capture_artifact_sha256.iter())
+                .any(|value| !Self::is_sha256(value))
+        {
+            return Err(format!(
+                "KIC1 expert INT4 calibration {} has an invalid manifest contract",
+                source_path.display()
+            ));
+        }
+        let payload = &raw[payload_offset..payload_end];
+        let payload_sha256 = format!("{:x}", Sha256::digest(payload));
+        if payload_sha256 != manifest.payload_sha256 {
+            return Err(format!(
+                "KIC1 expert INT4 calibration {} payload SHA-256 mismatch",
+                source_path.display()
+            ));
+        }
+        let mut moments = Vec::with_capacity(payload_len / 4);
+        for bytes in payload.chunks_exact(4) {
+            moments.push(f32::from_le_bytes(bytes.try_into().unwrap()));
+        }
+        let mut layer_offsets = HashMap::new();
+        let mut occupied_ranges = Vec::with_capacity(manifest.layers.len() * 2);
+        for layer in &manifest.layers {
+            if layer.route_count_min == 0 || layer.route_count_max < layer.route_count_min {
+                return Err(format!(
+                    "KIC1 layer {} has invalid real-route coverage {}..{}",
+                    layer.model_layer, layer.route_count_min, layer.route_count_max
+                ));
+            }
+            let input = Self::validated_moment_range(
+                &layer.input_second_moment_f32,
+                manifest.routed_experts * manifest.hidden_size,
+                payload_len,
+                layer.model_layer,
+                "input",
+            )?;
+            let down = Self::validated_moment_range(
+                &layer.down_second_moment_f32,
+                manifest.routed_experts * manifest.intermediate_size,
+                payload_len,
+                layer.model_layer,
+                "down",
+            )?;
+            occupied_ranges.push((
+                input,
+                input + manifest.routed_experts * manifest.hidden_size,
+            ));
+            occupied_ranges.push((
+                down,
+                down + manifest.routed_experts * manifest.intermediate_size,
+            ));
+            if layer_offsets
+                .insert(layer.model_layer, (input, down))
+                .is_some()
+            {
+                return Err(format!(
+                    "KIC1 contains duplicate model layer {}",
+                    layer.model_layer
+                ));
+            }
+        }
+        occupied_ranges.sort_unstable();
+        let mut next_float = 0usize;
+        for (start, end) in occupied_ranges {
+            if start != next_float {
+                return Err(format!(
+                    "KIC1 activation-moment payload is not exactly covered at float {}",
+                    next_float
+                ));
+            }
+            next_float = end;
+        }
+        if next_float != moments.len() {
+            return Err(format!(
+                "KIC1 activation-moment payload coverage ends at {}, expected {} floats",
+                next_float,
+                moments.len()
+            ));
+        }
+        if moments.iter().any(|value| !value.is_finite() || *value < 0.0) {
+            return Err("KIC1 activation moments must be finite and non-negative".to_string());
+        }
+        Ok(Self {
+            source_path,
+            source_hash,
+            storage: ExpertInt4CalibStorage::ActivationMoments {
+                manifest,
+                moments,
+                layer_offsets,
+            },
+        })
+    }
+
+    fn is_sha256(value: &str) -> bool {
+        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    fn validated_moment_range(
+        range: &ExpertInt4CalibRange,
+        expected_floats: usize,
+        payload_len: usize,
+        model_layer: usize,
+        label: &str,
+    ) -> Result<usize, String> {
+        let offset = usize::try_from(range.offset)
+            .map_err(|_| format!("KIC1 layer {model_layer} {label} offset does not fit usize"))?;
+        let len = usize::try_from(range.len)
+            .map_err(|_| format!("KIC1 layer {model_layer} {label} length does not fit usize"))?;
+        if offset % 4 != 0
+            || len != expected_floats * 4
+            || offset.checked_add(len).filter(|end| *end <= payload_len).is_none()
+        {
+            return Err(format!(
+                "KIC1 layer {model_layer} {label} moment range is invalid"
+            ));
+        }
+        Ok(offset / 4)
+    }
+
+    fn validate_for_model(&self, config: &ModelConfig) -> Result<(), String> {
+        let ExpertInt4CalibStorage::ActivationMoments {
+            manifest,
+            moments,
+            layer_offsets,
+        } = &self.storage
+        else {
+            return Ok(());
+        };
+        if manifest.hidden_size != config.routed_expert_hidden_size()
+            || manifest.intermediate_size != config.moe_intermediate_size
+            || manifest.routed_experts != config.n_routed_experts
+            || manifest.topk != config.num_experts_per_tok
+            || manifest.routed_layers != config.moe_layer_indices.len()
+        {
+            return Err(format!(
+                "KIC1 geometry mismatch: input={}/{} intermediate={}/{} experts={}/{} topk={}/{} layers={}/{}",
+                manifest.hidden_size,
+                config.routed_expert_hidden_size(),
+                manifest.intermediate_size,
+                config.moe_intermediate_size,
+                manifest.routed_experts,
+                config.n_routed_experts,
+                manifest.topk,
+                config.num_experts_per_tok,
+                manifest.routed_layers,
+                config.moe_layer_indices.len(),
+            ));
+        }
+        for &model_layer in &config.moe_layer_indices {
+            let Some(&(input_offset, down_offset)) = layer_offsets.get(&model_layer) else {
+                return Err(format!("KIC1 omits routed model layer {model_layer}"));
+            };
+            for expert_idx in 0..manifest.routed_experts {
+                let input_start = input_offset + expert_idx * manifest.hidden_size;
+                let down_start = down_offset + expert_idx * manifest.intermediate_size;
+                if moments[input_start..input_start + manifest.hidden_size]
+                    .iter()
+                    .all(|value| *value == 0.0)
+                    || moments[down_start..down_start + manifest.intermediate_size]
+                        .iter()
+                        .all(|value| *value == 0.0)
+                {
+                    return Err(format!(
+                        "KIC1 model layer {model_layer} expert {expert_idx} has an all-zero activation moment"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn entry_count(&self) -> usize {
+        match &self.storage {
+            ExpertInt4CalibStorage::Legacy { samples_by_key } => samples_by_key.len(),
+            ExpertInt4CalibStorage::ActivationMoments { manifest, .. } => {
+                manifest.routed_layers * manifest.routed_experts * 3
+            }
+        }
+    }
+
+    fn activation_moments_for(
+        &self,
+        layer_idx: usize,
+        expert_idx: usize,
+        proj_name: &str,
+    ) -> Option<&[f32]> {
+        let ExpertInt4CalibStorage::ActivationMoments {
+            manifest,
+            moments,
+            layer_offsets,
+        } = &self.storage
+        else {
+            return None;
+        };
+        if expert_idx >= manifest.routed_experts {
+            return None;
+        }
+        let &(input_offset, down_offset) = layer_offsets.get(&layer_idx)?;
+        let (offset, len) = match proj_name {
+            "gate_proj" | "up_proj" => (
+                input_offset + expert_idx * manifest.hidden_size,
+                manifest.hidden_size,
+            ),
+            "down_proj" => (
+                down_offset + expert_idx * manifest.intermediate_size,
+                manifest.intermediate_size,
+            ),
+            _ => return None,
+        };
+        Some(&moments[offset..offset + len])
+    }
+
+    fn legacy_context_for(
         &self,
         layer_idx: usize,
         expert_idx: usize,
@@ -2488,7 +3014,10 @@ impl ExpertInt4CalibData {
         row_idx: usize,
         group_idx: usize,
     ) -> Option<ExpertInt4CalibContext<'_>> {
-        self.samples_by_key
+        let ExpertInt4CalibStorage::Legacy { samples_by_key } = &self.storage else {
+            return None;
+        };
+        samples_by_key
             .get(&ExpertInt4CalibKey {
                 layer_idx,
                 expert_idx,
@@ -2515,6 +3044,9 @@ impl WeightStore {
             experts_gpu: Vec::new(),
             shared_experts_gpu: Vec::new(),
             layer_backings_gpu: Vec::new(),
+            mixed_layer_backings_gpu: Vec::new(),
+            mixed_precision_manifest: None,
+            mixed_gpu_cache_identity: None,
             tileq_layer_backings: Vec::new(),
             tileq_cache: None,
             gpu_cache_identity: None,
@@ -2633,6 +3165,7 @@ impl WeightStore {
     /// If `start_layer` is Some(s), start loading from MoE layer s (0-based).
     /// `cpu_num_bits`: 4 or 8 for CPU decode format.
     /// `gpu_num_bits`: 4 (Marlin, always INT4).
+    /// `shared_gpu_num_bits`: independent shared-expert precision (8 or 16).
     pub fn load_from_hf(
         model_dir: &Path,
         group_size: usize,
@@ -2640,8 +3173,38 @@ impl WeightStore {
         start_layer: Option<usize>,
         cpu_num_bits: u8,
         gpu_num_bits: u8,
+        shared_gpu_num_bits: u8,
         expert_int4_calib_mode: ExpertInt4CalibMode,
         gpu_only: bool,
+    ) -> Result<Self, String> {
+        Self::load_from_hf_with_mixed(
+            model_dir,
+            group_size,
+            max_layers,
+            start_layer,
+            cpu_num_bits,
+            gpu_num_bits,
+            shared_gpu_num_bits,
+            expert_int4_calib_mode,
+            gpu_only,
+            None,
+        )
+    }
+
+    /// Explicit mixed routed-expert entry point. Keeping the homogeneous
+    /// wrapper above preserves every existing model/test caller while this
+    /// path requires a validated manifest rather than ambient process state.
+    pub fn load_from_hf_with_mixed(
+        model_dir: &Path,
+        group_size: usize,
+        max_layers: Option<usize>,
+        start_layer: Option<usize>,
+        cpu_num_bits: u8,
+        gpu_num_bits: u8,
+        shared_gpu_num_bits: u8,
+        expert_int4_calib_mode: ExpertInt4CalibMode,
+        gpu_only: bool,
+        mixed_expert_manifest: Option<&Path>,
     ) -> Result<Self, String> {
         let start = std::time::Instant::now();
 
@@ -2659,12 +3222,20 @@ impl WeightStore {
             .and_then(|s| serde_json::from_str(&s).ok());
         let config = ModelConfig::from_json_with_index(&raw_json, index_json.as_ref())
             .map_err(|e| format!("Failed to extract MoE config: {e}"))?;
+        if config.n_shared_experts > 0
+            && shared_gpu_num_bits != 8
+            && shared_gpu_num_bits != 16
+        {
+            return Err(format!(
+                "shared experts require independently configured INT8 or BF16, got {shared_gpu_num_bits} bits"
+            ));
+        }
 
         log::info!(
-            "Model config: hidden={}, moe_intermediate={}, experts={}, top-{}, layers={}, moe_layers={}, cpu_bits={}, gpu_bits={}",
+            "Model config: hidden={}, moe_intermediate={}, experts={}, top-{}, layers={}, moe_layers={}, cpu_bits={}, gpu_bits={}, shared_gpu_bits={}",
             config.hidden_size, config.moe_intermediate_size, config.n_routed_experts,
             config.num_experts_per_tok, config.num_hidden_layers, config.num_moe_layers(),
-            cpu_num_bits, gpu_num_bits,
+            cpu_num_bits, gpu_num_bits, shared_gpu_num_bits,
         );
 
         let total_moe_layers = config.num_moe_layers();
@@ -2689,11 +3260,12 @@ impl WeightStore {
         let expert_int4_calib_data =
             ExpertInt4CalibData::from_env_for_mode(expert_int4_calib_mode)?;
         if let Some(data) = expert_int4_calib_data.as_ref() {
+            data.validate_for_model(&config)?;
             log::info!(
-                "Loaded expert INT4 calibration samples from {} (hash={:016x}, keys={})",
+                "Loaded expert INT4 calibration data from {} (hash={:016x}, entries={})",
                 data.source_path.display(),
                 data.source_hash,
-                data.samples_by_key.len(),
+                data.entry_count(),
             );
         }
         let config_hash = marlin_cache_config_hash(
@@ -2701,6 +3273,12 @@ impl WeightStore {
             gpu_num_bits,
             expert_int4_calib_mode,
             expert_int4_calib_data.as_ref().map(|d| d.source_hash),
+        );
+        let shared_config_hash = marlin_cache_config_hash(
+            &config_str,
+            shared_gpu_num_bits,
+            ExpertInt4CalibMode::Amax,
+            None,
         );
 
         // Detect the same effective group_size the Marlin builder will use
@@ -2718,6 +3296,9 @@ impl WeightStore {
         let mut experts_gpu: Vec<Vec<UnifiedExpertWeights>> = Vec::new();
         let mut shared_experts_gpu: Vec<UnifiedExpertWeights> = Vec::new();
         let mut layer_backings_gpu: Vec<LayerExpertBacking> = Vec::new();
+        let mut mixed_layer_backings_gpu: Vec<MixedLayerExpertBacking> = Vec::new();
+        let mut mixed_precision_manifest = None;
+        let mut mixed_gpu_cache_identity = None;
         let mut effective_gs = cache_gs;
 
         // BF16 validation mode: load directly from safetensors, no cache
@@ -2725,13 +3306,25 @@ impl WeightStore {
             log::info!(
                 "BF16 validation mode: loading experts directly from safetensors (no cache)"
             );
-            let (gpu_exp, gpu_shared) = Self::load_experts_bf16_direct(
+            let (gpu_exp, mut gpu_shared) = Self::load_experts_bf16_direct(
                 model_dir,
                 &config,
                 total_moe_layers,
                 moe_start,
                 num_moe_layers,
             )?;
+            if config.n_shared_experts > 0 && shared_gpu_num_bits == 8 {
+                gpu_shared = Self::load_or_build_shared_marlin_cache(
+                    model_dir,
+                    &config,
+                    cache_gs,
+                    total_moe_layers,
+                    shared_config_hash,
+                    moe_start,
+                    num_moe_layers,
+                    shared_gpu_num_bits,
+                )?;
+            }
             log::info!(
                 "Loaded BF16 experts in {:.1}s: {} layers, {} experts (+ {} shared)",
                 start.elapsed().as_secs_f64(),
@@ -2759,6 +3352,9 @@ impl WeightStore {
                 config: config.clone(),
                 group_size: 0,
                 layer_backings_gpu,
+                mixed_layer_backings_gpu: Vec::new(),
+                mixed_precision_manifest: None,
+                mixed_gpu_cache_identity: None,
                 tileq_layer_backings: Vec::new(),
                 tileq_cache: None,
                 gpu_cache_identity: None,
@@ -2792,33 +3388,39 @@ impl WeightStore {
                 num_moe_layers,
             )?;
             let shared_experts_gpu = if config.n_shared_experts > 0 {
-                let shared_bits = std::env::var("KRASIS_TILEQ_SHARED_EXPERT_BITS")
-                    .map_err(|_| {
-                        "TileQ model has shared experts but KRASIS_TILEQ_SHARED_EXPERT_BITS is not set"
-                            .to_string()
-                    })?
-                    .parse::<u8>()
-                    .map_err(|e| {
-                        format!(
-                            "invalid KRASIS_TILEQ_SHARED_EXPERT_BITS for TileQ shared experts: {e}"
+                if shared_gpu_num_bits == 8 {
+                    Self::load_or_build_shared_marlin_cache(
+                        model_dir,
+                        &config,
+                        group_size,
+                        total_moe_layers,
+                        shared_config_hash,
+                        moe_start,
+                        num_moe_layers,
+                        shared_gpu_num_bits,
+                    )?
+                } else if shared_gpu_num_bits == 16 {
+                    Self::load_shared_experts(
+                        model_dir,
+                        &config,
+                        group_size,
+                        shared_gpu_num_bits,
+                        moe_start,
+                        num_moe_layers,
+                    )?
+                    .iter()
+                    .map(|expert| {
+                        UnifiedExpertWeights::from_expert_weights_marlin(
+                            expert,
+                            shared_gpu_num_bits,
                         )
-                    })?;
-                if shared_bits != 8 && shared_bits != 16 {
+                    })
+                    .collect::<Vec<_>>()
+                } else {
                     return Err(format!(
-                        "TileQ shared experts require configured INT8 or BF16, got {shared_bits} bits"
+                        "shared experts require INT8 or BF16, got {shared_gpu_num_bits} bits"
                     ));
                 }
-                Self::load_shared_experts(
-                    model_dir,
-                    &config,
-                    group_size,
-                    shared_bits,
-                    moe_start,
-                    num_moe_layers,
-                )?
-                .iter()
-                .map(|expert| UnifiedExpertWeights::from_expert_weights_marlin(expert, shared_bits))
-                .collect::<Vec<_>>()
             } else {
                 Vec::new()
             };
@@ -2840,6 +3442,9 @@ impl WeightStore {
                 experts_gpu: tileq_experts,
                 shared_experts_gpu,
                 layer_backings_gpu: Vec::new(),
+                mixed_layer_backings_gpu: Vec::new(),
+                mixed_precision_manifest: None,
+                mixed_gpu_cache_identity: None,
                 tileq_layer_backings,
                 tileq_cache: Some(tileq_cache),
                 gpu_cache_identity: None,
@@ -2857,9 +3462,41 @@ impl WeightStore {
         // group size: the runtime kernels are configured with this exact layout.
         let mut gpu_loaded = false;
         let mut gpu_cache_identity = None;
+        if let Some(mixed_manifest_path) = mixed_expert_manifest {
+            if gpu_num_bits != 4 {
+                return Err(format!(
+                    "mixed routed-expert cache requires the INT4 baseline mode, got gpu_num_bits={gpu_num_bits}"
+                ));
+            }
+            if !gpu_only {
+                return Err(
+                    "mixed routed-expert precision currently requires GPU-only Rust/CUDA decode; CPU-tail/GGUF mixed dispatch is not validated"
+                        .to_string(),
+                );
+            }
+            let mixed = Self::load_mixed_marlin_cache(
+                mixed_manifest_path,
+                model_dir,
+                &config,
+                cache_gs,
+                total_moe_layers,
+                moe_start,
+                num_moe_layers,
+            )?;
+            experts_gpu = mixed.experts_gpu;
+            mixed_layer_backings_gpu = mixed.mixed_layer_backings_gpu;
+            mixed_precision_manifest = mixed.mixed_precision_manifest;
+            mixed_gpu_cache_identity = mixed.mixed_gpu_cache_identity;
+            effective_gs = mixed.group_size;
+            gpu_loaded = true;
+            log::info!(
+                "Loaded explicit mixed routed-expert precision manifest {}",
+                mixed_manifest_path.display(),
+            );
+        }
         let gpu_cache_path =
             cache_path_marlin(model_dir, cache_gs, gpu_num_bits, expert_int4_calib_mode);
-        if gpu_cache_path.exists() {
+        if !gpu_loaded && gpu_cache_path.exists() {
             match Self::load_marlin_cache(
                 &gpu_cache_path,
                 &config,
@@ -2967,6 +3604,46 @@ impl WeightStore {
                     gpu_num_bits,
                 ));
             }
+        }
+
+        if config.n_shared_experts > 0 && shared_gpu_num_bits != gpu_num_bits {
+            shared_experts_gpu = if shared_gpu_num_bits == 8 {
+                Self::load_or_build_shared_marlin_cache(
+                    model_dir,
+                    &config,
+                    effective_gs,
+                    total_moe_layers,
+                    shared_config_hash,
+                    moe_start,
+                    num_moe_layers,
+                    shared_gpu_num_bits,
+                )?
+            } else if shared_gpu_num_bits == 16 {
+                Self::load_shared_experts(
+                    model_dir,
+                    &config,
+                    effective_gs,
+                    shared_gpu_num_bits,
+                    moe_start,
+                    num_moe_layers,
+                )?
+                .iter()
+                .map(|expert| {
+                    UnifiedExpertWeights::from_expert_weights_marlin(
+                        expert,
+                        shared_gpu_num_bits,
+                    )
+                })
+                .collect()
+            } else {
+                return Err(format!(
+                    "shared experts require INT8 or BF16, got {shared_gpu_num_bits} bits"
+                ));
+            };
+            log::info!(
+                "Replaced routed-cache shared payload with independently configured {}-bit shared experts",
+                shared_gpu_num_bits,
+            );
         }
 
         // ── Phase 2: Load/build CPU transposed cache → experts_cpu ──
@@ -3079,6 +3756,7 @@ impl WeightStore {
         }
 
         // ── Build final WeightStore ──
+        let mixed_gpu_loaded = mixed_precision_manifest.is_some();
         let store = WeightStore {
             moe_layer_start: moe_start,
             experts: Vec::new(),
@@ -3088,6 +3766,9 @@ impl WeightStore {
             experts_gpu,
             shared_experts_gpu,
             layer_backings_gpu,
+            mixed_layer_backings_gpu,
+            mixed_precision_manifest,
+            mixed_gpu_cache_identity,
             tileq_layer_backings: Vec::new(),
             tileq_cache: None,
             gpu_cache_identity,
@@ -3105,7 +3786,13 @@ impl WeightStore {
             "Dual cache loaded in {:.1}s: {} MoE layers, GPU={} CPU=INT{}{}, gs={}",
             total_elapsed.as_secs_f64(),
             num_moe_layers,
-            if gpu_loaded { "Marlin" } else { "none" },
+            if mixed_gpu_loaded {
+                "mixed Marlin"
+            } else if gpu_loaded {
+                "Marlin"
+            } else {
+                "none"
+            },
             cpu_num_bits,
             if cpu_loaded { "" } else { "(none)" },
             effective_gs,
@@ -3747,6 +4434,9 @@ impl WeightStore {
             experts_gpu: Vec::new(),
             shared_experts_gpu: Vec::new(),
             layer_backings_gpu: Vec::new(),
+            mixed_layer_backings_gpu: Vec::new(),
+            mixed_precision_manifest: None,
+            mixed_gpu_cache_identity: None,
             tileq_layer_backings: Vec::new(),
             tileq_cache: None,
             gpu_cache_identity: None,
@@ -3922,6 +4612,299 @@ impl WeightStore {
             start.elapsed().as_secs_f64(),
         );
         Ok(shared)
+    }
+
+    fn shared_marlin_payload_bytes(
+        config: &ModelConfig,
+        group_size: usize,
+        gpu_bits: u8,
+    ) -> Result<usize, String> {
+        if gpu_bits != 8 {
+            return Err(format!(
+                "shared Marlin cache supports INT8 only, got {gpu_bits} bits"
+            ));
+        }
+        let h = config.hidden_size;
+        let m = config.shared_expert_intermediate_size;
+        let gated_n = if config.experts_gated { 2 * m } else { m };
+        let h_w2 = marlin_w2_padded_n(h, m);
+        let packed = (h / 4)
+            .checked_mul(gated_n)
+            .and_then(|value| value.checked_mul(4))
+            .and_then(|w13_packed| {
+                let w13_scales = (h / group_size)
+                    .checked_mul(gated_n)?
+                    .checked_mul(2)?;
+                let w2_packed = (m / 4).checked_mul(h_w2)?.checked_mul(4)?;
+                let w2_scales = scale_group_count(m, group_size)
+                    .checked_mul(h_w2)?
+                    .checked_mul(2)?;
+                w13_packed
+                    .checked_add(w13_scales)?
+                    .checked_add(w2_packed)?
+                    .checked_add(w2_scales)
+            })
+            .ok_or_else(|| "shared Marlin cache payload size overflow".to_string())?;
+        Ok(packed)
+    }
+
+    fn load_shared_marlin_cache(
+        path: &Path,
+        config: &ModelConfig,
+        group_size: usize,
+        total_moe_layers: usize,
+        config_hash: u64,
+        start_moe_layer: usize,
+        num_layers_to_load: usize,
+        gpu_bits: u8,
+    ) -> Result<Vec<UnifiedExpertWeights>, String> {
+        if start_moe_layer + num_layers_to_load > total_moe_layers {
+            return Err(format!(
+                "shared Marlin cache range [{start_moe_layer}, {}) exceeds {total_moe_layers} layers",
+                start_moe_layer + num_layers_to_load,
+            ));
+        }
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("failed to open shared Marlin cache: {e}"))?;
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|e| format!("failed to mmap shared Marlin cache: {e}"))?;
+        if mmap.len() < CACHE_HEADER_SIZE {
+            return Err("shared Marlin cache is smaller than its header".to_string());
+        }
+        if &mmap[0..4] != SHARED_MARLIN_CACHE_MAGIC {
+            return Err("bad shared Marlin cache magic".to_string());
+        }
+        let version = u32::from_le_bytes(mmap[4..8].try_into().unwrap());
+        let header_values = (8..64)
+            .step_by(8)
+            .map(|offset| u64::from_le_bytes(mmap[offset..offset + 8].try_into().unwrap()))
+            .collect::<Vec<_>>();
+        let expected_header = [
+            config.hidden_size as u64,
+            config.shared_expert_intermediate_size as u64,
+            total_moe_layers as u64,
+            group_size as u64,
+            config_hash,
+            config.n_shared_experts as u64,
+            gpu_bits as u64,
+        ];
+        if version != SHARED_MARLIN_CACHE_VERSION || header_values.as_slice() != expected_header {
+            return Err(format!(
+                "shared Marlin cache identity mismatch: version={version}, header={header_values:?}, expected_version={}, expected_header={expected_header:?}",
+                SHARED_MARLIN_CACHE_VERSION,
+            ));
+        }
+        let per_shared = Self::shared_marlin_payload_bytes(config, group_size, gpu_bits)?;
+        let expected_size = CACHE_HEADER_SIZE
+            .checked_add(
+                total_moe_layers
+                    .checked_mul(per_shared)
+                    .ok_or_else(|| "shared Marlin cache size overflow".to_string())?,
+            )
+            .ok_or_else(|| "shared Marlin cache size overflow".to_string())?;
+        if mmap.len() != expected_size {
+            return Err(format!(
+                "shared Marlin cache size mismatch: expected {expected_size}, got {}",
+                mmap.len(),
+            ));
+        }
+
+        let mut offset = CACHE_HEADER_SIZE + start_moe_layer * per_shared;
+        let mut shared = Vec::with_capacity(num_layers_to_load);
+        for _ in 0..num_layers_to_load {
+            shared.push(read_marlin_expert_gated(
+                &mmap,
+                &mut offset,
+                config.hidden_size,
+                config.shared_expert_intermediate_size,
+                group_size,
+                gpu_bits,
+                config.experts_gated,
+            ));
+        }
+        let expected_end = CACHE_HEADER_SIZE + (start_moe_layer + num_layers_to_load) * per_shared;
+        if offset != expected_end {
+            return Err(format!(
+                "shared Marlin cache range mismatch: consumed {offset}, expected {expected_end}"
+            ));
+        }
+        #[cfg(unix)]
+        let _ = unsafe { mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
+        log::info!(
+            "Loaded {} shared experts from independent INT{} Marlin cache {}",
+            shared.len(),
+            gpu_bits,
+            path.display(),
+        );
+        Ok(shared)
+    }
+
+    fn write_shared_marlin_cache(
+        path: &Path,
+        model_dir: &Path,
+        config: &ModelConfig,
+        group_size: usize,
+        total_moe_layers: usize,
+        config_hash: u64,
+        gpu_bits: u8,
+    ) -> Result<(), String> {
+        let shared = Self::load_shared_experts(
+            model_dir,
+            config,
+            group_size,
+            gpu_bits,
+            0,
+            total_moe_layers,
+        )?;
+        if shared.len() != total_moe_layers {
+            return Err(format!(
+                "shared expert loader returned {} layers, expected {total_moe_layers}",
+                shared.len(),
+            ));
+        }
+        let tmp_path = path.with_extension("bin.tmp");
+        let file = std::fs::File::create(&tmp_path)
+            .map_err(|e| format!("failed to create shared Marlin cache: {e}"))?;
+        let mut writer = std::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
+        writer
+            .write_all(SHARED_MARLIN_CACHE_MAGIC)
+            .map_err(|e| format!("failed to write shared Marlin cache magic: {e}"))?;
+        writer
+            .write_all(&SHARED_MARLIN_CACHE_VERSION.to_le_bytes())
+            .map_err(|e| format!("failed to write shared Marlin cache version: {e}"))?;
+        for value in [
+            config.hidden_size as u64,
+            config.shared_expert_intermediate_size as u64,
+            total_moe_layers as u64,
+            group_size as u64,
+            config_hash,
+            config.n_shared_experts as u64,
+            gpu_bits as u64,
+        ] {
+            writer
+                .write_all(&value.to_le_bytes())
+                .map_err(|e| format!("failed to write shared Marlin cache header: {e}"))?;
+        }
+        for expert in shared {
+            let marlin = UnifiedExpertWeights::from_expert_weights_marlin(&expert, gpu_bits);
+            write_vec_u32(&mut writer, &marlin.w13_packed)?;
+            write_vec_u16(&mut writer, &marlin.w13_scales)?;
+            write_vec_u32(&mut writer, &marlin.w2_packed)?;
+            write_vec_u16(&mut writer, &marlin.w2_scales)?;
+        }
+        writer
+            .flush()
+            .map_err(|e| format!("failed to flush shared Marlin cache: {e}"))?;
+        drop(writer);
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| format!("failed to publish shared Marlin cache: {e}"))?;
+        Ok(())
+    }
+
+    fn load_or_build_shared_marlin_cache(
+        model_dir: &Path,
+        config: &ModelConfig,
+        group_size: usize,
+        total_moe_layers: usize,
+        config_hash: u64,
+        start_moe_layer: usize,
+        num_layers_to_load: usize,
+        gpu_bits: u8,
+    ) -> Result<Vec<UnifiedExpertWeights>, String> {
+        let path = cache_path_shared_marlin(model_dir, group_size, gpu_bits);
+        if path.exists() {
+            match Self::load_shared_marlin_cache(
+                &path,
+                config,
+                group_size,
+                total_moe_layers,
+                config_hash,
+                start_moe_layer,
+                num_layers_to_load,
+                gpu_bits,
+            ) {
+                Ok(shared) => return Ok(shared),
+                Err(error) => {
+                    log::warn!(
+                        "Removing invalid independent shared Marlin cache {}: {error}",
+                        path.display(),
+                    );
+                    std::fs::remove_file(&path).map_err(|remove_error| {
+                        format!(
+                            "failed to remove invalid shared Marlin cache {}: {remove_error}",
+                            path.display(),
+                        )
+                    })?;
+                }
+            }
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!("failed to create shared Marlin cache directory: {e}")
+            })?;
+        }
+        let lock_path = path.with_extension("bin.lock");
+        let build_owner = match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(mut lock) => {
+                write!(lock, "{}", std::process::id())
+                    .map_err(|e| format!("failed to write shared cache lock: {e}"))?;
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => return Err(format!("failed to create shared cache lock: {error}")),
+        };
+        if build_owner {
+            log::info!(
+                "Building independent shared expert INT{} Marlin cache {}",
+                gpu_bits,
+                path.display(),
+            );
+            let result = Self::write_shared_marlin_cache(
+                &path,
+                model_dir,
+                config,
+                group_size,
+                total_moe_layers,
+                config_hash,
+                gpu_bits,
+            );
+            let _ = std::fs::remove_file(&lock_path);
+            result?;
+        } else {
+            let wait_start = std::time::Instant::now();
+            loop {
+                if path.exists() && !lock_path.exists() {
+                    break;
+                }
+                if !marlin_cache_lock_is_live(&lock_path) {
+                    return Err(format!(
+                        "shared Marlin cache builder exited without publishing {}",
+                        path.display(),
+                    ));
+                }
+                if wait_start.elapsed() > std::time::Duration::from_secs(1800) {
+                    return Err(format!(
+                        "timed out waiting for shared Marlin cache {}",
+                        path.display(),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+        Self::load_shared_marlin_cache(
+            &path,
+            config,
+            group_size,
+            total_moe_layers,
+            config_hash,
+            start_moe_layer,
+            num_layers_to_load,
+            gpu_bits,
+        )
     }
 
     /// Load expert weights directly as BF16 from safetensors (no cache, no quantization).
@@ -5181,6 +6164,9 @@ impl WeightStore {
             experts_gpu,
             shared_experts_gpu,
             layer_backings_gpu,
+            mixed_layer_backings_gpu: Vec::new(),
+            mixed_precision_manifest: None,
+            mixed_gpu_cache_identity: None,
             tileq_layer_backings: Vec::new(),
             tileq_cache: None,
             gpu_cache_identity: Some(GpuCacheIdentity {
@@ -5196,6 +6182,357 @@ impl WeightStore {
             group_size,
             cpu_num_bits: gpu_bits, // Will be overridden by caller
             gpu_num_bits: gpu_bits,
+        })
+    }
+
+    /// Load an immutable mixed routed INT4/INT8 bank selected by a canonical
+    /// precision manifest. The manifest refers directly to complete validated
+    /// homogeneous source caches, avoiding another on-disk weight copy.
+    fn load_mixed_marlin_cache(
+        manifest_path: &Path,
+        model_dir: &Path,
+        config: &ModelConfig,
+        group_size: usize,
+        total_moe_layers: usize,
+        start_moe_layer: usize,
+        num_layers_to_load: usize,
+    ) -> Result<WeightStore, String> {
+        let canonical_manifest_bytes = std::fs::read(manifest_path).map_err(|error| {
+            format!(
+                "read mixed routed-expert precision manifest {}: {error}",
+                manifest_path.display()
+            )
+        })?;
+        let external_manifest =
+            mixed_precision::parse_canonical_manifest(&canonical_manifest_bytes)?;
+        let manifest_dir = manifest_path.parent().ok_or_else(|| {
+            format!(
+                "mixed routed-expert precision manifest {} has no parent directory",
+                manifest_path.display()
+            )
+        })?;
+        let ranking_evidence_path = manifest_dir.join("mixed-expert-ranking.json");
+        let ranking_evidence_raw = std::fs::read(&ranking_evidence_path).map_err(|error| {
+            format!(
+                "read mixed routed-expert ranking evidence {}: {error}",
+                ranking_evidence_path.display()
+            )
+        })?;
+        mixed_precision::validate_ranking_evidence_bytes(
+            &external_manifest,
+            &ranking_evidence_raw,
+        )?;
+        let int4_path = manifest_dir.join(&external_manifest.source_int4.basename);
+        let int8_path = manifest_dir.join(&external_manifest.source_int8.basename);
+        let int4_file = std::fs::File::open(&int4_path).map_err(|error| {
+            format!(
+                "open mixed routed-expert INT4 source {}: {error}",
+                int4_path.display()
+            )
+        })?;
+        let int8_file = std::fs::File::open(&int8_path).map_err(|error| {
+            format!(
+                "open mixed routed-expert INT8 source {}: {error}",
+                int8_path.display()
+            )
+        })?;
+        let int4_mmap = unsafe { memmap2::MmapOptions::new().map(&int4_file) }
+            .map_err(|error| format!("map mixed routed-expert INT4 source: {error}"))?;
+        let int8_mmap = unsafe { memmap2::MmapOptions::new().map(&int8_file) }
+            .map_err(|error| format!("map mixed routed-expert INT8 source: {error}"))?;
+
+        let checkpoint_sha256 =
+            crate::checkpoint_identity::checkpoint_identity_sha256(model_dir)?;
+        let cache_namespace = crate::checkpoint_identity::cache_namespace(model_dir)?;
+        let config_bytes = std::fs::read(model_dir.join("config.json"))
+            .map_err(|error| format!("read model config for mixed cache identity: {error}"))?;
+        let config_sha256 = format!("{:x}", Sha256::digest(&config_bytes));
+        let model_layers = (0..total_moe_layers)
+            .map(|moe_layer| {
+                u32::try_from(config.moe_abs_layer(moe_layer))
+                    .map_err(|_| "mixed routed-expert model layer exceeds u32".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let int4_sizes = marlin_expert_byte_sizes(config, group_size, 4);
+        let int8_sizes = marlin_expert_byte_sizes(config, group_size, 8);
+        let geometry = mixed_precision::MixedPrecisionGeometry {
+            group_size,
+            hidden_size: config.routed_expert_hidden_size(),
+            intermediate_size: config.moe_intermediate_size,
+            routed_layers: total_moe_layers,
+            routed_experts_per_layer: config.n_routed_experts,
+            experts_gated: config.experts_gated,
+            model_layers,
+            int4_expert_bytes: int4_sizes.0 + int4_sizes.1 + int4_sizes.2 + int4_sizes.3,
+            int8_expert_bytes: int8_sizes.0 + int8_sizes.1 + int8_sizes.2 + int8_sizes.3,
+        };
+        mixed_precision::validate_manifest(
+            &external_manifest,
+            &geometry,
+            &checkpoint_sha256,
+            &cache_namespace,
+            &config_sha256,
+        )?;
+        let manifest = external_manifest;
+
+        let validate_source = |path: &Path,
+                               mmap: &[u8],
+                               identity: &mixed_precision::MixedCacheSourceIdentity,
+                               bits: u8|
+         -> Result<(), String> {
+            let identity_bytes = usize::try_from(identity.bytes)
+                .map_err(|_| format!("mixed routed-expert INT{bits} source size exceeds usize"))?;
+            if mmap.len() != identity_bytes || mmap.len() < CACHE_HEADER_SIZE {
+                return Err(format!(
+                    "mixed routed-expert INT{bits} source size mismatch: {} != {}",
+                    mmap.len(), identity.bytes,
+                ));
+            }
+            let header = read_marlin_cache_header(path)?;
+            let expected_size = expected_marlin_cache_size(
+                config,
+                group_size,
+                total_moe_layers,
+                config.n_shared_experts,
+                config.shared_expert_intermediate_size,
+                bits,
+            );
+            if header.version != CACHE_VERSION_MARLIN
+                || header.hidden_size != config.hidden_size
+                || header.moe_intermediate_size != config.moe_intermediate_size
+                || header.n_routed_experts != config.n_routed_experts
+                || header.num_moe_layers != total_moe_layers
+                || header.group_size != group_size
+                || header.n_shared_experts != config.n_shared_experts
+                || header.config_hash != identity.header_config_fnv1a
+                || header.expert_int4_calib_mode.config_value()
+                    != identity.expert_int4_calibration_mode
+                || mmap.len() != expected_size
+            {
+                return Err(format!(
+                    "mixed routed-expert INT{bits} source header/geometry mismatch"
+                ));
+            }
+            let source_sha = verified_marlin_source_sha256(path, mmap, &identity.sha256)?;
+            let header_sha = format!("{:x}", Sha256::digest(&mmap[..CACHE_HEADER_SIZE]));
+            if source_sha != identity.sha256 || header_sha != identity.header_sha256 {
+                return Err(format!(
+                    "mixed routed-expert INT{bits} source identity mismatch"
+                ));
+            }
+            Ok(())
+        };
+        validate_source(&int4_path, &int4_mmap, &manifest.source_int4, 4)?;
+        validate_source(&int8_path, &int8_mmap, &manifest.source_int8, 8)?;
+        let partition_regions = mixed_precision::regions_for_moe_partition(
+            &manifest,
+            start_moe_layer,
+            num_layers_to_load,
+        )?;
+
+        let load_start = std::time::Instant::now();
+        let mut experts_gpu = Vec::with_capacity(num_layers_to_load);
+        let mut mixed_layer_backings_gpu = Vec::with_capacity(num_layers_to_load);
+        for (local_moe_layer, global_moe_layer) in
+            (start_moe_layer..start_moe_layer + num_layers_to_load).enumerate()
+        {
+            let row_start = global_moe_layer
+                .checked_mul(config.n_routed_experts)
+                .ok_or_else(|| "mixed routed-expert row offset overflow".to_string())?;
+            let local_row_start = local_moe_layer
+                .checked_mul(config.n_routed_experts)
+                .ok_or_else(|| "mixed routed-expert local row offset overflow".to_string())?;
+            let rows = &partition_regions
+                [local_row_start..local_row_start + config.n_routed_experts];
+            let logical_bytes = rows.iter().try_fold(0usize, |total, region| {
+                let region_bytes = if region.bits == 4 {
+                    geometry.int4_expert_bytes
+                } else {
+                    geometry.int8_expert_bytes
+                };
+                total
+                    .checked_add(region_bytes)
+                    .ok_or_else(|| "mixed routed layer byte length overflow".to_string())
+            })?;
+            if logical_bytes % std::mem::size_of::<u64>() != 0 {
+                return Err(format!(
+                    "mixed routed layer {} payload {} is not u64-aligned",
+                    global_moe_layer, logical_bytes,
+                ));
+            }
+            let mut backing = MixedLayerExpertBacking {
+                payload: vec![0u64; logical_bytes / std::mem::size_of::<u64>()],
+                logical_bytes,
+            };
+            let backing_bytes = unsafe {
+                std::slice::from_raw_parts_mut(
+                    backing.payload.as_mut_ptr() as *mut u8,
+                    backing.logical_bytes,
+                )
+            };
+            let mut local_offset = 0usize;
+            for (expert_idx, region) in rows.iter().enumerate() {
+                let source_bytes = if region.bits == 4 {
+                    geometry.int4_expert_bytes
+                } else {
+                    geometry.int8_expert_bytes
+                };
+                let global_row = row_start
+                    .checked_add(expert_idx)
+                    .ok_or_else(|| "mixed routed-expert source row overflow".to_string())?;
+                let source_start = CACHE_HEADER_SIZE
+                    .checked_add(
+                        global_row
+                            .checked_mul(source_bytes)
+                            .ok_or_else(|| {
+                                "mixed routed-expert source offset overflow".to_string()
+                            })?,
+                    )
+                    .ok_or_else(|| "mixed routed-expert source offset overflow".to_string())?;
+                let source_end = source_start
+                    .checked_add(source_bytes)
+                    .ok_or_else(|| "mixed routed-expert source range overflow".to_string())?;
+                let source = if region.bits == 4 {
+                    &int4_mmap
+                } else {
+                    &int8_mmap
+                };
+                if source_end > source.len() {
+                    return Err(format!(
+                        "mixed routed-expert L{}E{} source range exceeds INT{} cache",
+                        region.model_layer, region.expert, region.bits,
+                    ));
+                }
+                backing_bytes[local_offset..local_offset + source_bytes]
+                    .copy_from_slice(&source[source_start..source_end]);
+                local_offset += source_bytes;
+            }
+            if local_offset != logical_bytes {
+                return Err("mixed routed layer copy did not cover its payload".to_string());
+            }
+
+            let base = backing.payload.as_ptr() as *const u8;
+            let mut experts = Vec::with_capacity(config.n_routed_experts);
+            let mut expert_offset = 0usize;
+            for region in rows {
+                let bits = region.bits;
+                let sizes = if bits == 4 { int4_sizes } else { int8_sizes };
+                let (w13pb, w13sb, w2pb, w2sb) = sizes;
+                let region_bytes = if bits == 4 {
+                    geometry.int4_expert_bytes
+                } else {
+                    geometry.int8_expert_bytes
+                };
+                if w13pb + w13sb + w2pb + w2sb != region_bytes {
+                    return Err(format!(
+                        "mixed routed-expert L{}E{} component bytes do not cover record",
+                        region.model_layer, region.expert,
+                    ));
+                }
+                let w13p = unsafe { base.add(expert_offset) };
+                let w13s = unsafe { w13p.add(w13pb) };
+                let w2p = unsafe { w13s.add(w13sb) };
+                let w2s = unsafe { w2p.add(w2pb) };
+                if (w13p as usize) % 4 != 0
+                    || (w13s as usize) % 2 != 0
+                    || (w2p as usize) % 4 != 0
+                    || (w2s as usize) % 2 != 0
+                {
+                    return Err(format!(
+                        "mixed routed-expert L{}E{} component alignment mismatch",
+                        region.model_layer, region.expert,
+                    ));
+                }
+                let (w13_packed, w13_scales, w2_packed, w2_scales) = unsafe {
+                    (
+                        Vec::from_raw_parts(w13p as *mut u32, w13pb / 4, w13pb / 4),
+                        Vec::from_raw_parts(w13s as *mut u16, w13sb / 2, w13sb / 2),
+                        Vec::from_raw_parts(w2p as *mut u32, w2pb / 4, w2pb / 4),
+                        Vec::from_raw_parts(w2s as *mut u16, w2sb / 2, w2sb / 2),
+                    )
+                };
+                experts.push(UnifiedExpertWeights {
+                    w13_packed,
+                    w13_scales,
+                    w2_packed,
+                    w2_scales,
+                    hidden_size: config.routed_expert_hidden_size(),
+                    intermediate_size: config.moe_intermediate_size,
+                    group_size,
+                    num_bits: bits,
+                    w2_bits: bits,
+                    gate_bias: None,
+                    up_bias: None,
+                    down_bias: None,
+                    tiled: false,
+                    gated: config.experts_gated,
+                    activation_type: if config.experts_gated { 0 } else { 1 },
+                    contiguous_backing: None,
+                    borrowed: true,
+                });
+                expert_offset = expert_offset
+                    .checked_add(region_bytes)
+                    .ok_or_else(|| "mixed routed-expert local offset overflow".to_string())?;
+            }
+            mixed_layer_backings_gpu.push(backing);
+            experts_gpu.push(experts);
+        }
+
+        // This manifest governs routed experts only. Shared experts remain on
+        // their independently configured INT8/BF16 loader below; do not copy
+        // the unused shared INT4 tail from the homogeneous routed source.
+        let shared_experts_gpu = Vec::new();
+
+        #[cfg(unix)]
+        {
+            let _ = unsafe {
+                int4_mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed)
+            };
+            let _ = unsafe {
+                int8_mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed)
+            };
+        }
+        drop(int4_mmap);
+        drop(int8_mmap);
+        drop(int4_file);
+        drop(int8_file);
+        log::info!(
+            "Loaded mixed routed-expert cache in {:.1}s: layers [{}..{}), {} experts/layer, requested={} bp achieved_bytes={}",
+            load_start.elapsed().as_secs_f64(),
+            start_moe_layer,
+            start_moe_layer + num_layers_to_load,
+            config.n_routed_experts,
+            manifest.budget.requested_basis_points,
+            manifest.budget.achieved_added_bytes,
+        );
+
+        Ok(WeightStore {
+            moe_layer_start: start_moe_layer,
+            experts: Vec::new(),
+            shared_experts: Vec::new(),
+            experts_cpu: Vec::new(),
+            shared_experts_cpu: Vec::new(),
+            experts_gpu,
+            shared_experts_gpu,
+            layer_backings_gpu: Vec::new(),
+            mixed_layer_backings_gpu,
+            mixed_precision_manifest: Some(Arc::new(manifest)),
+            mixed_gpu_cache_identity: Some(MixedGpuCacheIdentity {
+                manifest_path: manifest_path.to_path_buf(),
+                manifest_sha256: mixed_precision::sha256_hex(&canonical_manifest_bytes),
+                source_int4_path: int4_path,
+                source_int8_path: int8_path,
+            }),
+            tileq_layer_backings: Vec::new(),
+            tileq_cache: None,
+            gpu_cache_identity: None,
+            expert_hqq_cache: None,
+            experts_gguf: Vec::new(),
+            shared_experts_gguf: Vec::new(),
+            config: config.clone(),
+            group_size,
+            cpu_num_bits: 4,
+            gpu_num_bits: 4,
         })
     }
 
@@ -6179,6 +7516,7 @@ impl WeightStore {
     /// `group_size`: quantization group size (128 default)
     /// `cpu_num_bits`: 4 or 8 for CPU decode format
     /// `gpu_num_bits`: for GPU (Marlin), still loaded from safetensors
+    /// `shared_gpu_num_bits`: independent shared-expert precision (8 or 16)
     /// `max_layers`: optional limit on number of MoE layers to load
     /// `start_layer`: optional start MoE layer index
     pub fn load_from_gguf(
@@ -6189,6 +7527,7 @@ impl WeightStore {
         start_layer: Option<usize>,
         cpu_num_bits: u8,
         gpu_num_bits: u8,
+        shared_gpu_num_bits: u8,
         expert_int4_calib_mode: ExpertInt4CalibMode,
         gguf_native: bool,
     ) -> Result<Self, String> {
@@ -6206,6 +7545,14 @@ impl WeightStore {
             .and_then(|s| serde_json::from_str(&s).ok());
         let config = ModelConfig::from_json_with_index(&raw_json, index_json.as_ref())
             .map_err(|e| format!("Failed to extract MoE config: {e}"))?;
+        if config.n_shared_experts > 0
+            && shared_gpu_num_bits != 8
+            && shared_gpu_num_bits != 16
+        {
+            return Err(format!(
+                "shared experts require independently configured INT8 or BF16, got {shared_gpu_num_bits} bits"
+            ));
+        }
 
         log::info!(
             "GGUF loading: hidden={}, intermediate={}, experts={}, top-{}, layers={}, cpu_bits={}",
@@ -6227,11 +7574,12 @@ impl WeightStore {
         let expert_int4_calib_data =
             ExpertInt4CalibData::from_env_for_mode(expert_int4_calib_mode)?;
         if let Some(data) = expert_int4_calib_data.as_ref() {
+            data.validate_for_model(&config)?;
             log::info!(
-                "Loaded expert INT4 calibration samples from {} (hash={:016x}, keys={})",
+                "Loaded expert INT4 calibration data from {} (hash={:016x}, entries={})",
                 data.source_path.display(),
                 data.source_hash,
-                data.samples_by_key.len(),
+                data.entry_count(),
             );
         }
         let config_hash = marlin_cache_config_hash(
@@ -6239,6 +7587,12 @@ impl WeightStore {
             gpu_num_bits,
             expert_int4_calib_mode,
             expert_int4_calib_data.as_ref().map(|d| d.source_hash),
+        );
+        let shared_config_hash = marlin_cache_config_hash(
+            &config_str,
+            shared_gpu_num_bits,
+            ExpertInt4CalibMode::Amax,
+            None,
         );
 
         // Open GGUF file
@@ -6357,6 +7711,38 @@ impl WeightStore {
                     gpu_loaded = true;
                 }
             }
+        }
+
+        if config.n_shared_experts > 0 && shared_gpu_num_bits != gpu_num_bits {
+            shared_experts_gpu = if shared_gpu_num_bits == 8 {
+                Self::load_or_build_shared_marlin_cache(
+                    model_dir,
+                    &config,
+                    effective_gs,
+                    total_moe_layers,
+                    shared_config_hash,
+                    moe_start,
+                    num_moe_layers,
+                    shared_gpu_num_bits,
+                )?
+            } else {
+                Self::load_shared_experts(
+                    model_dir,
+                    &config,
+                    effective_gs,
+                    shared_gpu_num_bits,
+                    moe_start,
+                    num_moe_layers,
+                )?
+                .iter()
+                .map(|expert| {
+                    UnifiedExpertWeights::from_expert_weights_marlin(
+                        expert,
+                        shared_gpu_num_bits,
+                    )
+                })
+                .collect()
+            };
         }
 
         // ── Phase 2: CPU experts — try AVX2 cache first, then build from GGUF ──
@@ -6624,6 +8010,9 @@ impl WeightStore {
             experts_gpu,
             shared_experts_gpu,
             layer_backings_gpu: Vec::new(), // GGUF path doesn't use per-layer backing yet
+            mixed_layer_backings_gpu: Vec::new(),
+            mixed_precision_manifest: None,
+            mixed_gpu_cache_identity: None,
             tileq_layer_backings: Vec::new(),
             tileq_cache: None,
             gpu_cache_identity: None,
@@ -9397,14 +10786,54 @@ fn quantize_int4_expert_calibrated(
     }
 
     for g in 0..num_groups_per_row {
-        let has_activation_context = calib_data.map_or(false, |data| {
+        let activation_moments = calib_data.and_then(|data| {
+            data.activation_moments_for(layer_idx, expert_idx, proj_name)
+        });
+        if let Some(moments) = activation_moments {
+            assert_eq!(moments.len(), cols);
+            let col_start = g * group_size;
+            let col_end = (col_start + group_size).min(cols);
+            let mut best_factor = EXPERT_INT4_RMSE_SCALE_FACTORS[0];
+            let mut best_score = f32::INFINITY;
+            for &factor in EXPERT_INT4_RMSE_SCALE_FACTORS {
+                let mut numer = 0.0f32;
+                let mut denom = 0.0f32;
+                for row in 0..rows {
+                    let row_offset = row * cols;
+                    let scale =
+                        (base_scales[row * num_groups_per_row + g] * factor).max(f32::EPSILON);
+                    let inv_scale = 1.0 / scale;
+                    for col in col_start..col_end {
+                        let value = bf16_to_f32(weight_bf16[row_offset + col]);
+                        let quantized = (value * inv_scale).round().clamp(-8.0, 7.0);
+                        let error = quantized * scale - value;
+                        let activation_weight = moments[col];
+                        numer += activation_weight * error * error;
+                        denom += activation_weight * value * value;
+                    }
+                }
+                let score = (numer / denom.max(1e-12)).sqrt();
+                if score < best_score {
+                    best_score = score;
+                    best_factor = factor;
+                }
+            }
+            for row in 0..rows {
+                let best_scale =
+                    (base_scales[row * num_groups_per_row + g] * best_factor).max(f32::EPSILON);
+                scales[row * num_groups_per_row + g] = f32_to_bf16(best_scale);
+            }
+            continue;
+        }
+
+        let has_legacy_activation_context = calib_data.map_or(false, |data| {
             (0..rows).any(|row| {
-                data.context_for(layer_idx, expert_idx, proj_name, row, g)
+                data.legacy_context_for(layer_idx, expert_idx, proj_name, row, g)
                     .is_some()
             })
         });
 
-        if has_activation_context {
+        if has_legacy_activation_context {
             let mut best_factor = EXPERT_INT4_RMSE_SCALE_FACTORS[0];
             let mut best_score = f32::INFINITY;
             for &factor in EXPERT_INT4_RMSE_SCALE_FACTORS {
@@ -9416,7 +10845,9 @@ fn quantize_int4_expert_calibrated(
                     let group_end = (group_start + group_size).min(row_offset + cols);
                     let group = &weight_bf16[group_start..group_end];
                     if let Some(ctx) = calib_data
-                        .and_then(|data| data.context_for(layer_idx, expert_idx, proj_name, row, g))
+                        .and_then(|data| {
+                            data.legacy_context_for(layer_idx, expert_idx, proj_name, row, g)
+                        })
                     {
                         let scale =
                             (base_scales[row * num_groups_per_row + g] * factor).max(f32::EPSILON);
@@ -10160,6 +11591,319 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn test_mixed_precision_marlin_source_digest_cache_is_stat_bound_and_fail_closed() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "krasis-marlin-digest-test-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let source = dir.join("experts.marlin");
+        let bytes = b"synthetic marlin source with stable identity";
+        std::fs::write(&source, bytes).unwrap();
+        let expected = format!("{:x}", Sha256::digest(bytes));
+
+        assert_eq!(
+            verified_marlin_source_sha256(&source, bytes, &expected).unwrap(),
+            expected
+        );
+        let sidecar_path = marlin_sha256_cache_path(&source);
+        let first: MarlinSha256Cache =
+            serde_json::from_slice(&std::fs::read(&sidecar_path).unwrap()).unwrap();
+        assert_eq!(first.format, "krasis_marlin_sha256_cache");
+        assert_eq!(first.format_version, 1);
+        assert_eq!(first.sha256, expected);
+        assert_eq!((first.size, first.mtime_ns), marlin_file_stat_identity(&source).unwrap());
+
+        // A syntactically valid but wrong digest must not be trusted. The
+        // source is rehashed and the exact stat-bound sidecar is repaired.
+        let invalid = MarlinSha256Cache {
+            sha256: "00".repeat(32),
+            ..first
+        };
+        std::fs::write(&sidecar_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        verified_marlin_source_sha256(&source, bytes, &expected).unwrap();
+        let repaired: MarlinSha256Cache =
+            serde_json::from_slice(&std::fs::read(&sidecar_path).unwrap()).unwrap();
+        assert_eq!(repaired.sha256, expected);
+
+        let wrong_expected = "11".repeat(32);
+        assert!(verified_marlin_source_sha256(&source, bytes, &wrong_expected)
+            .unwrap_err()
+            .contains("SHA-256 mismatch"));
+        assert!(verified_marlin_source_sha256(&source, &bytes[..bytes.len() - 1], &expected)
+            .unwrap_err()
+            .contains("mapping/stat size mismatch"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn write_synthetic_int4_moment_artifact(path: &Path) -> Vec<f32> {
+        let input_moments = vec![
+            0.0f32, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ];
+        let down_moments = vec![1.0f32; 8];
+        let mut moments = input_moments;
+        moments.extend_from_slice(&down_moments);
+        let payload = moments
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let manifest = serde_json::json!({
+            "schema_version": EXPERT_INT4_CALIB_VERSION,
+            "format": "Krasis expert INT4 activation moments",
+            "objective": "router_weight_squared_diagonal_activation_second_moment_v1",
+            "hidden_size": 8,
+            "intermediate_size": 4,
+            "routed_experts": 2,
+            "topk": 1,
+            "routed_layers": 1,
+            "calibration_sha256": "00".repeat(32),
+            "capture_corpora_sha256": ["11".repeat(32)],
+            "capture_artifact_sha256": ["22".repeat(32)],
+            "payload_bytes": payload.len(),
+            "payload_sha256": format!("{:x}", Sha256::digest(&payload)),
+            "layers": [{
+                "model_layer": 0,
+                "input_second_moment_f32": {"offset": 0, "len": 64},
+                "down_second_moment_f32": {"offset": 64, "len": 32},
+                "route_count_min": 1,
+                "route_count_max": 3
+            }]
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let payload_offset = 4096usize;
+        let mut bytes = Vec::with_capacity(payload_offset + payload.len());
+        bytes.extend_from_slice(EXPERT_INT4_CALIB_MAGIC);
+        bytes.extend_from_slice(&EXPERT_INT4_CALIB_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(manifest_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(payload_offset as u64).to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&Sha256::digest(&manifest_bytes));
+        assert_eq!(bytes.len(), EXPERT_INT4_CALIB_HEADER_BYTES);
+        bytes.extend_from_slice(&manifest_bytes);
+        bytes.resize(payload_offset, 0);
+        bytes.extend_from_slice(&payload);
+        std::fs::write(path, bytes).unwrap();
+        moments
+    }
+
+    #[test]
+    fn test_int4_moment_artifact_identity_geometry_and_weighted_search() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "krasis-int4-moment-test-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("calibration.kic");
+        let expected_moments = write_synthetic_int4_moment_artifact(&path);
+        let data = ExpertInt4CalibData::from_bytes(
+            path.clone(),
+            std::fs::read(&path).unwrap(),
+        )
+        .unwrap();
+        let config = ModelConfig::from_json(
+            &serde_json::json!({
+                "hidden_size": 8,
+                "moe_intermediate_size": 4,
+                "num_experts": 2,
+                "num_experts_per_tok": 1,
+                "num_hidden_layers": 1,
+                "decoder_sparse_step": 1
+            }),
+        )
+        .unwrap();
+        data.validate_for_model(&config).unwrap();
+        assert_eq!(
+            data.activation_moments_for(0, 0, "gate_proj").unwrap(),
+            &expected_moments[..8]
+        );
+        assert_eq!(
+            data.activation_moments_for(0, 1, "down_proj").unwrap(),
+            &expected_moments[20..24]
+        );
+
+        let weights = [7.0f32, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            .iter()
+            .map(|value| f32_to_bf16(*value))
+            .collect::<Vec<_>>();
+        let quantized = quantize_int4_expert_calibrated(
+            &weights,
+            1,
+            8,
+            8,
+            ExpertInt4CalibMode::SearchRmse,
+            0,
+            0,
+            "gate_proj",
+            Some(&data),
+        );
+        assert!(bf16_to_f32(quantized.scales[0]) < 1.0);
+
+        let mut corrupt = std::fs::read(&path).unwrap();
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(ExpertInt4CalibData::from_bytes(path.clone(), corrupt)
+            .unwrap_err()
+            .contains("payload SHA-256 mismatch"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn shared_cache_test_config() -> ModelConfig {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "hidden_size": 128,
+                "moe_intermediate_size": 64,
+                "num_experts": 8,
+                "num_experts_per_tok": 2,
+                "num_hidden_layers": 2,
+                "decoder_sparse_step": 1,
+                "n_shared_experts": 1
+            }"#,
+        )
+        .unwrap();
+        ModelConfig::from_json(&json).unwrap()
+    }
+
+    fn write_synthetic_shared_cache(
+        path: &Path,
+        config: &ModelConfig,
+        group_size: usize,
+        total_moe_layers: usize,
+        config_hash: u64,
+        gpu_bits: u8,
+    ) {
+        let payload = WeightStore::shared_marlin_payload_bytes(config, group_size, gpu_bits)
+            .unwrap();
+        let mut bytes = Vec::with_capacity(CACHE_HEADER_SIZE + total_moe_layers * payload);
+        bytes.extend_from_slice(SHARED_MARLIN_CACHE_MAGIC);
+        bytes.extend_from_slice(&SHARED_MARLIN_CACHE_VERSION.to_le_bytes());
+        for value in [
+            config.hidden_size as u64,
+            config.shared_expert_intermediate_size as u64,
+            total_moe_layers as u64,
+            group_size as u64,
+            config_hash,
+            config.n_shared_experts as u64,
+            gpu_bits as u64,
+        ] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.resize(CACHE_HEADER_SIZE + total_moe_layers * payload, 0);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn test_shared_marlin_cache_identity_range_and_precision_fail_closed() {
+        let config = shared_cache_test_config();
+        let group_size = 32;
+        let total_moe_layers = config.num_moe_layers();
+        let config_hash = 0x0123_4567_89ab_cdef;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "krasis-shared-cache-test-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("shared.bin");
+        write_synthetic_shared_cache(
+            &path,
+            &config,
+            group_size,
+            total_moe_layers,
+            config_hash,
+            8,
+        );
+
+        let loaded = WeightStore::load_shared_marlin_cache(
+            &path,
+            &config,
+            group_size,
+            total_moe_layers,
+            config_hash,
+            0,
+            total_moe_layers,
+            8,
+        )
+        .unwrap();
+        assert_eq!(loaded.len(), total_moe_layers);
+        assert!(loaded
+            .iter()
+            .all(|expert| expert.num_bits == 8 && expert.w2_bits == 8));
+
+        let wrong_hash = WeightStore::load_shared_marlin_cache(
+            &path,
+            &config,
+            group_size,
+            total_moe_layers,
+            config_hash ^ 1,
+            0,
+            total_moe_layers,
+            8,
+        )
+        .err()
+        .expect("wrong checkpoint identity must fail");
+        assert!(wrong_hash.contains("identity mismatch"));
+
+        let wrong_precision = WeightStore::load_shared_marlin_cache(
+            &path,
+            &config,
+            group_size,
+            total_moe_layers,
+            config_hash,
+            0,
+            total_moe_layers,
+            4,
+        )
+        .err()
+        .expect("wrong shared precision must fail");
+        assert!(wrong_precision.contains("identity mismatch"));
+
+        let bad_range = WeightStore::load_shared_marlin_cache(
+            &path,
+            &config,
+            group_size,
+            total_moe_layers,
+            config_hash,
+            total_moe_layers,
+            1,
+            8,
+        )
+        .err()
+        .expect("out-of-range layer request must fail");
+        assert!(bad_range.contains("exceeds"));
+
+        let original_len = std::fs::metadata(&path).unwrap().len();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(original_len - 1).unwrap();
+        let truncated = WeightStore::load_shared_marlin_cache(
+            &path,
+            &config,
+            group_size,
+            total_moe_layers,
+            config_hash,
+            0,
+            total_moe_layers,
+            8,
+        )
+        .err()
+        .expect("truncated shared cache must fail");
+        assert!(truncated.contains("size mismatch"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn test_deepseek_v4_source_fp4_contract() {
         let json: serde_json::Value = serde_json::from_str(
             r#"{
@@ -10381,6 +12125,7 @@ mod tests {
             None,
             4,
             4,
+            8,
             ExpertInt4CalibMode::Amax,
             false,
         )
@@ -10455,6 +12200,7 @@ mod tests {
             None,
             4,
             4,
+            8,
             ExpertInt4CalibMode::Amax,
             false,
         )

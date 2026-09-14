@@ -2294,7 +2294,7 @@ impl KrasisEngine {
     ///              building from safetensors. GPU Marlin cache still from safetensors.
     /// `gguf_native`: If true, use raw GGUF blocks for CPU decode (slower but no conversion).
     ///                 Default false: dequant GGUF → re-quantize to fast AVX2 transposed format.
-    #[pyo3(signature = (model_dir, group_size=None, max_layers=None, start_layer=None, num_bits=None, cpu_num_bits=None, gpu_num_bits=None, expert_int4_calib=None, gguf_path=None, gguf_native=false, gpu_only=None, expert_hqq_diagnostic_cache_spec=None))]
+    #[pyo3(signature = (model_dir, group_size=None, max_layers=None, start_layer=None, num_bits=None, cpu_num_bits=None, gpu_num_bits=None, *, shared_gpu_num_bits, expert_int4_calib=None, mixed_expert_manifest=None, gguf_path=None, gguf_native=false, gpu_only=None, expert_hqq_diagnostic_cache_spec=None))]
     pub fn load(
         &mut self,
         model_dir: &str,
@@ -2304,7 +2304,9 @@ impl KrasisEngine {
         num_bits: Option<u8>,
         cpu_num_bits: Option<u8>,
         gpu_num_bits: Option<u8>,
+        shared_gpu_num_bits: u8,
         expert_int4_calib: Option<&str>,
+        mixed_expert_manifest: Option<&str>,
         gguf_path: Option<&str>,
         gguf_native: bool,
         gpu_only: Option<bool>,
@@ -2312,6 +2314,20 @@ impl KrasisEngine {
     ) -> PyResult<()> {
         let cpu_bits = cpu_num_bits.or(num_bits).unwrap_or(4);
         let gpu_bits = gpu_num_bits.unwrap_or(4);
+        let shared_gpu_bits = shared_gpu_num_bits;
+        let mixed_expert_manifest = mixed_expert_manifest
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if mixed_expert_manifest.is_some() && gpu_bits != 4 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "mixed_expert_manifest requires the routed INT4 baseline mode, got gpu_num_bits={gpu_bits}"
+            )));
+        }
+        if mixed_expert_manifest.is_some() && gguf_path.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "mixed_expert_manifest is not supported with GGUF CPU expert loading",
+            ));
+        }
         let expert_int4_calib_mode = crate::weights::ExpertInt4CalibMode::from_config_value(
             expert_int4_calib.unwrap_or("amax"),
         )
@@ -2328,8 +2344,8 @@ impl KrasisEngine {
         }
         let bits = cpu_bits; // For backward-compat logging and memory estimation
         log::info!(
-            "[DIAG-RUST] load() called: model_dir={}, start_layer={:?}, max_layers={:?}, cpu_bits={}, gpu_bits={}, gguf={:?}",
-            model_dir, start_layer, max_layers, cpu_bits, gpu_bits, gguf_path,
+            "[DIAG-RUST] load() called: model_dir={}, start_layer={:?}, max_layers={:?}, cpu_bits={}, gpu_bits={}, shared_gpu_bits={}, gguf={:?}",
+            model_dir, start_layer, max_layers, cpu_bits, gpu_bits, shared_gpu_bits, gguf_path,
         );
         crate::syscheck::log_memory_usage("[DIAG-RUST] load() entry");
         let gs = group_size.unwrap_or(DEFAULT_GROUP_SIZE);
@@ -2393,6 +2409,7 @@ impl KrasisEngine {
                 start_layer,
                 cpu_bits,
                 gpu_bits,
+                shared_gpu_bits,
                 expert_int4_calib_mode,
                 gguf_native,
             )
@@ -2404,15 +2421,17 @@ impl KrasisEngine {
             let skip_cpu = gpu_only.unwrap_or(false);
             log::info!("[DIAG-RUST] Calling WeightStore::load_from_hf (cpu_bits={}, gpu_bits={}, gpu_only={})...", cpu_bits, gpu_bits, skip_cpu);
             crate::syscheck::log_memory_usage("[DIAG-RUST] before load_from_hf");
-            let s = WeightStore::load_from_hf(
+            let s = WeightStore::load_from_hf_with_mixed(
                 path,
                 gs,
                 max_layers,
                 start_layer,
                 cpu_bits,
                 gpu_bits,
+                shared_gpu_bits,
                 expert_int4_calib_mode,
                 skip_cpu,
+                mixed_expert_manifest.map(Path::new),
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
             log::info!("[DIAG-RUST] WeightStore::load_from_hf completed OK");
@@ -5295,6 +5314,7 @@ mod tests {
             None,
             4,
             4,
+            8,
             crate::weights::ExpertInt4CalibMode::Amax,
             false,
         )
@@ -5394,6 +5414,7 @@ mod tests {
             None,
             4,
             4,
+            8,
             crate::weights::ExpertInt4CalibMode::Amax,
             false,
         )
@@ -5503,6 +5524,7 @@ mod tests {
             None,
             4,
             4,
+            8,
             crate::weights::ExpertInt4CalibMode::Amax,
             false,
         )
@@ -5612,6 +5634,7 @@ mod tests {
             None,
             4,
             4,
+            8,
             crate::weights::ExpertInt4CalibMode::Amax,
             false,
         )
@@ -5716,6 +5739,7 @@ mod tests {
             None,
             4,
             4,
+            8,
             crate::weights::ExpertInt4CalibMode::Amax,
             false,
         )
@@ -5913,6 +5937,7 @@ mod tests {
             None,
             4,
             4,
+            8,
             crate::weights::ExpertInt4CalibMode::Amax,
             false,
         )

@@ -5502,7 +5502,7 @@ pub fn fused_moe_ctmp_floats_for_config(config: &PrefillModelConfig) -> (usize, 
     let moe_block_size = 64;
     let hidden_size = config.hidden_size;
     let moe_intermediate_size = config.moe_intermediate_size;
-    let expert_bits = config.expert_bits as usize;
+    let expert_bits = config.max_expert_bits as usize;
     let group_size = config.group_size.max(1);
     let max_shared_mem = max_shared_mem_for_device(config.device_ordinal);
     let w1_n = if config.moe_gated {
@@ -5842,6 +5842,21 @@ const PDT_LAYER_GLM5_KDA_RECURRENT_LAST: u64 = 199;
 const PDT_LAYER_GLM5_KDA_OUTPUT_GATE_LAST: u64 = 200;
 const PDT_LAYER_GLM5_KDA_RMS_GATE_LAST: u64 = 201;
 const PDT_LAYER_GLM5_KDA_O_PROJ_LAST: u64 = 202;
+const PDT_LAYER_DSV4_HC_INPUT_STATE_LAST: u64 = 203;
+const PDT_LAYER_DSV4_ATTN_PREPARED_HIDDEN_LAST: u64 = 204;
+const PDT_LAYER_DSV4_ATTN_NORM_HIDDEN_LAST: u64 = 205;
+const PDT_LAYER_DSV4_ATTN_SUBLAYER_LAST: u64 = 206;
+const PDT_LAYER_DSV4_POST_ATTN_STATE_LAST: u64 = 207;
+const PDT_LAYER_DSV4_FFN_PREPARED_HIDDEN_LAST: u64 = 208;
+const PDT_LAYER_DSV4_FFN_NORM_HIDDEN_LAST: u64 = 209;
+const PDT_LAYER_DSV4_FFN_SUBLAYER_LAST: u64 = 210;
+const PDT_LAYER_DSV4_OUTPUT_STATE_LAST: u64 = 211;
+const PDT_LAYER_DSV4_COMPRESSOR_KV_PROJECTION_FULL: u64 = 212;
+const PDT_LAYER_DSV4_COMPRESSOR_SCORE_PROJECTION_FULL: u64 = 213;
+const PDT_LAYER_DSV4_COMPRESSOR_KV_STATE_FULL: u64 = 214;
+const PDT_LAYER_DSV4_COMPRESSOR_SCORE_STATE_FULL: u64 = 215;
+const PDT_LAYER_DSV4_COMPRESSOR_POOLED_FULL: u64 = 216;
+const PDT_LAYER_DSV4_COMPRESSOR_CACHE_FULL: u64 = 217;
 const PDT_LAYER_MAMBA2_SSD_OUTPUT_VALUE_DETAIL: u64 = 112;
 const PDT_LAYER_MAMBA2_SSD_OUTPUT_COMPONENT_DETAIL: u64 = 113;
 const PDT_LAYER_MAMBA2_SSD_OUTPUT_SOURCE_DETAIL: u64 = 114;
@@ -6117,6 +6132,27 @@ fn prefill_device_trace_stage_label(stage_id: u64) -> &'static str {
         PDT_LAYER_GLM5_KDA_OUTPUT_GATE_LAST => "layer_glm5_kda_output_gate_last",
         PDT_LAYER_GLM5_KDA_RMS_GATE_LAST => "layer_glm5_kda_rms_gate_last",
         PDT_LAYER_GLM5_KDA_O_PROJ_LAST => "layer_glm5_kda_o_proj_last",
+        PDT_LAYER_DSV4_HC_INPUT_STATE_LAST => "layer_dsv4_hc_input_state_last",
+        PDT_LAYER_DSV4_ATTN_PREPARED_HIDDEN_LAST => "layer_dsv4_attn_prepared_hidden_last",
+        PDT_LAYER_DSV4_ATTN_NORM_HIDDEN_LAST => "layer_dsv4_attn_norm_hidden_last",
+        PDT_LAYER_DSV4_ATTN_SUBLAYER_LAST => "layer_dsv4_attn_sublayer_last",
+        PDT_LAYER_DSV4_POST_ATTN_STATE_LAST => "layer_dsv4_post_attn_state_last",
+        PDT_LAYER_DSV4_FFN_PREPARED_HIDDEN_LAST => "layer_dsv4_ffn_prepared_hidden_last",
+        PDT_LAYER_DSV4_FFN_NORM_HIDDEN_LAST => "layer_dsv4_ffn_norm_hidden_last",
+        PDT_LAYER_DSV4_FFN_SUBLAYER_LAST => "layer_dsv4_ffn_sublayer_last",
+        PDT_LAYER_DSV4_OUTPUT_STATE_LAST => "layer_dsv4_output_state_last",
+        PDT_LAYER_DSV4_COMPRESSOR_KV_PROJECTION_FULL => {
+            "layer_dsv4_compressor_kv_projection_full"
+        }
+        PDT_LAYER_DSV4_COMPRESSOR_SCORE_PROJECTION_FULL => {
+            "layer_dsv4_compressor_score_projection_full"
+        }
+        PDT_LAYER_DSV4_COMPRESSOR_KV_STATE_FULL => "layer_dsv4_compressor_kv_state_full",
+        PDT_LAYER_DSV4_COMPRESSOR_SCORE_STATE_FULL => {
+            "layer_dsv4_compressor_score_state_full"
+        }
+        PDT_LAYER_DSV4_COMPRESSOR_POOLED_FULL => "layer_dsv4_compressor_pooled_full",
+        PDT_LAYER_DSV4_COMPRESSOR_CACHE_FULL => "layer_dsv4_compressor_cache_full",
         PDT_LAYER_MAMBA2_SSD_OUTPUT_VALUE_DETAIL => "layer_mamba2_ssd_output_value_detail",
         PDT_LAYER_MAMBA2_SSD_OUTPUT_COMPONENT_DETAIL => "layer_mamba2_ssd_output_component_detail",
         PDT_LAYER_MAMBA2_SSD_OUTPUT_SOURCE_DETAIL => "layer_mamba2_ssd_output_source_detail",
@@ -7024,6 +7060,9 @@ pub struct PrefillModelConfig {
     pub n_routed_experts: usize,
     pub num_experts_per_tok: usize,
     pub expert_bits: u8,
+    /// Largest routed-expert precision present in the loaded runtime. Equal to
+    /// `expert_bits` for homogeneous caches and used only for exact scratch sizing.
+    pub max_expert_bits: u8,
     pub shared_expert_bits: u8,
     pub shared_expert_intermediate_size: usize,
     pub group_size: usize,
@@ -9254,6 +9293,8 @@ pub struct PrefillLayerWeights {
 
 /// Expert weight pointers for DMA to GPU (mirrors ExpertDataPtr).
 pub struct ExpertWeightPtrs {
+    /// Per-expert routed Marlin precision (4 or 8).
+    pub bits: u8,
     pub w13_packed_ptr: usize,
     pub w13_packed_bytes: usize,
     pub w13_scales_ptr: usize,
@@ -9361,6 +9402,10 @@ pub struct PrefillScratch {
     pub d_gather_weight_map: GpuBuf<f32>, // [max_tokens * topk]
     // Fused MoE sorted dispatch buffers (in scratch so both paths share VRAM)
     pub d_fused_expert_ids: GpuBuf<i32>, // [fused_blocks]
+    /// Mixed routed-precision block maps. Each preserves the canonical fused
+    /// block order and marks blocks owned by the other precision with -1.
+    pub d_fused_expert_ids_int4: GpuBuf<i32>,
+    pub d_fused_expert_ids_int8: GpuBuf<i32>,
     pub d_num_tokens_post: GpuBuf<i32>,  // [1]
     pub fused_sorted_count: usize,
     pub fused_blocks: usize,
@@ -9770,6 +9815,94 @@ fn portable_predicted_w1_requires_exact_resize(
     predicted_active && exact_cold_slots > current_staging_slots
 }
 
+/// Precision-filtered Marlin block maps use `-1` for blocks owned by the
+/// other routed precision. The vendored MoE kernel scans past those sentinels
+/// only when its sparse/expert-parallel flag is set. Homogeneous maps contain
+/// no sentinels and retain the established non-sparse launch contract.
+#[inline]
+fn marlin_moe_uses_sparse_block_filter(layer_has_mixed_precision: bool) -> bool {
+    layer_has_mixed_precision
+}
+
+fn select_prefill_pinning_experts(
+    prescan_counts: &[Vec<u32>],
+    expert_payload_bytes: &[Vec<usize>],
+    budget_bytes: usize,
+) -> Result<Vec<Vec<usize>>, String> {
+    if prescan_counts.is_empty() || prescan_counts.len() != expert_payload_bytes.len() {
+        return Err("prefill pinning counts/payload layer cardinality mismatch".to_string());
+    }
+    let expert_count = prescan_counts[0].len();
+    if expert_count == 0
+        || prescan_counts
+            .iter()
+            .zip(expert_payload_bytes)
+            .any(|(counts, payloads)| {
+                counts.len() != expert_count
+                    || payloads.len() != expert_count
+                    || payloads.iter().any(|&bytes| bytes == 0)
+            })
+    {
+        return Err("prefill pinning expert payload geometry is invalid".to_string());
+    }
+    let mut ranked = Vec::with_capacity(prescan_counts.len());
+    for counts in prescan_counts {
+        let mut layer = counts
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, count)| *count > 0)
+            .collect::<Vec<_>>();
+        layer.sort_unstable_by(|left, right| {
+            right
+                .1
+                .cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        ranked.push(layer.into_iter().map(|(expert, _)| expert).collect::<Vec<_>>());
+    }
+
+    let first_payload = expert_payload_bytes[0][0];
+    let homogeneous = expert_payload_bytes
+        .iter()
+        .flatten()
+        .all(|&bytes| bytes == first_payload);
+    let mut selected = vec![Vec::new(); prescan_counts.len()];
+    if homogeneous {
+        // Preserve the established homogeneous behavior exactly: only complete
+        // equal-count layer rounds are admitted, even if a partial round would
+        // fit in the remainder.
+        let max_total = budget_bytes / first_payload;
+        let per_layer = (max_total / prescan_counts.len()).min(expert_count);
+        for (destination, candidates) in selected.iter_mut().zip(ranked.iter()) {
+            destination.extend(candidates.iter().copied().take(per_layer));
+        }
+        return Ok(selected);
+    }
+
+    // Heterogeneous records are known before allocation. Admit them in equal
+    // heat-rank rounds across layers, charging each exact manifest-derived
+    // payload. This avoids both INT8 padding and topology/model assumptions.
+    let rounds = ranked.iter().map(Vec::len).max().unwrap_or(0);
+    let mut used = 0usize;
+    for rank in 0..rounds {
+        for layer in 0..ranked.len() {
+            let Some(&expert) = ranked[layer].get(rank) else {
+                continue;
+            };
+            let bytes = expert_payload_bytes[layer][expert];
+            let Some(next) = used.checked_add(bytes) else {
+                return Err("prefill pinning selected-byte overflow".to_string());
+            };
+            if next <= budget_bytes {
+                selected[layer].push(expert);
+                used = next;
+            }
+        }
+    }
+    Ok(selected)
+}
+
 pub struct PrefillEngine {
     pub device: Arc<CudaDevice>,
     pub kernels: PrefillKernels,
@@ -9962,7 +10095,7 @@ pub struct PrefillEngine {
     pub pinning_pool_ptr: u64, // Raw GPU pointer for pinning pool (0 = not allocated)
     pub pinning_pool_bytes: usize, // Total allocated bytes
     pub pinned_expert_offsets: Vec<Vec<Option<usize>>>, // [moe_layer_idx][expert_id] -> byte offset in pool (None = not pinned)
-    pub pinning_pool_expert_bytes: usize, // total bytes per expert in pool (w1p + w1s + w2p + w2s)
+    pub pinning_pool_expert_bytes: usize, // maximum routed record bytes; compact pool offsets use each expert's actual payload
     pub pinning_active: bool,
     pub prefill_pinning_disabled: bool,
     pub optional_pinning_budget_mb: Option<usize>,
@@ -11660,7 +11793,8 @@ impl PrefillEngine {
         selected_rows.dedup();
         selected_experts.sort_unstable();
         selected_experts.dedup();
-        self.prefill_device_trace_enabled.set(enabled && !mla_only);
+        self.prefill_device_trace_enabled
+            .set(enabled && !mla_only);
         self.prefill_device_trace_mla_only.set(enabled && mla_only);
         self.prefill_device_trace_layer.set(layer_idx);
         self.prefill_device_trace_all_layers.set(all_layers);
@@ -19515,11 +19649,11 @@ impl PrefillEngine {
                     }
                     continue;
                 };
-                if expert.w13_packed_bytes != self.w1_packed_per_expert
-                    || expert.w13_scales_bytes != self.w1_scales_per_expert
+                if expert.w13_packed_bytes > self.w1_packed_per_expert
+                    || expert.w13_scales_bytes > self.w1_scales_per_expert
                 {
                     return Err(format!(
-                        "predicted-W1 expert {} layer {} byte geometry differs from runtime layout: packed={}/{} scales={}/{}",
+                        "predicted-W1 expert {} layer {} byte geometry exceeds runtime staging layout: packed={}/{} scales={}/{}",
                         eid,
                         layer_idx,
                         expert.w13_packed_bytes,
@@ -19810,13 +19944,19 @@ impl PrefillEngine {
             };
             if let Some(pool_off) = pin_offset {
                 let src = pool_base + pool_off as u64;
+                let e = moe_data.experts.get(eid).ok_or_else(|| {
+                    format!(
+                        "dense pointer-table pinned expert {} is missing at layer {}",
+                        eid, layer_idx,
+                    )
+                })?;
                 let mut off = 0u64;
                 self.h_expert_w1_ptrs[eid] = src + off;
-                off += self.w1_packed_per_expert as u64;
+                off += e.w13_packed_bytes as u64;
                 self.h_expert_w1s_ptrs[eid] = src + off;
-                off += self.w1_scales_per_expert as u64;
+                off += e.w13_scales_bytes as u64;
                 self.h_expert_w2_ptrs[eid] = src + off;
-                off += self.w2_packed_per_expert as u64;
+                off += e.w2_packed_bytes as u64;
                 self.h_expert_w2s_ptrs[eid] = src + off;
                 pinned_count += 1;
                 continue;
@@ -24763,7 +24903,6 @@ impl PrefillEngine {
     }
 
     /// Release scratch VRAM and prefill-only buffers so HCS can reclaim VRAM for decode.
-    /// GpuBuf::drop calls cuMemFree_v2 (synchronous, immediate release).
     pub fn release_scratch(&mut self) -> Result<(), String> {
         self.bind_cuda_context()?;
         self.refresh_trace_config();
@@ -24777,7 +24916,13 @@ impl PrefillEngine {
         );
         // Synchronize to ensure all prefill GPU work is done before freeing buffers.
         unsafe {
-            cuda_sys::lib().cuCtxSynchronize();
+            let err = cuda_sys::lib().cuCtxSynchronize();
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "synchronize prefill work before scratch release: {:?}",
+                    err
+                ));
+            }
         }
         self.release_pinning_pool();
         self.release_reusable_ptr_tables();
@@ -25080,6 +25225,12 @@ impl PrefillEngine {
         // computed by this request: a large restored cache prefix does not
         // create the route density or overlap window of a large prefill.
         self.active_prefill_prompt_tokens = total_prompt_tokens;
+        if vram_ledger_enabled() {
+            crate::vram_monitor::set_lifecycle_event(&format!(
+                "prefill_start suffix_tokens={} prompt_tokens={}",
+                total_m, total_prompt_tokens
+            ));
+        }
         let portable_predicted_w1_active = self.portable_predicted_w1_active(total_m);
         let h = self.config.hidden_size;
         let num_hidden_layers = self.config.num_hidden_layers;
@@ -28419,6 +28570,9 @@ impl PrefillEngine {
             };
 
         // 4. Final RMSNorm
+        if vram_ledger_enabled() {
+            crate::vram_monitor::set_lifecycle_event("prefill_final_norm");
+        }
         if deepseek_v4_prefill {
             let hc_state = *self
                 .scratch
@@ -28613,6 +28767,9 @@ impl PrefillEngine {
         }
 
         // 5. LM head + sampling
+        if vram_ledger_enabled() {
+            crate::vram_monitor::set_lifecycle_event("prefill_lm_head_and_sample");
+        }
         let first_token = self.lm_head_and_sample(m, temperature, suppress_tokens)?;
         if trace_prefill_final && m > 0 {
             let last_pos = m - 1;
@@ -34244,6 +34401,7 @@ impl PrefillEngine {
         }
         let compressor_timing = self.deepseek_v4_timing_start("deepseek_v4 indexer compressor")?;
         let valid_rows = self.run_deepseek_v4_compressor_prefill(
+            layer_idx,
             &format!("layer {} index", layer_idx),
             hidden,
             &indexer.compressor,
@@ -34901,6 +35059,7 @@ impl PrefillEngine {
     #[allow(clippy::too_many_arguments)]
     fn run_deepseek_v4_compressor_prefill(
         &self,
+        layer_idx: usize,
         label: &str,
         hidden: u64,
         compressor: &DeepseekV4CompressorPrefillDescriptor,
@@ -35019,8 +35178,15 @@ impl PrefillEngine {
                 ));
             }
             let history_ptr = *history.device_ptr();
-            if self.active_prefill_chunk_idx == 0 && first_group > 0 {
-                self.unpack_deepseek_v4_native_cache(native, history_ptr, first_group, 0, label)?;
+            let restore_rows = deepseek_v4_native_prefix_rows_to_restore(first_group);
+            if restore_rows > 0 {
+                // This expanded BF16 history is one request-scoped scratch
+                // view shared by every DSV4 layer and by both the main and
+                // index compressors. It therefore contains a different
+                // descriptor's data after every layer call. Reload this
+                // compressor's exact persistent prefix before *every* prompt
+                // chunk, not only the first suffix chunk of a cached request.
+                self.unpack_deepseek_v4_native_cache(native, history_ptr, restore_rows, 0, label)?;
             }
             Some(history_ptr)
         } else {
@@ -35053,6 +35219,27 @@ impl PrefillEngine {
             .ok_or_else(|| format!("DeepSeek-V4 {label} score pointer overflow"))?;
         self.cublas_bf16_gemm_f32(hidden, &compressor.wkv, kv_projection, tokens)?;
         self.cublas_bf16_gemm_f32(hidden, &compressor.wgate, score_projection, tokens)?;
+        let trace_position = end_pos.saturating_sub(1);
+        self.record_prefill_device_trace_f32_slice(
+            PDT_LAYER_DSV4_COMPRESSOR_KV_PROJECTION_FULL,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            kv_projection,
+            0,
+            projection_elements,
+        )?;
+        self.record_prefill_device_trace_f32_slice(
+            PDT_LAYER_DSV4_COMPRESSOR_SCORE_PROJECTION_FULL,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            score_projection,
+            0,
+            projection_elements,
+        )?;
 
         let candidates = copies
             .checked_mul(ratio)
@@ -35064,7 +35251,22 @@ impl PrefillEngine {
                 candidates, pool_threads
             ));
         }
-        let mut p0 = kv_projection;
+        // The continuation kernel reads the complete KV projection while it
+        // publishes pooled rows. Keep those objects disjoint so its
+        // `__restrict__` contract remains valid on every compiler/architecture.
+        // This existing runtime-sized MoE accumulator is idle during the
+        // attention compressor phase and requires no additional allocation.
+        let required_output = emitted_rows
+            .checked_mul(head_dim)
+            .ok_or_else(|| format!("DeepSeek-V4 {label} pooled output size overflow"))?;
+        if required_output > self.scratch.d_moe_accum.len {
+            return Err(format!(
+                "DeepSeek-V4 {label} compressor output needs {} FP32 values, has {}",
+                required_output, self.scratch.d_moe_accum.len
+            ));
+        }
+        let compressor_output = *self.scratch.d_moe_accum.device_ptr();
+        let mut p0 = compressor_output;
         let mut p1 = compressor.kv_state_ptr;
         let mut p2 = compressor.score_state_ptr;
         let mut p3 = kv_projection;
@@ -35115,6 +35317,40 @@ impl PrefillEngine {
                 ],
             )?;
         }
+        self.record_prefill_device_trace_f32_slice(
+            PDT_LAYER_DSV4_COMPRESSOR_KV_STATE_FULL,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            compressor.kv_state_ptr,
+            0,
+            compressor.kv_state_elems,
+        )?;
+        self.record_prefill_device_trace_f32_slice(
+            PDT_LAYER_DSV4_COMPRESSOR_SCORE_STATE_FULL,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            compressor.score_state_ptr,
+            0,
+            compressor.score_state_elems,
+        )?;
+        if emitted_rows > 0 {
+            self.record_prefill_device_trace_f32_slice(
+                PDT_LAYER_DSV4_COMPRESSOR_POOLED_FULL,
+                layer_idx,
+                0,
+                trace_position,
+                0,
+                compressor_output,
+                0,
+                emitted_rows.checked_mul(head_dim).ok_or_else(|| {
+                    format!("DeepSeek-V4 {label} pooled trace size overflow")
+                })?,
+            )?;
+        }
         if emitted_rows == 0 {
             return Ok(valid_rows);
         }
@@ -35132,7 +35368,7 @@ impl PrefillEngine {
             .ok_or_else(|| format!("DeepSeek-V4 {label} cache pointer overflow"))?;
         let norm_threads = head_dim.next_power_of_two().clamp(32, 1024);
         let mut n0 = cache_output;
-        let mut n1 = kv_projection;
+        let mut n1 = compressor_output;
         let mut n2 = compressor.norm_ptr;
         let mut n3 = i32::try_from(emitted_rows)
             .map_err(|_| format!("DeepSeek-V4 {label} emitted rows exceed i32"))?;
@@ -35383,6 +35619,18 @@ impl PrefillEngine {
                 }
             }
         }
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_DSV4_COMPRESSOR_CACHE_FULL,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            cache_output_base,
+            0,
+            valid_rows.checked_mul(head_dim).ok_or_else(|| {
+                format!("DeepSeek-V4 {label} compressed-cache trace size overflow")
+            })?,
+        )?;
         Ok(valid_rows)
     }
 
@@ -36733,6 +36981,7 @@ impl PrefillEngine {
         let mut compressed_rows = 0usize;
         if let Some(compressor) = desc.compressor.as_ref() {
             compressed_rows = self.run_deepseek_v4_compressor_prefill(
+                layer_idx,
                 &format!("layer {} main", layer_idx),
                 hidden,
                 compressor,
@@ -38928,6 +39177,28 @@ impl PrefillEngine {
             .device_ptr();
         let temp_state = *self.scratch.d_scratch1.device_ptr();
         let hidden = *self.scratch.d_hidden.device_ptr();
+        let trace_row = m.saturating_sub(1);
+        let trace_position = chunk_start.saturating_add(trace_row);
+        let trace_hc_mult = self.layer_weights[layer_idx]
+            .deepseek_v4
+            .as_ref()
+            .ok_or_else(|| format!("DeepSeek-V4 layer {} descriptor is missing", layer_idx))?
+            .hyper_connection
+            .mult;
+        let trace_hc_width = trace_hc_mult
+            .checked_mul(h)
+            .ok_or_else(|| format!("DeepSeek-V4 layer {} HC trace width overflow", layer_idx))?;
+
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_DSV4_HC_INPUT_STATE_LAST,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            state,
+            trace_row,
+            trace_hc_width,
+        )?;
 
         let attn_hc_timing = self.deepseek_v4_timing_start("deepseek_v4 attn_hc_prep_norm")?;
         let (attn_post, attn_comb, hc_mult) = {
@@ -38949,6 +39220,16 @@ impl PrefillEngine {
             )?;
             (prepared.0, prepared.1, hc.mult)
         };
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_DSV4_ATTN_PREPARED_HIDDEN_LAST,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            hidden,
+            trace_row,
+            h,
+        )?;
         let required_state = m
             .checked_mul(hc_mult)
             .and_then(|value| value.checked_mul(h))
@@ -38967,6 +39248,16 @@ impl PrefillEngine {
             m,
             h,
         )?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_DSV4_ATTN_NORM_HIDDEN_LAST,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            hidden,
+            trace_row,
+            h,
+        )?;
         self.deepseek_v4_hc_internal_timing_finish(
             DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_NORM,
             attn_norm_timing,
@@ -38978,9 +39269,29 @@ impl PrefillEngine {
         )?;
         self.prefetch_predicted_w1_for_layer(layer_idx, m, chunk_start, false)?;
         self.forward_deepseek_v4_attention(layer_idx, m, chunk_start)?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_DSV4_ATTN_SUBLAYER_LAST,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            hidden,
+            trace_row,
+            h,
+        )?;
         let attn_hc_post_timing = self.deepseek_v4_timing_start("deepseek_v4 attn_hc_post")?;
         self.launch_deepseek_v4_hc_post(
             temp_state, hidden, state, attn_post, attn_comb, hc_mult, m,
+        )?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_DSV4_POST_ATTN_STATE_LAST,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            temp_state,
+            trace_row,
+            trace_hc_width,
         )?;
         self.deepseek_v4_timing_finish(
             DEEPSEEK_V4_PREFILL_TIMING_STAGE_ATTN_HC_POST,
@@ -39013,12 +39324,32 @@ impl PrefillEngine {
                 m,
             )?
         };
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_DSV4_FFN_PREPARED_HIDDEN_LAST,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            hidden,
+            trace_row,
+            h,
+        )?;
         let ffn_norm_timing = self.deepseek_v4_hc_internal_timing_start();
         self.launch_rmsnorm(
             hidden,
             hidden,
             self.layer_weights[layer_idx].post_attn_norm,
             m,
+            h,
+        )?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_DSV4_FFN_NORM_HIDDEN_LAST,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            hidden,
+            trace_row,
             h,
         )?;
         self.deepseek_v4_hc_internal_timing_finish(
@@ -39032,6 +39363,16 @@ impl PrefillEngine {
         )?;
         let moe_timing = self.deepseek_v4_timing_start("deepseek_v4 moe")?;
         self.forward_moe_with_inputs(layer_idx, m, hidden, hidden, hidden)?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_DSV4_FFN_SUBLAYER_LAST,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            hidden,
+            trace_row,
+            h,
+        )?;
         self.deepseek_v4_timing_finish(
             DEEPSEEK_V4_PREFILL_TIMING_STAGE_MOE,
             "deepseek_v4 moe",
@@ -39039,6 +39380,16 @@ impl PrefillEngine {
         )?;
         let ffn_hc_post_timing = self.deepseek_v4_timing_start("deepseek_v4 ffn_hc_post")?;
         self.launch_deepseek_v4_hc_post(state, hidden, temp_state, ffn_post, ffn_comb, hc_mult, m)?;
+        self.record_prefill_device_trace_all_layer_bf16_row(
+            PDT_LAYER_DSV4_OUTPUT_STATE_LAST,
+            layer_idx,
+            0,
+            trace_position,
+            0,
+            state,
+            trace_row,
+            trace_hc_width,
+        )?;
         self.capture_dspark_target_hc_state(layer_idx, state, chunk_start, m, hc_mult)?;
         self.deepseek_v4_timing_finish(
             DEEPSEEK_V4_PREFILL_TIMING_STAGE_FFN_HC_POST,
@@ -58483,6 +58834,23 @@ impl PrefillEngine {
             && self.kernels.fused_moe_fn.is_some()
             && (self.d_fused_expert_w1_a.is_some() || self.d_expert_w1_ptrs.is_some())
             && std::env::var("KRASIS_SEQUENTIAL_MOE").is_err();
+        let layer_requires_precision_override = self.layer_weights[layer_idx]
+            .moe_layer_idx
+            .and_then(|index| self.moe_layers.get(index))
+            .and_then(|layer| layer.as_ref())
+            .map(|layer| {
+                layer
+                    .experts
+                    .iter()
+                    .any(|expert| expert.bits != expert_bits)
+            })
+            .unwrap_or(false);
+        if layer_requires_precision_override && !use_fused {
+            return Err(format!(
+                "mixed routed-expert prefill at layer {} requires fused Marlin dispatch; sequential/debug dispatch is unsupported",
+                layer_idx
+            ));
+        }
         if use_fused {
             if layer_idx == 0 {
                 if stderr_debug_enabled() {
@@ -58702,6 +59070,16 @@ impl PrefillEngine {
     ) -> Result<(), String> {
         let diag_moe = std::env::var("KRASIS_PREFILL_DIAG").is_ok();
         let debug_prefill = prefill_debug_enabled();
+        let vram_phase_tracking = vram_ledger_enabled();
+        let set_vram_phase = |phase: &str| {
+            if vram_phase_tracking {
+                crate::vram_monitor::set_lifecycle_event(&format!(
+                    "prefill_moe layer={} tokens={} phase={}",
+                    layer_idx, m, phase
+                ));
+            }
+        };
+        set_vram_phase("routing");
         let mt = self.gqa_timing_enabled.get(); // MoE timing flag (reuses same env var)
         let mt0 = if mt {
             self.stream_sync()?;
@@ -60489,6 +60867,7 @@ impl PrefillEngine {
         }
 
         // Sync to get routing results on CPU for selective expert DMA
+        set_vram_phase("route_sync");
         self.stream_sync()?;
         if let Some(t) = mt0 {
             self.t_moe_gate
@@ -60638,6 +61017,45 @@ impl PrefillEngine {
             .enumerate()
             .filter_map(|(eid, &cnt)| if cnt > 0 { Some(eid) } else { None })
             .collect();
+        let registered_expert_precision_bits: Option<Vec<u8>> = moe_layer_idx
+            .and_then(|index| self.moe_layers.get(index))
+            .and_then(|layer| layer.as_ref())
+            .map(|layer| layer.experts.iter().map(|expert| expert.bits).collect());
+        let expert_precision_bits = match registered_expert_precision_bits {
+            Some(values) => values,
+            None if self.config.max_expert_bits != self.config.expert_bits => {
+                return Err(format!(
+                    "mixed routed-expert prefill at layer {} is missing its registered precision table",
+                    layer_idx
+                ));
+            }
+            None => vec![bits; n_experts],
+        };
+        if expert_precision_bits.len() != n_experts {
+            return Err(format!(
+                "routed expert precision table length mismatch at layer {}: expected {}, got {}",
+                layer_idx,
+                n_experts,
+                expert_precision_bits.len()
+            ));
+        }
+        if let Some((eid, invalid)) = expert_precision_bits
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, value)| !matches!(value, 4 | 8))
+        {
+            return Err(format!(
+                "unsupported routed expert precision at layer {} expert {}: {} bits",
+                layer_idx, eid, invalid
+            ));
+        }
+        let layer_has_mixed_precision = expert_precision_bits
+            .windows(2)
+            .any(|pair| pair[0] != pair[1]);
+        let layer_expert_bits = expert_precision_bits.first().copied().ok_or_else(|| {
+            format!("routed expert precision table is empty at layer {}", layer_idx)
+        })?;
         let hcs_layer_idx = moe_layer_idx.unwrap_or(layer_idx);
         let pinning_layer_idx = self
             .moe_ordinal_for_model_layer(layer_idx)
@@ -60750,6 +61168,7 @@ impl PrefillEngine {
                 self.clear_predicted_w1_state();
                 predicted_w1_for_layer = false;
             }
+            set_vram_phase("cold_staging_capacity");
             self.ensure_cold_staging_capacity(cold_slots_needed, m)?;
         }
 
@@ -60759,6 +61178,80 @@ impl PrefillEngine {
         //    (zero copy), cold experts are H2D'd to a dynamic staging buffer sized
         //    from the routed experts for this layer/chunk.
         let use_ptr_table = self.d_expert_w1_ptrs.is_some() && !prefill_disable_ptr_table();
+        if layer_has_mixed_precision && !use_ptr_table {
+            return Err(format!(
+                "mixed routed-expert prefill at layer {} requires the expert pointer-table path",
+                layer_idx
+            ));
+        }
+        let (fused_expert_ids_int4, fused_expert_ids_int8) = if layer_has_mixed_precision {
+            let mut int4_ids = Vec::new();
+            let mut int8_ids = Vec::new();
+            for (eid, &count) in h_expert_counts.iter().enumerate() {
+                let count = usize::try_from(count).map_err(|_| {
+                    format!(
+                        "negative routed expert count at layer {} expert {}: {}",
+                        layer_idx, eid, count
+                    )
+                })?;
+                let blocks = count.div_ceil(block_size as usize);
+                let eid_i32 = i32::try_from(eid).map_err(|_| {
+                    format!(
+                        "routed expert index exceeds i32 ABI at layer {}: {}",
+                        layer_idx, eid
+                    )
+                })?;
+                for _ in 0..blocks {
+                    int4_ids.push(if expert_precision_bits[eid] == 4 {
+                        eid_i32
+                    } else {
+                        -1
+                    });
+                    int8_ids.push(if expert_precision_bits[eid] == 8 {
+                        eid_i32
+                    } else {
+                        -1
+                    });
+                }
+            }
+            let expected_blocks = total_sorted.div_ceil(block_size as usize);
+            if int4_ids.len() != expected_blocks || int8_ids.len() != expected_blocks {
+                return Err(format!(
+                    "mixed routed expert block-map mismatch at layer {}: expected {}, int4 {}, int8 {}",
+                    layer_idx,
+                    expected_blocks,
+                    int4_ids.len(),
+                    int8_ids.len()
+                ));
+            }
+            let int4_ptr = *self.scratch.d_fused_expert_ids_int4.device_ptr();
+            let int8_ptr = *self.scratch.d_fused_expert_ids_int8.device_ptr();
+            unsafe {
+                let bytes = expected_blocks
+                    .checked_mul(std::mem::size_of::<i32>())
+                    .ok_or_else(|| "mixed routed expert block-map byte overflow".to_string())?;
+                for (label, dst, src) in [
+                    ("int4", int4_ptr, int4_ids.as_ptr()),
+                    ("int8", int8_ptr, int8_ids.as_ptr()),
+                ] {
+                    let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        dst,
+                        src as *const std::ffi::c_void,
+                        bytes,
+                        self.stream,
+                    );
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "upload mixed {} routed expert block map at layer {}: {:?}",
+                            label, layer_idx, err
+                        ));
+                    }
+                }
+            }
+            (Some(int4_ptr), Some(int8_ptr))
+        } else {
+            (None, None)
+        };
         if self.synthetic_repack.is_some() && !use_ptr_table {
             return Err(
                 "KRASIS_SYNTH_REPACK=1 requires the prefill expert pointer-table path".to_string(),
@@ -60929,13 +61422,21 @@ impl PrefillEngine {
 
                 if let Some(pool_off) = pin_offset {
                     let src = self.pinning_pool_ptr + pool_off as u64;
+                    let e = moe_data
+                        .and_then(|data| data.experts.get(eid))
+                        .ok_or_else(|| {
+                            format!(
+                                "pinned routed expert {} is missing at layer {}",
+                                eid, layer_idx,
+                            )
+                        })?;
                     let mut off = 0u64;
                     self.h_expert_w1_ptrs[eid] = src + off;
-                    off += self.w1_packed_per_expert as u64;
+                    off += e.w13_packed_bytes as u64;
                     self.h_expert_w1s_ptrs[eid] = src + off;
-                    off += self.w1_scales_per_expert as u64;
+                    off += e.w13_scales_bytes as u64;
                     self.h_expert_w2_ptrs[eid] = src + off;
-                    off += self.w2_packed_per_expert as u64;
+                    off += e.w2_packed_bytes as u64;
                     self.h_expert_w2s_ptrs[eid] = src + off;
                     pinned_count += 1;
                     continue;
@@ -61220,31 +61721,51 @@ impl PrefillEngine {
                 self.copy_stream
             };
             unsafe {
-                cuda_sys::lib().cuEventRecord(self.dma_event, dma_completion_stream);
-                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                let event_err =
+                    cuda_sys::lib().cuEventRecord(self.dma_event, dma_completion_stream);
+                if event_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "record prefill pointer-table DMA completion event at layer {}: {:?}",
+                        layer_idx, event_err
+                    ));
+                }
+                let w1_err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                     w1_ptrs_gpu,
                     self.h_expert_w1_ptrs.as_ptr() as *const _,
                     n_experts * 8,
                     self.stream,
                 );
-                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                let w1s_err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                     w1s_ptrs_gpu,
                     self.h_expert_w1s_ptrs.as_ptr() as *const _,
                     n_experts * 8,
                     self.stream,
                 );
-                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                let w2_err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                     w2_ptrs_gpu,
                     self.h_expert_w2_ptrs.as_ptr() as *const _,
                     n_experts * 8,
                     self.stream,
                 );
-                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                let w2s_err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                     w2s_ptrs_gpu,
                     self.h_expert_w2s_ptrs.as_ptr() as *const _,
                     n_experts * 8,
                     self.stream,
                 );
+                for (table, err) in [
+                    ("w13_packed", w1_err),
+                    ("w13_scales", w1s_err),
+                    ("w2_packed", w2_err),
+                    ("w2_scales", w2s_err),
+                ] {
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "upload prefill pointer table at layer {} table {}: {:?}",
+                            layer_idx, table, err
+                        ));
+                    }
+                }
             }
             if let Some(t) = mt_upload {
                 self.t_moe_ptr_upload
@@ -61309,6 +61830,7 @@ impl PrefillEngine {
             }
         }
 
+        set_vram_phase("pointer_dma");
         if use_ptr_table {
             self.verify_cold_staging_layer(
                 layer_idx,
@@ -61416,6 +61938,7 @@ impl PrefillEngine {
             && std::env::var("KRASIS_PREFILL_DEFER_SHARED_EXPERT_LAUNCH").is_ok();
 
         // 5. Launch shared expert on dedicated shared_stream (async overlap with fused MoE)
+        set_vram_phase("shared_launch");
         if has_shared && !force_sync_shared_expert && !defer_shared_expert_launch {
             unsafe {
                 cuda_sys::lib().cuEventRecord(self.shared_launch_event, self.stream);
@@ -61641,6 +62164,7 @@ impl PrefillEngine {
         }
 
         // 7. Call MarlinDefault for w1 (gate_up projection)
+        set_vram_phase("routed_w1");
         // Both w1 and w2 use top_k=1 trick: sorted_id is used as direct index.
         // For w1: A = fused_input (replicated), kernel reads A[sorted_id] directly.
         let fused_fn = self.kernels.fused_moe_fn.ok_or("fused MoE fn not loaded")?;
@@ -61654,7 +62178,18 @@ impl PrefillEngine {
         let stream_ptr = self.stream as *mut std::ffi::c_void;
 
         let gs = self.config.group_size as i32;
-        let q_type_ptr = &self.q_type as *const ScalarType as *const std::ffi::c_void;
+        let q_type_int4 = ScalarType::U4B8;
+        let q_type_int8 = ScalarType::U8B128;
+        let q_type_ptr = match layer_expert_bits {
+            4 => &q_type_int4 as *const ScalarType as *const std::ffi::c_void,
+            8 => &q_type_int8 as *const ScalarType as *const std::ffi::c_void,
+            invalid => {
+                return Err(format!(
+                    "unsupported routed expert precision at layer {}: {} bits",
+                    layer_idx, invalid
+                ))
+            }
+        };
         let w1_ctmp_floats = self.config.fused_moe_w1_ctmp_floats;
         let w2_ctmp_floats = self.config.fused_moe_w2_ctmp_floats;
 
@@ -62000,7 +62535,30 @@ impl PrefillEngine {
                 w1_n,
             )?;
         } else {
-            unsafe {
+            let mixed_launches = [
+                (
+                    fused_expert_ids_int4.unwrap_or(fused_expert_ids_val),
+                    if layer_has_mixed_precision {
+                        &q_type_int4 as *const ScalarType as *const std::ffi::c_void
+                    } else {
+                        q_type_ptr
+                    },
+                ),
+                (
+                    fused_expert_ids_int8.unwrap_or(fused_expert_ids_val),
+                    &q_type_int8 as *const ScalarType as *const std::ffi::c_void,
+                ),
+            ];
+            let launch_count = if layer_has_mixed_precision { 2 } else { 1 };
+            for &(expert_ids_ptr, launch_q_type_ptr) in &mixed_launches[..launch_count] {
+                unsafe {
+                    cuda_sys::lib().cuMemsetD32Async(ws_ptr, 0, ws_len, self.stream);
+                    cuda_sys::lib().cuMemsetD32Async(
+                        fused_c_tmp_ptr,
+                        0,
+                        w1_ctmp_floats,
+                        self.stream,
+                    );
                 fused_fn(
                     fused_input_ptr as *const _,      // A: [m*topk, K=hidden] replicated
                     w1_b_param as *const _, // B: base ref (ptr table overrides per-expert)
@@ -62014,18 +62572,19 @@ impl PrefillEngine {
                     std::ptr::null(),       // perm (none)
                     std::ptr::null(),       // a_tmp (none)
                     sorted_ids_val as *const _, // sorted_ids (vLLM format: token*topk+slot)
-                    fused_expert_ids_val as *const _, // expert_ids
+                    expert_ids_ptr as *const _, // expert_ids (precision-filtered when mixed)
                     num_tokens_post_val as *const _, // num_tokens_post_padded
                     topk_weights_ptr as *const _, // topk_weights
                     block_size,             // moe_block_size
                     1i32,                   // top_k=1: sorted_id/1 = direct index into A
                     false,                  // mul_topk_weights (false for w1)
-                    false,                  // is_ep
+                    marlin_moe_uses_sparse_block_filter(layer_has_mixed_precision),
+                    // is_ep/sparse block filtering: required for -1 entries
                     m_topk as i32,          // size_m = m*topk (padding threshold = m*topk*1)
                     w1_n as i32,            // size_n
                     expert_h as i32,        // size_k
                     *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
-                    q_type_ptr,             // q_type_ptr
+                    launch_q_type_ptr,      // q_type_ptr
                     false,                  // has_bias
                     false,                  // has_act_order
                     true,                   // is_k_full
@@ -62051,6 +62610,7 @@ impl PrefillEngine {
                         std::ptr::null()
                     }, // S_expert_ptrs
                 );
+                }
             }
         }
         let w1_output_values = m_topk
@@ -62976,6 +63536,7 @@ impl PrefillEngine {
         }
 
         // 9. Activation (silu_mul or relu2) on fused_inter -> fused_inter2
+        set_vram_phase("activation");
         // w1 writes C at sorted_id positions [0..m*topk), so activation grid = m_topk
         let fused_inter2_ptr = *self.scratch.d_moe_inter.device_ptr();
         if gated {
@@ -63148,6 +63709,7 @@ impl PrefillEngine {
                 .set(self.t_moe_w1.get() + t.elapsed().as_secs_f64() * 1000.0);
         }
         // 10. MarlinDefault for w2 (down projection)
+        set_vram_phase("routed_w2");
         // w2 trick: top_k=1, size_m=m*topk so kernel reads A[sorted_id/1] = A[sorted_id] directly
         // This lets each (token,expert) pair access its own intermediate result
         let fused_output_ptr = *self.scratch.d_moe_expert_out.device_ptr();
@@ -63307,7 +63869,30 @@ impl PrefillEngine {
                 expert_h,
             )?;
         } else {
-            unsafe {
+            let mixed_launches = [
+                (
+                    fused_expert_ids_int4.unwrap_or(fused_expert_ids_val),
+                    if layer_has_mixed_precision {
+                        &q_type_int4 as *const ScalarType as *const std::ffi::c_void
+                    } else {
+                        q_type_ptr
+                    },
+                ),
+                (
+                    fused_expert_ids_int8.unwrap_or(fused_expert_ids_val),
+                    &q_type_int8 as *const ScalarType as *const std::ffi::c_void,
+                ),
+            ];
+            let launch_count = if layer_has_mixed_precision { 2 } else { 1 };
+            for &(expert_ids_ptr, launch_q_type_ptr) in &mixed_launches[..launch_count] {
+                unsafe {
+                    cuda_sys::lib().cuMemsetD32Async(ws_ptr, 0, ws_len, self.stream);
+                    cuda_sys::lib().cuMemsetD32Async(
+                        fused_c_tmp_ptr,
+                        0,
+                        w2_ctmp_floats,
+                        self.stream,
+                    );
                 fused_fn(
                     w2_input as *const _,             // A: [m*topk, K=inter] indexed by sorted_id
                     w2_b_param as *const _, // B: base ref (ptr table overrides per-expert)
@@ -63321,18 +63906,19 @@ impl PrefillEngine {
                     std::ptr::null(),       // perm (none)
                     std::ptr::null(),       // a_tmp (none)
                     sorted_ids_val as *const _, // sorted_ids (vLLM format)
-                    fused_expert_ids_val as *const _, // expert_ids
+                    expert_ids_ptr as *const _, // expert_ids (precision-filtered when mixed)
                     num_tokens_post_val as *const _, // num_tokens_post_padded
                     topk_weights_ptr as *const _, // topk_weights
                     block_size,             // moe_block_size
                     1i32,                   // top_k=1: sorted_id/1 = direct index into A
                     false,                  // mul_topk_weights=false (scatter handles it)
-                    false,                  // is_ep
+                    marlin_moe_uses_sparse_block_filter(layer_has_mixed_precision),
+                    // is_ep/sparse block filtering: required for -1 entries
                     m_topk as i32,          // size_m = m*topk (padding threshold = m*topk*1)
                     expert_h as i32,        // size_n
                     inter as i32,           // size_k
                     *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
-                    q_type_ptr,             // q_type_ptr
+                    launch_q_type_ptr,      // q_type_ptr
                     false,                  // has_bias
                     false,                  // has_act_order
                     true,                   // is_k_full
@@ -63358,6 +63944,7 @@ impl PrefillEngine {
                         std::ptr::null()
                     }, // S_expert_ptrs
                 );
+                }
             }
         }
         if let Some((diag_config, diag_fetch)) = diag_moe_w2_lane_fns {
@@ -63817,6 +64404,7 @@ impl PrefillEngine {
         }
 
         // 11. Zero accumulator then scatter-add with topk_weights * scale_factor.
+        set_vram_phase("routed_scatter");
         // Opt-in barriers for diagnosing live fused-w2 -> scatter visibility issues.
         let use_copy_stream_scatter =
             std::env::var("KRASIS_PREFILL_SCATTER_ON_COPY_STREAM").is_ok();
@@ -65346,6 +65934,7 @@ impl PrefillEngine {
         let mut latent_shared_output_ptr: Option<u64> = None;
 
         // 12. Wait for shared expert on shared_stream, then add to accumulator with sigmoid gate
+        set_vram_phase("shared_add");
         if has_shared {
             let shared_add_on_shared_stream = !force_sync_shared_expert
                 && std::env::var("KRASIS_PREFILL_SHARED_ADD_ON_SHARED_STREAM").is_ok();
@@ -65424,6 +66013,16 @@ impl PrefillEngine {
                 0,
                 m.checked_mul(h)
                     .ok_or_else(|| "MLA MoE shared-output trace size overflow".to_string())?,
+            )?;
+            self.record_prefill_device_trace_all_layer_bf16_row(
+                PDT_LAYER_MOE_SHARED_OUTPUT_BF16_LAST,
+                layer_idx,
+                0,
+                trace_moe_last_pos,
+                trace_moe_token_id,
+                s1_buf,
+                trace_moe_last_row,
+                h,
             )?;
 
             if diag_moe_branch_enabled {
@@ -66545,6 +67144,7 @@ impl PrefillEngine {
         }
 
         // 13. Convert routed accumulator to layer output.
+        set_vram_phase("output");
         if latent_moe {
             let latent_bf16 = *self.scratch.d_moe_expert_out.device_ptr();
             let ct = std::cmp::max(32, ((std::cmp::min(1024, expert_h) + 31) / 32) * 32) as u32;
@@ -67096,6 +67696,15 @@ impl PrefillEngine {
             }
         }
 
+        // The cold expert slab is shared by every routed layer. Its H2D stream
+        // must not begin reusing the slab for a later layer/chunk until this
+        // layer's main-stream Marlin consumers have finished reading it. The
+        // copy->compute event above protects the current consumer; this
+        // compute->copy event protects the next producer without a host sync.
+        if use_ptr_table && trace_cold_count > 0 && self.d_cold_staging.is_some() {
+            self.order_copy_stream_after_compute_for_cold_staging()?;
+        }
+
         // NOTE: Pin-as-you-go caching is deferred to rolling-scan pipeline (multi-chunk only).
         // Single-chunk prompts have no cross-chunk reuse, so pinning wastes VRAM and fragments
         // the allocator. The fused_pin_queue data is available when rolling-scan is implemented.
@@ -67114,6 +67723,7 @@ impl PrefillEngine {
             }
         }
 
+        set_vram_phase("complete");
         Ok(())
     }
 
@@ -67686,6 +68296,8 @@ impl PrefillEngine {
         }
 
         // Phase 3: build gather/scatter maps (applies scale_factor to weights)
+        // BF16 validation uses the deterministic expert/token/top-k ordering.
+        // Production INT4/INT8 keeps the existing atomic map builder.
         let use_stable_moe_maps = self.config.expert_bits == 16;
         let route_map_builder = if use_stable_moe_maps {
             "moe_build_maps_stable_kernel"
@@ -69046,14 +69658,21 @@ impl PrefillEngine {
                                 let next_buf_previously_used = ci + 1 >= 2;
                                 unsafe {
                                     cuda_sys::lib().cuEventRecord(self.compute_event, self.stream);
-                                    // BF16 cold H2D uses synchronous pageable copies, so copy_stream
-                                    // waits do not order the host copy before staging-buffer reuse.
-                                    if bits == 16 && next_buf_previously_used {
+                                    // dma_expert_to_buf uses synchronous cuMemcpyHtoD_v2 for every
+                                    // expert format because the source allocations are pageable.
+                                    // That host copy is not enqueued on copy_stream, so the stream
+                                    // wait above cannot protect a staging buffer from reuse. Wait on
+                                    // the compute event on the host before overwriting either INT4,
+                                    // INT8, or BF16 weights that Marlin/cuBLAS may still be reading.
+                                    if synchronous_cold_staging_reuse_requires_host_wait(
+                                        next_buf_previously_used,
+                                        false,
+                                    ) {
                                         let err =
                                             cuda_sys::lib().cuEventSynchronize(self.compute_event);
                                         if err != cuda_sys::CUresult::CUDA_SUCCESS {
                                             return Err(format!(
-                                                "BF16 cold staging reuse wait failed: {:?}",
+                                                "synchronous cold staging reuse wait failed: {:?}",
                                                 err
                                             ));
                                         }
@@ -73066,6 +73685,65 @@ impl PrefillEngine {
         }
         self.pinning_pool_expert_bytes = expert_bytes;
 
+        let moe_layer_indices: Vec<usize> = (0..self.config.num_hidden_layers)
+            .filter(|&i| self.layer_weights[i].moe_gate_ptr != 0)
+            .collect();
+        if moe_layer_indices.len() != num_moe_layers {
+            return Err(format!(
+                "prefill pinning routed layer count mismatch: gates={} prescan={}",
+                moe_layer_indices.len(), num_moe_layers,
+            ));
+        }
+        let mut expert_payload_bytes = Vec::with_capacity(num_moe_layers);
+        for (mi, &layer_idx) in moe_layer_indices.iter().enumerate() {
+            if prescan_counts[mi].len() != n_experts {
+                return Err(format!(
+                    "prefill pinning layer {} count width {} != routed experts {}",
+                    layer_idx,
+                    prescan_counts[mi].len(),
+                    n_experts,
+                ));
+            }
+            let moe_idx = self.layer_weights[layer_idx].moe_layer_idx.ok_or_else(|| {
+                format!("prefill pinning layer {layer_idx} has no MoE storage index")
+            })?;
+            let moe_data = self
+                .moe_layers
+                .get(moe_idx)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| format!("prefill pinning layer {layer_idx} has no expert data"))?;
+            if moe_data.experts.len() != n_experts {
+                return Err(format!(
+                    "prefill pinning layer {} expert width {} != {}",
+                    layer_idx,
+                    moe_data.experts.len(),
+                    n_experts,
+                ));
+            }
+            let mut payloads = Vec::with_capacity(n_experts);
+            for (expert_idx, expert) in moe_data.experts.iter().enumerate() {
+                let payload = expert
+                    .w13_packed_bytes
+                    .checked_add(expert.w13_scales_bytes)
+                    .and_then(|value| value.checked_add(expert.w2_packed_bytes))
+                    .and_then(|value| value.checked_add(expert.w2_scales_bytes))
+                    .ok_or_else(|| {
+                        format!(
+                            "prefill pinning payload overflow at layer {} expert {}",
+                            layer_idx, expert_idx,
+                        )
+                    })?;
+                if payload == 0 || payload > expert_bytes {
+                    return Err(format!(
+                        "prefill pinning payload {} at layer {} expert {} exceeds maximum slot {}",
+                        payload, layer_idx, expert_idx, expert_bytes,
+                    ));
+                }
+                payloads.push(payload);
+            }
+            expert_payload_bytes.push(payloads);
+        }
+
         // Measure free VRAM at runtime
         let (free, _total) = unsafe {
             let mut f = 0usize;
@@ -73080,22 +73758,35 @@ impl PrefillEngine {
             .saturating_mul(1024 * 1024);
         let hard_floor =
             (crate::vram_monitor::VRAM_HARD_EXIT_FLOOR_MB as usize).saturating_mul(1024 * 1024);
-        let mut max_active_for_cold = 0usize;
+        // Cold staging uses fixed maximum-size slots so every slot can receive
+        // either source precision without reallocating or changing its pointer
+        // layout. Reserve the bytes that CUDA will actually allocate; compact
+        // manifest-derived payloads are used only by the persistent pin pool.
+        let mut cold_reserve_slots = 0usize;
         for layer_chunks in &self.prescan_active_experts {
             for active in layer_chunks {
-                max_active_for_cold = max_active_for_cold.max(active.len());
+                let mut seen = vec![false; n_experts];
+                let mut slots = 0usize;
+                for &expert in active {
+                    if expert >= n_experts || seen[expert] {
+                        continue;
+                    }
+                    seen[expert] = true;
+                    slots = slots.saturating_add(1);
+                }
+                cold_reserve_slots = cold_reserve_slots.max(slots);
             }
         }
-        if max_active_for_cold == 0 {
-            max_active_for_cold = prescan_counts
+        if cold_reserve_slots == 0 {
+            cold_reserve_slots = prescan_counts
                 .iter()
-                .map(|layer| layer.iter().filter(|&&cnt| cnt > 0).count())
+                .map(|counts| counts.iter().filter(|&&count| count > 0).count())
                 .max()
                 .unwrap_or(0);
         }
-        let cold_reserve = max_active_for_cold
-            .min(n_experts)
-            .saturating_mul(expert_bytes);
+        let cold_reserve = cold_reserve_slots
+            .checked_mul(expert_bytes)
+            .ok_or_else(|| "prefill pinning cold-reserve byte overflow".to_string())?;
         let pool_budget = free
             .saturating_sub(safety)
             .saturating_sub(hard_floor)
@@ -73107,34 +73798,30 @@ impl PrefillEngine {
             .unwrap_or(usize::MAX);
         let pool_budget = pool_budget.min(measured_budget);
 
-        // Total pinnable experts across all layers
-        let max_total_experts = pool_budget / expert_bytes;
-        let experts_per_layer = std::cmp::min(max_total_experts / num_moe_layers, n_experts);
-
-        if experts_per_layer == 0 {
+        let pin_experts = select_prefill_pinning_experts(
+            prescan_counts,
+            &expert_payload_bytes,
+            pool_budget,
+        )?;
+        let total_pinned: usize = pin_experts.iter().map(Vec::len).sum();
+        if total_pinned == 0 {
             if stderr_debug_enabled() {
                 eprintln!("[PREFILL] Pinning pool: insufficient measured surplus ({:.0} MB free, {:.1} MB safety, {:.1} MB hard floor, {:.1} MB cold reserve, budget {:?} MB), skipping",
                     free as f64 / 1e6, safety as f64 / 1e6, hard_floor as f64 / 1e6, cold_reserve as f64 / 1e6, self.optional_pinning_budget_mb);
             }
             return Ok(0);
         }
-
-        let active_counts: Vec<usize> = prescan_counts
+        let pool_bytes = pin_experts
             .iter()
-            .map(|layer| layer.iter().filter(|&&cnt| cnt > 0).count())
-            .collect();
-        let pin_counts: Vec<usize> = active_counts
-            .iter()
-            .map(|&active| std::cmp::min(active, experts_per_layer))
-            .collect();
-        let total_pinned: usize = pin_counts.iter().sum();
-        if total_pinned == 0 {
-            if stderr_debug_enabled() || prefill_debug_enabled() {
-                eprintln!("[PREFILL] Pinning pool: no active experts in prescan, skipping");
-            }
-            return Ok(0);
-        }
-        let pool_bytes = total_pinned * expert_bytes;
+            .enumerate()
+            .try_fold(0usize, |total, (layer, experts)| {
+                experts.iter().try_fold(total, |subtotal, &expert| {
+                    subtotal
+                        .checked_add(expert_payload_bytes[layer][expert])
+                        .ok_or_else(|| "prefill pinning pool byte overflow".to_string())
+                })
+            })?;
+        let max_pinned_per_layer = pin_experts.iter().map(Vec::len).max().unwrap_or(0);
 
         if stderr_debug_enabled() {
             let avg_pinned = total_pinned as f64 / num_moe_layers as f64;
@@ -73145,7 +73832,7 @@ impl PrefillEngine {
                 cold_reserve as f64 / 1e6,
                 self.measured_scratch_alloc_overhead_bytes as f64 / 1e6,
                 self.optional_pinning_budget_mb,
-                experts_per_layer,
+                max_pinned_per_layer,
                 n_experts,
                 total_pinned,
                 avg_pinned,
@@ -73195,86 +73882,100 @@ impl PrefillEngine {
             return Ok(0);
         }
 
-        // For each MoE layer, sort experts by activation count and pin the top N
-        let mut offsets: Vec<Vec<Option<usize>>> = vec![vec![None; n_experts]; num_moe_layers];
-
-        // Identify MoE layers
-        let moe_layer_indices: Vec<usize> = (0..self.config.num_hidden_layers)
-            .filter(|&i| self.layer_weights[i].moe_gate_ptr != 0)
-            .collect();
-
+        // Pack the selected records contiguously at their actual precision-derived
+        // sizes. Keep ownership local until every async copy has completed so an
+        // error cannot leak the raw CUDA allocation.
         let t_pin = Instant::now();
+        let fill_result = (|| -> Result<Vec<Vec<Option<usize>>>, String> {
+            let mut offsets: Vec<Vec<Option<usize>>> =
+                vec![vec![None; n_experts]; num_moe_layers];
+            let mut pool_offset = 0usize;
+            for (mi, &layer_idx) in moe_layer_indices.iter().enumerate() {
+                let moe_idx = self.layer_weights[layer_idx].moe_layer_idx.ok_or_else(|| {
+                    format!("prefill pinning layer {layer_idx} lost its MoE storage index")
+                })?;
+                let moe_data = self
+                    .moe_layers
+                    .get(moe_idx)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| {
+                        format!("prefill pinning layer {layer_idx} lost its expert data")
+                    })?;
 
-        let mut layer_base_offset = 0usize;
-        for (mi, &layer_idx) in moe_layer_indices.iter().enumerate() {
-            if mi >= num_moe_layers {
-                break;
-            }
-
-            // Sort experts by activation count (descending)
-            let mut ranked: Vec<(usize, u32)> = prescan_counts[mi]
-                .iter()
-                .enumerate()
-                .map(|(eid, &cnt)| (eid, cnt))
-                .collect();
-            ranked.sort_by(|a, b| b.1.cmp(&a.1));
-
-            let moe_idx = match self.layer_weights[layer_idx].moe_layer_idx {
-                Some(idx) => idx,
-                None => continue,
-            };
-
-            // Pin top experts
-            for rank in 0..pin_counts[mi] {
-                let (eid, _cnt) = ranked[rank];
-                let pool_offset = layer_base_offset + rank * expert_bytes;
-                offsets[mi][eid] = Some(pool_offset);
-
-                // DMA expert weights from CPU to pinning pool
-                if let Some(Some(moe_data)) = self.moe_layers.get(moe_idx) {
-                    if eid < moe_data.experts.len() {
-                        let e = &moe_data.experts[eid];
-                        let dst = pool_base + pool_offset as u64;
-                        let mut off = 0u64;
-                        unsafe {
-                            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                dst + off,
-                                e.w13_packed_ptr as *const _,
-                                e.w13_packed_bytes,
-                                self.copy_stream,
-                            );
-                            off += self.w1_packed_per_expert as u64;
-                            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                dst + off,
-                                e.w13_scales_ptr as *const _,
-                                e.w13_scales_bytes,
-                                self.copy_stream,
-                            );
-                            off += self.w1_scales_per_expert as u64;
-                            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                dst + off,
-                                e.w2_packed_ptr as *const _,
-                                e.w2_packed_bytes,
-                                self.copy_stream,
-                            );
-                            off += self.w2_packed_per_expert as u64;
-                            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                dst + off,
-                                e.w2_scales_ptr as *const _,
-                                e.w2_scales_bytes,
-                                self.copy_stream,
-                            );
-                        }
+                for &eid in &pin_experts[mi] {
+                    let e = moe_data.experts.get(eid).ok_or_else(|| {
+                        format!(
+                            "prefill pinning expert {} is missing at layer {}",
+                            eid, layer_idx,
+                        )
+                    })?;
+                    let payload = expert_payload_bytes[mi][eid];
+                    let end = pool_offset
+                        .checked_add(payload)
+                        .ok_or_else(|| "prefill pinning pool offset overflow".to_string())?;
+                    if end > pool_bytes {
+                        return Err(format!(
+                            "prefill pinning packed range exceeds pool at layer {} expert {}",
+                            layer_idx, eid,
+                        ));
                     }
+                    offsets[mi][eid] = Some(pool_offset);
+
+                    let dst = pool_base + pool_offset as u64;
+                    let mut component_offset = 0u64;
+                    for &(src, bytes) in &[
+                        (e.w13_packed_ptr, e.w13_packed_bytes),
+                        (e.w13_scales_ptr, e.w13_scales_bytes),
+                        (e.w2_packed_ptr, e.w2_packed_bytes),
+                        (e.w2_scales_ptr, e.w2_scales_bytes),
+                    ] {
+                        let err = unsafe {
+                            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                dst + component_offset,
+                                src as *const _,
+                                bytes,
+                                self.copy_stream,
+                            )
+                        };
+                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!(
+                                "prefill pinning DMA failed at layer {} expert {}: {:?}",
+                                layer_idx, eid, err,
+                            ));
+                        }
+                        component_offset += bytes as u64;
+                    }
+                    if component_offset as usize != payload {
+                        return Err(format!(
+                            "prefill pinning payload mismatch at layer {} expert {}: copied={} expected={}",
+                            layer_idx, eid, component_offset, payload,
+                        ));
+                    }
+                    pool_offset = end;
                 }
             }
-            layer_base_offset += pin_counts[mi] * expert_bytes;
-        }
-
-        // Wait for all DMA to complete
-        unsafe {
-            cuda_sys::lib().cuStreamSynchronize(self.copy_stream);
-        }
+            if pool_offset != pool_bytes {
+                return Err(format!(
+                    "prefill pinning pool coverage mismatch: packed={} allocated={}",
+                    pool_offset, pool_bytes,
+                ));
+            }
+            let err = unsafe { cuda_sys::lib().cuStreamSynchronize(self.copy_stream) };
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("prefill pinning completion sync failed: {:?}", err));
+            }
+            Ok(offsets)
+        })();
+        let offsets = match fill_result {
+            Ok(offsets) => offsets,
+            Err(message) => {
+                unsafe {
+                    cuda_sys::lib().cuStreamSynchronize(self.copy_stream);
+                    cuda_sys::lib().cuMemFree_v2(pool_base);
+                }
+                return Err(message);
+            }
+        };
 
         let pin_ms = t_pin.elapsed().as_secs_f64() * 1000.0;
         if stderr_debug_enabled() || prefill_debug_enabled() {
@@ -73290,7 +73991,7 @@ impl PrefillEngine {
         self.pinned_expert_offsets = offsets;
         self.pinning_active = true;
 
-        Ok(pin_counts.iter().copied().max().unwrap_or(0))
+        Ok(max_pinned_per_layer)
     }
 
     /// Selective DMA: copy only specific experts to fused buffer.
@@ -73318,6 +74019,7 @@ impl PrefillEngine {
             if eid >= moe_data.experts.len() {
                 continue;
             }
+            let e = &moe_data.experts[eid];
 
             let w1_off = (eid * self.w1_packed_per_expert) as u64;
             let w1s_off = (eid * self.w1_scales_per_expert) as u64;
@@ -73327,31 +74029,21 @@ impl PrefillEngine {
             // Tier 1: Check prefill cache + HCS (GPU-resident experts)
             if let Some((hw1p, hw1s, hw2p, hw2s)) = self.expert_lookup(model_layer_idx, eid) {
                 // Fast D2D from HCS cache to fused buffer
-                unsafe {
-                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(
-                        w1_base + w1_off,
-                        hw1p,
-                        self.w1_packed_per_expert,
-                        self.copy_stream,
-                    );
-                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(
-                        w1s_base + w1s_off,
-                        hw1s,
-                        self.w1_scales_per_expert,
-                        self.copy_stream,
-                    );
-                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(
-                        w2_base + w2_off,
-                        hw2p,
-                        self.w2_packed_per_expert,
-                        self.copy_stream,
-                    );
-                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(
-                        w2s_base + w2s_off,
-                        hw2s,
-                        self.w2_scales_per_expert,
-                        self.copy_stream,
-                    );
+                for (name, dst, src, bytes) in [
+                    ("w13 packed", w1_base + w1_off, hw1p, e.w13_packed_bytes),
+                    ("w13 scales", w1s_base + w1s_off, hw1s, e.w13_scales_bytes),
+                    ("w2 packed", w2_base + w2_off, hw2p, e.w2_packed_bytes),
+                    ("w2 scales", w2s_base + w2s_off, hw2s, e.w2_scales_bytes),
+                ] {
+                    let err = unsafe {
+                        cuda_sys::lib().cuMemcpyDtoDAsync_v2(dst, src, bytes, self.copy_stream)
+                    };
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "prefill HCS D2D {} failed at layer {} expert {}: {:?}",
+                            name, model_layer_idx, eid, err,
+                        ));
+                    }
                 }
                 hcs += 1;
                 continue;
@@ -73371,64 +74063,71 @@ impl PrefillEngine {
                 // Fast D2D from pinning pool to fused buffer
                 let src = pool_base + pool_off as u64;
                 let mut src_off = 0u64;
-                unsafe {
-                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(
-                        w1_base + w1_off,
-                        src + src_off,
-                        self.w1_packed_per_expert,
-                        self.copy_stream,
-                    );
-                    src_off += self.w1_packed_per_expert as u64;
-                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(
-                        w1s_base + w1s_off,
-                        src + src_off,
-                        self.w1_scales_per_expert,
-                        self.copy_stream,
-                    );
-                    src_off += self.w1_scales_per_expert as u64;
-                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(
-                        w2_base + w2_off,
-                        src + src_off,
-                        self.w2_packed_per_expert,
-                        self.copy_stream,
-                    );
-                    src_off += self.w2_packed_per_expert as u64;
-                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(
-                        w2s_base + w2s_off,
-                        src + src_off,
-                        self.w2_scales_per_expert,
-                        self.copy_stream,
-                    );
+                for (name, dst, bytes) in [
+                    ("w13 packed", w1_base + w1_off, e.w13_packed_bytes),
+                    ("w13 scales", w1s_base + w1s_off, e.w13_scales_bytes),
+                    ("w2 packed", w2_base + w2_off, e.w2_packed_bytes),
+                    ("w2 scales", w2s_base + w2s_off, e.w2_scales_bytes),
+                ] {
+                    let err = unsafe {
+                        cuda_sys::lib().cuMemcpyDtoDAsync_v2(
+                            dst,
+                            src + src_off,
+                            bytes,
+                            self.copy_stream,
+                        )
+                    };
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "prefill pinning D2D {} failed at layer {} expert {}: {:?}",
+                            name, model_layer_idx, eid, err,
+                        ));
+                    }
+                    src_off += bytes as u64;
                 }
                 pinned += 1;
             } else {
                 // Tier 3: Cold - H2D from CPU via copy_stream
-                let e = &moe_data.experts[eid];
-                unsafe {
-                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                for (name, dst, src, bytes) in [
+                    (
+                        "w13 packed",
                         w1_base + w1_off,
-                        e.w13_packed_ptr as *const _,
+                        e.w13_packed_ptr,
                         e.w13_packed_bytes,
-                        self.copy_stream,
-                    );
-                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    ),
+                    (
+                        "w13 scales",
                         w1s_base + w1s_off,
-                        e.w13_scales_ptr as *const _,
+                        e.w13_scales_ptr,
                         e.w13_scales_bytes,
-                        self.copy_stream,
-                    );
-                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    ),
+                    (
+                        "w2 packed",
                         w2_base + w2_off,
-                        e.w2_packed_ptr as *const _,
+                        e.w2_packed_ptr,
                         e.w2_packed_bytes,
-                        self.copy_stream,
-                    );
-                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    ),
+                    (
+                        "w2 scales",
                         w2s_base + w2s_off,
-                        e.w2_scales_ptr as *const _,
+                        e.w2_scales_ptr,
                         e.w2_scales_bytes,
-                        self.copy_stream,
-                    );
+                    ),
+                ] {
+                    let err = unsafe {
+                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            dst,
+                            src as *const _,
+                            bytes,
+                            self.copy_stream,
+                        )
+                    };
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "prefill cold H2D {} failed at layer {} expert {}: {:?}",
+                            name, model_layer_idx, eid, err,
+                        ));
+                    }
                 }
                 cold += 1;
             }
@@ -74403,7 +75102,6 @@ impl PrefillEngine {
         } else {
             return Err("No LM head (neither Marlin nor BF16)".to_string());
         }
-
         // Download logits
         self.h_logits.resize(v, 0.0);
         let h_logits_host_ptr = self.h_logits.as_ptr() as usize;
@@ -76093,6 +76791,22 @@ fn deepseek_v4_native_history_elems(
         .ok_or_else(|| "DeepSeek-V4 Native prefill history allocation overflow".to_string())
 }
 
+#[inline]
+fn deepseek_v4_native_prefix_rows_to_restore(first_group: usize) -> usize {
+    // d_deepseek_v4_native_history is a single expanded scratch view shared
+    // across all layers/compressors. Any non-zero prefix must be restored for
+    // every invocation, including later prompt chunks.
+    first_group
+}
+
+#[inline]
+fn synchronous_cold_staging_reuse_requires_host_wait(
+    buffer_previously_used: bool,
+    copy_is_stream_ordered: bool,
+) -> bool {
+    buffer_previously_used && !copy_is_stream_ordered
+}
+
 /// Compute total VRAM bytes needed for prefill buffers as a function of max_tokens.
 /// Returns (fixed_bytes, per_token_bytes) including both scratch AND fused MoE buffers.
 /// This is used to dynamically compute the largest chunk size that fits in available VRAM.
@@ -76350,7 +77064,7 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     if config.n_routed_experts > 0 {
         let n_routed = config.n_routed_experts;
         let gs = config.group_size.max(1);
-        let bits = config.expert_bits as usize;
+        let bits = config.max_expert_bits as usize;
         let w13_n = if config.moe_gated {
             2 * moe_inter
         } else {
@@ -76369,9 +77083,9 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
             + 4; // d_gather_src_map (i32)
         fixed += n_routed * block_size_moe * per_sorted_entry;
 
-        // Fused expert_ids buffer: fused_blocks * 4 (approx n_routed + padding)
-        // and num_tokens_post: 4 bytes. Small, just add a rough estimate.
-        fixed += (n_routed + 1024) * 4 + 4;
+        // Canonical fused expert map plus the two precision-filtered maps and
+        // num_tokens_post. All are sized from runtime fused geometry.
+        fixed += (n_routed + 1024) * 4 * 3 + 4;
 
         // Cold staging is allocated dynamically from actual routed experts after
         // gating, so it is not a fixed prefill allocation.
@@ -76622,14 +77336,14 @@ fn estimate_scratch_vram_for_prompt(
     ); // shared routed-MoE / split-dense activation scratch
     add(fsc, 4); // gather_src_map
     add(max_tokens.saturating_mul(topk), 4); // gather_weight_map
-    add(fsc / block_size_moe + n_routed, 4); // fused_expert_ids
+    add(fsc / block_size_moe + n_routed, 4 * 3); // canonical + INT4/INT8 expert ids
     add(1, 4); // num_tokens_post
     add(config.n_routed_experts.max(1), 4); // expert_counts
     add(config.n_routed_experts.max(1).saturating_add(1), 4); // expert_offsets
     add(config.n_routed_experts.max(1), 4); // write_offsets
 
     if config.n_routed_experts > 0 {
-        let bits = config.expert_bits as usize;
+        let bits = config.max_expert_bits as usize;
         let gs = config.group_size.max(1);
         let w13_bytes = h.saturating_mul(w1_n).saturating_mul(bits) / 8;
         let w13_scales = (h / gs).saturating_mul(w1_n).saturating_mul(2);
@@ -77043,6 +77757,14 @@ pub fn allocate_scratch_for_prompt(
             let fb = fsc / block_size_moe + n_routed;
             alloc_i32(fb.max(1), "fused_expert_ids")?
         },
+        d_fused_expert_ids_int4: {
+            let fb = fsc / block_size_moe + n_routed;
+            alloc_i32(fb.max(1), "fused_expert_ids_int4")?
+        },
+        d_fused_expert_ids_int8: {
+            let fb = fsc / block_size_moe + n_routed;
+            alloc_i32(fb.max(1), "fused_expert_ids_int8")?
+        },
         d_num_tokens_post: alloc_i32(1, "num_tokens_post")?,
         fused_sorted_count: fsc,
         fused_blocks: fsc / block_size_moe + n_routed,
@@ -77058,7 +77780,7 @@ pub fn allocate_scratch_for_prompt(
                 } else {
                     moe_inter
                 };
-                h * w13_n * config.expert_bits as usize / 8
+                h * w13_n * config.max_expert_bits as usize / 8
             } else {
                 1
             };
@@ -77079,7 +77801,7 @@ pub fn allocate_scratch_for_prompt(
         },
         d_expert_w2_packed_a: {
             let w2_size = if config.n_routed_experts > 0 {
-                moe_inter * h * config.expert_bits as usize / 8
+                moe_inter * h * config.max_expert_bits as usize / 8
             } else {
                 1
             };
@@ -77100,7 +77822,7 @@ pub fn allocate_scratch_for_prompt(
                 } else {
                     moe_inter
                 };
-                h * w13_n * config.expert_bits as usize / 8
+                h * w13_n * config.max_expert_bits as usize / 8
             } else {
                 1
             };
@@ -77121,7 +77843,7 @@ pub fn allocate_scratch_for_prompt(
         },
         d_expert_w2_packed_b: {
             let w2_size = if config.n_routed_experts > 0 {
-                moe_inter * h * config.expert_bits as usize / 8
+                moe_inter * h * config.max_expert_bits as usize / 8
             } else {
                 1
             };
@@ -77927,12 +78649,78 @@ mod chunk_plan_tests {
     use super::{
         build_balanced_prefill_chunk_plan, build_balanced_prefill_chunk_plan_at_boundary,
         build_image_aware_prefill_chunk_plan, build_prefill_chunk_plan,
-        build_prefill_chunk_plan_at_boundary, glm5_hc_temp_state_elements_from_geometry,
-        kimi_delta_state_elements_from_geometry, portable_predicted_w1_requires_exact_resize,
-        prefill_chunk_guard_prompt_tokens, project_prefill_runtime_reserve_bytes,
-        shared_moe_inter_scratch_elements, stage_exact_export_launch_scalars,
-        stage_exact_export_range, PortablePredictedW1Policy,
+        build_prefill_chunk_plan_at_boundary, deepseek_v4_native_prefix_rows_to_restore,
+        glm5_hc_temp_state_elements_from_geometry, kimi_delta_state_elements_from_geometry,
+        marlin_moe_uses_sparse_block_filter,
+        portable_predicted_w1_requires_exact_resize, prefill_chunk_guard_prompt_tokens,
+        project_prefill_runtime_reserve_bytes, shared_moe_inter_scratch_elements,
+        select_prefill_pinning_experts, stage_exact_export_launch_scalars, stage_exact_export_range,
+        synchronous_cold_staging_reuse_requires_host_wait, PortablePredictedW1Policy,
     };
+
+    #[test]
+    fn mixed_marlin_prefill_enables_negative_sentinel_filtering_only_for_heterogeneous_layers() {
+        assert!(marlin_moe_uses_sparse_block_filter(true));
+        assert!(!marlin_moe_uses_sparse_block_filter(false));
+    }
+
+    #[test]
+    fn homogeneous_prefill_pinning_preserves_complete_equal_layer_rounds() {
+        let counts = vec![vec![9, 7, 0], vec![8, 6, 5]];
+        let payloads = vec![vec![100, 100, 100], vec![100, 100, 100]];
+        let selected = select_prefill_pinning_experts(&counts, &payloads, 500).unwrap();
+        assert_eq!(selected, vec![vec![0, 1], vec![0, 1]]);
+    }
+
+    #[test]
+    fn heterogeneous_prefill_pinning_charges_exact_selected_payloads() {
+        let counts = vec![vec![9, 7], vec![8, 6]];
+        let payloads = vec![vec![100, 200], vec![200, 100]];
+        let selected = select_prefill_pinning_experts(&counts, &payloads, 400).unwrap();
+        assert_eq!(selected, vec![vec![0], vec![0, 1]]);
+        let selected_bytes: usize = selected
+            .iter()
+            .enumerate()
+            .map(|(layer, experts)| {
+                experts
+                    .iter()
+                    .map(|&expert| payloads[layer][expert])
+                    .sum::<usize>()
+            })
+            .sum();
+        assert_eq!(selected_bytes, 400);
+    }
+
+    #[test]
+    fn prefill_pinning_rejects_inconsistent_payload_geometry() {
+        assert!(select_prefill_pinning_experts(&[vec![1]], &[vec![]], 100).is_err());
+        assert!(select_prefill_pinning_experts(&[vec![1]], &[vec![0]], 100).is_err());
+        assert!(select_prefill_pinning_experts(&[vec![1]], &[], 100).is_err());
+    }
+
+    #[test]
+    fn synchronous_cold_staging_reuse_waits_on_host_only_when_required() {
+        assert!(!synchronous_cold_staging_reuse_requires_host_wait(
+            false, false
+        ));
+        assert!(synchronous_cold_staging_reuse_requires_host_wait(
+            true, false
+        ));
+        assert!(!synchronous_cold_staging_reuse_requires_host_wait(
+            false, true
+        ));
+        assert!(!synchronous_cold_staging_reuse_requires_host_wait(
+            true, true
+        ));
+    }
+
+    #[test]
+    fn deepseek_v4_native_history_restores_every_nonempty_prefix() {
+        assert_eq!(deepseek_v4_native_prefix_rows_to_restore(0), 0);
+        assert_eq!(deepseek_v4_native_prefix_rows_to_restore(1), 1);
+        assert_eq!(deepseek_v4_native_prefix_rows_to_restore(6_000), 6_000);
+        assert_eq!(deepseek_v4_native_prefix_rows_to_restore(125_000), 125_000);
+    }
 
     #[test]
     fn glm5_hc_temp_state_is_checkpoint_geometry_derived() {
@@ -79118,6 +79906,7 @@ mod kernel_tests {
                     "tileq_rank_project_bf16",
                     "tileq_int3_gemv_bf16",
                     "hqq_dequant_bf16",
+                    "hqq6_decode_gemv_bf16_vec4",
                 ],
             )
             .expect("Failed to load decode kernels PTX");
@@ -83351,6 +84140,302 @@ mod kernel_tests {
             &restored[retained_start * raw_head_dim..restore_end * raw_head_dim],
             &restore_bits[retained_start * raw_head_dim..restore_end * raw_head_dim],
         );
+    }
+
+    #[cfg(has_decode_kernels)]
+    #[test]
+    fn test_deepseek_v4_compressor_parallel_qb_is_bit_exact() {
+        use crate::weights::marlin::f32_to_bf16;
+
+        let ctx = GpuTestCtx::new();
+        let compressor = ctx.get_kernel("deepseek_v4_compressor_decode_kernel");
+        let qb = ctx.get_decode_kernel("hqq6_decode_gemv_bf16_vec4");
+
+        // Exact Vision-Exp production geometry. The synthetic payload keeps
+        // this invariant independent of a locally installed checkpoint while
+        // preserving the launch grid, shared-memory demand and buffer sizes
+        // of the workload implicated by the exact-state replay.
+        let qb_rows = 32_768usize;
+        let qb_cols = 1_024usize;
+        let qb_group_size = 128usize;
+        let qb_groups = qb_cols / qb_group_size;
+        let qb_packed_stride = qb_cols / 4 * 3;
+        let qb_scale_stride = qb_groups * std::mem::size_of::<f32>();
+        let qb_packed = ctx
+            .dev
+            .htod_copy(
+                (0..qb_rows * qb_packed_stride)
+                    .map(|index| index.wrapping_mul(37).wrapping_add(11) as u8)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let qb_scales = ctx
+            .dev
+            .htod_copy(
+                (0..qb_rows * qb_groups)
+                    .map(|index| 0.001f32 + (index % qb_groups) as f32 * 0.000125)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let qb_zeros = ctx
+            .dev
+            .htod_copy(
+                (0..qb_rows * qb_groups)
+                    .map(|index| 29.5f32 + (index % qb_groups) as f32 * 0.25)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let qb_input = ctx
+            .dev
+            .htod_copy(
+                (0..qb_cols)
+                    .map(|index| f32_to_bf16((index as f32 * 0.017).sin()))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+        let head_dim = 512usize;
+        let ratio = 128usize;
+        let state_elems = ratio * head_dim;
+        let kv_input = ctx
+            .dev
+            .htod_copy(
+                (0..head_dim)
+                    .map(|index| ((index * 41 + 17) % 109) as f32 * 0.019 - 1.0)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let score_input = ctx
+            .dev
+            .htod_copy(
+                (0..head_dim)
+                    .map(|index| ((index * 23 + 11) % 89) as f32 * 0.027 - 1.0)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let ape = ctx
+            .dev
+            .htod_copy(
+                (0..state_elems)
+                    .map(|index| ((index * 13 + 3) % 47) as f32 * 0.017 - 0.4)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let kv_state_host = (0..state_elems)
+            .map(|index| ((index * 17 + 9) % 103) as f32 * 0.021 - 1.0)
+            .collect::<Vec<_>>();
+        let score_state_host = (0..state_elems)
+            .map(|index| ((index * 29 + 5) % 97) as f32 * 0.033 - 1.0)
+            .collect::<Vec<_>>();
+
+        let mut main_stream: cuda_sys::CUstream = std::ptr::null_mut();
+        let mut qb_stream: cuda_sys::CUstream = std::ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                cuda_sys::lib().cuStreamCreate(
+                    &mut main_stream,
+                    cuda_sys::CUstream_flags::CU_STREAM_NON_BLOCKING as u32,
+                ),
+                cuda_sys::CUresult::CUDA_SUCCESS,
+            );
+            assert_eq!(
+                cuda_sys::lib().cuStreamCreate(
+                    &mut qb_stream,
+                    cuda_sys::CUstream_flags::CU_STREAM_NON_BLOCKING as u32,
+                ),
+                cuda_sys::CUresult::CUDA_SUCCESS,
+            );
+        }
+
+        let guard = 64usize;
+        let f32_canary = f32::from_bits(0x4f1a_2b3c);
+        let bf16_canary = 0xa55au16;
+        let run = |position: i32, concurrent_qb: bool| {
+            let mut kv_state_guarded = vec![f32_canary; guard + state_elems + guard];
+            kv_state_guarded[guard..guard + state_elems].copy_from_slice(&kv_state_host);
+            let mut score_state_guarded = vec![f32_canary; guard + state_elems + guard];
+            score_state_guarded[guard..guard + state_elems].copy_from_slice(&score_state_host);
+            let mut d_kv_state = ctx.dev.htod_copy(kv_state_guarded).unwrap();
+            let mut d_score_state = ctx.dev.htod_copy(score_state_guarded).unwrap();
+            let mut d_output = ctx
+                .dev
+                .htod_copy(vec![f32_canary; guard + head_dim + guard])
+                .unwrap();
+            let d_position = ctx.dev.htod_copy(vec![position]).unwrap();
+            let mut d_qb_output = ctx
+                .dev
+                .htod_copy(vec![bf16_canary; guard + qb_rows + guard])
+                .unwrap();
+            ctx.dev.synchronize().unwrap();
+
+            unsafe {
+                if concurrent_qb {
+                    let mut q0 = *qb_packed.device_ptr() as u64;
+                    let mut q1 = *qb_scales.device_ptr() as u64;
+                    let mut q2 = *qb_zeros.device_ptr() as u64;
+                    let mut q3 = *qb_input.device_ptr() as u64;
+                    let mut q4 = *d_qb_output.device_ptr() as u64
+                        + (guard * std::mem::size_of::<u16>()) as u64;
+                    let mut q5 = qb_rows as i32;
+                    let mut q6 = qb_cols as i32;
+                    let mut q7 = qb_group_size as i32;
+                    let mut q8 = qb_packed_stride as i32;
+                    let mut q9 = qb_scale_stride as i32;
+                    let mut q10 = qb_scale_stride as i32;
+                    launch(
+                        qb,
+                        ((qb_rows / 8) as u32, 1, 1),
+                        (256, 1, 1),
+                        (qb_cols * std::mem::size_of::<u16>()) as u32,
+                        qb_stream,
+                        &mut [
+                            &mut q0 as *mut _ as *mut std::ffi::c_void,
+                            &mut q1 as *mut _ as *mut std::ffi::c_void,
+                            &mut q2 as *mut _ as *mut std::ffi::c_void,
+                            &mut q3 as *mut _ as *mut std::ffi::c_void,
+                            &mut q4 as *mut _ as *mut std::ffi::c_void,
+                            &mut q5 as *mut _ as *mut std::ffi::c_void,
+                            &mut q6 as *mut _ as *mut std::ffi::c_void,
+                            &mut q7 as *mut _ as *mut std::ffi::c_void,
+                            &mut q8 as *mut _ as *mut std::ffi::c_void,
+                            &mut q9 as *mut _ as *mut std::ffi::c_void,
+                            &mut q10 as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )
+                    .unwrap();
+                }
+
+                let mut c0 = *d_output.device_ptr() as u64
+                    + (guard * std::mem::size_of::<f32>()) as u64;
+                let mut c1 = *d_kv_state.device_ptr() as u64
+                    + (guard * std::mem::size_of::<f32>()) as u64;
+                let mut c2 = *d_score_state.device_ptr() as u64
+                    + (guard * std::mem::size_of::<f32>()) as u64;
+                let mut c3 = *kv_input.device_ptr() as u64;
+                let mut c4 = *score_input.device_ptr() as u64;
+                let mut c5 = *ape.device_ptr() as u64;
+                let mut c6 = *d_position.device_ptr() as u64;
+                let mut c7 = head_dim as i32;
+                let mut c8 = ratio as i32;
+                let mut c9 = 0i32;
+                launch(
+                    compressor,
+                    (head_dim as u32, 1, 1),
+                    (ratio as u32, 1, 1),
+                    (ratio * 3 * std::mem::size_of::<f32>()) as u32,
+                    main_stream,
+                    &mut [
+                        &mut c0 as *mut _ as *mut std::ffi::c_void,
+                        &mut c1 as *mut _ as *mut std::ffi::c_void,
+                        &mut c2 as *mut _ as *mut std::ffi::c_void,
+                        &mut c3 as *mut _ as *mut std::ffi::c_void,
+                        &mut c4 as *mut _ as *mut std::ffi::c_void,
+                        &mut c5 as *mut _ as *mut std::ffi::c_void,
+                        &mut c6 as *mut _ as *mut std::ffi::c_void,
+                        &mut c7 as *mut _ as *mut std::ffi::c_void,
+                        &mut c8 as *mut _ as *mut std::ffi::c_void,
+                        &mut c9 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )
+                .unwrap();
+                assert_eq!(
+                    cuda_sys::lib().cuStreamSynchronize(main_stream),
+                    cuda_sys::CUresult::CUDA_SUCCESS,
+                );
+                if concurrent_qb {
+                    assert_eq!(
+                        cuda_sys::lib().cuStreamSynchronize(qb_stream),
+                        cuda_sys::CUresult::CUDA_SUCCESS,
+                    );
+                }
+            }
+
+            let kv = ctx
+                .dev
+                .dtoh_sync_copy(&d_kv_state)
+                .unwrap()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>();
+            let score = ctx
+                .dev
+                .dtoh_sync_copy(&d_score_state)
+                .unwrap()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>();
+            let output = ctx
+                .dev
+                .dtoh_sync_copy(&d_output)
+                .unwrap()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>();
+            let qb_output = ctx.dev.dtoh_sync_copy(&d_qb_output).unwrap();
+            let f32_canary_bits = f32_canary.to_bits();
+            assert!(kv[..guard].iter().all(|bits| *bits == f32_canary_bits));
+            assert!(kv[guard + state_elems..]
+                .iter()
+                .all(|bits| *bits == f32_canary_bits));
+            assert!(score[..guard]
+                .iter()
+                .all(|bits| *bits == f32_canary_bits));
+            assert!(score[guard + state_elems..]
+                .iter()
+                .all(|bits| *bits == f32_canary_bits));
+            assert!(output[..guard]
+                .iter()
+                .all(|bits| *bits == f32_canary_bits));
+            assert!(output[guard + head_dim..]
+                .iter()
+                .all(|bits| *bits == f32_canary_bits));
+            assert!(qb_output[..guard].iter().all(|bits| *bits == bf16_canary));
+            assert!(qb_output[guard + qb_rows..]
+                .iter()
+                .all(|bits| *bits == bf16_canary));
+            (kv, score, output, qb_output)
+        };
+
+        // 5968 is the exact first decode position of the retained ledger
+        // request. 6015 additionally exercises the ratio-128 pooling boundary.
+        for position in [5_968i32, 6_015i32] {
+            let serial = run(position, false);
+            let mut first_qb_output = None;
+            for repeat in 0..32 {
+                let concurrent = run(position, true);
+                assert_eq!(
+                    concurrent.0, serial.0,
+                    "compressor KV state changed under Q-B overlap at position={position} repeat={repeat}",
+                );
+                assert_eq!(
+                    concurrent.1, serial.1,
+                    "compressor score state changed under Q-B overlap at position={position} repeat={repeat}",
+                );
+                assert_eq!(
+                    concurrent.2, serial.2,
+                    "compressor output changed under Q-B overlap at position={position} repeat={repeat}",
+                );
+                if let Some(reference) = first_qb_output.as_ref() {
+                    assert_eq!(
+                        &concurrent.3, reference,
+                        "Q-B output changed under identical overlap at position={position} repeat={repeat}",
+                    );
+                } else {
+                    first_qb_output = Some(concurrent.3);
+                }
+            }
+        }
+
+        unsafe {
+            assert_eq!(
+                cuda_sys::lib().cuStreamDestroy_v2(main_stream),
+                cuda_sys::CUresult::CUDA_SUCCESS,
+            );
+            assert_eq!(
+                cuda_sys::lib().cuStreamDestroy_v2(qb_stream),
+                cuda_sys::CUresult::CUDA_SUCCESS,
+            );
+        }
     }
 
     #[test]

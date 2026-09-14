@@ -476,6 +476,9 @@ def _krasis_runtime_code_hash() -> dict[str, Any]:
         "src/server.rs",
         "src/gpu_decode.rs",
         "src/gpu_prefill.rs",
+        "src/weights/mod.rs",
+        "src/weights/mixed_precision.rs",
+        "src/cuda/decode_kernels.cu",
         "src/cuda/prefill_kernels.cu",
     ]
     h = hashlib.sha256()
@@ -559,6 +562,44 @@ def _heatmap_route_signature(model: KrasisModel, args) -> dict[str, Any]:
     return _heatmap_route_signature_from_cfg(model.cfg, args)
 
 
+def _mixed_expert_manifest_metadata(path: Optional[str]) -> Optional[dict[str, Any]]:
+    """Return immutable treatment identity without trusting unvalidated values."""
+    if not path:
+        return None
+    manifest_path = os.path.abspath(os.path.expanduser(path))
+    with open(manifest_path, "rb") as handle:
+        raw = handle.read()
+    try:
+        manifest = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"mixed routed-expert manifest is invalid JSON: {manifest_path}: {exc}"
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise RuntimeError(
+            f"mixed routed-expert manifest root is not an object: {manifest_path}"
+        )
+    budget = manifest.get("budget")
+    source_int4 = manifest.get("source_int4")
+    source_int8 = manifest.get("source_int8")
+    if not all(isinstance(value, dict) for value in (budget, source_int4, source_int8)):
+        raise RuntimeError(
+            f"mixed routed-expert manifest lacks budget/source identity: {manifest_path}"
+        )
+    return {
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "basename": os.path.basename(manifest_path),
+        "format": manifest.get("format"),
+        "schema_version": manifest.get("schema_version"),
+        "checkpoint_sha256": manifest.get("checkpoint_sha256"),
+        "cache_namespace": manifest.get("cache_namespace"),
+        "requested_basis_points": budget.get("requested_basis_points"),
+        "achieved_added_bytes": budget.get("achieved_added_bytes"),
+        "source_int4_sha256": source_int4.get("sha256"),
+        "source_int8_sha256": source_int8.get("sha256"),
+    }
+
+
 def _runtime_heatmap_capture_config(args) -> dict[str, Any]:
     sidecar_manifest = None
     if args.hqq_sidecar_manifest:
@@ -571,6 +612,9 @@ def _runtime_heatmap_capture_config(args) -> dict[str, Any]:
         "gpu_expert_bits": int(args.gpu_expert_bits),
         "expert_group_size": int(args.expert_group_size),
         "gpu_expert_int4_calib": args.gpu_expert_int4_calib,
+        "mixed_expert_manifest": _mixed_expert_manifest_metadata(
+            args.mixed_expert_manifest
+        ),
         "cpu_expert_bits": int(args.cpu_expert_bits),
         "attention_quant": args.attention_quant,
         "hqq_cache_profile": args.hqq_cache_profile,
@@ -692,6 +736,9 @@ def _expected_heatmap_metadata(model: KrasisModel, args, prompts: list[str]) -> 
         "gpu_expert_bits": int(args.gpu_expert_bits),
         "expert_group_size": int(args.expert_group_size),
         "gpu_expert_int4_calib": args.gpu_expert_int4_calib,
+        "mixed_expert_manifest": _mixed_expert_manifest_metadata(
+            args.mixed_expert_manifest
+        ),
         "cpu_expert_bits": int(args.cpu_expert_bits),
         "attention_quant": args.attention_quant,
         "hqq_cache_profile": args.hqq_cache_profile,
@@ -2672,7 +2719,7 @@ def _remove_registry() -> None:
         _registry_file = None
 
 
-def _cleanup_cuda():
+def _cleanup_cuda(*, fail_closed: bool = False):
     """Release all CUDA contexts to prevent zombie GPU memory."""
     try:
         import torch
@@ -2681,7 +2728,82 @@ def _cleanup_cuda():
                 torch.cuda.synchronize(i)
             torch.cuda.empty_cache()
     except Exception:
+        if fail_closed:
+            raise
+
+
+def _largest_memory_mappings(limit: int = 12) -> str:
+    """Summarize the largest live VMAs for shutdown ownership diagnostics."""
+    mappings = []
+    with open("/proc/self/maps", encoding="utf-8") as maps_file:
+        for line in maps_file:
+            columns = line.rstrip("\n").split(maxsplit=5)
+            start_text, end_text = columns[0].split("-", 1)
+            size_kib = (int(end_text, 16) - int(start_text, 16)) // 1024
+            pathname = columns[5] if len(columns) == 6 else "[anonymous]"
+            mappings.append((size_kib, columns[1], pathname.replace(" ", "_")))
+    mappings.sort(reverse=True)
+    return ",".join(
+        f"{size_kib}k:{permissions}:{pathname}"
+        for size_kib, permissions, pathname in mappings[:limit]
+    )
+
+
+def _shutdown_observation(phase: str) -> None:
+    """Write a signal-safe shutdown boundary with process ownership data."""
+    fields = [f"phase={phase}", f"monotonic_s={time.monotonic():.6f}"]
+    try:
+        with open("/proc/self/status", encoding="utf-8") as status_file:
+            wanted = {"VmSize", "VmRSS", "VmData", "Threads"}
+            for line in status_file:
+                key, separator, value = line.partition(":")
+                if separator and key in wanted:
+                    fields.append(f"{key.lower()}={value.strip().replace(' ', '_')}")
+    except OSError:
         pass
+    try:
+        python_threads = threading.enumerate()
+        fields.append(f"python_threads={len(python_threads)}")
+        fields.append(
+            "python_thread_ids="
+            + ",".join(
+                f"{thread.name}:{thread.native_id}:{int(thread.daemon)}"
+                for thread in python_threads
+            )
+        )
+    except Exception as exc:
+        fields.append(f"thread_inventory_error={type(exc).__name__}")
+    if phase in {"python_model_collected", "final_cuda_cleanup_complete"}:
+        try:
+            fields.append(f"largest_mappings={_largest_memory_mappings()}")
+        except Exception as exc:
+            fields.append(f"mapping_inventory_error={type(exc).__name__}")
+    try:
+        os.write(2, ("KRASIS_SHUTDOWN " + " ".join(fields) + "\n").encode())
+    except OSError:
+        pass
+
+
+def _shutdown_inductor_compile_workers() -> None:
+    """Stop an already-created TorchInductor compile pool before interpreter exit.
+
+    Linear-attention warmup can create TorchInductor's subprocess-backed
+    compile pool. Explicitly invoking the pool's own shutdown hook before CUDA
+    teardown prevents its reader thread and worker process from racing normal
+    interpreter cleanup. Looking in ``sys.modules`` avoids importing or
+    creating Inductor during shutdown when this runtime did not use it.
+    """
+    async_compile = sys.modules.get("torch._inductor.async_compile")
+    if async_compile is None:
+        return
+    shutdown = getattr(async_compile, "shutdown_compile_workers", None)
+    if shutdown is None:
+        raise RuntimeError(
+            "loaded torch._inductor.async_compile has no shutdown_compile_workers"
+        )
+    logger.info("Stopping TorchInductor compile workers")
+    shutdown()
+    logger.info("TorchInductor compile workers stopped")
 
 
 def _tileq_configuration_error(gpu_expert_bits: int, tileq_cache: Optional[str]) -> Optional[str]:
@@ -2691,6 +2813,41 @@ def _tileq_configuration_error(gpu_expert_bits: int, tileq_cache: Optional[str])
     if gpu_expert_bits != 3 and tileq_cache:
         return "--tileq-cache is valid only with --gpu-expert-bits 3"
     return None
+
+
+def _mixed_expert_configuration_error(
+    gpu_expert_bits: int,
+    mixed_expert_manifest: Optional[str],
+    multi_gpu_mode: str = "auto",
+    dynamic_peer: bool = False,
+    expert_compression: bool = False,
+    dspark_mode: str = "off",
+) -> Optional[str]:
+    """Return fail-closed errors for not-yet-validated mixed combinations."""
+    if not mixed_expert_manifest:
+        return None
+    if gpu_expert_bits != 4:
+        return "--mixed-expert-manifest requires --gpu-expert-bits 4"
+    if multi_gpu_mode == "peer" or dynamic_peer:
+        return "mixed routed experts are not yet validated with peer expert serving"
+    if expert_compression:
+        return "mixed routed experts are not yet validated with expert compression"
+    if dspark_mode != "off":
+        return "mixed routed experts are not yet validated with D-Spark"
+    return None
+
+
+def _resolve_serving_gpu_count(args) -> int:
+    """Resolve serving topology and reject unqualified mixed execution."""
+    import torch
+
+    count = args.num_gpus or torch.cuda.device_count()
+    if args.mixed_expert_manifest and count != 1:
+        raise ValueError(
+            "mixed routed experts require exactly one selected GPU; "
+            f"mixed multi-GPU execution is not live-qualified (got {count})"
+        )
+    return count
 
 
 def main():
@@ -2738,6 +2895,7 @@ def main():
             "CFG_KV_DTYPE": "kv_dtype",
             "CFG_GPU_EXPERT_BITS": "gpu_expert_bits",
             "CFG_TILEQ_CACHE": "tileq_cache",
+            "CFG_MIXED_EXPERT_MANIFEST": "mixed_expert_manifest",
             "CFG_EXPERT_GROUP_SIZE": "expert_group_size",
             "CFG_GPU_EXPERT_INT4_CALIB": "gpu_expert_int4_calib",
             "CFG_CPU_EXPERT_BITS": "cpu_expert_bits",
@@ -2951,6 +3109,8 @@ def main():
                         help="Expert weight bits: 3 uses an explicit TileQ cache, 4/8 use Marlin, 16 is direct BF16 debug mode")
     parser.add_argument("--tileq-cache", default=None,
                         help="Explicit source-bound KTQ1 routed-expert artifact; required for GPU expert bits=3")
+    parser.add_argument("--mixed-expert-manifest", default=None,
+                        help="Explicit validated routed INT4/INT8 precision manifest; requires GPU expert bits=4")
     parser.add_argument("--expert-group-size", type=int, default=128, choices=[32, 64, 128],
                         help="Expert quantization group size for routed GPU/CPU expert caches")
     parser.add_argument("--gpu-expert-int4-calib", default="amax", choices=list(GPU_EXPERT_INT4_CALIB_CHOICES),
@@ -3164,6 +3324,24 @@ def main():
         os.environ.pop("KRASIS_EXPERT_COMPRESSION_PIPELINE", None)
     if args.multi_gpu_mode == "peer" and not args.hcs:
         parser.error("--multi-gpu-mode peer requires HCS")
+    mixed_error = _mixed_expert_configuration_error(
+        args.gpu_expert_bits,
+        args.mixed_expert_manifest,
+        args.multi_gpu_mode,
+        args.dynamic_peer,
+        args.expert_compression,
+        args.dspark_mode,
+    )
+    if mixed_error is not None:
+        parser.error(mixed_error)
+    if args.mixed_expert_manifest:
+        args.mixed_expert_manifest = os.path.abspath(
+            os.path.expanduser(args.mixed_expert_manifest)
+        )
+        if not os.path.isfile(args.mixed_expert_manifest):
+            parser.error(
+                f"mixed expert manifest not found: {args.mixed_expert_manifest}"
+            )
     peer_format_error = _peer_expert_format_error(args.gpu_expert_bits)
     if args.multi_gpu_mode == "peer" and peer_format_error is not None:
         parser.error(f"--multi-gpu-mode peer: {peer_format_error}")
@@ -3335,6 +3513,7 @@ def main():
         dense_mlp=args.dense_mlp_quant,
         gpu_expert_bits=args.gpu_expert_bits,
         tileq_cache=args.tileq_cache,
+        mixed_expert_manifest=args.mixed_expert_manifest,
         expert_group_size=args.expert_group_size,
         gpu_expert_int4_calib=args.gpu_expert_int4_calib,
         cpu_expert_bits=args.cpu_expert_bits,
@@ -3384,7 +3563,10 @@ def main():
 
     cfg = ModelConfig.from_model_path(args.model_path)
     num_layers = cfg.num_hidden_layers
-    num_gpus_available = args.num_gpus or torch.cuda.device_count()
+    try:
+        num_gpus_available = _resolve_serving_gpu_count(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.multi_gpu_mode == "peer" and num_gpus_available < 2:
         parser.error("--multi-gpu-mode peer requires at least two selected GPUs")
     if args.dynamic_peer and num_gpus_available < 2:
@@ -3410,9 +3592,19 @@ def main():
         expert_detail = "Experts: GPU BF16"
     elif args.gpu_expert_bits == 3:
         expert_detail = f"Experts: TileQ INT3 residual g{args.expert_group_size}"
+    elif args.mixed_expert_manifest:
+        mixed_metadata = _mixed_expert_manifest_metadata(args.mixed_expert_manifest)
+        requested_basis_points = int(mixed_metadata["requested_basis_points"])
+        requested_pct = requested_basis_points / 100.0
+        expert_detail = (
+            "Experts: GPU mixed INT4/INT8 "
+            f"+{requested_pct:g}% budget "
+            f"({int(mixed_metadata['achieved_added_bytes']):,} added bytes, "
+            f"INT4 {args.gpu_expert_int4_calib}) g{args.expert_group_size}"
+        )
     else:
         expert_detail = f"Experts: GPU INT{args.gpu_expert_bits} g{args.expert_group_size}"
-    if args.gpu_expert_bits == 4:
+    if args.gpu_expert_bits == 4 and not args.mixed_expert_manifest:
         expert_detail += f" ({args.gpu_expert_int4_calib})"
     _detail(f"{expert_detail}  |  Attention: {args.attention_quant}  |  KV: {args.kv_dtype}")
     _detail(f"Layer groups: {args.layer_group_size}  |  KV cache: {args.kv_cache_mb} MB  |  Threads: {args.krasis_threads}")
@@ -3937,8 +4129,8 @@ def main():
                 "Startup diag probe %s: prompt_len=%d baseline_free=%d prefill_post_alloc=%d prefill_min=%d "
                 "decode_min=%d post_cleanup=%d prefill_s=%.3f prefill_tps=%.2f "
                 "decode_s=%.3f decode_tps=%.2f",
-                label, prompt_len, baseline_free, prefill_post_alloc_free, prefill_min_free, decode_min_free,
-                post_cleanup_free, prefill_elapsed, prefill_tps, decode_elapsed, decode_tps,
+                label, prompt_len, baseline_free, prefill_post_alloc_free, prefill_min_free,
+                decode_min_free, post_cleanup_free, prefill_elapsed, prefill_tps, decode_elapsed, decode_tps,
             )
         if vram_ledger:
             logger.info(
@@ -3957,6 +4149,12 @@ def main():
                 decode_elapsed,
             )
         return prompt_len, baseline_free, prefill_post_alloc_free, prefill_min_free, decode_min_free
+
+    # A 1 ms polling cadence can miss brief CUDA allocation low-waters. During
+    # these startup probes only, the Rust scratch-release boundary handshakes
+    # with the existing monitor thread so every calibrated demand point covers
+    # the operation that produced the measured transient.
+    vram_monitor.enable_precision_windows()
 
     short_prompt = _make_startup_calibration_prompts(_model, [short_target])[0]
     short_tokens, short_baseline_free, short_prefill_post_alloc, short_prefill_min, short_decode_min = _measure_vram_probe(
@@ -4135,6 +4333,8 @@ def main():
     _model.server_cleanup()
     time.sleep(0.1)
     post_calibration_free_mb = int(vram_monitor.current_free_mb(dev_idx))
+
+    vram_monitor.disable_precision_windows()
 
     short_prefill_delta = max(0, short_baseline_free - short_prefill_min)
     long_prefill_delta = max(0, long_baseline_free - long_prefill_min)
@@ -5976,16 +6176,18 @@ def main():
             raise SystemExit(f"SSH tunnel failed: {exc}") from exc
 
     def _handle_exit(sig, frame):
+        # Rust owns SIGINT/SIGTERM while run() is executing without the GIL.
+        # When it restores this Python handler, CPython may then deliver the
+        # same pending signal immediately after run() returns.  Keep this
+        # handler idempotent and, critically, do not redirect stdout/stderr:
+        # the orderly post-run resource release and final CUDA cleanup still
+        # have to run, and their diagnostics are part of the shutdown
+        # contract.
+        logger.info("Python shutdown handler completing signal %d", sig)
         if ssh_tunnel is not None:
             ssh_tunnel.stop()
         rust_server.stop()
-        try:
-            sys.stderr = open(os.devnull, "w")
-            sys.stdout = open(os.devnull, "w")
-            logging.disable(logging.CRITICAL)
-        except Exception:
-            pass
-        os.write(1, f"\n{_BOLD}{_GREEN}Server stopped.{_NC}\n".encode())
+        logger.info("Python shutdown handler completed signal %d", sig)
 
     signal.signal(signal.SIGINT, _handle_exit)
     signal.signal(signal.SIGTERM, _handle_exit)
@@ -6098,13 +6300,75 @@ def main():
             logger.warning("Failed to write VRAM report: %s", e)
 
     # ── Clean exit before Python teardown triggers cascading errors ──
+    _shutdown_observation("post_server_report")
+    logger.info("Stopping VRAM monitor")
     vram_monitor.stop()
+    _shutdown_observation("vram_monitor_stopped")
+    logger.info("VRAM monitor stopped")
     if ssh_tunnel is not None:
+        logger.info("Stopping SSH tunnel")
         ssh_tunnel.stop()
+        logger.info("SSH tunnel stopped")
     _remove_registry()
+    logger.info("Server registry removed")
+    _shutdown_inductor_compile_workers()
+    _shutdown_observation("inductor_stopped")
+    logger.info("Releasing stopped Rust/Python model GPU resources")
+    # RustServer still retains the Python model here, guaranteeing that every
+    # WeightStore backing remains alive while its decode stores synchronize and
+    # unregister CUDA host ranges. Only after that fail-closed release succeeds
+    # may Python remove its primary/auxiliary store owners.
+    released_regions, released_bytes, released_stores = (
+        rust_server.release_runtime_resources()
+    )
+    print(
+        "KRASIS_SHUTDOWN phase=expert_host_unregistered "
+        f"regions={released_regions} bytes={released_bytes} "
+        f"decode_stores={released_stores}",
+        flush=True,
+    )
+    _shutdown_observation("rust_runtime_released")
+    for attr in ("_gpu_decode_store", "_aux_gpu_decode_store"):
+        if hasattr(_model, attr):
+            setattr(_model, attr, None)
+    if hasattr(_model, "_aux_gpu_decode_stores"):
+        _model._aux_gpu_decode_stores = []
+    if hasattr(_model, "gpu_prefill_managers"):
+        _model.gpu_prefill_managers.clear()
+    # Function-local references outlive the model attributes in Python. Clear
+    # every store name used by the single- and arbitrary-multi-GPU setup paths
+    # before collecting the model itself.
+    gpu_store = None
+    store = None
+    aux_store = None
+    _model = None
+    gc.collect()
+    _shutdown_observation("python_model_collected")
+    logger.info("Stopped Rust/Python model GPU resources released")
+    logger.info("Starting CUDA cleanup")
     _cleanup_cuda()
-    os._exit(0)
+    _shutdown_observation("first_cuda_cleanup_complete")
+    logger.info("CUDA cleanup complete; returning from server main")
+    # Return normally so the setup frame releases its remaining local tensor
+    # owners. The module entry point performs one strict post-frame CUDA purge
+    # and then allows ordinary interpreter teardown. An unconditional
+    # os._exit() was inherited from the removed Uvicorn server path; on large
+    # CUDA contexts it left one driver-cleanup thread running for over a minute
+    # and prevented the launcher wrapper from reaping the process.
+    _shutdown_observation("main_return")
+    return None
 
 
 if __name__ == "__main__":
     main()
+    # Returning from main releases setup-local tensor owners into the PyTorch
+    # caching allocator. Empty it after that frame teardown; the earlier
+    # cleanup cannot release allocations whose final Python reference still
+    # existed at that point. Normal interpreter exit then runs remaining
+    # library cleanup instead of forcing CUDA context destruction from
+    # exit_group().
+    logger.info("Server main frame released; starting final CUDA cleanup")
+    _shutdown_observation("main_frame_released")
+    _cleanup_cuda(fail_closed=True)
+    _shutdown_observation("final_cuda_cleanup_complete")
+    logger.info("Final CUDA cleanup complete; exiting normally")

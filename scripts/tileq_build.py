@@ -10,9 +10,11 @@ are enforced.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import math
+import mimetypes
 import os
 import random
 import re
@@ -22,6 +24,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from functools import cmp_to_key
 from pathlib import Path
 from typing import BinaryIO, Iterable
 
@@ -51,6 +54,19 @@ HEADER_BYTES = 64
 PAYLOAD_OFFSET = 4 * 1024 * 1024
 CAPTURE_MAGIC = b"KTC1"
 CAPTURE_VERSION = 2
+INT4_CALIB_MAGIC = b"KIC1"
+INT4_CALIB_VERSION = 1
+INT4_CALIB_PAYLOAD_OFFSET = 4 * 1024 * 1024
+MARLIN_CACHE_MAGIC = b"KRAS"
+MARLIN_CACHE_VERSION = 7
+MARLIN_CACHE_HEADER_BYTES = 64
+MIXED_EXPERT_FORMAT = "Krasis routed mixed Marlin INT4/INT8"
+MIXED_EXPERT_SCHEMA_VERSION = 1
+MIXED_EXPERT_RANKING_METHOD = (
+    "paired_int4_int8_output_disagreement_under_routed_activation_moments_v1"
+)
+MIXED_EXPERT_BUDGET_BPS = (500, 1000, 1500, 2000)
+MIXED_EXPERT_GAIN_SCALE_EXPONENT = -12
 
 
 @dataclass
@@ -83,6 +99,41 @@ def sha256_file(path: Path, chunk_bytes: int = 64 * 1024 * 1024) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def stable_sha256_file(path: Path) -> tuple[str, os.stat_result]:
+    before = path.stat()
+    digest = sha256_file(path)
+    after = path.stat()
+    before_identity = (before.st_size, before.st_mtime_ns)
+    after_identity = (after.st_size, after.st_mtime_ns)
+    if before_identity != after_identity:
+        raise RuntimeError(f"file changed while hashing: {path}")
+    return digest, after
+
+
+def write_marlin_sha256_cache(path: Path, digest: str, stat: os.stat_result) -> None:
+    payload = {
+        "format": "krasis_marlin_sha256_cache",
+        "format_version": 1,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": digest,
+    }
+    destination = Path(f"{path}.sha256.json")
+    temporary = Path(f"{destination}.{os.getpid()}.tmp")
+    with temporary.open("x", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, destination)
+    if os.name != "nt":
+        directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
 
 def combined_sha256(paths: Iterable[Path]) -> str:
@@ -223,6 +274,66 @@ def read_capture_layer(path: Path) -> CaptureLayer:
     )
 
 
+def iter_capture_router_rows(path: Path, batch_rows: int):
+    """Yield KTC1 router inputs/IDs without materializing expert outputs."""
+    raw = np.memmap(path, mode="r", dtype=np.uint8)
+    if raw.size < 32:
+        raise RuntimeError(f"capture {path} is truncated")
+    magic, version, layer, input_size, intermediate, topk, experts, reserved = struct.unpack_from(
+        "<4s7I", raw, 0
+    )
+    if magic != CAPTURE_MAGIC or version != CAPTURE_VERSION or reserved != 0:
+        raise RuntimeError(f"capture {path} has invalid header")
+    offset = 32
+    row_base = 0
+    chunk_index = 0
+    while offset < raw.size:
+        if offset + 4 > raw.size:
+            raise RuntimeError(f"capture {path} has truncated chunk row count")
+        rows = struct.unpack_from("<I", raw, offset)[0]
+        offset += 4
+        if rows == 0:
+            raise RuntimeError(f"capture {path} contains an empty chunk")
+        x_bytes = rows * input_size * 2
+        id_bytes = rows * topk * 4
+        weight_bytes = rows * topk * 4
+        down_bytes = rows * topk * intermediate * 2
+        end = offset + x_bytes + id_bytes + weight_bytes + down_bytes
+        if end > raw.size:
+            raise RuntimeError(f"capture {path} has truncated chunk payload")
+        x_offset = offset
+        id_offset = x_offset + x_bytes
+        for start in range(0, rows, batch_rows):
+            count = min(batch_rows, rows - start)
+            x_bits = np.frombuffer(
+                raw,
+                dtype="<u2",
+                count=count * input_size,
+                offset=x_offset + start * input_size * 2,
+            ).reshape(count, input_size)
+            ids = np.frombuffer(
+                raw,
+                dtype="<i4",
+                count=count * topk,
+                offset=id_offset + start * topk * 4,
+            ).reshape(count, topk)
+            yield (
+                layer,
+                experts,
+                topk,
+                chunk_index,
+                row_base + start,
+                start,
+                torch.from_numpy(x_bits.copy()).view(torch.bfloat16),
+                torch.from_numpy(ids.copy()).to(torch.int64),
+            )
+        offset = end
+        row_base += rows
+        chunk_index += 1
+    if row_base == 0:
+        raise RuntimeError(f"capture {path} contains no rows")
+
+
 def combine_capture_layers(layers: list[CaptureLayer]) -> CaptureLayer:
     if not layers:
         raise RuntimeError("cannot combine an empty capture-layer set")
@@ -254,6 +365,41 @@ def combine_capture_layers(layers: list[CaptureLayer]) -> CaptureLayer:
 def capture_binding_sha256(digests: list[str]) -> str:
     binding = json.dumps(digests, separators=(",", ":")).encode("ascii")
     return hashlib.sha256(binding).hexdigest()
+
+
+def mixed_calibration_entry_hashes(
+    corpus_manifest: dict, manifest_path: Path
+) -> set[str]:
+    """Return exact source/slice identities for a supported calibration corpus."""
+    corpus_format = corpus_manifest.get("format")
+    entries = corpus_manifest.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise RuntimeError(f"calibration corpus has no entries: {manifest_path}")
+    if corpus_format == "Krasis TileQ calibration corpus":
+        required_hashes = ("source_sha256", "slice_sha256")
+    elif corpus_format == "Krasis TileQ multimodal calibration corpus":
+        required_hashes = ("image_source_sha256", "prompt_source_sha256")
+    else:
+        raise RuntimeError(
+            f"unsupported mixed-expert calibration corpus format "
+            f"{corpus_format!r}: {manifest_path}"
+        )
+    hashes: set[str] = set()
+    for entry_index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise RuntimeError(
+                f"calibration corpus has a non-object entry {entry_index}: "
+                f"{manifest_path}"
+            )
+        for key in required_hashes:
+            value = entry.get(key)
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise RuntimeError(
+                    f"calibration corpus {manifest_path} entry {entry_index} "
+                    f"has invalid {key}"
+                )
+            hashes.add(value)
+    return hashes
 
 
 def capture_metadata(capture_dir: Path) -> dict:
@@ -1184,13 +1330,480 @@ def command_inspect_capture(args: argparse.Namespace) -> None:
         )
         counts = torch.bincount(layer.topk_ids.reshape(-1), minlength=layer.expert_count)
         routed = counts[counts > 0]
+        missing = torch.nonzero(counts == 0).flatten().tolist()
         print(
             f"{path.name}: tokens={layer.expert_inputs.shape[0]} input={layer.expert_input_size} "
             f"topk={layer.topk} intermediate={layer.intermediate_size} experts={layer.expert_count} "
-            f"route_zero={int((counts == 0).sum())} "
+            f"route_zero={len(missing)} route_missing={missing} "
             f"route_nonzero_min={int(routed.min()) if routed.numel() else 0} "
             f"route_max={int(counts.max())}"
         )
+
+
+def unique_tensor_name(weight_map: dict, suffix: str, *, required: bool) -> str | None:
+    matches = [name for name in weight_map if name.endswith(suffix)]
+    if len(matches) > 1:
+        raise RuntimeError(f"ambiguous tensor suffix {suffix}: {matches}")
+    if not matches:
+        if required:
+            raise RuntimeError(f"model has no tensor ending in {suffix}")
+        return None
+    return matches[0]
+
+
+def load_named_tensor(model_dir: Path, weight_map: dict, name: str) -> torch.Tensor:
+    shard = weight_map.get(name)
+    if not isinstance(shard, str):
+        raise RuntimeError(f"model index does not bind tensor {name}")
+    with safe_open(model_dir / shard, framework="pt", device="cpu") as handle:
+        return handle.get_tensor(name)
+
+
+def router_scores(logits: torch.Tensor, scoring_func: str) -> torch.Tensor:
+    if scoring_func == "sqrtsoftplus":
+        return torch.sqrt(F.softplus(logits))
+    if scoring_func == "sigmoid":
+        return torch.sigmoid(logits)
+    if scoring_func in ("softmax", ""):
+        return torch.softmax(logits, dim=-1)
+    raise RuntimeError(f"unsupported router scoring_func {scoring_func!r}")
+
+
+def command_inspect_route_rank(args: argparse.Namespace) -> None:
+    """Measure one expert's actual selection rank on captured router inputs."""
+    if args.layer < 0:
+        raise RuntimeError("--layer must be non-negative")
+    if args.batch_rows <= 0:
+        raise RuntimeError("--batch-rows must be greater than zero")
+    model_dir = args.model_dir.resolve()
+    capture_dirs = [args.capture_dir.resolve(), *[path.resolve() for path in args.extra]]
+    _, config, weight_map = text_config(model_dir)
+    layer = args.layer
+    expert = args.expert
+    topk = int(config.get("num_experts_per_tok", 0))
+    expert_count = int(config.get("n_routed_experts", config.get("num_local_experts", 0)))
+    if topk <= 0 or expert_count <= 0 or expert < 0 or expert >= expert_count:
+        raise RuntimeError(
+            f"invalid router geometry topk={topk} experts={expert_count} target={expert}"
+        )
+    scoring_func = str(config.get("scoring_func", "softmax"))
+    gate_suffixes = (
+        f"layers.{layer}.ffn.gate.weight",
+        f"layers.{layer}.mlp.gate.weight",
+        f"layers.{layer}.mlp.router.weight",
+    )
+    gate_name = next(
+        (
+            name
+            for suffix in gate_suffixes
+            if (name := unique_tensor_name(weight_map, suffix, required=False)) is not None
+        ),
+        None,
+    )
+    if gate_name is None:
+        raise RuntimeError(f"model has no supported router weight for layer {layer}")
+    gate = load_named_tensor(model_dir, weight_map, gate_name).to(torch.float32)
+    if gate.ndim != 2 or gate.shape[0] != expert_count:
+        raise RuntimeError(f"invalid router weight shape {tuple(gate.shape)}")
+
+    bias_candidates = {"none": torch.zeros(expert_count, dtype=torch.float32)}
+    for label, suffix in (
+        ("text", f"layers.{layer}.ffn.gate.bias"),
+        ("vision", f"layers.{layer}.ffn.gate.bias_vl"),
+        ("correction", f"layers.{layer}.mlp.gate.e_score_correction_bias"),
+        ("router_bias", f"layers.{layer}.moe.router_bias"),
+    ):
+        name = unique_tensor_name(weight_map, suffix, required=False)
+        if name is not None:
+            value = load_named_tensor(model_dir, weight_map, name).to(torch.float32).reshape(-1)
+            if value.numel() != expert_count:
+                raise RuntimeError(f"router bias {name} has shape {tuple(value.shape)}")
+            bias_candidates[label] = value
+
+    device = torch.device(f"cuda:{args.cuda_device}")
+    torch.cuda.set_device(device)
+    gate = gate.to(device)
+    biases = {label: value.to(device) for label, value in bias_candidates.items()}
+    expert_indices = torch.arange(expert_count, device=device)
+    result = {
+        "model_dir": str(model_dir),
+        "gate_tensor": gate_name,
+        "layer": layer,
+        "expert": expert,
+        "experts": expert_count,
+        "topk": topk,
+        "scoring_func": scoring_func,
+        "batch_rows": args.batch_rows,
+        "bias_modes": {
+            label: {
+                "target_bias": float(value[expert].item()),
+                "minimum_bias": float(value.min().item()),
+                "maximum_bias": float(value.max().item()),
+                "target_bias_rank": 1
+                + int((value > value[expert]).sum().item())
+                + int(
+                    (
+                        (value == value[expert])
+                        & (torch.arange(expert_count, device=value.device) < expert)
+                    ).sum().item()
+                ),
+            }
+            for label, value in biases.items()
+        },
+        "captures": [],
+    }
+    for capture_dir in capture_dirs:
+        capture_metadata(capture_dir)
+        path = capture_dir / f"layer_{layer:05d}.ktc"
+        stats = {
+            label: {
+                "exact_topk_rows": 0,
+                "minimum_rank": expert_count + 1,
+                "best_target_minus_cutoff": -float("inf"),
+                "best_row": None,
+                "best_chunk": None,
+                "best_chunk_row": None,
+            }
+            for label in biases
+        }
+        total_rows = 0
+        for (
+            file_layer,
+            file_experts,
+            file_topk,
+            chunk_index,
+            row_base,
+            chunk_row_base,
+            inputs,
+            observed_ids,
+        ) in iter_capture_router_rows(path, args.batch_rows):
+            if (file_layer, file_experts, file_topk) != (layer, expert_count, topk):
+                raise RuntimeError(
+                    f"capture router geometry mismatch in {path}: "
+                    f"{file_layer}/{file_experts}/{file_topk}"
+                )
+            if inputs.shape[1] != gate.shape[1]:
+                raise RuntimeError(
+                    f"capture router input width {inputs.shape[1]} does not match "
+                    f"gate width {gate.shape[1]} in {path}"
+                )
+            inputs = inputs.to(device=device, dtype=torch.float32)
+            observed_ids = observed_ids.to(device)
+            scores = router_scores(inputs @ gate.T, scoring_func)
+            sorted_observed = observed_ids.sort(dim=-1).values
+            for label, bias in biases.items():
+                selection = scores + bias
+                target = selection[:, expert]
+                ranks = 1 + (selection > target[:, None]).sum(dim=-1)
+                ranks += ((selection == target[:, None]) & (expert_indices < expert)).sum(dim=-1)
+                selected = torch.topk(selection, topk, dim=-1, sorted=False).indices
+                exact = selected.sort(dim=-1).values.eq(sorted_observed).all(dim=-1)
+                cutoff = torch.topk(selection, topk, dim=-1).values[:, -1]
+                margins = target - cutoff
+                best_index = int(torch.argmax(margins).item())
+                best_margin = float(margins[best_index].item())
+                minimum_rank = int(ranks.min().item())
+                item = stats[label]
+                item["exact_topk_rows"] += int(exact.sum().item())
+                item["minimum_rank"] = min(item["minimum_rank"], minimum_rank)
+                if best_margin > item["best_target_minus_cutoff"]:
+                    item["best_target_minus_cutoff"] = best_margin
+                    item["best_row"] = row_base + best_index
+                    item["best_chunk"] = chunk_index
+                    item["best_chunk_row"] = chunk_row_base + best_index
+            total_rows += inputs.shape[0]
+        for item in stats.values():
+            item["exact_topk_fraction"] = item["exact_topk_rows"] / total_rows
+        result["captures"].append(
+            {"capture_dir": str(capture_dir), "rows": total_rows, "bias_modes": stats}
+        )
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def routed_activation_second_moments(
+    capture: CaptureLayer,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Aggregate every measured route into deterministic expert moments."""
+    # Keep route grouping/counting on CPU. CUDA bincount uses atomic updates and
+    # would make the calibration evidence itself nondeterministic. Only the
+    # selected row indices and weights move to the measurement device.
+    route_ids = capture.topk_ids.reshape(-1).to(device="cpu", dtype=torch.int64)
+    route_weights = capture.topk_weights.reshape(-1).to(
+        device="cpu", dtype=torch.float32
+    )
+    route_weight_squares = route_weights.square()
+    route_counts = torch.bincount(route_ids, minlength=capture.expert_count)
+    ordered_positions = torch.argsort(route_ids, stable=True)
+    route_offsets = torch.cat(
+        [torch.zeros(1, dtype=torch.int64), route_counts.cumsum(dim=0)]
+    )
+    missing = torch.nonzero(route_counts == 0).flatten().tolist()
+    if missing:
+        raise RuntimeError(
+            f"capture layer {capture.model_layer} has no real routes for experts {missing}"
+        )
+
+    expert_inputs = capture.expert_inputs.to(device)
+    down_inputs = capture.down_inputs.reshape(
+        -1, capture.intermediate_size
+    ).to(device)
+    input_moments = torch.empty(
+        (capture.expert_count, capture.expert_input_size),
+        dtype=torch.float32,
+        device="cpu",
+    )
+    down_moments = torch.empty(
+        (capture.expert_count, capture.intermediate_size),
+        dtype=torch.float32,
+        device="cpu",
+    )
+    for expert in range(capture.expert_count):
+        start = int(route_offsets[expert].item())
+        end = int(route_offsets[expert + 1].item())
+        positions_cpu = ordered_positions[start:end]
+        positions = positions_cpu.to(device=device)
+        weights = route_weight_squares.index_select(0, positions_cpu).to(device=device)
+        weight_sum = weights.sum()
+        if not torch.isfinite(weight_sum) or float(weight_sum.item()) <= 0.0:
+            raise RuntimeError(
+                f"capture layer {capture.model_layer} expert {expert} has invalid squared router-weight sum"
+            )
+        token_rows = torch.div(positions, capture.topk, rounding_mode="floor")
+        input_values = expert_inputs.index_select(0, token_rows).float()
+        down_values = down_inputs.index_select(0, positions).float()
+        input_moments[expert] = (
+            input_values.square().mul_(weights[:, None]).sum(dim=0) / weight_sum
+        ).cpu()
+        down_moments[expert] = (
+            down_values.square().mul_(weights[:, None]).sum(dim=0) / weight_sum
+        ).cpu()
+    if not torch.isfinite(input_moments).all() or not torch.isfinite(down_moments).all():
+        raise RuntimeError(
+            f"capture layer {capture.model_layer} produced non-finite activation moments"
+        )
+    if torch.any(input_moments < 0) or torch.any(down_moments < 0):
+        raise RuntimeError(
+            f"capture layer {capture.model_layer} produced negative activation moments"
+        )
+    return input_moments, down_moments, route_counts
+
+
+def command_export_int4_calibration(args: argparse.Namespace) -> None:
+    if sys.byteorder != "little":
+        raise RuntimeError("KIC1 export currently requires a little-endian host")
+    capture_dirs = [
+        args.capture_dir.resolve(),
+        *[path.resolve() for path in args.extra],
+    ]
+    if len(set(capture_dirs)) != len(capture_dirs):
+        raise RuntimeError("INT4 calibration capture directories must be unique")
+    metadata = [capture_metadata(path) for path in capture_dirs]
+    corpus_hashes = [item["calibration_sha256"].lower() for item in metadata]
+    if len(set(corpus_hashes)) != len(corpus_hashes):
+        raise RuntimeError("INT4 calibration captures must come from distinct corpus bindings")
+    layer_names = sorted(path.name for path in capture_dirs[0].glob("layer_*.ktc"))
+    if not layer_names:
+        raise RuntimeError(f"capture {capture_dirs[0]} contains no KTC1 layer files")
+    for capture_dir in capture_dirs[1:]:
+        current = sorted(path.name for path in capture_dir.glob("layer_*.ktc"))
+        if current != layer_names:
+            raise RuntimeError(
+                f"capture layer inventory mismatch between {capture_dirs[0]} and {capture_dir}"
+            )
+
+    artifact_hashes = []
+    for capture_dir in capture_dirs:
+        files = [capture_dir / "capture.json", *sorted(capture_dir.glob("layer_*.ktc"))]
+        artifact_hashes.append(combined_sha256(files))
+
+    output = args.output.resolve()
+    temporary = output.with_name(output.name + ".tmp")
+    if output.exists() or temporary.exists():
+        raise RuntimeError(
+            f"refusing to overwrite existing INT4 calibration artifact or temporary file: {output}"
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    device = torch.device(f"cuda:{args.cuda_device}" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+    torch.use_deterministic_algorithms(True)
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.cuda.matmul.allow_tf32 = False
+
+    layers = []
+    payload_hasher = hashlib.sha256()
+    cursor = 0
+    geometry = None
+    started = time.monotonic()
+    with temporary.open("xb+") as handle:
+        handle.truncate(INT4_CALIB_PAYLOAD_OFFSET)
+        for sequence, layer_name in enumerate(layer_names):
+            capture = combine_capture_layers(
+                [read_capture_layer(path / layer_name) for path in capture_dirs]
+            )
+            current_geometry = (
+                capture.expert_input_size,
+                capture.intermediate_size,
+                capture.expert_count,
+                capture.topk,
+            )
+            if geometry is None:
+                geometry = current_geometry
+            elif current_geometry != geometry:
+                raise RuntimeError(
+                    f"capture geometry changed at model layer {capture.model_layer}: "
+                    f"{current_geometry} != {geometry}"
+                )
+            input_moments, down_moments, route_counts = routed_activation_second_moments(
+                capture, device
+            )
+            layer_manifest = {"model_layer": capture.model_layer}
+            for key, tensor in (
+                ("input_second_moment_f32", input_moments),
+                ("down_second_moment_f32", down_moments),
+            ):
+                payload = tensor.contiguous().numpy().astype("<f4", copy=False).tobytes()
+                layer_manifest[key] = {"offset": cursor, "len": len(payload)}
+                handle.seek(INT4_CALIB_PAYLOAD_OFFSET + cursor)
+                handle.write(payload)
+                payload_hasher.update(payload)
+                cursor += len(payload)
+            layer_manifest["route_count_min"] = int(route_counts.min())
+            layer_manifest["route_count_max"] = int(route_counts.max())
+            layers.append(layer_manifest)
+            del capture, input_moments, down_moments, route_counts
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            print(
+                f"[int4-calib] completed layer {sequence + 1}/{len(layer_names)} "
+                f"file={layer_name} elapsed_s={time.monotonic() - started:.1f}",
+                flush=True,
+            )
+        assert geometry is not None
+        hidden, intermediate, experts, topk = geometry
+        manifest = {
+            "schema_version": INT4_CALIB_VERSION,
+            "format": "Krasis expert INT4 activation moments",
+            "objective": "router_weight_squared_diagonal_activation_second_moment_v1",
+            "hidden_size": hidden,
+            "intermediate_size": intermediate,
+            "routed_experts": experts,
+            "topk": topk,
+            "routed_layers": len(layers),
+            "calibration_sha256": capture_binding_sha256(corpus_hashes),
+            "capture_corpora_sha256": corpus_hashes,
+            "capture_artifact_sha256": artifact_hashes,
+            "payload_bytes": cursor,
+            "payload_sha256": payload_hasher.hexdigest(),
+            "layers": layers,
+        }
+        manifest_bytes = json.dumps(
+            manifest, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        if HEADER_BYTES + len(manifest_bytes) > INT4_CALIB_PAYLOAD_OFFSET:
+            raise RuntimeError("KIC1 manifest exceeds reserved manifest area")
+        header = struct.pack(
+            "<4sIQQQ32s",
+            INT4_CALIB_MAGIC,
+            INT4_CALIB_VERSION,
+            len(manifest_bytes),
+            INT4_CALIB_PAYLOAD_OFFSET,
+            cursor,
+            hashlib.sha256(manifest_bytes).digest(),
+        )
+        handle.seek(0)
+        handle.write(header)
+        handle.write(manifest_bytes)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, output)
+    parent_fd = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    print(
+        json.dumps(
+            {
+                "output": str(output),
+                "bytes": output.stat().st_size,
+                "sha256": sha256_file(output),
+                "calibration_sha256": manifest["calibration_sha256"],
+                "capture_artifact_sha256": artifact_hashes,
+                "layers": len(layers),
+                "experts": experts,
+                "elapsed_s": time.monotonic() - started,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def command_verify_int4_calibration(args: argparse.Namespace) -> None:
+    path = args.artifact.resolve()
+    raw = np.memmap(path, mode="r", dtype=np.uint8)
+    if raw.size < HEADER_BYTES:
+        raise RuntimeError(f"KIC1 artifact {path} is truncated")
+    magic, version, manifest_len, payload_offset, payload_len, expected_sha = struct.unpack_from(
+        "<4sIQQQ32s", raw, 0
+    )
+    if magic != INT4_CALIB_MAGIC or version != INT4_CALIB_VERSION:
+        raise RuntimeError(f"KIC1 artifact {path} has incompatible magic/version")
+    manifest_end = HEADER_BYTES + manifest_len
+    payload_end = payload_offset + payload_len
+    if manifest_end > raw.size or payload_offset < manifest_end or payload_end != raw.size:
+        raise RuntimeError(f"KIC1 artifact {path} has invalid ranges")
+    manifest_bytes = bytes(raw[HEADER_BYTES:manifest_end])
+    if hashlib.sha256(manifest_bytes).digest() != expected_sha:
+        raise RuntimeError(f"KIC1 artifact {path} manifest SHA-256 mismatch")
+    manifest = json.loads(manifest_bytes)
+    if (
+        manifest.get("schema_version") != INT4_CALIB_VERSION
+        or manifest.get("format") != "Krasis expert INT4 activation moments"
+        or manifest.get("objective")
+        != "router_weight_squared_diagonal_activation_second_moment_v1"
+        or manifest.get("payload_bytes") != payload_len
+    ):
+        raise RuntimeError(f"KIC1 artifact {path} has an invalid manifest contract")
+    payload_sha256 = hashlib.sha256(raw[payload_offset:payload_end]).hexdigest()
+    if payload_sha256 != manifest.get("payload_sha256"):
+        raise RuntimeError(f"KIC1 artifact {path} payload SHA-256 mismatch")
+    ranges = []
+    for layer in manifest.get("layers", []):
+        for key in ("input_second_moment_f32", "down_second_moment_f32"):
+            descriptor = layer[key]
+            ranges.append((int(descriptor["offset"]), int(descriptor["len"])))
+    ranges.sort()
+    cursor = 0
+    for offset, length in ranges:
+        if offset != cursor or length <= 0 or length % 4:
+            raise RuntimeError(
+                f"KIC1 artifact {path} payload is not exactly covered at byte {cursor}"
+            )
+        cursor += length
+    if cursor != payload_len:
+        raise RuntimeError(
+            f"KIC1 artifact {path} payload coverage ends at {cursor}, expected {payload_len}"
+        )
+    print(
+        json.dumps(
+            {
+                "status": "pass",
+                "artifact": str(path),
+                "sha256": sha256_file(path),
+                "payload_sha256": payload_sha256,
+                "calibration_sha256": manifest["calibration_sha256"],
+                "layers": manifest["routed_layers"],
+                "experts": manifest["routed_experts"],
+                "hidden_size": manifest["hidden_size"],
+                "intermediate_size": manifest["intermediate_size"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 def command_prepare_corpus(args: argparse.Namespace) -> None:
@@ -1277,6 +1890,169 @@ def command_prepare_corpus(args: argparse.Namespace) -> None:
     print(json.dumps(binding, indent=2, sort_keys=True))
 
 
+def command_prepare_excluded_inputs(args: argparse.Namespace) -> None:
+    """Hash every frozen evaluation input that calibration must not reuse."""
+    requested = [path.resolve() for path in args.inputs]
+    if not requested:
+        raise RuntimeError("at least one excluded input path is required")
+    if len(set(requested)) != len(requested):
+        raise RuntimeError("excluded input paths must be unique")
+    output = args.output.resolve()
+    if output.exists():
+        raise RuntimeError(f"refusing to overwrite excluded-input manifest: {output}")
+
+    files: list[Path] = []
+    for source in requested:
+        if source.is_file():
+            files.append(source)
+        elif source.is_dir():
+            files.extend(
+                path.resolve()
+                for path in sorted(source.rglob("*"))
+                if path.is_file()
+            )
+        else:
+            raise RuntimeError(f"excluded input path does not exist: {source}")
+    files = sorted(set(files), key=lambda path: str(path))
+    if not files:
+        raise RuntimeError("excluded input paths contain no files")
+
+    entries = []
+    for path in files:
+        raw = path.read_bytes()
+        entries.append(
+            {
+                "path": str(path),
+                "bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+    binding = {
+        "schema_version": 1,
+        "format": "Krasis mixed-expert excluded evaluation inputs",
+        "input_roots": [str(path) for path in requested],
+        "entries": entries,
+        "sha256s": sorted({entry["sha256"] for entry in entries}),
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(output.name + f".{os.getpid()}.tmp")
+    if temporary.exists():
+        raise RuntimeError(f"refusing to overwrite temporary manifest: {temporary}")
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(binding, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output)
+        parent_fd = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except BaseException:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+    print(
+        json.dumps(
+            {
+                "status": "pass",
+                "manifest": str(output),
+                "files": len(entries),
+                "unique_sha256s": len(binding["sha256s"]),
+                "manifest_sha256": sha256_file(output),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def command_prepare_multimodal_corpus(args: argparse.Namespace) -> None:
+    pairs = [(image.resolve(), prompt.resolve()) for image, prompt in args.entry]
+    if not pairs:
+        raise RuntimeError("at least one image/prompt corpus entry is required")
+    if len(set(pairs)) != len(pairs):
+        raise RuntimeError("multimodal corpus image/prompt pairs must be unique")
+    output = args.output_dir.resolve()
+    temporary = output.with_name(output.name + ".tmp")
+    if output.exists() or temporary.exists():
+        raise RuntimeError(f"refusing to overwrite corpus directory or temporary directory: {output}")
+    temporary.mkdir(parents=True)
+    entries = []
+    try:
+        for index, (image_source, prompt_source) in enumerate(pairs):
+            image_bytes = image_source.read_bytes()
+            prompt_bytes = prompt_source.read_bytes()
+            if not image_bytes or not prompt_bytes:
+                raise RuntimeError(
+                    f"multimodal corpus source is empty: image={image_source} prompt={prompt_source}"
+                )
+            try:
+                prompt_bytes.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise RuntimeError(
+                    f"multimodal corpus prompt is not UTF-8: {prompt_source}: {exc}"
+                ) from exc
+            mime, _ = mimetypes.guess_type(image_source.name)
+            if mime not in {"image/png", "image/jpeg", "image/webp"}:
+                raise RuntimeError(
+                    f"unsupported multimodal corpus image type {mime!r}: {image_source}"
+                )
+            image_file = f"{index:02d}_image{image_source.suffix.lower()}"
+            prompt_file = f"{index:02d}_prompt{prompt_source.suffix.lower()}"
+            for destination, payload in (
+                (temporary / image_file, image_bytes),
+                (temporary / prompt_file, prompt_bytes),
+            ):
+                with destination.open("xb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            entries.append(
+                {
+                    "index": index,
+                    "image_source": str(image_source),
+                    "image_source_sha256": hashlib.sha256(image_bytes).hexdigest(),
+                    "image_bytes": len(image_bytes),
+                    "image_mime": mime,
+                    "image_file": image_file,
+                    "prompt_source": str(prompt_source),
+                    "prompt_source_sha256": hashlib.sha256(prompt_bytes).hexdigest(),
+                    "prompt_bytes": len(prompt_bytes),
+                    "prompt_file": prompt_file,
+                }
+            )
+        binding = {
+            "schema_version": 1,
+            "format": "Krasis TileQ multimodal calibration corpus",
+            "content_order": "image_then_text",
+            "entries": entries,
+        }
+        canonical = json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        binding["corpus_sha256"] = hashlib.sha256(canonical).hexdigest()
+        manifest_path = temporary / "manifest.json"
+        with manifest_path.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(binding, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        directory_fd = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        os.replace(temporary, output)
+        parent_fd = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except BaseException:
+        raise
+    print(json.dumps(binding, indent=2, sort_keys=True))
+
+
 def command_capture_corpus(args: argparse.Namespace) -> None:
     corpus_dir = args.corpus_dir.resolve()
     manifest = load_json(corpus_dir / "manifest.json")
@@ -1339,6 +2115,123 @@ def command_capture_corpus(args: argparse.Namespace) -> None:
                     "index": expected_index,
                     "file": entry["file"],
                     "slice_sha256": entry["slice_sha256"],
+                    "usage": usage,
+                    "response_id": result.get("id"),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+    print(
+        json.dumps(
+            {
+                "status": "complete",
+                "corpus_sha256": actual_digest,
+                "requests": len(entries),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
+def command_capture_multimodal_corpus(args: argparse.Namespace) -> None:
+    corpus_dir = args.corpus_dir.resolve()
+    manifest = load_json(corpus_dir / "manifest.json")
+    expected_digest = manifest.pop("corpus_sha256", None)
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    actual_digest = hashlib.sha256(canonical).hexdigest()
+    if expected_digest != actual_digest:
+        raise RuntimeError(
+            f"multimodal corpus manifest binding mismatch: expected={expected_digest} actual={actual_digest}"
+        )
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("format") != "Krasis TileQ multimodal calibration corpus"
+        or manifest.get("content_order") != "image_then_text"
+    ):
+        raise RuntimeError("multimodal corpus manifest contract mismatch")
+    entries = manifest.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise RuntimeError("multimodal corpus manifest has no entries")
+    endpoint = args.base_url.rstrip("/") + "/v1/chat/completions"
+    for expected_index, entry in enumerate(entries):
+        if entry.get("index") != expected_index:
+            raise RuntimeError(
+                f"multimodal corpus entry ordering mismatch at {expected_index}: {entry.get('index')}"
+            )
+        image_source = Path(entry["image_source"])
+        prompt_source = Path(entry["prompt_source"])
+        if sha256_file(image_source) != entry["image_source_sha256"]:
+            raise RuntimeError(f"multimodal corpus image source changed: {image_source}")
+        if sha256_file(prompt_source) != entry["prompt_source_sha256"]:
+            raise RuntimeError(f"multimodal corpus prompt source changed: {prompt_source}")
+        image_bytes = (corpus_dir / entry["image_file"]).read_bytes()
+        prompt_bytes = (corpus_dir / entry["prompt_file"]).read_bytes()
+        if (
+            len(image_bytes) != entry["image_bytes"]
+            or hashlib.sha256(image_bytes).hexdigest() != entry["image_source_sha256"]
+        ):
+            raise RuntimeError(f"multimodal corpus staged image mismatch at entry {expected_index}")
+        if (
+            len(prompt_bytes) != entry["prompt_bytes"]
+            or hashlib.sha256(prompt_bytes).hexdigest() != entry["prompt_source_sha256"]
+        ):
+            raise RuntimeError(f"multimodal corpus staged prompt mismatch at entry {expected_index}")
+        prompt = prompt_bytes.decode("utf-8")
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        body = json.dumps(
+            {
+                "model": args.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{entry['image_mime']};base64,{encoded}"
+                                },
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+                "max_tokens": 1,
+                "temperature": 0,
+                "stream": False,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            endpoint,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=args.timeout) as response:
+                response_body = response.read()
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise RuntimeError(
+                f"multimodal capture request failed at entry {expected_index}: {exc}"
+            ) from exc
+        try:
+            result = json.loads(response_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"multimodal capture response is not JSON at entry {expected_index}: {exc}"
+            ) from exc
+        usage = result.get("usage")
+        if not isinstance(usage, dict) or int(usage.get("prompt_tokens", 0)) <= 0:
+            raise RuntimeError(
+                f"multimodal capture response omits valid token usage at entry {expected_index}"
+            )
+        print(
+            json.dumps(
+                {
+                    "index": expected_index,
+                    "image_sha256": entry["image_source_sha256"],
+                    "prompt_sha256": entry["prompt_source_sha256"],
                     "usage": usage,
                     "response_id": result.get("id"),
                 },
@@ -1509,6 +2402,32 @@ def command_counterfactual_test(args: argparse.Namespace) -> None:
         raise RuntimeError("counterfactual down Hessian diagonal mismatch")
     if not torch.isfinite(gate_hdiag).all() or not torch.isfinite(down_hdiag).all():
         raise RuntimeError("counterfactual Hessian contains non-finite values")
+    complete_capture = CaptureLayer(
+        model_layer=9,
+        expert_input_size=2,
+        intermediate_size=2,
+        topk=2,
+        expert_count=2,
+        expert_inputs=torch.tensor([[2.0, 3.0]], dtype=torch.bfloat16),
+        topk_ids=torch.tensor([[0, 1]], dtype=torch.int64),
+        topk_weights=torch.tensor([[0.5, 1.0]], dtype=torch.float32),
+        down_inputs=torch.tensor([[[4.0, 5.0], [6.0, 7.0]]], dtype=torch.bfloat16),
+    )
+    input_moments, down_moments, route_counts = routed_activation_second_moments(
+        complete_capture, device
+    )
+    if not torch.equal(
+        input_moments,
+        torch.tensor([[4.0, 9.0], [4.0, 9.0]], dtype=torch.float32),
+    ):
+        raise RuntimeError(f"routed input second moments mismatch: {input_moments}")
+    if not torch.equal(
+        down_moments,
+        torch.tensor([[16.0, 25.0], [36.0, 49.0]], dtype=torch.float32),
+    ):
+        raise RuntimeError(f"routed down second moments mismatch: {down_moments}")
+    if not torch.equal(route_counts, torch.tensor([1, 1], dtype=torch.int64)):
+        raise RuntimeError(f"routed activation route counts mismatch: {route_counts}")
     global_gate_hdiag = global_hessian_diagonal(capture, "gate", row_chunk=2)
     global_down_hdiag = global_hessian_diagonal(capture, "down", row_chunk=2)
     if not torch.allclose(
@@ -1816,6 +2735,866 @@ def command_verify(args: argparse.Namespace) -> None:
     )
 
 
+def _mixed_marlin_header(path: Path) -> dict[str, int | str]:
+    with path.open("rb", buffering=0) as handle:
+        raw = handle.read(MARLIN_CACHE_HEADER_BYTES)
+    if len(raw) != MARLIN_CACHE_HEADER_BYTES or raw[:4] != MARLIN_CACHE_MAGIC:
+        raise RuntimeError(f"mixed-expert source has an invalid Marlin header: {path}")
+    version = struct.unpack_from("<I", raw, 4)[0]
+    if version != MARLIN_CACHE_VERSION:
+        raise RuntimeError(
+            f"mixed-expert source {path} has Marlin version {version}, "
+            f"expected {MARLIN_CACHE_VERSION}"
+        )
+    hidden, intermediate, experts, layers, group_size, config_fnv = struct.unpack_from(
+        "<QQQQQQ", raw, 8
+    )
+    tail = struct.unpack_from("<Q", raw, 56)[0]
+    calibration_tag = tail >> 32
+    if calibration_tag not in (0, 1):
+        raise RuntimeError(f"mixed-expert source {path} has invalid calibration tag")
+    return {
+        "hidden_size": hidden,
+        "intermediate_size": intermediate,
+        "experts": experts,
+        "layers": layers,
+        "group_size": group_size,
+        "config_fnv": config_fnv,
+        "shared_experts": tail & 0xFFFFFFFF,
+        "calibration_mode": "amax" if calibration_tag == 0 else "search_rmse",
+        "header_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def _mixed_marlin_component_bytes(
+    hidden: int, intermediate: int, group_size: int, bits: int, gated: bool
+) -> tuple[int, int, int, int]:
+    if bits not in (4, 8) or min(hidden, intermediate, group_size) <= 0:
+        raise RuntimeError("invalid mixed-expert Marlin geometry")
+    w2_hidden = hidden + 64 if hidden == intermediate and hidden % 256 else hidden
+    w13_n = 2 * intermediate if gated else intermediate
+    divisor = 8 if bits == 4 else 4
+    return (
+        (hidden // divisor) * w13_n * 4,
+        (hidden // group_size) * w13_n * 2,
+        (intermediate // divisor) * w2_hidden * 4,
+        math.ceil(intermediate / group_size) * w2_hidden * 2,
+    )
+
+
+def _mixed_weight_permutation(bits: int) -> torch.Tensor:
+    base: list[int] = []
+    for index in range(32):
+        column = index // 4
+        perm1 = []
+        for block in range(2):
+            for row in (
+                2 * (index % 4),
+                2 * (index % 4) + 1,
+                2 * (index % 4 + 4),
+                2 * (index % 4 + 4) + 1,
+            ):
+                perm1.append(16 * row + column + 8 * block)
+        for tile in range(4):
+            base.extend(value + 256 * tile for value in perm1)
+    interleave = (0, 2, 4, 6, 1, 3, 5, 7) if bits == 4 else (0, 2, 1, 3)
+    result = []
+    for start in range(0, 1024, len(interleave)):
+        result.extend(base[start + source] for source in interleave)
+    return torch.tensor(result, dtype=torch.int64)
+
+
+def _mixed_scale_permutation() -> torch.Tensor:
+    return torch.tensor(
+        [row + 8 * column for row in range(8) for column in range(8)],
+        dtype=torch.int64,
+    )
+
+
+def _mixed_unpack_marlin_codes(
+    cache: np.memmap,
+    offset: int,
+    packed_bytes: int,
+    bits: int,
+    k: int,
+    n: int,
+    device: torch.device,
+    permutation: torch.Tensor,
+) -> torch.Tensor:
+    if k % 16 or n % 64 or packed_bytes % 4:
+        raise RuntimeError(f"unsupported mixed-expert Marlin matrix k={k} n={n}")
+    words = np.frombuffer(cache, dtype="<u4", count=packed_bytes // 4, offset=offset)
+    words_device = torch.from_numpy(np.array(words, copy=True)).to(
+        device=device, dtype=torch.int64
+    )
+    pack = 8 if bits == 4 else 4
+    mask = (1 << bits) - 1
+    shifts = torch.arange(pack, device=device, dtype=torch.int64) * bits
+    applied = ((words_device[:, None] >> shifts) & mask).reshape(
+        k // 16, n // 64, 1024
+    )
+    clean = torch.empty_like(applied)
+    clean[:, :, permutation.to(device)] = applied
+    return clean.reshape(k // 16, n // 64, 4, 16, 16).permute(
+        0, 3, 1, 2, 4
+    ).reshape(k, n)
+
+
+def _mixed_unpack_marlin_scales(
+    cache: np.memmap,
+    offset: int,
+    scale_bytes: int,
+    k: int,
+    n: int,
+    group_size: int,
+    device: torch.device,
+    permutation: torch.Tensor,
+) -> torch.Tensor:
+    groups = math.ceil(k / group_size)
+    if scale_bytes != groups * n * 2 or (groups * n) % 64:
+        raise RuntimeError("mixed-expert Marlin scale geometry mismatch")
+    values = np.frombuffer(cache, dtype="<u2", count=groups * n, offset=offset)
+    source = torch.from_numpy(np.array(values, copy=True)).view(torch.bfloat16).to(device)
+    source = source.reshape(-1, 64)
+    clean = torch.empty_like(source)
+    clean[:, permutation.to(device)] = source
+    return clean.reshape(groups, n).float()
+
+
+def _mixed_projection_disagreement(
+    cache4: np.memmap,
+    cache8: np.memmap,
+    packed4_offset: int,
+    scales4_offset: int,
+    packed8_offset: int,
+    scales8_offset: int,
+    packed4_bytes: int,
+    packed8_bytes: int,
+    scale_bytes: int,
+    k: int,
+    n: int,
+    output_rows: int,
+    group_size: int,
+    moments: torch.Tensor,
+    device: torch.device,
+    perm4: torch.Tensor,
+    perm8: torch.Tensor,
+    scale_perm: torch.Tensor,
+) -> float:
+    codes4 = _mixed_unpack_marlin_codes(
+        cache4, packed4_offset, packed4_bytes, 4, k, n, device, perm4
+    ).float().sub_(8.0)
+    codes8 = _mixed_unpack_marlin_codes(
+        cache8, packed8_offset, packed8_bytes, 8, k, n, device, perm8
+    ).float().sub_(128.0)
+    scales4 = _mixed_unpack_marlin_scales(
+        cache4, scales4_offset, scale_bytes, k, n, group_size, device, scale_perm
+    )
+    scales8 = _mixed_unpack_marlin_scales(
+        cache8, scales8_offset, scale_bytes, k, n, group_size, device, scale_perm
+    )
+    scale4_kn = scales4.repeat_interleave(group_size, dim=0)[:k]
+    scale8_kn = scales8.repeat_interleave(group_size, dim=0)[:k]
+    difference = codes4[:, :output_rows].mul_(scale4_kn[:, :output_rows]).sub_(
+        codes8[:, :output_rows].mul_(scale8_kn[:, :output_rows])
+    )
+    weighted = difference.square_().mul_(moments.to(device=device, dtype=torch.float32)[:, None])
+    result = float(weighted.double().sum().item())
+    del codes4, codes8, scales4, scales8, scale4_kn, scale8_kn, difference, weighted
+    return result
+
+
+def command_build_mixed_expert_manifests(args: argparse.Namespace) -> None:
+    if not torch.cuda.is_available():
+        raise RuntimeError("mixed-expert ranking requires CUDA")
+    torch.use_deterministic_algorithms(True)
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.cuda.matmul.allow_tf32 = False
+    device = torch.device(f"cuda:{args.cuda_device}")
+    torch.cuda.set_device(device)
+
+    model_dir = args.model_dir.resolve()
+    cache4_path = args.int4_cache.resolve()
+    cache8_path = args.int8_cache.resolve()
+    output_dir = args.output_dir.resolve()
+    if cache4_path.parent != cache8_path.parent or output_dir != cache4_path.parent:
+        raise RuntimeError(
+            "mixed-expert manifests and their INT4/INT8 sources must share one cache directory"
+        )
+    capture_dirs = [args.capture_dir.resolve(), *[path.resolve() for path in args.extra]]
+    corpus_manifests = [path.resolve() for path in args.corpus_manifest]
+    if len(set(capture_dirs)) != len(capture_dirs):
+        raise RuntimeError("mixed-expert calibration capture directories must be unique")
+    if len(corpus_manifests) != len(capture_dirs):
+        raise RuntimeError(
+            "provide exactly one --corpus-manifest for every calibration capture directory"
+        )
+    capture_metas = [capture_metadata(path) for path in capture_dirs]
+    corpus_hashes = [meta["calibration_sha256"].lower() for meta in capture_metas]
+    if len(set(corpus_hashes)) != len(corpus_hashes):
+        raise RuntimeError(
+            "mixed-expert calibration captures must use distinct corpus identities"
+        )
+    capture_files = [
+        file
+        for path in capture_dirs
+        for file in [path / "capture.json", *sorted(path.glob("layer_*.ktc"))]
+    ]
+    capture_stats = {
+        file: (file.stat().st_size, file.stat().st_mtime_ns) for file in capture_files
+    }
+    capture_hashes = [
+        combined_sha256([path / "capture.json", *sorted(path.glob("layer_*.ktc"))])
+        for path in capture_dirs
+    ]
+    calibration_input_hashes: set[str] = set()
+    corpus_manifest_hashes: list[str] = []
+    for expected_corpus_hash, manifest_path in zip(corpus_hashes, corpus_manifests):
+        manifest_raw = manifest_path.read_bytes()
+        corpus_manifest_hashes.append(hashlib.sha256(manifest_raw).hexdigest())
+        corpus_manifest = json.loads(manifest_raw)
+        declared_corpus_hash = corpus_manifest.pop("corpus_sha256", None)
+        canonical = json.dumps(
+            corpus_manifest, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        actual_corpus_hash = hashlib.sha256(canonical).hexdigest()
+        if declared_corpus_hash != actual_corpus_hash or actual_corpus_hash != expected_corpus_hash:
+            raise RuntimeError(
+                f"calibration corpus/capture binding mismatch for {manifest_path}"
+            )
+        calibration_input_hashes.update(
+            mixed_calibration_entry_hashes(corpus_manifest, manifest_path)
+        )
+
+    exclusions_raw = args.excluded_input_manifest.resolve().read_bytes()
+    exclusions = json.loads(exclusions_raw)
+    excluded_hashes = set(exclusions.get("sha256s", [])) if isinstance(exclusions, dict) else set()
+    if not excluded_hashes or any(
+        not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+        for value in excluded_hashes
+    ):
+        raise RuntimeError("excluded-input manifest must contain lowercase SHA-256 identities")
+    overlap = (set(corpus_hashes) | calibration_input_hashes) & excluded_hashes
+    if overlap:
+        raise RuntimeError(f"mixed-expert calibration overlaps an excluded input set: {sorted(overlap)}")
+
+    header4 = _mixed_marlin_header(cache4_path)
+    header8 = _mixed_marlin_header(cache8_path)
+    comparable = ("hidden_size", "intermediate_size", "experts", "layers", "group_size", "shared_experts")
+    if any(header4[key] != header8[key] for key in comparable):
+        raise RuntimeError("INT4 and INT8 Marlin source headers have different geometry")
+    if header8["calibration_mode"] != "amax":
+        raise RuntimeError("INT8 Marlin source must carry the canonical amax tag")
+    # Bind the immutable source bytes before they influence ranking. A final
+    # snapshot check below rejects any source or capture changed during the
+    # measurement instead of publishing an internally inconsistent identity.
+    source4_sha, source4_stat = stable_sha256_file(cache4_path)
+    source8_sha, source8_stat = stable_sha256_file(cache8_path)
+
+    layer_names = sorted(path.name for path in capture_dirs[0].glob("layer_*.ktc"))
+    if len(layer_names) != int(header4["layers"]):
+        raise RuntimeError("mixed-expert captures do not cover every routed layer")
+    for capture_dir in capture_dirs[1:]:
+        if sorted(path.name for path in capture_dir.glob("layer_*.ktc")) != layer_names:
+            raise RuntimeError("mixed-expert capture layer inventories differ")
+
+    config_path = model_dir / "config.json"
+    config_before = config_path.stat()
+    config_raw = config_path.read_bytes()
+    config_root = json.loads(config_raw)
+    config = config_root.get("text_config", config_root)
+    if not isinstance(config, dict):
+        raise RuntimeError("model text_config is not an object")
+    experts_gated = str(config.get("mlp_hidden_act", "")).lower() != "relu2"
+    first_capture = read_capture_layer(capture_dirs[0] / layer_names[0])
+    routed_hidden = first_capture.expert_input_size
+    intermediate = first_capture.intermediate_size
+    experts = first_capture.expert_count
+    group_size = int(header4["group_size"])
+    if experts != int(header4["experts"]) or intermediate != int(header4["intermediate_size"]):
+        raise RuntimeError("mixed-expert capture and Marlin source geometry differ")
+    sizes4 = _mixed_marlin_component_bytes(
+        routed_hidden, intermediate, group_size, 4, experts_gated
+    )
+    sizes8 = _mixed_marlin_component_bytes(
+        routed_hidden, intermediate, group_size, 8, experts_gated
+    )
+    record4 = sum(sizes4)
+    record8 = sum(sizes8)
+    routed_count = len(layer_names) * experts
+    shared_experts = int(header4["shared_experts"])
+    shared_intermediate = int(
+        config.get("moe_shared_expert_intermediate_size")
+        or config.get("shared_expert_intermediate_size")
+        or config.get("share_expert_dim")
+        or shared_experts * intermediate
+    )
+    shared4 = sum(
+        _mixed_marlin_component_bytes(
+            int(header4["hidden_size"]), shared_intermediate, group_size, 4, experts_gated
+        )
+    )
+    shared8 = sum(
+        _mixed_marlin_component_bytes(
+            int(header8["hidden_size"]), shared_intermediate, group_size, 8, experts_gated
+        )
+    )
+    expected4 = (
+        MARLIN_CACHE_HEADER_BYTES
+        + routed_count * record4
+        + (len(layer_names) * shared4 if shared_experts > 0 else 0)
+    )
+    expected8 = (
+        MARLIN_CACHE_HEADER_BYTES
+        + routed_count * record8
+        + (len(layer_names) * shared8 if shared_experts > 0 else 0)
+    )
+    if cache4_path.stat().st_size != expected4:
+        raise RuntimeError(
+            f"INT4 Marlin source size {cache4_path.stat().st_size} != expected {expected4}"
+        )
+    if cache8_path.stat().st_size != expected8:
+        raise RuntimeError(
+            f"INT8 Marlin source size {cache8_path.stat().st_size} != expected {expected8}"
+        )
+
+    cache4 = np.memmap(cache4_path, mode="r", dtype=np.uint8)
+    cache8 = np.memmap(cache8_path, mode="r", dtype=np.uint8)
+    perm4 = _mixed_weight_permutation(4)
+    perm8 = _mixed_weight_permutation(8)
+    scale_perm = _mixed_scale_permutation()
+    w2_n = routed_hidden + 64 if routed_hidden == intermediate and routed_hidden % 256 else routed_hidden
+    candidates = []
+    started = time.monotonic()
+    for moe_layer, layer_name in enumerate(layer_names):
+        capture = combine_capture_layers(
+            [read_capture_layer(path / layer_name) for path in capture_dirs]
+        )
+        input_moments, down_moments, _route_counts = routed_activation_second_moments(
+            capture, device
+        )
+        route_mass = torch.bincount(
+            capture.topk_ids.reshape(-1).to(device="cpu", dtype=torch.int64),
+            weights=capture.topk_weights.reshape(-1)
+            .to(device="cpu", dtype=torch.float64)
+            .square(),
+            minlength=experts,
+        )
+        for expert in range(experts):
+            global_region = moe_layer * experts + expert
+            base4 = MARLIN_CACHE_HEADER_BYTES + global_region * record4
+            base8 = MARLIN_CACHE_HEADER_BYTES + global_region * record8
+            w13 = _mixed_projection_disagreement(
+                cache4, cache8,
+                base4, base4 + sizes4[0],
+                base8, base8 + sizes8[0],
+                sizes4[0], sizes8[0], sizes4[1],
+                routed_hidden,
+                (2 if experts_gated else 1) * intermediate,
+                (2 if experts_gated else 1) * intermediate,
+                group_size,
+                input_moments[expert], device, perm4, perm8, scale_perm,
+            )
+            w2_base4 = base4 + sizes4[0] + sizes4[1]
+            w2_base8 = base8 + sizes8[0] + sizes8[1]
+            w2 = _mixed_projection_disagreement(
+                cache4, cache8,
+                w2_base4, w2_base4 + sizes4[2],
+                w2_base8, w2_base8 + sizes8[2],
+                sizes4[2], sizes8[2], sizes4[3],
+                intermediate, w2_n, routed_hidden, group_size,
+                down_moments[expert], device, perm4, perm8, scale_perm,
+            )
+            normalized = (
+                w13 / ((2 if experts_gated else 1) * intermediate)
+                + w2 / routed_hidden
+            ) * float(route_mass[expert].item())
+            gain_units = max(0, round(normalized * 10 ** (-MIXED_EXPERT_GAIN_SCALE_EXPONENT)))
+            if gain_units > (1 << 63) - 1:
+                raise RuntimeError(
+                    f"mixed-expert fixed-point gain exceeds i64 for layer {moe_layer} expert {expert}"
+                )
+            candidates.append({
+                "model_layer": capture.model_layer,
+                "moe_layer": moe_layer,
+                "expert": expert,
+                "int4_bytes": record4,
+                "int8_bytes": record8,
+                "quality_gain_units": gain_units,
+                "quality_disagreement": format(normalized, ".17g"),
+            })
+        torch.cuda.empty_cache()
+        print(
+            f"[mixed-expert] ranked layer {moe_layer + 1}/{len(layer_names)} "
+            f"model_layer={capture.model_layer} elapsed_s={time.monotonic() - started:.1f}",
+            flush=True,
+        )
+
+    def compare_candidates(left: dict, right: dict) -> int:
+        left_delta = left["int8_bytes"] - left["int4_bytes"]
+        right_delta = right["int8_bytes"] - right["int4_bytes"]
+        left_cross = left["quality_gain_units"] * right_delta
+        right_cross = right["quality_gain_units"] * left_delta
+        if left_cross != right_cross:
+            return -1 if left_cross > right_cross else 1
+        left_identity = (left["moe_layer"], left["expert"], left["model_layer"])
+        right_identity = (right["moe_layer"], right["expert"], right["model_layer"])
+        return (left_identity > right_identity) - (left_identity < right_identity)
+
+    candidates.sort(key=cmp_to_key(compare_candidates))
+    for rank, candidate in enumerate(candidates):
+        candidate["quality_rank"] = rank
+    device_properties = torch.cuda.get_device_properties(device)
+    device_uuid = getattr(device_properties, "uuid", None)
+    ranking_evidence = {
+        "format": "Krasis mixed routed-expert ranking evidence",
+        "schema_version": 1,
+        "ranking_method": MIXED_EXPERT_RANKING_METHOD,
+        "quality_gain_scale_exponent": MIXED_EXPERT_GAIN_SCALE_EXPONENT,
+        "calibration_corpora_sha256": corpus_hashes,
+        "calibration_corpus_manifest_sha256": corpus_manifest_hashes,
+        "calibration_input_sha256": sorted(calibration_input_hashes),
+        "capture_artifact_sha256": capture_hashes,
+        "excluded_input_set_sha256": hashlib.sha256(exclusions_raw).hexdigest(),
+        "device": {
+            "logical": str(device),
+            "name": device_properties.name,
+            "compute_capability": [device_properties.major, device_properties.minor],
+            "total_memory_bytes": device_properties.total_memory,
+            "uuid": None if device_uuid is None else str(device_uuid),
+        },
+        "candidates": candidates,
+    }
+    evidence_raw = json.dumps(ranking_evidence, sort_keys=True, separators=(",", ":")).encode()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = output_dir / "mixed-expert-ranking.json"
+
+    from krasis.checkpoint_identity import cache_namespace, checkpoint_identity
+    checkpoint = checkpoint_identity(str(model_dir))
+    source4 = {
+        "bits": 4, "basename": cache4_path.name, "bytes": cache4_path.stat().st_size,
+        "sha256": source4_sha, "header_sha256": header4["header_sha256"],
+        "header_config_fnv1a": header4["config_fnv"],
+        "expert_int4_calibration_mode": header4["calibration_mode"],
+    }
+    source8 = {
+        "bits": 8, "basename": cache8_path.name, "bytes": cache8_path.stat().st_size,
+        "sha256": source8_sha, "header_sha256": header8["header_sha256"],
+        "header_config_fnv1a": header8["config_fnv"],
+        "expert_int4_calibration_mode": header8["calibration_mode"],
+    }
+    baseline = routed_count * record4
+    delta = record8 - record4
+    manifests = []
+    publications: list[tuple[Path, bytes]] = [(evidence_path, evidence_raw)]
+    for basis_points in MIXED_EXPERT_BUDGET_BPS:
+        cap = baseline * basis_points // 10_000
+        selected = set()
+        used = 0
+        for candidate in candidates:
+            if candidate["quality_gain_units"] <= 0:
+                continue
+            if used + delta <= cap:
+                selected.add((candidate["moe_layer"], candidate["expert"]))
+                used += delta
+        by_identity = {(item["moe_layer"], item["expert"]): item for item in candidates}
+        regions = []
+        for moe_layer in range(len(layer_names)):
+            for expert in range(experts):
+                item = by_identity[(moe_layer, expert)]
+                regions.append({
+                    "model_layer": item["model_layer"], "moe_layer": moe_layer,
+                    "expert": expert, "bits": 8 if (moe_layer, expert) in selected else 4,
+                    "int4_bytes": record4, "int8_bytes": record8,
+                    "quality_gain_units": item["quality_gain_units"],
+                    "quality_rank": item["quality_rank"],
+                })
+        manifest = {
+            "format": MIXED_EXPERT_FORMAT,
+            "schema_version": MIXED_EXPERT_SCHEMA_VERSION,
+            "checkpoint_sha256": checkpoint["sha256"],
+            "cache_namespace": cache_namespace(str(model_dir)),
+            "config_sha256": hashlib.sha256(config_raw).hexdigest(),
+            "group_size": group_size,
+            "hidden_size": routed_hidden,
+            "intermediate_size": intermediate,
+            "routed_layers": len(layer_names),
+            "routed_experts_per_layer": experts,
+            "experts_gated": experts_gated,
+            "default_bits": 4,
+            "source_int4": source4,
+            "source_int8": source8,
+            "calibration": {
+                "artifact_sha256": capture_binding_sha256(capture_hashes),
+                "ranking_evidence_sha256": hashlib.sha256(evidence_raw).hexdigest(),
+                "ranking_method": MIXED_EXPERT_RANKING_METHOD,
+                "quality_gain_scale_exponent": MIXED_EXPERT_GAIN_SCALE_EXPONENT,
+                "corpus_sha256": corpus_hashes,
+                "capture_artifact_sha256": capture_hashes,
+                "excluded_input_set_sha256": hashlib.sha256(exclusions_raw).hexdigest(),
+            },
+            "budget": {
+                "requested_basis_points": basis_points,
+                "baseline_int4_routed_bytes": baseline,
+                "maximum_added_bytes": cap,
+                "achieved_added_bytes": used,
+                "achieved_percent_millionths": used * 100_000_000 // baseline,
+            },
+            "regions": regions,
+        }
+        raw = json.dumps(manifest, separators=(",", ":")).encode()
+        path = output_dir / f"mixed-experts-int4-plus-{basis_points // 100}.json"
+        publications.append((path, raw))
+        manifests.append({"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw), "selected": len(selected), "added_bytes": used})
+
+    current_config = config_path.stat()
+    if (
+        current_config.st_size != config_before.st_size
+        or current_config.st_mtime_ns != config_before.st_mtime_ns
+        or config_path.read_bytes() != config_raw
+    ):
+        raise RuntimeError("model config changed during mixed-expert calibration")
+    for cache_path, snapshot in (
+        (cache4_path, source4_stat),
+        (cache8_path, source8_stat),
+    ):
+        current = cache_path.stat()
+        if (current.st_size, current.st_mtime_ns) != (
+            snapshot.st_size,
+            snapshot.st_mtime_ns,
+        ):
+            raise RuntimeError(f"Marlin source changed during mixed-expert calibration: {cache_path}")
+    for file, snapshot in capture_stats.items():
+        current = file.stat()
+        if (current.st_size, current.st_mtime_ns) != snapshot:
+            raise RuntimeError(f"capture changed during mixed-expert calibration: {file}")
+
+    temporary_publications: list[tuple[Path, Path]] = []
+    for destination, _raw in publications:
+        temporary = destination.with_name(destination.name + f".{os.getpid()}.tmp")
+        if destination.exists() or temporary.exists():
+            raise RuntimeError(
+                f"refusing to overwrite mixed-expert artifact or temporary file: {destination}"
+            )
+        temporary_publications.append((destination, temporary))
+    try:
+        for (destination, raw), (_, temporary) in zip(publications, temporary_publications):
+            with temporary.open("xb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+        for destination, temporary in temporary_publications:
+            os.replace(temporary, destination)
+        parent_fd = os.open(output_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except BaseException:
+        for _destination, temporary in temporary_publications:
+            if temporary.exists():
+                temporary.unlink()
+        raise
+    write_marlin_sha256_cache(cache4_path, source4_sha, source4_stat)
+    write_marlin_sha256_cache(cache8_path, source8_sha, source8_stat)
+    print(json.dumps({"status": "pass", "ranking_evidence": str(evidence_path), "manifests": manifests, "elapsed_s": time.monotonic() - started}, indent=2, sort_keys=True))
+
+
+def command_verify_mixed_expert_manifest(args: argparse.Namespace) -> None:
+    path = args.manifest.resolve()
+    raw = path.read_bytes()
+    manifest = json.loads(raw)
+    if json.dumps(manifest, separators=(",", ":")).encode() != raw:
+        raise RuntimeError("mixed-expert manifest is not canonical compact JSON")
+    if (
+        manifest.get("format") != MIXED_EXPERT_FORMAT
+        or manifest.get("schema_version") != MIXED_EXPERT_SCHEMA_VERSION
+        or manifest.get("default_bits") != 4
+        or manifest.get("experts_gated") not in (True, False)
+    ):
+        raise RuntimeError("unsupported mixed-expert manifest contract")
+
+    model_dir = args.model_dir.resolve()
+    config_root = load_json(model_dir / "config.json")
+    config = config_root.get("text_config", config_root)
+    if not isinstance(config, dict):
+        raise RuntimeError("model text_config is not an object")
+    from krasis.checkpoint_identity import cache_namespace, checkpoint_identity
+
+    checkpoint = checkpoint_identity(str(model_dir))
+    config_sha256 = hashlib.sha256((model_dir / "config.json").read_bytes()).hexdigest()
+    if (
+        manifest.get("checkpoint_sha256") != checkpoint["sha256"]
+        or manifest.get("cache_namespace") != cache_namespace(str(model_dir))
+        or manifest.get("config_sha256") != config_sha256
+    ):
+        raise RuntimeError("mixed-expert checkpoint/config identity mismatch")
+
+    hidden = int(manifest["hidden_size"])
+    intermediate = int(manifest["intermediate_size"])
+    group_size = int(manifest["group_size"])
+    layers = int(manifest["routed_layers"])
+    experts = int(manifest["routed_experts_per_layer"])
+    experts_gated = bool(manifest["experts_gated"])
+    model_experts_gated = str(config.get("mlp_hidden_act", "")).lower() != "relu2"
+    if experts_gated != model_experts_gated:
+        raise RuntimeError("mixed-expert gated/ungated model contract mismatch")
+    sizes4 = _mixed_marlin_component_bytes(
+        hidden, intermediate, group_size, 4, experts_gated
+    )
+    sizes8 = _mixed_marlin_component_bytes(
+        hidden, intermediate, group_size, 8, experts_gated
+    )
+    record4 = sum(sizes4)
+    record8 = sum(sizes8)
+    baseline = layers * experts * record4
+    budget = manifest["budget"]
+    basis_points = int(budget["requested_basis_points"])
+    if basis_points not in MIXED_EXPERT_BUDGET_BPS:
+        raise RuntimeError("unsupported mixed-expert byte budget")
+    maximum_added = baseline * basis_points // 10_000
+    if (
+        int(budget["baseline_int4_routed_bytes"]) != baseline
+        or int(budget["maximum_added_bytes"]) != maximum_added
+    ):
+        raise RuntimeError("mixed-expert baseline or maximum byte budget mismatch")
+
+    source_headers = {}
+    for bits, key in ((4, "source_int4"), (8, "source_int8")):
+        identity = manifest[key]
+        if identity.get("bits") != bits:
+            raise RuntimeError(f"mixed-expert {key} precision mismatch")
+        basename = identity.get("basename")
+        if not isinstance(basename, str) or Path(basename).name != basename:
+            raise RuntimeError(f"mixed-expert {key} is not a safe basename")
+        source_path = path.parent / basename
+        if source_path.stat().st_size != int(identity["bytes"]):
+            raise RuntimeError(f"mixed-expert INT{bits} source size mismatch")
+        header = _mixed_marlin_header(source_path)
+        source_headers[bits] = header
+        if (
+            header["header_sha256"] != identity["header_sha256"]
+            or int(header["config_fnv"]) != int(identity["header_config_fnv1a"])
+            or header["calibration_mode"] != identity["expert_int4_calibration_mode"]
+            or int(header["intermediate_size"]) != intermediate
+            or int(header["experts"]) != experts
+            or int(header["layers"]) != layers
+            or int(header["group_size"]) != group_size
+        ):
+            raise RuntimeError(f"mixed-expert INT{bits} source header identity mismatch")
+        if sha256_file(source_path) != identity["sha256"]:
+            raise RuntimeError(f"mixed-expert INT{bits} full source SHA-256 mismatch")
+
+    if any(
+        source_headers[4][key] != source_headers[8][key]
+        for key in (
+            "hidden_size", "intermediate_size", "experts", "layers", "group_size",
+            "shared_experts",
+        )
+    ):
+        raise RuntimeError("mixed-expert source cache geometries differ")
+    shared_experts = int(source_headers[4]["shared_experts"])
+    shared_intermediate = int(
+        config.get("moe_shared_expert_intermediate_size")
+        or config.get("shared_expert_intermediate_size")
+        or config.get("share_expert_dim")
+        or shared_experts * intermediate
+    )
+    for bits, key, record in (
+        (4, "source_int4", record4), (8, "source_int8", record8)
+    ):
+        shared_record = sum(
+            _mixed_marlin_component_bytes(
+                int(source_headers[bits]["hidden_size"]),
+                shared_intermediate,
+                group_size,
+                bits,
+                experts_gated,
+            )
+        )
+        expected_source_bytes = (
+            MARLIN_CACHE_HEADER_BYTES
+            + layers * experts * record
+            + (layers * shared_record if shared_experts > 0 else 0)
+        )
+        if int(manifest[key]["bytes"]) != expected_source_bytes:
+            raise RuntimeError(
+                f"mixed-expert INT{bits} source does not exactly cover routed/shared geometry"
+            )
+
+    regions = manifest.get("regions")
+    if not isinstance(regions, list) or len(regions) != layers * experts:
+        raise RuntimeError("mixed-expert region cardinality mismatch")
+    candidates = []
+    ranks = set()
+    for index, region in enumerate(regions):
+        moe_layer, expert = divmod(index, experts)
+        if (
+            int(region["moe_layer"]) != moe_layer
+            or int(region["expert"]) != expert
+            or int(region["bits"]) not in (4, 8)
+            or int(region["int4_bytes"]) != record4
+            or int(region["int8_bytes"]) != record8
+        ):
+            raise RuntimeError(f"mixed-expert region geometry mismatch at row {index}")
+        rank = int(region["quality_rank"])
+        gain = int(region["quality_gain_units"])
+        if rank < 0 or rank >= len(regions) or gain < 0 or gain > (1 << 63) - 1:
+            raise RuntimeError(f"mixed-expert rank/gain mismatch at row {index}")
+        ranks.add(rank)
+        candidates.append(region)
+    if len(ranks) != len(regions):
+        raise RuntimeError("mixed-expert quality ranks are not a permutation")
+
+    def compare_candidates(left: dict, right: dict) -> int:
+        left_delta = int(left["int8_bytes"]) - int(left["int4_bytes"])
+        right_delta = int(right["int8_bytes"]) - int(right["int4_bytes"])
+        left_cross = int(left["quality_gain_units"]) * right_delta
+        right_cross = int(right["quality_gain_units"]) * left_delta
+        if left_cross != right_cross:
+            return -1 if left_cross > right_cross else 1
+        left_identity = (
+            int(left["moe_layer"]), int(left["expert"]), int(left["model_layer"])
+        )
+        right_identity = (
+            int(right["moe_layer"]), int(right["expert"]), int(right["model_layer"])
+        )
+        return (left_identity > right_identity) - (left_identity < right_identity)
+
+    ranked = sorted(candidates, key=cmp_to_key(compare_candidates))
+    for rank, region in enumerate(ranked):
+        if int(region["quality_rank"]) != rank:
+            raise RuntimeError("mixed-expert recorded ranks do not match exact ratio ordering")
+    selected = set()
+    achieved = 0
+    for region in ranked:
+        delta = int(region["int8_bytes"]) - int(region["int4_bytes"])
+        if int(region["quality_gain_units"]) > 0 and achieved + delta <= maximum_added:
+            selected.add((int(region["moe_layer"]), int(region["expert"])))
+            achieved += delta
+    if any(
+        (int(region["bits"]) == 8)
+        != ((int(region["moe_layer"]), int(region["expert"])) in selected)
+        for region in regions
+    ):
+        raise RuntimeError("mixed-expert precision rows do not implement the exact budget")
+    achieved_millionths = achieved * 100_000_000 // baseline
+    if (
+        int(budget["achieved_added_bytes"]) != achieved
+        or int(budget["achieved_percent_millionths"]) != achieved_millionths
+    ):
+        raise RuntimeError("mixed-expert achieved byte budget mismatch")
+
+    calibration = manifest["calibration"]
+    calibration_corpora = calibration.get("corpus_sha256")
+    calibration_captures = calibration.get("capture_artifact_sha256")
+    calibration_hashes_valid = (
+        isinstance(calibration_corpora, list)
+        and isinstance(calibration_captures, list)
+        and all(
+            isinstance(value, str)
+            and re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in [*calibration_corpora, *calibration_captures]
+        )
+    )
+    if (
+        not isinstance(calibration_corpora, list)
+        or not calibration_corpora
+        or not isinstance(calibration_captures, list)
+        or len(calibration_captures) != len(calibration_corpora)
+        or not calibration_hashes_valid
+        or len(set(calibration_corpora)) != len(calibration_corpora)
+        or len(set(calibration_captures)) != len(calibration_captures)
+        or calibration.get("artifact_sha256")
+        != capture_binding_sha256(calibration_captures)
+    ):
+        raise RuntimeError("mixed-expert aggregate calibration identity is invalid")
+    evidence_path = path.parent / "mixed-expert-ranking.json"
+    evidence_raw = evidence_path.read_bytes()
+    if hashlib.sha256(evidence_raw).hexdigest() != calibration["ranking_evidence_sha256"]:
+        raise RuntimeError("mixed-expert ranking evidence identity mismatch")
+    evidence = json.loads(evidence_raw)
+    device_identity = evidence.get("device")
+    if (
+        evidence.get("format") != "Krasis mixed routed-expert ranking evidence"
+        or evidence.get("schema_version") != 1
+        or evidence.get("quality_gain_scale_exponent")
+        != MIXED_EXPERT_GAIN_SCALE_EXPONENT
+        or evidence.get("calibration_corpora_sha256")
+        != calibration.get("corpus_sha256")
+        or evidence.get("capture_artifact_sha256")
+        != calibration.get("capture_artifact_sha256")
+        or evidence.get("excluded_input_set_sha256")
+        != calibration.get("excluded_input_set_sha256")
+        or not isinstance(device_identity, dict)
+        or not isinstance(device_identity.get("logical"), str)
+        or not isinstance(device_identity.get("name"), str)
+        or not device_identity.get("name")
+        or not isinstance(device_identity.get("compute_capability"), list)
+        or len(device_identity["compute_capability"]) != 2
+        or any(
+            not isinstance(value, int) or value < 0
+            for value in device_identity["compute_capability"]
+        )
+        or not isinstance(device_identity.get("total_memory_bytes"), int)
+        or device_identity["total_memory_bytes"] <= 0
+        or (
+            device_identity.get("uuid") is not None
+            and not isinstance(device_identity.get("uuid"), str)
+        )
+    ):
+        raise RuntimeError("mixed-expert ranking evidence identity is incomplete")
+    ranking_fields = (
+        "model_layer", "moe_layer", "expert", "int4_bytes", "int8_bytes",
+        "quality_gain_units", "quality_rank",
+    )
+    evidence_candidates = evidence.get("candidates")
+    if (
+        evidence.get("ranking_method") != MIXED_EXPERT_RANKING_METHOD
+        or not isinstance(evidence_candidates, list)
+        or len(evidence_candidates) != len(ranked)
+        or any(
+            {key: left.get(key) for key in ranking_fields}
+            != {key: right.get(key) for key in ranking_fields}
+            for left, right in zip(evidence_candidates, ranked)
+        )
+    ):
+        raise RuntimeError("mixed-expert ranking evidence content mismatch")
+    gain_scale = 10 ** (-MIXED_EXPERT_GAIN_SCALE_EXPONENT)
+    for index, candidate in enumerate(evidence_candidates):
+        try:
+            disagreement = float(candidate["quality_disagreement"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"mixed-expert ranking evidence has invalid disagreement at row {index}"
+            ) from exc
+        if (
+            not math.isfinite(disagreement)
+            or disagreement < 0.0
+            or round(disagreement * gain_scale)
+            != int(candidate["quality_gain_units"])
+        ):
+            raise RuntimeError(
+                f"mixed-expert ranking evidence disagreement/gain mismatch at row {index}"
+            )
+    print(
+        json.dumps(
+            {
+                "status": "pass",
+                "manifest": str(path),
+                "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+                "budget_basis_points": basis_points,
+                "selected_int8_regions": len(selected),
+                "achieved_added_bytes": achieved,
+                "achieved_percent_millionths": achieved_millionths,
+                "source_sha256_verified": {str(bits): manifest[key]["sha256"] for bits, key in ((4, "source_int4"), (8, "source_int8"))},
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     sub = root.add_subparsers(dest="command", required=True)
@@ -1823,6 +3602,36 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("capture_dir", type=Path)
     inspect.add_argument("--extra", action="append", default=[], type=Path)
     inspect.set_defaults(func=command_inspect_capture)
+
+    inspect_rank = sub.add_parser(
+        "inspect-route-rank",
+        help="measure one expert's router rank and top-k cutoff margin on KTC1 inputs",
+    )
+    inspect_rank.add_argument("model_dir", type=Path)
+    inspect_rank.add_argument("capture_dir", type=Path)
+    inspect_rank.add_argument("--extra", action="append", default=[], type=Path)
+    inspect_rank.add_argument("--layer", type=int, required=True)
+    inspect_rank.add_argument("--expert", type=int, required=True)
+    inspect_rank.add_argument("--cuda-device", type=int, required=True)
+    inspect_rank.add_argument("--batch-rows", type=int, required=True)
+    inspect_rank.set_defaults(func=command_inspect_route_rank)
+
+    int4_calib = sub.add_parser(
+        "export-int4-calibration",
+        help="aggregate source-bound KTC1 routes into a KIC1 INT4 calibration artifact",
+    )
+    int4_calib.add_argument("capture_dir", type=Path)
+    int4_calib.add_argument("output", type=Path)
+    int4_calib.add_argument("--extra", action="append", default=[], type=Path)
+    int4_calib.add_argument("--cuda-device", type=int, default=0)
+    int4_calib.set_defaults(func=command_export_int4_calibration)
+
+    verify_int4_calib = sub.add_parser(
+        "verify-int4-calibration",
+        help="validate KIC1 metadata, hashes, and exact payload coverage",
+    )
+    verify_int4_calib.add_argument("artifact", type=Path)
+    verify_int4_calib.set_defaults(func=command_verify_int4_calibration)
 
     prepare = sub.add_parser(
         "prepare-corpus",
@@ -1832,6 +3641,29 @@ def parser() -> argparse.ArgumentParser:
     prepare.add_argument("sources", nargs="+", type=Path)
     prepare.add_argument("--half", choices=("head", "tail"), required=True)
     prepare.set_defaults(func=command_prepare_corpus)
+
+    prepare_excluded = sub.add_parser(
+        "prepare-excluded-inputs",
+        help="build a hash-bound set of evaluation inputs excluded from calibration",
+    )
+    prepare_excluded.add_argument("output", type=Path)
+    prepare_excluded.add_argument("inputs", nargs="+", type=Path)
+    prepare_excluded.set_defaults(func=command_prepare_excluded_inputs)
+
+    prepare_multimodal = sub.add_parser(
+        "prepare-multimodal-corpus",
+        help="build a source-bound corpus from real image/prompt pairs",
+    )
+    prepare_multimodal.add_argument("output_dir", type=Path)
+    prepare_multimodal.add_argument(
+        "--entry",
+        action="append",
+        nargs=2,
+        required=True,
+        type=Path,
+        metavar=("IMAGE", "PROMPT"),
+    )
+    prepare_multimodal.set_defaults(func=command_prepare_multimodal_corpus)
 
     capture = sub.add_parser(
         "capture-corpus",
@@ -1846,6 +3678,20 @@ def parser() -> argparse.ArgumentParser:
     )
     capture.add_argument("--timeout", type=float, default=1800.0)
     capture.set_defaults(func=command_capture_corpus)
+
+    capture_multimodal = sub.add_parser(
+        "capture-multimodal-corpus",
+        help="submit every verified image/prompt pair to an armed Krasis server",
+    )
+    capture_multimodal.add_argument("corpus_dir", type=Path)
+    capture_multimodal.add_argument("--base-url", default="http://127.0.0.1:18216")
+    capture_multimodal.add_argument(
+        "--model",
+        required=True,
+        help="Exact vision model identifier exposed by the calibration server",
+    )
+    capture_multimodal.add_argument("--timeout", type=float, default=1800.0)
+    capture_multimodal.set_defaults(func=command_capture_multimodal_corpus)
 
     plan = sub.add_parser("plan", help="print exact TileQ artifact geometry without building")
     plan.add_argument("model_dir", type=Path)
@@ -1893,6 +3739,31 @@ def parser() -> argparse.ArgumentParser:
     verify = sub.add_parser("verify", help="validate KTQ1 metadata and ranges")
     verify.add_argument("artifact", type=Path)
     verify.set_defaults(func=command_verify)
+
+    mixed_build = sub.add_parser(
+        "build-mixed-expert-manifests",
+        help="rank and emit source-bound routed INT4/INT8 precision manifests",
+    )
+    mixed_build.add_argument("model_dir", type=Path)
+    mixed_build.add_argument("int4_cache", type=Path)
+    mixed_build.add_argument("int8_cache", type=Path)
+    mixed_build.add_argument("capture_dir", type=Path)
+    mixed_build.add_argument("output_dir", type=Path)
+    mixed_build.add_argument("--extra", action="append", default=[], type=Path)
+    mixed_build.add_argument(
+        "--corpus-manifest", action="append", required=True, type=Path
+    )
+    mixed_build.add_argument("--excluded-input-manifest", required=True, type=Path)
+    mixed_build.add_argument("--cuda-device", type=int, default=0)
+    mixed_build.set_defaults(func=command_build_mixed_expert_manifests)
+
+    mixed_verify = sub.add_parser(
+        "verify-mixed-expert-manifest",
+        help="verify one manifest, exact budget, ranking, and full source cache identities",
+    )
+    mixed_verify.add_argument("model_dir", type=Path)
+    mixed_verify.add_argument("manifest", type=Path)
+    mixed_verify.set_defaults(func=command_verify_mixed_expert_manifest)
     return root
 
 

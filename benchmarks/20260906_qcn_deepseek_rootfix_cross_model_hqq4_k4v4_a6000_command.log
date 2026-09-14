@@ -1,0 +1,14 @@
+Date: 2026-09-06
+Working directory: /home/main/Documents/Claude/krasis
+tmux log: /home/main/Documents/Claude/krasis-internal/dsv4_rootfix_speed_test_v2_20260906.log
+Command: ./dev speed-test
+Run directory: logs/dev-benchmark_20260906_144346
+Timing/trace instrumentation: disabled
+Exit status: 0
+Native extension SHA-256: a607bd8fbbc1e541adb7471a87969d9af59123a3826f68d3a5cf0d6a0551f136
+
+SHA-256:
+benchmark_report  484df23a83221aacca5b22f2e8716dc7d7957e5afbe69bd5c143fe1b442e8a5e
+benchmark_stdout  1d736b425a1205f4c36025fb57e81831c1e7349d78c4f2f2a96fbed2b6a202d1
+runtime           09f8b735091ab62734fc09bca8e649a6a4e47957e021c635c5a8abe53c643008
+outer             1886512ac237a8369fa356ba1c03b5fe4e8518ef7413cc1df8f7f2d94b6326d6

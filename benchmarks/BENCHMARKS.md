@@ -1,5 +1,315 @@
 # Krasis Benchmark Results
 
+## QCN homogeneous guard after mixed-mode admission checks — 2026-09-14
+
+The fixed timing-disabled `./dev speed-test` completed once with exit 0 and
+clean shutdown, using `tests/qcn-k4v4-hqq4-int4-benchmark.conf` on RTX A6000.
+Native SHA-256: `b8406247a3f22f3512384228a41d4e63676716b49e3e4a418f4efa116718aa03`.
+This is post-admission-change homogeneous validation, separate from the frozen
+DeepSeek treatment measurements below.
+
+| Measurement | Request lengths | All rates, tok/s |
+|---|---|---|
+| Internal prefill | 1K / 5K / 10K / 20K / 35K / 39,920 | 1306.5 / 2357.9 / 2529.7 / 2555.7 / 2504.5 / 2467.4 |
+| Internal decode | 50 / 100 / 250 | 58.82 / 58.89 / 57.88 |
+| HTTP displayed rate | 50 / 100 / 250 | 121.41 / 79.10 / 64.70 |
+
+HTTP whole-request times were 3.24 / 4.08 / 6.65 seconds. The displayed HTTP
+rate has the buffering/first-content limitation described below; it is not
+whole-request throughput. Best internal prefill/decode: 2555.7 / 58.89 tok/s.
+Report-time process RAM: 79.2 GiB. Formal decode minimum free VRAM: 4106 MiB;
+all 24,576 experts were resident, so additional free capacity cannot increase
+expert residency. Recorded HCS failure counters were zero.
+
+Against the previous fixed run on 2026-09-12, all six prefill and all three
+internal decode readings increased; long decode changed 56.88 → 57.88 tok/s
+(+1.76%). This pair shows no observed slowdown, but does not estimate variance
+or establish cross-model mixed quality qualification.
+
+Evidence: [report](20260914_qcn_mixed_precision_admission_guard_hqq4_k4v4_a6000_benchmark_report.log),
+[command](20260914_qcn_mixed_precision_admission_guard_hqq4_k4v4_a6000_command.log),
+[outer log](20260914_qcn_mixed_precision_admission_guard_hqq4_k4v4_a6000_outer.log).
+The same prefix also has benchmark stdout, runtime log and status.
+
+## DeepSeek V4 Flash Vision Exp precision sweep — 2026-09-14
+
+Six once-only timing-disabled `./dev benchmark <config>` runs completed with
+exit 0 on one RTX PRO 6000, native SHA-256
+`b8406247a3f22f3512384228a41d4e63676716b49e3e4a418f4efa116718aa03`.
+Same checkpoint and settings: HQQ68_AUTO attention at 10%, Native cache,
+3,524 MiB cache allocation, 1,048,576 maximum context, and 600 MiB safety.
+The +5/+10/+15/+20 labels denote additional routed-expert payload budgets;
+achieved percentages are 4.994714/9.998238/14.992952/19.996476. Each run
+explicitly binds its treatment heatmap and applicable calibration artifact.
+These are experimental precision comparisons, not universal defaults.
+
+The preceding r12 invocation failed before expert-cache load or timed rows
+because its runner omitted the required calibration-sample binding. It is
+preserved as [setup-failure evidence](20260914_dsv4_vision_mixed_sweep_r12_int4_setup_failure_outer.log),
+not a treatment result. The corrected r13 runner also binds each heatmap
+explicitly; completed treatments were not retried.
+
+All prefill rates are internal tok/s:
+
+| Treatment | 1K | 5K | 10K | 20K | 35K | 39,920 |
+|---|---:|---:|---:|---:|---:|---:|
+| INT4 | 158.4 | 694.1 | 1347.8 | 2220.8 | 2596.1 | 2594.5 |
+| +5% | 155.1 | 690.4 | 1317.2 | 2218.2 | 2596.0 | 2586.9 |
+| +10% | 150.6 | 669.8 | 1300.8 | 2153.3 | 2580.3 | 2574.4 |
+| +15% | 143.6 | 636.6 | 1238.4 | 2111.4 | 2566.0 | 2561.2 |
+| +20% | 141.4 | 617.0 | 1211.3 | 2068.0 | 2549.8 | 2558.0 |
+| INT8 | 95.8 | 411.5 | 798.5 | 1531.2 | 2125.9 | 2214.3 |
+
+Internal decode rates are Rust engine measurements. HTTP columns retain the
+benchmark's displayed rates and whole-request times, in 50/100/250 order:
+
+| Treatment | Internal decode tok/s | HTTP displayed tok/s | HTTP total seconds |
+|---|---|---|---|
+| INT4 | 32.28 / 32.70 / 32.00 | 55.93 / 41.57 / 35.09 | 9.40 / 10.96 / 15.64 |
+| +5% | 29.61 / 29.41 / 29.38 | 48.35 / 35.75 / 32.22 | 9.55 / 11.52 / 16.43 |
+| +10% | 27.60 / 26.78 / 27.22 | 46.65 / 33.20 / 29.31 | 9.84 / 11.88 / 17.19 |
+| +15% | 24.98 / 24.95 / 25.16 | 40.28 / 31.32 / 27.07 | 10.18 / 12.22 / 18.08 |
+| +20% | 23.37 / 22.75 / 23.07 | 36.98 / 29.04 / 24.96 | 10.45 / 12.71 / 19.04 |
+| INT8 | 12.12 / 11.85 / 11.42 | 20.10 / 14.63 / 12.21 | 14.29 / 18.51 / 32.14 |
+
+The HTTP displayed rate excludes time before the first parsed content and
+uses buffered SSE reads. It is not tokens divided by whole-request time;
+buffering can bias it. Use internal decode for engine speed comparisons.
+
+| Treatment | Expert-load seconds | Full-model-load seconds | Process RAM GiB | Resident experts | Decode min free MiB |
+|---|---:|---:|---:|---:|---:|
+| INT4 | 93.7 | 131.3 | 153.0 | 6340/11008 (57.6%) | 1223 |
+| +5% | 107.8 | 144.8 | 159.7 | 5937/11008 (53.9%) | 1135 |
+| +10% | 112.9 | 150.0 | 166.3 | 5563/11008 (50.5%) | 1267 |
+| +15% | 119.4 | 156.3 | 173.0 | 5263/11008 (47.8%) | 1191 |
+| +20% | 124.3 | 161.2 | 179.6 | 5002/11008 (45.4%) | 1183 |
+| INT8 | 196.1 | 232.9 | 282.0 | 3200/11008 (29.1%) | 1373 |
+
+All reported failure counters were zero. These short benchmark floors exceed
+600 MiB; they do not override separate long-context VRAM failures in the
+qualification campaign. Excess short-run headroom also remains an unresolved
+budget-efficiency observation. Load times exclude later calibration/warmup;
+RAM is the report-time resident set, not peak startup RAM.
+
+Each evidence bundle includes report, stdout, runtime, exact command, outer
+log and status (same prefix with corresponding suffix):
+
+- INT4: [report](20260914_dsv4_vision_mixed_sweep_r13_int4_hqq68auto_native_pro_benchmark_report.log), [command](20260914_dsv4_vision_mixed_sweep_r13_int4_hqq68auto_native_pro_command.log), [outer log](20260914_dsv4_vision_mixed_sweep_r13_int4_hqq68auto_native_pro_outer.log).
+- +5%: [report](20260914_dsv4_vision_mixed_sweep_r13_plus5_hqq68auto_native_pro_benchmark_report.log), [command](20260914_dsv4_vision_mixed_sweep_r13_plus5_hqq68auto_native_pro_command.log), [outer log](20260914_dsv4_vision_mixed_sweep_r13_plus5_hqq68auto_native_pro_outer.log).
+- +10%: [report](20260914_dsv4_vision_mixed_sweep_r13_plus10_hqq68auto_native_pro_benchmark_report.log), [command](20260914_dsv4_vision_mixed_sweep_r13_plus10_hqq68auto_native_pro_command.log), [outer log](20260914_dsv4_vision_mixed_sweep_r13_plus10_hqq68auto_native_pro_outer.log).
+- +15%: [report](20260914_dsv4_vision_mixed_sweep_r13_plus15_hqq68auto_native_pro_benchmark_report.log), [command](20260914_dsv4_vision_mixed_sweep_r13_plus15_hqq68auto_native_pro_command.log), [outer log](20260914_dsv4_vision_mixed_sweep_r13_plus15_hqq68auto_native_pro_outer.log).
+- +20%: [report](20260914_dsv4_vision_mixed_sweep_r13_plus20_hqq68auto_native_pro_benchmark_report.log), [command](20260914_dsv4_vision_mixed_sweep_r13_plus20_hqq68auto_native_pro_command.log), [outer log](20260914_dsv4_vision_mixed_sweep_r13_plus20_hqq68auto_native_pro_outer.log).
+- INT8: [report](20260914_dsv4_vision_mixed_sweep_r13_int8_hqq68auto_native_pro_benchmark_report.log), [command](20260914_dsv4_vision_mixed_sweep_r13_int8_hqq68auto_native_pro_command.log), [outer log](20260914_dsv4_vision_mixed_sweep_r13_int8_hqq68auto_native_pro_outer.log).
+
+## DeepSeek precision sweep PCIe diagnostics — 2026-09-14
+
+All six `./dev benchmark <config> --timing` diagnostics completed with exit 0
+on the same native/source build as the preceding speed table, before the
+subsequent startup admission change. **These instrumented rates are diagnostic
+only; they are not speed benchmark results.** Every triple below follows the
+50/100/250-token requests (49/99/249 measured decode steps). Calibration,
+warmup and HTTP requests are excluded from these extracts.
+
+| Treatment | Diagnostic tok/s | Transfer MiB/token | Cold experts/token | HCS experts/token |
+|---|---|---|---|---|
+| INT4 | 32.3 / 31.8 / 31.9 | 110.62 / 106.38 / 121.81 | 8.9 / 8.6 / 9.8 | 249.1 / 249.4 / 248.2 |
+| +5% | 29.8 / 29.3 / 29.3 | 137.59 / 142.82 / 153.61 | 11.0 / 11.4 / 12.1 | 247.0 / 246.6 / 245.9 |
+| +10% | 27.5 / 26.5 / 27.2 | 179.36 / 179.38 / 193.58 | 14.0 / 13.9 / 14.9 | 244.0 / 244.1 / 243.1 |
+| +15% | 24.4 / 25.3 / 25.0 | 239.82 / 214.55 / 252.66 | 17.8 / 16.2 / 18.9 | 240.2 / 241.8 / 239.1 |
+| +20% | 23.2 / 22.8 / 23.3 | 295.76 / 290.80 / 307.13 | 21.3 / 20.4 / 22.0 | 236.7 / 237.6 / 236.0 |
+| INT8 | 12.0 / 12.1 / 11.3 | 1084.44 / 1105.49 / 1216.79 | 44.5 / 45.4 / 49.9 | 213.5 / 212.6 / 208.1 |
+
+| Treatment | DMA calls/token | Active demand H2D ms/token | Active H2D GB/s |
+|---|---|---|---|
+| INT4 | 36 / 34 / 39 | 4.56 / 4.39 / 5.16 | 24.67 / 25.03 / 24.62 |
+| +5% | 44 / 46 / 49 | 5.41 / 5.95 / 6.41 | 25.69 / 24.73 / 24.98 |
+| +10% | 56 / 55 / 59 | 7.25 / 7.20 / 7.80 | 25.09 / 25.80 / 25.88 |
+| +15% | 71 / 65 / 75 | 9.68 / 8.84 / 10.13 | 25.28 / 25.10 / 26.04 |
+| +20% | 85 / 82 / 88 | 11.93 / 11.89 / 12.21 | 25.35 / 25.36 / 26.25 |
+| INT8 | 178 / 181 / 200 | 42.17 / 42.72 / 48.48 | 26.15 / 26.74 / 26.15 |
+
+Formal residency matched each corresponding speed run:
+6340/5937/5563/5263/5002/3200 experts. Failure counters remained zero.
+Transfer volume and cold-expert count rise across the treatments; active
+bandwidth stays near 25–27 GB/s. This measures increasing demand-copy work,
+but does not attribute the entire speed loss to transfers. The byte counters
+are decode demand traffic, not all startup/prefill/residency-maintenance PCIe
+traffic. Runtime labels MB/KB here use MiB/KiB; bandwidth uses decimal GB/s.
+
+Each diagnostic has the same six-artifact bundle as the speed runs:
+
+- INT4: [full log](20260914_dsv4_vision_mixed_pcie_r13_int4_hqq68auto_native_pro_outer.log), [report](20260914_dsv4_vision_mixed_pcie_r13_int4_hqq68auto_native_pro_benchmark_report.log), [command](20260914_dsv4_vision_mixed_pcie_r13_int4_hqq68auto_native_pro_command.log).
+- +5%: [full log](20260914_dsv4_vision_mixed_pcie_r13_plus5_hqq68auto_native_pro_outer.log), [report](20260914_dsv4_vision_mixed_pcie_r13_plus5_hqq68auto_native_pro_benchmark_report.log), [command](20260914_dsv4_vision_mixed_pcie_r13_plus5_hqq68auto_native_pro_command.log).
+- +10%: [full log](20260914_dsv4_vision_mixed_pcie_r13_plus10_hqq68auto_native_pro_outer.log), [report](20260914_dsv4_vision_mixed_pcie_r13_plus10_hqq68auto_native_pro_benchmark_report.log), [command](20260914_dsv4_vision_mixed_pcie_r13_plus10_hqq68auto_native_pro_command.log).
+- +15%: [full log](20260914_dsv4_vision_mixed_pcie_r13_plus15_hqq68auto_native_pro_outer.log), [report](20260914_dsv4_vision_mixed_pcie_r13_plus15_hqq68auto_native_pro_benchmark_report.log), [command](20260914_dsv4_vision_mixed_pcie_r13_plus15_hqq68auto_native_pro_command.log).
+- +20%: [full log](20260914_dsv4_vision_mixed_pcie_r13_plus20_hqq68auto_native_pro_outer.log), [report](20260914_dsv4_vision_mixed_pcie_r13_plus20_hqq68auto_native_pro_benchmark_report.log), [command](20260914_dsv4_vision_mixed_pcie_r13_plus20_hqq68auto_native_pro_command.log).
+- INT8: [full log](20260914_dsv4_vision_mixed_pcie_r13_int8_hqq68auto_native_pro_outer.log), [report](20260914_dsv4_vision_mixed_pcie_r13_int8_hqq68auto_native_pro_benchmark_report.log), [command](20260914_dsv4_vision_mixed_pcie_r13_int8_hqq68auto_native_pro_command.log).
+
+## QCN guard after true-greedy ADQ harness validation — 2026-09-12
+
+The fixed timing-disabled `./dev speed-test` passed on native SHA-256
+`959a5df3...`, run `logs/dev-benchmark_20260912_004925`, exit 0. Internal
+prefill was `1302.1/2353.0/2529.3/2548.4/2497.3/2457.6 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`57.58/57.81/56.88 tok/s`; HTTP round trip was
+`119.98/78.31/63.63 tok/s` for 50/100/250-token outputs.
+
+QCN retained all 24,576 experts with 100% HCS coverage and held 4,108 MiB
+minimum free VRAM during formal decode against the 600 MiB margin. HCS budget
+skips, no-slot events, and copy failures were zero. Against the preceding
+fixed 2026-09-11 run, best prefill moved `2553.1 -> 2548.4 tok/s` (-0.18%)
+and best internal decode moved `58.04 -> 57.81 tok/s` (-0.40%); the longest
+prefill/decode rows changed -0.25%/-0.49%. This is normal run variance and not
+a material cross-model regression.
+
+Evidence: [report](20260912_qcn_true_greedy_adq_harness_validation_hqq4_k4v4_a6000_report.log),
+[stdout](20260912_qcn_true_greedy_adq_harness_validation_hqq4_k4v4_a6000_stdout.log),
+[runtime](20260912_qcn_true_greedy_adq_harness_validation_hqq4_k4v4_a6000_runtime.log),
+[outer](20260912_qcn_true_greedy_adq_harness_validation_hqq4_k4v4_a6000_outer.log), and
+[command](20260912_qcn_true_greedy_adq_harness_validation_hqq4_k4v4_a6000_command.log).
+
+## QCN cross-model guard after DeepSeek INT8 determinism repair — 2026-09-11
+
+The fixed timing-disabled `./dev speed-test` passed on native SHA-256
+`69e539e3...`, run `logs/dev-benchmark_20260911_093440`, exit 0. Internal
+prefill was `1303.8/2356.6/2534.6/2553.1/2499.5/2463.7 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`58.12/58.04/57.16 tok/s`; HTTP round trip was
+`120.27/78.70/64.14 tok/s` for 50/100/250-token outputs.
+
+QCN retained all 24,576 experts with 100% HCS coverage and held 4,108 MiB
+minimum free VRAM during formal decode against the 600 MiB margin. HCS budget
+skips, no-slot events, and copy failures were zero; no CUDA failure, OOM, or
+below-margin warning occurred. Against the 2026-09-09 fixed baseline, best
+prefill moved `2559.7 -> 2553.1 tok/s` (-0.26%) and best internal decode moved
+`58.71 -> 58.12 tok/s` (-1.00%); all rows remain within normal run variance,
+so this does not show a material cross-model regression.
+
+Evidence: [report](20260911_qcn_dsv4_int8_determinism_fix_cross_model_hqq4_k4v4_a6000_report.log),
+[stdout](20260911_qcn_dsv4_int8_determinism_fix_cross_model_hqq4_k4v4_a6000_stdout.log),
+[runtime](20260911_qcn_dsv4_int8_determinism_fix_cross_model_hqq4_k4v4_a6000_runtime.log),
+[outer](20260911_qcn_dsv4_int8_determinism_fix_cross_model_hqq4_k4v4_a6000_outer.log), and
+[command](20260911_qcn_dsv4_int8_determinism_fix_cross_model_hqq4_k4v4_a6000_command.log).
+
+## QCN cross-model guard after Vision-Exp activation calibration — 2026-09-09
+
+The fixed timing-disabled `./dev speed-test` passed on native SHA-256
+`2eba7706...`, run `logs/dev-benchmark_20260909_194918`, exit 0. The command
+resolved the current standard config
+`tests/qcn-k4v4-hqq4-int4-benchmark.conf`. Internal prefill was
+`1318.9/2358.0/2539.2/2559.7/2506.6/2469.1 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`58.71/58.40/57.63 tok/s`; HTTP round trip was
+`121.25/74.11/63.08 tok/s` for 50/100/250-token outputs.
+
+QCN retained all 24,576 experts with 100% HCS coverage and held 4,108 MiB
+minimum free VRAM during formal decode against the 600 MiB margin. HCS budget
+skips, no-slot events, and copy failures were zero; no CUDA failure, OOM, or
+below-margin warning occurred. Against the preceding 2026-09-07 fixed run,
+best prefill moved `2558.2 -> 2559.7 tok/s` and best internal decode
+`58.70 -> 58.71 tok/s`; the longest decode row changed by -0.6%. This is no
+material cross-model regression.
+
+Evidence: [report](20260909_qcn_dsv4_int4_calibrated_cross_model_hqq4_k4v4_a6000_report.log),
+[stdout](20260909_qcn_dsv4_int4_calibrated_cross_model_hqq4_k4v4_a6000_stdout.log),
+[runtime](20260909_qcn_dsv4_int4_calibrated_cross_model_hqq4_k4v4_a6000_runtime.log),
+[outer](20260909_qcn_dsv4_int4_calibrated_cross_model_hqq4_k4v4_a6000_outer.log), and
+[command](20260909_qcn_dsv4_int4_calibrated_cross_model_hqq4_k4v4_a6000_command.log).
+
+## QCN cross-model guard after graceful SSE cancellation repair — 2026-09-07
+
+The fixed timing-disabled `./dev speed-test` passed on final native SHA-256
+`8a551724...`, run `logs/dev-benchmark_20260907_151814`, exit 0. Internal
+prefill was `1307.0/2357.3/2535.8/2558.2/2506.9/2471.6 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`58.70/58.70/57.98 tok/s`; HTTP round trip was
+`120.80/78.78/64.45 tok/s` for 50/100/250-token outputs.
+
+This gate covers the exact source and native binary containing the Rust
+peer-read SSE cancellation monitor and no forced-token diagnostic selector.
+QCN retained all 24,576 experts (100% HCS), held 4,110 MiB minimum free VRAM
+against the 600 MiB margin, and recorded zero budget skips, no-slot events,
+copy failures, CUDA errors, OOMs, or below-margin warnings. Best internal
+decode is 0.4% below the preceding 58.96 tok/s run and best prefill is
+effectively unchanged; this does not show a material performance regression.
+
+Evidence: [report](20260907_qcn_dsv4_sse_cancel_cross_model_hqq4_k4v4_a6000_report.log),
+[stdout](20260907_qcn_dsv4_sse_cancel_cross_model_hqq4_k4v4_a6000_stdout.log),
+[runtime](20260907_qcn_dsv4_sse_cancel_cross_model_hqq4_k4v4_a6000_runtime.log),
+[outer](20260907_qcn_dsv4_sse_cancel_cross_model_hqq4_k4v4_a6000_outer.log), and
+[command](20260907_qcn_dsv4_sse_cancel_cross_model_hqq4_k4v4_a6000_command.log).
+
+## QCN final cross-model guard after DeepSeek full-context readiness — 2026-09-07
+
+The fixed timing-disabled `./dev speed-test` passed on final native SHA-256
+`bae441b5...`, run `logs/dev-benchmark_20260907_113825`, exit 0. Internal
+prefill was `1292.9/2348.4/2532.2/2558.0/2504.8/2468.2 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`58.93/58.96/58.22 tok/s`; HTTP round trip was
+`121.22/79.10/64.74 tok/s` for 50/100/250-token outputs.
+
+This gate covers the exact binary that passed DeepSeek's 1,048,576-token
+startup, deterministic ledger replay, and exact-500K readiness run. QCN
+retained all 24,576 experts (100% HCS), held 4,110 MiB minimum free VRAM
+against the 600 MiB margin, and recorded zero budget skips, no-slot events,
+copy failures, CUDA errors, OOMs, or below-margin warnings. Best internal
+decode is 0.5% above the prior corrected A6000 result (58.66 tok/s), while
+best prefill is unchanged within 0.1%; this does not show a material
+performance regression.
+
+Evidence: [report](20260907_qcn_dsv4_adq_readiness_cross_model_hqq4_k4v4_a6000_report.log),
+[stdout](20260907_qcn_dsv4_adq_readiness_cross_model_hqq4_k4v4_a6000_stdout.log),
+[runtime](20260907_qcn_dsv4_adq_readiness_cross_model_hqq4_k4v4_a6000_runtime.log),
+[outer](20260907_qcn_dsv4_adq_readiness_cross_model_hqq4_k4v4_a6000_outer.log), and
+[command](20260907_qcn_dsv4_adq_readiness_cross_model_hqq4_k4v4_a6000_command.log).
+
+## QCN final cross-model guard after DeepSeek VRAM reconciliation — 2026-09-07
+
+The fixed timing-disabled `./dev speed-test` passed on final native SHA-256
+`969bc1a5...`, run `logs/dev-benchmark_20260907_041709`, exit 0. Internal
+prefill was `1293.9/2347.5/2534.2/2557.8/2507.2/2471.7 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`58.52/58.66/57.80 tok/s`; HTTP round trip was
+`120.63/78.03/64.48 tok/s` for 50/100/250-token outputs.
+
+This gate follows the request-lifecycle VRAM measurement repair and removal of
+rejected DeepSeek-only diagnostic samplers. QCN retained all 24,576 experts
+(100% HCS), held 4,108 MiB minimum free VRAM against the 600 MiB margin, and
+recorded zero budget skips, no-slot events, copy failures, CUDA errors, OOMs,
+or below-margin warnings. Best internal decode is 0.4% below the prior
+corrected A6000 result (58.91 tok/s), while best prefill is 0.1% higher; this
+does not show a material performance regression.
+
+Evidence: [report](20260907_qcn_dsv4_adq_vram_final_cross_model_hqq4_k4v4_a6000_report.log),
+[stdout](20260907_qcn_dsv4_adq_vram_final_cross_model_hqq4_k4v4_a6000_stdout.log),
+[runtime](20260907_qcn_dsv4_adq_vram_final_cross_model_hqq4_k4v4_a6000_runtime.log),
+[outer](20260907_qcn_dsv4_adq_vram_final_cross_model_hqq4_k4v4_a6000_outer.log), and
+[command](20260907_qcn_dsv4_adq_vram_final_cross_model_hqq4_k4v4_a6000_command.log).
+
+## QCN cross-model guard after DeepSeek decode correction — 2026-09-06
+
+The fixed timing-disabled `./dev speed-test` passed on the exact repaired
+source, run `logs/dev-benchmark_20260906_144346`, exit 0. Internal prefill was
+`1291.0/2349.5/2534.4/2554.4/2506.5/2470.9 tok/s` at
+1K/5K/10K/20K/35K/39,920 tokens. Internal decode was
+`58.45/58.91/58.19 tok/s`; HTTP round trip was
+`121.10/78.94/64.65 tok/s` for 50/100/250-token outputs.
+
+The gate first exposed that automatic Marlin N16/N32 and K-split measurements
+were deferred until graph capture, after the canonical uncaptured first decode
+step required those exact dispatch decisions. The repaired runtime measures
+all loaded-shape/GPU decisions before that first step and reuses the same maps
+during capture. This final run retained all 24,576 experts (100% HCS), held
+4,108 MiB minimum free VRAM against the 600 MiB margin, and recorded zero
+budget skips, no-slot events, copy failures, CUDA errors, OOMs, or below-margin
+warnings.
+
+Evidence: [report](20260906_qcn_deepseek_rootfix_cross_model_hqq4_k4v4_a6000_report.log),
+[stdout](20260906_qcn_deepseek_rootfix_cross_model_hqq4_k4v4_a6000_stdout.log),
+[runtime](20260906_qcn_deepseek_rootfix_cross_model_hqq4_k4v4_a6000_runtime.log),
+[outer](20260906_qcn_deepseek_rootfix_cross_model_hqq4_k4v4_a6000_outer.log), and
+[command](20260906_qcn_deepseek_rootfix_cross_model_hqq4_k4v4_a6000_command.log).
+
 ## GLM-5.3-Flash final installed-source repeat on RTX PRO 6000 — 2026-08-31
 
 The final installed restored source passed the exact timing-disabled command

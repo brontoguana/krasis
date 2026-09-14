@@ -9,11 +9,13 @@ import shutil
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 
+from krasis import KrasisEngine
 from krasis.config import ModelConfig, QuantConfig
 from krasis.kv_cache import MLA_CKV_KERNEL_MIN_DIM, PagedKVCache
 from krasis.layer import (
@@ -30,7 +32,11 @@ from krasis.model import (
     _dsa_resource_layers_for_segment,
     _dsa_topk_candidate_capacity,
 )
-from krasis.server import _tileq_configuration_error
+from krasis.server import (
+    _mixed_expert_configuration_error,
+    _resolve_serving_gpu_count,
+    _tileq_configuration_error,
+)
 from krasis.vram_budget import compute_vram_budget, _kv_bytes_per_token_per_layer
 from krasis.weight_loader import WeightLoader
 
@@ -132,6 +138,47 @@ def _deepseek_v4_config() -> dict:
 
 
 class ModelConfigContractTests(unittest.TestCase):
+    def test_mixed_serving_rejects_resolved_multi_gpu_and_empty_topologies(self) -> None:
+        for requested, available in ((None, 0), (None, 2), (0, 4), (2, 1), (5, 8)):
+            with self.subTest(requested=requested, available=available):
+                args = SimpleNamespace(num_gpus=requested, mixed_expert_manifest="mixed.json")
+                with mock.patch("torch.cuda.device_count", return_value=available):
+                    with self.assertRaisesRegex(ValueError, "not live-qualified"):
+                        _resolve_serving_gpu_count(args)
+
+    def test_mixed_serving_preserves_single_selected_and_discovered_gpu(self) -> None:
+        args = SimpleNamespace(num_gpus=1, mixed_expert_manifest="mixed.json")
+        with mock.patch("torch.cuda.device_count", side_effect=AssertionError("explicit selection")):
+            self.assertEqual(_resolve_serving_gpu_count(args), 1)
+        args.num_gpus = None
+        with mock.patch("torch.cuda.device_count", return_value=1):
+            self.assertEqual(_resolve_serving_gpu_count(args), 1)
+
+    def test_homogeneous_serving_keeps_existing_gpu_count_resolution(self) -> None:
+        for bits in (4, 8):
+            for manifest in (None, ""):
+                for requested, available in ((None, 2), (0, 4), (1, 8), (3, 8)):
+                    with self.subTest(bits=bits, manifest=manifest, requested=requested):
+                        args = SimpleNamespace(
+                            num_gpus=requested, mixed_expert_manifest=manifest,
+                            gpu_expert_bits=bits,
+                        )
+                        with mock.patch("torch.cuda.device_count", return_value=available):
+                            self.assertEqual(_resolve_serving_gpu_count(args), requested or available)
+
+    def test_native_engine_requires_explicit_shared_expert_precision(self) -> None:
+        signature = inspect.signature(KrasisEngine.load)
+        parameter = signature.parameters["shared_gpu_num_bits"]
+        self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertIs(parameter.default, inspect.Parameter.empty)
+
+        engine = KrasisEngine()
+        with self.assertRaisesRegex(
+            TypeError,
+            "missing 1 required keyword argument: 'shared_gpu_num_bits'",
+        ):
+            engine.load("/definitely/not/a/model")
+
     def test_context_limit_comes_only_from_checkpoint_metadata(self) -> None:
         flat = _deepseek_v4_config()
         flat["max_position_embeddings"] = 98_765
@@ -258,6 +305,43 @@ class ModelConfigContractTests(unittest.TestCase):
         )
         self.assertIsNone(_tileq_configuration_error(3, "/tmp/model.ktq"))
         self.assertIsNone(_tileq_configuration_error(4, None))
+
+    def test_mixed_expert_configuration_rejects_unvalidated_combinations(self) -> None:
+        manifest = "/tmp/mixed-experts.json"
+        self.assertEqual(
+            _mixed_expert_configuration_error(8, manifest),
+            "--mixed-expert-manifest requires --gpu-expert-bits 4",
+        )
+        self.assertIn(
+            "peer expert serving",
+            _mixed_expert_configuration_error(4, manifest, multi_gpu_mode="peer"),
+        )
+        self.assertIn(
+            "peer expert serving",
+            _mixed_expert_configuration_error(4, manifest, dynamic_peer=True),
+        )
+        self.assertIn(
+            "expert compression",
+            _mixed_expert_configuration_error(4, manifest, expert_compression=True),
+        )
+        self.assertIn(
+            "D-Spark",
+            _mixed_expert_configuration_error(4, manifest, dspark_mode="resident"),
+        )
+        self.assertIsNone(_mixed_expert_configuration_error(4, manifest))
+        self.assertIsNone(
+            _mixed_expert_configuration_error(8, None, dspark_mode="resident")
+        )
+
+    def test_mixed_expert_quant_config_requires_int4_baseline(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires gpu_expert_bits=4"):
+            QuantConfig(gpu_expert_bits=8, mixed_expert_manifest="manifest.json")
+        with self.assertRaisesRegex(ValueError, "cannot be combined with tileq_cache"):
+            QuantConfig(
+                gpu_expert_bits=4,
+                mixed_expert_manifest="manifest.json",
+                tileq_cache="weights.ktq",
+            )
 
     def test_aux_decode_hash_tables_use_exact_pipeline_segment(self) -> None:
         """Aux registration must use the method's [split_layer, layer_end) contract."""

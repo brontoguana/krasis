@@ -114,6 +114,11 @@ extern "C" __global__ void deepseek_v4_compressor_pool_prefill_kernel(
         __syncthreads();
     }
     float maximum = work[0];
+    // Every warp must consume the completed maximum before lane 0 reuses
+    // work[0] for the weight-sum reduction below. Without this barrier,
+    // lane 0 can overwrite work[0] while another warp is still loading the
+    // maximum, making the compressor result scheduling-dependent.
+    __syncthreads();
     float weight = lane < candidates && isfinite(scores[lane])
         ? expf(scores[lane] - maximum)
         : 0.0f;
@@ -242,6 +247,8 @@ extern "C" __global__ void deepseek_v4_compressor_decode_kernel(
         __syncthreads();
     }
     float maximum = work[0];
+    // Complete the read phase before lane 0 reuses work[0] below.
+    __syncthreads();
     float weight = lane < candidates && isfinite(scores[lane])
         ? expf(scores[lane] - maximum)
         : 0.0f;
@@ -470,6 +477,8 @@ extern "C" __global__ void deepseek_v4_compressor_continue_prefill_kernel(
                 __syncthreads();
             }
             float maximum = work[0];
+            // Complete the read phase before lane 0 reuses work[0] below.
+            __syncthreads();
             float weight = lane < candidates && isfinite(weights[lane])
                 ? expf(weights[lane] - maximum)
                 : 0.0f;

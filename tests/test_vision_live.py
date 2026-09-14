@@ -8,6 +8,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -34,20 +35,31 @@ def main() -> int:
         raise SystemExit("Run this gate through ./dev vision-test; direct execution is unsupported.")
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--image", required=True)
+    parser.add_argument("--image", action="append", required=True)
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--expect", action="append", default=[])
+    parser.add_argument(
+        "--expect-regex",
+        action="append",
+        default=[],
+        help="case-insensitive regular expression that must match the response",
+    )
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--timeout", type=int, default=600)
     args = parser.parse_args()
 
-    image_path = Path(args.image).resolve()
-    if not image_path.is_file():
-        print(f"FAIL image does not exist: {image_path}")
+    image_paths = [Path(value).resolve() for value in args.image]
+    missing_paths = [path for path in image_paths if not path.is_file()]
+    if missing_paths:
+        print(f"FAIL images do not exist: {missing_paths}")
         return 1
-    mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
-    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    data_url = f"data:{mime};base64,{encoded}"
+    image_parts = []
+    for image_path in image_paths:
+        mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
+        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        image_parts.append(
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
+        )
     base_url = f"http://127.0.0.1:{args.port}"
 
     model_status, model_body = _request(f"{base_url}/v1/models", None, args.timeout)
@@ -69,10 +81,7 @@ def main() -> int:
         "messages": [
             {
                 "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                    {"type": "text", "text": args.prompt},
-                ],
+                "content": image_parts + [{"type": "text", "text": args.prompt}],
             }
         ],
         "max_tokens": args.max_tokens,
@@ -93,7 +102,15 @@ def main() -> int:
     if missing:
         print(f"FAIL response omitted expected terms {missing}: {text}")
         return 1
-    print(f"PASS model={model_id} image={image_path.name} response={text!r}")
+    missing_patterns = [
+        pattern
+        for pattern in args.expect_regex
+        if re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL) is None
+    ]
+    if missing_patterns:
+        print(f"FAIL response omitted expected patterns {missing_patterns}: {text}")
+        return 1
+    print(f"PASS model={model_id} images={[path.name for path in image_paths]} response={text!r}")
     timing = body.get("krasis_timing")
     if timing is not None:
         print("TIMING " + json.dumps(timing, sort_keys=True))

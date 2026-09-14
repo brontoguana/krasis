@@ -1,0 +1,5 @@
+2026-08-28T10:00:00.000Z schedule id=invoice-42 deadline=1005000 attempt=1
+2026-08-28T10:00:00.100Z upstream-retry id=invoice-42 replacement_deadline=1002000 attempt=2
+2026-08-28T10:00:02.000Z dispatch id=invoice-42 attempt=2 expected=true
+2026-08-28T10:00:05.000Z dispatch id=invoice-42 attempt=1 expected=false duplicate=true
+2026-08-28T10:00:05.001Z invariant-failed id=invoice-42 live_deadlines=0 stale_dispatch=1
