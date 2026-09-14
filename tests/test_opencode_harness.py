@@ -97,10 +97,23 @@ class OpencodeHarnessTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 self.assertEqual(received, [{**request, "temperature": 0}])
                 captures = []
-                for meta_path in sorted(capture_dir.glob("*.meta.json")):
-                    candidate = json.loads(meta_path.read_text())
-                    if candidate["path"] == "/v1/chat/completions":
-                        captures.append((meta_path, candidate))
+                # Content-Length lets the client finish reading before the
+                # relay's upstream end callback writes its capture metadata.
+                # Wait for the complete newline-terminated metadata record,
+                # keeping missing captures a test failure after the deadline.
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    captures = []
+                    for meta_path in sorted(capture_dir.glob("*.meta.json")):
+                        text = meta_path.read_text()
+                        if not text.endswith("\n"):
+                            continue
+                        candidate = json.loads(text)
+                        if candidate["path"] == "/v1/chat/completions":
+                            captures.append((meta_path, candidate))
+                    if captures or relay.poll() is not None:
+                        break
+                    time.sleep(0.01)
                 self.assertEqual(len(captures), 1)
                 meta_path, meta = captures[0]
                 raw_path = meta_path.with_name(

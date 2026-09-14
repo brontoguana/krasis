@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed an intermittent ADQ relay test failure by waiting for completed capture
+  metadata with a bounded deadline before validating the captured request.
+
 - Mixed routed-expert startup now fails closed unless exactly one GPU is
   selected, including automatic discovery and direct-server starts. Launcher
   topology checks also reject mixed multi-GPU configurations on models whose
