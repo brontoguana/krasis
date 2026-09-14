@@ -564,9 +564,55 @@ jobs:
           python scripts/build_sidecars.py verify-wheel --wheel-dir dist
 
       - name: Test Rust server response contracts
+        env:
+          # Keep shipped wheels on the release profile's single codegen unit.
+          # Test binaries use Rust's non-incremental default to split LLVM work.
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
         run: |
-          cargo test --release --lib server::tests
-          cargo test --release --lib manager::tests
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          Get-CimInstance Win32_OperatingSystem |
+            Select-Object TotalVisibleMemorySize,FreePhysicalMemory,TotalVirtualMemorySize,FreeVirtualMemory |
+            Format-List
+          Get-CimInstance Win32_PageFileUsage |
+            Select-Object Name,AllocatedBaseSize,CurrentUsage,PeakUsage |
+            Format-Table
+          $memoryLog = Join-Path $env:RUNNER_TEMP "krasis-rust-test-memory.log"
+          $monitor = Start-Job -ArgumentList $memoryLog -ScriptBlock {
+            param($memoryLog)
+            $ErrorActionPreference = "Stop"
+            while ($true) {
+              $memory = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory
+              $compilers = @(Get-Process rustc -ErrorAction SilentlyContinue)
+              [ordered]@{
+                utc = [DateTime]::UtcNow.ToString("o")
+                committed_bytes = $memory.CommittedBytes
+                commit_limit_bytes = $memory.CommitLimit
+                available_bytes = $memory.AvailableBytes
+                rustc = @($compilers | ForEach-Object {
+                  [ordered]@{
+                    pid = $_.Id
+                    private_bytes = $_.PrivateMemorySize64
+                    working_set_bytes = $_.WorkingSet64
+                    peak_working_set_bytes = $_.PeakWorkingSet64
+                  }
+                })
+              } | ConvertTo-Json -Depth 4 -Compress | Add-Content -Path $memoryLog
+              Start-Sleep -Seconds 5
+            }
+          }
+          try {
+            cargo test --release --lib server::tests
+            cargo test --release --lib manager::tests
+          } finally {
+            Stop-Job $monitor
+            try {
+              Receive-Job $monitor -ErrorAction Stop
+            } finally {
+              Remove-Job $monitor
+              if (Test-Path $memoryLog) { Get-Content $memoryLog }
+            }
+          }
 
       - name: Build native Windows launcher
         run: |
@@ -947,6 +993,7 @@ jobs:
             dist/Krasis-Windows-Package-*.zip
             dist/windows-fla-build-manifest.json
             dist/windows-installer-test.log
+            ${{ runner.temp }}/krasis-rust-test-memory.log
             ${{ runner.temp }}/krasis-installer-test.log
             ${{ runner.temp }}/krasis-uninstaller-test.log
             ${{ runner.temp }}/krasis-private-runtime-test/runtime-install.log
