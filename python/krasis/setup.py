@@ -376,13 +376,30 @@ print(json.dumps(result))
 
 
 def _unsupported_torch_devices(torch_probe: Dict[str, object]) -> List[str]:
-    """Return visible devices whose SM arch is missing from installed torch."""
+    """Return visible devices whose SM arch is missing from installed torch.
+
+    A GPU with compute capability X.Y can run any kernel compiled for an
+    architecture <= X.Y (CUDA forward compatibility).  We only flag a device
+    as unsupported when *no* arch in the torch binary is <= the device cap.
+    """
     if not torch_probe.get("installed") or not torch_probe.get("cuda_available"):
         return []
-    arch_list = set(torch_probe.get("arch_list") or [])
+    arch_list_raw = torch_probe.get("arch_list") or []
     devices = torch_probe.get("devices") or []
-    if not arch_list or not isinstance(devices, list):
+    if not arch_list_raw or not isinstance(devices, list):
         return []
+
+    # Parse arch tokens like "sm_86" into (major, minor) tuples.
+    compiled_caps: List[Tuple[int, int]] = []
+    for tok in arch_list_raw:
+        t = str(tok)
+        if t.startswith("sm_") or t.startswith("compute_"):
+            v = t.split("_", 1)[1]
+            try:
+                major, minor = int(v[0]), int(v[1]) if len(v) > 1 else 0
+                compiled_caps.append((major, minor))
+            except (ValueError, IndexError):
+                pass
 
     unsupported = []
     for device in devices:
@@ -391,8 +408,14 @@ def _unsupported_torch_devices(torch_probe: Dict[str, object]) -> List[str]:
         capability = str(device.get("capability") or "")
         if "." not in capability:
             continue
-        token = _torch_arch_token(capability)
-        if token not in arch_list:
+        try:
+            parts = capability.split(".")
+            dev_cap = (int(parts[0]), int(parts[1]))
+        except (ValueError, IndexError):
+            continue
+        # The device is supported if ANY compiled arch is <= device cap.
+        if not any(ca <= dev_cap for ca in compiled_caps):
+            token = _torch_arch_token(capability)
             unsupported.append(
                 f"GPU {device.get('index')} {device.get('name')} ({token})"
             )
