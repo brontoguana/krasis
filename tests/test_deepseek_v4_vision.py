@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """No-GPU contracts for DeepSeek-V4-Flash-Vision preprocessing and modules."""
 
+import json
 import os
 import unittest
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from krasis.deepseek_v4_vision import (
     IMAGE_END,
     IMAGE_START,
 )
+from krasis.model import KrasisModel
 
 
 def _config():
@@ -63,6 +65,41 @@ class DeepseekV4VisionContractTests(unittest.TestCase):
             int((prepared.types == IMAGE).sum()), int(prepared.perm.numel())
         )
         self.assertEqual(int(prepared.types[-1]), IMAGE_END)
+
+    def test_images_in_tool_results_are_allowed(self):
+        messages = json.dumps(
+            [
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_vision",
+                    "content": [
+                        {"type": "text", "text": "Image loaded."},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,abc"},
+                        },
+                    ],
+                }
+            ]
+        )
+        KrasisModel._validate_deepseek_v4_image_roles(messages)
+
+    def test_images_outside_user_or_tool_messages_fail_closed(self):
+        messages = json.dumps(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,abc"},
+                        }
+                    ],
+                }
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "user messages or tool results"):
+            KrasisModel._validate_deepseek_v4_image_roles(messages)
 
 
 if __name__ == "__main__":

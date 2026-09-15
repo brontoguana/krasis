@@ -2548,10 +2548,43 @@ class KrasisModel:
             "image_tokens": expected_image_tokens,
         }
 
+    @staticmethod
+    def _validate_deepseek_v4_image_roles(messages_json: str) -> None:
+        """Allow images only in turns rendered as DeepSeek user input.
+
+        DeepSeek-V4 has no standalone tool role. The bundled chat template
+        nests OpenAI ``tool`` messages in a user ``<tool_result>`` block, so
+        image-bearing tool results are valid model input. Other non-user roles
+        remain rejected fail-closed.
+        """
+        messages = json.loads(messages_json)
+        allowed_image_roles = {"user", "tool"}
+        for message_idx, message in enumerate(messages):
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                is_image = (
+                    part_type in ("image", "image_url", "input_image")
+                    or "image" in part
+                    or "image_url" in part
+                )
+                if is_image and message.get("role") not in allowed_image_roles:
+                    raise ValueError(
+                        "DeepSeek-V4-Flash-Vision-Exp accepts images only in "
+                        "user messages or tool results; "
+                        f"message {message_idx} has role "
+                        f"{message.get('role')!r}"
+                    )
+
     def _build_deepseek_v4_multimodal_prefill_inputs(
         self, messages_json: str, rendered_prompt: str
     ):
         """Build checkpoint-native image blocks and BF16 embeddings for V4 Vision."""
+        self._validate_deepseek_v4_image_roles(messages_json)
         if self.embedding is None:
             raise RuntimeError("Model embedding is not loaded")
         images = self._extract_openai_images(messages_json)

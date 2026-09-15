@@ -83,7 +83,7 @@
       {{- '<｜User｜>' -}}
       {%- set state.in_user = true -%}
     {%- endif -%}
-    {{- '<tool_result>' + (message['content'] or '') + '</tool_result>' -}}
+    {{- '<tool_result>' + render_content(message['content']) + '</tool_result>' -}}
   {%- elif message['role'] == 'assistant' -%}
     {%- set state.in_user = false -%}
     {{- '<｜Assistant｜>' -}}
