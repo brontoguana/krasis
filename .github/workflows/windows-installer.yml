@@ -598,6 +598,7 @@ jobs:
             }
           }
           try {
+            cargo test --release --lib gpu_decode::cached_kernel_loading_tests
             cargo test --release --lib server::tests
             cargo test --release --lib manager::tests
           } finally {

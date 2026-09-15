@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Restructured kernel-handle initialization to avoid excessive Rust/LLVM
+  compilation complexity, preserving kernel mappings, errors and cleanup.
+  Added success, error and unwind cleanup tests to the Windows build gate.
+
 - Windows CI now records compiler memory and stops on the first native command
   failure. Release compilation settings are preserved; the current Windows
   unit-test compiler memory failure remains under investigation.

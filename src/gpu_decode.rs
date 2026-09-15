@@ -17749,6 +17749,393 @@ struct CachedKernels {
     relu2_w2_int8_batched: cudarc::driver::CudaFunction,
 }
 
+// Collect fallible handles in a loop so LLVM sees one cleanup path rather than
+// a separate partially initialized struct for every failed lookup.
+#[inline(never)]
+fn collect_kernel_handles<T, E, const N: usize>(
+    names: [&str; N],
+    mut get: impl FnMut(&str) -> Result<T, E>,
+) -> Result<[T; N], E> {
+    struct Pending<T>(Vec<T>);
+    impl<T> Drop for Pending<T> {
+        fn drop(&mut self) {
+            // Match partial struct initialization: release in reverse lookup order,
+            // including when the lookup unwinds instead of returning an error.
+            while let Some(handle) = self.0.pop() {
+                drop(handle);
+            }
+        }
+    }
+    let mut pending = Pending(Vec::with_capacity(N));
+    for name in names {
+        pending.0.push(get(name)?);
+    }
+    // Exactly N successful lookups precede this conversion. Destructuring the
+    // array below moves handles into named fields without more fallible calls.
+    match std::mem::take(&mut pending.0).try_into() {
+        Ok(handles) => Ok(handles),
+        Err(_) => unreachable!("kernel handle count must match the names array"),
+    }
+}
+
+macro_rules! load_cached_handles {
+    ($ty:ident, $get:expr, { $($field:ident: $symbol:literal,)* }) => {{
+        let [$($field,)*] = collect_kernel_handles([$($symbol,)*], $get)?;
+        $ty { $($field,)* }
+    }};
+}
+
+#[cfg(test)]
+mod cached_kernel_loading_tests {
+    use super::collect_kernel_handles;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct Handle(&'static str, Rc<RefCell<Vec<&'static str>>>);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            self.1.borrow_mut().push(self.0);
+        }
+    }
+
+    // Deliberately differs from lookup order to check named-field assignment
+    // and successful struct destruction separately from partial cleanup.
+    struct Cache {
+        third: Handle,
+        first: Handle,
+        second: Handle,
+    }
+
+    fn load(get: impl FnMut(&str) -> Result<Handle, &'static str>) -> Result<Cache, &'static str> {
+        Ok(load_cached_handles!(Cache, get, {
+            first: "first_symbol",
+            second: "second_symbol",
+            third: "third_symbol",
+        }))
+    }
+
+    fn original(
+        mut get: impl FnMut(&str) -> Result<Handle, &'static str>,
+    ) -> Result<Cache, &'static str> {
+        Ok(Cache {
+            first: get("first_symbol")?,
+            second: get("second_symbol")?,
+            third: get("third_symbol")?,
+        })
+    }
+
+    fn exercise(
+        fail_at: usize,
+        panic_at_failure: bool,
+        use_original: bool,
+    ) -> (Vec<String>, Vec<&'static str>) {
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let mut calls = Vec::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let get = |name: &str| {
+                let index = calls.len();
+                calls.push(name.to_owned());
+                if index == fail_at {
+                    if panic_at_failure {
+                        panic!("injected lookup panic");
+                    }
+                    return Err("injected lookup error");
+                }
+                let name = match name {
+                    "first_symbol" => "first",
+                    "second_symbol" => "second",
+                    "third_symbol" => "third",
+                    _ => panic!("unexpected kernel symbol"),
+                };
+                Ok(Handle(name, drops.clone()))
+            };
+            let result = if use_original {
+                original(get)
+            } else {
+                load(get)
+            };
+            match result {
+                Ok(cache) => {
+                    assert_eq!(fail_at, 3);
+                    assert_eq!(
+                        (cache.first.0, cache.second.0, cache.third.0),
+                        ("first", "second", "third")
+                    );
+                    assert!(drops.borrow().is_empty());
+                    drop(cache);
+                }
+                Err(error) => {
+                    assert!(fail_at < 3);
+                    assert_eq!(error, "injected lookup error");
+                }
+            }
+        }));
+        assert_eq!(result.is_err(), panic_at_failure && fail_at < 3);
+        let released = drops.borrow().clone();
+        (calls, released)
+    }
+
+    #[test]
+    fn success_preserves_symbols_ownership_and_field_drop_order() {
+        let actual = exercise(3, false, false);
+        assert_eq!(actual, exercise(3, false, true));
+        assert_eq!(actual.1, ["third", "first", "second"]);
+    }
+
+    #[test]
+    fn every_lookup_error_preserves_original_cleanup_and_stops_loading() {
+        for fail_at in 0..3 {
+            let actual = exercise(fail_at, false, false);
+            assert_eq!(actual, exercise(fail_at, false, true));
+            assert_eq!(actual.0.len(), fail_at + 1);
+            assert_eq!(actual.1.len(), fail_at);
+        }
+    }
+
+    #[test]
+    fn every_lookup_panic_preserves_original_cleanup() {
+        for fail_at in 0..3 {
+            assert_eq!(
+                exercise(fail_at, true, false),
+                exercise(fail_at, true, true)
+            );
+        }
+    }
+
+    #[test]
+    fn empty_collection_does_not_call_loader() {
+        let handles: Result<[Handle; 0], ()> =
+            collect_kernel_handles([], |_| panic!("unexpected lookup"));
+        assert!(handles.is_ok());
+    }
+}
+
+impl CachedKernels {
+    #[inline(never)]
+    fn load(device: &Arc<CudaDevice>) -> PyResult<Self> {
+        let get = |name: &str| -> PyResult<cudarc::driver::CudaFunction> {
+            device.get_func(MODULE_NAME, name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Kernel '{}' not found", name))
+            })
+        };
+        Ok(load_cached_handles!(Self, get, {
+            bf16_to_fp32: "bf16_to_fp32",
+            duplicate_bf16_vector_columns: "duplicate_bf16_vector_columns",
+            fp32_to_bf16: "fp32_to_bf16",
+            rmsnorm: "rmsnorm",
+            rmsnorm_scale: "rmsnorm_scale",
+            dual_rmsnorm_scale: "dual_rmsnorm_scale",
+            fused_add_rmsnorm: "fused_add_rmsnorm",
+            silu_mul: "silu_mul",
+            silu_mul_deepseek_clamp: "silu_mul_deepseek_clamp",
+            tileq_rank_project_bf16: "tileq_rank_project_bf16",
+            tileq_rank_project_batched_bf16: "tileq_rank_project_batched_bf16",
+            tileq_int3_gemv_bf16: "tileq_int3_gemv_bf16",
+            tileq_int3_gemv_batched_bf16: "tileq_int3_gemv_batched_bf16",
+            tileq_silu_mul_batched_bf16: "tileq_silu_mul_batched_bf16",
+            gelu_tanh_mul: "gelu_tanh_mul",
+            relu2_bf16: "relu2_bf16",
+            apply_logit_softcap_f32: "apply_logit_softcap_f32",
+            sigmoid_topk: "sigmoid_topk",
+            sigmoid_topk_parallel_scores: "sigmoid_topk_parallel_scores",
+            softmax_topk: "softmax_topk",
+            softmax_topk_parallel_scores: "softmax_topk_parallel_scores",
+            softmax_topk_parallel_selection: "softmax_topk_parallel_selection",
+            normalize_topk_weights: "normalize_topk_weights",
+            deepseek_v4_sqrtsoftplus_topk: "deepseek_v4_sqrtsoftplus_topk",
+            deepseek_v4_sqrtsoftplus_topk_parallel: "deepseek_v4_sqrtsoftplus_topk_parallel",
+            deepseek_v4_sqrtsoftplus_topk_parallel_selection: "deepseek_v4_sqrtsoftplus_topk_parallel_selection",
+            deepseek_v4_swiglu_bf16: "deepseek_v4_swiglu_bf16",
+            deepseek_v4_hc_replicate: "deepseek_v4_hc_replicate_kernel",
+            dspark_pack_target_features: "dspark_pack_target_features_kernel",
+            dspark_capture_target_state: "dspark_capture_target_state_kernel",
+            deepseek_v4_hc_inv_rms: "deepseek_v4_hc_inv_rms_kernel",
+            deepseek_v4_hc_project: "deepseek_v4_hc_project_kernel",
+            deepseek_v4_hc_prepare: "deepseek_v4_hc_prepare_kernel",
+            deepseek_v4_hc_reduce: "deepseek_v4_hc_reduce_kernel",
+            deepseek_v4_hc_post: "deepseek_v4_hc_post_kernel",
+            deepseek_v4_hc_reduce_tiled: "deepseek_v4_hc_reduce_tiled_kernel",
+            deepseek_v4_hc_post_tiled: "deepseek_v4_hc_post_tiled_kernel",
+            deepseek_v4_hc_head_prepare: "deepseek_v4_hc_head_prepare_kernel",
+            deepseek_v4_rmsnorm_rows_bf16: "deepseek_v4_rmsnorm_rows_bf16_kernel",
+            deepseek_v4_tail_rope_bf16: "deepseek_v4_tail_rope_bf16_kernel",
+            deepseek_v4_sparse_scores: "deepseek_v4_sparse_scores_kernel",
+            deepseek_v4_gather_selected_kv_scores: "deepseek_v4_gather_selected_kv_scores_kernel",
+            deepseek_v4_gather_selected_native_kv_scores: "deepseek_v4_gather_selected_native_kv_scores_kernel",
+            deepseek_v4_sparse_output: "deepseek_v4_sparse_output_kernel",
+            deepseek_v4_sparse_output_cached_exp: "deepseek_v4_sparse_output_cached_exp_kernel",
+            deepseek_v4_sparse_output_selected_cached_exp: "deepseek_v4_sparse_output_selected_cached_exp_kernel",
+            deepseek_v4_sparse_softmax_bf16: "deepseek_v4_sparse_softmax_bf16_kernel",
+            deepseek_v4_compressor_decode: "deepseek_v4_compressor_decode_kernel",
+            deepseek_v4_compressor_finalize_decode: "deepseek_v4_compressor_finalize_decode_kernel",
+            deepseek_v4_compressor_finalize_native_decode: "deepseek_v4_compressor_finalize_native_decode_kernel",
+            deepseek_v4_compressor_rmsnorm: "deepseek_v4_compressor_rmsnorm_kernel",
+            deepseek_v4_fp8_qat_inplace: "deepseek_v4_fp8_qat_inplace_kernel",
+            deepseek_v4_hadamard_inplace: "deepseek_v4_hadamard_inplace_kernel",
+            deepseek_v4_fp4_qat_inplace: "deepseek_v4_fp4_qat_inplace_kernel",
+            deepseek_v4_scale_index_weights: "deepseek_v4_scale_index_weights_kernel",
+            deepseek_v4_window_indices: "deepseek_v4_window_indices_kernel",
+            deepseek_v4_offset_index_selection: "deepseek_v4_offset_index_selection_kernel",
+            deepseek_v4_compressed_causal_counts: "deepseek_v4_compressed_causal_counts_kernel",
+            deepseek_v4_static_compressed_indices: "deepseek_v4_static_compressed_indices_kernel",
+            deepseek_v4_store_raw_kv_decode: "deepseek_v4_store_raw_kv_decode_kernel",
+            deepseek_v4_store_raw_native_decode: "deepseek_v4_store_raw_native_decode_kernel",
+            deepseek_v4_index_scores_decode: "deepseek_v4_index_scores_decode_kernel",
+            deepseek_v4_index_scores_native_decode: "deepseek_v4_index_scores_native_decode_kernel",
+            zero_bf16: "zero_bf16",
+            add_bf16: "add_bf16",
+            peer_publish_request: "peer_publish_request",
+            peer_mailbox_round_trip_loop: "peer_mailbox_round_trip_loop",
+            peer_wait_response: "peer_wait_response",
+            peer_wait_copy_bf16: "peer_wait_copy_bf16",
+            add_peer_bf16_if_active: "add_peer_bf16_if_active",
+            weighted_add_bf16: "weighted_add_bf16",
+            weighted_add_bf16_sigmoid_f32: "weighted_add_bf16_sigmoid_f32",
+            scale_bf16: "scale_bf16",
+            scale_bf16_by_ptr: "scale_bf16_by_ptr",
+            dsa_layernorm_rope_key_write: "dsa_layernorm_rope_key_write",
+            dsa_layernorm_rope_key_write_g: "dsa_layernorm_rope_key_write_g",
+            dsa_kpool_write: "dsa_kpool_write",
+            dsa_kpool_write_g: "dsa_kpool_write_g",
+            dsa_kpool_expand_indices: "dsa_kpool_expand_indices",
+            dsa_kpool_expand_indices_g: "dsa_kpool_expand_indices_g",
+            dsa_rope_query_bf16: "dsa_rope_query_bf16",
+            dsa_rope_query_bf16_g: "dsa_rope_query_bf16_g",
+            dsa_reduce_weighted_scores: "dsa_reduce_weighted_scores",
+            dsa_reduce_weighted_scores_g: "dsa_reduce_weighted_scores_g",
+            dsa_fused_live_scores_g: "dsa_fused_live_scores_g",
+            dsa_topk_sort_chunks: "dsa_topk_sort_chunks",
+            dsa_topk_sort_chunks_g: "dsa_topk_sort_chunks_g",
+            dsa_topk_radix_sort_chunks_g: "dsa_topk_radix_sort_chunks_g",
+            dsa_topk_merge_runs: "dsa_topk_merge_runs",
+            dsa_topk_merge_runs_g: "dsa_topk_merge_runs_g",
+            dsa_topk_linear_merge_runs_g: "dsa_topk_linear_merge_runs_g",
+            embedding_lookup: "embedding_lookup",
+            marlin_gemv_int4: "marlin_gemv_int4",
+            fused_silu_accum: "marlin_gemv_int4_fused_silu_accum",
+            fused_silu_accum_int8: "marlin_gemv_int8_fused_silu_accum",
+            marlin_gemv_int4_v2: "marlin_gemv_int4_v2",
+            reduce_ksplits_bf16: "reduce_ksplits_bf16",
+            fused_silu_accum_v2: "marlin_gemv_int4_fused_silu_accum_v2",
+            fused_silu_accum_v2_int8: "marlin_gemv_int8_fused_silu_accum_v2",
+            reduce_ksplits_weighted_accum_bf16: "reduce_ksplits_weighted_accum_bf16",
+            reduce_ksplits_sigmoid_accum_bf16: "reduce_ksplits_sigmoid_accum_bf16",
+            uninterleave_qkvz: "uninterleave_qkvz",
+            la_conv1d: "la_conv1d",
+            compute_gate_beta: "compute_gate_beta",
+            repeat_interleave_heads: "repeat_interleave_heads",
+            l2norm_scale_per_head: "l2norm_scale_per_head",
+            gated_delta_net_step: "gated_delta_net_step",
+            gated_rmsnorm_silu: "gated_rmsnorm_silu",
+            kimi_delta_conv_silu_bf16: "kimi_delta_conv_silu_bf16",
+            kimi_delta_recurrent_scan_bf16: "kimi_delta_recurrent_scan_bf16",
+            kimi_delta_rmsnorm_gate_bf16: "kimi_delta_rmsnorm_gate_bf16",
+            split_gated_q: "split_gated_q",
+            per_head_rmsnorm: "per_head_rmsnorm",
+            apply_rope: "apply_rope",
+            apply_rope_half_split: "apply_rope_half_split",
+            kv_cache_write: "kv_cache_write",
+            kv_cache_write_bf16: "kv_cache_write_bf16",
+            kv_cache_write_k8v4: "kv_cache_write_k8v4",
+            kv_cache_write_k4v4: "kv_cache_write_k4v4",
+            kv_cache_write_k6v4: "kv_cache_write_k6v4",
+            kv_cache_write_k7v4: "kv_cache_write_k7v4",
+            kv_cache_write_k6v6: "kv_cache_write_k6v6",
+            kv_cache_write_k8v6: "kv_cache_write_k8v6",
+            kv_cache_write_tq4: "kv_cache_write_tq4",
+            gqa_attention: "gqa_attention",
+            gqa_attention_bf16: "gqa_attention_bf16",
+            gqa_attention_k8v4: "gqa_attention_k8v4",
+            gqa_attention_k4v4: "gqa_attention_k4v4",
+            gqa_attention_k6v4: "gqa_attention_k6v4",
+            gqa_attention_k7v4: "gqa_attention_k7v4",
+            gqa_attention_k6v6: "gqa_attention_k6v6",
+            gqa_attention_k8v6: "gqa_attention_k8v6",
+            gqa_attention_tq4: "gqa_attention_tq4",
+            gqa_attention_tiled: "gqa_attention_tiled",
+            gqa_attention_tiled_bf16: "gqa_attention_tiled_bf16",
+            gqa_attention_reduce: "gqa_attention_reduce",
+            gqa_attention_k4v4_single_g: "gqa_attention_k4v4_single_g",
+            gqa_attention_k4v4_single_g_timed: "gqa_attention_k4v4_single_g_timed",
+            apply_gated_attn: "apply_gated_attn",
+            marlin_gemv_int4_v2_fused_f32: "marlin_gemv_int4_v2_fused_f32",
+            marlin_gemv_int8_v2: "marlin_gemv_int8_v2",
+            marlin_gemv_int8_v2_fused_f32: "marlin_gemv_int8_v2_fused_f32",
+            marlin_gemv_int4_v2_batched: "marlin_gemv_int4_v2_batched",
+            marlin_gemv_int4_v2_batched_n32: "marlin_gemv_int4_v2_batched_n32",
+            marlin_gemv_int4_v2_batched_bf16_out: "marlin_gemv_int4_v2_batched_bf16_out",
+            marlin_gemv_int8_v2_batched: "marlin_gemv_int8_v2_batched",
+            reduce_ksplits_bf16_batched: "reduce_ksplits_bf16_batched",
+            fused_silu_w2_batched: "fused_silu_w2_batched",
+            fused_silu_w2_batched_n32: "fused_silu_w2_batched_n32",
+            fused_silu_w2_batched_timed: "fused_silu_w2_batched_timed",
+            fused_silu_w2_int8_batched: "fused_silu_w2_int8_batched",
+            multi_expert_weighted_add_bf16: "multi_expert_weighted_add_bf16",
+            partition_mixed_router_weights: "partition_mixed_router_weights",
+            embedding_lookup_g: "embedding_lookup_g",
+            apply_rope_g: "apply_rope_g",
+            apply_rope_half_split_g: "apply_rope_half_split_g",
+            kv_cache_write_g: "kv_cache_write_g",
+            kv_cache_write_bf16_g: "kv_cache_write_bf16_g",
+            kv_cache_write_k8v4_g: "kv_cache_write_k8v4_g",
+            kv_cache_write_k4v4_g: "kv_cache_write_k4v4_g",
+            kv_cache_write_k6v4_g: "kv_cache_write_k6v4_g",
+            kv_cache_write_k7v4_g: "kv_cache_write_k7v4_g",
+            kv_cache_write_k6v6_g: "kv_cache_write_k6v6_g",
+            kv_cache_write_k8v6_g: "kv_cache_write_k8v6_g",
+            kv_cache_write_tq4_g: "kv_cache_write_tq4_g",
+            gqa_attention_g: "gqa_attention_g",
+            gated_rmsnorm_silu_bf16: "gated_rmsnorm_silu_bf16",
+            gqa_attention_g_bf16: "gqa_attention_g_bf16",
+            apply_gated_attn_bf16: "apply_gated_attn_bf16",
+            apply_head_gated_attn_bf16: "apply_head_gated_attn_bf16",
+            gqa_attention_tiled_g: "gqa_attention_tiled_g",
+            gqa_attention_tiled_bf16_g: "gqa_attention_tiled_bf16_g",
+            gqa_attention_k8v4_tiled_g: "gqa_attention_k8v4_tiled_g",
+            gqa_attention_k4v4_tiled_g: "gqa_attention_k4v4_tiled_g",
+            gqa_attention_k6v4_tiled_g: "gqa_attention_k6v4_tiled_g",
+            gqa_attention_k7v4_tiled_g: "gqa_attention_k7v4_tiled_g",
+            gqa_attention_k6v6_tiled_g: "gqa_attention_k6v6_tiled_g",
+            gqa_attention_k8v6_tiled_g: "gqa_attention_k8v6_tiled_g",
+            gqa_attention_tq4_tiled_g: "gqa_attention_tq4_tiled_g",
+            gqa_attention_reduce_g: "gqa_attention_reduce_g",
+            la_fused_post_proj: "la_fused_post_proj",
+            la_fused_post_proj_f32: "la_fused_post_proj_f32",
+            expert_classify_prepare: "expert_classify_prepare",
+            mla_kv_cache_write_k4_g: "mla_kv_cache_write_k4_g",
+            mla_kv_cache_write_k4: "mla_kv_cache_write_k4",
+            mla_attention_k4_g: "mla_attention_k4_g",
+            mla_attention_k4: "mla_attention_k4",
+            mla_sparse_attention_k4_g: "mla_sparse_attention_k4_g",
+            mla_sparse_attention_k4: "mla_sparse_attention_k4",
+            mla_kv_cache_write_k6_g: "mla_kv_cache_write_k6_g",
+            mla_kv_cache_write_k6: "mla_kv_cache_write_k6",
+            mla_attention_k6_g: "mla_attention_k6_g",
+            mla_attention_k6: "mla_attention_k6",
+            mla_sparse_attention_k6_g: "mla_sparse_attention_k6_g",
+            mla_sparse_attention_k6: "mla_sparse_attention_k6",
+            mla_deinterleave: "mla_deinterleave",
+            mla_split_q: "mla_split_q",
+            mla_absorb_wkc: "mla_absorb_wkc",
+            mla_apply_wvc: "mla_apply_wvc",
+            kv_cache_write_polar4: "kv_cache_write_polar4",
+            gqa_attention_polar4: "gqa_attention_polar4",
+            kv_cache_write_polar4_g: "kv_cache_write_polar4_g",
+            gqa_attention_polar4_g: "gqa_attention_polar4_g",
+            gqa_attention_polar4_tiled_g: "gqa_attention_polar4_tiled_g",
+            gqa_attention_polar4_reduce_g: "gqa_attention_polar4_reduce_g",
+            record_globaltimer_u64_g: "record_globaltimer_u64_g",
+            mamba2_conv1d: "mamba2_conv1d",
+            mamba2_ssm_step: "mamba2_ssm_step",
+            mamba2_discretize: "mamba2_discretize",
+            mamba2_gate_output: "mamba2_gate_output",
+            relu2_w2_batched: "relu2_w2_batched",
+            relu2_w2_batched_coalesced: "relu2_w2_batched_coalesced",
+            relu2_w2_int8_batched: "relu2_w2_int8_batched",
+        }))
+    }
+}
+
 // ── Main GPU decode graph ──────────────────────────────────────────────
 
 struct GpuDecodeGraph {
@@ -30276,263 +30663,7 @@ impl GpuDecodeStore {
 
         // Cache kernel function handles (avoid HashMap lookup per call)
         if self.kernels_loaded {
-            let get = |name: &str| -> PyResult<cudarc::driver::CudaFunction> {
-                self.device.get_func(MODULE_NAME, name).ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Kernel '{}' not found",
-                        name
-                    ))
-                })
-            };
-            let kernels = CachedKernels {
-                bf16_to_fp32: get("bf16_to_fp32")?,
-                duplicate_bf16_vector_columns: get("duplicate_bf16_vector_columns")?,
-                fp32_to_bf16: get("fp32_to_bf16")?,
-                rmsnorm: get("rmsnorm")?,
-                rmsnorm_scale: get("rmsnorm_scale")?,
-                dual_rmsnorm_scale: get("dual_rmsnorm_scale")?,
-                fused_add_rmsnorm: get("fused_add_rmsnorm")?,
-                silu_mul: get("silu_mul")?,
-                silu_mul_deepseek_clamp: get("silu_mul_deepseek_clamp")?,
-                tileq_rank_project_bf16: get("tileq_rank_project_bf16")?,
-                tileq_rank_project_batched_bf16: get("tileq_rank_project_batched_bf16")?,
-                tileq_int3_gemv_bf16: get("tileq_int3_gemv_bf16")?,
-                tileq_int3_gemv_batched_bf16: get("tileq_int3_gemv_batched_bf16")?,
-                tileq_silu_mul_batched_bf16: get("tileq_silu_mul_batched_bf16")?,
-                gelu_tanh_mul: get("gelu_tanh_mul")?,
-                relu2_bf16: get("relu2_bf16")?,
-                apply_logit_softcap_f32: get("apply_logit_softcap_f32")?,
-                sigmoid_topk: get("sigmoid_topk")?,
-                sigmoid_topk_parallel_scores: get("sigmoid_topk_parallel_scores")?,
-                softmax_topk: get("softmax_topk")?,
-                softmax_topk_parallel_scores: get("softmax_topk_parallel_scores")?,
-                softmax_topk_parallel_selection: get("softmax_topk_parallel_selection")?,
-                normalize_topk_weights: get("normalize_topk_weights")?,
-                deepseek_v4_sqrtsoftplus_topk: get("deepseek_v4_sqrtsoftplus_topk")?,
-                deepseek_v4_sqrtsoftplus_topk_parallel: get(
-                    "deepseek_v4_sqrtsoftplus_topk_parallel",
-                )?,
-                deepseek_v4_sqrtsoftplus_topk_parallel_selection: get(
-                    "deepseek_v4_sqrtsoftplus_topk_parallel_selection",
-                )?,
-                deepseek_v4_swiglu_bf16: get("deepseek_v4_swiglu_bf16")?,
-                deepseek_v4_hc_replicate: get("deepseek_v4_hc_replicate_kernel")?,
-                dspark_pack_target_features: get("dspark_pack_target_features_kernel")?,
-                dspark_capture_target_state: get("dspark_capture_target_state_kernel")?,
-                deepseek_v4_hc_inv_rms: get("deepseek_v4_hc_inv_rms_kernel")?,
-                deepseek_v4_hc_project: get("deepseek_v4_hc_project_kernel")?,
-                deepseek_v4_hc_prepare: get("deepseek_v4_hc_prepare_kernel")?,
-                deepseek_v4_hc_reduce: get("deepseek_v4_hc_reduce_kernel")?,
-                deepseek_v4_hc_post: get("deepseek_v4_hc_post_kernel")?,
-                deepseek_v4_hc_reduce_tiled: get("deepseek_v4_hc_reduce_tiled_kernel")?,
-                deepseek_v4_hc_post_tiled: get("deepseek_v4_hc_post_tiled_kernel")?,
-                deepseek_v4_hc_head_prepare: get("deepseek_v4_hc_head_prepare_kernel")?,
-                deepseek_v4_rmsnorm_rows_bf16: get("deepseek_v4_rmsnorm_rows_bf16_kernel")?,
-                deepseek_v4_tail_rope_bf16: get("deepseek_v4_tail_rope_bf16_kernel")?,
-                deepseek_v4_sparse_scores: get("deepseek_v4_sparse_scores_kernel")?,
-                deepseek_v4_gather_selected_kv_scores: get(
-                    "deepseek_v4_gather_selected_kv_scores_kernel",
-                )?,
-                deepseek_v4_gather_selected_native_kv_scores: get(
-                    "deepseek_v4_gather_selected_native_kv_scores_kernel",
-                )?,
-                deepseek_v4_sparse_output: get("deepseek_v4_sparse_output_kernel")?,
-                deepseek_v4_sparse_output_cached_exp: get(
-                    "deepseek_v4_sparse_output_cached_exp_kernel",
-                )?,
-                deepseek_v4_sparse_output_selected_cached_exp: get(
-                    "deepseek_v4_sparse_output_selected_cached_exp_kernel",
-                )?,
-                deepseek_v4_sparse_softmax_bf16: get("deepseek_v4_sparse_softmax_bf16_kernel")?,
-                deepseek_v4_compressor_decode: get("deepseek_v4_compressor_decode_kernel")?,
-                deepseek_v4_compressor_finalize_decode: get(
-                    "deepseek_v4_compressor_finalize_decode_kernel",
-                )?,
-                deepseek_v4_compressor_finalize_native_decode: get(
-                    "deepseek_v4_compressor_finalize_native_decode_kernel",
-                )?,
-                deepseek_v4_compressor_rmsnorm: get("deepseek_v4_compressor_rmsnorm_kernel")?,
-                deepseek_v4_fp8_qat_inplace: get("deepseek_v4_fp8_qat_inplace_kernel")?,
-                deepseek_v4_hadamard_inplace: get("deepseek_v4_hadamard_inplace_kernel")?,
-                deepseek_v4_fp4_qat_inplace: get("deepseek_v4_fp4_qat_inplace_kernel")?,
-                deepseek_v4_scale_index_weights: get("deepseek_v4_scale_index_weights_kernel")?,
-                deepseek_v4_window_indices: get("deepseek_v4_window_indices_kernel")?,
-                deepseek_v4_offset_index_selection: get(
-                    "deepseek_v4_offset_index_selection_kernel",
-                )?,
-                deepseek_v4_compressed_causal_counts: get(
-                    "deepseek_v4_compressed_causal_counts_kernel",
-                )?,
-                deepseek_v4_static_compressed_indices: get(
-                    "deepseek_v4_static_compressed_indices_kernel",
-                )?,
-                deepseek_v4_store_raw_kv_decode: get("deepseek_v4_store_raw_kv_decode_kernel")?,
-                deepseek_v4_store_raw_native_decode: get(
-                    "deepseek_v4_store_raw_native_decode_kernel",
-                )?,
-                deepseek_v4_index_scores_decode: get("deepseek_v4_index_scores_decode_kernel")?,
-                deepseek_v4_index_scores_native_decode: get(
-                    "deepseek_v4_index_scores_native_decode_kernel",
-                )?,
-                zero_bf16: get("zero_bf16")?,
-                add_bf16: get("add_bf16")?,
-                peer_publish_request: get("peer_publish_request")?,
-                peer_mailbox_round_trip_loop: get("peer_mailbox_round_trip_loop")?,
-                peer_wait_response: get("peer_wait_response")?,
-                peer_wait_copy_bf16: get("peer_wait_copy_bf16")?,
-                add_peer_bf16_if_active: get("add_peer_bf16_if_active")?,
-                weighted_add_bf16: get("weighted_add_bf16")?,
-                weighted_add_bf16_sigmoid_f32: get("weighted_add_bf16_sigmoid_f32")?,
-                scale_bf16: get("scale_bf16")?,
-                scale_bf16_by_ptr: get("scale_bf16_by_ptr")?,
-                dsa_layernorm_rope_key_write: get("dsa_layernorm_rope_key_write")?,
-                dsa_layernorm_rope_key_write_g: get("dsa_layernorm_rope_key_write_g")?,
-                dsa_kpool_write: get("dsa_kpool_write")?,
-                dsa_kpool_write_g: get("dsa_kpool_write_g")?,
-                dsa_kpool_expand_indices: get("dsa_kpool_expand_indices")?,
-                dsa_kpool_expand_indices_g: get("dsa_kpool_expand_indices_g")?,
-                dsa_rope_query_bf16: get("dsa_rope_query_bf16")?,
-                dsa_rope_query_bf16_g: get("dsa_rope_query_bf16_g")?,
-                dsa_reduce_weighted_scores: get("dsa_reduce_weighted_scores")?,
-                dsa_reduce_weighted_scores_g: get("dsa_reduce_weighted_scores_g")?,
-                dsa_fused_live_scores_g: get("dsa_fused_live_scores_g")?,
-                dsa_topk_sort_chunks: get("dsa_topk_sort_chunks")?,
-                dsa_topk_sort_chunks_g: get("dsa_topk_sort_chunks_g")?,
-                dsa_topk_radix_sort_chunks_g: get("dsa_topk_radix_sort_chunks_g")?,
-                dsa_topk_merge_runs: get("dsa_topk_merge_runs")?,
-                dsa_topk_merge_runs_g: get("dsa_topk_merge_runs_g")?,
-                dsa_topk_linear_merge_runs_g: get("dsa_topk_linear_merge_runs_g")?,
-                embedding_lookup: get("embedding_lookup")?,
-                marlin_gemv_int4: get("marlin_gemv_int4")?,
-                fused_silu_accum: get("marlin_gemv_int4_fused_silu_accum")?,
-                fused_silu_accum_int8: get("marlin_gemv_int8_fused_silu_accum")?,
-                marlin_gemv_int4_v2: get("marlin_gemv_int4_v2")?,
-                reduce_ksplits_bf16: get("reduce_ksplits_bf16")?,
-                fused_silu_accum_v2: get("marlin_gemv_int4_fused_silu_accum_v2")?,
-                fused_silu_accum_v2_int8: get("marlin_gemv_int8_fused_silu_accum_v2")?,
-                reduce_ksplits_weighted_accum_bf16: get("reduce_ksplits_weighted_accum_bf16")?,
-                reduce_ksplits_sigmoid_accum_bf16: get("reduce_ksplits_sigmoid_accum_bf16")?,
-                // Attention kernels (LA + GQA)
-                uninterleave_qkvz: get("uninterleave_qkvz")?,
-                la_conv1d: get("la_conv1d")?,
-                compute_gate_beta: get("compute_gate_beta")?,
-                repeat_interleave_heads: get("repeat_interleave_heads")?,
-                l2norm_scale_per_head: get("l2norm_scale_per_head")?,
-                gated_delta_net_step: get("gated_delta_net_step")?,
-                gated_rmsnorm_silu: get("gated_rmsnorm_silu")?,
-                kimi_delta_conv_silu_bf16: get("kimi_delta_conv_silu_bf16")?,
-                kimi_delta_recurrent_scan_bf16: get("kimi_delta_recurrent_scan_bf16")?,
-                kimi_delta_rmsnorm_gate_bf16: get("kimi_delta_rmsnorm_gate_bf16")?,
-                split_gated_q: get("split_gated_q")?,
-                per_head_rmsnorm: get("per_head_rmsnorm")?,
-                apply_rope: get("apply_rope")?,
-                apply_rope_half_split: get("apply_rope_half_split")?,
-                kv_cache_write: get("kv_cache_write")?,
-                kv_cache_write_bf16: get("kv_cache_write_bf16")?,
-                kv_cache_write_k8v4: get("kv_cache_write_k8v4")?,
-                kv_cache_write_k4v4: get("kv_cache_write_k4v4")?,
-                kv_cache_write_k6v4: get("kv_cache_write_k6v4")?,
-                kv_cache_write_k7v4: get("kv_cache_write_k7v4")?,
-                kv_cache_write_k6v6: get("kv_cache_write_k6v6")?,
-                kv_cache_write_k8v6: get("kv_cache_write_k8v6")?,
-                kv_cache_write_tq4: get("kv_cache_write_tq4")?,
-                gqa_attention: get("gqa_attention")?,
-                gqa_attention_bf16: get("gqa_attention_bf16")?,
-                gqa_attention_k8v4: get("gqa_attention_k8v4")?,
-                gqa_attention_k4v4: get("gqa_attention_k4v4")?,
-                gqa_attention_k6v4: get("gqa_attention_k6v4")?,
-                gqa_attention_k7v4: get("gqa_attention_k7v4")?,
-                gqa_attention_k6v6: get("gqa_attention_k6v6")?,
-                gqa_attention_k8v6: get("gqa_attention_k8v6")?,
-                gqa_attention_tq4: get("gqa_attention_tq4")?,
-                gqa_attention_tiled: get("gqa_attention_tiled")?,
-                gqa_attention_tiled_bf16: get("gqa_attention_tiled_bf16")?,
-                gqa_attention_reduce: get("gqa_attention_reduce")?,
-                gqa_attention_k4v4_single_g: get("gqa_attention_k4v4_single_g")?,
-                gqa_attention_k4v4_single_g_timed: get("gqa_attention_k4v4_single_g_timed")?,
-                apply_gated_attn: get("apply_gated_attn")?,
-                // Fused v2 kernels (inline atomic reduction)
-                marlin_gemv_int4_v2_fused_f32: get("marlin_gemv_int4_v2_fused_f32")?,
-                marlin_gemv_int8_v2: get("marlin_gemv_int8_v2")?,
-                marlin_gemv_int8_v2_fused_f32: get("marlin_gemv_int8_v2_fused_f32")?,
-                marlin_gemv_int4_v2_batched: get("marlin_gemv_int4_v2_batched")?,
-                marlin_gemv_int4_v2_batched_n32: get("marlin_gemv_int4_v2_batched_n32")?,
-                marlin_gemv_int4_v2_batched_bf16_out: get("marlin_gemv_int4_v2_batched_bf16_out")?,
-                marlin_gemv_int8_v2_batched: get("marlin_gemv_int8_v2_batched")?,
-                reduce_ksplits_bf16_batched: get("reduce_ksplits_bf16_batched")?,
-                fused_silu_w2_batched: get("fused_silu_w2_batched")?,
-                fused_silu_w2_batched_n32: get("fused_silu_w2_batched_n32")?,
-                fused_silu_w2_batched_timed: get("fused_silu_w2_batched_timed")?,
-                fused_silu_w2_int8_batched: get("fused_silu_w2_int8_batched")?,
-                multi_expert_weighted_add_bf16: get("multi_expert_weighted_add_bf16")?,
-                partition_mixed_router_weights: get("partition_mixed_router_weights")?,
-                // Graphable variants
-                embedding_lookup_g: get("embedding_lookup_g")?,
-                apply_rope_g: get("apply_rope_g")?,
-                apply_rope_half_split_g: get("apply_rope_half_split_g")?,
-                kv_cache_write_g: get("kv_cache_write_g")?,
-                kv_cache_write_bf16_g: get("kv_cache_write_bf16_g")?,
-                kv_cache_write_k8v4_g: get("kv_cache_write_k8v4_g")?,
-                kv_cache_write_k4v4_g: get("kv_cache_write_k4v4_g")?,
-                kv_cache_write_k6v4_g: get("kv_cache_write_k6v4_g")?,
-                kv_cache_write_k7v4_g: get("kv_cache_write_k7v4_g")?,
-                kv_cache_write_k6v6_g: get("kv_cache_write_k6v6_g")?,
-                kv_cache_write_k8v6_g: get("kv_cache_write_k8v6_g")?,
-                kv_cache_write_tq4_g: get("kv_cache_write_tq4_g")?,
-                gqa_attention_g: get("gqa_attention_g")?,
-                // BF16-output variants
-                gated_rmsnorm_silu_bf16: get("gated_rmsnorm_silu_bf16")?,
-                gqa_attention_g_bf16: get("gqa_attention_g_bf16")?,
-                apply_gated_attn_bf16: get("apply_gated_attn_bf16")?,
-                apply_head_gated_attn_bf16: get("apply_head_gated_attn_bf16")?,
-                gqa_attention_tiled_g: get("gqa_attention_tiled_g")?,
-                gqa_attention_tiled_bf16_g: get("gqa_attention_tiled_bf16_g")?,
-                gqa_attention_k8v4_tiled_g: get("gqa_attention_k8v4_tiled_g")?,
-                gqa_attention_k4v4_tiled_g: get("gqa_attention_k4v4_tiled_g")?,
-                gqa_attention_k6v4_tiled_g: get("gqa_attention_k6v4_tiled_g")?,
-                gqa_attention_k7v4_tiled_g: get("gqa_attention_k7v4_tiled_g")?,
-                gqa_attention_k6v6_tiled_g: get("gqa_attention_k6v6_tiled_g")?,
-                gqa_attention_k8v6_tiled_g: get("gqa_attention_k8v6_tiled_g")?,
-                gqa_attention_tq4_tiled_g: get("gqa_attention_tq4_tiled_g")?,
-                gqa_attention_reduce_g: get("gqa_attention_reduce_g")?,
-                la_fused_post_proj: get("la_fused_post_proj")?,
-                la_fused_post_proj_f32: get("la_fused_post_proj_f32")?,
-                expert_classify_prepare: get("expert_classify_prepare")?,
-                // MLA kernels
-                mla_kv_cache_write_k4_g: get("mla_kv_cache_write_k4_g")?,
-                mla_kv_cache_write_k4: get("mla_kv_cache_write_k4")?,
-                mla_attention_k4_g: get("mla_attention_k4_g")?,
-                mla_attention_k4: get("mla_attention_k4")?,
-                mla_sparse_attention_k4_g: get("mla_sparse_attention_k4_g")?,
-                mla_sparse_attention_k4: get("mla_sparse_attention_k4")?,
-                mla_kv_cache_write_k6_g: get("mla_kv_cache_write_k6_g")?,
-                mla_kv_cache_write_k6: get("mla_kv_cache_write_k6")?,
-                mla_attention_k6_g: get("mla_attention_k6_g")?,
-                mla_attention_k6: get("mla_attention_k6")?,
-                mla_sparse_attention_k6_g: get("mla_sparse_attention_k6_g")?,
-                mla_sparse_attention_k6: get("mla_sparse_attention_k6")?,
-                mla_deinterleave: get("mla_deinterleave")?,
-                mla_split_q: get("mla_split_q")?,
-                mla_absorb_wkc: get("mla_absorb_wkc")?,
-                mla_apply_wvc: get("mla_apply_wvc")?,
-                // 4-bit PolarQuant kernels
-                kv_cache_write_polar4: get("kv_cache_write_polar4")?,
-                gqa_attention_polar4: get("gqa_attention_polar4")?,
-                kv_cache_write_polar4_g: get("kv_cache_write_polar4_g")?,
-                gqa_attention_polar4_g: get("gqa_attention_polar4_g")?,
-                gqa_attention_polar4_tiled_g: get("gqa_attention_polar4_tiled_g")?,
-                gqa_attention_polar4_reduce_g: get("gqa_attention_polar4_reduce_g")?,
-                record_globaltimer_u64_g: get("record_globaltimer_u64_g")?,
-                // Mamba2 SSM kernels
-                mamba2_conv1d: get("mamba2_conv1d")?,
-                mamba2_ssm_step: get("mamba2_ssm_step")?,
-                mamba2_discretize: get("mamba2_discretize")?,
-                mamba2_gate_output: get("mamba2_gate_output")?,
-                // relu2 expert activation
-                relu2_w2_batched: get("relu2_w2_batched")?,
-                relu2_w2_batched_coalesced: get("relu2_w2_batched_coalesced")?,
-                relu2_w2_int8_batched: get("relu2_w2_int8_batched")?,
-            };
+            let kernels = CachedKernels::load(&self.device)?;
             // Extract raw CUfunction handles for spec routing on spec_stream.
             self.raw_sigmoid_topk = CudaFunc(extract_cu_function(&kernels.sigmoid_topk));
             self.raw_softmax_topk = CudaFunc(extract_cu_function(&kernels.softmax_topk));
