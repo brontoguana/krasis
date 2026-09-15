@@ -1,0 +1,118 @@
+name: Diagnose Windows Rust compiler memory
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Candidate source commit to diagnose
+        required: true
+        type: string
+      baseline_ref:
+        description: Previously successful source commit
+        required: true
+        type: string
+      toolchain:
+        description: Compiler used by the failing build
+        required: true
+        type: string
+      baseline_toolchain:
+        description: Compiler used by the successful build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: candidate-current-compiler
+            source: ${{ inputs.source_ref }}
+            toolchain: ${{ inputs.toolchain }}
+          - label: baseline-current-compiler
+            source: ${{ inputs.baseline_ref }}
+            toolchain: ${{ inputs.toolchain }}
+          - label: candidate-baseline-compiler
+            source: ${{ inputs.source_ref }}
+            toolchain: ${{ inputs.baseline_toolchain }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: diagnostics
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.source }}
+          path: source
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.6.3"
+      - name: Compile and trace the unchanged library test gate
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $trace = Join-Path $env:GITHUB_WORKSPACE "trace"
+          New-Item -ItemType Directory -Force $trace | Out-Null
+          rustc --edition 2021 diagnostics/scripts/rustc-profile.rs -o "$trace/rustc-profile.exe"
+          $env:RUSTC_WORKSPACE_WRAPPER = "$trace/rustc-profile.exe"
+          $env:KRASIS_COMPILER_TRACE_DIR = $trace
+          rustc -vV | Set-Content "$trace/toolchain.txt"
+          git -C source rev-parse HEAD | Set-Content "$trace/source-sha.txt"
+          Get-CimInstance Win32_OperatingSystem | Format-List * | Out-File "$trace/system.txt"
+          Get-CimInstance Win32_PageFileUsage | Format-List * | Out-File "$trace/pagefile.txt"
+          $monitor = Start-Job -ArgumentList "$trace/memory.jsonl" -ScriptBlock {
+            param($path)
+            while ($true) {
+              $memory = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory
+              $compilers = @(Get-Process rustc -ErrorAction SilentlyContinue)
+              [ordered]@{
+                utc = [DateTime]::UtcNow.ToString("o")
+                committed_bytes = $memory.CommittedBytes
+                commit_limit_bytes = $memory.CommitLimit
+                available_bytes = $memory.AvailableBytes
+                rustc = @($compilers | ForEach-Object {
+                  [ordered]@{
+                    pid = $_.Id
+                    private_bytes = $_.PrivateMemorySize64
+                    working_set_bytes = $_.WorkingSet64
+                    cpu_seconds = $_.CPU
+                  }
+                })
+              } | ConvertTo-Json -Depth 4 -Compress | Add-Content $path
+              Start-Sleep -Seconds 2
+            }
+          }
+          Push-Location source
+          try {
+            cargo test --locked --release --lib server::tests 2>&1 | Tee-Object "$trace/cargo.log"
+            cargo test --locked --release --lib manager::tests 2>&1 | Tee-Object -Append "$trace/cargo.log"
+          } finally {
+            Pop-Location
+            Stop-Job $monitor
+            Receive-Job $monitor
+            Remove-Job $monitor
+          }
+      - name: Upload compiler evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-memory-${{ matrix.label }}
+          retention-days: 7
+          path: |
+            trace/
+            source/target/release/deps/krasis*.json
+            source/target/release/deps/krasis*.bc
