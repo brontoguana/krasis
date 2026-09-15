@@ -318,9 +318,31 @@ class HFDownloaderTests(unittest.TestCase):
         self.assertEqual(calls, [(spec.repo_id, spec.revision, True, True)])
         self.assertTrue(candidate.supported_download)
         self.assertTrue(candidate.is_krasis_candidate)
+        self.assertEqual(candidate.key, spec.key)
         self.assertEqual(candidate.local_dir_name, spec.local_dir_name)
         self.assertEqual(candidate.revision, spec.revision)
         self.assertEqual(candidate.compatibility, "supported by Krasis")
+
+    def test_apply_supported_spec_copies_catalog_key(self):
+        spec = supported_models()[0]
+        candidate = candidate_from_info(
+            SimpleNamespace(
+                id=spec.repo_id,
+                pipeline_tag="text-generation",
+                tags=["transformers", "safetensors"],
+                gated=False,
+                private=False,
+                downloads=0,
+                likes=0,
+                last_modified=None,
+                safetensors=SimpleNamespace(total=1000, parameters={}),
+                siblings=[],
+            ),
+            include_files=False,
+        )
+        applied = hf_downloader._apply_supported_spec(candidate, spec)
+        self.assertEqual(applied.key, spec.key)
+        self.assertEqual(hf_downloader.supported_model_spec(applied.key).repo_id, spec.repo_id)
 
     def test_download_model_passes_revision_to_snapshot_download(self):
         calls = []
