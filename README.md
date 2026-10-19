@@ -1,5 +1,12 @@
 # Krasis
 
+**[Krasis website](https://krasis.ai/) · [Northloom](https://northloom.ai/) · [Local inference consulting](https://northloom.ai/consultancy/)**
+
+Krasis is built by [Northloom](https://northloom.ai/). Need help running AI
+locally? Northloom offers [local and self-hosted AI inference consulting](https://northloom.ai/consultancy/),
+including model selection, GPU hardware planning, inference performance
+optimisation, architecture reviews and ongoing technical advice.
+
 Krasis is an LLM runtime for running large MoE models on NVIDIA consumer GPUs.
 It is built around fast GPU prompt processing, GPU-executed decode, and HCS
 expert residency management so models much larger than VRAM can still run
