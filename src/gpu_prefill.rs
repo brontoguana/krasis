@@ -7358,6 +7358,44 @@ fn dsa_score_context_rows(logical_context_rows: usize, context_divisor: usize) -
     logical_context_rows / context_divisor.max(1)
 }
 
+fn dsa_prefill_needs_selection_expansion(configured_topk: usize, output_topk: usize) -> bool {
+    output_topk > configured_topk
+}
+
+fn deepseek_v4_indexer_workspace_geometry(
+    layer_idx: usize,
+    compress_ratio: usize,
+    index_topk: usize,
+    index_n_heads: usize,
+    index_head_dim: usize,
+) -> Result<DsaPrefillWorkspaceGeometry, String> {
+    if compress_ratio != 4 {
+        return Err(format!(
+            "DeepSeek-V4 indexer layer {} requires ratio-4 compressed context, got {}",
+            layer_idx, compress_ratio
+        ));
+    }
+    if index_topk == 0 || index_n_heads == 0 || index_head_dim == 0 {
+        return Err(format!(
+            "DeepSeek-V4 indexer layer {} has invalid workspace geometry: topk={} heads={} head_dim={}",
+            layer_idx, index_topk, index_n_heads, index_head_dim
+        ));
+    }
+    Ok(DsaPrefillWorkspaceGeometry {
+        index_topk,
+        output_topk: index_topk,
+        // Selection receives compressed count-1 positions, not raw token
+        // positions. Dividing them again hides three quarters of the prefix.
+        // Only GEMM band planning retains the raw-token compression span.
+        context_divisor: 1,
+        causal_context_row_span: compress_ratio,
+        index_n_heads,
+        index_head_dim,
+        mla_num_heads: 0,
+        mla_ckv_cache_dim: 0,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Glm5FfnKind {
     RoutedMoe,
@@ -7708,7 +7746,10 @@ impl DsaPrefillRequestWorkspace {
                     .ok_or_else(|| "DSA prefill raw selected-index size overflow".to_string())?,
             )
             .map_err(|error| format!("alloc DSA prefill selected indices: {error}"))?,
-            d_pool_selected_indices: if context_divisor > 1 {
+            d_pool_selected_indices: if dsa_prefill_needs_selection_expansion(
+                configured_topk,
+                output_topk,
+            ) {
                 Some(
                     GpuBuf::alloc_zeroed(plan.selection_elements).map_err(|error| {
                         format!("alloc DSA prefill pooled selected indices: {error}")
@@ -41784,16 +41825,13 @@ impl PrefillEngine {
             let Some(indexer) = descriptor.indexer.as_ref() else {
                 continue;
             };
-            let current = DsaPrefillWorkspaceGeometry {
-                index_topk: indexer.index_topk,
-                output_topk: indexer.index_topk,
-                context_divisor: 1,
-                causal_context_row_span: descriptor.compress_ratio,
-                index_n_heads: indexer.index_n_heads,
-                index_head_dim: indexer.index_head_dim,
-                mla_num_heads: 0,
-                mla_ckv_cache_dim: 0,
-            };
+            let current = deepseek_v4_indexer_workspace_geometry(
+                layer_idx,
+                descriptor.compress_ratio,
+                indexer.index_topk,
+                indexer.index_n_heads,
+                indexer.index_head_dim,
+            )?;
             if let Some(expected) = geometry {
                 if expected != current {
                     return Err(format!(
@@ -84497,11 +84535,41 @@ mod kernel_tests {
     }
 
     #[test]
+    fn test_deepseek_v4_prefill_causal_positions_are_not_compressed_twice() {
+        let geometry = deepseek_v4_indexer_workspace_geometry(2, 4, 512, 64, 128).unwrap();
+        // DeepSeek's compressor already converts raw positions to count-1
+        // positions. CUDA selection computes (position + 1) / divisor, while
+        // GEMM band planning still spans four raw tokens per compressed row.
+        assert_eq!(geometry.causal_context_row_span, 4);
+        for raw_position in -1i64..200_000 {
+            let reference_visible = (raw_position + 1).max(0) as usize / 4;
+            let selection_position = reference_visible as i64 - 1;
+            let actual_visible =
+                (selection_position + 1).max(0) as usize / geometry.context_divisor;
+            assert_eq!(
+                actual_visible, reference_visible,
+                "raw position {raw_position}"
+            );
+        }
+    }
+
+    #[test]
     fn test_dsa_prefill_selection_plan() {
         assert_eq!(dsa_score_context_rows(300, 4), 75);
         assert_eq!(dsa_score_context_rows(303, 4), 75);
         assert_eq!(dsa_score_context_rows(304, 4), 76);
         assert_eq!(dsa_score_context_rows(303, 1), 303);
+        let deepseek_v4 = deepseek_v4_indexer_workspace_geometry(2, 4, 512, 64, 128).unwrap();
+        assert_eq!(deepseek_v4.context_divisor, 1);
+        assert_eq!(deepseek_v4.causal_context_row_span, 4);
+        assert_eq!(deepseek_v4.index_topk, 512);
+        assert_eq!(deepseek_v4.output_topk, 512);
+        assert!(!dsa_prefill_needs_selection_expansion(
+            deepseek_v4.index_topk,
+            deepseek_v4.output_topk,
+        ));
+        assert!(deepseek_v4_indexer_workspace_geometry(2, 1, 512, 64, 128).is_err());
+        assert!(deepseek_v4_indexer_workspace_geometry(2, 4, 0, 64, 128).is_err());
         assert_eq!(glm5_ffn_kind(true, false).unwrap(), Glm5FfnKind::RoutedMoe);
         assert_eq!(glm5_ffn_kind(false, true).unwrap(), Glm5FfnKind::Dense);
         assert!(glm5_ffn_kind(true, true).is_err());
@@ -84531,6 +84599,7 @@ mod kernel_tests {
             pooled.workspace_selection_geometry().unwrap(),
             (512, 2051, 4)
         );
+        assert!(dsa_prefill_needs_selection_expansion(512, 2051));
         assert_eq!(pooled.selection_context_divisor().unwrap(), 4);
         assert_eq!(
             DsaPrefillLayerDescriptor {
