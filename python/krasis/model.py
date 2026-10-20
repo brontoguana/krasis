@@ -10996,7 +10996,7 @@ class KrasisModel:
                 )
 
                 # Set up RoPE tables from first MLA layer
-                if not rope_set:
+                if not rope_set and attn.qk_rope_dim > 0:
                     cos, sin = attn._get_rope_cos_sin(max_seq)
                     cos_f32 = cos.float().contiguous()
                     sin_f32 = sin.float().contiguous()
@@ -11167,7 +11167,7 @@ class KrasisModel:
                     store.set_gqa_rope_half_split(layer_idx, True)
 
                 # Set up RoPE tables from first GQA layer
-                if not rope_set:
+                if not rope_set and _rope_half > 0:
                     if _rope_cos is None or _rope_sin is None:
                         raise RuntimeError(f"Missing RoPE table for GQA layer {layer_idx}")
                     self._rust_rope_cos = _rope_cos
@@ -11522,7 +11522,9 @@ class KrasisModel:
             logger.info("Native MLA %s KV cache: max_seq=%d (%d pages × %d)",
                         cache.kv_format_str, max_seq, cache.max_pages, cache.page_size)
 
-        if hqq_active and not rope_set:
+        # Non-rotary attention (including GLM-5.3) has no tables to upload.
+        # Keep the Rust transfer's nonempty-extent contract for actual RoPE.
+        if hqq_active and not rope_set and self.cfg.rotary_dim > 0:
             max_seq = max(
                 c.max_context_tokens for c in self.kv_caches if c is not None
             )
@@ -12525,7 +12527,7 @@ class KrasisModel:
                     )
 
                     # RoPE from first MLA layer in segment
-                    if not aux_rope_set:
+                    if not aux_rope_set and attn.qk_rope_dim > 0:
                         cos, sin = attn._get_rope_cos_sin(max_seq)
                         cos_f32 = cos.float().contiguous().to(aux_device)
                         sin_f32 = sin.float().contiguous().to(aux_device)
@@ -12671,7 +12673,7 @@ class KrasisModel:
                         store.set_gqa_rope_half_split(layer_idx, True)
 
                     # RoPE tables on aux GPU (from first GQA layer in segment)
-                    if not aux_rope_set:
+                    if not aux_rope_set and _rope_half > 0:
                         if _rope_cos is None or _rope_sin is None:
                             raise RuntimeError(f"Missing aux RoPE table for GQA layer {layer_idx}")
                         self._aux_rope_cos = _rope_cos

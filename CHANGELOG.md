@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-20 — Non-rotary attention startup
+
+- Skip RoPE uploads when the attention layer has zero rotary dimensions, including primary, auxiliary and HQQ fallback registration. GLM-5.3 requires zero RoPE dimensions; the stream-ordered transfer correctly rejects empty tables, so passing empty fallback tensors prevented startup after the runtime sync. Positive-dimension RoPE uploads retain their checked transfer path.
+
 - Synced remaining runtime, CUDA memory/stream-safety, sidecar, and Windows installer fixes into `main`:
   - Typed `CUfunction` accessor (`func.cu_function()`) across `src/gpu_decode.rs`, `src/gpu_prefill.rs`, `src/hqq.rs`, `src/synthetic_repack.rs`, and `src/weights/expert_hqq.rs` instead of raw struct-offset pointer probing.
   - Owned CUDA weight and graph-capture lifetime management (`src/owned_gpu_weights.rs`, `src/graph_capture_lifetime.rs`, and `vendor/cudarc` `UnsafeCell<CUstream>` + `set_stream_for_capture`), retaining Rust-uploaded weight buffers on `GpuDecodeGraph` instead of `std::mem::forget`, ensuring context synchronization and `CUgraphExec` destruction before buffer release on graph replacement or Store teardown, and synchronizing `copy_stream` event handoffs on `*self.device.cu_stream()` instead of the null default stream.
