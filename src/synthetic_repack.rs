@@ -630,19 +630,5 @@ unsafe fn launch_raw(
 }
 
 fn extract_cu_function(function: &cudarc::driver::CudaFunction) -> cuda_sys::CUfunction {
-    unsafe {
-        let struct_ptr = function as *const _ as *const u8;
-        let word0: cuda_sys::CUfunction = std::ptr::read(struct_ptr as *const _);
-        let mut attribute = 0i32;
-        if cuda_sys::lib().cuFuncGetAttribute(
-            &mut attribute,
-            cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_NUM_REGS,
-            word0,
-        ) == cuda_sys::CUresult::CUDA_SUCCESS
-        {
-            word0
-        } else {
-            std::ptr::read(struct_ptr.add(std::mem::size_of::<usize>()) as *const _)
-        }
-    }
+    function.cu_function()
 }

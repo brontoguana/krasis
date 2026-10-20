@@ -29,6 +29,8 @@ fn copy_row(
 
 fn row_operation(label: &str) -> Option<&'static str> {
     match label {
+        "all_layer_post_attn_residual_last" => Some("model_row_post_attn_residual"),
+        "all_layer_post_mlp_hidden_last" => Some("model_row_post_mlp_hidden"),
         "layer_glm5_hc_input_state_last" => Some("glm5_row_hc_entry"),
         "layer_glm5_attn_prepared_hidden_last" => Some("glm5_row_attn_prepared"),
         "layer_glm5_attn_norm_hidden_last" => Some("glm5_row_attn_norm"),
@@ -55,35 +57,100 @@ fn row_operation(label: &str) -> Option<&'static str> {
 }
 
 // Intersect an explicitly bounded global row window with the actual resident chunk.
-fn window_fragment(start:usize,count:usize,max_bytes:usize,chunk_start:usize,chunk_end:usize,width:usize)->Result<Option<(usize,usize,usize,usize)>,String>{
-    let end=start.checked_add(count).ok_or("window extent overflow")?;
-    let stride=width.checked_mul(2).filter(|&n|n>0).ok_or("window width invalid")?;
-    let total=count.checked_mul(stride).filter(|&n|n>0 && n<=max_bytes).ok_or("window exceeds explicit byte bound")?;
-    let _=total;
-    if chunk_start>=chunk_end{return Err("window chunk extent invalid".into());}
-    let first=start.max(chunk_start);let last=end.min(chunk_end);
-    if first>=last{return Ok(None);}
-    let offset=(first-chunk_start).checked_mul(stride).ok_or("window local offset overflow")?;
-    let bytes=(last-first).checked_mul(stride).ok_or("window fragment overflow")?;
-    offset.checked_add(bytes).ok_or("window pointer extent overflow")?;
-    Ok(Some((first,last,offset,bytes)))
+fn window_fragment(
+    start: usize,
+    count: usize,
+    max_bytes: usize,
+    chunk_start: usize,
+    chunk_end: usize,
+    width: usize,
+) -> Result<Option<(usize, usize, usize, usize)>, String> {
+    let end = start.checked_add(count).ok_or("window extent overflow")?;
+    let stride = width
+        .checked_mul(2)
+        .filter(|&n| n > 0)
+        .ok_or("window width invalid")?;
+    let total = count
+        .checked_mul(stride)
+        .filter(|&n| n > 0 && n <= max_bytes)
+        .ok_or("window exceeds explicit byte bound")?;
+    let _ = total;
+    if chunk_start >= chunk_end {
+        return Err("window chunk extent invalid".into());
+    }
+    let first = start.max(chunk_start);
+    let last = end.min(chunk_end);
+    if first >= last {
+        return Ok(None);
+    }
+    let offset = (first - chunk_start)
+        .checked_mul(stride)
+        .ok_or("window local offset overflow")?;
+    let bytes = (last - first)
+        .checked_mul(stride)
+        .ok_or("window fragment overflow")?;
+    offset
+        .checked_add(bytes)
+        .ok_or("window pointer extent overflow")?;
+    Ok(Some((first, last, offset, bytes)))
 }
 
 #[cfg(test)]
 #[test]
-fn bounded_window_fragment_contract(){
-    assert_eq!(window_fragment(10,13,104,0,12,4).unwrap(),Some((10,12,80,16)));
-    assert_eq!(window_fragment(10,13,104,12,20,4).unwrap(),Some((12,20,0,64)));
-    assert_eq!(window_fragment(10,13,104,20,30,4).unwrap(),Some((20,23,0,24)));
-    assert_eq!(window_fragment(10,13,104,0,10,4).unwrap(),None);
-    assert_eq!(window_fragment(10,13,104,23,30,4).unwrap(),None);
-    for args in [(10,13,103,0,30,4),(usize::MAX,1,100,0,10,1),(0,1,100,1,1,1),(0,0,100,0,1,1),(0,1,100,0,1,0),(0,1,100,0,1,usize::MAX)]{
-        assert!(window_fragment(args.0,args.1,args.2,args.3,args.4,args.5).is_err());
+fn bounded_model_window_stage_mapping_contract() {
+    for (label, expected) in [
+        (
+            "all_layer_post_attn_residual_last",
+            "model_window_post_attn_residual",
+        ),
+        (
+            "all_layer_post_mlp_hidden_last",
+            "model_window_post_mlp_hidden",
+        ),
+        ("layer_glm5_attn_norm_hidden_last", "glm5_window_attn_norm"),
+    ] {
+        assert_eq!(
+            row_operation(label)
+                .unwrap()
+                .replacen("_row_", "_window_", 1),
+            expected
+        );
+    }
+    assert_eq!(row_operation("all_layer_unknown_last"), None);
+}
+
+#[cfg(test)]
+#[test]
+fn bounded_window_fragment_contract() {
+    assert_eq!(
+        window_fragment(10, 13, 104, 0, 12, 4).unwrap(),
+        Some((10, 12, 80, 16))
+    );
+    assert_eq!(
+        window_fragment(10, 13, 104, 12, 20, 4).unwrap(),
+        Some((12, 20, 0, 64))
+    );
+    assert_eq!(
+        window_fragment(10, 13, 104, 20, 30, 4).unwrap(),
+        Some((20, 23, 0, 24))
+    );
+    assert_eq!(window_fragment(10, 13, 104, 0, 10, 4).unwrap(), None);
+    assert_eq!(window_fragment(10, 13, 104, 23, 30, 4).unwrap(), None);
+    for args in [
+        (10, 13, 103, 0, 30, 4),
+        (usize::MAX, 1, 100, 0, 10, 1),
+        (0, 1, 100, 1, 1, 1),
+        (0, 0, 100, 0, 1, 1),
+        (0, 1, 100, 0, 1, 0),
+        (0, 1, 100, 0, 1, usize::MAX),
+    ] {
+        assert!(window_fragment(args.0, args.1, args.2, args.3, args.4, args.5).is_err());
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn capture_stage(invocation: Option<&crate::matched_prefill_capture::Invocation>,
+pub(crate) fn capture_stage(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
     label: &str,
     layer: usize,
     height: usize,
@@ -92,45 +159,101 @@ pub(crate) fn capture_stage(invocation: Option<&crate::matched_prefill_capture::
     ptr: u64,
     width: usize,
     stream: sys::CUstream,
-    chunk_start:usize,
+    chunk_start: usize,
 ) -> Result<(), String> {
     let Some(operation) = row_operation(label) else {
         return Ok(());
     };
-    let Some(invocation)=invocation else{return Ok(())};
-    let window_operation=operation.replacen("glm5_row_","glm5_window_",1);
-    if let Some(target)=crate::matched_prefill_capture::target(Some(invocation),&window_operation,layer,invocation.logical_tokens(),None)? {
-        if last_position.checked_add(1)!=Some(height){return Err("window stage height mismatch".into());}
-        let (count,max_bytes)=crate::matched_probe::prefill_window_parameters(&window_operation,layer,invocation.logical_tokens())?;
-        if let Some((first,last,offset,bytes))=window_fragment(target.row,count,max_bytes,chunk_start,height,width)?{
-            let pointer=ptr.checked_add(u64::try_from(offset).map_err(|_|"window offset exceeds u64")?).ok_or("window pointer overflow")?;
-            pointer.checked_add(u64::try_from(bytes).map_err(|_|"window bytes exceed u64")?).ok_or("window pointer end overflow")?;
-            let window_start=target.row;
-            let fragment=target.child(&format!("chunk-{chunk}-rows-{first}-{last}"))?;
-            fragment.device("values.bf16",pointer,bytes,stream)?;
+    let Some(invocation) = invocation else {
+        return Ok(());
+    };
+    let window_operation = operation.replacen("_row_", "_window_", 1);
+    if let Some(target) = crate::matched_prefill_capture::target(
+        Some(invocation),
+        &window_operation,
+        layer,
+        invocation.logical_tokens(),
+        None,
+    )? {
+        if last_position.checked_add(1) != Some(height) {
+            return Err("window stage height mismatch".into());
+        }
+        let (count, max_bytes) = crate::matched_probe::prefill_window_parameters(
+            &window_operation,
+            layer,
+            invocation.logical_tokens(),
+        )?;
+        if let Some((first, last, offset, bytes)) =
+            window_fragment(target.row, count, max_bytes, chunk_start, height, width)?
+        {
+            let pointer = ptr
+                .checked_add(u64::try_from(offset).map_err(|_| "window offset exceeds u64")?)
+                .ok_or("window pointer overflow")?;
+            pointer
+                .checked_add(u64::try_from(bytes).map_err(|_| "window bytes exceed u64")?)
+                .ok_or("window pointer end overflow")?;
+            let window_start = target.row;
+            let fragment = target.child(&format!("chunk-{chunk}-rows-{first}-{last}"))?;
+            fragment.device("values.bf16", pointer, bytes, stream)?;
             fragment.write("descriptor.json",&serde_json::to_vec_pretty(&json!({"operation":window_operation,"stage":label,"layer":layer,"height":invocation.logical_tokens(),"window_start":window_start,"window_rows":count,"window_max_bytes":max_bytes,"fragment_start":first,"fragment_end":last,"width":width,"dtype":"bf16","chunk_index":chunk,"chunk_start":chunk_start,"chunk_end":height,"local_row":first-chunk_start,"device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?)?;
         }
     }
-    let digest_operation=format!("{window_operation}_sha256");
-    if let Some(target)=crate::matched_prefill_capture::target(Some(invocation),&digest_operation,layer,invocation.logical_tokens(),None)? {
-        if last_position.checked_add(1)!=Some(height){return Err("digest window stage height mismatch".into());}
-        let (count,max_bytes)=crate::matched_probe::prefill_window_parameters(&digest_operation,layer,invocation.logical_tokens())?;
-        if let Some((first,last,offset,bytes))=window_fragment(target.row,count,max_bytes,chunk_start,height,width)? {
-            let pointer=ptr.checked_add(u64::try_from(offset).map_err(|_|"digest offset exceeds u64")?).ok_or("digest pointer overflow")?;
-            let row_bytes=width.checked_mul(2).ok_or("digest row bytes overflow")?;
-            let fragment=target.digest_child(&format!("chunk-{chunk}-rows-{first}-{last}"))?;
-            let retained=fragment.device_row_sha256("rows.sha256",pointer,bytes,row_bytes,max_bytes,stream)?;
+    let digest_operation = format!("{window_operation}_sha256");
+    if let Some(target) = crate::matched_prefill_capture::target(
+        Some(invocation),
+        &digest_operation,
+        layer,
+        invocation.logical_tokens(),
+        None,
+    )? {
+        if last_position.checked_add(1) != Some(height) {
+            return Err("digest window stage height mismatch".into());
+        }
+        let (count, max_bytes) = crate::matched_probe::prefill_window_parameters(
+            &digest_operation,
+            layer,
+            invocation.logical_tokens(),
+        )?;
+        if let Some((first, last, offset, bytes)) =
+            window_fragment(target.row, count, max_bytes, chunk_start, height, width)?
+        {
+            let pointer = ptr
+                .checked_add(u64::try_from(offset).map_err(|_| "digest offset exceeds u64")?)
+                .ok_or("digest pointer overflow")?;
+            let row_bytes = width.checked_mul(2).ok_or("digest row bytes overflow")?;
+            let fragment = target.digest_child(&format!("chunk-{chunk}-rows-{first}-{last}"))?;
+            let retained = fragment.device_row_sha256(
+                "rows.sha256",
+                pointer,
+                bytes,
+                row_bytes,
+                max_bytes,
+                stream,
+            )?;
             fragment.write("descriptor.json",&serde_json::to_vec_pretty(&json!({"operation":digest_operation,"stage":label,"layer":layer,"height":invocation.logical_tokens(),"window_start":target.row,"window_rows":count,"window_max_bytes":max_bytes,"fragment_start":first,"fragment_end":last,"width":width,"dtype":"bf16","encoding":"independent SHA256 of each actual contiguous row","source_bytes_read":bytes,"retained_digest_bytes":retained,"chunk_index":chunk,"chunk_start":chunk_start,"chunk_end":height,"local_row":first-chunk_start,"device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?)?;
         }
     }
-    let Some(target) = crate::matched_prefill_capture::target(Some(invocation),operation, layer, invocation.logical_tokens(),None)? else {
+    let Some(target) = crate::matched_prefill_capture::target(
+        Some(invocation),
+        operation,
+        layer,
+        invocation.logical_tokens(),
+        None,
+    )?
+    else {
         return Ok(());
     };
-    if last_position.checked_add(1) != Some(height) {return Err("selected stage last position differs from actual global height".into());}
-    let rows=height.checked_sub(chunk_start).ok_or("selected stage chunk extent invalid")?;
-    if target.row<chunk_start || target.row>=height{return Ok(())}
-    let local_row=crate::mla_probe::chunk_row(target.row,chunk_start,rows)?;
-    crate::mla_probe::row(&target,"values.bf16",ptr,local_row,width,2,stream)?;
+    if last_position.checked_add(1) != Some(height) {
+        return Err("selected stage last position differs from actual global height".into());
+    }
+    let rows = height
+        .checked_sub(chunk_start)
+        .ok_or("selected stage chunk extent invalid")?;
+    if target.row < chunk_start || target.row >= height {
+        return Ok(());
+    }
+    let local_row = crate::mla_probe::chunk_row(target.row, chunk_start, rows)?;
+    crate::mla_probe::row(&target, "values.bf16", ptr, local_row, width, 2, stream)?;
     target.write("descriptor.json",serde_json::to_vec_pretty(&json!({"operation":operation,"stage":label,"layer":layer,"height":invocation.logical_tokens(),"chunk_end":height,"row":target.row,"width":width,"dtype":"bf16","chunk_index":chunk,"chunk_start":chunk_start,"chunk_rows":rows,"local_row":local_row,"device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?.as_slice())
 }
 
@@ -153,7 +276,8 @@ fn routes(ids: &[u8], weights: &[u8], experts: usize, topk: usize) -> Result<Vec
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn capture_routes(invocation: Option<&crate::matched_prefill_capture::Invocation>,
+pub(crate) fn capture_routes(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
     layer: usize,
     height: usize,
     router_input: u64,
@@ -167,7 +291,9 @@ pub(crate) fn capture_routes(invocation: Option<&crate::matched_prefill_capture:
     weights: u64,
     stream: sys::CUstream,
 ) -> Result<(), String> {
-    let Some(target) = crate::matched_prefill_capture::target(invocation,"prefill_moe_row", layer, height,None)? else {
+    let Some(target) =
+        crate::matched_prefill_capture::target(invocation, "prefill_moe_row", layer, height, None)?
+    else {
         return Ok(());
     };
     target.row("router-input.bf16", router_input, router_width, stream)?;
@@ -205,7 +331,188 @@ pub(crate) fn capture_routes(invocation: Option<&crate::matched_prefill_capture:
     target.write("routing.json",serde_json::to_vec_pretty(&json!({"layer":layer,"height":height,"row":target.row,"router_width":router_width,"expert_width":expert_width,"experts":experts,"topk":topk,"selected_experts":selected,"route_contract":"Actual scaled/normalized production router outputs before replication and expert dispatch","device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?.as_slice())
 }
 
-pub(crate) fn capture_slots(invocation: Option<&crate::matched_prefill_capture::Invocation>,
+fn combination_target(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
+    layer: usize,
+    height: usize,
+) -> Result<Option<Target>, String> {
+    if invocation.is_none() {
+        return Ok(None);
+    }
+    let target =
+        crate::matched_prefill_capture::target(invocation, "prefill_moe_row", layer, height, None)?;
+    if target.as_ref().is_some_and(|target| target.row >= height) {
+        return Err("selected MoE combination row exceeds actual resident height".into());
+    }
+    Ok(target)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn capture_router_weights(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
+    layer: usize,
+    height: usize,
+    pointers: [u64; 5],
+    experts: usize,
+    cols: usize,
+    scoring: u8,
+    normalized: bool,
+    scale: f32,
+    stream: sys::CUstream,
+) -> Result<(), String> {
+    let Some(target) = combination_target(invocation, layer, height)? else {
+        return Ok(());
+    };
+    if experts == 0 || cols == 0 || pointers[0] == 0 {
+        return Err("selected router requires its actual nonempty BF16 weight matrix".into());
+    }
+    let bytes = experts
+        .checked_mul(cols)
+        .and_then(|n| n.checked_mul(std::mem::size_of::<u16>()))
+        .ok_or("selected router weight extent overflow")?;
+    target.device("router-weight.bf16", pointers[0], bytes, stream)?;
+    for (name, ptr) in [
+        ("router-per-expert-scale.f32", pointers[1]),
+        ("router-correction-bias.f32", pointers[2]),
+        ("router-vl-bias.f32", pointers[3]),
+    ] {
+        if ptr != 0 {
+            let bytes = experts
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or("selected router bias extent overflow")?;
+            target.device(name, ptr, bytes, stream)?;
+        }
+    }
+    target.write("router-weight-descriptor.json", serde_json::to_vec_pretty(&json!({
+        "layer":layer, "height":height, "row":target.row, "rows":experts, "cols":cols,
+        "weight_dtype":"bfloat16", "weight_layout":"row_major", "weight_bytes":bytes,
+        "weight_ptr":pointers[0], "per_expert_scale_ptr":pointers[1],
+        "correction_bias_ptr":pointers[2], "vl_bias_ptr":pointers[3], "hash_table_ptr":pointers[4],
+        "hash_table_captured":false, "scoring_func":scoring, "normalized_topk":normalized,
+        "routed_scaling_factor":scale, "device_diagnostic_allocation_bytes":0,
+        "scope":"Actual BF16 router matrix and non-null expert-scale/bias vectors; hash-table routing operands are not covered.",
+    })).map_err(|e|e.to_string())?.as_slice())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn capture_shared_operands(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
+    layer: usize,
+    height: usize,
+    input: u64,
+    shared: u64,
+    accumulator: u64,
+    width: usize,
+    routed_rounded: bool,
+    gate_present: bool,
+    stream: sys::CUstream,
+) -> Result<(), String> {
+    let Some(target) = combination_target(invocation, layer, height)? else {
+        return Ok(());
+    };
+    if width == 0 || input == 0 || shared == 0 || accumulator == 0 {
+        return Err("selected MoE combination requires actual nonempty operands".into());
+    }
+    target.row("shared-input.bf16", input, width, stream)?;
+    target.row("shared-output.bf16", shared, width, stream)?;
+    copy_row(
+        &target,
+        "used-routed-accumulator.f32",
+        accumulator,
+        width,
+        std::mem::size_of::<f32>(),
+        stream,
+    )?;
+    target.write("shared-combination-descriptor.json", serde_json::to_vec_pretty(&json!({
+        "layer":layer, "height":height, "row":target.row, "width":width,
+        "routed_rounded_before_shared":routed_rounded, "gate_present":gate_present,
+        "input_ptr":input, "shared_output_ptr":shared, "routed_accumulator_ptr":accumulator,
+        "input_dtype":"bfloat16", "shared_dtype":"bfloat16", "accumulator_dtype":"float32",
+        "point":"actual selected add-stream operands after existing shared completion dependency",
+        "stream_ptr":stream as usize,
+        "device_diagnostic_allocation_bytes":0,
+    })).map_err(|e|e.to_string())?.as_slice())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn capture_shared_gate(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
+    layer: usize,
+    height: usize,
+    weight: u64,
+    output: u64,
+    rows: usize,
+    cols: usize,
+    stream: sys::CUstream,
+) -> Result<(), String> {
+    let Some(target) = combination_target(invocation, layer, height)? else {
+        return Ok(());
+    };
+    if rows == 0 || cols == 0 || weight == 0 || output == 0 {
+        return Err("selected shared gate requires actual nonempty operands".into());
+    }
+    let bytes = rows
+        .checked_mul(cols)
+        .and_then(|n| n.checked_mul(std::mem::size_of::<u16>()))
+        .ok_or("selected shared gate weight extent overflow")?;
+    target.device("shared-gate-weight.bf16", weight, bytes, stream)?;
+    copy_row(
+        &target,
+        "shared-gate.f32",
+        output,
+        rows,
+        std::mem::size_of::<f32>(),
+        stream,
+    )?;
+    target.write(
+        "shared-gate-descriptor.json",
+        serde_json::to_vec_pretty(&json!({
+            "layer":layer, "height":height, "row":target.row, "rows":rows, "cols":cols,
+            "weight_ptr":weight, "output_ptr":output, "weight_bytes":bytes,
+            "weight_dtype":"bfloat16", "output_dtype":"float32", "weight_layout":"row_major",
+            "point":"actual shared-gate BF16/F32 projection result before sigmoid-gated addition",
+            "stream_ptr":stream as usize,
+            "device_diagnostic_allocation_bytes":0,
+        }))
+        .map_err(|e| e.to_string())?
+        .as_slice(),
+    )
+}
+
+pub(crate) fn capture_combined_output(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
+    layer: usize,
+    height: usize,
+    accumulator: u64,
+    output: u64,
+    width: usize,
+    stream: sys::CUstream,
+) -> Result<(), String> {
+    let Some(target) = combination_target(invocation, layer, height)? else {
+        return Ok(());
+    };
+    if width == 0 || accumulator == 0 || output == 0 {
+        return Err("selected combined MoE output requires actual nonempty operands".into());
+    }
+    copy_row(
+        &target,
+        "total-accumulator.f32",
+        accumulator,
+        width,
+        std::mem::size_of::<f32>(),
+        stream,
+    )?;
+    target.row("moe-output.bf16", output, width, stream)?;
+    target.write("combined-output-descriptor.json", serde_json::to_vec_pretty(&json!({
+        "layer":layer, "height":height, "row":target.row, "width":width,
+        "accumulator_ptr":accumulator, "output_ptr":output,
+        "accumulator_dtype":"float32", "output_dtype":"bfloat16",
+        "point":"after shared addition and final BF16 conversion", "device_diagnostic_allocation_bytes":0,
+    })).map_err(|e|e.to_string())?.as_slice())
+}
+
+pub(crate) fn capture_slots(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
     layer: usize,
     height: usize,
     name: &str,
@@ -214,10 +521,19 @@ pub(crate) fn capture_slots(invocation: Option<&crate::matched_prefill_capture::
     topk: usize,
     stream: sys::CUstream,
 ) -> Result<(), String> {
-    let Some(target) = crate::matched_prefill_capture::target(invocation,"prefill_moe_row", layer, height,None)? else {
+    let Some(target) =
+        crate::matched_prefill_capture::target(invocation, "prefill_moe_row", layer, height, None)?
+    else {
         return Ok(());
     };
-    if !["w1-slots.bf16", "activation-slots.bf16", "w2-slots.bf16"].contains(&name) {
+    if ![
+        "w1-input-slots.bf16",
+        "w1-slots.bf16",
+        "activation-slots.bf16",
+        "w2-slots.bf16",
+    ]
+    .contains(&name)
+    {
         return Err("unsupported selected expert stage".into());
     }
     target.row(
@@ -230,14 +546,17 @@ pub(crate) fn capture_slots(invocation: Option<&crate::matched_prefill_capture::
     )
 }
 
-pub(crate) fn capture_accumulator(invocation: Option<&crate::matched_prefill_capture::Invocation>,
+pub(crate) fn capture_accumulator(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
     layer: usize,
     height: usize,
     ptr: u64,
     width: usize,
     stream: sys::CUstream,
 ) -> Result<(), String> {
-    let Some(target) = crate::matched_prefill_capture::target(invocation,"prefill_moe_row", layer, height,None)? else {
+    let Some(target) =
+        crate::matched_prefill_capture::target(invocation, "prefill_moe_row", layer, height, None)?
+    else {
         return Ok(());
     };
     copy_row(
@@ -251,7 +570,8 @@ pub(crate) fn capture_accumulator(invocation: Option<&crate::matched_prefill_cap
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn capture_weights(invocation: Option<&crate::matched_prefill_capture::Invocation>,
+pub(crate) fn capture_weights(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
     layer: usize,
     height: usize,
     operation: &str,
@@ -270,7 +590,9 @@ pub(crate) fn capture_weights(invocation: Option<&crate::matched_prefill_capture
     scale_factor: f32,
     stream: sys::CUstream,
 ) -> Result<(), String> {
-    let Some(target) = crate::matched_prefill_capture::target(invocation,"prefill_moe_row", layer, height,None)? else {
+    let Some(target) =
+        crate::matched_prefill_capture::target(invocation, "prefill_moe_row", layer, height, None)?
+    else {
         return Ok(());
     };
     if !["w1", "w2"].contains(&operation) || k == 0 || n == 0 || group == 0 {
@@ -370,13 +692,16 @@ mod tests {
         assert!(routes(&ids(&[1]), &weights(&[0.4, 0.6]), 4, 2).is_err());
     }
     #[test]
-    fn selected_stage_map_is_scoped_to_observed_glm_ffn_boundaries() {
+    fn selected_stage_map_preserves_known_glm_and_rejects_unknown_boundaries() {
         assert_eq!(
             row_operation("layer_glm5_ffn_sublayer_last"),
             Some("glm5_row_ffn_output")
         );
         assert_eq!(row_operation("layer_other_model_output"), None);
-        assert_eq!(row_operation("layer_glm5_kda_recurrent_last"), None);
+        assert_eq!(
+            row_operation("layer_glm5_kda_recurrent_last"),
+            Some("glm5_row_kda_recurrent")
+        );
     }
 }
 
@@ -391,14 +716,52 @@ struct LaneSpec {
     expert: usize,
     coordinates: Vec<usize>,
 }
-fn resolve_lane_spec(spec:&LaneSpec,layer:usize,height:usize,row:usize,width:usize,ids:&[i32])->Result<(i32,Vec<i32>),String>{
-    if spec.schema_version!=1||spec.layer!=layer||spec.row!=row||!spec.heights.contains(&height)||row>=height||spec.coordinates.is_empty()||spec.coordinates.len()>4||spec.coordinates.iter().any(|&x|x>=width)||spec.coordinates.iter().collect::<std::collections::HashSet<_>>().len()!=spec.coordinates.len(){return Err("invalid explicit selected W1 lane geometry/coordinates".into())}
-    let expert=i32::try_from(spec.expert).map_err(|_|"lane expert exceeds ABI")?;
-    let matches=ids.iter().enumerate().filter(|(_,x)|**x==expert).map(|(i,_)|i).collect::<Vec<_>>();
-    if matches.len()!=1{return Err("selected lane expert absent or duplicated in actual routing".into())}
-    let sorted=row.checked_mul(ids.len()).and_then(|x|x.checked_add(matches[0])).and_then(|x|i32::try_from(x).ok()).ok_or("selected lane row exceeds ABI")?;
-    let coordinates=spec.coordinates.iter().map(|&x|i32::try_from(x).map_err(|_|"lane coordinate exceeds ABI".to_string())).collect::<Result<Vec<_>,_>>()?;
-    Ok((sorted,coordinates))
+fn resolve_lane_spec(
+    spec: &LaneSpec,
+    layer: usize,
+    height: usize,
+    row: usize,
+    width: usize,
+    ids: &[i32],
+) -> Result<(i32, Vec<i32>), String> {
+    if spec.schema_version != 1
+        || spec.layer != layer
+        || spec.row != row
+        || !spec.heights.contains(&height)
+        || row >= height
+        || spec.coordinates.is_empty()
+        || spec.coordinates.len() > 4
+        || spec.coordinates.iter().any(|&x| x >= width)
+        || spec
+            .coordinates
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != spec.coordinates.len()
+    {
+        return Err("invalid explicit selected W1 lane geometry/coordinates".into());
+    }
+    let expert = i32::try_from(spec.expert).map_err(|_| "lane expert exceeds ABI")?;
+    let matches = ids
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| **x == expert)
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err("selected lane expert absent or duplicated in actual routing".into());
+    }
+    let sorted = row
+        .checked_mul(ids.len())
+        .and_then(|x| x.checked_add(matches[0]))
+        .and_then(|x| i32::try_from(x).ok())
+        .ok_or("selected lane row exceeds ABI")?;
+    let coordinates = spec
+        .coordinates
+        .iter()
+        .map(|&x| i32::try_from(x).map_err(|_| "lane coordinate exceeds ABI".to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((sorted, coordinates))
 }
 pub(crate) struct LaneSelection {
     pub target: Target,
@@ -406,31 +769,79 @@ pub(crate) struct LaneSelection {
     pub expert: i32,
     pub coordinates: Vec<i32>,
 }
-pub(crate) fn lane_selection(invocation: Option<&crate::matched_prefill_capture::Invocation>,layer:usize,height:usize,width:usize,topk:usize)->Result<Option<LaneSelection>,String>{
-    let Some(target)=crate::matched_prefill_capture::target(invocation,"prefill_moe_lane",layer,height,None)? else{return Ok(None)};
-    let source=crate::matched_prefill_capture::target(invocation,"prefill_moe_row",layer,height,None)?.ok_or("lane diagnostic requires actual selected-row routing capture")?;
-    if source.row!=target.row{return Err("lane and routing selected row differ".into())}
-    let file=std::env::var("KRASIS_MATCHED_MOE_LANE_CONFIG").map_err(|_|"explicit selected W1 lane config required")?;
-    let raw=std::fs::read(&file).map_err(|e|e.to_string())?;
-    let spec:LaneSpec=serde_json::from_slice(&raw).map_err(|e|e.to_string())?;
-    let raw_ids=std::fs::read(source.directory.join("route-ids.i32")).map_err(|e|e.to_string())?;
-    if raw_ids.len()!=topk.checked_mul(4).ok_or("lane routing bytes overflow")?{return Err("invalid actual lane routing length".into())}
-    let ids=raw_ids.chunks_exact(4).map(|x|i32::from_le_bytes(x.try_into().unwrap())).collect::<Vec<_>>();
-    let (sorted_row,coordinates)=resolve_lane_spec(&spec,layer,height,target.row,width,&ids)?;
-    target.write("selection-config.json",&raw)?;
-    Ok(Some(LaneSelection{target,sorted_row,expert:i32::try_from(spec.expert).map_err(|_|"lane expert exceeds ABI")?,coordinates}))
+pub(crate) fn lane_selection(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
+    layer: usize,
+    height: usize,
+    width: usize,
+    topk: usize,
+) -> Result<Option<LaneSelection>, String> {
+    let Some(target) = crate::matched_prefill_capture::target(
+        invocation,
+        "prefill_moe_lane",
+        layer,
+        height,
+        None,
+    )?
+    else {
+        return Ok(None);
+    };
+    let source =
+        crate::matched_prefill_capture::target(invocation, "prefill_moe_row", layer, height, None)?
+            .ok_or("lane diagnostic requires actual selected-row routing capture")?;
+    if source.row != target.row {
+        return Err("lane and routing selected row differ".into());
+    }
+    let file = std::env::var("KRASIS_MATCHED_MOE_LANE_CONFIG")
+        .map_err(|_| "explicit selected W1 lane config required")?;
+    let raw = std::fs::read(&file).map_err(|e| e.to_string())?;
+    let spec: LaneSpec = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+    let raw_ids =
+        std::fs::read(source.directory.join("route-ids.i32")).map_err(|e| e.to_string())?;
+    if raw_ids.len() != topk.checked_mul(4).ok_or("lane routing bytes overflow")? {
+        return Err("invalid actual lane routing length".into());
+    }
+    let ids = raw_ids
+        .chunks_exact(4)
+        .map(|x| i32::from_le_bytes(x.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    let (sorted_row, coordinates) =
+        resolve_lane_spec(&spec, layer, height, target.row, width, &ids)?;
+    target.write("selection-config.json", &raw)?;
+    Ok(Some(LaneSelection {
+        target,
+        sorted_row,
+        expert: i32::try_from(spec.expert).map_err(|_| "lane expert exceeds ABI")?,
+        coordinates,
+    }))
 }
 #[cfg(test)]
-mod lane_tests{
- use super::*;
- #[test]fn selected_lane_requires_actual_unique_expert_and_valid_coordinates(){
-  let mut spec=LaneSpec{schema_version:1,layer:2,row:3,heights:vec![10,20],expert:7,coordinates:vec![4]};
-  assert_eq!(resolve_lane_spec(&spec,2,10,3,8,&[1,7]).unwrap(),(7,vec![4]));
-  assert!(resolve_lane_spec(&spec,2,10,3,8,&[1,2]).is_err());assert!(resolve_lane_spec(&spec,2,10,3,8,&[7,7]).is_err());
-  spec.coordinates=vec![8];assert!(resolve_lane_spec(&spec,2,10,3,8,&[1,7]).is_err());
-  spec.coordinates=vec![4,4];assert!(resolve_lane_spec(&spec,2,10,3,8,&[1,7]).is_err());
-  spec.coordinates=vec![4];assert!(resolve_lane_spec(&spec,2,11,3,8,&[1,7]).is_err());assert!(resolve_lane_spec(&spec,3,10,3,8,&[1,7]).is_err());
- }
+mod lane_tests {
+    use super::*;
+    #[test]
+    fn selected_lane_requires_actual_unique_expert_and_valid_coordinates() {
+        let mut spec = LaneSpec {
+            schema_version: 1,
+            layer: 2,
+            row: 3,
+            heights: vec![10, 20],
+            expert: 7,
+            coordinates: vec![4],
+        };
+        assert_eq!(
+            resolve_lane_spec(&spec, 2, 10, 3, 8, &[1, 7]).unwrap(),
+            (7, vec![4])
+        );
+        assert!(resolve_lane_spec(&spec, 2, 10, 3, 8, &[1, 2]).is_err());
+        assert!(resolve_lane_spec(&spec, 2, 10, 3, 8, &[7, 7]).is_err());
+        spec.coordinates = vec![8];
+        assert!(resolve_lane_spec(&spec, 2, 10, 3, 8, &[1, 7]).is_err());
+        spec.coordinates = vec![4, 4];
+        assert!(resolve_lane_spec(&spec, 2, 10, 3, 8, &[1, 7]).is_err());
+        spec.coordinates = vec![4];
+        assert!(resolve_lane_spec(&spec, 2, 11, 3, 8, &[1, 7]).is_err());
+        assert!(resolve_lane_spec(&spec, 3, 10, 3, 8, &[1, 7]).is_err());
+    }
 }
 // END bounded routed W1 lane selection
 
@@ -453,19 +864,34 @@ pub(crate) enum PartitionPolicy {
 }
 impl PartitionPolicy {
     pub(crate) fn label(self) -> &'static str {
-        match self { Self::OneBlockFullK => "single-block", Self::OneCtaPerMoeBlock => "concurrent-full-k" }
+        match self {
+            Self::OneBlockFullK => "single-block",
+            Self::OneCtaPerMoeBlock => "concurrent-full-k",
+        }
     }
-    pub(crate) fn grid(self, padded: usize, block_size: usize, group_size: usize, k: usize) -> Result<i32, String> {
+    pub(crate) fn grid(
+        self,
+        padded: usize,
+        block_size: usize,
+        group_size: usize,
+        k: usize,
+    ) -> Result<i32, String> {
         // This diagnostic admits only homogeneous large-M launches. Each CTA
         // receives all N columns of one actual padded MoE block. Consequently
         // ceil(k_tiles*n_tiles*blocks/grid) == k_tiles*n_tiles, independent of
         // the selected thread N/K geometry and unrelated future routing.
-        if block_size <= 16 || padded == 0 || padded % block_size != 0 || group_size == 0 || k % group_size != 0 {
+        if block_size <= 16
+            || padded == 0
+            || padded % block_size != 0
+            || group_size == 0
+            || k % group_size != 0
+        {
             return Err("full-K replay requires complete homogeneous padded/group spans".into());
         }
         match self {
             Self::OneBlockFullK => Ok(1),
-            Self::OneCtaPerMoeBlock => i32::try_from(padded / block_size).map_err(|_| "concurrent grid exceeds launch ABI".into()),
+            Self::OneCtaPerMoeBlock => i32::try_from(padded / block_size)
+                .map_err(|_| "concurrent grid exceeds launch ABI".into()),
         }
     }
 }
@@ -474,8 +900,18 @@ pub(crate) struct PartitionReplay {
     pub(crate) policy: PartitionPolicy,
     pub(crate) samples: Option<usize>,
 }
-fn validate_partition(spec: &PartitionSpec, layer: usize, height: usize, row: usize) -> Result<(), String> {
-    if spec.schema_version != 1 || spec.layer != layer || spec.row != row || row >= height || !spec.heights.contains(&height) {
+fn validate_partition(
+    spec: &PartitionSpec,
+    layer: usize,
+    height: usize,
+    row: usize,
+) -> Result<(), String> {
+    if spec.schema_version != 1
+        || spec.layer != layer
+        || spec.row != row
+        || row >= height
+        || !spec.heights.contains(&height)
+    {
         return Err("partition replay does not match its explicit selected operator".into());
     }
     if matches!(spec.policy, PartitionPolicy::OneCtaPerMoeBlock) && spec.samples.is_none() {
@@ -486,74 +922,153 @@ fn validate_partition(spec: &PartitionSpec, layer: usize, height: usize, row: us
     }
     Ok(())
 }
-pub(crate) fn partition_target(invocation: Option<&crate::matched_prefill_capture::Invocation>,layer: usize, height: usize) -> Result<Option<PartitionReplay>, String> {
-    let Some(target) = crate::matched_prefill_capture::target(invocation,"prefill_moe_partition", layer, height,None)? else { return Ok(None); };
-    let lane = crate::matched_prefill_capture::target(invocation,"prefill_moe_lane", layer, height,None)?.ok_or("partition replay requires actual W1 lane diagnostics")?;
-    if lane.row != target.row { return Err("partition and lane rows differ".into()); }
-    let file = std::env::var("KRASIS_MATCHED_MOE_PARTITION_CONFIG").map_err(|_| "explicit partition replay config required")?;
+pub(crate) fn partition_target(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
+    layer: usize,
+    height: usize,
+) -> Result<Option<PartitionReplay>, String> {
+    let Some(target) = crate::matched_prefill_capture::target(
+        invocation,
+        "prefill_moe_partition",
+        layer,
+        height,
+        None,
+    )?
+    else {
+        return Ok(None);
+    };
+    let lane = crate::matched_prefill_capture::target(
+        invocation,
+        "prefill_moe_lane",
+        layer,
+        height,
+        None,
+    )?
+    .ok_or("partition replay requires actual W1 lane diagnostics")?;
+    if lane.row != target.row {
+        return Err("partition and lane rows differ".into());
+    }
+    let file = std::env::var("KRASIS_MATCHED_MOE_PARTITION_CONFIG")
+        .map_err(|_| "explicit partition replay config required")?;
     let raw = std::fs::read(file).map_err(|e| e.to_string())?;
     let spec: PartitionSpec = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
     validate_partition(&spec, layer, height, target.row)?;
     target.write("partition-config.json", &raw)?;
-    Ok(Some(PartitionReplay { target, policy: spec.policy, samples: spec.samples }))
+    Ok(Some(PartitionReplay {
+        target,
+        policy: spec.policy,
+        samples: spec.samples,
+    }))
 }
-pub(crate) struct PartitionEvents { start: sys::CUevent, stop: sys::CUevent }
+pub(crate) struct PartitionEvents {
+    start: sys::CUevent,
+    stop: sys::CUevent,
+}
 impl PartitionEvents {
     pub(crate) fn new() -> Result<Self, String> {
-        let mut result = Self { start: std::ptr::null_mut(), stop: std::ptr::null_mut() };
+        let mut result = Self {
+            start: std::ptr::null_mut(),
+            stop: std::ptr::null_mut(),
+        };
         for event in [&mut result.start, &mut result.stop] {
             let rc = unsafe { sys::lib().cuEventCreate(event, 0) };
-            if rc != sys::CUresult::CUDA_SUCCESS { return Err(format!("partition event creation: {rc:?}")); }
+            if rc != sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("partition event creation: {rc:?}"));
+            }
         }
         Ok(result)
     }
-    pub(crate) fn begin(&self, stream: sys::CUstream) -> Result<(), String> { self.record(self.start, stream) }
-    pub(crate) fn end(&self, stream: sys::CUstream) -> Result<(), String> { self.record(self.stop, stream) }
+    pub(crate) fn begin(&self, stream: sys::CUstream) -> Result<(), String> {
+        self.record(self.start, stream)
+    }
+    pub(crate) fn end(&self, stream: sys::CUstream) -> Result<(), String> {
+        self.record(self.stop, stream)
+    }
     fn record(&self, event: sys::CUevent, stream: sys::CUstream) -> Result<(), String> {
         let rc = unsafe { sys::lib().cuEventRecord(event, stream) };
-        if rc != sys::CUresult::CUDA_SUCCESS { return Err(format!("partition event record: {rc:?}")); }
+        if rc != sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("partition event record: {rc:?}"));
+        }
         Ok(())
     }
     pub(crate) fn elapsed(&self) -> Result<f32, String> {
         let mut ms = 0.0;
         let rc = unsafe { sys::lib().cuEventElapsedTime(&mut ms, self.start, self.stop) };
-        if rc != sys::CUresult::CUDA_SUCCESS || !ms.is_finite() || ms <= 0.0 { return Err(format!("invalid partition event measurement: {rc:?}, ms={ms}")); }
+        if rc != sys::CUresult::CUDA_SUCCESS || !ms.is_finite() || ms <= 0.0 {
+            return Err(format!(
+                "invalid partition event measurement: {rc:?}, ms={ms}"
+            ));
+        }
         Ok(ms)
     }
 }
 impl Drop for PartitionEvents {
     fn drop(&mut self) {
-        for event in [self.start, self.stop] { if !event.is_null() { unsafe { let _ = sys::lib().cuEventDestroy_v2(event); } } }
+        for event in [self.start, self.stop] {
+            if !event.is_null() {
+                unsafe {
+                    let _ = sys::lib().cuEventDestroy_v2(event);
+                }
+            }
+        }
     }
 }
 pub(crate) fn free_device_bytes() -> Result<usize, String> {
     let (mut free, mut total) = (0usize, 0usize);
     let rc = unsafe { sys::lib().cuMemGetInfo_v2(&mut free, &mut total) };
-    if rc != sys::CUresult::CUDA_SUCCESS { return Err(format!("partition memory measurement: {rc:?}")); }
+    if rc != sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("partition memory measurement: {rc:?}"));
+    }
     Ok(free)
 }
-pub(crate) fn lane_variant(invocation: Option<&crate::matched_prefill_capture::Invocation>,layer: usize, height: usize, width: usize, topk: usize, variant: &str) -> Result<LaneSelection, String> {
-    let mut selection = lane_selection(invocation,layer, height, width, topk)?.ok_or("partition replay lane selection missing")?;
-    let raw = std::fs::read(selection.target.directory.join("selection-config.json")).map_err(|e| e.to_string())?;
+pub(crate) fn lane_variant(
+    invocation: Option<&crate::matched_prefill_capture::Invocation>,
+    layer: usize,
+    height: usize,
+    width: usize,
+    topk: usize,
+    variant: &str,
+) -> Result<LaneSelection, String> {
+    let mut selection = lane_selection(invocation, layer, height, width, topk)?
+        .ok_or("partition replay lane selection missing")?;
+    let raw = std::fs::read(selection.target.directory.join("selection-config.json"))
+        .map_err(|e| e.to_string())?;
     selection.target = selection.target.child(variant)?;
     selection.target.write("selection-config.json", &raw)?;
     Ok(selection)
 }
-pub(crate) fn device_digest(ptr: u64, bytes: usize, stream: sys::CUstream) -> Result<String, String> {
+pub(crate) fn device_digest(
+    ptr: u64,
+    bytes: usize,
+    stream: sys::CUstream,
+) -> Result<String, String> {
     use sha2::{Digest, Sha256};
-    if ptr == 0 || bytes == 0 || ptr.checked_add(u64::try_from(bytes).map_err(|_| "operand byte count exceeds pointer ABI")?).is_none() {
+    if ptr == 0
+        || bytes == 0
+        || ptr
+            .checked_add(
+                u64::try_from(bytes).map_err(|_| "operand byte count exceeds pointer ABI")?,
+            )
+            .is_none()
+    {
         return Err("invalid partition replay operand range".into());
     }
     let rc = unsafe { sys::lib().cuStreamSynchronize(stream) };
-    if rc != sys::CUresult::CUDA_SUCCESS { return Err(format!("partition operand fence: {rc:?}")); }
+    if rc != sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("partition operand fence: {rc:?}"));
+    }
     // Bounded host I/O buffer; this is neither a GPU allocation nor a model budget.
     let mut host = vec![0u8; bytes.min(1024 * 1024)];
     let mut digest = Sha256::new();
     let mut offset = 0usize;
     while offset < bytes {
         let count = host.len().min(bytes - offset);
-        let rc = unsafe { sys::lib().cuMemcpyDtoH_v2(host.as_mut_ptr().cast(), ptr + offset as u64, count) };
-        if rc != sys::CUresult::CUDA_SUCCESS { return Err(format!("partition operand download: {rc:?}")); }
+        let rc = unsafe {
+            sys::lib().cuMemcpyDtoH_v2(host.as_mut_ptr().cast(), ptr + offset as u64, count)
+        };
+        if rc != sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("partition operand download: {rc:?}"));
+        }
         digest.update(&host[..count]);
         offset += count;
     }
@@ -570,28 +1085,61 @@ mod partition_tests {
         for (layer, height, row) in [(3, 10, 3), (2, 11, 3), (2, 10, 2), (2, 3, 3)] {
             assert!(validate_partition(&spec, layer, height, row).is_err());
         }
-        assert!(serde_json::from_str::<PartitionSpec>(&raw.replace("one_block_full_k", "automatic")).is_err());
-        assert!(serde_json::from_str::<PartitionSpec>(&raw.replace("\"policy\"", "\"unknown\"")).is_err());
+        assert!(serde_json::from_str::<PartitionSpec>(
+            &raw.replace("one_block_full_k", "automatic")
+        )
+        .is_err());
+        assert!(
+            serde_json::from_str::<PartitionSpec>(&raw.replace("\"policy\"", "\"unknown\""))
+                .is_err()
+        );
     }
     #[test]
     fn concurrent_partition_uses_actual_padded_work_without_template_constants() {
         let p = PartitionPolicy::OneCtaPerMoeBlock;
-        for (padded, block, group, k) in [(960, 32, 64, 1536), (12352, 64, 128, 4096), (1440, 48, 32, 3072)] {
-            assert_eq!(p.grid(padded, block, group, k).unwrap(), (padded / block) as i32);
+        for (padded, block, group, k) in [
+            (960, 32, 64, 1536),
+            (12352, 64, 128, 4096),
+            (1440, 48, 32, 3072),
+        ] {
+            assert_eq!(
+                p.grid(padded, block, group, k).unwrap(),
+                (padded / block) as i32
+            );
             // For any valid template geometry the stripe covers complete K.
             for (tk, tn, n) in [(64, 256, 4096), (128, 64, 1536)] {
-                let k_tiles = k / tk; let n_tiles = n / tn;
+                let k_tiles = k / tk;
+                let n_tiles = n / tn;
                 let grid = p.grid(padded, block, group, k).unwrap() as usize;
-                assert_eq!((k_tiles * n_tiles * (padded / block)).div_ceil(grid), k_tiles * n_tiles);
+                assert_eq!(
+                    (k_tiles * n_tiles * (padded / block)).div_ceil(grid),
+                    k_tiles * n_tiles
+                );
             }
         }
-        for (padded, block, group, k) in [(0,64,128,4096),(65,64,128,4096),(64,16,128,4096),(64,64,0,4096),(64,64,128,4100)] {
+        for (padded, block, group, k) in [
+            (0, 64, 128, 4096),
+            (65, 64, 128, 4096),
+            (64, 16, 128, 4096),
+            (64, 64, 0, 4096),
+            (64, 64, 128, 4100),
+        ] {
             assert!(p.grid(padded, block, group, k).is_err());
         }
-        assert!(p.grid(((i32::MAX as usize)+1)*64,64,128,4096).is_err());
-        let raw=r#"{"schema_version":1,"layer":2,"row":3,"heights":[10],"policy":"one_cta_per_moe_block","samples":7}"#;
-        assert!(validate_partition(&serde_json::from_str(raw).unwrap(),2,10,3).is_ok());
-        for value in ["0", "1025", "null"] { assert!(validate_partition(&serde_json::from_str(&raw.replace("7}",&format!("{value}}}"))).unwrap(),2,10,3).is_err()); }
+        assert!(p
+            .grid(((i32::MAX as usize) + 1) * 64, 64, 128, 4096)
+            .is_err());
+        let raw = r#"{"schema_version":1,"layer":2,"row":3,"heights":[10],"policy":"one_cta_per_moe_block","samples":7}"#;
+        assert!(validate_partition(&serde_json::from_str(raw).unwrap(), 2, 10, 3).is_ok());
+        for value in ["0", "1025", "null"] {
+            assert!(validate_partition(
+                &serde_json::from_str(&raw.replace("7}", &format!("{value}}}"))).unwrap(),
+                2,
+                10,
+                3
+            )
+            .is_err());
+        }
     }
 }
 // END bounded same-operator partition replay

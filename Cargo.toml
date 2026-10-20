@@ -14,6 +14,7 @@ default = ["cuda"]
 cuda = ["cudarc"]
 copy-lifecycle-test = []
 shared-kda-test = ["copy-lifecycle-test"]
+scalar-gdn-test = ["shared-kda-test"]
 gpu-debug = []  # Enable GPU decode debug instrumentation (syncs, peeks, layer capture)
 
 [dependencies]

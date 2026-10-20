@@ -59,7 +59,7 @@ impl CudaFunction {
             cfg.grid_dim,
             cfg.block_dim,
             cfg.shared_mem_bytes,
-            self.device.stream,
+            *self.device.cu_stream(),
             params,
         )
     }
@@ -76,7 +76,7 @@ impl CudaFunction {
             cfg.grid_dim,
             cfg.block_dim,
             cfg.shared_mem_bytes,
-            self.device.stream,
+            *self.device.cu_stream(),
             params,
         )
     }

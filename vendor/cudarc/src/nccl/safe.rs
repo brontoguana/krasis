@@ -216,7 +216,7 @@ impl Comm {
                 T::as_nccl_type(),
                 peer,
                 self.comm,
-                self.device.stream as *mut _,
+                *self.device.cu_stream() as *mut _,
             )?;
         }
         Ok(())
@@ -234,7 +234,7 @@ impl Comm {
                 T::as_nccl_type(),
                 peer,
                 self.comm,
-                self.device.stream as *mut _,
+                *self.device.cu_stream() as *mut _,
             )
         }
     }
@@ -257,7 +257,7 @@ impl Comm {
                 T::as_nccl_type(),
                 root,
                 self.comm,
-                self.device.stream as *mut _,
+                *self.device.cu_stream() as *mut _,
             )
         }
     }
@@ -274,7 +274,7 @@ impl Comm {
                 sendbuff.len(),
                 T::as_nccl_type(),
                 self.comm,
-                self.device.stream as *mut _,
+                *self.device.cu_stream() as *mut _,
             )
         }
     }
@@ -293,7 +293,7 @@ impl Comm {
                 T::as_nccl_type(),
                 convert_to_nccl_reduce_op(reduce_op),
                 self.comm,
-                self.device.stream as *mut _,
+                *self.device.cu_stream() as *mut _,
             )
         }
     }
@@ -314,7 +314,7 @@ impl Comm {
                 convert_to_nccl_reduce_op(reduce_op),
                 root,
                 self.comm,
-                self.device.stream as *mut _,
+                *self.device.cu_stream() as *mut _,
             )
         }
     }
@@ -333,7 +333,7 @@ impl Comm {
                 T::as_nccl_type(),
                 convert_to_nccl_reduce_op(reduce_op),
                 self.comm,
-                self.device.stream as *mut _,
+                *self.device.cu_stream() as *mut _,
             )
         }
     }

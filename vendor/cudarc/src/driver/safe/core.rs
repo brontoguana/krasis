@@ -37,7 +37,7 @@ pub struct CudaDevice {
     pub(crate) cu_device: sys::CUdevice,
     pub(crate) cu_primary_ctx: sys::CUcontext,
     /// The stream that all work is executed on.
-    pub(crate) stream: sys::CUstream,
+    pub(crate) stream: std::cell::UnsafeCell<sys::CUstream>,
     /// Used to synchronize with stream
     pub(crate) event: sys::CUevent,
     pub(crate) modules: RwLock<BTreeMap<String, CudaModule>>,
@@ -74,7 +74,7 @@ impl CudaDevice {
         let device = CudaDevice {
             cu_device,
             cu_primary_ctx,
-            stream: std::ptr::null_mut(),
+            stream: std::cell::UnsafeCell::new(std::ptr::null_mut()),
             event,
             modules: RwLock::new(BTreeMap::new()),
             ordinal,
@@ -110,7 +110,7 @@ impl CudaDevice {
         let device = CudaDevice {
             cu_device,
             cu_primary_ctx,
-            stream,
+            stream: std::cell::UnsafeCell::new(stream),
             event,
             modules: RwLock::new(BTreeMap::new()),
             ordinal,
@@ -168,8 +168,20 @@ impl CudaDevice {
     /// **You must not free/release the stream pointer**, as it is still
     /// owned by the [CudaDevice].
     pub fn cu_stream(&self) -> &sys::CUstream {
-        &self.stream
+        unsafe { &*self.stream.get() }
     }
+
+    /// Replace the borrowed execution stream during serialized graph capture.
+    ///
+    /// # Safety
+    /// Caller must exclude all concurrent device users, retain both streams,
+    /// end all cu_stream() borrows before this call, and restore the original
+    /// stream before releasing the replacement or device. This transfers no
+    /// stream ownership; CudaDevice::drop still releases its current stream.
+    pub unsafe fn set_stream_for_capture(&self, stream: sys::CUstream) {
+        self.stream.get().write(stream);
+    }
+
 
     /// Get the value of the specified attribute of this [CudaDevice].
     pub fn attribute(&self, attrib: sys::CUdevice_attribute) -> Result<i32, result::DriverError> {
@@ -190,7 +202,7 @@ impl Drop for CudaDevice {
         }
         modules.clear();
 
-        let stream = std::mem::replace(&mut self.stream, std::ptr::null_mut());
+        let stream = std::mem::replace(self.stream.get_mut(), std::ptr::null_mut());
         if !stream.is_null() {
             unsafe { result::stream::destroy(stream) }.unwrap();
         }
@@ -249,7 +261,7 @@ impl<T> Drop for CudaSlice<T> {
         self.device.bind_to_thread().unwrap();
         unsafe {
             if self.device.is_async {
-                result::free_async(self.cu_device_ptr, self.device.stream).unwrap();
+                result::free_async(self.cu_device_ptr, *self.device.cu_stream()).unwrap();
             } else {
                 result::free_sync(self.cu_device_ptr).unwrap();
             }
@@ -378,7 +390,7 @@ impl CudaFunction {
             blockDimY: config.block_dim.1,
             blockDimZ: config.block_dim.2,
             sharedMemBytes: shared_mem_size as std::ffi::c_uint,
-            hStream: self.device.stream,
+            hStream: *self.device.cu_stream(),
             attrs: std::ptr::null_mut(),
             numAttrs: 0,
         };
@@ -441,7 +453,7 @@ impl CudaFunction {
             blockDimY: config.block_dim.1,
             blockDimZ: config.block_dim.2,
             sharedMemBytes: shared_mem_size as std::ffi::c_uint,
-            hStream: self.device.stream,
+            hStream: *self.device.cu_stream(),
             attrs: std::ptr::null_mut(),
             numAttrs: 0,
         };
@@ -579,7 +591,7 @@ impl CudaDevice {
         unsafe {
             result::event::record(self.event, stream.stream)?;
             result::stream::wait_event(
-                self.stream,
+                *self.cu_stream(),
                 self.event,
                 sys::CUevent_wait_flags::CU_EVENT_WAIT_DEFAULT,
             )
@@ -593,7 +605,7 @@ impl CudaStream {
     pub fn wait_for_default(&self) -> Result<(), result::DriverError> {
         self.device.bind_to_thread()?;
         unsafe {
-            result::event::record(self.device.event, self.device.stream)?;
+            result::event::record(self.device.event, *self.device.cu_stream())?;
             result::stream::wait_event(
                 self.stream,
                 self.device.event,

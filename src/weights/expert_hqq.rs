@@ -5471,21 +5471,7 @@ struct ExpertHqqGpuRawCuFunc(cuda_sys::CUfunction);
 
 #[cfg(all(test, has_prefill_kernels))]
 fn extract_expert_hqq_gpu_cu_func(func: &CudaFunction) -> ExpertHqqGpuRawCuFunc {
-    unsafe {
-        let struct_ptr = func as *const _ as *const u8;
-        let word0: cuda_sys::CUfunction = std::ptr::read(struct_ptr as *const _);
-        let mut dummy = 0i32;
-        let w0_valid = cuda_sys::lib().cuFuncGetAttribute(
-            &mut dummy,
-            cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_NUM_REGS,
-            word0,
-        ) == cuda_sys::CUresult::CUDA_SUCCESS;
-        ExpertHqqGpuRawCuFunc(if w0_valid {
-            word0
-        } else {
-            std::ptr::read(struct_ptr.add(8) as *const _)
-        })
-    }
+    ExpertHqqGpuRawCuFunc(func.cu_function())
 }
 
 #[cfg(all(test, has_prefill_kernels))]

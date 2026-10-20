@@ -29,7 +29,7 @@ impl CudaBlas {
         device.bind_to_thread().unwrap();
         let handle = result::create_handle()?;
         let blas = Self { handle, device };
-        unsafe { result::set_stream(handle, blas.device.stream as *mut _) }?;
+        unsafe { result::set_stream(handle, *blas.device.cu_stream() as *mut _) }?;
         Ok(blas)
     }
 
@@ -47,7 +47,7 @@ impl CudaBlas {
     pub unsafe fn set_stream(&self, opt_stream: Option<&CudaStream>) -> Result<(), CublasError> {
         match opt_stream {
             Some(s) => result::set_stream(self.handle, s.stream as *mut _),
-            None => result::set_stream(self.handle, self.device.stream as *mut _),
+            None => result::set_stream(self.handle, *self.device.cu_stream() as *mut _),
         }
     }
 }

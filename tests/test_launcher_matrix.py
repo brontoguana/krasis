@@ -3190,3 +3190,47 @@ class LauncherMatrixTest(unittest.TestCase):
             )
         finally:
             config_path.unlink(missing_ok=True)
+
+
+class IsolatedTorchDependencyTests(unittest.TestCase):
+    def test_probe_process_preserves_architecture_failures(self):
+        result = subprocess.CompletedProcess([], 0, '{"problems":["PyTorch build lacking GPU 0 test (sm_120)"]}', '')
+        with mock.patch.object(launcher_mod.subprocess, "run", return_value=result) as run:
+            problems = launcher_mod._isolated_torch_runtime_problems(check_architectures=True)
+        self.assertEqual(problems, ["PyTorch build lacking GPU 0 test (sm_120)"])
+        self.assertEqual(run.call_args.args[0], [sys.executable, "-m", "krasis.launcher", "--internal-torch-dependency-probe", "architectures"])
+
+    def test_failed_or_malformed_child_cannot_admit_launch(self):
+        cases = [
+            subprocess.CompletedProcess([], 1, '', 'CUDA probe failed'),
+            subprocess.CompletedProcess([], 0, 'not JSON', ''),
+            subprocess.CompletedProcess([], 0, '{}', ''),
+            subprocess.CompletedProcess([], 0, '{"problems":null}', ''),
+            subprocess.CompletedProcess([], 0, '{"problems":[false]}', ''),
+            subprocess.CompletedProcess([], 0, '{"problems":[""]}', ''),
+        ]
+        for result in cases:
+            with self.subTest(result=result), mock.patch.object(launcher_mod.subprocess, "run", return_value=result):
+                with self.assertRaises(RuntimeError):
+                    launcher_mod._isolated_torch_runtime_problems(check_architectures=False)
+
+    def test_actual_probe_keeps_visible_architecture_checks(self):
+        fake_cuda = mock.Mock()
+        fake_cuda.is_available.return_value = True
+        fake_cuda.get_arch_list.return_value = ["sm_80"]
+        fake_cuda.device_count.return_value = 2
+        fake_cuda.get_device_capability.side_effect = [(8, 0), (12, 0)]
+        fake_cuda.get_device_properties.return_value = mock.Mock(name="other GPU")
+        fake_torch = mock.Mock(cuda=fake_cuda)
+        with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+            problems = launcher_mod._torch_runtime_problems(check_architectures=True)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("sm_120", problems[0])
+        self.assertEqual(fake_cuda.get_device_capability.call_count, 2)
+
+    def test_availability_probe_does_not_invent_architecture_checks(self):
+        fake_torch = mock.Mock()
+        fake_torch.cuda.is_available.return_value = False
+        with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+            self.assertEqual(launcher_mod._torch_runtime_problems(check_architectures=False), ["CUDA-enabled PyTorch"])
+        fake_torch.cuda.get_device_capability.assert_not_called()

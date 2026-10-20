@@ -790,3 +790,60 @@ class ApprovedHeatmapAutoTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NativeArithmeticHeatmapIdentityTest(unittest.TestCase):
+    base = {"attention_quant": "hqq4", "kv_dtype": "k4v4"}
+    native = {"format": "native64-test", "native": "actual-sidecar-id", "producer": "actual-projection-id"}
+
+    def model(self, identity):
+        return SimpleNamespace(_gpu_decode_store=SimpleNamespace(
+            native_scalar_runtime_identity=lambda: identity))
+
+    def config(self, identity):
+        with patch.object(server, "_runtime_heatmap_capture_config", return_value=dict(self.base)):
+            return server._actual_runtime_heatmap_capture_config(self.model(identity), SimpleNamespace())
+
+    def test_default_execution_signature_stays_unchanged(self):
+        self.assertEqual(self.config(None), self.base)
+
+    def test_native_and_different_kernel_contracts_require_separate_validation(self):
+        current = self.config(json.dumps(self.native))
+        self.assertEqual(current["native_scalar_arithmetic"], self.native)
+        self.assertFalse(server._runtime_matches_approved_heatmap_policy(current, [self.base], None)[0])
+        self.assertTrue(server._runtime_matches_approved_heatmap_policy(current, [current], None)[0])
+        changed = self.config(json.dumps({**self.native, "producer": "different-projection-id"}))
+        self.assertFalse(server._runtime_matches_approved_heatmap_policy(changed, [current], None)[0])
+
+    def test_missing_or_invalid_actual_identity_is_visible(self):
+        with patch.object(server, "_runtime_heatmap_capture_config", return_value=dict(self.base)):
+            with self.assertRaisesRegex(RuntimeError, "configured GPU decode store"):
+                server._actual_runtime_heatmap_capture_config(SimpleNamespace(), SimpleNamespace())
+        for raw in ("not JSON", "{}", '{"format":"x","native":"x","producer":""}'):
+            with self.subTest(raw=raw), self.assertRaises(RuntimeError):
+                self.config(raw)
+        def poisoned():
+            raise RuntimeError("actual owner is poisoned")
+        model = SimpleNamespace(_gpu_decode_store=SimpleNamespace(native_scalar_runtime_identity=poisoned))
+        with patch.object(server, "_runtime_heatmap_capture_config", return_value=dict(self.base)):
+            with self.assertRaisesRegex(RuntimeError, "actual owner is poisoned"):
+                server._actual_runtime_heatmap_capture_config(model, SimpleNamespace())
+
+    def test_bootstrap_and_resume_reject_ordinary_artifact_for_native_execution(self):
+        route = {"actual-model": "same-checkpoint"}
+        artifact = {"0,0": 1, "_metadata": {
+            "format": server.APPROVED_HEATMAP_FORMAT,
+            "format_version": server.APPROVED_HEATMAP_FORMAT_VERSION,
+            "route_signature": route,
+            "validated_compatible_runtimes": [self.base],
+        }}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ordinary.json"
+            path.write_text(json.dumps(artifact), encoding="utf-8")
+            with patch.object(server, "_heatmap_route_signature", return_value=route), \
+                 patch.object(server, "_runtime_heatmap_capture_config", side_effect=lambda args: dict(self.base)):
+                model = self.model(json.dumps(self.native))
+                with self.assertRaisesRegex(RuntimeError, "has not been validated"):
+                    server._load_heatmap_residency_bootstrap(model, SimpleNamespace(), str(path))
+                with self.assertRaisesRegex(RuntimeError, "has not been validated"):
+                    server._validate_approved_heatmap_resume_base(model, SimpleNamespace(), str(path), ["held-out"], 256)

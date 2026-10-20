@@ -611,6 +611,21 @@ fn session_snapshot_reservation_bytes(
     Ok(bytes)
 }
 
+// Called on the owning model-worker queue after all actual device phases.
+// Check every device before exposing any prefill token or debug logits.
+fn scalar_gdn_publication_health(primary: usize, auxiliary: &[usize]) -> Result<(), String> {
+    #[cfg(feature = "scalar-gdn-test")]
+    for address in std::iter::once(primary).chain(auxiliary.iter().copied()) {
+        if address == 0 {
+            return Err("scalar publication has a null actual store address".into());
+        }
+        unsafe { &*(address as *const GpuDecodeStore) }.scalar_gdn_publication_health()?;
+    }
+    #[cfg(not(feature = "scalar-gdn-test"))]
+    let _ = (primary, auxiliary);
+    Ok(())
+}
+
 fn cancel_boundary_reservation(
     session_cache: &mut SessionCacheRuntime,
     reservation: &mut Option<crate::session_cache::RamReservationId>,
@@ -2164,6 +2179,87 @@ fn handle_sequence_state_transfer_measurement(
         }
     };
 
+    if let Some(action) = request
+        .get("aux_handoff_failure_action")
+        .and_then(serde_json::Value::as_str)
+    {
+        #[cfg(feature = "scalar-gdn-test")]
+        let result = crate::publication_failure_control::auxiliary_action(action);
+        #[cfg(not(feature = "scalar-gdn-test"))]
+        let result: Result<bool, String> =
+            Err("auxiliary handoff failure control was not compiled".into());
+        match result {
+            Ok(armed) => {
+                let _ = send_json(stream, 200, &serde_json::json!({"armed":armed}).to_string());
+            }
+            Err(error) => {
+                let _ = send_json(stream, 400, &serde_json::json!({"error":error}).to_string());
+            }
+        }
+        return;
+    }
+    if let Some(action) = request
+        .get("publication_failure_action")
+        .and_then(serde_json::Value::as_str)
+    {
+        #[cfg(feature = "scalar-gdn-test")]
+        let result = crate::publication_failure_control::action(action);
+        #[cfg(not(feature = "scalar-gdn-test"))]
+        let result: Result<bool, String> =
+            Err("publication failure control was not compiled".into());
+        match result {
+            Ok(armed) => {
+                let _ = send_json(stream, 200, &serde_json::json!({"armed":armed}).to_string());
+            }
+            Err(error) => {
+                let _ = send_json(stream, 400, &serde_json::json!({"error":error}).to_string());
+            }
+        }
+        return;
+    }
+    if request
+        .get("store_capture_lifecycle")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        #[cfg(feature = "scalar-gdn-test")]
+        let result = (|| -> Result<serde_json::Value, String> {
+            // This handler runs on the same exclusive model worker as chat.
+            if state.session_cache.active.is_none() {
+                return Err("Store capture control requires a completed live cached conversation; reference cleanup is not live state".into());
+            }
+            // Active cache identity can name an earlier device checkpoint. The
+            // actual live cursor is checked by each Store, not inferred from it.
+            invalidate_active_sequence(state, "explicit_actual_store_capture_control");
+            let mut devices = Vec::new();
+            for address in std::iter::once(state.gpu_store_addr)
+                .chain(state.aux_gpu_store_addrs.iter().copied())
+            {
+                if address != 0 {
+                    devices.push(
+                        unsafe { &mut *(address as *mut GpuDecodeStore) }
+                            .installed_store_capture_control_rust(logical_tokens)?,
+                    );
+                }
+            }
+            if devices.is_empty() {
+                return Err("no actual Store for capture control".into());
+            }
+            Ok(serde_json::json!({"devices":devices}))
+        })();
+        #[cfg(not(feature = "scalar-gdn-test"))]
+        let result: Result<serde_json::Value, String> =
+            Err("actual Store capture diagnostic feature was not compiled".into());
+        match result {
+            Ok(value) => {
+                let _ = send_json(stream, 200, &value.to_string());
+            }
+            Err(error) => {
+                let _ = send_json(stream, 500, &serde_json::json!({"error":error}).to_string());
+            }
+        }
+        return;
+    }
     if let Some(action) = request
         .get("copy_error_action")
         .and_then(serde_json::Value::as_str)
@@ -5180,6 +5276,12 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     let prefill_gil_ms = t_prefill_gil.elapsed().as_secs_f64() * 1000.0;
     crate::vram_monitor::report_event("prefill_end");
 
+    // Only the primary has completed this prefill. Auxiliary state is
+    // validated after its explicit complete prompt handoff, before publication.
+    let prefill_result = prefill_result.and_then(|value| {
+        scalar_gdn_publication_health(state.gpu_store_addr, &[])?;
+        Ok(value)
+    });
     let (mut first_token, prompt_len, stop_ids, kv_overflow, mut chat_debug_payload) =
         match prefill_result {
             Ok(v) => v,
@@ -5490,6 +5592,19 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     i + 1,
                     e
                 );
+                let message = format!("KV state handoff failed: {}", e);
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(
+                        r#"{{"error":{{"message":"{}","type":"server_error"}}}}"#,
+                        json_escape(&message)
+                    ),
+                );
+                Python::with_gil(|py| {
+                    let _ = state.py_model.call_method0(py, "server_cleanup");
+                });
+                return;
             }
             // Copy LA recurrent state (conv_state + recur_state) for linear attention layers
             if let Err(e) = store.copy_la_states_to_aux(aux_store, layer_start, layer_end) {
@@ -5499,6 +5614,15 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     i + 1,
                     e
                 );
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(
+                        r#"{{"error":{{"message":"LA state handoff failed: {}","type":"server_error"}}}}"#,
+                        json_escape(&e)
+                    ),
+                );
+                return;
             }
             match store.copy_dsa_prompt_keys_to_aux(aux_store, prompt_len) {
                 Ok((owners, bytes)) => {
@@ -5537,6 +5661,27 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             dsa_owner_copies,
             dsa_key_bytes,
         );
+    }
+    let handoff_health = if state.aux_gpu_store_addrs.is_empty() {
+        Ok(()) // Primary health was checked at the completed prefill boundary.
+    } else {
+        scalar_gdn_publication_health(state.gpu_store_addr, &state.aux_gpu_store_addrs)
+    };
+    if let Err(e) = handoff_health {
+        let message = format!("Prompt state handoff health rejected: {}", e);
+        log::error!("Request {}: {}", request_id, message);
+        let _ = send_json(
+            stream,
+            500,
+            &format!(
+                r#"{{"error":{{"message":"{}","type":"server_error"}}}}"#,
+                json_escape(&message)
+            ),
+        );
+        Python::with_gil(|py| {
+            let _ = state.py_model.call_method0(py, "server_cleanup");
+        });
+        return;
     }
     let (pressure_evicted, pressure_freed_mb, pressure_final_free_mb) =
         store.hcs_drain_vram_pressure("request_before_decode", true);
@@ -6489,7 +6634,15 @@ fn handle_teacher_forced_decode_logits(
 fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
     invalidate_active_sequence(state, "reference_test_request");
     let t_start = Instant::now();
-    state.reference_test_request_order = state.reference_test_request_order.saturating_add(1);
+    let Some(next_order) = state.reference_test_request_order.checked_add(1) else {
+        let _ = send_json(
+            stream,
+            500,
+            r#"{"error":"reference request identity exhausted"}"#,
+        );
+        return;
+    };
+    state.reference_test_request_order = next_order;
     let reference_request_order = state.reference_test_request_order;
     crate::vram_monitor::begin_request_context(&format!(
         "route=/v1/internal/reference_test request_order={} model={} phase=parse",
@@ -7436,6 +7589,12 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         ));
     }
 
+    // Raw reference_test uses the full primary Store for prefill and
+    // gpu_generate_stream; no auxiliary state is consumed or handed off here.
+    let prefill_result = prefill_result.and_then(|value| {
+        scalar_gdn_publication_health(state.gpu_store_addr, &[])?;
+        Ok(value)
+    });
     let (first_token, prompt_len, first_token_top_k, debug_prefill_logits) = match prefill_result {
         Ok(r) => {
             let first_token = r.first_token as usize;
@@ -7675,20 +7834,21 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
                 matched_replay
                     .as_ref()
                     .map(|(label, _)| format!("matched_replay_{label}"))
-                    .unwrap_or_else(|| "reference_test".to_string()),
+                    .unwrap_or_else(|| format!("reference_test_{reference_request_order}")),
             ),
             on_token,
         );
     }
-    if matched_replay.is_some() {
-        if let Some(error) = store.last_stream_failure_rust() {
-            let _ = send_json(
-                stream,
-                500,
-                &serde_json::json!({"error":error,"attribution_prohibited":true}).to_string(),
-            );
-            return;
-        }
+    if let Some(error) = store.last_stream_failure_rust() {
+        let _ = send_json(
+            stream,
+            500,
+            &serde_json::json!({"error":error,"attribution_prohibited":true}).to_string(),
+        );
+        Python::with_gil(|py| {
+            let _ = state.py_model.call_method0(py, "server_cleanup");
+        });
+        return;
     }
     if debug_mamba2_state_lifecycle_trace {
         debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
@@ -8434,6 +8594,25 @@ fn handle_gpu_decode(
 
         // Capture decode timing BEFORE post-generation processing (tool call parsing etc.)
         let decode_elapsed = decode_start.elapsed().as_secs_f64();
+        let engine_failure = store.last_stream_failure_rust().map(str::to_string);
+        let consumed_boundary =
+            consumed_generation_boundary(first_token, &emitted_token_ids, generated);
+        if let Some(error) = engine_failure
+            .clone()
+            .or_else(|| consumed_boundary.as_ref().err().cloned())
+        {
+            log::error!(
+                "Request {}: decode publication rejected: {}",
+                request_id,
+                error
+            );
+            let body = serde_json::json!({"error":{"message":error,"type":"server_error"}});
+            let _ = tx.send(format!("data: {}\n\n", body));
+            let _ = tx.send("data: [DONE]\n\n".to_string());
+            drop(tx);
+            let _ = writer_handle.join();
+            return DecodeTransactionOutcome::failed(error);
+        }
 
         // ── Post-generation: emit tool calls or finish ──
         if has_tools {
@@ -8550,10 +8729,7 @@ fn handle_gpu_decode(
         drop(tx);
         let _ = writer_handle.join();
 
-        let engine_failure = store.last_stream_failure_rust().map(str::to_string);
         let disconnected = writer_disconnected.load(Ordering::Acquire);
-        let consumed_boundary =
-            consumed_generation_boundary(first_token, &emitted_token_ids, generated);
         let completed = engine_failure.is_none()
             && !delivery_failed
             && !disconnected
@@ -8719,6 +8895,26 @@ fn handle_gpu_decode(
             }
         }
 
+        let engine_failure = store.last_stream_failure_rust().map(str::to_string);
+        let consumed_boundary = consumed_generation_boundary(
+            first_token,
+            &emitted_token_ids,
+            decode_reported_generated,
+        );
+        if let Some(error) = engine_failure
+            .clone()
+            .or_else(|| consumed_boundary.as_ref().err().cloned())
+        {
+            log::error!(
+                "Request {}: decode publication rejected: {}",
+                request_id,
+                error
+            );
+            let body = serde_json::json!({"error":{"message":error,"type":"server_error"}});
+            let _ = send_json(stream, 500, &body.to_string());
+            return DecodeTransactionOutcome::failed(error);
+        }
+
         if let Some(serde_json::Value::Object(debug)) = chat_debug_payload.as_mut() {
             let token_ids: Vec<usize> = debug_output_tokens.iter().map(|(tid, _)| *tid).collect();
             let per_token: Result<Vec<serde_json::Value>, String> = debug_output_tokens
@@ -8819,12 +9015,6 @@ fn handle_gpu_decode(
             send_json(stream, 200, &response)
         };
 
-        let engine_failure = store.last_stream_failure_rust().map(str::to_string);
-        let consumed_boundary = consumed_generation_boundary(
-            first_token,
-            &emitted_token_ids,
-            decode_reported_generated,
-        );
         let completed =
             engine_failure.is_none() && consumed_boundary.is_ok() && response_delivery.is_ok();
         let consumed_generation_tokens = if completed {
@@ -9592,6 +9782,8 @@ impl RustServer {
         engine.set_optional_pinning_budget_mb(None);
         prefill_release_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
+        scalar_gdn_publication_health(self.gpu_store_addr, &self.aux_gpu_store_addrs)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         let first_token = prefill_result.first_token as usize;
         let prompt_len = prefill_result.prompt_len;
         // Load EOS tokens for benchmark path (same logic as serve_forever)
@@ -9834,6 +10026,10 @@ impl RustServer {
                         i + 1,
                         e
                     );
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "KV state handoff failed: {}",
+                        e
+                    )));
                 }
                 if let Err(e) = store.copy_la_states_to_aux(aux_store, layer_start, layer_end) {
                     log::error!(
@@ -9841,6 +10037,9 @@ impl RustServer {
                         i + 1,
                         e
                     );
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "LA state handoff failed:{e}"
+                    )));
                 }
                 store
                     .copy_dsa_prompt_keys_to_aux(aux_store, prompt_len)
@@ -9853,6 +10052,8 @@ impl RustServer {
                     })?;
             }
         }
+        scalar_gdn_publication_health(self.gpu_store_addr, &self.aux_gpu_store_addrs)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         let (pressure_evicted, pressure_freed_mb, pressure_final_free_mb) =
             store.hcs_drain_vram_pressure("benchmark_before_decode", true);
         if pressure_evicted > 0 {

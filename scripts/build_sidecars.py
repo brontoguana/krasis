@@ -705,6 +705,8 @@ def build(args: argparse.Namespace) -> None:
     nvcc = find_nvcc()
     contracts = sidecar_inputs(nvcc)
     manifest = read_manifest()
+    if args.marlin_only and (manifest is None or not manifest_matches(manifest, {"flash_attn": contracts["flash_attn"]})):
+        raise SystemExit("ERROR: --marlin-only requires the existing FlashAttention artifact to pass its exact current source/compiler/ABI/build-ID/hash/symbol contract")
     if not args.force and manifest is not None and manifest_matches(manifest, contracts):
         print("[sidecars] Marlin/FlashAttention sidecars are current")
         return
@@ -722,7 +724,13 @@ def build(args: argparse.Namespace) -> None:
     flash_hash = input_hash(contracts["flash_attn"])
 
     marlin_so = copy_to_package(build_marlin(nvcc, marlin_hash[:24], args.force))
-    flash_so = copy_to_package(build_flash_attn(nvcc, flash_hash[:24], args.force))
+    if args.marlin_only:
+        # Explicit reuse, never a fallback. The complete existing verifier above
+        # binds actual bytes, exported ABI/build ID and exact numerical inputs.
+        flash_so = PACKAGE_DIR / str(contracts["flash_attn"]["output"])
+        print(f"[sidecars] reusing verified unchanged FlashAttention {rel(flash_so)}")
+    else:
+        flash_so = copy_to_package(build_flash_attn(nvcc, flash_hash[:24], args.force))
     windows_runtime_dlls = copy_windows_cuda_runtime(nvcc)
 
     for name, path, contract, contract_hash in (
@@ -980,6 +988,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_build = sub.add_parser("build")
     p_build.add_argument("--force", action="store_true")
+    p_build.add_argument("--marlin-only", action="store_true", help="rebuild complete Marlin and reuse only an exactly verified current FlashAttention artifact")
     p_build.set_defaults(func=build)
     p_verify = sub.add_parser("verify")
     p_verify.set_defaults(func=verify)

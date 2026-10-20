@@ -12,6 +12,7 @@ import json
 import math
 import os
 import time
+import uuid
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from safetensors import safe_open
@@ -1017,11 +1018,25 @@ def require_complete_hqq_sidecar_manifest(
 def _save_hqq_attention_manifest_to_path(path: str, manifest: dict) -> None:
     cache_dir = os.path.dirname(path)
     os.makedirs(cache_dir, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(manifest, f, indent=2, sort_keys=True)
-        f.write("\n")
-    os.replace(tmp, path)
+    # Each full-document writer owns its temporary path. Concurrent model
+    # loads may validate the same canonical cache; neither may rename/unlink
+    # another writer's staging file. Close before replace on native Windows.
+    tmp = path + "." + uuid.uuid4().hex + ".tmp"
+    created = False
+    try:
+        with open(tmp, "x", encoding="utf-8") as f:
+            created = True
+            json.dump(manifest, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if created:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass  # Successful atomic replacement consumed this owned path.
 
 
 def save_hqq_attention_manifest(

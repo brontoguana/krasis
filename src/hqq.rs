@@ -477,21 +477,7 @@ struct RawCuFunc(cuda_sys::CUfunction);
 
 #[cfg(has_hqq_search_kernels)]
 fn extract_cu_func(func: &CudaFunction) -> RawCuFunc {
-    unsafe {
-        let struct_ptr = func as *const _ as *const u8;
-        let word0: cuda_sys::CUfunction = std::ptr::read(struct_ptr as *const _);
-        let mut dummy = 0i32;
-        let w0_valid = cuda_sys::lib().cuFuncGetAttribute(
-            &mut dummy,
-            cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_NUM_REGS,
-            word0,
-        ) == cuda_sys::CUresult::CUDA_SUCCESS;
-        RawCuFunc(if w0_valid {
-            word0
-        } else {
-            std::ptr::read(struct_ptr.add(8) as *const _)
-        })
-    }
+    RawCuFunc(func.cu_function())
 }
 
 #[cfg(has_hqq_search_kernels)]

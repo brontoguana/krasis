@@ -202,7 +202,7 @@ def build_base_store(
 
     cos = torch.ones(max_seq, head_dim // 2, dtype=torch.float32, device=device)
     sin = torch.zeros(max_seq, head_dim // 2, dtype=torch.float32, device=device)
-    store.set_rope_tables(int(cos.data_ptr()), int(sin.data_ptr()), head_dim // 2, max_seq)
+    store.set_rope_tables(int(cos.data_ptr()), int(sin.data_ptr()), head_dim // 2, max_seq, torch.cuda.current_stream(cos.device).cuda_stream)
 
     kv_k = torch.zeros(max_seq, kv_stride, dtype=torch.bfloat16, device=device)
     kv_v = torch.zeros(max_seq, kv_stride, dtype=torch.bfloat16, device=device)
@@ -513,7 +513,7 @@ def build_real_model_store(
     freqs = torch.outer(positions, inv_freq)
     cos = freqs.cos().contiguous()
     sin = freqs.sin().contiguous()
-    store.set_rope_tables(int(cos.data_ptr()), int(sin.data_ptr()), cos.shape[1], max_seq)
+    store.set_rope_tables(int(cos.data_ptr()), int(sin.data_ptr()), cos.shape[1], max_seq, torch.cuda.current_stream(cos.device).cuda_stream)
 
     kv_k = torch.zeros(max_seq, kv_stride, dtype=torch.bfloat16, device=device)
     kv_v = torch.zeros(max_seq, kv_stride, dtype=torch.bfloat16, device=device)

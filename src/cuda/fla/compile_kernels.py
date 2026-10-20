@@ -538,6 +538,9 @@ def compile_kernel(spec: dict, h_value: int | None, arch: int):
     else:
         safe_name = base
 
+    if compiled.metadata.global_scratch_size != 0 or compiled.metadata.profile_scratch_size != 0:
+        raise RuntimeError("FLA wrapper ABI does not support nonzero hidden scratch allocations")
+
     result = {
         "name": spec["name"],
         "safe_name": safe_name,
@@ -586,6 +589,7 @@ def generated_export_symbols(kernels: list[dict]) -> list[str]:
     return [
         "krasis_fla_init",
         "krasis_fla_cleanup",
+        "krasis_fla_artifact_identity",
         *(f"krasis_fla_{kernel['safe_name']}" for kernel in kernels),
     ]
 
@@ -597,6 +601,76 @@ def sidecar_contract_fingerprint() -> str:
         f"h_values={','.join(str(value) for value in H_VALUES)}\n"
     )
     return hashlib.sha256(record.encode("utf-8")).hexdigest()
+
+
+def generate_context_owned_wrappers(kernels: list[dict]) -> list[str]:
+    """Add explicit per-CUDA-context handles without changing compiled cubins."""
+    lines = ["// Explicit context ownership; legacy entry points remain ABI compatible."]
+    lines += ["struct KrasisFlaContext {", "    CUcontext cuda_context;"]
+    for kernel in kernels:
+        sn = kernel["safe_name"]
+        lines += [f"    CUmodule module_{sn};", f"    CUfunction func_{sn};"]
+    lines += ["};", ""]
+    lines += ["KRASIS_FLA_EXPORT uint32_t krasis_fla_context_abi_version(void) { return 2; }", ""]
+    lines += ["KRASIS_FLA_EXPORT CUresult krasis_fla_context_destroy(void* opaque) {",
+              "    if (!opaque) return CUDA_ERROR_INVALID_VALUE;",
+              "    KrasisFlaContext* ctx = static_cast<KrasisFlaContext*>(opaque);",
+              "    CUcontext current = NULL;",
+              "    CUresult res = cuCtxGetCurrent(&current);",
+              "    if (res != CUDA_SUCCESS) return res;",
+              "    if (current != ctx->cuda_context) return CUDA_ERROR_INVALID_CONTEXT;",
+              "    CUresult first_error = CUDA_SUCCESS;"]
+    for kernel in kernels:
+        sn = kernel["safe_name"]
+        lines += [f"    if (ctx->module_{sn}) {{",
+                  f"        res = cuModuleUnload(ctx->module_{sn});",
+                  "        if (res != CUDA_SUCCESS && first_error == CUDA_SUCCESS) first_error = res;",
+                  f"        if (res == CUDA_SUCCESS) {{ ctx->module_{sn} = NULL; ctx->func_{sn} = NULL; }}",
+                  "    }"]
+    lines += ["    if (first_error != CUDA_SUCCESS) return first_error;",
+              "    free(ctx);", "    return CUDA_SUCCESS;", "}", ""]
+    lines += ["KRASIS_FLA_EXPORT CUresult krasis_fla_context_create(void** out) {",
+              "    if (!out) return CUDA_ERROR_INVALID_VALUE;", "    *out = NULL;",
+              "    KrasisFlaContext* ctx = static_cast<KrasisFlaContext*>(calloc(1, sizeof(KrasisFlaContext)));",
+              "    if (!ctx) return CUDA_ERROR_OUT_OF_MEMORY;",
+              "    CUresult res = cuCtxGetCurrent(&ctx->cuda_context);",
+              "    if (res != CUDA_SUCCESS) { free(ctx); return res; }",
+              "    if (!ctx->cuda_context) { free(ctx); return CUDA_ERROR_INVALID_CONTEXT; }"]
+    def checked(statement: str) -> None:
+        lines.extend([f"    res = {statement};", "    if (res != CUDA_SUCCESS) {",
+                      "        CUresult cleanup = krasis_fla_context_destroy(ctx);",
+                      "        if (cleanup != CUDA_SUCCESS) {",
+                      "            *out = ctx; // ABI2: retain incomplete resource for fail-closed caller.",
+                      '            fprintf(stderr, "FLA context create failed: %d; cleanup also failed: %d\\n", res, cleanup);',
+                      "        }",
+                      "        return res;", "    }"])
+    for kernel in kernels:
+        sn = kernel["safe_name"]
+        checked(f"cuModuleLoadData(&ctx->module_{sn}, cubin_{sn})")
+        checked(f'cuModuleGetFunction(&ctx->func_{sn}, ctx->module_{sn}, "{kernel["meta"]["name"]}")')
+        shared = kernel["meta"]["shared"]
+        if shared > 49152:
+            checked(f"cuFuncSetAttribute(ctx->func_{sn}, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, {shared})")
+    lines += ["    *out = ctx;", "    return CUDA_SUCCESS;", "}", ""]
+    # Use the exact same metadata/arguments/hidden scratch parameters as the
+    # existing wrappers. No context lookup, mutex or allocation during launch.
+    for kernel in kernels:
+        sn = kernel["safe_name"]
+        args = kernel["args"]
+        meta = kernel["meta"]
+        signature = ["    void* opaque"] + [f"    {ctype} {name}" for name, ctype in args]
+        signature += ["    unsigned int grid_x", "    unsigned int grid_y", "    unsigned int grid_z", "    CUstream stream"]
+        lines += [f"KRASIS_FLA_EXPORT CUresult krasis_fla_context_{sn}(", ",\n".join(signature), ") {",
+                  "    if (!opaque) return CUDA_ERROR_INVALID_VALUE;",
+                  "    const KrasisFlaContext* ctx = static_cast<const KrasisFlaContext*>(opaque);",
+                  "    CUdeviceptr global_scratch = 0;", "    CUdeviceptr profile_scratch = 0;",
+                  "    void* kernel_args[] = {"]
+        lines += [f"        &{name}," for name, _ in args]
+        lines += ["        &global_scratch,", "        &profile_scratch,", "    };",
+                  f"    return cuLaunchKernel(ctx->func_{sn},", "        grid_x, grid_y, grid_z,",
+                  f'        {meta["num_warps"] * 32}, 1, 1,', f'        {meta["shared"]},',
+                  "        stream,", "        kernel_args, NULL);", "}", ""]
+    return lines
 
 
 def generate_c_wrapper(
@@ -616,6 +690,7 @@ def generate_c_wrapper(
     lines.append('#include <cuda.h>')
     lines.append('#include <stdint.h>')
     lines.append('#include <stdio.h>')
+    lines.append('#include <stdlib.h>')
     lines.append("")
 
     lines.append("#ifdef _WIN32")
@@ -734,9 +809,27 @@ def generate_c_wrapper(
         lines.append("}")
         lines.append("")
 
+    lines.extend(generate_context_owned_wrappers(kernels))
+
+    # Bind the loaded library, rather than a possibly replaced pathname. The
+    # identity covers the complete generated host contract and every actual
+    # embedded cubin; build-directory names do not change its semantics.
+    import hashlib
+    identity_source = "\n".join(lines)
+    for kernel in kernels:
+        embedded_path = os.path.join(cubin_dir, kernel["safe_name"] + ".cubin")
+        identity_source = identity_source.replace(embedded_path, "embedded:" + kernel["safe_name"])
+    digest = hashlib.sha256(identity_source.encode("utf-8"))
+    for kernel in kernels:
+        digest.update(len(kernel["cubin"]).to_bytes(8, "little"))
+        digest.update(kernel["cubin"])
+    identity = digest.hexdigest()
+    lines.append('KRASIS_FLA_EXPORT const char* krasis_fla_artifact_identity(void) { return "' + identity + '"; }')
+
     with open(output_path, "w") as f:
         f.write("\n".join(lines))
     print(f"  Generated {output_path} ({len(lines)} lines)")
+    return identity
 
 
 # BEGIN isolated diagnostic build admission

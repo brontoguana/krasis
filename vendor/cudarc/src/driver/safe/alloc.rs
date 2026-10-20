@@ -112,7 +112,7 @@ impl CudaDevice {
         self.bind_to_thread()?;
         let cu_device_ptr = unsafe {
             if self.is_async {
-                result::malloc_async(self.stream, 0)?
+                result::malloc_async(*self.cu_stream(), 0)?
             } else {
                 result::malloc_sync(0)?
             }
@@ -135,7 +135,7 @@ impl CudaDevice {
     ) -> Result<CudaSlice<T>, result::DriverError> {
         self.bind_to_thread()?;
         let cu_device_ptr = if self.is_async {
-            result::malloc_async(self.stream, len * std::mem::size_of::<T>())?
+            result::malloc_async(*self.cu_stream(), len * std::mem::size_of::<T>())?
         } else {
             result::malloc_sync(len * std::mem::size_of::<T>())?
         };
@@ -174,7 +174,7 @@ impl CudaDevice {
         self.bind_to_thread()?;
         if self.is_async {
             unsafe {
-                result::memset_d8_async(*dst.device_ptr_mut(), 0, dst.num_bytes(), self.stream)
+                result::memset_d8_async(*dst.device_ptr_mut(), 0, dst.num_bytes(), *self.cu_stream())
             }
         } else {
             unsafe { result::memset_d8_sync(*dst.device_ptr_mut(), 0, dst.num_bytes()) }
@@ -205,7 +205,7 @@ impl CudaDevice {
                     *dst.device_ptr_mut(),
                     *src.device_ptr(),
                     src.len() * std::mem::size_of::<T>(),
-                    self.stream,
+                    *self.cu_stream(),
                 )
             }
         } else {
@@ -255,7 +255,7 @@ impl CudaDevice {
                 result::memcpy_htod_async(
                     dst.cu_device_ptr,
                     dst.host_buf.as_ref().unwrap(),
-                    self.stream,
+                    *self.cu_stream(),
                 )
             }?
         } else {
@@ -300,7 +300,7 @@ impl CudaDevice {
         assert_eq!(src.len(), dst.len());
         self.bind_to_thread()?;
         if self.is_async {
-            unsafe { result::memcpy_htod_async(*dst.device_ptr_mut(), src, self.stream) }?;
+            unsafe { result::memcpy_htod_async(*dst.device_ptr_mut(), src, *self.cu_stream()) }?;
         } else {
             unsafe { result::memcpy_htod_sync(*dst.device_ptr_mut(), src) }?;
         }
@@ -344,7 +344,7 @@ impl CudaDevice {
         assert_eq!(src.len(), dst.len());
         self.bind_to_thread()?;
         if self.is_async {
-            unsafe { result::memcpy_dtoh_async(dst, *src.device_ptr(), self.stream) }?;
+            unsafe { result::memcpy_dtoh_async(dst, *src.device_ptr(), *self.cu_stream()) }?;
         } else {
             unsafe { result::memcpy_dtoh_sync(dst, *src.device_ptr()) }?;
         }
@@ -373,7 +373,7 @@ impl CudaDevice {
     /// Synchronizes the stream.
     pub fn synchronize(self: &Arc<Self>) -> Result<(), result::DriverError> {
         self.bind_to_thread()?;
-        unsafe { result::stream::synchronize(self.stream) }
+        unsafe { result::stream::synchronize(*self.cu_stream()) }
     }
 }
 

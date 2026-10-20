@@ -2958,8 +2958,15 @@ class KrasisModel:
         self.log_vram_ledger_residency("after-full-load")
         logger.info("Model fully loaded in %.1fs", total)
 
-    def warmup_cuda_runtime(self, devices: List[torch.device]):
-        """Trigger ALL lazy CUDA runtime allocations on ALL devices before HCS expert loading."""
+    def warmup_cuda_runtime(self, devices: List[torch.device], *, execution_backend: str = "torch"):
+        """Warm the selected backend before HCS budgeting.
+
+        Standalone legacy model users retain the Torch compiler warmup. Rust
+        serving separately warms its actual registered prefill engine, with
+        hard failure before calibration, in server.main.
+        """
+        if execution_backend not in ("torch", "rust"):
+            raise ValueError(f"Unknown CUDA warmup execution backend: {execution_backend!r}")
         from krasis.marlin_utils import (
             get_scalar_type,
             gptq_marlin_gemm,
@@ -2988,10 +2995,13 @@ class KrasisModel:
                             if k * n > max_k * max_n: max_k, max_n = k, n
 
                 if max_k > 0:
-                    for m_size in (32, 512):
-                        x = torch.randint(-127, 127, (m_size, max_k), dtype=torch.int8, device=device)
-                        w = torch.randint(-127, 127, (max_n, max_k), dtype=torch.int8, device=device)
-                        _ = torch._int_mm(x, w.t())
+                    from krasis.krasis import warmup_int8_cuda
+                    device_index = torch.device(device).index
+                    if device_index is None:
+                        raise ValueError("CUDA warmup requires an explicit selected device")
+                    completed = warmup_int8_cuda(device_index, max_k, max_n, [32, 512])
+                    if completed != [32, 512]:
+                        raise RuntimeError("Owned cuBLAS warmup omitted a required batch probe")
             except Exception as e:
                 raise RuntimeError(
                     f"CUDA warmup (cuBLAS) on {device} failed: {e}\n"
@@ -3067,14 +3077,18 @@ class KrasisModel:
             
             torch.cuda.synchronize(device)
 
-        # ── 3. Linear attention torch.compile warmup ──
+        # ── 3. Selected Torch-backend linear attention compiler warmup ──
+        # Rust serving uses its mandatory registered Rust engine warmup below
+        # Store setup in server.main; it must not initialize an unused Torch
+        # cuBLAS pool. The legacy Torch execution backend remains warmed here.
         # Must set device back to primary BEFORE torch.compile — after the per-device
         # loop above, the current CUDA device may be a secondary GPU with a different
         # SM architecture. Inductor generates PTX for the current device's arch, so
         # compiling while cuda:1 (e.g. Ada sm_89) is current would produce kernels
         # that fail on cuda:0 (e.g. Blackwell sm_120).
         if (
-            self.cfg.linear_num_value_heads > 0
+            execution_backend == "torch"
+            and self.cfg.linear_num_value_heads > 0
             and self.cfg.linear_attention_family == "gated_deltanet"
         ):
             try:
@@ -9842,6 +9856,8 @@ class KrasisModel:
                 tensor=tensor,
                 logical_tokens_per_row=tokens_per_row,
             )
+            if kind in ("linear_attention_conv_state", "linear_attention_recurrent_state") and store.scalar_gdn_requested():
+                store.register_scalar_gdn_state(int(layer_idx), kind, tensor)
             registered += 1
 
         for cache_idx, cache in enumerate(self.kv_caches):
@@ -10989,6 +11005,7 @@ class KrasisModel:
                     store.set_rope_tables(
                         cos_f32.data_ptr(), sin_f32.data_ptr(),
                         cos_f32.shape[1], max_seq,
+                        torch.cuda.current_stream(cos_f32.device).cuda_stream,
                     )
                     rope_set = True
 
@@ -11158,6 +11175,7 @@ class KrasisModel:
                     store.set_rope_tables(
                         _rope_cos.data_ptr(), _rope_sin.data_ptr(),
                         _rope_cos.shape[1], max_seq,
+                        torch.cuda.current_stream(_rope_cos.device).cuda_stream,
                     )
                     rope_set = True
 
@@ -11540,6 +11558,7 @@ class KrasisModel:
             store.set_rope_tables(
                 cos_f32.data_ptr(), sin_f32.data_ptr(),
                 cos_f32.shape[1], max_seq,
+                torch.cuda.current_stream(cos_f32.device).cuda_stream,
             )
             rope_set = True
             logger.info(
@@ -12515,6 +12534,7 @@ class KrasisModel:
                         store.set_rope_tables(
                             cos_f32.data_ptr(), sin_f32.data_ptr(),
                             cos_f32.shape[1], max_seq,
+                            torch.cuda.current_stream(cos_f32.device).cuda_stream,
                         )
                         aux_rope_set = True
                 else:
@@ -12659,6 +12679,7 @@ class KrasisModel:
                         store.set_rope_tables(
                             _rope_cos.data_ptr(), _rope_sin.data_ptr(),
                             _rope_cos.shape[1], max_seq,
+                            torch.cuda.current_stream(_rope_cos.device).cuda_stream,
                         )
                         aux_rope_set = True
                 else:
@@ -13039,6 +13060,8 @@ class KrasisModel:
                 tensor=tensor,
                 logical_tokens_per_row=tokens_per_row,
             )
+            if kind in ("linear_attention_conv_state", "linear_attention_recurrent_state") and store.scalar_gdn_requested():
+                store.register_scalar_gdn_state(int(layer_idx), kind, tensor)
             registered_sequence_state += 1
         required_sequence_state = int(store.finalize_sequence_state_inventory())
         logger.info(

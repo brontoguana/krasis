@@ -555,44 +555,129 @@ fn probe_lib(name: &str) -> bool {
 // Private selected-serving build. Missing CUDA/toolchain is an explicit build
 // failure for this feature; no empty kernel bank or native arithmetic fallback.
 fn compile_selected_kda_kernels() {
-    if std::env::var_os("CARGO_FEATURE_SHARED_KDA_TEST").is_none() { return; }
+    if std::env::var_os("CARGO_FEATURE_SHARED_KDA_TEST").is_none() {
+        return;
+    }
     let nvcc = find_nvcc().expect("shared-kda-test requires nvcc");
-    let version = std::process::Command::new(&nvcc).arg("--version").output().expect("selected compiler identity");
-    assert!(version.status.success(), "selected compiler identity failed");
-    let host_args=nvcc_host_compiler_args();
+    let version = std::process::Command::new(&nvcc)
+        .arg("--version")
+        .output()
+        .expect("selected compiler identity");
+    assert!(
+        version.status.success(),
+        "selected compiler identity failed"
+    );
+    let host_args = nvcc_host_compiler_args();
     let out_dir = std::env::var("OUT_DIR").unwrap();
-    for stem in ["kda_owner_transport", "kda_owner_math", "kda_raw_producer", "ordered_projection", "ordered_hc_compensated", "ordered_dense_bf16", "ordered_marlin_serving", "ordered_router_f32", "dsa_score_tensorcomp", "ordered_moe_combine", "common_rmsnorm", "mla_f32_ops", "stable_mla_ops"] {
+    let mut stems = vec![
+        "kda_owner_transport",
+        "kda_owner_math",
+        "kda_raw_producer",
+        "ordered_projection",
+        "ordered_hc_compensated",
+        "ordered_dense_bf16",
+        "ordered_marlin_serving",
+        "ordered_router_f32",
+        "dsa_score_tensorcomp",
+        "ordered_moe_combine",
+        "common_rmsnorm",
+        "mla_f32_ops",
+        "stable_mla_ops",
+    ];
+    if std::env::var_os("CARGO_FEATURE_SCALAR_GDN_TEST").is_some() {
+        stems.extend(["scalar_gdn_transport", "scalar_gdn_projection"]);
+    }
+    for stem in stems {
         let source = format!("src/cuda/{stem}.cu");
         let destination = format!("{out_dir}/{stem}.ptx");
-        let stamp=format!("{out_dir}/{stem}.build-contract");
+        let stamp = format!("{out_dir}/{stem}.build-contract");
         println!("cargo:rerun-if-changed={source}");
-        let mut flags=vec!["--ptx", "-std=c++17", "-O3", "-arch=compute_80"];
-        if stem=="ordered_hc_compensated" || stem=="ordered_dense_bf16" || stem=="ordered_marlin_serving" || stem=="ordered_router_f32" || stem=="dsa_score_tensorcomp" || stem=="ordered_moe_combine" {
-            flags=vec!["-ptx","-allow-unsupported-compiler","-arch=sm_80","-O3","--fmad=false","--ftz=false","--prec-div=true","--prec-sqrt=true"];
-        } else if stem=="mla_f32_ops" || stem=="stable_mla_ops" || stem=="common_rmsnorm" {
-            flags=vec!["-ptx","-allow-unsupported-compiler","-arch=sm_80","-O3","--use_fast_math","-std=c++17"];
-        } else if stem=="ordered_projection" {
-            flags=vec!["-ptx","-allow-unsupported-compiler","-arch=sm_80","-O3","--use_fast_math"];
-        } else if stem=="kda_raw_producer" {
-            flags.extend(["--fmad=false", "--ftz=false", "--prec-div=true", "--prec-sqrt=true"]);
+        let mut flags = vec!["--ptx", "-std=c++17", "-O3", "-arch=compute_80"];
+        if stem == "scalar_gdn_projection" {
+            // Exact203 independent-projection compilation contract. No fast-math
+            // substitution; explicit RN operations and compensated BF16 output.
+            flags = vec![
+                "-arch=compute_80",
+                "-ptx",
+                "-O3",
+                "-lineinfo",
+                "--fmad=false",
+                "--ftz=false",
+            ];
+        } else if stem == "ordered_hc_compensated"
+            || stem == "ordered_dense_bf16"
+            || stem == "ordered_marlin_serving"
+            || stem == "ordered_router_f32"
+            || stem == "dsa_score_tensorcomp"
+            || stem == "ordered_moe_combine"
+        {
+            flags = vec![
+                "-ptx",
+                "-allow-unsupported-compiler",
+                "-arch=sm_80",
+                "-O3",
+                "--fmad=false",
+                "--ftz=false",
+                "--prec-div=true",
+                "--prec-sqrt=true",
+            ];
+        } else if stem == "mla_f32_ops" || stem == "stable_mla_ops" || stem == "common_rmsnorm" {
+            flags = vec![
+                "-ptx",
+                "-allow-unsupported-compiler",
+                "-arch=sm_80",
+                "-O3",
+                "--use_fast_math",
+                "-std=c++17",
+            ];
+        } else if stem == "ordered_projection" {
+            flags = vec![
+                "-ptx",
+                "-allow-unsupported-compiler",
+                "-arch=sm_80",
+                "-O3",
+                "--use_fast_math",
+            ];
+        } else if stem == "kda_raw_producer" {
+            flags.extend([
+                "--fmad=false",
+                "--ftz=false",
+                "--prec-div=true",
+                "--prec-sqrt=true",
+            ]);
         } else {
             // This is the qualified prepared-owner compilation contract.
             // IEEE-critical F32 operations remain explicit inline PTX.
             flags.push("--use_fast_math");
         }
-        let mut identity=format!("{nvcc}\n{flags:?}\n{host_args:?}\n").into_bytes();
+        let mut identity = format!("{nvcc}\n{flags:?}\n{host_args:?}\n").into_bytes();
         identity.extend(&version.stdout);
         identity.extend(&version.stderr);
         identity.extend(std::fs::read(&source).expect("selected CUDA source"));
-        let fresh=std::path::Path::new(&destination).is_file() && std::fs::read(&stamp).is_ok_and(|prior|prior==identity);
+        let fresh = std::path::Path::new(&destination).is_file()
+            && std::fs::read(&stamp).is_ok_and(|prior| prior == identity);
         if !fresh {
             let mut command = std::process::Command::new(&nvcc);
             command.args(&flags);
-            if stem!="common_rmsnorm" && stem!="stable_mla_ops" && stem!="mla_f32_ops" && stem!="ordered_projection" && stem!="ordered_hc_compensated" && stem!="ordered_dense_bf16" && stem!="ordered_marlin_serving" && stem!="ordered_router_f32" && stem!="dsa_score_tensorcomp" && stem!="ordered_moe_combine" {command.args(&host_args);}
+            if stem != "scalar_gdn_projection"
+                && stem != "common_rmsnorm"
+                && stem != "stable_mla_ops"
+                && stem != "mla_f32_ops"
+                && stem != "ordered_projection"
+                && stem != "ordered_hc_compensated"
+                && stem != "ordered_dense_bf16"
+                && stem != "ordered_marlin_serving"
+                && stem != "ordered_router_f32"
+                && stem != "dsa_score_tensorcomp"
+                && stem != "ordered_moe_combine"
+            {
+                command.args(&host_args);
+            }
             command.arg(&source).arg("-o").arg(&destination);
-            let status = run_status_timed(command, &format!("selected {stem} PTX")).expect("selected KDA nvcc execution");
+            let status = run_status_timed(command, &format!("selected {stem} PTX"))
+                .expect("selected KDA nvcc execution");
             assert!(status.success(), "selected KDA compilation failed: {stem}");
-            std::fs::write(&stamp,identity).expect("selected CUDA build identity");
+            std::fs::write(&stamp, identity).expect("selected CUDA build identity");
         }
     }
 }

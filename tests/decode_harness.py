@@ -766,7 +766,7 @@ class SyntheticDecodeHarness:
         if first_gqa_layer is not None:
             cos_ptr, sin_ptr, rope_half, cos_f32, _ = self._gqa_rope_table_ptrs(first_gqa_layer)
             if cos_f32 is not None:
-                self.store.set_rope_tables(cos_ptr, sin_ptr, rope_half, self.max_seq)
+                self.store.set_rope_tables(cos_ptr, sin_ptr, rope_half, self.max_seq, torch.cuda.current_stream(cos_f32.device).cuda_stream)
 
         free_mb = int(torch.cuda.mem_get_info(self.device)[0] // (1024 * 1024))
         hcs_budget_mb = max(256, free_mb - 512)

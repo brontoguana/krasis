@@ -433,7 +433,11 @@ __global__ void Marlin(
 
   int k_tiles = prob_k / 16 / thread_k_blocks;
   int n_tiles = prob_n / 16 / thread_n_blocks;
-  int iters = div_ceil(k_tiles * n_tiles * parallel, gridDim.x);
+  // Every CTA owns complete K reductions. Original stripe lengths could cut
+  // the same output dot into different slices when the batch length changed.
+  // Round work in output tiles, not K iterations; preserve actual runtime grid,
+  // quantized-weight reconstruction and the inner MMA/reduction arithmetic.
+  int iters = k_tiles * div_ceil(n_tiles * parallel, gridDim.x);
 
   if constexpr (!has_act_order && group_blocks != -1) {
     if (group_blocks >= thread_k_blocks) {

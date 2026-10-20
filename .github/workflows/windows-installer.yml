@@ -689,7 +689,7 @@ jobs:
             -Version $version
           Get-ChildItem dist | Format-Table Name,Length
 
-      - name: Test clean install, isolation, legacy repair, and uninstall
+      - name: Test clean install, runtime reuse, cached repair, isolation, legacy repair, and uninstall
         run: |
           $installer = Get-ChildItem dist -Filter "KrasisSetup-*-win64.exe" | Select-Object -First 1
           if (-not $installer) {
@@ -819,6 +819,99 @@ jobs:
             }
           }
           Remove-Item Env:PYTHONHOME,Env:PYTHONPATH -ErrorAction SilentlyContinue
+
+          $releaseNamesBefore = @(
+            Get-ChildItem (Join-Path $testRoot "runtime\releases") -Directory |
+              Select-Object -ExpandProperty Name |
+              Sort-Object
+          )
+          $sameReleaseInstallLog = Join-Path $env:RUNNER_TEMP "same-release-installer-test.log"
+          $sameReleaseInstall = Start-Process `
+            -FilePath $installer.FullName `
+            -ArgumentList @(
+              "/VERYSILENT",
+              "/SUPPRESSMSGBOXES",
+              "/NORESTART",
+              "/DIR=$testRoot",
+              "/LOG=$sameReleaseInstallLog"
+            ) `
+            -PassThru `
+            -Wait
+          if (Test-Path $sameReleaseInstallLog) {
+            Write-Host "Same-release installer log:"
+            Get-Content $sameReleaseInstallLog
+          }
+          if ($sameReleaseInstall.ExitCode -ne 0) {
+            throw "Same-release installer failed with status $($sameReleaseInstall.ExitCode)."
+          }
+          $sameReleaseRuntimeLog = Get-Content -Raw $runtimeInstallLog
+          if ($sameReleaseRuntimeLog -notmatch "Krasis private runtime already matches this installer") {
+            throw "Same-release installer did not report reuse of the active private runtime."
+          }
+          if ($sameReleaseRuntimeLog -match "Installing pinned CUDA PyTorch") {
+            throw "Same-release installer unexpectedly invoked the PyTorch installation."
+          }
+          $currentNameAfterSameRelease = (
+            Get-Content -Raw (Join-Path $testRoot "runtime\current.txt")
+          ).Trim()
+          if ($currentNameAfterSameRelease -ne $currentName) {
+            throw "Same-release installer changed the active runtime."
+          }
+          $releaseNamesAfter = @(
+            Get-ChildItem (Join-Path $testRoot "runtime\releases") -Directory |
+              Select-Object -ExpandProperty Name |
+              Sort-Object
+          )
+          if (Compare-Object $releaseNamesBefore $releaseNamesAfter) {
+            throw "Same-release installer left a new runtime release directory."
+          }
+          scripts/windows/Test-InstalledRuntime.ps1 -InstallRoot $testRoot
+
+          $activeRuntimeBeforeRepair = Join-Path $testRoot "runtime\releases\$currentName"
+          $activationBeforeRepair = Join-Path $activeRuntimeBeforeRepair "activation.json"
+          $activation = Get-Content -Raw $activationBeforeRepair | ConvertFrom-Json
+          $activation.payload_sha256 = "0" * 64
+          $activation | ConvertTo-Json -Depth 4 | Set-Content $activationBeforeRepair -Encoding UTF8
+
+          $cachedTorchInstallLog = Join-Path $env:RUNNER_TEMP "cached-torch-installer-test.log"
+          $cachedTorchInstall = Start-Process `
+            -FilePath $installer.FullName `
+            -ArgumentList @(
+              "/VERYSILENT",
+              "/SUPPRESSMSGBOXES",
+              "/NORESTART",
+              "/DIR=$testRoot",
+              "/LOG=$cachedTorchInstallLog"
+            ) `
+            -PassThru `
+            -Wait
+          if (Test-Path $cachedTorchInstallLog) {
+            Write-Host "Cached-Torch repair installer log:"
+            Get-Content $cachedTorchInstallLog
+          }
+          if ($cachedTorchInstall.ExitCode -ne 0) {
+            throw "Cached-Torch repair installer failed with status $($cachedTorchInstall.ExitCode)."
+          }
+          $cachedTorchRuntimeLog = Get-Content -Raw $runtimeInstallLog
+          if ($cachedTorchRuntimeLog -notmatch "Using verified cached CUDA PyTorch wheel") {
+            throw "Repair installer did not reuse the verified cached CUDA PyTorch wheel."
+          }
+          if ($cachedTorchRuntimeLog -match "Downloading pinned CUDA PyTorch") {
+            throw "Repair installer unexpectedly downloaded the cached CUDA PyTorch wheel again."
+          }
+          $currentNameAfterRepair = (
+            Get-Content -Raw (Join-Path $testRoot "runtime\current.txt")
+          ).Trim()
+          if ($currentNameAfterRepair -eq $currentName) {
+            throw "Repair installer did not activate a newly validated private runtime."
+          }
+          $torchArtifacts = @(
+            Get-ChildItem (Join-Path $testRoot "runtime\artifacts\torch") -Recurse -File -Filter "*.whl"
+          )
+          if ($torchArtifacts.Count -ne 1) {
+            throw "Installer retained $($torchArtifacts.Count) cached CUDA PyTorch wheels instead of one."
+          }
+          scripts/windows/Test-InstalledRuntime.ps1 -InstallRoot $testRoot
 
           if (Test-Path (Join-Path $testRoot "python")) {
             throw "Installer retained the legacy Python directory."
@@ -992,6 +1085,8 @@ jobs:
             dist/windows-installer-test.log
             ${{ runner.temp }}/krasis-rust-test-memory.log
             ${{ runner.temp }}/krasis-installer-test.log
+            ${{ runner.temp }}/same-release-installer-test.log
+            ${{ runner.temp }}/cached-torch-installer-test.log
             ${{ runner.temp }}/krasis-uninstaller-test.log
             ${{ runner.temp }}/krasis-private-runtime-test/runtime-install.log
             ${{ runner.temp }}/krasis-windows-fla-dll-cache/**

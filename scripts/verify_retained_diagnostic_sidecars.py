@@ -30,6 +30,22 @@ for row in rows:
     if not raw or len(raw) != row["bytes"] or hashlib.sha256(raw).hexdigest() != row["sha256"]:
         raise SystemExit(f"Historical sidecar identity changed: {path.name}")
     by_name[path.name] = row
+if "fla_artifact_identities" in bank:
+    identities = bank["fla_artifact_identities"]
+    required = {f"libkrasis_fla_sm{arch}.so" for arch in contract["architectures"]}
+    if set(identities) != required:
+        raise SystemExit("Exact complete loaded FLA identity set required")
+    for name, expected_identity in identities.items():
+        if len(expected_identity) != 64 or any(c not in "0123456789abcdef" for c in expected_identity):
+            raise SystemExit("Invalid admitted FLA artifact contract digest")
+        lib = ctypes.CDLL(str(package / name))
+        lib.krasis_fla_artifact_identity.restype = ctypes.c_char_p
+        lib.krasis_fla_context_abi_version.restype = ctypes.c_uint32
+        actual_identity = lib.krasis_fla_artifact_identity()
+        if actual_identity is None or actual_identity.decode("ascii") != expected_identity:
+            raise SystemExit(f"Loaded FLA artifact contract differs: {name}")
+        if lib.krasis_fla_context_abi_version() != 2:
+            raise SystemExit(f"Loaded FLA context ABI differs: {name}")
 manifest = json.loads((package / "sidecar_manifest.json").read_text())
 abi = int((repo / "sidecar_abi_version.txt").read_text())
 if manifest["schema_version"] != 1 or manifest["sidecar_abi"] != abi:

@@ -4116,6 +4116,63 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.build_cache = True
 
 
+def _torch_runtime_problems(*, check_architectures: bool) -> List[str]:
+    """Run inside the disposable dependency-probe process, before server exec."""
+    problems = []
+    try:
+        import torch
+        torch.set_float32_matmul_precision('high')
+        if not torch.cuda.is_available():
+            problems.append("CUDA-enabled PyTorch")
+        elif check_architectures:
+            arch_list = (
+                set(torch.cuda.get_arch_list())
+                if hasattr(torch.cuda, "get_arch_list")
+                else set()
+            )
+            unsupported = []
+            if arch_list:
+                for i in range(torch.cuda.device_count()):
+                    major, minor = torch.cuda.get_device_capability(i)
+                    token = f"sm_{major}{minor}"
+                    if token not in arch_list:
+                        name = torch.cuda.get_device_properties(i).name
+                        unsupported.append(f"GPU {i} {name} ({token})")
+            if unsupported:
+                problems.append("PyTorch build lacking " + ", ".join(unsupported))
+    except ImportError:
+        problems.append("PyTorch")
+    return problems
+
+
+def _isolated_torch_runtime_problems(*, check_architectures: bool) -> List[str]:
+    # CUDA initialization must not survive in the launcher process that execs
+    # the server. Preserve the complete dependency/architecture probe in a child
+    # process; malformed/failed probes are explicit failures, never a fallback.
+    command = [
+        sys.executable, "-m", "krasis.launcher", "--internal-torch-dependency-probe",
+        "architectures" if check_architectures else "availability",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"PyTorch dependency probe failed (exit {result.returncode}): "
+            + (result.stderr.strip() or result.stdout.strip())
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except (ValueError, TypeError) as error:
+        raise RuntimeError("PyTorch dependency probe returned invalid JSON") from error
+    if not isinstance(payload, dict) or set(payload) != {"problems"}:
+        raise RuntimeError("PyTorch dependency probe returned an invalid result")
+    problems = payload["problems"]
+    if not isinstance(problems, list) or any(
+        not isinstance(problem, str) or not problem for problem in problems
+    ):
+        raise RuntimeError("PyTorch dependency probe returned invalid problems")
+    return problems
+
+
 def _check_gpu_deps():
     """Quick check that GPU dependencies are present. Points to krasis-setup if not."""
     import shutil
@@ -4135,13 +4192,7 @@ def _check_gpu_deps():
 
     if os.name == "nt":
         problems = []
-        try:
-            import torch
-            torch.set_float32_matmul_precision('high')
-            if not torch.cuda.is_available():
-                problems.append("CUDA-enabled PyTorch")
-        except ImportError:
-            problems.append("PyTorch")
+        problems.extend(_isolated_torch_runtime_problems(check_architectures=False))
 
         if problems:
             print(f"{RED}Missing GPU dependencies: {', '.join(problems)}{NC}")
@@ -4188,32 +4239,8 @@ def _check_gpu_deps():
     if not shutil.which("ninja") and not shutil.which("ninja-build"):
         problems.append("ninja")
 
-    # Check CUDA torch
-    try:
-        import torch
-        torch.set_float32_matmul_precision('high')
-        if not torch.cuda.is_available():
-            problems.append("CUDA-enabled PyTorch")
-        else:
-            arch_list = (
-                set(torch.cuda.get_arch_list())
-                if hasattr(torch.cuda, "get_arch_list")
-                else set()
-            )
-            unsupported = []
-            if arch_list:
-                for i in range(torch.cuda.device_count()):
-                    major, minor = torch.cuda.get_device_capability(i)
-                    token = f"sm_{major}{minor}"
-                    if token not in arch_list:
-                        name = torch.cuda.get_device_properties(i).name
-                        unsupported.append(f"GPU {i} {name} ({token})")
-            if unsupported:
-                problems.append(
-                    "PyTorch build lacking " + ", ".join(unsupported)
-                )
-    except ImportError:
-        problems.append("PyTorch")
+    # Preserve actual Torch/CUDA and every visible architecture check.
+    problems.extend(_isolated_torch_runtime_problems(check_architectures=True))
 
     # GPU packages: sgl-kernel no longer needed (Marlin GEMM is vendored)
     # Triton no longer required (Rust prefill uses compiled CUDA kernels)
@@ -4735,4 +4762,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--internal-torch-dependency-probe":
+        if sys.argv[2] not in {"availability", "architectures"}:
+            raise SystemExit("Invalid internal PyTorch dependency probe mode")
+        print(json.dumps({"problems": _torch_runtime_problems(
+            check_architectures=sys.argv[2] == "architectures",
+        )}))
+    else:
+        main()

@@ -656,6 +656,28 @@ def _runtime_heatmap_capture_config(args) -> dict[str, Any]:
     return config
 
 
+def _actual_runtime_heatmap_capture_config(model: KrasisModel, args) -> dict[str, Any]:
+    """Bind the configured domain's actual kernel arithmetic, once at startup."""
+    runtime = _runtime_heatmap_capture_config(args)
+    store = getattr(model, "_gpu_decode_store", None)
+    if store is None:
+        raise RuntimeError("Heatmap arithmetic identity requires the configured GPU decode store")
+    raw = store.native_scalar_runtime_identity()
+    if raw is None:
+        return runtime
+    try:
+        identity = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("Native heatmap arithmetic identity is invalid JSON") from error
+    if not isinstance(identity, dict) or not all(
+        isinstance(identity.get(key), str) and identity[key]
+        for key in ("format", "native", "producer")
+    ):
+        raise RuntimeError("Native heatmap arithmetic identity lacks actual kernel contracts")
+    runtime["native_scalar_arithmetic"] = identity
+    return runtime
+
+
 def _runtime_matches_approved_heatmap_policy(
     current: dict[str, Any],
     validated_runtimes: Any,
@@ -802,7 +824,7 @@ def _expected_heatmap_metadata(model: KrasisModel, args, prompts: list[str]) -> 
         },
         "route_signature": _heatmap_route_signature(model, args),
         "runtime": runtime_metadata,
-        "runtime_compat": _runtime_heatmap_capture_config(args),
+        "runtime_compat": _actual_runtime_heatmap_capture_config(model, args),
         "heatmap_build": {
             "prompt_source": "python/krasis/prompts/heatmap_prompts.txt",
             "prompt_file_sha256": _sha256_file(prompt_file),
@@ -2103,6 +2125,7 @@ def _approved_heatmap_metadata(
 ) -> dict[str, Any]:
     from krasis import __version__ as krasis_version
 
+    runtime_config = _actual_runtime_heatmap_capture_config(model, args)
     return {
         "format": APPROVED_HEATMAP_FORMAT,
         "format_version": APPROVED_HEATMAP_FORMAT_VERSION,
@@ -2112,10 +2135,8 @@ def _approved_heatmap_metadata(
             "runtime_code": _krasis_runtime_code_hash(),
         },
         "route_signature": _heatmap_route_signature(model, args),
-        "captured_runtime": _runtime_heatmap_capture_config(args),
-        "validated_compatible_runtimes": [
-            _runtime_heatmap_capture_config(args),
-        ],
+        "captured_runtime": runtime_config,
+        "validated_compatible_runtimes": [runtime_config],
         "heatmap_build": {
             "prompt_source": os.path.abspath(prompt_path),
             "prompt_file_sha256": _sha256_file(prompt_path),
@@ -2253,7 +2274,7 @@ def _load_heatmap_residency_bootstrap(
     if fmt == APPROVED_HEATMAP_FORMAT:
         expected = {
             "route_signature": _heatmap_route_signature(model, args),
-            "runtime_compat": _runtime_heatmap_capture_config(args),
+            "runtime_compat": _actual_runtime_heatmap_capture_config(model, args),
         }
     else:
         quick_prompts = _load_heatmap_prompts()
@@ -2272,7 +2293,7 @@ def _validate_approved_heatmap_resume_base(
 ) -> tuple[dict[str, int], int, int]:
     expected_metadata = {
         "route_signature": _heatmap_route_signature(model, args),
-        "runtime_compat": _runtime_heatmap_capture_config(args),
+        "runtime_compat": _actual_runtime_heatmap_capture_config(model, args),
     }
     base_data = _load_validated_heatmap(resume_path, expected_metadata)
     meta = base_data.get("_metadata", {})
@@ -2769,6 +2790,69 @@ def _largest_memory_mappings(limit: int = 12) -> str:
         f"{size_kib}k:{permissions}:{pathname}"
         for size_kib, permissions, pathname in mappings[:limit]
     )
+
+
+def _trace_shutdown_owners(model, phase: str, *, scope: str = "shutdown") -> None:
+    """Cold, opt-in ownership data; never retain inspected model/store objects."""
+    components = {item.strip().lower() for item in os.environ.get("KRASIS_TRACE_COMPONENTS", "").split(",") if item.strip()}
+    if os.environ.get("KRASIS_TRACE") != "1" or (components and "resource_lifecycle" not in components):
+        return
+    rows = []
+    def describe(value, role):
+        count = sys.getrefcount(value)
+        referrers = gc.get_referrers(value)
+        types = {}
+        dictionaries = []
+        for owner in referrers:
+            name = type(owner).__module__ + "." + type(owner).__qualname__
+            types[name] = types.get(name, 0) + 1
+            if isinstance(owner, dict):
+                keys = sorted(key for key, item in owner.items() if item is value and isinstance(key, str) and key.isidentifier())
+                if keys:
+                    dictionaries.append(keys)
+        result = {"role": role, "python_id": hex(id(value)), "type": type(value).__qualname__, "refcount_including_inspector": count, "gc_referrer_count": len(referrers), "gc_referrer_types": types, "dictionary_reference_keys": dictionaries}
+        # Batch provenance in one additional GC scan, without materializing
+        # frame locals or retaining any inspected object in the returned data.
+        import types
+        frames = [owner for owner in referrers if isinstance(owner, types.FrameType)]
+        result["retaining_frames"] = [{"function": frame.f_code.co_name, "file": frame.f_code.co_filename, "line": frame.f_lineno} for frame in frames]
+        if frames:
+            frame_ids = {id(frame) for frame in frames}
+            owners_of_frames = gc.get_referrers(*frames)
+            frame_owner_types = {}
+            traceback_owners = []
+            frame_dictionary_keys = []
+            for frame_owner in owners_of_frames:
+                if frame_owner is frames or frame_owner is referrers:
+                    continue
+                name = type(frame_owner).__module__ + "." + type(frame_owner).__qualname__
+                frame_owner_types[name] = frame_owner_types.get(name, 0) + 1
+                if isinstance(frame_owner, types.TracebackType):
+                    traceback_owners.append({"function": frame_owner.tb_frame.f_code.co_name, "file": frame_owner.tb_frame.f_code.co_filename, "line": frame_owner.tb_lineno})
+                elif isinstance(frame_owner, dict):
+                    keys = sorted(key for key, item in frame_owner.items() if id(item) in frame_ids and isinstance(key, str) and key.isidentifier())
+                    if keys:
+                        frame_dictionary_keys.append(keys)
+            result["frame_owner_types"] = frame_owner_types
+            result["traceback_owners"] = traceback_owners
+            result["frame_dictionary_reference_keys"] = frame_dictionary_keys
+            del owners_of_frames
+        del frames
+
+        # Release all actual object references before returning primitive data.
+        del referrers
+        return result
+    if model is None:
+        rows.append({"role": "model", "collected": True})
+    else:
+        rows.append(describe(model, "model"))
+        for role in ("_gpu_decode_store", "_aux_gpu_decode_store"):
+            value = getattr(model, role, None)
+            if value is not None:
+                rows.append(describe(value, role))
+        for index, value in enumerate(getattr(model, "_aux_gpu_decode_stores", ())):
+            rows.append(describe(value, "_aux_gpu_decode_stores[" + str(index) + "]"))
+    os.write(2, (f"[KRASIS-TRACE] event=ownership scope={scope} component=resource_lifecycle " + json.dumps({"phase": phase, "objects": rows}, sort_keys=True) + "\n").encode())
 
 
 def _shutdown_observation(phase: str) -> None:
@@ -3774,7 +3858,13 @@ def main():
     devices = [torch.device(f"cuda:{i}") for i in range(num_gpus_available)]
     device_indices = list(range(num_gpus_available))
     _status("CUDA runtime warmup")
-    _model.warmup_cuda_runtime(devices)
+    # Stress/perplexity validation executes Model.forward; serving and the
+    # production benchmark execute the registered Rust engine. Warm each
+    # backend that the selected mode actually uses.
+    _model.warmup_cuda_runtime(
+        devices,
+        execution_backend="torch" if (args.stress_test or args.perplexity) else "rust",
+    )
     _detail("cuBLAS + Marlin runtime warmup done")
     log_ram_ledger("after-cuda-runtime-warmup")
 
@@ -3785,6 +3875,7 @@ def main():
     _status("Setting up GPU decode store")
     log_ram_ledger("before-decode-store-setup")
     gpu_store = _model.setup_gpu_decode_store()
+    _trace_shutdown_owners(_model, "post_store_setup", scope="startup")
     gpu_store_addr = gpu_store.gpu_store_addr()
     _detail(f"GPU decode store ready (addr={gpu_store_addr:#x})")
     log_ram_ledger("after-decode-store-setup-before-release")
@@ -6342,6 +6433,9 @@ def main():
     # WeightStore backing remains alive while its decode stores synchronize and
     # unregister CUDA host ranges. Only after that fail-closed release succeeds
     # may Python remove its primary/auxiliary store owners.
+    import weakref
+    _shutdown_model_weak = weakref.ref(_model)
+    _trace_shutdown_owners(_model, "before_rust_runtime_release")
     released_regions, released_bytes, released_stores = (
         rust_server.release_runtime_resources()
     )
@@ -6352,6 +6446,7 @@ def main():
         flush=True,
     )
     _shutdown_observation("rust_runtime_released")
+    _trace_shutdown_owners(_model, "after_rust_runtime_release")
     for attr in ("_gpu_decode_store", "_aux_gpu_decode_store"):
         if hasattr(_model, attr):
             setattr(_model, attr, None)
@@ -6367,6 +6462,7 @@ def main():
     aux_store = None
     _model = None
     gc.collect()
+    _trace_shutdown_owners(_shutdown_model_weak(), "after_model_attributes_and_locals_cleared")
     _shutdown_observation("python_model_collected")
     logger.info("Stopped Rust/Python model GPU resources released")
     logger.info("Starting CUDA cleanup")

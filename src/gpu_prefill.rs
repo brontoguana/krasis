@@ -13,6 +13,9 @@
 //! Kernels loaded from PTX (simple ops) or dynamically loaded sidecars
 //! such as vendored Marlin/FlashAttention/FLA libraries.
 
+#[path = "prefill_progress.rs"]
+mod prefill_progress;
+
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -240,9 +243,7 @@ fn dsa_mla_scalar_trace_shadow_enabled(
     // diagnostic replay for scalar/grouped paths, not part of production
     // gathered-GEMM tracing. Gathered-GEMM traces must retain and summarize
     // the actual production output without replacing it before WVC.
-    !gathered_gemm_enabled
-        && trace_enabled
-        && (selected_layer || grouped_exact_all_layers)
+    !gathered_gemm_enabled && trace_enabled && (selected_layer || grouped_exact_all_layers)
 }
 
 fn dsa_mla_gathered_gemm_enabled(default_enabled: bool) -> Result<bool, String> {
@@ -5523,10 +5524,21 @@ fn fused_moe_fp32_reduce_floats_for_precisions(
     sms: usize,
     max_shared_mem: usize,
 ) -> usize {
-    precisions.iter().map(|&bits| fused_moe_fp32_reduce_floats(
-        moe_block_size, prob_n, prob_k, bits as usize,
-        group_size, sms, max_shared_mem,
-    )).max().unwrap_or(0)
+    precisions
+        .iter()
+        .map(|&bits| {
+            fused_moe_fp32_reduce_floats(
+                moe_block_size,
+                prob_n,
+                prob_k,
+                bits as usize,
+                group_size,
+                sms,
+                max_shared_mem,
+            )
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 pub fn fused_moe_ctmp_floats_for_config(config: &PrefillModelConfig) -> (usize, usize) {
@@ -5613,7 +5625,9 @@ unsafe impl<T: Copy + Sync> Sync for GpuBuf<T> {}
 
 impl<T: Copy> GpuBuf<T> {
     pub fn alloc_uninit(count: usize) -> Result<Self, String> {
-        let bytes = count.checked_mul(std::mem::size_of::<T>()).ok_or("native GPU allocation byte count overflow")?;
+        let bytes = count
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or("native GPU allocation byte count overflow")?;
         if bytes == 0 {
             return Ok(Self {
                 ptr: 0,
@@ -5625,12 +5639,20 @@ impl<T: Copy> GpuBuf<T> {
         }
         // Get current device ordinal for drop
         let mut dev: i32 = 0;
-        let mut allocation_context=std::ptr::null_mut();
+        let mut allocation_context = std::ptr::null_mut();
         unsafe {
-            cuda_sys::lib().cuCtxGetDevice(&mut dev).result().map_err(|e|format!("native allocation device: {e}"))?;
-            cuda_sys::lib().cuCtxGetCurrent(&mut allocation_context).result().map_err(|e|format!("native allocation context: {e}"))?;
+            cuda_sys::lib()
+                .cuCtxGetDevice(&mut dev)
+                .result()
+                .map_err(|e| format!("native allocation device: {e}"))?;
+            cuda_sys::lib()
+                .cuCtxGetCurrent(&mut allocation_context)
+                .result()
+                .map_err(|e| format!("native allocation context: {e}"))?;
         }
-        if allocation_context.is_null(){return Err("native GPU allocation has no current context".into())}
+        if allocation_context.is_null() {
+            return Err("native GPU allocation has no current context".into());
+        }
         let mut ptr: u64 = 0;
         let err = unsafe { cuda_sys::lib().cuMemAlloc_v2(&mut ptr, bytes) };
         if err != cuda_sys::CUresult::CUDA_SUCCESS {
@@ -5664,7 +5686,9 @@ impl<T: Copy> GpuBuf<T> {
         &self.ptr
     }
 
-    pub(crate) fn allocation_context(&self)->cuda_sys::CUcontext{self.allocation_context}
+    pub(crate) fn allocation_context(&self) -> cuda_sys::CUcontext {
+        self.allocation_context
+    }
 
     pub fn len(&self) -> usize {
         self.len
@@ -6185,16 +6209,12 @@ fn prefill_device_trace_stage_label(stage_id: u64) -> &'static str {
         PDT_LAYER_DSV4_FFN_NORM_HIDDEN_LAST => "layer_dsv4_ffn_norm_hidden_last",
         PDT_LAYER_DSV4_FFN_SUBLAYER_LAST => "layer_dsv4_ffn_sublayer_last",
         PDT_LAYER_DSV4_OUTPUT_STATE_LAST => "layer_dsv4_output_state_last",
-        PDT_LAYER_DSV4_COMPRESSOR_KV_PROJECTION_FULL => {
-            "layer_dsv4_compressor_kv_projection_full"
-        }
+        PDT_LAYER_DSV4_COMPRESSOR_KV_PROJECTION_FULL => "layer_dsv4_compressor_kv_projection_full",
         PDT_LAYER_DSV4_COMPRESSOR_SCORE_PROJECTION_FULL => {
             "layer_dsv4_compressor_score_projection_full"
         }
         PDT_LAYER_DSV4_COMPRESSOR_KV_STATE_FULL => "layer_dsv4_compressor_kv_state_full",
-        PDT_LAYER_DSV4_COMPRESSOR_SCORE_STATE_FULL => {
-            "layer_dsv4_compressor_score_state_full"
-        }
+        PDT_LAYER_DSV4_COMPRESSOR_SCORE_STATE_FULL => "layer_dsv4_compressor_score_state_full",
         PDT_LAYER_DSV4_COMPRESSOR_POOLED_FULL => "layer_dsv4_compressor_pooled_full",
         PDT_LAYER_DSV4_COMPRESSOR_CACHE_FULL => "layer_dsv4_compressor_cache_full",
         PDT_LAYER_MAMBA2_SSD_OUTPUT_VALUE_DETAIL => "layer_mamba2_ssd_output_value_detail",
@@ -6327,21 +6347,7 @@ pub(crate) fn native_mla_block_bytes(kv_format: u32) -> Result<usize, String> {
 
 /// Extract raw CUfunction from cudarc's CudaFunction.
 fn extract_cu_func(func: &CudaFunction) -> RawCuFunc {
-    unsafe {
-        let struct_ptr = func as *const _ as *const u8;
-        let word0: cuda_sys::CUfunction = std::ptr::read(struct_ptr as *const _);
-        let mut dummy = 0i32;
-        let w0_valid = cuda_sys::lib().cuFuncGetAttribute(
-            &mut dummy,
-            cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_NUM_REGS,
-            word0,
-        ) == cuda_sys::CUresult::CUDA_SUCCESS;
-        RawCuFunc(if w0_valid {
-            word0
-        } else {
-            std::ptr::read(struct_ptr.add(8) as *const _)
-        })
-    }
+    RawCuFunc(func.cu_function())
 }
 
 /// Launch a CUDA kernel with a parameter buffer.
@@ -6772,46 +6778,127 @@ struct MatchedW1LaneGuard {
     active: bool,
 }
 impl MatchedW1LaneGuard {
-    fn begin(selection:crate::matched_prefill_row::LaneSelection)->Result<Self,String>{
-        let (config,fetch)=load_moe_w2_lane_diag().ok_or("existing MoE lane diagnostic symbols unavailable")?;
-        let guard=Self{selection,config,fetch,active:true};
-        let rc=unsafe{(guard.config)(1,guard.selection.sorted_row,guard.selection.coordinates.as_ptr(),i32::try_from(guard.selection.coordinates.len()).map_err(|_|"lane coordinate count exceeds ABI")?)};
-        if rc!=0{return Err(format!("selected W1 lane enable failed: cuda_error={rc}"))}
+    fn begin(selection: crate::matched_prefill_row::LaneSelection) -> Result<Self, String> {
+        let (config, fetch) =
+            load_moe_w2_lane_diag().ok_or("existing MoE lane diagnostic symbols unavailable")?;
+        let guard = Self {
+            selection,
+            config,
+            fetch,
+            active: true,
+        };
+        let rc = unsafe {
+            (guard.config)(
+                1,
+                guard.selection.sorted_row,
+                guard.selection.coordinates.as_ptr(),
+                i32::try_from(guard.selection.coordinates.len())
+                    .map_err(|_| "lane coordinate count exceeds ABI")?,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("selected W1 lane enable failed: cuda_error={rc}"));
+        }
         Ok(guard)
     }
-    fn finish(mut self,stream:cuda_sys::CUstream,output:u64,width:usize)->Result<(),String>{
-        let rc=unsafe{cuda_sys::lib().cuStreamSynchronize(stream)};
-        if rc!=cuda_sys::CUresult::CUDA_SUCCESS{return Err(format!("selected W1 lane stream sync failed: {rc:?}"))}
-        let mut entries=[MoeW2LaneDiagEntry::default();128]; // Exact capacity of the existing exported CUDA diagnostic ABI.
-        let mut count=0i32;
-        let fetch_rc=unsafe{(self.fetch)(entries.as_mut_ptr(),entries.len() as i32,&mut count)};
-        let disable_rc=unsafe{(self.config)(0,0,std::ptr::null(),0)};
-        if disable_rc!=0{return Err(format!("selected W1 lane disable failed: cuda_error={disable_rc}"))}
-        self.active=false;
-        if fetch_rc!=0{return Err(format!("selected W1 lane fetch failed: cuda_error={fetch_rc}"))}
-        let count=usize::try_from(count).map_err(|_|"negative selected W1 lane entry count")?;
-        if count==0||count>=entries.len(){return Err("missing or possibly truncated selected W1 lane evidence".into())}
-        let entries=&entries[..count];
+    fn finish(
+        mut self,
+        stream: cuda_sys::CUstream,
+        output: u64,
+        width: usize,
+    ) -> Result<(), String> {
+        let rc = unsafe { cuda_sys::lib().cuStreamSynchronize(stream) };
+        if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("selected W1 lane stream sync failed: {rc:?}"));
+        }
+        let mut entries = [MoeW2LaneDiagEntry::default(); 128]; // Exact capacity of the existing exported CUDA diagnostic ABI.
+        let mut count = 0i32;
+        let fetch_rc =
+            unsafe { (self.fetch)(entries.as_mut_ptr(), entries.len() as i32, &mut count) };
+        let disable_rc = unsafe { (self.config)(0, 0, std::ptr::null(), 0) };
+        if disable_rc != 0 {
+            return Err(format!(
+                "selected W1 lane disable failed: cuda_error={disable_rc}"
+            ));
+        }
+        self.active = false;
+        if fetch_rc != 0 {
+            return Err(format!(
+                "selected W1 lane fetch failed: cuda_error={fetch_rc}"
+            ));
+        }
+        let count = usize::try_from(count).map_err(|_| "negative selected W1 lane entry count")?;
+        if count == 0 || count >= entries.len() {
+            return Err("missing or possibly truncated selected W1 lane evidence".into());
+        }
+        let entries = &entries[..count];
         for e in entries {
-            if e.expert_id!=self.selection.expert||e.sorted_row!=self.selection.sorted_row||!self.selection.coordinates.contains(&e.target_dim)||![1,2].contains(&e.stage)||[e.acc0,e.acc1,e.scale0,e.scale1].iter().any(|x|!x.is_finite()){return Err("invalid/nonfinite selected W1 lane entry; attribution refused".into())}
+            if e.expert_id != self.selection.expert
+                || e.sorted_row != self.selection.sorted_row
+                || !self.selection.coordinates.contains(&e.target_dim)
+                || ![1, 2].contains(&e.stage)
+                || [e.acc0, e.acc1, e.scale0, e.scale1]
+                    .iter()
+                    .any(|x| !x.is_finite())
+            {
+                return Err("invalid/nonfinite selected W1 lane entry; attribution refused".into());
+            }
         }
         for &coordinate in &self.selection.coordinates {
-            if ![1,2].iter().all(|stage|entries.iter().any(|e|e.target_dim==coordinate&&e.stage==*stage)){return Err("selected W1 lane missing pre-round or final-store stage".into())}
-            let element=usize::try_from(self.selection.sorted_row).map_err(|_|"negative sorted lane row")?.checked_mul(width).and_then(|x|x.checked_add(coordinate as usize)).ok_or("selected W1 output offset overflow")?;
-            let ptr=element.checked_mul(2).and_then(|x|output.checked_add(x as u64)).ok_or("selected W1 output pointer overflow")?;
-            let name=format!("coordinate-{coordinate}.bf16");self.selection.target.device(&name,ptr,2,stream)?;
-            let raw=std::fs::read(self.selection.target.directory.join(&name)).map_err(|e|e.to_string())?;
-            let bits=u16::from_le_bytes(raw.try_into().map_err(|_|"invalid selected W1 output bytes")?) as u32;
-            if entries.iter().filter(|e|e.target_dim==coordinate&&e.stage==2).any(|e|e.final_bits!=bits){return Err("selected W1 final-store capture disagrees with actual output".into())}
+            if ![1, 2].iter().all(|stage| {
+                entries
+                    .iter()
+                    .any(|e| e.target_dim == coordinate && e.stage == *stage)
+            }) {
+                return Err("selected W1 lane missing pre-round or final-store stage".into());
+            }
+            let element = usize::try_from(self.selection.sorted_row)
+                .map_err(|_| "negative sorted lane row")?
+                .checked_mul(width)
+                .and_then(|x| x.checked_add(coordinate as usize))
+                .ok_or("selected W1 output offset overflow")?;
+            let ptr = element
+                .checked_mul(2)
+                .and_then(|x| output.checked_add(x as u64))
+                .ok_or("selected W1 output pointer overflow")?;
+            let name = format!("coordinate-{coordinate}.bf16");
+            self.selection.target.device(&name, ptr, 2, stream)?;
+            let raw = std::fs::read(self.selection.target.directory.join(&name))
+                .map_err(|e| e.to_string())?;
+            let bits = u16::from_le_bytes(
+                raw.try_into()
+                    .map_err(|_| "invalid selected W1 output bytes")?,
+            ) as u32;
+            if entries
+                .iter()
+                .filter(|e| e.target_dim == coordinate && e.stage == 2)
+                .any(|e| e.final_bits != bits)
+            {
+                return Err("selected W1 final-store capture disagrees with actual output".into());
+            }
         }
-        let binary=unsafe{std::slice::from_raw_parts(entries.as_ptr().cast::<u8>(),std::mem::size_of_val(entries))};
-        self.selection.target.write("entries.native.bin",binary)?;
+        let binary = unsafe {
+            std::slice::from_raw_parts(
+                entries.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(entries),
+            )
+        };
+        self.selection.target.write("entries.native.bin", binary)?;
         let rows=entries.iter().map(|e|serde_json::json!({"stage":e.stage,"block_idx":e.block_idx,"thread_idx":e.thread_idx,"slice_col":e.slice_col,"slice_idx":e.slice_idx,"slice_count":e.slice_count,"moe_block_id":e.moe_block_id,"expert_id":e.expert_id,"sorted_row":e.sorted_row,"slot_in_block":e.slot_in_block,"target_dim":e.target_dim,"target_lane":e.target_lane,"c_pack":e.c_pack,"c_lane":e.c_lane,"sh_half2_idx":e.sh_half2_idx,"sh_int4_idx":e.sh_int4_idx,"true_idx":e.true_idx,"flags":e.flags,"acc0":e.acc0,"acc1":e.acc1,"scale0":e.scale0,"scale1":e.scale1,"scale0_bits":e.scale0_bits,"scale1_bits":e.scale1_bits,"bf16_0_bits":e.bf16_0_bits,"bf16_1_bits":e.bf16_1_bits,"final_bits":e.final_bits})).collect::<Vec<_>>();
         self.selection.target.write("entries.json",serde_json::to_vec_pretty(&serde_json::json!({"operation":"actual production W1; existing CUDA lane diagnostic","entry_bytes":std::mem::size_of::<MoeW2LaneDiagEntry>(),"native_little_endian":cfg!(target_endian="little"),"device_diagnostic_allocation_bytes":0,"disabled_after_capture":true,"entries":rows})).map_err(|e|e.to_string())?.as_slice())
     }
 }
 impl Drop for MatchedW1LaneGuard {
-    fn drop(&mut self){if self.active{let rc=unsafe{(self.config)(0,0,std::ptr::null(),0)};if rc!=0{eprintln!("ERROR: selected W1 lane cleanup failed: cuda_error={rc}; evidence is invalid");}}}
+    fn drop(&mut self) {
+        if self.active {
+            let rc = unsafe { (self.config)(0, 0, std::ptr::null(), 0) };
+            if rc != 0 {
+                eprintln!(
+                    "ERROR: selected W1 lane cleanup failed: cuda_error={rc}; evidence is invalid"
+                );
+            }
+        }
+    }
 }
 // END bounded routed W1 lane guard
 
@@ -7565,9 +7652,11 @@ fn dsa_mla_minimum_transient_workspace_bytes(
             geometry.mla_num_heads,
             geometry.output_topk,
         )?;
-        minimum = minimum.max(row_bytes.checked_add(alignment_reserve).ok_or_else(|| {
-            "DSA MLA grouped-exact minimum workspace overflow".to_string()
-        })?);
+        minimum = minimum.max(
+            row_bytes
+                .checked_add(alignment_reserve)
+                .ok_or_else(|| "DSA MLA grouped-exact minimum workspace overflow".to_string())?,
+        );
     } else if gathered_gemm {
         let (row_bytes, alignment_reserve) = dsa_mla_gathered_gemm_workspace_row_layout(
             geometry.mla_num_heads,
@@ -7575,9 +7664,11 @@ fn dsa_mla_minimum_transient_workspace_bytes(
             geometry.mla_ckv_cache_dim,
             geometry.mla_qk_rope_dim,
         )?;
-        minimum = minimum.max(row_bytes.checked_add(alignment_reserve).ok_or_else(|| {
-            "DSA MLA gathered-GEMM minimum workspace overflow".to_string()
-        })?);
+        minimum = minimum.max(
+            row_bytes
+                .checked_add(alignment_reserve)
+                .ok_or_else(|| "DSA MLA gathered-GEMM minimum workspace overflow".to_string())?,
+        );
     }
     if dsa_mla_gathered_wvc_enabled(gathered_gemm)? {
         let (row_bytes, alignment_reserve) = dsa_mla_wvc_workspace_row_layout(
@@ -7915,7 +8006,7 @@ impl DsaPrefillRequestWorkspace {
         mla_num_heads: usize,
         mla_ckv_cache_dim: usize,
         workspace_capacity_bytes: usize,
-        mla_scratch_row_elements: (usize,usize,usize),
+        mla_scratch_row_elements: (usize, usize, usize),
     ) -> Result<Self, String> {
         if index_n_heads == 0 || index_head_dim == 0 {
             return Err(format!(
@@ -7947,10 +8038,19 @@ impl DsaPrefillRequestWorkspace {
             .checked_mul(index_n_heads)
             .and_then(|value| value.checked_mul(index_head_dim))
             .ok_or_else(|| "DSA prefill query workspace size overflow".to_string())?;
-        let canonical_mla = mla_num_heads.checked_mul(mla_ckv_cache_dim).ok_or("MLA workspace geometry overflow")?;
-        if mla_scratch_row_elements.0<canonical_mla || mla_scratch_row_elements.1<canonical_mla{return Err("MLA scratch extent below canonical attention requirement".into());}
-        let mla_latent_elements=chunk_rows.checked_mul(mla_scratch_row_elements.0).ok_or("MLA latent workspace extent overflow")?;
-        let mla_query_elements=chunk_rows.checked_mul(mla_scratch_row_elements.1).ok_or("MLA query workspace extent overflow")?;
+        let canonical_mla = mla_num_heads
+            .checked_mul(mla_ckv_cache_dim)
+            .ok_or("MLA workspace geometry overflow")?;
+        if mla_scratch_row_elements.0 < canonical_mla || mla_scratch_row_elements.1 < canonical_mla
+        {
+            return Err("MLA scratch extent below canonical attention requirement".into());
+        }
+        let mla_latent_elements = chunk_rows
+            .checked_mul(mla_scratch_row_elements.0)
+            .ok_or("MLA latent workspace extent overflow")?;
+        let mla_query_elements = chunk_rows
+            .checked_mul(mla_scratch_row_elements.1)
+            .ok_or("MLA query workspace extent overflow")?;
         Ok(Self {
             max_chunk_rows: chunk_rows,
             max_context_end: context_end,
@@ -7987,7 +8087,18 @@ impl DsaPrefillRequestWorkspace {
                 .map_err(|error| format!("alloc DSA prefill absorbed queries: {error}"))?,
             d_mla_attention: GpuBuf::alloc_zeroed(mla_query_elements)
                 .map_err(|error| format!("alloc DSA prefill MLA attention: {error}"))?,
-            d_mla_packed_rope: if mla_scratch_row_elements.2==0 {None}else{Some(GpuBuf::alloc_zeroed(chunk_rows.checked_mul(mla_scratch_row_elements.2).ok_or("MLA packed rotary extent overflow")?).map_err(|e|format!("alloc actual MLA packed F32 rotary queries: {e}"))?)},
+            d_mla_packed_rope: if mla_scratch_row_elements.2 == 0 {
+                None
+            } else {
+                Some(
+                    GpuBuf::alloc_zeroed(
+                        chunk_rows
+                            .checked_mul(mla_scratch_row_elements.2)
+                            .ok_or("MLA packed rotary extent overflow")?,
+                    )
+                    .map_err(|e| format!("alloc actual MLA packed F32 rotary queries: {e}"))?,
+                )
+            },
             active_owner_layer_idx: Cell::new(None),
             active_chunk_start: Cell::new(0),
             active_chunk_rows: Cell::new(0),
@@ -8453,11 +8564,25 @@ fn launch_dsa_prefill_gemm_scores(
                     .ok_or_else(|| "DSA prefill GEMM query-head pointer overflow".to_string())?;
                 let head_count_i32 = i32::try_from(head_count)
                     .map_err(|_| format!("DSA prefill GEMM head batch {head_count} exceeds i32"))?;
-                if let (Some(score), false)=(kernels.score_tensorcomp,temporary_is_bf16) {
-                    unsafe{score.enqueue(key_cache_ptr,query_band_ptr,buffers.score_temp_ptr,band_rows,score_context_end,index_n_heads,index_head_dim,head_start,head_count,score_scale,stream)?;}
+                if let (Some(score), false) = (kernels.score_tensorcomp, temporary_is_bf16) {
+                    unsafe {
+                        score.enqueue(
+                            key_cache_ptr,
+                            query_band_ptr,
+                            buffers.score_temp_ptr,
+                            band_rows,
+                            score_context_end,
+                            index_n_heads,
+                            index_head_dim,
+                            head_start,
+                            head_count,
+                            score_scale,
+                            stream,
+                        )?;
+                    }
                 } else {
-                unsafe {
-                    cublas_result::gemm_strided_batched_ex(
+                    unsafe {
+                        cublas_result::gemm_strided_batched_ex(
                         cublas_handle,
                         cublas_sys::cublasOperation_t::CUBLAS_OP_T,
                         cublas_sys::cublasOperation_t::CUBLAS_OP_N,
@@ -8500,7 +8625,7 @@ fn launch_dsa_prefill_gemm_scores(
                             error
                         )
                     })?;
-                }
+                    }
                 }
                 let mut e0 = output_band_ptr;
                 let mut e1 = buffers.score_temp_ptr;
@@ -8597,7 +8722,7 @@ fn launch_dsa_prefill_selection_rows(
     buffers: DsaPrefillSelectionBuffers,
     timing_events: Option<DsaPrefillSelectionTimingEvents>,
     timing: &mut DsaPrefillSelectionTiming,
-    observed_row: Option<(&crate::matched_probe::Target,usize)>,
+    observed_row: Option<(&crate::matched_probe::Target, usize)>,
 ) -> Result<crate::gpu_decode::DsaTopkPlan, String> {
     if rows == 0 || context_end == 0 {
         return Err(format!(
@@ -8852,15 +8977,40 @@ fn launch_dsa_prefill_selection_rows(
         timing,
     )?;
 
-    if let Some((target,row))=observed_row {
-        if row>=rows {return Err("indexer observation requires actual score tile row".into());}
-        let absolute_row=causal_position_start.checked_add(row).ok_or("index score observed position overflow")?;
-        let raw_prefix=absolute_row.checked_add(1).ok_or("index score observed prefix overflow")?;
-        let prefix=crate::mla_probe::causal_score_count(raw_prefix,causal_position_divisor)?;
-        if prefix>context_end{return Err("index observed score prefix exceeds actual context".into());}
-        crate::mla_probe::row(target,"indexer-rope-query.bf16",rope_queries_ptr,row,index_n_heads.checked_mul(index_head_dim).ok_or("index observed query extent overflow")?,2,stream)?;
-        let score_at=buffers.scores_ptr.checked_add(row.checked_mul(context_end).and_then(|v|v.checked_mul(4)).ok_or("index observed score offset overflow")? as u64).ok_or("index observed score pointer overflow")?;
-        crate::mla_probe::logical_block(target,"indexer-scores.f32",score_at,prefix,4,stream)?;
+    if let Some((target, row)) = observed_row {
+        if row >= rows {
+            return Err("indexer observation requires actual score tile row".into());
+        }
+        let absolute_row = causal_position_start
+            .checked_add(row)
+            .ok_or("index score observed position overflow")?;
+        let raw_prefix = absolute_row
+            .checked_add(1)
+            .ok_or("index score observed prefix overflow")?;
+        let prefix = crate::mla_probe::causal_score_count(raw_prefix, causal_position_divisor)?;
+        if prefix > context_end {
+            return Err("index observed score prefix exceeds actual context".into());
+        }
+        crate::mla_probe::row(
+            target,
+            "indexer-rope-query.bf16",
+            rope_queries_ptr,
+            row,
+            index_n_heads
+                .checked_mul(index_head_dim)
+                .ok_or("index observed query extent overflow")?,
+            2,
+            stream,
+        )?;
+        let score_at = buffers
+            .scores_ptr
+            .checked_add(
+                row.checked_mul(context_end)
+                    .and_then(|v| v.checked_mul(4))
+                    .ok_or("index observed score offset overflow")? as u64,
+            )
+            .ok_or("index observed score pointer overflow")?;
+        crate::mla_probe::logical_block(target, "indexer-scores.f32", score_at, prefix, 4, stream)?;
         target.write("indexer-score-layout.json",serde_json::to_vec_pretty(&serde_json::json!({"absolute_row":absolute_row,"tile_local_row":row,"tile_rows":rows,"score_row_stride":context_end,"copied_causal_scores":prefix,"raw_prefix":raw_prefix,"causal_position_divisor":causal_position_divisor,"causal_context_row_span":causal_context_row_span,"index_heads":index_n_heads,"index_head_dim":index_head_dim,"score_scale":score_scale,"score_mode":format!("{:?}",index_score_mode),"topk_mode":format!("{:?}",topk_mode),"scope":"actual current score tile before top-k; excludes future masked positions; no last-tile scratch substitution"})).map_err(|e|e.to_string())?.as_slice())?;
     }
 
@@ -9290,8 +9440,14 @@ fn launch_dsa_prefill_selection_chunk(
             },
             timing_events,
             &mut timing,
-        observed.and_then(|target|target.row.checked_sub(row_start).filter(|&row|row<rows).map(|row|(target,row))),
-)?;
+            observed.and_then(|target| {
+                target
+                    .row
+                    .checked_sub(row_start)
+                    .filter(|&row| row < rows)
+                    .map(|row| (target, row))
+            }),
+        )?;
     }
     workspace.mark_owner_result(
         owner_layer_idx,
@@ -9690,7 +9846,7 @@ pub struct PrefillScratch {
     /// block order and marks blocks owned by the other precision with -1.
     pub d_fused_expert_ids_int4: GpuBuf<i32>,
     pub d_fused_expert_ids_int8: GpuBuf<i32>,
-    pub d_num_tokens_post: GpuBuf<i32>,  // [1]
+    pub d_num_tokens_post: GpuBuf<i32>, // [1]
     pub fused_sorted_count: usize,
     pub fused_blocks: usize,
     // GPU-only routing scratch
@@ -9707,21 +9863,21 @@ pub struct PrefillScratch {
     pub d_expert_w2_packed_b: GpuBuf<u8>,
     pub d_expert_w2_scales_b: GpuBuf<u8>,
     // Linear attention scratch buffers
-    pub d_la_q: Option<GpuBuf<f32>>,    // [max_tokens, nv, dk] FP32
-    pub d_la_k: Option<GpuBuf<f32>>,    // [max_tokens, nv, dk] FP32
-    pub d_la_v: Option<GpuBuf<f32>>,    // [max_tokens, nv, dv] FP32
-    pub d_la_z: Option<GpuBuf<u16>>,    // [max_tokens, nv, dv] BF16 (gate)
-    pub d_la_b: Option<Arc<GpuBuf<u16>>>,    // [max_tokens, nv] BF16
-    pub d_la_a: Option<GpuBuf<u16>>,    // [max_tokens, nv] BF16
-    pub d_la_beta: Option<GpuBuf<f32>>, // [max_tokens, nv] FP32
-    pub d_la_gate: Option<GpuBuf<f32>>, // [max_tokens, nv] FP32
+    pub d_la_q: Option<GpuBuf<f32>>,      // [max_tokens, nv, dk] FP32
+    pub d_la_k: Option<GpuBuf<f32>>,      // [max_tokens, nv, dk] FP32
+    pub d_la_v: Option<GpuBuf<f32>>,      // [max_tokens, nv, dv] FP32
+    pub d_la_z: Option<GpuBuf<u16>>,      // [max_tokens, nv, dv] BF16 (gate)
+    pub d_la_b: Option<Arc<GpuBuf<u16>>>, // [max_tokens, nv] BF16
+    pub d_la_a: Option<GpuBuf<u16>>,      // [max_tokens, nv] BF16
+    pub d_la_beta: Option<GpuBuf<f32>>,   // [max_tokens, nv] FP32
+    pub d_la_gate: Option<GpuBuf<f32>>,   // [max_tokens, nv] FP32
     pub d_la_conv_out: Option<GpuBuf<f32>>, // [conv_dim, max_tokens] FP32
     pub d_la_v_beta: Option<GpuBuf<f32>>, // [nv, max_tokens, dv] FP32
     pub d_la_k_beta: Option<GpuBuf<f32>>, // [nv, max_tokens, dk] FP32
-    pub d_la_v_new: Option<GpuBuf<f32>>, // [nv, chunk_size, dv] FP32 (per chunk)
-    pub d_la_g_cum: Option<GpuBuf<f32>>, // [nv, num_chunks, chunk_size] FP32
-    pub d_la_attn: Option<GpuBuf<f32>>, // [nv, num_chunks, CS, CS] FP32
-    pub d_la_state: Option<GpuBuf<f32>>, // [nv, dk, dv] FP32 (recurrent state)
+    pub d_la_v_new: Option<GpuBuf<f32>>,  // [nv, chunk_size, dv] FP32 (per chunk)
+    pub d_la_g_cum: Option<GpuBuf<f32>>,  // [nv, num_chunks, chunk_size] FP32
+    pub d_la_attn: Option<GpuBuf<f32>>,   // [nv, num_chunks, CS, CS] FP32
+    pub d_la_state: Option<GpuBuf<f32>>,  // [nv, dk, dv] FP32 (recurrent state)
     // FlashAttention-2 scratch
     pub d_fa2_lse: Option<GpuBuf<f32>>, // [num_heads, max_tokens] FP32 softmax LSE
     pub d_la_chunk_out: Option<GpuBuf<f32>>, // [nv, chunk_size, dv] FP32
@@ -9839,7 +9995,9 @@ impl TileQCalibrationCapture {
     ) -> Result<Option<Self>, String> {
         let Some(raw_dir) = std::env::var_os("KRASIS_TILEQ_CAPTURE_DIR") else {
             if std::env::var_os("KRASIS_TILEQ_CAPTURE_WINDOW_BYTES").is_some() {
-                return Err("KRASIS_TILEQ_CAPTURE_WINDOW_BYTES requires KRASIS_TILEQ_CAPTURE_DIR".into());
+                return Err(
+                    "KRASIS_TILEQ_CAPTURE_WINDOW_BYTES requires KRASIS_TILEQ_CAPTURE_DIR".into(),
+                );
             }
             return Ok(None);
         };
@@ -9849,7 +10007,9 @@ impl TileQCalibrationCapture {
             );
         }
         let mut phase = crate::capture_phase::CapturePhase::from_env()?;
-        if let Some(sink) = phase.as_mut() { sink.mark("capture_init_begin", None, 0)?; }
+        if let Some(sink) = phase.as_mut() {
+            sink.mark("capture_init_begin", None, 0)?;
+        }
         let dir = PathBuf::from(raw_dir);
         if dir.as_os_str().is_empty() {
             return Err("KRASIS_TILEQ_CAPTURE_DIR must not be empty".to_string());
@@ -9929,13 +10089,22 @@ impl TileQCalibrationCapture {
             None => None,
             Some(raw) => {
                 use crate::session_cache::MemoryAvailabilityProbe;
-                let bytes = raw.to_str().ok_or("capture window size must be UTF-8")?
-                    .parse::<usize>().map_err(|_| "KRASIS_TILEQ_CAPTURE_WINDOW_BYTES must be a positive byte count")?;
-                let available = crate::session_cache::SystemMemoryAvailabilityProbe.availability()?.effective_available_bytes;
+                let bytes = raw
+                    .to_str()
+                    .ok_or("capture window size must be UTF-8")?
+                    .parse::<usize>()
+                    .map_err(|_| {
+                        "KRASIS_TILEQ_CAPTURE_WINDOW_BYTES must be a positive byte count"
+                    })?;
+                let available = crate::session_cache::SystemMemoryAvailabilityProbe
+                    .availability()?
+                    .effective_available_bytes;
                 let window = crate::capture_window::CaptureWindow::new(bytes, available)?;
                 for spec in layer_specs.iter().flatten() {
                     let geometry = crate::capture_window::Geometry {
-                        input: spec.expert_input_size, intermediate: spec.intermediate_size, topk: spec.topk,
+                        input: spec.expert_input_size,
+                        intermediate: spec.intermediate_size,
+                        topk: spec.topk,
                     };
                     let rows = window.rows(geometry, max_tokens_per_request)?;
                     eprintln!("[TILEQ-CAPTURE] bounded layer={} staging_bytes={} rows_per_window={} persist_each_window=true",
@@ -9981,8 +10150,10 @@ impl TileQCalibrationCapture {
         if metadata_path.exists() {
             let existing = std::fs::read(&metadata_path)
                 .map_err(|e| format!("failed to read {}: {e}", metadata_path.display()))?;
-            let existing_json: serde_json::Value = serde_json::from_slice(&existing)
-                .map_err(|e| format!("invalid capture metadata {}: {e}", metadata_path.display()))?;
+            let existing_json: serde_json::Value =
+                serde_json::from_slice(&existing).map_err(|e| {
+                    format!("invalid capture metadata {}: {e}", metadata_path.display())
+                })?;
             if existing_json != metadata {
                 return Err(format!(
                     "TileQ capture metadata {} does not match the requested runtime/corpus identity",
@@ -9990,7 +10161,12 @@ impl TileQCalibrationCapture {
                 ));
             }
         } else if std::fs::read_dir(&dir)
-            .map_err(|e| format!("failed to inspect TileQ capture directory {}: {e}", dir.display()))?
+            .map_err(|e| {
+                format!(
+                    "failed to inspect TileQ capture directory {}: {e}",
+                    dir.display()
+                )
+            })?
             .next()
             .is_some()
         {
@@ -10011,7 +10187,10 @@ impl TileQCalibrationCapture {
         }
         let requests_dir = dir.join("requests");
         std::fs::create_dir_all(&requests_dir).map_err(|e| {
-            format!("failed to create TileQ request directory {}: {e}", requests_dir.display())
+            format!(
+                "failed to create TileQ request directory {}: {e}",
+                requests_dir.display()
+            )
         })?;
         let (tokens_per_layer, accepted_request_hashes, accepted_requests) =
             Self::load_accepted_requests(
@@ -10030,7 +10209,9 @@ impl TileQCalibrationCapture {
             accepted_requests,
             tokens_per_layer.iter().copied().max().unwrap_or(0),
         );
-        if let Some(sink) = phase.as_mut() { sink.mark("capture_init_done", None, accepted_requests)?; }
+        if let Some(sink) = phase.as_mut() {
+            sink.mark("capture_init_done", None, accepted_requests)?;
+        }
         Ok(Some(Self {
             phase,
             persist_windows: window.is_some(),
@@ -10060,9 +10241,12 @@ impl TileQCalibrationCapture {
             .layer_specs
             .iter()
             .enumerate()
-            .filter_map(|(layer, spec)| spec.as_ref().map(|_| {
-                self.max_tokens_per_layer.saturating_sub(self.tokens_per_layer[layer])
-            }))
+            .filter_map(|(layer, spec)| {
+                spec.as_ref().map(|_| {
+                    self.max_tokens_per_layer
+                        .saturating_sub(self.tokens_per_layer[layer])
+                })
+            })
             .min()
             .unwrap_or(0);
         let target_rows = token_ids
@@ -10106,7 +10290,10 @@ impl TileQCalibrationCapture {
             ));
         }
         std::fs::create_dir(&temp_dir).map_err(|e| {
-            format!("failed to create TileQ request transaction {}: {e}", temp_dir.display())
+            format!(
+                "failed to create TileQ request transaction {}: {e}",
+                temp_dir.display()
+            )
         })?;
         self.active_request = Some(TileQCaptureRequest {
             temp_dir,
@@ -10124,9 +10311,13 @@ impl TileQCalibrationCapture {
         self.active_request
             .as_ref()
             .map(|request| {
-                request
-                    .target_rows
-                    .saturating_sub(request.rows_per_layer.get(model_layer).copied().unwrap_or(0))
+                request.target_rows.saturating_sub(
+                    request
+                        .rows_per_layer
+                        .get(model_layer)
+                        .copied()
+                        .unwrap_or(0),
+                )
             })
             .unwrap_or(0)
     }
@@ -10160,14 +10351,18 @@ impl TileQCalibrationCapture {
         if !metadata.is_file() || metadata.len() != expected_bytes {
             return Err(format!(
                 "TileQ shard {} size mismatch: expected {} got {}",
-                path.display(), expected_bytes, metadata.len()
+                path.display(),
+                expected_bytes,
+                metadata.len()
             ));
         }
         let actual_sha256 = Self::sha256_path(path)?;
         if actual_sha256 != expected_sha256 {
             return Err(format!(
                 "TileQ shard {} SHA-256 mismatch: expected {} got {}",
-                path.display(), expected_sha256, actual_sha256
+                path.display(),
+                expected_sha256,
+                actual_sha256
             ));
         }
         let mut file = File::open(path)
@@ -10187,19 +10382,24 @@ impl TileQCalibrationCapture {
             || u32_at(24) as usize != spec.expert_count
             || u32_at(28) != 0
         {
-            return Err(format!("TileQ shard {} has incompatible geometry", path.display()));
+            return Err(format!(
+                "TileQ shard {} has incompatible geometry",
+                path.display()
+            ));
         }
         let mut offset = 32u64;
         let mut rows_total = 0usize;
         while offset < expected_bytes {
             let mut row_bytes = [0u8; 4];
-            file.read_exact(&mut row_bytes).map_err(|e| {
-                format!("truncated TileQ shard row count {}: {e}", path.display())
-            })?;
+            file.read_exact(&mut row_bytes)
+                .map_err(|e| format!("truncated TileQ shard row count {}: {e}", path.display()))?;
             offset += 4;
             let rows = u32::from_le_bytes(row_bytes) as usize;
             if rows == 0 {
-                return Err(format!("TileQ shard {} contains an empty chunk", path.display()));
+                return Err(format!(
+                    "TileQ shard {} contains an empty chunk",
+                    path.display()
+                ));
             }
             let payload = rows
                 .checked_mul(spec.expert_input_size)
@@ -10220,7 +10420,10 @@ impl TileQCalibrationCapture {
                 .checked_add(payload as u64)
                 .ok_or_else(|| format!("TileQ shard offset overflow: {}", path.display()))?;
             if offset > expected_bytes {
-                return Err(format!("TileQ shard {} has a truncated payload", path.display()));
+                return Err(format!(
+                    "TileQ shard {} has a truncated payload",
+                    path.display()
+                ));
             }
             file.seek(SeekFrom::Start(offset))
                 .map_err(|e| format!("failed to seek TileQ shard {}: {e}", path.display()))?;
@@ -10231,7 +10434,11 @@ impl TileQCalibrationCapture {
         if offset != expected_bytes || rows_total != expected_rows {
             return Err(format!(
                 "TileQ shard {} row/length mismatch: rows {}/{} bytes {}/{}",
-                path.display(), rows_total, expected_rows, offset, expected_bytes
+                path.display(),
+                rows_total,
+                expected_rows,
+                offset,
+                expected_bytes
             ));
         }
         Ok(())
@@ -10244,9 +10451,19 @@ impl TileQCalibrationCapture {
         layer_specs: &[Option<TileQCaptureLayerSpec>],
     ) -> Result<(Vec<usize>, HashSet<String>, usize), String> {
         let mut entries = std::fs::read_dir(requests_dir)
-            .map_err(|e| format!("failed to scan TileQ requests {}: {e}", requests_dir.display()))?
+            .map_err(|e| {
+                format!(
+                    "failed to scan TileQ requests {}: {e}",
+                    requests_dir.display()
+                )
+            })?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("failed to enumerate TileQ requests {}: {e}", requests_dir.display()))?;
+            .map_err(|e| {
+                format!(
+                    "failed to enumerate TileQ requests {}: {e}",
+                    requests_dir.display()
+                )
+            })?;
         entries.sort_by_key(|entry| entry.file_name());
         let mut totals = vec![0usize; layer_specs.len()];
         let mut hashes = HashSet::new();
@@ -10269,25 +10486,41 @@ impl TileQCalibrationCapture {
             let manifest_path = entry.path().join("request.json");
             let manifest_bytes = std::fs::read(&manifest_path)
                 .map_err(|e| format!("failed to read {}: {e}", manifest_path.display()))?;
-            let manifest: TileQRequestManifest = serde_json::from_slice(&manifest_bytes)
-                .map_err(|e| format!("invalid TileQ request manifest {}: {e}", manifest_path.display()))?;
+            let manifest: TileQRequestManifest =
+                serde_json::from_slice(&manifest_bytes).map_err(|e| {
+                    format!(
+                        "invalid TileQ request manifest {}: {e}",
+                        manifest_path.display()
+                    )
+                })?;
             if manifest.schema_version != TILEQ_REQUEST_MANIFEST_VERSION
                 || manifest.format != "Krasis KTC1 transactional request"
                 || manifest.calibration_sha256 != calibration_sha256
                 || manifest.request_sha256.len() != 64
-                || !manifest.request_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                || !manifest
+                    .request_sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit())
                 || manifest.rows_per_layer == 0
             {
-                return Err(format!("TileQ request manifest {} has an incompatible identity", manifest_path.display()));
+                return Err(format!(
+                    "TileQ request manifest {} has an incompatible identity",
+                    manifest_path.display()
+                ));
             }
             if !hashes.insert(manifest.request_sha256.clone()) {
-                return Err(format!("duplicate TileQ request identity {}", manifest.request_sha256));
+                return Err(format!(
+                    "duplicate TileQ request identity {}",
+                    manifest.request_sha256
+                ));
             }
             let routed_count = layer_specs.iter().filter(|spec| spec.is_some()).count();
             if manifest.layers.len() != routed_count {
                 return Err(format!(
                     "TileQ request {} layer cardinality mismatch: expected {} got {}",
-                    manifest.request_sha256, routed_count, manifest.layers.len()
+                    manifest.request_sha256,
+                    routed_count,
+                    manifest.layers.len()
                 ));
             }
             let mut expected_files = HashSet::from(["request.json".to_string()]);
@@ -10295,7 +10528,12 @@ impl TileQCalibrationCapture {
                 let spec = layer_specs
                     .get(layer.model_layer)
                     .and_then(|value| value.as_ref())
-                    .ok_or_else(|| format!("TileQ request references non-routed layer {}", layer.model_layer))?;
+                    .ok_or_else(|| {
+                        format!(
+                            "TileQ request references non-routed layer {}",
+                            layer.model_layer
+                        )
+                    })?;
                 let expected_name = format!("layer_{:05}.ktc", layer.model_layer);
                 if layer.file != expected_name
                     || layer.rows != manifest.rows_per_layer
@@ -10363,8 +10601,9 @@ impl TileQCalibrationCapture {
     fn sync_directory(path: &std::path::Path) -> Result<(), String> {
         #[cfg(unix)]
         {
-            let directory = File::open(path)
-                .map_err(|e| format!("failed to open directory {} for sync: {e}", path.display()))?;
+            let directory = File::open(path).map_err(|e| {
+                format!("failed to open directory {} for sync: {e}", path.display())
+            })?;
             directory
                 .sync_all()
                 .map_err(|e| format!("failed to sync directory {}: {e}", path.display()))?;
@@ -10388,7 +10627,9 @@ impl TileQCalibrationCapture {
                 ));
             }
             if spec.is_none() && request.rows_per_layer[layer] != 0 {
-                return Err(format!("TileQ request recorded rows for non-routed layer {layer}"));
+                return Err(format!(
+                    "TileQ request recorded rows for non-routed layer {layer}"
+                ));
             }
         }
         let mut layers = Vec::new();
@@ -10399,21 +10640,29 @@ impl TileQCalibrationCapture {
                 .read(true)
                 .write(true)
                 .open(&path)
-                .map_err(|e| format!("failed to open completed TileQ shard {}: {e}", path.display()))?;
-            file.sync_all()
-                .map_err(|e| format!("failed to sync completed TileQ shard {}: {e}", path.display()))?;
+                .map_err(|e| {
+                    format!(
+                        "failed to open completed TileQ shard {}: {e}",
+                        path.display()
+                    )
+                })?;
+            file.sync_all().map_err(|e| {
+                format!(
+                    "failed to sync completed TileQ shard {}: {e}",
+                    path.display()
+                )
+            })?;
             let bytes = file
                 .metadata()
-                .map_err(|e| format!("failed to stat completed TileQ shard {}: {e}", path.display()))?
+                .map_err(|e| {
+                    format!(
+                        "failed to stat completed TileQ shard {}: {e}",
+                        path.display()
+                    )
+                })?
                 .len();
             let sha256 = Self::sha256_path(&path)?;
-            Self::validate_layer_shard(
-                &path,
-                spec,
-                request.target_rows,
-                bytes,
-                &sha256,
-            )?;
+            Self::validate_layer_shard(&path, spec, request.target_rows, bytes, &sha256)?;
             layers.push(TileQRequestLayerManifest {
                 model_layer: spec.model_layer,
                 file: file_name,
@@ -10455,12 +10704,16 @@ impl TileQCalibrationCapture {
             &request.request_sha256[..16]
         ));
         if final_dir.exists() {
-            return Err(format!("TileQ published request already exists: {}", final_dir.display()));
+            return Err(format!(
+                "TileQ published request already exists: {}",
+                final_dir.display()
+            ));
         }
         std::fs::rename(&request.temp_dir, &final_dir).map_err(|e| {
             format!(
                 "failed to atomically publish TileQ request {} -> {}: {e}",
-                request.temp_dir.display(), final_dir.display()
+                request.temp_dir.display(),
+                final_dir.display()
             )
         })?;
         Self::sync_directory(&self.dir.join("requests"))?;
@@ -10565,17 +10818,29 @@ impl TileQCalibrationCapture {
         file.flush()
             .map_err(|e| format!("failed to flush TileQ capture {}: {e}", path.display()))?;
         if self.persist_windows {
-            file.sync_data()
-                .map_err(|e| format!("failed to persist TileQ capture window {}: {e}", path.display()))?;
+            file.sync_data().map_err(|e| {
+                format!(
+                    "failed to persist TileQ capture window {}: {e}",
+                    path.display()
+                )
+            })?;
         }
         request.rows_per_layer[model_layer] = existing.saturating_add(rows);
         Ok(())
     }
 
-    fn capture_bounded_inputs(&mut self, model_layer: usize, rows: usize,
-        geometry: crate::capture_window::Geometry, expert_count: usize,
-        pointers: [u64; 4]) -> Result<(), String> {
-        let mut window = self.window.take().ok_or("bounded capture staging is missing")?;
+    fn capture_bounded_inputs(
+        &mut self,
+        model_layer: usize,
+        rows: usize,
+        geometry: crate::capture_window::Geometry,
+        expert_count: usize,
+        pointers: [u64; 4],
+    ) -> Result<(), String> {
+        let mut window = self
+            .window
+            .take()
+            .ok_or("bounded capture staging is missing")?;
         let result = (|| {
             let step = window.rows(geometry, rows)?;
             let mut offset = 0;
@@ -10588,8 +10853,17 @@ impl TileQCalibrationCapture {
                 let batch = window.copy_device(geometry, count, offset, pointers)?;
                 copy_ms += started.elapsed().as_secs_f64() * 1000.0;
                 let started = Instant::now();
-                self.append_chunk(model_layer, geometry.input, geometry.intermediate, geometry.topk,
-                    expert_count, batch.inputs, batch.ids, batch.weights, batch.down)?;
+                self.append_chunk(
+                    model_layer,
+                    geometry.input,
+                    geometry.intermediate,
+                    geometry.topk,
+                    expert_count,
+                    batch.inputs,
+                    batch.ids,
+                    batch.weights,
+                    batch.down,
+                )?;
                 persist_ms += started.elapsed().as_secs_f64() * 1000.0;
                 offset += count;
                 windows += 1;
@@ -10722,7 +10996,11 @@ mod tileq_transaction_tests {
         assert!(error.contains("incomplete at layer 2"));
         assert!(std::fs::read_dir(dir.join("requests"))
             .unwrap()
-            .all(|entry| entry.unwrap().file_name().to_string_lossy().starts_with('.')));
+            .all(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with('.')));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -10763,9 +11041,18 @@ mod tileq_transaction_tests {
             let mut offset = 32;
             let mut result: [Vec<u8>; 4] = Default::default();
             while offset < bytes.len() {
-                let rows = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                let rows =
+                    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
                 offset += 4;
-                for (index, stride) in [g.input * 2, g.topk * 4, g.topk * 4, g.topk * g.intermediate * 2].iter().enumerate() {
+                for (index, stride) in [
+                    g.input * 2,
+                    g.topk * 4,
+                    g.topk * 4,
+                    g.topk * g.intermediate * 2,
+                ]
+                .iter()
+                .enumerate()
+                {
                     let end = offset + rows * stride;
                     result[index].extend_from_slice(&bytes[offset..end]);
                     offset = end;
@@ -10774,17 +11061,53 @@ mod tileq_transaction_tests {
             result
         }
         let count = CudaDevice::count().unwrap();
-        assert!(count > 0, "bounded capture equality requires a real CUDA device");
+        assert!(
+            count > 0,
+            "bounded capture equality requires a real CUDA device"
+        );
         for device in 0..count as usize {
             let dev = CudaDevice::new(device).unwrap();
-            let g = Geometry { input: 3, intermediate: 3, topk: 2 };
+            let g = Geometry {
+                input: 3,
+                intermediate: 3,
+                topk: 2,
+            };
             let rows = 7;
-            let inputs = dev.htod_copy((0..rows * g.input).map(|x| 0x3f00 + x as u16).collect::<Vec<_>>()).unwrap();
-            let ids = dev.htod_copy((0..rows * g.topk).map(|x| (x % 2) as i32).collect::<Vec<_>>()).unwrap();
-            let weights = dev.htod_copy((0..rows * g.topk).map(|x| (x + 1) as f32 / 16.0).collect::<Vec<_>>()).unwrap();
-            let down = dev.htod_copy((0..rows * g.topk * g.intermediate).map(|x| 0x4000 + x as u16).collect::<Vec<_>>()).unwrap();
+            let inputs = dev
+                .htod_copy(
+                    (0..rows * g.input)
+                        .map(|x| 0x3f00 + x as u16)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+            let ids = dev
+                .htod_copy(
+                    (0..rows * g.topk)
+                        .map(|x| (x % 2) as i32)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+            let weights = dev
+                .htod_copy(
+                    (0..rows * g.topk)
+                        .map(|x| (x + 1) as f32 / 16.0)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+            let down = dev
+                .htod_copy(
+                    (0..rows * g.topk * g.intermediate)
+                        .map(|x| 0x4000 + x as u16)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
             dev.synchronize().unwrap();
-            let pointers = [*inputs.device_ptr(), *ids.device_ptr(), *weights.device_ptr(), *down.device_ptr()];
+            let pointers = [
+                *inputs.device_ptr(),
+                *ids.device_ptr(),
+                *weights.device_ptr(),
+                *down.device_ptr(),
+            ];
             let legacy_dir = test_dir("gpu-legacy");
             let bounded_dir = test_dir("gpu-bounded");
             let mut legacy = capture_for(legacy_dir.clone());
@@ -10792,28 +11115,70 @@ mod tileq_transaction_tests {
             for capture in [&mut legacy, &mut bounded] {
                 capture.max_tokens_per_request = rows;
                 capture.layer_specs = vec![Some(TileQCaptureLayerSpec {
-                    model_layer: 0, expert_input_size: g.input, intermediate_size: g.intermediate,
-                    topk: g.topk, expert_count: 2,
+                    model_layer: 0,
+                    expert_input_size: g.input,
+                    intermediate_size: g.intermediate,
+                    topk: g.topk,
+                    expert_count: 2,
                 })];
                 capture.tokens_per_layer = vec![0];
-                capture.begin_request(&(0..rows as u32).collect::<Vec<_>>(), 0).unwrap();
+                capture
+                    .begin_request(&(0..rows as u32).collect::<Vec<_>>(), 0)
+                    .unwrap();
             }
             bounded.window = Some(CaptureWindow::new(104, 104).unwrap());
             bounded.persist_windows = true;
             assert_eq!(bounded.window.as_ref().unwrap().rows(g, rows).unwrap(), 3);
-            legacy.append_chunk(0, g.input, g.intermediate, g.topk, 2,
-                &download_device_u16(pointers[0], rows * g.input).unwrap(),
-                &download_device_i32(pointers[1], rows * g.topk).unwrap(),
-                &download_device_f32(pointers[2], rows * g.topk).unwrap(),
-                &download_device_u16(pointers[3], rows * g.topk * g.intermediate).unwrap()).unwrap();
-            bounded.capture_bounded_inputs(0, rows, g, 2, pointers).unwrap();
-            assert_eq!(tuples(&legacy.active_request.as_ref().unwrap().temp_dir.join("layer_00000.ktc"), g),
-                tuples(&bounded.active_request.as_ref().unwrap().temp_dir.join("layer_00000.ktc"), g));
+            legacy
+                .append_chunk(
+                    0,
+                    g.input,
+                    g.intermediate,
+                    g.topk,
+                    2,
+                    &download_device_u16(pointers[0], rows * g.input).unwrap(),
+                    &download_device_i32(pointers[1], rows * g.topk).unwrap(),
+                    &download_device_f32(pointers[2], rows * g.topk).unwrap(),
+                    &download_device_u16(pointers[3], rows * g.topk * g.intermediate).unwrap(),
+                )
+                .unwrap();
+            bounded
+                .capture_bounded_inputs(0, rows, g, 2, pointers)
+                .unwrap();
+            assert_eq!(
+                tuples(
+                    &legacy
+                        .active_request
+                        .as_ref()
+                        .unwrap()
+                        .temp_dir
+                        .join("layer_00000.ktc"),
+                    g
+                ),
+                tuples(
+                    &bounded
+                        .active_request
+                        .as_ref()
+                        .unwrap()
+                        .temp_dir
+                        .join("layer_00000.ktc"),
+                    g
+                )
+            );
             legacy.commit_request().unwrap();
             bounded.commit_request().unwrap();
-            assert_eq!(legacy.accepted_request_hashes, bounded.accepted_request_hashes);
-            let (accepted_rows, hashes, requests) = TileQCalibrationCapture::load_accepted_requests(
-                &bounded_dir.join("requests"), &"11".repeat(32), 8, &bounded.layer_specs).unwrap();
+            assert_eq!(
+                legacy.accepted_request_hashes,
+                bounded.accepted_request_hashes
+            );
+            let (accepted_rows, hashes, requests) =
+                TileQCalibrationCapture::load_accepted_requests(
+                    &bounded_dir.join("requests"),
+                    &"11".repeat(32),
+                    8,
+                    &bounded.layer_specs,
+                )
+                .unwrap();
             assert_eq!(accepted_rows, vec![rows]);
             assert_eq!(hashes, legacy.accepted_request_hashes);
             assert_eq!(requests, 1);
@@ -10938,12 +11303,14 @@ fn select_prefill_pinning_experts(
             .filter(|(_, count)| *count > 0)
             .collect::<Vec<_>>();
         layer.sort_unstable_by(|left, right| {
-            right
-                .1
-                .cmp(&left.1)
-                .then_with(|| left.0.cmp(&right.0))
+            right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0))
         });
-        ranked.push(layer.into_iter().map(|(expert, _)| expert).collect::<Vec<_>>());
+        ranked.push(
+            layer
+                .into_iter()
+                .map(|(expert, _)| expert)
+                .collect::<Vec<_>>(),
+        );
     }
 
     let first_payload = expert_payload_bytes[0][0];
@@ -10988,7 +11355,10 @@ fn select_prefill_pinning_experts(
 }
 
 pub struct PrefillEngine {
+    #[cfg(feature = "scalar-gdn-test")]
+    pub(crate) selected_scalar_gdn: Option<Arc<crate::scalar_gdn_runtime::Storage>>,
     pub(crate) selected_kda: Option<Arc<crate::kda_prefix_owner::KdaEngineRequestStorage>>,
+    pub(crate) native_bf16_projection: Option<Arc<crate::bf16_row_projection::Program>>,
     pub(crate) ordered_kda_projection: Option<Arc<crate::ordered_projection::OrderedProjection>>,
     pub(crate) ordered_mla_f32: Option<Arc<crate::mla_f32::MlaF32Ops>>,
     pub(crate) common_mla: Option<Arc<std::sync::Mutex<crate::stable_mla_runtime::Bank>>>,
@@ -11465,16 +11835,26 @@ unsafe impl Sync for PrefillEngine {}
 
 impl Drop for PrefillEngine {
     fn drop(&mut self) {
+        #[cfg(feature = "scalar-gdn-test")]
+        if let Some(storage) = &self.selected_scalar_gdn {
+            storage.complete_before_release();
+        }
         // Teardown only: every producer must finish while scratch, event and
         // pointer-table owners are still alive, including an error/unwind exit.
         if let Err(e) = self.device.bind_to_thread() {
-            crate::vram_monitor::fatal_cuda_context_error("prefill teardown context", &e.to_string());
+            crate::vram_monitor::fatal_cuda_context_error(
+                "prefill teardown context",
+                &e.to_string(),
+            );
         }
         for stream in [self.stream, self.copy_stream, self.shared_stream] {
             if !stream.is_null() {
                 let rc = unsafe { cuda_sys::lib().cuStreamSynchronize(stream) };
                 if rc != cuda_sys::CUresult::CUDA_SUCCESS {
-                    crate::vram_monitor::fatal_cuda_context_error("prefill teardown completion", &format!("{rc:?}"));
+                    crate::vram_monitor::fatal_cuda_context_error(
+                        "prefill teardown completion",
+                        &format!("{rc:?}"),
+                    );
                 }
             }
         }
@@ -11543,22 +11923,55 @@ struct ExpertHqqRuntimePrefillSingleBlockGpuDiagnosticOutput {
 }
 
 impl PrefillEngine {
-    pub(crate) fn with_matched_prefill_request<T>(&mut self, request: &str, run: impl FnOnce(&mut Self) -> Result<T,String>) -> Result<T,String> {
-        if self.matched_prefill_invocation.is_some() || self.matched_prefill_request_label.is_some() { return Err("nested prefill capture request".into()); }
-        if crate::matched_probe::enabled()? { self.matched_prefill_request_label=Some(request.to_owned()); }
-        let result=run(self);
-        self.matched_prefill_request_label=None;
+    pub(crate) fn with_matched_prefill_request<T>(
+        &mut self,
+        request: &str,
+        run: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if self.matched_prefill_invocation.is_some() || self.matched_prefill_request_label.is_some()
+        {
+            return Err("nested prefill capture request".into());
+        }
+        if crate::matched_probe::enabled()? {
+            self.matched_prefill_request_label = Some(request.to_owned());
+        }
+        let result = run(self);
+        self.matched_prefill_request_label = None;
         result
     }
-    fn with_prefill_capture<T>(&mut self, tokens:&[u32], start:usize, run:impl FnOnce(&mut Self)->Result<T,String>)->Result<T,String> {
-        if self.matched_prefill_invocation.is_some() { return Err("nested actual prefill capture invocation".into()); }
-        self.matched_prefill_invocation=crate::matched_prefill_capture::Invocation::begin(self.config.device_ordinal,self.matched_prefill_request_label.as_deref(),tokens,start)?;
-        let result=run(self);
-        self.matched_prefill_invocation=None;
+    fn with_prefill_capture<T>(
+        &mut self,
+        tokens: &[u32],
+        start: usize,
+        run: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if self.matched_prefill_invocation.is_some() {
+            return Err("nested actual prefill capture invocation".into());
+        }
+        self.matched_prefill_invocation = crate::matched_prefill_capture::Invocation::begin(
+            self.config.device_ordinal,
+            self.matched_prefill_request_label.as_deref(),
+            tokens,
+            start,
+        )?;
+        let result = run(self);
+        self.matched_prefill_invocation = None;
         result
     }
-    fn matched_prefill_target(&self,operation:&str,layer:usize,height:usize,label:Option<&str>)->Result<Option<crate::matched_probe::Target>,String>{
-        crate::matched_prefill_capture::target(self.matched_prefill_invocation.as_ref(),operation,layer,height,label)
+    fn matched_prefill_target(
+        &self,
+        operation: &str,
+        layer: usize,
+        height: usize,
+        label: Option<&str>,
+    ) -> Result<Option<crate::matched_probe::Target>, String> {
+        crate::matched_prefill_capture::target(
+            self.matched_prefill_invocation.as_ref(),
+            operation,
+            layer,
+            height,
+            label,
+        )
     }
     pub(crate) fn portable_predicted_w1_policy_label(&self) -> String {
         self.portable_prefill_predicted_w1_policy.label()
@@ -11649,38 +12062,71 @@ impl PrefillEngine {
         if capture_rows == 0 {
             return Ok(());
         }
-        self.tileq_capture.as_mut().unwrap().phase("stream_sync_begin", Some(model_layer), capture_rows)?;
+        self.tileq_capture.as_mut().unwrap().phase(
+            "stream_sync_begin",
+            Some(model_layer),
+            capture_rows,
+        )?;
         self.stream_sync()?;
         if self.tileq_capture.as_ref().unwrap().persist_windows {
             let capture = self.tileq_capture.as_mut().unwrap();
             capture.phase("bounded_copy_begin", Some(model_layer), capture_rows)?;
-            capture.capture_bounded_inputs(model_layer, capture_rows,
-                crate::capture_window::Geometry { input: expert_input_size, intermediate: intermediate_size, topk },
-                expert_count, [expert_input_ptr, topk_ids_ptr, topk_weights_ptr, down_input_ptr])?;
+            capture.capture_bounded_inputs(
+                model_layer,
+                capture_rows,
+                crate::capture_window::Geometry {
+                    input: expert_input_size,
+                    intermediate: intermediate_size,
+                    topk,
+                },
+                expert_count,
+                [
+                    expert_input_ptr,
+                    topk_ids_ptr,
+                    topk_weights_ptr,
+                    down_input_ptr,
+                ],
+            )?;
             return capture.phase("append_done", Some(model_layer), capture_rows);
         }
-        self.tileq_capture.as_mut().unwrap().phase("inputs_copy_begin", Some(model_layer), capture_rows)?;
+        self.tileq_capture.as_mut().unwrap().phase(
+            "inputs_copy_begin",
+            Some(model_layer),
+            capture_rows,
+        )?;
         let expert_inputs = download_device_u16(
             expert_input_ptr,
             capture_rows
                 .checked_mul(expert_input_size)
                 .ok_or_else(|| "TileQ gate/up capture length overflow".to_string())?,
         )?;
-        self.tileq_capture.as_mut().unwrap().phase("routes_copy_begin", Some(model_layer), capture_rows)?;
+        self.tileq_capture.as_mut().unwrap().phase(
+            "routes_copy_begin",
+            Some(model_layer),
+            capture_rows,
+        )?;
         let topk_ids = download_device_i32(
             topk_ids_ptr,
             capture_rows
                 .checked_mul(topk)
                 .ok_or_else(|| "TileQ route capture length overflow".to_string())?,
         )?;
-        self.tileq_capture.as_mut().unwrap().phase("weights_copy_begin", Some(model_layer), capture_rows)?;
+        self.tileq_capture.as_mut().unwrap().phase(
+            "weights_copy_begin",
+            Some(model_layer),
+            capture_rows,
+        )?;
         let topk_weights = download_device_f32(
             topk_weights_ptr,
             capture_rows
                 .checked_mul(topk)
                 .ok_or_else(|| "TileQ route-weight capture length overflow".to_string())?,
         )?;
-        self.tileq_capture.as_mut().unwrap().phase("down_copy_begin", Some(model_layer), capture_rows)?;
+        self.tileq_capture.as_mut().unwrap().phase(
+            "down_copy_begin",
+            Some(model_layer),
+            capture_rows,
+        )?;
         let down_inputs = download_device_u16(
             down_input_ptr,
             capture_rows
@@ -11688,7 +12134,11 @@ impl PrefillEngine {
                 .and_then(|v| v.checked_mul(intermediate_size))
                 .ok_or_else(|| "TileQ down capture length overflow".to_string())?,
         )?;
-        self.tileq_capture.as_mut().unwrap().phase("append_begin", Some(model_layer), capture_rows)?;
+        self.tileq_capture.as_mut().unwrap().phase(
+            "append_begin",
+            Some(model_layer),
+            capture_rows,
+        )?;
         self.tileq_capture
             .as_mut()
             .ok_or_else(|| "TileQ calibration capture disappeared during append".to_string())?
@@ -11703,7 +12153,10 @@ impl PrefillEngine {
                 &topk_weights,
                 &down_inputs,
             )?;
-        self.tileq_capture.as_mut().unwrap().phase("append_done", Some(model_layer), capture_rows)
+        self.tileq_capture
+            .as_mut()
+            .unwrap()
+            .phase("append_done", Some(model_layer), capture_rows)
     }
 
     fn prompt_hcs_shadow_env_enabled() -> bool {
@@ -12934,8 +13387,7 @@ impl PrefillEngine {
         selected_rows.dedup();
         selected_experts.sort_unstable();
         selected_experts.dedup();
-        self.prefill_device_trace_enabled
-            .set(enabled && !mla_only);
+        self.prefill_device_trace_enabled.set(enabled && !mla_only);
         self.prefill_device_trace_mla_only.set(enabled && mla_only);
         self.prefill_device_trace_layer.set(layer_idx);
         self.prefill_device_trace_all_layers.set(all_layers);
@@ -16053,27 +16505,51 @@ impl PrefillEngine {
         width: usize,
     ) -> Result<(), String> {
         // BEGIN selected prefill row stage capture
-        crate::matched_prefill_row::capture_stage(self.matched_prefill_invocation.as_ref(),prefill_device_trace_stage_label(stage_id), layer_idx, absolute_position.checked_add(1).ok_or("selected stage height overflow")?, chunk_idx, absolute_position, ptr, width, self.stream,self.active_prefill_chunk_start)?;
+        crate::matched_prefill_row::capture_stage(
+            self.matched_prefill_invocation.as_ref(),
+            prefill_device_trace_stage_label(stage_id),
+            layer_idx,
+            absolute_position
+                .checked_add(1)
+                .ok_or("selected stage height overflow")?,
+            chunk_idx,
+            absolute_position,
+            ptr,
+            width,
+            self.stream,
+            self.active_prefill_chunk_start,
+        )?;
         // END selected prefill row stage capture
         // BEGIN bounded binary prefill stage capture
         if let Some(operation) = crate::matched_probe::prefill_stage_operation(
             prefill_device_trace_stage_label(stage_id),
         ) {
-            let height = row_idx.checked_add(1).ok_or("matched stage height overflow")?;
-            if let Some(target) = self.matched_prefill_target(operation, layer_idx, height,None)? {
+            let height = row_idx
+                .checked_add(1)
+                .ok_or("matched stage height overflow")?;
+            if let Some(target) = self.matched_prefill_target(operation, layer_idx, height, None)? {
                 if target.row != 0 || chunk_idx != 0 || absolute_position != row_idx {
-                    return Err("matched whole stage requires an initial complete prefill batch".into());
+                    return Err(
+                        "matched whole stage requires an initial complete prefill batch".into(),
+                    );
                 }
-                let bytes = height.checked_mul(width).and_then(|n| n.checked_mul(2))
+                let bytes = height
+                    .checked_mul(width)
+                    .and_then(|n| n.checked_mul(2))
                     .ok_or("matched stage byte count overflow")?;
                 target.device("values.bf16", ptr, bytes, self.stream)?;
-                target.write("descriptor.json", serde_json::to_vec_pretty(&serde_json::json!({
-                    "operation": operation, "stage": prefill_device_trace_stage_label(stage_id),
-                    "layer": layer_idx, "height": height, "width": width,
-                    "dtype": "bf16", "chunk_index": chunk_idx,
-                    "chunk_start": absolute_position - row_idx,
-                    "device_diagnostic_allocation_bytes": 0
-                })).map_err(|e| e.to_string())?.as_slice())?;
+                target.write(
+                    "descriptor.json",
+                    serde_json::to_vec_pretty(&serde_json::json!({
+                        "operation": operation, "stage": prefill_device_trace_stage_label(stage_id),
+                        "layer": layer_idx, "height": height, "width": width,
+                        "dtype": "bf16", "chunk_index": chunk_idx,
+                        "chunk_start": absolute_position - row_idx,
+                        "device_diagnostic_allocation_bytes": 0
+                    }))
+                    .map_err(|e| e.to_string())?
+                    .as_slice(),
+                )?;
             }
         }
         // END bounded binary prefill stage capture
@@ -24539,44 +25015,82 @@ impl PrefillEngine {
     }
 
     #[cfg(feature = "copy-lifecycle-test")]
-    pub(crate) fn installed_external_copy_lifecycle_rust(&mut self, store_addr: usize, snapshot: &crate::session_cache::SessionSnapshot) -> Result<serde_json::Value,String> {
-        let tokens=snapshot.consumed_token_ids.len();
-        if !snapshot.state_blobs.iter().any(|blob| crate::session_cache::is_prefill_stage_kind(&blob.kind)) {
-            return Ok(serde_json::json!({"external_active":false,"allocations":0,"scope":"actual saved boundary has no temporary stage allocations"}));
+    pub(crate) fn installed_external_copy_lifecycle_rust(
+        &mut self,
+        store_addr: usize,
+        snapshot: &crate::session_cache::SessionSnapshot,
+    ) -> Result<serde_json::Value, String> {
+        let tokens = snapshot.consumed_token_ids.len();
+        if !snapshot
+            .state_blobs
+            .iter()
+            .any(|blob| crate::session_cache::is_prefill_stage_kind(&blob.kind))
+        {
+            return Ok(
+                serde_json::json!({"external_active":false,"allocations":0,"scope":"actual saved boundary has no temporary stage allocations"}),
+            );
         }
         self.set_prefill_hcs_guard_store_addr(store_addr);
-        let result=(|| {
+        let result = (|| {
             self.prepare_for_prefill_session_cache_exact(tokens)?;
-            let store=unsafe { &mut *(store_addr as *mut crate::gpu_decode::GpuDecodeStore) };
-            let allocations=self.stage_exact_sequence_allocations(store.device_ordinal() as usize)?;
-            if allocations.is_empty() { return Ok(serde_json::json!({"external_active":false,"allocations":0,"scope":"current backend has no temporary stage allocations"})); }
-            self.restore_stage_exact_sequence_state(snapshot,tokens)?;
-            let owners: [&dyn crate::sequence_external_owner::CudaRegion;2]=[
-                self.prefill_kv_temp_k.as_ref().ok_or("missing live K owner")?,self.prefill_kv_temp_v.as_ref().ok_or("missing live V owner")?
+            let store = unsafe { &mut *(store_addr as *mut crate::gpu_decode::GpuDecodeStore) };
+            let allocations =
+                self.stage_exact_sequence_allocations(store.device_ordinal() as usize)?;
+            if allocations.is_empty() {
+                return Ok(
+                    serde_json::json!({"external_active":false,"allocations":0,"scope":"current backend has no temporary stage allocations"}),
+                );
+            }
+            self.restore_stage_exact_sequence_state(snapshot, tokens)?;
+            let owners: [&dyn crate::sequence_external_owner::CudaRegion; 2] = [
+                self.prefill_kv_temp_k
+                    .as_ref()
+                    .ok_or("missing live K owner")?,
+                self.prefill_kv_temp_v
+                    .as_ref()
+                    .ok_or("missing live V owner")?,
             ];
             // Empty/wrong owner descriptors must reject before any copy.
             crate::copy_fault::take();
-            if store.snapshot_external_sequence_state_rust(&allocations,tokens,&[]).is_ok() {return Err("external copy accepted absent owners".into());}
-            let (count,_)=crate::copy_fault::take();if count!=0{return Err("owner admission queued work".into());}
-            let result=store.installed_external_copy_lifecycle_rust(&allocations,&owners,tokens)?;
-            Ok(serde_json::json!({"external_active":true,"owner_admission_rejected_before_enqueue":true,"controls":result}))
+            if store
+                .snapshot_external_sequence_state_rust(&allocations, tokens, &[])
+                .is_ok()
+            {
+                return Err("external copy accepted absent owners".into());
+            }
+            let (count, _) = crate::copy_fault::take();
+            if count != 0 {
+                return Err("owner admission queued work".into());
+            }
+            let result =
+                store.installed_external_copy_lifecycle_rust(&allocations, &owners, tokens)?;
+            Ok(
+                serde_json::json!({"external_active":true,"owner_admission_rejected_before_enqueue":true,"controls":result}),
+            )
         })();
-        let cleanup=self.release_scratch();
+        let cleanup = self.release_scratch();
         self.clear_prefill_hcs_guard_store_addr();
-        let store=unsafe { &mut *(store_addr as *mut crate::gpu_decode::GpuDecodeStore) };
-        let decode_cleanup=store.prepare_runtime_for_decode_rust();
-        match (result,cleanup,decode_cleanup) {
-            (Ok(value),Ok(()),Ok(()))=>Ok(value),
-            (Err(error),_,_)=>Err(error),
-            (_,Err(error),_)=>Err(error),
-            (_,_,Err(error))=>Err(error),
+        let store = unsafe { &mut *(store_addr as *mut crate::gpu_decode::GpuDecodeStore) };
+        let decode_cleanup = store.prepare_runtime_for_decode_rust();
+        match (result, cleanup, decode_cleanup) {
+            (Ok(value), Ok(()), Ok(())) => Ok(value),
+            (Err(error), _, _) => Err(error),
+            (_, Err(error), _) => Err(error),
+            (_, _, Err(error)) => Err(error),
         }
     }
 
-    pub fn capture_matched_stage_state_rust(&self, logical_tokens: usize, directory: std::path::PathBuf) -> Result<(),String> {
-        self.device.bind_to_thread().map_err(|e|e.to_string())?;
-        let target=crate::matched_probe::Target {row:0,directory};
-        target.allocations(&self.stage_exact_sequence_allocations(self.config.device_ordinal)?,logical_tokens)
+    pub fn capture_matched_stage_state_rust(
+        &self,
+        logical_tokens: usize,
+        directory: std::path::PathBuf,
+    ) -> Result<(), String> {
+        self.device.bind_to_thread().map_err(|e| e.to_string())?;
+        let target = crate::matched_probe::Target { row: 0, directory };
+        target.allocations(
+            &self.stage_exact_sequence_allocations(self.config.device_ordinal)?,
+            logical_tokens,
+        )
     }
 
     fn stage_exact_sequence_allocations(
@@ -24696,8 +25210,12 @@ impl PrefillEngine {
             .map_err(|_| "stage-exact device ordinal is negative".to_string())?;
         let allocations = self.stage_exact_sequence_allocations(device_ordinal)?;
         let owners: [&dyn crate::sequence_external_owner::CudaRegion; 2] = [
-            self.prefill_kv_temp_k.as_ref().ok_or("external sequence K owner is unavailable")?,
-            self.prefill_kv_temp_v.as_ref().ok_or("external sequence V owner is unavailable")?,
+            self.prefill_kv_temp_k
+                .as_ref()
+                .ok_or("external sequence K owner is unavailable")?,
+            self.prefill_kv_temp_v
+                .as_ref()
+                .ok_or("external sequence V owner is unavailable")?,
         ];
         if let Some(base) = incremental_base {
             let previous_blobs: Vec<_> = base
@@ -25004,8 +25522,12 @@ impl PrefillEngine {
             );
         }
         let owners: [&dyn crate::sequence_external_owner::CudaRegion; 2] = [
-            self.prefill_kv_temp_k.as_ref().ok_or("external sequence K owner is unavailable")?,
-            self.prefill_kv_temp_v.as_ref().ok_or("external sequence V owner is unavailable")?,
+            self.prefill_kv_temp_k
+                .as_ref()
+                .ok_or("external sequence K owner is unavailable")?,
+            self.prefill_kv_temp_v
+                .as_ref()
+                .ok_or("external sequence V owner is unavailable")?,
         ];
         store.restore_external_sequence_state_rust(
             &allocations,
@@ -25062,10 +25584,14 @@ impl PrefillEngine {
                     "compressed prefill boundary has no exact stage blobs to calibrate".to_string(),
                 );
             }
-        let owners: [&dyn crate::sequence_external_owner::CudaRegion; 2] = [
-            self.prefill_kv_temp_k.as_ref().ok_or("external sequence K owner is unavailable")?,
-            self.prefill_kv_temp_v.as_ref().ok_or("external sequence V owner is unavailable")?,
-        ];
+            let owners: [&dyn crate::sequence_external_owner::CudaRegion; 2] = [
+                self.prefill_kv_temp_k
+                    .as_ref()
+                    .ok_or("external sequence K owner is unavailable")?,
+                self.prefill_kv_temp_v
+                    .as_ref()
+                    .ok_or("external sequence V owner is unavailable")?,
+            ];
             restore_ms += store.restore_external_sequence_state_rust(
                 &stage_allocations,
                 logical_tokens,
@@ -25323,7 +25849,8 @@ impl PrefillEngine {
         session_cache_exact_stage: bool,
     ) -> Result<(), String> {
         if self.prefill_hcs_store_addr != 0 {
-            unsafe { &*(self.prefill_hcs_store_addr as *const crate::gpu_decode::GpuDecodeStore) }.require_sequence_state_ready_rust()?;
+            unsafe { &*(self.prefill_hcs_store_addr as *const crate::gpu_decode::GpuDecodeStore) }
+                .require_sequence_state_ready_rust()?;
         }
         self.bind_cuda_context()?;
         self.refresh_trace_config();
@@ -25336,8 +25863,10 @@ impl PrefillEngine {
         // 1. Synchronize all GPU work (ensures pending cuMemFreeAsync from HCS
         //    soft eviction have completed on cudarc's internal stream).
         unsafe {
-            let rc=cuda_sys::lib().cuCtxSynchronize();
-            if rc!=cuda_sys::CUresult::CUDA_SUCCESS {return Err(format!("complete work before prefill allocation: {rc:?}"));}
+            let rc = cuda_sys::lib().cuCtxSynchronize();
+            if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("complete work before prefill allocation: {rc:?}"));
+            }
         }
 
         // 2. Trim cudarc's default memory pool to release HCS soft VRAM back to OS.
@@ -25377,7 +25906,9 @@ impl PrefillEngine {
             }
         }
 
-        if let Some(storage)=&self.selected_kda { storage.retire_before_release("scratch reallocation")?; }
+        if let Some(storage) = &self.selected_kda {
+            storage.retire_before_release("scratch reallocation")?;
+        }
         // 3. Drop old scratch to free its VRAM (GpuBuf::drop = cuMemFree_v2, immediate).
         //    Also free prefill-only GPU buffers from previous request.
         let old_tokens = self.scratch.max_tokens;
@@ -25694,16 +26225,17 @@ impl PrefillEngine {
 
             let mut attempt_pre_alloc_free_bytes = 0usize;
             unsafe {
-                cuda_sys::lib().cuMemGetInfo_v2(
-                    &mut attempt_pre_alloc_free_bytes,
-                    &mut total_bytes,
-                );
+                cuda_sys::lib()
+                    .cuMemGetInfo_v2(&mut attempt_pre_alloc_free_bytes, &mut total_bytes);
             }
 
             self.d_cold_staging = None;
             self.max_cold_experts = 0;
 
-            if self.fla.is_some() && self.config.layer_types.iter().any(|&t| t == 3) {
+            if self.fla.is_some()
+                && !self.scalar_native_selected()
+                && self.config.layer_types.iter().any(|&t| t == 3)
+            {
                 let nv = self.config.la_num_v_heads;
                 let dk = self.config.la_k_head_dim;
                 let dv = self.config.la_v_head_dim;
@@ -25962,12 +26494,11 @@ impl PrefillEngine {
                             deficit_bytes,
                             detail,
                         }) => {
-                            let next_tokens = self
-                                .dsa_retry_chunk_cap_for_measured_deficit(
-                                    scratch_tokens,
-                                    prompt_tokens,
-                                    deficit_bytes,
-                                )?;
+                            let next_tokens = self.dsa_retry_chunk_cap_for_measured_deficit(
+                                scratch_tokens,
+                                prompt_tokens,
+                                deficit_bytes,
+                            )?;
                             if ledger_enabled {
                                 vram_ledger_log!(
                                     "VRAM LEDGER dsa_workspace_scratch_retry attempt={} prompt_tokens={} scratch_tokens={} measured_deficit_mb={:.3} next_tokens={:?} required_floor_mb={:.1}",
@@ -26220,10 +26751,24 @@ impl PrefillEngine {
             );
         }
 
-        if let Some(storage)=&self.selected_kda {
-            let sources=storage.layers().iter().map(|&layer|self.retained_kda_prefill_source(layer,self.scratch.max_tokens,storage.reserve)).collect::<Result<Vec<_>,_>>()?;
-            storage.attach_after_prepare(sources,self.scratch.max_tokens)?;
-            storage.admit_serving_logits(*self.scratch.d_logits.device_ptr(),self.scratch.d_logits.len()*4,self.stream)?;
+        if let Some(storage) = &self.selected_kda {
+            let sources = storage
+                .layers()
+                .iter()
+                .map(|&layer| {
+                    self.retained_kda_prefill_source(
+                        layer,
+                        self.scratch.max_tokens,
+                        storage.reserve,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            storage.attach_after_prepare(sources, self.scratch.max_tokens)?;
+            storage.admit_serving_logits(
+                *self.scratch.d_logits.device_ptr(),
+                self.scratch.d_logits.len() * 4,
+                self.stream,
+            )?;
         }
 
         trace_emit_prefill_global_mark(
@@ -26308,7 +26853,9 @@ impl PrefillEngine {
                 ));
             }
         }
-        if let Some(storage)=&self.selected_kda { storage.retire_before_release("scratch release")?; }
+        if let Some(storage) = &self.selected_kda {
+            storage.retire_before_release("scratch release")?;
+        }
         self.release_pinning_pool();
         self.release_reusable_ptr_tables();
         // Replace scratch with zero-capacity (drops old, frees VRAM immediately).
@@ -26597,51 +27144,90 @@ impl PrefillEngine {
         temperature: f32,
         suppress_tokens: &[u32],
     ) -> Result<(PrefillResult, Option<PrefillSequenceBoundaryCapture>), String> {
+        let prefill_start = Instant::now();
         let storage = self.selected_kda.clone();
-        self.with_prefill_capture(token_ids,sequence_start,|engine| {
+        self.with_prefill_capture(token_ids, sequence_start, |engine| {
+            #[cfg(feature = "scalar-gdn-test")]
+            if let Some(scalar) = engine.selected_scalar_gdn.clone() {
+                if storage.is_some() {
+                    return Err(
+                        "distinct selected recurrence execution domains cannot overlap".into(),
+                    );
+                }
+                engine.validate_prefill_state_request(
+                    token_ids.len(),
+                    sequence_start,
+                    reset_sequence_state,
+                    capture_boundary,
+                    incremental_base,
+                )?;
+                engine.check_prefill_cancelled("run_start", 0, 0)?;
+                let _ = engine.first_token_margin_projection_target()?;
+                let _ = engine.read_only_checkpoint_config()?;
+                if reset_sequence_state {
+                    scalar.reset()?;
+                }
+                return unsafe {
+                    scalar.with_prefill(|| {
+                        engine.run_prefill_from_state_inner(
+                            token_ids,
+                            sequence_start,
+                            reset_sequence_state,
+                            capture_boundary,
+                            incremental_base,
+                            temperature,
+                            suppress_tokens,
+                            None,
+                            prefill_start,
+                        )
+                    })
+                };
+            }
             if let Some(storage) = storage {
-                storage.with_serving_execution(engine.stream,||storage.with_prefill_phase(token_ids, sequence_start, |phase| engine.run_prefill_from_state_inner(token_ids,sequence_start,reset_sequence_state,capture_boundary,incremental_base,temperature,suppress_tokens,Some(phase))))
+                storage.with_serving_execution(engine.stream, || {
+                    storage.with_prefill_phase(token_ids, sequence_start, |phase| {
+                        engine.run_prefill_from_state_inner(
+                            token_ids,
+                            sequence_start,
+                            reset_sequence_state,
+                            capture_boundary,
+                            incremental_base,
+                            temperature,
+                            suppress_tokens,
+                            Some(phase),
+                            prefill_start,
+                        )
+                    })
+                })
             } else {
-                engine.run_prefill_from_state_inner(token_ids,sequence_start,reset_sequence_state,capture_boundary,incremental_base,temperature,suppress_tokens,None)
+                engine.run_prefill_from_state_inner(
+                    token_ids,
+                    sequence_start,
+                    reset_sequence_state,
+                    capture_boundary,
+                    incremental_base,
+                    temperature,
+                    suppress_tokens,
+                    None,
+                    prefill_start,
+                )
             }
         })
     }
 
-    fn run_prefill_from_state_inner(
-        &mut self,
-        token_ids: &[u32],
+    // Read-only contract validation is shared with the native phase entry so
+    // invalid/cancelled input cannot reset a valid sequence before rejection.
+    fn validate_prefill_state_request(
+        &self,
+        total_m: usize,
         sequence_start: usize,
         reset_sequence_state: bool,
         capture_boundary: Option<usize>,
         incremental_base: Option<&crate::session_cache::SessionSnapshot>,
-        temperature: f32,
-        suppress_tokens: &[u32],
-        kda_phase: Option<&crate::kda_prefix_owner::KdaPrefillExecutionPhase<'_, '_>>,
-    ) -> Result<(PrefillResult, Option<PrefillSequenceBoundaryCapture>), String> {
-        // Bind CUDA context to calling thread (needed for cross-thread use)
-        self.bind_cuda_context()?;
-        self.refresh_trace_config();
-        let t0 = Instant::now();
-        let total_m = token_ids.len();
+    ) -> Result<(), String> {
         let total_prompt_tokens = sequence_start
             .checked_add(total_m)
-            .ok_or_else(|| "prefill continuation position overflows".to_string())?;
-        self.check_prefill_cancelled("run_start", 0, 0)?;
-        // Memory and sequence-state accounting use the complete logical
-        // prompt. Predicted-W1 admission instead uses the suffix actually
-        // computed by this request: a large restored cache prefix does not
-        // create the route density or overlap window of a large prefill.
-        self.active_prefill_prompt_tokens = total_prompt_tokens;
-        if vram_ledger_enabled() {
-            crate::vram_monitor::set_lifecycle_event(&format!(
-                "prefill_start suffix_tokens={} prompt_tokens={}",
-                total_m, total_prompt_tokens
-            ));
-        }
-        let portable_predicted_w1_active = self.portable_predicted_w1_active(total_m);
-        let h = self.config.hidden_size;
-        let num_hidden_layers = self.config.num_hidden_layers;
-        let liveness_timing = prefill_liveness_timing_enabled();
+            .ok_or("prefill continuation position overflows")?;
         if total_m == 0 {
             return Err("Empty token sequence".to_string());
         }
@@ -26683,6 +27269,52 @@ impl PrefillEngine {
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn run_prefill_from_state_inner(
+        &mut self,
+        token_ids: &[u32],
+        sequence_start: usize,
+        reset_sequence_state: bool,
+        capture_boundary: Option<usize>,
+        incremental_base: Option<&crate::session_cache::SessionSnapshot>,
+        temperature: f32,
+        suppress_tokens: &[u32],
+        kda_phase: Option<&crate::kda_prefix_owner::KdaPrefillExecutionPhase<'_, '_>>,
+        prefill_start: Instant,
+    ) -> Result<(PrefillResult, Option<PrefillSequenceBoundaryCapture>), String> {
+        // Bind CUDA context to calling thread (needed for cross-thread use)
+        self.bind_cuda_context()?;
+        self.refresh_trace_config();
+        let t0 = prefill_start;
+        let total_m = token_ids.len();
+        let total_prompt_tokens = sequence_start
+            .checked_add(total_m)
+            .ok_or_else(|| "prefill continuation position overflows".to_string())?;
+        self.check_prefill_cancelled("run_start", 0, 0)?;
+        // Memory and sequence-state accounting use the complete logical
+        // prompt. Predicted-W1 admission instead uses the suffix actually
+        // computed by this request: a large restored cache prefix does not
+        // create the route density or overlap window of a large prefill.
+        self.active_prefill_prompt_tokens = total_prompt_tokens;
+        if vram_ledger_enabled() {
+            crate::vram_monitor::set_lifecycle_event(&format!(
+                "prefill_start suffix_tokens={} prompt_tokens={}",
+                total_m, total_prompt_tokens
+            ));
+        }
+        let portable_predicted_w1_active = self.portable_predicted_w1_active(total_m);
+        let h = self.config.hidden_size;
+        let num_hidden_layers = self.config.num_hidden_layers;
+        let liveness_timing = prefill_liveness_timing_enabled();
+        self.validate_prefill_state_request(
+            total_m,
+            sequence_start,
+            reset_sequence_state,
+            capture_boundary,
+            incremental_base,
+        )?;
         let _ = self.first_token_margin_projection_target()?;
         let _ = self.read_only_checkpoint_config()?;
         self.first_token_margin_projection_layer_deltas
@@ -26849,7 +27481,7 @@ impl PrefillEngine {
                         );
                     }
                 }
-                if lw.la_conv_state_ptr != 0 {
+                if lw.la_conv_state_ptr != 0 && !self.scalar_native_selected() {
                     let conv_dim = self.config.la_conv_dim;
                     let kernel_dim = self.config.la_conv_kernel_dim;
                     unsafe {
@@ -26861,7 +27493,7 @@ impl PrefillEngine {
                         );
                     }
                 }
-                if lw.la_recur_state_ptr != 0 {
+                if lw.la_recur_state_ptr != 0 && !self.scalar_native_selected() {
                     let nv = self.config.la_num_v_heads;
                     let dk = self.config.la_k_head_dim;
                     let dv = self.config.la_v_head_dim;
@@ -27296,6 +27928,7 @@ impl PrefillEngine {
         let mut t_embed_ms = 0.0f64;
         let mut t_other_ms = 0.0f64;
 
+        let mut completion_progress = prefill_progress::Progress::new(&self.device);
         let mut boundary_capture: Option<PrefillSequenceBoundaryCapture> = None;
         let mut suffix_chunk_start = 0usize;
         for (chunk_idx, &planned_chunk_tokens) in chunk_plan.iter().enumerate() {
@@ -27312,6 +27945,8 @@ impl PrefillEngine {
             let chunk_tokens = &token_ids[suffix_chunk_start..suffix_chunk_end];
             self.active_prefill_chunk_idx = chunk_idx;
             self.active_prefill_chunk_start = chunk_start;
+            completion_progress
+                .submitted(|| format!("chunk={chunk_idx} start={chunk_start} end={chunk_end}"))?;
             let chunk_tok0 = chunk_tokens.first().copied().unwrap_or(0) as usize;
             let chunk_last_pos = chunk_end.saturating_sub(1);
             let chunk_last_tok = chunk_tokens.last().copied().unwrap_or(0) as usize;
@@ -27466,6 +28101,7 @@ impl PrefillEngine {
             let mut deepseek_v4_hc_initialized = false;
             let mut glm5_hc_initialized = false;
             for layer_idx in 0..num_hidden_layers {
+                completion_progress.submitted(|| format!("chunk={chunk_idx} layer={layer_idx}"))?;
                 let liveness_layer_t0 = Instant::now();
                 let layer_type = self.layer_weights[layer_idx].layer_type;
                 let layer_name = match layer_type {
@@ -27514,8 +28150,15 @@ impl PrefillEngine {
                         )?;
                         glm5_hc_initialized = true;
                     }
-                    self.forward_glm5_layer(layer_idx, m, chunk_idx, chunk_start, chunk_last_tok, kda_phase)
-                        .map_err(|error| format!("GLM-5.3 layer {}: {}", layer_idx, error))?;
+                    self.forward_glm5_layer(
+                        layer_idx,
+                        m,
+                        chunk_idx,
+                        chunk_start,
+                        chunk_last_tok,
+                        kda_phase,
+                    )
+                    .map_err(|error| format!("GLM-5.3 layer {}: {}", layer_idx, error))?;
                     continue;
                 }
                 if layer_type == 4 {
@@ -27785,6 +28428,12 @@ impl PrefillEngine {
                     eprintln!("[DIAG] layer0 input_norm_weight L2={:.6}", norm_l2);
                 }
 
+                self.observe_gdn_prefill_point(
+                    layer_idx,
+                    m,
+                    chunk_start,
+                    GdnPrefillPoint::BeforeNorm(has_residual),
+                )?;
                 // Pre-attention RMSNorm
                 let tn0 = Instant::now();
                 let reference_layer0_to_layer1_handoff_trace =
@@ -29816,6 +30465,9 @@ impl PrefillEngine {
                         layer_idx, lt_name, has_moe, last_pos_norm
                     );
                 }
+                completion_progress.recorded(self.stream, || {
+                    format!("chunk={chunk_idx} layer={layer_idx}")
+                })?;
                 if liveness_timing {
                     let sync_t0 = Instant::now();
                     prefill_liveness!(
@@ -29881,6 +30533,8 @@ impl PrefillEngine {
                 "prefill_chunk",
                 &format!("phase=chunk_end chunk_tokens={}", m),
             );
+            completion_progress
+                .recorded(self.stream, || format!("chunk={chunk_idx} end={chunk_end}"))?;
             self.check_prefill_cancelled("chunk_complete", chunk_idx, suffix_chunk_end)?;
             if capture_boundary == Some(chunk_end) {
                 // Stage-exact compressed KV modes write prefill K/V into a
@@ -30332,6 +30986,7 @@ impl PrefillEngine {
 
         // 6. Sync
         self.stream_sync()?;
+        completion_progress.poll()?;
         self.report_prefill_prescan_accuracy(total_m);
 
         // Free pinning pool — VRAM is released for decode HCS allocation.
@@ -31322,7 +31977,7 @@ impl PrefillEngine {
                 return Err(format!("debug DSA positions H2D: {:?}", position_copy));
             }
         }
-        self.populate_dsa_prefill_owner_key_cache(layer_idx, 0, positions.len(),None)?;
+        self.populate_dsa_prefill_owner_key_cache(layer_idx, 0, positions.len(), None)?;
         self.stream_sync()
     }
 
@@ -31424,7 +32079,7 @@ impl PrefillEngine {
                 ));
             }
         }
-        self.populate_dsa_prefill_owner_key_cache(layer_idx, 0, rows,None)?;
+        self.populate_dsa_prefill_owner_key_cache(layer_idx, 0, rows, None)?;
         unsafe {
             let q_residual_copy = cuda_sys::lib().cuMemcpyHtoD_v2(
                 *self.scratch.d_scratch2.device_ptr(),
@@ -31469,7 +32124,7 @@ impl PrefillEngine {
             0,
             0,
             score_row_bytes,
-            (0,0,0),
+            (0, 0, 0),
         )?;
         let plan = plan_dsa_prefill_selection(
             rows,
@@ -31487,7 +32142,11 @@ impl PrefillEngine {
         }
         launch_dsa_prefill_selection_chunk(
             DsaPrefillSelectionKernels {
-                score_tensorcomp: self.ordered_kda_projection.as_ref().map(|bank|bank.score_kernel()).transpose()?,
+                score_tensorcomp: self
+                    .ordered_kda_projection
+                    .as_ref()
+                    .map(|bank| bank.score_kernel())
+                    .transpose()?,
                 rope_query_bf16: self.kernels.dsa_prefill_rope_query_bf16,
                 fused_scores: self.kernels.dsa_prefill_fused_scores,
                 accumulate_gemm_scores: self.kernels.dsa_prefill_accumulate_gemm_scores,
@@ -31518,8 +32177,8 @@ impl PrefillEngine {
             0,
             &workspace,
             None,
-        None,
-)?;
+            None,
+        )?;
         let owner_view =
             workspace.resolve_for_layer(layer_idx, registration, 0, rows, context_end)?;
         let shared_registration = DsaPrefillLayerDescriptor {
@@ -31595,11 +32254,60 @@ impl PrefillEngine {
         sample_every: usize,
         target_token_ids: Option<&[u32]>,
     ) -> Result<Vec<PrefillLogitPosition>, String> {
-        let storage=self.selected_kda.clone();
-        self.with_prefill_capture(token_ids,0,|engine| {
-            if let Some(storage)=storage {
-                storage.with_serving_execution(engine.stream,||storage.with_prefill_phase(token_ids,0,|phase|engine.run_prefill_logits_inner(token_ids,top_k,sample_every,target_token_ids,Some(phase))))
-            } else {engine.run_prefill_logits_inner(token_ids,top_k,sample_every,target_token_ids,None)}
+        let storage = self.selected_kda.clone();
+        self.with_prefill_capture(token_ids, 0, |engine| {
+            #[cfg(feature = "scalar-gdn-test")]
+            if let Some(scalar) = engine.selected_scalar_gdn.clone() {
+                if storage.is_some() {
+                    return Err(
+                        "distinct selected recurrence execution domains cannot overlap".into(),
+                    );
+                }
+                if token_ids.is_empty() {
+                    return Err("Empty token sequence".into());
+                }
+                if token_ids.len() > engine.scratch.max_tokens {
+                    return Err(format!(
+                        "Prompt {} tokens > scratch {}",
+                        token_ids.len(),
+                        engine.scratch.max_tokens
+                    ));
+                }
+                engine.check_prefill_cancelled("run_start", 0, 0)?;
+                scalar.reset()?;
+                return unsafe {
+                    scalar.with_prefill(|| {
+                        engine.run_prefill_logits_inner(
+                            token_ids,
+                            top_k,
+                            sample_every,
+                            target_token_ids,
+                            None,
+                        )
+                    })
+                };
+            }
+            if let Some(storage) = storage {
+                storage.with_serving_execution(engine.stream, || {
+                    storage.with_prefill_phase(token_ids, 0, |phase| {
+                        engine.run_prefill_logits_inner(
+                            token_ids,
+                            top_k,
+                            sample_every,
+                            target_token_ids,
+                            Some(phase),
+                        )
+                    })
+                })
+            } else {
+                engine.run_prefill_logits_inner(
+                    token_ids,
+                    top_k,
+                    sample_every,
+                    target_token_ids,
+                    None,
+                )
+            }
         })
     }
 
@@ -31611,7 +32319,7 @@ impl PrefillEngine {
         target_token_ids: Option<&[u32]>,
         kda_phase: Option<&crate::kda_prefix_owner::KdaPrefillExecutionPhase<'_, '_>>,
     ) -> Result<Vec<PrefillLogitPosition>, String> {
-        self.active_prefill_chunk_start=0;
+        self.active_prefill_chunk_start = 0;
         self.bind_cuda_context()?;
 
         let t0 = Instant::now();
@@ -31678,7 +32386,7 @@ impl PrefillEngine {
                     );
                 }
             }
-            if lw.la_conv_state_ptr != 0 {
+            if lw.la_conv_state_ptr != 0 && !self.scalar_native_selected() {
                 let conv_dim = self.config.la_conv_dim;
                 let kernel_dim = self.config.la_conv_kernel_dim;
                 unsafe {
@@ -31690,7 +32398,7 @@ impl PrefillEngine {
                     );
                 }
             }
-            if lw.la_recur_state_ptr != 0 {
+            if lw.la_recur_state_ptr != 0 && !self.scalar_native_selected() {
                 let nv = self.config.la_num_v_heads;
                 let dk = self.config.la_k_head_dim;
                 let dv = self.config.la_v_head_dim;
@@ -32083,7 +32791,13 @@ impl PrefillEngine {
                 return Err("No LM head (neither Marlin nor BF16)".to_string());
             }
 
-            if let Some(selected)=&self.selected_kda {selected.enqueue_serving_guard(*self.scratch.d_logits.device_ptr(),self.scratch.d_logits.len()*4,self.stream)?;}
+            if let Some(selected) = &self.selected_kda {
+                selected.enqueue_serving_guard(
+                    *self.scratch.d_logits.device_ptr(),
+                    self.scratch.d_logits.len() * 4,
+                    self.stream,
+                )?;
+            }
 
             // Download logits
             unsafe {
@@ -32098,8 +32812,17 @@ impl PrefillEngine {
                 }
             }
             self.stream_sync()?;
-            if self.selected_kda.is_some() && self.h_logits.first().is_some_and(|v|v.is_nan()) {return Err("selected prefill recurrence rejected invalid state/operands before sampling".into());}
-        apply_logit_softcap_in_place(&mut self.h_logits, self.final_logit_softcap);
+            #[cfg(feature = "scalar-gdn-test")]
+            if let Some(storage) = &self.selected_scalar_gdn {
+                storage.require_active_health()?;
+            }
+            if self.selected_kda.is_some() && self.h_logits.first().is_some_and(|v| v.is_nan()) {
+                return Err(
+                    "selected prefill recurrence rejected invalid state/operands before sampling"
+                        .into(),
+                );
+            }
+            apply_logit_softcap_in_place(&mut self.h_logits, self.final_logit_softcap);
 
             let target_token_id = target_token_ids
                 .and_then(|targets| targets.get(pos))
@@ -32303,7 +33026,18 @@ impl PrefillEngine {
         hc_eps: f32,
         m: usize,
     ) -> Result<(u64, u64), String> {
-        self.launch_deepseek_v4_hc_prepare_observed_sublayer(state,hidden_out,function,base,scale,hc_mult,sinkhorn_iters,hc_eps,m,None)
+        self.launch_deepseek_v4_hc_prepare_observed_sublayer(
+            state,
+            hidden_out,
+            function,
+            base,
+            scale,
+            hc_mult,
+            sinkhorn_iters,
+            hc_eps,
+            m,
+            None,
+        )
     }
 
     fn launch_deepseek_v4_hc_prepare_observed_sublayer(
@@ -32317,7 +33051,7 @@ impl PrefillEngine {
         sinkhorn_iters: usize,
         hc_eps: f32,
         m: usize,
-        observed: Option<(&crate::matched_probe::Target,usize)>,
+        observed: Option<(&crate::matched_probe::Target, usize)>,
     ) -> Result<(u64, u64), String> {
         if m == 0 || hc_mult == 0 || sinkhorn_iters == 0 {
             return Err("DeepSeek-V4 HC prepare requires non-zero rows, multiplicity, and Sinkhorn iterations".to_string());
@@ -32361,7 +33095,23 @@ impl PrefillEngine {
         let post_ptr = pre_ptr + (m * hc_mult * std::mem::size_of::<f32>()) as u64;
         let comb_ptr = post_ptr + (m * hc_mult * std::mem::size_of::<f32>()) as u64;
 
-        if let Some((target,row))=observed {target.hc_prepare_operands(row,m,h,hc_mult,state,function.ptr,base,scale,self.stream,self.deepseek_v4_prefill_hc_project_mode.label(),self.config.rms_norm_eps,hc_eps,sinkhorn_iters)?;}
+        if let Some((target, row)) = observed {
+            target.hc_prepare_operands(
+                row,
+                m,
+                h,
+                hc_mult,
+                state,
+                function.ptr,
+                base,
+                scale,
+                self.stream,
+                self.deepseek_v4_prefill_hc_project_mode.label(),
+                self.config.rms_norm_eps,
+                hc_eps,
+                sinkhorn_iters,
+            )?;
+        }
         let reduction_threads =
             std::cmp::max(32, std::cmp::min(1024, flat).next_power_of_two()) as u32;
         let mut i0 = inv_ptr;
@@ -32391,156 +33141,179 @@ impl PrefillEngine {
             inv_rms_timing,
         )?;
 
-        if let Some((target,row))=observed {target.hc_observed_row("inverse-rms.f32",inv_ptr,row,1,4,self.stream)?;}
+        if let Some((target, row)) = observed {
+            target.hc_observed_row("inverse-rms.f32", inv_ptr, row, 1, 4, self.stream)?;
+        }
         let project_timing = self.deepseek_v4_hc_internal_timing_start();
-        if let Some(bank)=&self.ordered_kda_projection {
-            unsafe {bank.enqueue_hc(state,inv_ptr,function.ptr,mixes_ptr,mix_width,flat,m,self.stream)?;}
-        } else {match self.deepseek_v4_prefill_hc_project_mode {
-            DeepseekV4PrefillHcProjectMode::Scalar => {
-                let mut j0 = mixes_ptr;
-                let mut j1 = state;
-                let mut j2 = function.ptr;
-                let mut j3 = inv_ptr;
-                let mut j4 = h as i32;
-                let mut j5 = hc_mult as i32;
-                let mut j6 = mix_width as i32;
-                unsafe {
-                    launch(
-                        self.kernels.deepseek_v4_hc_project,
-                        (mix_width as u32, m as u32, 1),
-                        (reduction_threads, 1, 1),
-                        reduction_threads * 4,
-                        self.stream,
-                        &mut [
-                            &mut j0 as *mut _ as *mut std::ffi::c_void,
-                            &mut j1 as *mut _ as *mut std::ffi::c_void,
-                            &mut j2 as *mut _ as *mut std::ffi::c_void,
-                            &mut j3 as *mut _ as *mut std::ffi::c_void,
-                            &mut j4 as *mut _ as *mut std::ffi::c_void,
-                            &mut j5 as *mut _ as *mut std::ffi::c_void,
-                            &mut j6 as *mut _ as *mut std::ffi::c_void,
-                        ],
-                    )?;
-                }
+        if let Some(bank) = &self.ordered_kda_projection {
+            unsafe {
+                bank.enqueue_hc(
+                    state,
+                    inv_ptr,
+                    function.ptr,
+                    mixes_ptr,
+                    mix_width,
+                    flat,
+                    m,
+                    self.stream,
+                )?;
             }
-            DeepseekV4PrefillHcProjectMode::Tf32Gemm => {
-                let normalized_ptr = *self.scratch.d_moe_accum.device_ptr();
-                let tile_capacity = self.scratch.d_moe_accum.len() / flat;
-                if normalized_ptr == 0 || tile_capacity == 0 {
-                    return Err(format!(
+        } else {
+            match self.deepseek_v4_prefill_hc_project_mode {
+                DeepseekV4PrefillHcProjectMode::Scalar => {
+                    let mut j0 = mixes_ptr;
+                    let mut j1 = state;
+                    let mut j2 = function.ptr;
+                    let mut j3 = inv_ptr;
+                    let mut j4 = h as i32;
+                    let mut j5 = hc_mult as i32;
+                    let mut j6 = mix_width as i32;
+                    unsafe {
+                        launch(
+                            self.kernels.deepseek_v4_hc_project,
+                            (mix_width as u32, m as u32, 1),
+                            (reduction_threads, 1, 1),
+                            reduction_threads * 4,
+                            self.stream,
+                            &mut [
+                                &mut j0 as *mut _ as *mut std::ffi::c_void,
+                                &mut j1 as *mut _ as *mut std::ffi::c_void,
+                                &mut j2 as *mut _ as *mut std::ffi::c_void,
+                                &mut j3 as *mut _ as *mut std::ffi::c_void,
+                                &mut j4 as *mut _ as *mut std::ffi::c_void,
+                                &mut j5 as *mut _ as *mut std::ffi::c_void,
+                                &mut j6 as *mut _ as *mut std::ffi::c_void,
+                            ],
+                        )?;
+                    }
+                }
+                DeepseekV4PrefillHcProjectMode::Tf32Gemm => {
+                    let normalized_ptr = *self.scratch.d_moe_accum.device_ptr();
+                    let tile_capacity = self.scratch.d_moe_accum.len() / flat;
+                    if normalized_ptr == 0 || tile_capacity == 0 {
+                        return Err(format!(
                         "DeepSeek-V4 HC TF32 projection scratch is too small: elements={} flat={}",
                         self.scratch.d_moe_accum.len(),
                         flat
                     ));
-                }
-                let cublas_workspace = *self.scratch.d_fp32_scratch.device_ptr();
-                let cublas_workspace_bytes = self
-                    .scratch
-                    .d_fp32_scratch
-                    .len()
-                    .checked_mul(std::mem::size_of::<f32>())
-                    .ok_or("DeepSeek-V4 HC TF32 cuBLAS workspace size overflow")?;
-                if cublas_workspace == 0 || cublas_workspace_bytes == 0 {
-                    return Err("DeepSeek-V4 HC TF32 cuBLAS workspace is absent".to_string());
-                }
-                let lib = unsafe { cublas_sys::lib() };
-                let set_workspace = unsafe {
-                    lib.cublasSetWorkspace_v2(
-                        self.cublas_handle,
-                        cublas_workspace as *mut std::ffi::c_void,
-                        cublas_workspace_bytes,
-                    )
-                };
-                if set_workspace != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
-                    return Err(format!(
+                    }
+                    let cublas_workspace = *self.scratch.d_fp32_scratch.device_ptr();
+                    let cublas_workspace_bytes = self
+                        .scratch
+                        .d_fp32_scratch
+                        .len()
+                        .checked_mul(std::mem::size_of::<f32>())
+                        .ok_or("DeepSeek-V4 HC TF32 cuBLAS workspace size overflow")?;
+                    if cublas_workspace == 0 || cublas_workspace_bytes == 0 {
+                        return Err("DeepSeek-V4 HC TF32 cuBLAS workspace is absent".to_string());
+                    }
+                    let lib = unsafe { cublas_sys::lib() };
+                    let set_workspace = unsafe {
+                        lib.cublasSetWorkspace_v2(
+                            self.cublas_handle,
+                            cublas_workspace as *mut std::ffi::c_void,
+                            cublas_workspace_bytes,
+                        )
+                    };
+                    if set_workspace != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                        return Err(format!(
                         "DeepSeek-V4 HC TF32 cublasSetWorkspace failed: {set_workspace:?} bytes={cublas_workspace_bytes}"
                     ));
-                }
-                let project_result = (|| -> Result<(), String> {
-                    unsafe {
-                        cublas_result::set_stream(
-                            self.cublas_handle,
-                            self.stream as cublas_sys::cudaStream_t,
-                        )
-                        .map_err(|error| {
-                            format!("DeepSeek-V4 HC TF32 set_stream failed: {error:?}")
-                        })?;
                     }
-                    let alpha = 1.0f32;
-                    let beta = 0.0f32;
-                    let mut token_start = 0usize;
-                    while token_start < m {
-                        let tile_rows = (m - token_start).min(tile_capacity);
-                        let tile_elements = tile_rows
-                            .checked_mul(flat)
-                            .ok_or("DeepSeek-V4 HC TF32 tile element count overflow")?;
-                        let state_tile = state
-                            .checked_add(
-                                u64::try_from(
-                                    token_start
-                                        .checked_mul(flat)
-                                        .and_then(|value| {
-                                            value.checked_mul(std::mem::size_of::<u16>())
-                                        })
-                                        .ok_or("DeepSeek-V4 HC TF32 state offset overflow")?,
-                                )
-                                .map_err(|_| "DeepSeek-V4 HC TF32 state offset exceeds u64")?,
-                            )
-                            .ok_or("DeepSeek-V4 HC TF32 state pointer overflow")?;
-                        let inv_tile = inv_ptr
-                            .checked_add(
-                                u64::try_from(
-                                    token_start
-                                        .checked_mul(std::mem::size_of::<f32>())
-                                        .ok_or("DeepSeek-V4 HC TF32 inverse-RMS offset overflow")?,
-                                )
-                                .map_err(|_| {
-                                    "DeepSeek-V4 HC TF32 inverse-RMS offset exceeds u64"
-                                })?,
-                            )
-                            .ok_or("DeepSeek-V4 HC TF32 inverse-RMS pointer overflow")?;
-                        let mixes_tile = mixes_ptr
-                            .checked_add(
-                                u64::try_from(
-                                    token_start
-                                        .checked_mul(mix_width)
-                                        .and_then(|value| {
-                                            value.checked_mul(std::mem::size_of::<f32>())
-                                        })
-                                        .ok_or("DeepSeek-V4 HC TF32 output offset overflow")?,
-                                )
-                                .map_err(|_| "DeepSeek-V4 HC TF32 output offset exceeds u64")?,
-                            )
-                            .ok_or("DeepSeek-V4 HC TF32 output pointer overflow")?;
-                        let threads = 256u32;
-                        let blocks = u32::try_from(tile_elements.div_ceil(threads as usize))
-                            .map_err(|_| "DeepSeek-V4 HC TF32 normalize grid exceeds u32")?;
-                        let mut n0 = normalized_ptr;
-                        let mut n1 = state_tile;
-                        let mut n2 = inv_tile;
-                        let mut n3 = i64::try_from(tile_elements)
-                            .map_err(|_| "DeepSeek-V4 HC TF32 tile elements exceed i64")?;
-                        let mut n4 = i32::try_from(flat)
-                            .map_err(|_| "DeepSeek-V4 HC TF32 flat width exceeds i32")?;
+                    let project_result = (|| -> Result<(), String> {
                         unsafe {
-                            launch(
-                                self.kernels.deepseek_v4_hc_normalize_f32,
-                                (blocks, 1, 1),
-                                (threads, 1, 1),
-                                0,
-                                self.stream,
-                                &mut [
-                                    &mut n0 as *mut _ as *mut std::ffi::c_void,
-                                    &mut n1 as *mut _ as *mut std::ffi::c_void,
-                                    &mut n2 as *mut _ as *mut std::ffi::c_void,
-                                    &mut n3 as *mut _ as *mut std::ffi::c_void,
-                                    &mut n4 as *mut _ as *mut std::ffi::c_void,
-                                ],
-                            )?;
-                            if let Some((target,row))=observed {
-                                if row>=token_start && row<token_start+tile_rows {target.hc_observed_row("normalized.f32",normalized_ptr,row-token_start,flat,4,self.stream)?;}
-                            }
-                            cublas_result::gemm_ex(
+                            cublas_result::set_stream(
+                                self.cublas_handle,
+                                self.stream as cublas_sys::cudaStream_t,
+                            )
+                            .map_err(|error| {
+                                format!("DeepSeek-V4 HC TF32 set_stream failed: {error:?}")
+                            })?;
+                        }
+                        let alpha = 1.0f32;
+                        let beta = 0.0f32;
+                        let mut token_start = 0usize;
+                        while token_start < m {
+                            let tile_rows = (m - token_start).min(tile_capacity);
+                            let tile_elements = tile_rows
+                                .checked_mul(flat)
+                                .ok_or("DeepSeek-V4 HC TF32 tile element count overflow")?;
+                            let state_tile = state
+                                .checked_add(
+                                    u64::try_from(
+                                        token_start
+                                            .checked_mul(flat)
+                                            .and_then(|value| {
+                                                value.checked_mul(std::mem::size_of::<u16>())
+                                            })
+                                            .ok_or("DeepSeek-V4 HC TF32 state offset overflow")?,
+                                    )
+                                    .map_err(|_| "DeepSeek-V4 HC TF32 state offset exceeds u64")?,
+                                )
+                                .ok_or("DeepSeek-V4 HC TF32 state pointer overflow")?;
+                            let inv_tile = inv_ptr
+                                .checked_add(
+                                    u64::try_from(
+                                        token_start.checked_mul(std::mem::size_of::<f32>()).ok_or(
+                                            "DeepSeek-V4 HC TF32 inverse-RMS offset overflow",
+                                        )?,
+                                    )
+                                    .map_err(|_| {
+                                        "DeepSeek-V4 HC TF32 inverse-RMS offset exceeds u64"
+                                    })?,
+                                )
+                                .ok_or("DeepSeek-V4 HC TF32 inverse-RMS pointer overflow")?;
+                            let mixes_tile = mixes_ptr
+                                .checked_add(
+                                    u64::try_from(
+                                        token_start
+                                            .checked_mul(mix_width)
+                                            .and_then(|value| {
+                                                value.checked_mul(std::mem::size_of::<f32>())
+                                            })
+                                            .ok_or("DeepSeek-V4 HC TF32 output offset overflow")?,
+                                    )
+                                    .map_err(|_| "DeepSeek-V4 HC TF32 output offset exceeds u64")?,
+                                )
+                                .ok_or("DeepSeek-V4 HC TF32 output pointer overflow")?;
+                            let threads = 256u32;
+                            let blocks = u32::try_from(tile_elements.div_ceil(threads as usize))
+                                .map_err(|_| "DeepSeek-V4 HC TF32 normalize grid exceeds u32")?;
+                            let mut n0 = normalized_ptr;
+                            let mut n1 = state_tile;
+                            let mut n2 = inv_tile;
+                            let mut n3 = i64::try_from(tile_elements)
+                                .map_err(|_| "DeepSeek-V4 HC TF32 tile elements exceed i64")?;
+                            let mut n4 = i32::try_from(flat)
+                                .map_err(|_| "DeepSeek-V4 HC TF32 flat width exceeds i32")?;
+                            unsafe {
+                                launch(
+                                    self.kernels.deepseek_v4_hc_normalize_f32,
+                                    (blocks, 1, 1),
+                                    (threads, 1, 1),
+                                    0,
+                                    self.stream,
+                                    &mut [
+                                        &mut n0 as *mut _ as *mut std::ffi::c_void,
+                                        &mut n1 as *mut _ as *mut std::ffi::c_void,
+                                        &mut n2 as *mut _ as *mut std::ffi::c_void,
+                                        &mut n3 as *mut _ as *mut std::ffi::c_void,
+                                        &mut n4 as *mut _ as *mut std::ffi::c_void,
+                                    ],
+                                )?;
+                                if let Some((target, row)) = observed {
+                                    if row >= token_start && row < token_start + tile_rows {
+                                        target.hc_observed_row(
+                                            "normalized.f32",
+                                            normalized_ptr,
+                                            row - token_start,
+                                            flat,
+                                            4,
+                                            self.stream,
+                                        )?;
+                                    }
+                                }
+                                cublas_result::gemm_ex(
                                 self.cublas_handle,
                                 cublas_sys::cublasOperation_t::CUBLAS_OP_T,
                                 cublas_sys::cublasOperation_t::CUBLAS_OP_N,
@@ -32573,28 +33346,31 @@ impl PrefillEngine {
                                     token_start + tile_rows
                                 )
                             })?;
+                            }
+                            token_start += tile_rows;
                         }
-                        token_start += tile_rows;
-                    }
-                    Ok(())
-                })();
-                let restore_workspace = unsafe {
-                    lib.cublasSetWorkspace_v2(self.cublas_handle, std::ptr::null_mut(), 0)
-                };
-                if restore_workspace != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
-                    return Err(format!(
+                        Ok(())
+                    })();
+                    let restore_workspace = unsafe {
+                        lib.cublasSetWorkspace_v2(self.cublas_handle, std::ptr::null_mut(), 0)
+                    };
+                    if restore_workspace != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                        return Err(format!(
                         "DeepSeek-V4 HC TF32 failed to restore cuBLAS workspace: {restore_workspace:?}; operation={project_result:?}"
                     ));
+                    }
+                    project_result?;
                 }
-                project_result?;
             }
-        }}
+        }
         self.deepseek_v4_hc_internal_timing_finish(
             DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_PROJECT,
             project_timing,
         )?;
 
-        if let Some((target,row))=observed {target.hc_observed_row("mixes.f32",mixes_ptr,row,mix_width,4,self.stream)?;}
+        if let Some((target, row)) = observed {
+            target.hc_observed_row("mixes.f32", mixes_ptr, row, mix_width, 4, self.stream)?;
+        }
         let mut k0 = pre_ptr;
         let mut k1 = post_ptr;
         let mut k2 = comb_ptr;
@@ -32632,10 +33408,19 @@ impl PrefillEngine {
             prepare_timing,
         )?;
 
-        if let Some((target,row))=observed {
-            target.hc_observed_row("pre.f32",pre_ptr,row,hc_mult,4,self.stream)?;
-            target.hc_observed_row("post.f32",post_ptr,row,hc_mult,4,self.stream)?;
-            target.hc_observed_row("comb.f32",comb_ptr,row,hc_mult.checked_mul(hc_mult).ok_or("HC observed comb overflow")?,4,self.stream)?;
+        if let Some((target, row)) = observed {
+            target.hc_observed_row("pre.f32", pre_ptr, row, hc_mult, 4, self.stream)?;
+            target.hc_observed_row("post.f32", post_ptr, row, hc_mult, 4, self.stream)?;
+            target.hc_observed_row(
+                "comb.f32",
+                comb_ptr,
+                row,
+                hc_mult
+                    .checked_mul(hc_mult)
+                    .ok_or("HC observed comb overflow")?,
+                4,
+                self.stream,
+            )?;
         }
         let hidden_threads = std::cmp::max(32, ((std::cmp::min(1024, h) + 31) / 32) * 32) as u32;
         let mut r0 = hidden_out;
@@ -32857,7 +33642,14 @@ impl PrefillEngine {
     }
 
     fn launch_rmsnorm(&self, out: u64, x: u64, w: u64, m: usize, d: usize) -> Result<(), String> {
-        if let Some(bank)=&self.ordered_kda_projection {return unsafe{bank.norm.as_ref().ok_or("common RMSNorm not admitted")?.enqueue(out,x,w,d,m,self.config.rms_norm_eps,self.stream)};}
+        if let Some(bank) = &self.ordered_kda_projection {
+            return unsafe {
+                bank.norm
+                    .as_ref()
+                    .ok_or("common RMSNorm not admitted")?
+                    .enqueue(out, x, w, d, m, self.config.rms_norm_eps, self.stream)
+            };
+        }
         let t = std::cmp::max(32, ((std::cmp::min(1024, d) + 31) / 32) * 32) as u32;
         let mut p0 = out;
         let mut p1 = x;
@@ -35501,20 +36293,99 @@ impl PrefillEngine {
     // ── Marlin GEMM ──
 
     // Shared/expert-only backend selection. Generic dense paths retain83c arithmetic.
-    fn expert_marlin_gemm_on_stream(&self,a:u64,w:&MarlinWeight,c:u64,m:usize,stream:cuda_sys::CUstream,fp32_scratch:u64,workspace:u64)->Result<(),String>{
-        if let Some(bank)=&self.ordered_kda_projection {
-            return unsafe{bank.marlin.as_ref().ok_or("common expert program not admitted")?.enqueue(crate::common_marlin::Geometry{rows:w.n,cols:w.k,group:if w.num_groups==1{w.k}else{w.group_size},bits:w.num_bits as usize},w.packed,w.scales,a,c,0,m,stream)};
+    fn expert_marlin_gemm_on_stream(
+        &self,
+        a: u64,
+        w: &MarlinWeight,
+        c: u64,
+        m: usize,
+        stream: cuda_sys::CUstream,
+        fp32_scratch: u64,
+        workspace: u64,
+    ) -> Result<(), String> {
+        if let Some(bank) = &self.ordered_kda_projection {
+            return unsafe {
+                bank.marlin
+                    .as_ref()
+                    .ok_or("common expert program not admitted")?
+                    .enqueue(
+                        crate::common_marlin::Geometry {
+                            rows: w.n,
+                            cols: w.k,
+                            group: if w.num_groups == 1 { w.k } else { w.group_size },
+                            bits: w.num_bits as usize,
+                        },
+                        w.packed,
+                        w.scales,
+                        a,
+                        c,
+                        0,
+                        m,
+                        stream,
+                    )
+            };
         }
-        self.marlin_gemm_on_stream(a,w,c,m,stream,fp32_scratch,workspace)
+        self.marlin_gemm_on_stream(a, w, c, m, stream, fp32_scratch, workspace)
     }
-    fn expert_marlin_gemm(&self,a:u64,w:&MarlinWeight,c:u64,m:usize)->Result<(),String>{self.expert_marlin_gemm_on_stream(a,w,c,m,self.stream,*self.scratch.d_fp32_scratch.device_ptr(),*self.scratch.d_workspace.device_ptr())}
-    fn expert_gated_activation(&self,out:u64,gate_up:u64,activation:u8,m:usize,inter:usize,limit:f32,raw:bool)->Result<(),String>{self.expert_gated_activation_on_stream(out,gate_up,activation,m,inter,limit,raw,self.stream)}
-    fn expert_gated_activation_on_stream(&self,out:u64,gate_up:u64,activation:u8,m:usize,inter:usize,limit:f32,raw:bool,stream:cuda_sys::CUstream)->Result<(),String>{
-        if let Some(bank)=&self.ordered_kda_projection {
-            let stride=inter.checked_mul(if activation==1{1}else{2}).ok_or("common expert activation stride overflow")?;
-            return unsafe{bank.marlin.as_ref().ok_or("common expert activation program not admitted")?.enqueue_activation(gate_up,out,0,inter,activation,limit,raw,stride,inter,m,stream)};
+    fn expert_marlin_gemm(&self, a: u64, w: &MarlinWeight, c: u64, m: usize) -> Result<(), String> {
+        self.expert_marlin_gemm_on_stream(
+            a,
+            w,
+            c,
+            m,
+            self.stream,
+            *self.scratch.d_fp32_scratch.device_ptr(),
+            *self.scratch.d_workspace.device_ptr(),
+        )
+    }
+    fn expert_gated_activation(
+        &self,
+        out: u64,
+        gate_up: u64,
+        activation: u8,
+        m: usize,
+        inter: usize,
+        limit: f32,
+        raw: bool,
+    ) -> Result<(), String> {
+        self.expert_gated_activation_on_stream(
+            out,
+            gate_up,
+            activation,
+            m,
+            inter,
+            limit,
+            raw,
+            self.stream,
+        )
+    }
+    fn expert_gated_activation_on_stream(
+        &self,
+        out: u64,
+        gate_up: u64,
+        activation: u8,
+        m: usize,
+        inter: usize,
+        limit: f32,
+        raw: bool,
+        stream: cuda_sys::CUstream,
+    ) -> Result<(), String> {
+        if let Some(bank) = &self.ordered_kda_projection {
+            let stride = inter
+                .checked_mul(if activation == 1 { 1 } else { 2 })
+                .ok_or("common expert activation stride overflow")?;
+            return unsafe {
+                bank.marlin
+                    .as_ref()
+                    .ok_or("common expert activation program not admitted")?
+                    .enqueue_activation(
+                        gate_up, out, 0, inter, activation, limit, raw, stride, inter, m, stream,
+                    )
+            };
         }
-        self.launch_gated_activation_on_stream(out,gate_up,activation,m,inter,limit,raw,stream)
+        self.launch_gated_activation_on_stream(
+            out, gate_up, activation, m, inter, limit, raw, stream,
+        )
     }
     fn marlin_gemm_on_stream(
         &self,
@@ -35663,11 +36534,19 @@ impl PrefillEngine {
 
     // The selected DSA query contract uses fixed tensor arithmetic in every batch.
     // Native strided-batched cuBLAS remains batch-count dependent at real dimensions.
-    fn dsa_owner_query_projection_gemm(&self, input:u64, w:&Bf16Weight, output:u64, rows:usize)->Result<(),String>{
-        if let Some(bank)=&self.ordered_kda_projection {
-            return unsafe{bank.enqueue_dense_bf16(w.ptr,input,output,w.n,w.k,rows,self.stream)};
+    fn dsa_owner_query_projection_gemm(
+        &self,
+        input: u64,
+        w: &Bf16Weight,
+        output: u64,
+        rows: usize,
+    ) -> Result<(), String> {
+        if let Some(bank) = &self.ordered_kda_projection {
+            return unsafe {
+                bank.enqueue_dense_bf16(w.ptr, input, output, w.n, w.k, rows, self.stream)
+            };
         }
-        self.dsa_owner_projection_gemm(input,w,output,rows)
+        self.dsa_owner_projection_gemm(input, w, output, rows)
     }
 
     fn dsa_owner_projection_gemm(
@@ -36263,7 +37142,11 @@ impl PrefillEngine {
         };
         let selection_timing = launch_dsa_prefill_selection_chunk(
             DsaPrefillSelectionKernels {
-                score_tensorcomp: self.ordered_kda_projection.as_ref().map(|bank|bank.score_kernel()).transpose()?,
+                score_tensorcomp: self
+                    .ordered_kda_projection
+                    .as_ref()
+                    .map(|bank| bank.score_kernel())
+                    .transpose()?,
                 rope_query_bf16: self.kernels.dsa_prefill_rope_query_bf16,
                 fused_scores: self.kernels.dsa_prefill_fused_scores,
                 accumulate_gemm_scores: self.kernels.dsa_prefill_accumulate_gemm_scores,
@@ -36298,8 +37181,8 @@ impl PrefillEngine {
                 })?,
             workspace,
             selection_timing_events,
-        None,
-)?;
+            None,
+        )?;
         for (source, target) in [
             (
                 DSA_PREFILL_SELECTION_TIMING_QUERY,
@@ -36855,9 +37738,9 @@ impl PrefillEngine {
                 0,
                 compressor_output,
                 0,
-                emitted_rows.checked_mul(head_dim).ok_or_else(|| {
-                    format!("DeepSeek-V4 {label} pooled trace size overflow")
-                })?,
+                emitted_rows
+                    .checked_mul(head_dim)
+                    .ok_or_else(|| format!("DeepSeek-V4 {label} pooled trace size overflow"))?,
             )?;
         }
         if emitted_rows == 0 {
@@ -39550,9 +40433,26 @@ impl PrefillEngine {
         let temp_state = *temp_state_buffer.device_ptr();
         let hidden = *self.scratch.d_hidden.device_ptr();
         let trace_position = chunk_start.saturating_add(m.saturating_sub(1));
-        let hc_producer_capture=crate::matched_prefill_capture::target(self.matched_prefill_invocation.as_ref(),"hc_prepare_operands",layer_idx,chunk_start.checked_add(m).ok_or("HC producer height overflow")?,None)?;
-        let hc_producer_row=hc_producer_capture.as_ref().map(|target|target.row.checked_sub(chunk_start).filter(|&row|row<m).ok_or("HC producer row outside chunk")).transpose()?;
-        let hc_observed=hc_producer_capture.as_ref().zip(hc_producer_row);
+        let hc_producer_capture = crate::matched_prefill_capture::target(
+            self.matched_prefill_invocation.as_ref(),
+            "hc_prepare_operands",
+            layer_idx,
+            chunk_start
+                .checked_add(m)
+                .ok_or("HC producer height overflow")?,
+            None,
+        )?;
+        let hc_producer_row = hc_producer_capture
+            .as_ref()
+            .map(|target| {
+                target
+                    .row
+                    .checked_sub(chunk_start)
+                    .filter(|&row| row < m)
+                    .ok_or("HC producer row outside chunk")
+            })
+            .transpose()?;
+        let hc_observed = hc_producer_capture.as_ref().zip(hc_producer_row);
         let attn_hc_timing = self.glm5_timing_start("glm5 attn_hc_prep_norm")?;
         let (attn_post, attn_comb, hc_mult) = {
             let hc = self.layer_weights[layer_idx]
@@ -39683,19 +40583,57 @@ impl PrefillEngine {
             m.saturating_sub(1),
             h,
         )?;
-        let hc_capture=crate::matched_prefill_capture::target(self.matched_prefill_invocation.as_ref(),"hc_post_operands",layer_idx,
-            self.active_prefill_chunk_start.checked_add(m).ok_or("HC capture height overflow")?,None)?;
-        let hc_capture_row=hc_capture.as_ref().map(|target|target.row.checked_sub(self.active_prefill_chunk_start).filter(|&row|row<m).ok_or("HC capture row outside chunk")).transpose()?;
-        if let (Some(target),Some(row))=(&hc_capture,hc_capture_row) {
-            target.hc_post_operands(row,m,h,hc_mult,hidden,state,attn_post,attn_comb,temp_state,self.stream,"deepseek_v4_hc_post_kernel")?;
+        let hc_capture = crate::matched_prefill_capture::target(
+            self.matched_prefill_invocation.as_ref(),
+            "hc_post_operands",
+            layer_idx,
+            self.active_prefill_chunk_start
+                .checked_add(m)
+                .ok_or("HC capture height overflow")?,
+            None,
+        )?;
+        let hc_capture_row = hc_capture
+            .as_ref()
+            .map(|target| {
+                target
+                    .row
+                    .checked_sub(self.active_prefill_chunk_start)
+                    .filter(|&row| row < m)
+                    .ok_or("HC capture row outside chunk")
+            })
+            .transpose()?;
+        if let (Some(target), Some(row)) = (&hc_capture, hc_capture_row) {
+            target.hc_post_operands(
+                row,
+                m,
+                h,
+                hc_mult,
+                hidden,
+                state,
+                attn_post,
+                attn_comb,
+                temp_state,
+                self.stream,
+                "deepseek_v4_hc_post_kernel",
+            )?;
         }
         let attn_hc_post_timing = self.glm5_timing_start("glm5 attn_hc_post")?;
         self.launch_deepseek_v4_hc_post(
             temp_state, hidden, state, attn_post, attn_comb, hc_mult, m,
         )?;
-        if let (Some(target),Some(row))=(&hc_capture,hc_capture_row) {
-            let bytes=h.checked_mul(hc_mult).and_then(|n|n.checked_mul(2)).ok_or("HC output extent overflow")?;
-            target.device("output.bf16",temp_state.checked_add(row.checked_mul(bytes).ok_or("HC output row overflow")? as u64).ok_or("HC output pointer overflow")?,bytes,self.stream)?;
+        if let (Some(target), Some(row)) = (&hc_capture, hc_capture_row) {
+            let bytes = h
+                .checked_mul(hc_mult)
+                .and_then(|n| n.checked_mul(2))
+                .ok_or("HC output extent overflow")?;
+            target.device(
+                "output.bf16",
+                temp_state
+                    .checked_add(row.checked_mul(bytes).ok_or("HC output row overflow")? as u64)
+                    .ok_or("HC output pointer overflow")?,
+                bytes,
+                self.stream,
+            )?;
         }
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_POST_ATTN_STATE_LAST,
@@ -40006,23 +40944,61 @@ impl PrefillEngine {
         let stream_ptr = self.stream as *mut std::ffi::c_void;
 
         let batch_label = format!("prompt-{}", self.active_prefill_prompt_tokens);
-        let batch_probe = self.matched_prefill_target("kda_full_batch", layer_idx, m, Some(&batch_label))?;
-        let tensor_bytes = m.checked_mul(heads).and_then(|n| n.checked_mul(desc.head_dim)).and_then(|n| n.checked_mul(2)).ok_or("KDA batch tensor bytes overflow")?;
-        let recurrent_bytes = heads.checked_mul(desc.head_dim).and_then(|n| n.checked_mul(desc.head_dim)).and_then(|n| n.checked_mul(4)).ok_or("KDA batch state bytes overflow")?;
+        let batch_probe =
+            self.matched_prefill_target("kda_full_batch", layer_idx, m, Some(&batch_label))?;
+        let tensor_bytes = m
+            .checked_mul(heads)
+            .and_then(|n| n.checked_mul(desc.head_dim))
+            .and_then(|n| n.checked_mul(2))
+            .ok_or("KDA batch tensor bytes overflow")?;
+        let recurrent_bytes = heads
+            .checked_mul(desc.head_dim)
+            .and_then(|n| n.checked_mul(desc.head_dim))
+            .and_then(|n| n.checked_mul(4))
+            .ok_or("KDA batch state bytes overflow")?;
         if let Some(target) = &batch_probe {
-            let actual_end = self.active_prefill_chunk_start.checked_add(m).ok_or("KDA batch absolute end overflow")?;
-            let checkpoint = self.active_prefill_chunk_start.checked_add(target.row).ok_or("KDA batch checkpoint overflow")?;
-            if self.active_prefill_prompt_tokens == 0 || actual_end != self.active_prefill_prompt_tokens || target.row == 0 {
+            let actual_end = self
+                .active_prefill_chunk_start
+                .checked_add(m)
+                .ok_or("KDA batch absolute end overflow")?;
+            let checkpoint = self
+                .active_prefill_chunk_start
+                .checked_add(target.row)
+                .ok_or("KDA batch checkpoint overflow")?;
+            if self.active_prefill_prompt_tokens == 0
+                || actual_end != self.active_prefill_prompt_tokens
+                || target.row == 0
+            {
                 return Err("full-batch recurrence capture requires a bounded interior checkpoint in the actual final prompt batch".into());
             }
-            let beta_bytes = m.checked_mul(heads).and_then(|n| n.checked_mul(2)).ok_or("KDA batch beta bytes overflow")?;
-            let bias_bytes = heads.checked_mul(desc.head_dim).and_then(|n| n.checked_mul(4)).ok_or("KDA batch bias bytes overflow")?;
-            for (name,ptr,bytes) in [
-                ("raw-q.bf16",q,tensor_bytes),("raw-k.bf16",k,tensor_bytes),("raw-v.bf16",v,tensor_bytes),
-                ("raw-gates.bf16",gate,tensor_bytes),("raw-beta.bf16",beta,beta_bytes),
-                ("a-log.f32",desc.a_log_ptr,heads.checked_mul(4).ok_or("KDA batch A bytes overflow")?),
-                ("dt-bias.f32",desc.dt_bias_ptr,bias_bytes),("actual-incoming-state.f32",desc.recur_state_ptr,recurrent_bytes)
-            ] { target.device(name,ptr,bytes,self.stream)?; }
+            let beta_bytes = m
+                .checked_mul(heads)
+                .and_then(|n| n.checked_mul(2))
+                .ok_or("KDA batch beta bytes overflow")?;
+            let bias_bytes = heads
+                .checked_mul(desc.head_dim)
+                .and_then(|n| n.checked_mul(4))
+                .ok_or("KDA batch bias bytes overflow")?;
+            for (name, ptr, bytes) in [
+                ("raw-q.bf16", q, tensor_bytes),
+                ("raw-k.bf16", k, tensor_bytes),
+                ("raw-v.bf16", v, tensor_bytes),
+                ("raw-gates.bf16", gate, tensor_bytes),
+                ("raw-beta.bf16", beta, beta_bytes),
+                (
+                    "a-log.f32",
+                    desc.a_log_ptr,
+                    heads.checked_mul(4).ok_or("KDA batch A bytes overflow")?,
+                ),
+                ("dt-bias.f32", desc.dt_bias_ptr, bias_bytes),
+                (
+                    "actual-incoming-state.f32",
+                    desc.recur_state_ptr,
+                    recurrent_bytes,
+                ),
+            ] {
+                target.device(name, ptr, bytes, self.stream)?;
+            }
             target.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({
                 "layer":layer_idx,"height":m,"heads":heads,"dim":desc.head_dim,
                 "actual_prompt_tokens":self.active_prefill_prompt_tokens,"actual_batch_start":self.active_prefill_chunk_start,
@@ -40115,26 +41091,39 @@ impl PrefillEngine {
         }
         // BEGIN bounded model KDA diagnostic launch
         let rc = if let Some(diagnostic) = self.matched_kda_intra.as_ref() {
-            unsafe { diagnostic.launch((heads, desc.head_dim, desc.gate_lower_bound), q, k, g, beta, aqk, akkd, q_scale, t_arg, self.stream)?; }
+            unsafe {
+                diagnostic.launch(
+                    (heads, desc.head_dim, desc.gate_lower_bound),
+                    q,
+                    k,
+                    g,
+                    beta,
+                    aqk,
+                    akkd,
+                    q_scale,
+                    t_arg,
+                    self.stream,
+                )?;
+            }
             0
         } else {
             unsafe {
-            (fla.kda_intra)(
-                q,
-                k,
-                g,
-                beta,
-                aqk,
-                akkd,
-                q_scale,
-                0,
-                0,
-                t_arg,
-                u32::try_from(chunks).map_err(|_| "chunked KDA intra grid exceeds u32")?,
-                4,
-                u32::try_from(heads).map_err(|_| "chunked KDA head grid exceeds u32")?,
-                stream_ptr,
-            )
+                (fla.kda_intra)(
+                    q,
+                    k,
+                    g,
+                    beta,
+                    aqk,
+                    akkd,
+                    q_scale,
+                    0,
+                    0,
+                    t_arg,
+                    u32::try_from(chunks).map_err(|_| "chunked KDA intra grid exceeds u32")?,
+                    4,
+                    u32::try_from(heads).map_err(|_| "chunked KDA head grid exceeds u32")?,
+                    stream_ptr,
+                )
             }
         };
         // END bounded model KDA diagnostic launch
@@ -40197,14 +41186,30 @@ impl PrefillEngine {
             ));
         }
         if let Some(target) = &batch_probe {
-            let beta_bytes = m.checked_mul(heads).and_then(|n|n.checked_mul(2)).ok_or("KDA prepared beta bytes overflow")?;
-            let gate_bytes = tensor_bytes.checked_mul(2).ok_or("KDA prepared gate bytes overflow")?;
-            let aqk_bytes = m.checked_mul(heads).and_then(|n|n.checked_mul(block_tokens)).and_then(|n|n.checked_mul(2)).ok_or("KDA Aqk bytes overflow")?;
-            for (name,ptr,bytes) in [
-                ("prepared-q.bf16",q,tensor_bytes),("prepared-k.bf16",k,tensor_bytes),("prepared-beta.bf16",beta,beta_bytes),
-                ("native-g.f32",g,gate_bytes),("native-kg.bf16",kg,tensor_bytes),("native-u.bf16",u,tensor_bytes),
-                ("native-w.bf16",w,tensor_bytes),("native-aqk.bf16",aqk,aqk_bytes)
-            ] { target.device(name,ptr,bytes,self.stream)?; }
+            let beta_bytes = m
+                .checked_mul(heads)
+                .and_then(|n| n.checked_mul(2))
+                .ok_or("KDA prepared beta bytes overflow")?;
+            let gate_bytes = tensor_bytes
+                .checked_mul(2)
+                .ok_or("KDA prepared gate bytes overflow")?;
+            let aqk_bytes = m
+                .checked_mul(heads)
+                .and_then(|n| n.checked_mul(block_tokens))
+                .and_then(|n| n.checked_mul(2))
+                .ok_or("KDA Aqk bytes overflow")?;
+            for (name, ptr, bytes) in [
+                ("prepared-q.bf16", q, tensor_bytes),
+                ("prepared-k.bf16", k, tensor_bytes),
+                ("prepared-beta.bf16", beta, beta_bytes),
+                ("native-g.f32", g, gate_bytes),
+                ("native-kg.bf16", kg, tensor_bytes),
+                ("native-u.bf16", u, tensor_bytes),
+                ("native-w.bf16", w, tensor_bytes),
+                ("native-aqk.bf16", aqk, aqk_bytes),
+            ] {
+                target.device(name, ptr, bytes, self.stream)?;
+            }
         }
         let rc = unsafe {
             (fla.kda_state_recurrence)(
@@ -40234,11 +41239,16 @@ impl PrefillEngine {
             ));
         }
         if let Some(target) = &batch_probe {
-            let h_bytes = chunks.checked_mul(recurrent_bytes/2).ok_or("KDA native block H bytes overflow")?;
-            for (name,ptr,bytes) in [
-                ("native-block-start-h.bf16",h,h_bytes),("native-v-new.bf16",v_new,tensor_bytes),
-                ("native-final-state.f32",final_state,recurrent_bytes)
-            ] { target.device(name,ptr,bytes,self.stream)?; }
+            let h_bytes = chunks
+                .checked_mul(recurrent_bytes / 2)
+                .ok_or("KDA native block H bytes overflow")?;
+            for (name, ptr, bytes) in [
+                ("native-block-start-h.bf16", h, h_bytes),
+                ("native-v-new.bf16", v_new, tensor_bytes),
+                ("native-final-state.f32", final_state, recurrent_bytes),
+            ] {
+                target.device(name, ptr, bytes, self.stream)?;
+            }
         }
         let rc = unsafe {
             (fla.kda_output)(
@@ -40265,7 +41275,14 @@ impl PrefillEngine {
                 layer_idx, rc
             ));
         }
-        if let Some(target) = &batch_probe { target.device("native-full-batch-output.bf16",output,tensor_bytes,self.stream)?; }
+        if let Some(target) = &batch_probe {
+            target.device(
+                "native-full-batch-output.bf16",
+                output,
+                tensor_bytes,
+                self.stream,
+            )?;
+        }
         let state_bytes = heads
             .checked_mul(desc.head_dim)
             .and_then(|value| value.checked_mul(desc.head_dim))
@@ -40288,19 +41305,57 @@ impl PrefillEngine {
         Ok(())
     }
 
-    pub(crate) fn ordered_kda_layout(&self,projection:&DeepseekV4ProjectionPrefillDescriptor)->Result<crate::ordered_projection::Layout,String>{
-        let DeepseekV4ProjectionPrefillDescriptor::Hqq{tensor_name,desc}=projection else {return Err("ordered KDA projection requires loaded HQQ6".into());};
-        if self.validate_hqq_row_major_materialize_tensor_desc(tensor_name,desc)?!=6 || desc.cols==0 || desc.group_size==0 || desc.cols%desc.group_size!=0 {
+    pub(crate) fn ordered_kda_layout(
+        &self,
+        projection: &DeepseekV4ProjectionPrefillDescriptor,
+    ) -> Result<crate::ordered_projection::Layout, String> {
+        let DeepseekV4ProjectionPrefillDescriptor::Hqq { tensor_name, desc } = projection else {
+            return Err("ordered KDA projection requires loaded HQQ6".into());
+        };
+        if self.validate_hqq_row_major_materialize_tensor_desc(tensor_name, desc)? != 6
+            || desc.cols == 0
+            || desc.group_size == 0
+            || desc.cols % desc.group_size != 0
+        {
             return Err("ordered KDA projection requires unpadded HQQ6/F32 coefficients".into());
         }
-        let parameter_stride=(desc.cols/desc.group_size).checked_mul(4).ok_or("ordered prefill parameter stride overflow")?;
-        Ok(crate::ordered_projection::Layout{packed:desc.packed_ptr,scales:desc.scales_ptr,zeros:desc.zeros_ptr,rows:desc.rows,cols:desc.cols,group:desc.group_size,packed_stride:(desc.cols/4).checked_mul(3).ok_or("ordered prefill packed stride overflow")?,scales_stride:parameter_stride,zeros_stride:parameter_stride})
+        let parameter_stride = (desc.cols / desc.group_size)
+            .checked_mul(4)
+            .ok_or("ordered prefill parameter stride overflow")?;
+        Ok(crate::ordered_projection::Layout {
+            packed: desc.packed_ptr,
+            scales: desc.scales_ptr,
+            zeros: desc.zeros_ptr,
+            rows: desc.rows,
+            cols: desc.cols,
+            group: desc.group_size,
+            packed_stride: (desc.cols / 4)
+                .checked_mul(3)
+                .ok_or("ordered prefill packed stride overflow")?,
+            scales_stride: parameter_stride,
+            zeros_stride: parameter_stride,
+        })
     }
-    fn kda_projection_prefill(&self,layer:usize,desc:&DeepseekV4ProjectionPrefillDescriptor,input:u64,output:u64,tokens:usize)->Result<(),String>{
-        if let Some(bank)=&self.ordered_kda_projection {
-            unsafe {bank.enqueue(&self.ordered_kda_layout(desc)?,input,output,tokens,self.stream)}
+    fn kda_projection_prefill(
+        &self,
+        layer: usize,
+        desc: &DeepseekV4ProjectionPrefillDescriptor,
+        input: u64,
+        output: u64,
+        tokens: usize,
+    ) -> Result<(), String> {
+        if let Some(bank) = &self.ordered_kda_projection {
+            unsafe {
+                bank.enqueue(
+                    &self.ordered_kda_layout(desc)?,
+                    input,
+                    output,
+                    tokens,
+                    self.stream,
+                )
+            }
         } else {
-            self.deepseek_v4_projection_prefill_gemm_bf16(layer,desc,input,output,tokens)
+            self.deepseek_v4_projection_prefill_gemm_bf16(layer, desc, input, output, tokens)
         }
     }
 
@@ -40367,69 +41422,157 @@ impl PrefillEngine {
         }
 
         let hidden = *self.scratch.d_hidden.device_ptr();
-        let transition=crate::matched_prefill_capture::target(self.matched_prefill_invocation.as_ref(),"kda_transition_row",layer_idx,
-            self.active_prefill_chunk_start.checked_add(m).ok_or("transition height overflow")?,None)?;
-        let transition_row=transition.as_ref().map(|target|target.row.checked_sub(self.active_prefill_chunk_start).filter(|&row|row<m).ok_or("transition row outside actual chunk")).transpose()?;
-        let observe_transition=|name:&str,ptr:u64,cols:usize|->Result<(),String>{
-            if let (Some(target),Some(row))=(&transition,transition_row) {
-                let offset=row.checked_mul(cols).and_then(|n|n.checked_mul(2)).ok_or("transition row offset")?;
-                target.device(name,ptr.checked_add(offset as u64).ok_or("transition pointer overflow")?,cols.checked_mul(2).ok_or("transition bytes overflow")?,self.stream)?;
+        let transition = crate::matched_prefill_capture::target(
+            self.matched_prefill_invocation.as_ref(),
+            "kda_transition_row",
+            layer_idx,
+            self.active_prefill_chunk_start
+                .checked_add(m)
+                .ok_or("transition height overflow")?,
+            None,
+        )?;
+        let transition_row = transition
+            .as_ref()
+            .map(|target| {
+                target
+                    .row
+                    .checked_sub(self.active_prefill_chunk_start)
+                    .filter(|&row| row < m)
+                    .ok_or("transition row outside actual chunk")
+            })
+            .transpose()?;
+        let observe_transition = |name: &str, ptr: u64, cols: usize| -> Result<(), String> {
+            if let (Some(target), Some(row)) = (&transition, transition_row) {
+                let offset = row
+                    .checked_mul(cols)
+                    .and_then(|n| n.checked_mul(2))
+                    .ok_or("transition row offset")?;
+                target.device(
+                    name,
+                    ptr.checked_add(offset as u64)
+                        .ok_or("transition pointer overflow")?,
+                    cols.checked_mul(2).ok_or("transition bytes overflow")?,
+                    self.stream,
+                )?;
             }
             Ok(())
         };
-        observe_transition("normalized-input.bf16",hidden,self.config.hidden_size)?;
+        observe_transition("normalized-input.bf16", hidden, self.config.hidden_size)?;
         let qkv_timing = self.glm5_timing_start("glm5 kda_qkv_proj")?;
         self.kda_projection_prefill(layer_idx, &desc.q_proj, hidden, q, m)?;
         // BEGIN bounded full Q projection diagnostic selection
-        let row_q_target = self.matched_prefill_target("q_projection", layer_idx, m,None)?;
-        let full_q_target = self.matched_prefill_target("q_projection_full", layer_idx, m,None)?;
+        let row_q_target = self.matched_prefill_target("q_projection", layer_idx, m, None)?;
+        let full_q_target = self.matched_prefill_target("q_projection_full", layer_idx, m, None)?;
         if row_q_target.is_some() && full_q_target.is_some() {
             return Err("ambiguous full and selected-row Q diagnostic targets".into());
         }
         let full_q_target_enabled = full_q_target.is_some();
         // END bounded full Q projection diagnostic selection
         if let Some(target) = row_q_target.or(full_q_target) {
-            let DeepseekV4ProjectionPrefillDescriptor::Hqq { tensor_name, desc: weight } = &desc.q_proj else {
+            let DeepseekV4ProjectionPrefillDescriptor::Hqq {
+                tensor_name,
+                desc: weight,
+            } = &desc.q_proj
+            else {
                 return Err("matched Q probe requires an HQQ projection".into());
             };
             let bits = self.validate_hqq_row_major_materialize_tensor_desc(tensor_name, weight)?;
             let groups = weight.cols.div_ceil(weight.group_size);
-            let padded_cols = groups.checked_mul(weight.group_size).ok_or("Q probe padded columns overflow")?;
-            let packed_stride = match bits { 4 => padded_cols.div_ceil(2), 6 => padded_cols.div_ceil(4) * 3, 8 => padded_cols, _ => unreachable!() };
+            let padded_cols = groups
+                .checked_mul(weight.group_size)
+                .ok_or("Q probe padded columns overflow")?;
+            let packed_stride = match bits {
+                4 => padded_cols.div_ceil(2),
+                6 => padded_cols.div_ceil(4) * 3,
+                8 => padded_cols,
+                _ => unreachable!(),
+            };
             target.row("input.bf16", hidden, weight.cols, self.stream)?;
             target.row("production-prefill.bf16", q, weight.rows, self.stream)?;
-            target.device("packed.bin", weight.packed_ptr, weight.rows.checked_mul(packed_stride).ok_or("Q probe packed size overflow")?, self.stream)?;
-            let parameter_bytes = weight.rows.checked_mul(groups).and_then(|n| n.checked_mul(4)).ok_or("Q probe parameters overflow")?;
-            target.device("scales.f32", weight.scales_ptr, parameter_bytes, self.stream)?;
+            target.device(
+                "packed.bin",
+                weight.packed_ptr,
+                weight
+                    .rows
+                    .checked_mul(packed_stride)
+                    .ok_or("Q probe packed size overflow")?,
+                self.stream,
+            )?;
+            let parameter_bytes = weight
+                .rows
+                .checked_mul(groups)
+                .and_then(|n| n.checked_mul(4))
+                .ok_or("Q probe parameters overflow")?;
+            target.device(
+                "scales.f32",
+                weight.scales_ptr,
+                parameter_bytes,
+                self.stream,
+            )?;
             target.device("zeros.f32", weight.zeros_ptr, parameter_bytes, self.stream)?;
             if self.config.hqq_prefill_materialize_bf16 && self.ordered_kda_projection.is_none() {
-                let ptr = *self.scratch.d_hqq_bf16_weight.as_ref().ok_or("Q probe materialized weight absent")?.device_ptr();
-                target.device("materialized.bf16", ptr, weight.rows.checked_mul(weight.cols).and_then(|n| n.checked_mul(2)).ok_or("Q probe materialized size overflow")?, self.stream)?;
+                let ptr = *self
+                    .scratch
+                    .d_hqq_bf16_weight
+                    .as_ref()
+                    .ok_or("Q probe materialized weight absent")?
+                    .device_ptr();
+                target.device(
+                    "materialized.bf16",
+                    ptr,
+                    weight
+                        .rows
+                        .checked_mul(weight.cols)
+                        .and_then(|n| n.checked_mul(2))
+                        .ok_or("Q probe materialized size overflow")?,
+                    self.stream,
+                )?;
             }
             // BEGIN bounded full Q operand/handle capture
             if full_q_target_enabled {
-                if !self.config.hqq_prefill_materialize_bf16 || self.ordered_kda_projection.is_some() {
+                if !self.config.hqq_prefill_materialize_bf16
+                    || self.ordered_kda_projection.is_some()
+                {
                     return Err("full Q replay requires actual materialized BF16 weights".into());
                 }
-                let input_bytes = m.checked_mul(weight.cols).and_then(|n|n.checked_mul(2)).ok_or("full Q input bytes overflow")?;
-                let output_bytes = m.checked_mul(weight.rows).and_then(|n|n.checked_mul(2)).ok_or("full Q output bytes overflow")?;
-                target.device("full-input.bf16",hidden,input_bytes,self.stream)?;
-                target.device("full-production-prefill.bf16",q,output_bytes,self.stream)?;
+                let input_bytes = m
+                    .checked_mul(weight.cols)
+                    .and_then(|n| n.checked_mul(2))
+                    .ok_or("full Q input bytes overflow")?;
+                let output_bytes = m
+                    .checked_mul(weight.rows)
+                    .and_then(|n| n.checked_mul(2))
+                    .ok_or("full Q output bytes overflow")?;
+                target.device("full-input.bf16", hidden, input_bytes, self.stream)?;
+                target.device("full-production-prefill.bf16", q, output_bytes, self.stream)?;
                 use cudarc::cublas::sys as cb;
-                let mut math=0u32;
-                let mut atomics=cb::cublasAtomicsMode_t::CUBLAS_ATOMICS_NOT_ALLOWED;
-                let mut pointer=cb::cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;
-                let mut version=0i32;let mut sm_count=0i32;let mut stream=std::ptr::null_mut();
-                let results=unsafe {[
-                    cb::lib().cublasGetMathMode(self.cublas_handle,(&mut math as *mut u32).cast::<cb::cublasMath_t>()),
-                    cb::lib().cublasGetAtomicsMode(self.cublas_handle,&mut atomics),
-                    cb::lib().cublasGetPointerMode_v2(self.cublas_handle,&mut pointer),
-                    cb::lib().cublasGetVersion_v2(self.cublas_handle,&mut version),
-                    cb::lib().cublasGetSmCountTarget(self.cublas_handle,&mut sm_count),
-                    cb::lib().cublasGetStream_v2(self.cublas_handle,&mut stream),
-                ]};
-                if results.iter().any(|r|*r!=cb::cublasStatus_t::CUBLAS_STATUS_SUCCESS)||stream as usize!=self.stream as usize {
-                    return Err(format!("full Q cuBLAS handle contract query failed/mismatched stream: {results:?}"));
+                let mut math = 0u32;
+                let mut atomics = cb::cublasAtomicsMode_t::CUBLAS_ATOMICS_NOT_ALLOWED;
+                let mut pointer = cb::cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;
+                let mut version = 0i32;
+                let mut sm_count = 0i32;
+                let mut stream = std::ptr::null_mut();
+                let results = unsafe {
+                    [
+                        cb::lib().cublasGetMathMode(
+                            self.cublas_handle,
+                            (&mut math as *mut u32).cast::<cb::cublasMath_t>(),
+                        ),
+                        cb::lib().cublasGetAtomicsMode(self.cublas_handle, &mut atomics),
+                        cb::lib().cublasGetPointerMode_v2(self.cublas_handle, &mut pointer),
+                        cb::lib().cublasGetVersion_v2(self.cublas_handle, &mut version),
+                        cb::lib().cublasGetSmCountTarget(self.cublas_handle, &mut sm_count),
+                        cb::lib().cublasGetStream_v2(self.cublas_handle, &mut stream),
+                    ]
+                };
+                if results
+                    .iter()
+                    .any(|r| *r != cb::cublasStatus_t::CUBLAS_STATUS_SUCCESS)
+                    || stream as usize != self.stream as usize
+                {
+                    return Err(format!(
+                        "full Q cuBLAS handle contract query failed/mismatched stream: {results:?}"
+                    ));
                 }
                 target.write("cublas-contract.json",serde_json::to_vec_pretty(&serde_json::json!({
                     "version":version,"math_mode":math as u32,"atomics_mode":atomics as u32,"pointer_mode":pointer as u32,"sm_count_target":sm_count,
@@ -40639,39 +41782,67 @@ impl PrefillEngine {
         )?;
 
         let forget_beta_timing = self.glm5_timing_start("glm5 kda_forget_beta_proj")?;
-        self.kda_projection_prefill(
-            layer_idx,
-            &desc.f_a_proj,
-            hidden,
-            low_rank,
-            m,
-        )?;
-        self.kda_projection_prefill(
-            layer_idx,
-            &desc.f_b_proj,
-            low_rank,
-            gate,
-            m,
-        )?;
+        self.kda_projection_prefill(layer_idx, &desc.f_a_proj, hidden, low_rank, m)?;
+        self.kda_projection_prefill(layer_idx, &desc.f_b_proj, low_rank, gate, m)?;
         self.kda_projection_prefill(layer_idx, &desc.b_proj, hidden, beta, m)?;
-        if let Some(target) = self.matched_prefill_target("beta_projection", layer_idx, m,None)? {
-            let DeepseekV4ProjectionPrefillDescriptor::Hqq { tensor_name, desc: weight } = &desc.b_proj else {
+        if let Some(target) = self.matched_prefill_target("beta_projection", layer_idx, m, None)? {
+            let DeepseekV4ProjectionPrefillDescriptor::Hqq {
+                tensor_name,
+                desc: weight,
+            } = &desc.b_proj
+            else {
                 return Err("matched beta projection requires loaded HQQ weights".into());
             };
             let bits = self.validate_hqq_row_major_materialize_tensor_desc(tensor_name, weight)?;
             let groups = weight.cols.div_ceil(weight.group_size);
-            let padded_cols = groups.checked_mul(weight.group_size).ok_or("beta padded columns overflow")?;
-            let packed_stride = match bits { 4 => padded_cols.div_ceil(2), 6 => padded_cols.div_ceil(4).checked_mul(3).ok_or("beta packed stride overflow")?, 8 => padded_cols, _ => return Err("unsupported beta diagnostic bits".into()) };
-            let packed_bytes = weight.rows.checked_mul(packed_stride).ok_or("beta packed extent overflow")?;
-            let parameter_bytes = weight.rows.checked_mul(groups).and_then(|n|n.checked_mul(4)).ok_or("beta parameter extent overflow")?;
-            target.row("input.bf16",hidden,weight.cols,self.stream)?;
-            target.row("production-prefill.bf16",beta,weight.rows,self.stream)?;
-            target.device("packed.bin",weight.packed_ptr,packed_bytes,self.stream)?;
-            target.device("scales.f32",weight.scales_ptr,parameter_bytes,self.stream)?;
-            target.device("zeros.f32",weight.zeros_ptr,parameter_bytes,self.stream)?;
+            let padded_cols = groups
+                .checked_mul(weight.group_size)
+                .ok_or("beta padded columns overflow")?;
+            let packed_stride = match bits {
+                4 => padded_cols.div_ceil(2),
+                6 => padded_cols
+                    .div_ceil(4)
+                    .checked_mul(3)
+                    .ok_or("beta packed stride overflow")?,
+                8 => padded_cols,
+                _ => return Err("unsupported beta diagnostic bits".into()),
+            };
+            let packed_bytes = weight
+                .rows
+                .checked_mul(packed_stride)
+                .ok_or("beta packed extent overflow")?;
+            let parameter_bytes = weight
+                .rows
+                .checked_mul(groups)
+                .and_then(|n| n.checked_mul(4))
+                .ok_or("beta parameter extent overflow")?;
+            target.row("input.bf16", hidden, weight.cols, self.stream)?;
+            target.row("production-prefill.bf16", beta, weight.rows, self.stream)?;
+            target.device("packed.bin", weight.packed_ptr, packed_bytes, self.stream)?;
+            target.device(
+                "scales.f32",
+                weight.scales_ptr,
+                parameter_bytes,
+                self.stream,
+            )?;
+            target.device("zeros.f32", weight.zeros_ptr, parameter_bytes, self.stream)?;
             if self.config.hqq_prefill_materialize_bf16 && self.ordered_kda_projection.is_none() {
-                let weight_ptr=*self.scratch.d_hqq_bf16_weight.as_ref().ok_or("actual beta materialized weight absent")?.device_ptr();
-                target.device("materialized.bf16",weight_ptr,weight.rows.checked_mul(weight.cols).and_then(|n|n.checked_mul(2)).ok_or("beta materialized extent overflow")?,self.stream)?;
+                let weight_ptr = *self
+                    .scratch
+                    .d_hqq_bf16_weight
+                    .as_ref()
+                    .ok_or("actual beta materialized weight absent")?
+                    .device_ptr();
+                target.device(
+                    "materialized.bf16",
+                    weight_ptr,
+                    weight
+                        .rows
+                        .checked_mul(weight.cols)
+                        .and_then(|n| n.checked_mul(2))
+                        .ok_or("beta materialized extent overflow")?,
+                    self.stream,
+                )?;
             }
             target.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({
                 "layer":layer_idx,"row":target.row,"height":m,"tensor_name":tensor_name,
@@ -40709,20 +41880,43 @@ impl PrefillEngine {
             forget_beta_timing,
         )?;
 
-        if let Some(target)=self.matched_prefill_target("kda_inputs",layer_idx,m,None)? {
-            let elements=m.checked_mul(desc.num_heads).and_then(|v|v.checked_mul(desc.head_dim)).ok_or("matched KDA tensor overflow")?;
-            let row_bytes=desc.num_heads.checked_mul(desc.head_dim).and_then(|n|n.checked_mul(2)).ok_or("matched KDA row overflow")?;
-            let tensor_bytes=elements.checked_mul(2).ok_or("matched KDA byte overflow")?;
-            let beta_bytes=m.checked_mul(desc.num_heads).and_then(|n|n.checked_mul(2)).ok_or("matched KDA beta overflow")?;
-            let a_bytes=desc.num_heads.checked_mul(4).ok_or("matched KDA A overflow")?;
-            let bias_bytes=row_bytes.checked_mul(2).ok_or("matched KDA bias overflow")?;
-            let state_bytes=bias_bytes.checked_mul(desc.head_dim).ok_or("matched KDA state overflow")?;
-            for (name,ptr,bytes) in [
-                ("q.bf16",q,tensor_bytes),("k.bf16",k,tensor_bytes),("v.bf16",v,tensor_bytes),
-                ("gates.bf16",gate,tensor_bytes),("beta.bf16",beta,beta_bytes),
-                ("a-log.f32",desc.a_log_ptr,a_bytes),("dt-bias.f32",desc.dt_bias_ptr,bias_bytes),
-                ("initial-state.f32",desc.recur_state_ptr,state_bytes)
-            ] {target.device(name,ptr,bytes,self.stream)?;}
+        if let Some(target) = self.matched_prefill_target("kda_inputs", layer_idx, m, None)? {
+            let elements = m
+                .checked_mul(desc.num_heads)
+                .and_then(|v| v.checked_mul(desc.head_dim))
+                .ok_or("matched KDA tensor overflow")?;
+            let row_bytes = desc
+                .num_heads
+                .checked_mul(desc.head_dim)
+                .and_then(|n| n.checked_mul(2))
+                .ok_or("matched KDA row overflow")?;
+            let tensor_bytes = elements.checked_mul(2).ok_or("matched KDA byte overflow")?;
+            let beta_bytes = m
+                .checked_mul(desc.num_heads)
+                .and_then(|n| n.checked_mul(2))
+                .ok_or("matched KDA beta overflow")?;
+            let a_bytes = desc
+                .num_heads
+                .checked_mul(4)
+                .ok_or("matched KDA A overflow")?;
+            let bias_bytes = row_bytes
+                .checked_mul(2)
+                .ok_or("matched KDA bias overflow")?;
+            let state_bytes = bias_bytes
+                .checked_mul(desc.head_dim)
+                .ok_or("matched KDA state overflow")?;
+            for (name, ptr, bytes) in [
+                ("q.bf16", q, tensor_bytes),
+                ("k.bf16", k, tensor_bytes),
+                ("v.bf16", v, tensor_bytes),
+                ("gates.bf16", gate, tensor_bytes),
+                ("beta.bf16", beta, beta_bytes),
+                ("a-log.f32", desc.a_log_ptr, a_bytes),
+                ("dt-bias.f32", desc.dt_bias_ptr, bias_bytes),
+                ("initial-state.f32", desc.recur_state_ptr, state_bytes),
+            ] {
+                target.device(name, ptr, bytes, self.stream)?;
+            }
             target.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({
                 "layer":layer_idx,"height":m,"row":target.row,"heads":desc.num_heads,"dim":desc.head_dim,
                 "gate_lower_bound":desc.gate_lower_bound,"block_tokens":FLA_PREFILL_BLOCK_TOKENS,
@@ -40732,8 +41926,15 @@ impl PrefillEngine {
             })).map_err(|e|e.to_string())?.as_slice())?;
         }
         let recurrent_timing = self.glm5_timing_start("glm5 kda_recurrent")?;
-        if let Some(phase)=kda_phase {
-            phase.enqueue_recurrence(layer_idx,self.active_prefill_chunk_start,m,[q,k,v,gate,beta],recurrent_out,self.matched_prefill_invocation.as_ref())?;
+        if let Some(phase) = kda_phase {
+            phase.enqueue_recurrence(
+                layer_idx,
+                self.active_prefill_chunk_start,
+                m,
+                [q, k, v, gate, beta],
+                recurrent_out,
+                self.matched_prefill_invocation.as_ref(),
+            )?;
         } else if glm53_kda_recurrent_oracle_enabled()? {
             self.forward_kimi_delta_recurrent_oracle(
                 layer_idx,
@@ -40759,12 +41960,16 @@ impl PrefillEngine {
                 recurrent_out,
             )?;
         }
-        if let Some(target) = self.matched_prefill_target("kda_inputs", layer_idx, m,None)? {
-            let tensor_bytes = m.checked_mul(desc.num_heads)
+        if let Some(target) = self.matched_prefill_target("kda_inputs", layer_idx, m, None)? {
+            let tensor_bytes = m
+                .checked_mul(desc.num_heads)
                 .and_then(|v| v.checked_mul(desc.head_dim))
-                .and_then(|v| v.checked_mul(2)).ok_or("matched KDA output overflow")?;
-            let beta_bytes = m.checked_mul(desc.num_heads)
-                .and_then(|v| v.checked_mul(2)).ok_or("matched KDA prepared beta overflow")?;
+                .and_then(|v| v.checked_mul(2))
+                .ok_or("matched KDA output overflow")?;
+            let beta_bytes = m
+                .checked_mul(desc.num_heads)
+                .and_then(|v| v.checked_mul(2))
+                .ok_or("matched KDA prepared beta overflow")?;
             for (name, ptr, bytes) in [
                 ("native-output.bf16", recurrent_out, tensor_bytes),
                 ("prepared-q.bf16", q, tensor_bytes),
@@ -40774,7 +41979,7 @@ impl PrefillEngine {
                 target.device(name, ptr, bytes, self.stream)?;
             }
         }
-        observe_transition("recurrence-output.bf16",recurrent_out,width)?;
+        observe_transition("recurrence-output.bf16", recurrent_out, width)?;
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_KDA_RECURRENT_LAST,
             layer_idx,
@@ -40792,21 +41997,9 @@ impl PrefillEngine {
         )?;
 
         let output_gate_timing = self.glm5_timing_start("glm5 kda_output_gate_proj")?;
-        self.kda_projection_prefill(
-            layer_idx,
-            &desc.g_a_proj,
-            hidden,
-            low_rank,
-            m,
-        )?;
-        self.kda_projection_prefill(
-            layer_idx,
-            &desc.g_b_proj,
-            low_rank,
-            gate,
-            m,
-        )?;
-        observe_transition("output-gate.bf16",gate,width)?;
+        self.kda_projection_prefill(layer_idx, &desc.g_a_proj, hidden, low_rank, m)?;
+        self.kda_projection_prefill(layer_idx, &desc.g_b_proj, low_rank, gate, m)?;
+        observe_transition("output-gate.bf16", gate, width)?;
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_KDA_OUTPUT_GATE_LAST,
             layer_idx,
@@ -40877,7 +42070,7 @@ impl PrefillEngine {
                 ],
             )?;
         }
-        observe_transition("rms-gate.bf16",v,width)?;
+        observe_transition("rms-gate.bf16", v, width)?;
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_KDA_RMS_GATE_LAST,
             layer_idx,
@@ -40900,8 +42093,8 @@ impl PrefillEngine {
         // discarded KDA attention on every KDA layer.
         let o_proj_timing = self.glm5_timing_start("glm5 kda_o_proj")?;
         self.kda_projection_prefill(layer_idx, &desc.o_proj, v, hidden, m)?;
-        observe_transition("o-projection.bf16",hidden,self.config.hidden_size)?;
-        if let Some(target)=&transition {
+        observe_transition("o-projection.bf16", hidden, self.config.hidden_size)?;
+        if let Some(target) = &transition {
             target.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({"layer":layer_idx,"absolute_row":target.row,"actual_chunk_start":self.active_prefill_chunk_start,
                 "actual_chunk_rows":m,"local_row":transition_row,"heads":desc.num_heads,"dim":desc.head_dim,
                 "hidden_size":self.config.hidden_size,"stream":self.stream as usize,"actual_operator_outputs":true,
@@ -42686,6 +43879,17 @@ impl PrefillEngine {
         c: u64,
         m: usize,
     ) -> Result<(), String> {
+        #[cfg(feature = "scalar-gdn-test")]
+        if self.selected_scalar_gdn.is_some()
+            && self
+                .layer_weights
+                .get(layer_idx)
+                .ok_or("scalar projection layer absent")?
+                .la_recur_state_ptr
+                != 0
+        {
+            return self.scalar_native_projection(layer_idx, tensor_name, a, c, m);
+        }
         if let Some(desc) = hqq {
             if self.config.hqq_prefill_materialize_bf16 {
                 self.hqq_materialized_prefill_gemm_bf16(layer_idx, tensor_name, desc, a, c, m)
@@ -43574,19 +44778,83 @@ impl PrefillEngine {
         Ok(geometry)
     }
 
-    fn common_mla_minimum_transient_workspace_bytes(&self,geometry:DsaPrefillWorkspaceGeometry)->Result<usize,String>{
-        if self.common_mla.is_none(){return Ok(0)}
-        let mut maximum=0;
-        for layer in &self.layer_weights{let Some(mla)=&layer.mla_prefill else{continue};if layer.dsa_prefill.is_none(){continue}
-            let g=crate::stable_mla_path::Geometry{heads:mla.num_heads,ccd:mla.ckv_cache_dim,rope:mla.qk_rope_dim,values:mla.v_head_dim,slots:geometry.output_topk,codec:match self.kv_format{7=>crate::stable_mla_ops::Codec::K6,9=>crate::stable_mla_ops::Codec::K4,_=>return Err("common MLA requires actual K4/K6 cache".into())}};
-            let one=g.work_elements(1)?;let elements=one[0].checked_add(one[1].max(one[5])).and_then(|n|n.checked_add(one[2])).and_then(|n|n.checked_add(one[3])).ok_or("common MLA minimum row extent overflow")?;
-            let bytes=elements.checked_mul(4).and_then(|n|n.checked_add(3*(DSA_MLA_WORKSPACE_ALIGNMENT_BYTES-1))).ok_or("common MLA minimum workspace overflow")?;maximum=maximum.max(bytes);
-        }Ok(maximum)
+    fn common_mla_minimum_transient_workspace_bytes(
+        &self,
+        geometry: DsaPrefillWorkspaceGeometry,
+    ) -> Result<usize, String> {
+        if self.common_mla.is_none() {
+            return Ok(0);
+        }
+        let mut maximum = 0;
+        for layer in &self.layer_weights {
+            let Some(mla) = &layer.mla_prefill else {
+                continue;
+            };
+            if layer.dsa_prefill.is_none() {
+                continue;
+            }
+            let g = crate::stable_mla_path::Geometry {
+                heads: mla.num_heads,
+                ccd: mla.ckv_cache_dim,
+                rope: mla.qk_rope_dim,
+                values: mla.v_head_dim,
+                slots: geometry.output_topk,
+                codec: match self.kv_format {
+                    7 => crate::stable_mla_ops::Codec::K6,
+                    9 => crate::stable_mla_ops::Codec::K4,
+                    _ => return Err("common MLA requires actual K4/K6 cache".into()),
+                },
+            };
+            let one = g.work_elements(1)?;
+            let elements = one[0]
+                .checked_add(one[1].max(one[5]))
+                .and_then(|n| n.checked_add(one[2]))
+                .and_then(|n| n.checked_add(one[3]))
+                .ok_or("common MLA minimum row extent overflow")?;
+            let bytes = elements
+                .checked_mul(4)
+                .and_then(|n| n.checked_add(3 * (DSA_MLA_WORKSPACE_ALIGNMENT_BYTES - 1)))
+                .ok_or("common MLA minimum workspace overflow")?;
+            maximum = maximum.max(bytes);
+        }
+        Ok(maximum)
     }
 
-    fn selected_mla_workspace_row_elements(&self,geometry:DsaPrefillWorkspaceGeometry)->Result<(usize,usize,usize),String>{
-        let canonical=geometry.mla_num_heads.checked_mul(geometry.mla_ckv_cache_dim).ok_or("MLA scratch geometry overflow")?;let mut elements=(canonical,canonical,0);
-        if self.ordered_mla_f32.is_some(){for layer in &self.layer_weights{if let Some(mla)=&layer.mla_prefill{if layer.dsa_prefill.is_none(){continue;}let widths=crate::mla_f32::workspace_row_elements(mla.num_heads,mla.ckv_cache_dim,mla.q_lora_rank,mla.kv_lora_rank,mla.qk_nope_dim,mla.qk_rope_dim)?;elements.0=elements.0.max(widths.0);elements.1=elements.1.max(widths.1);if self.common_mla.is_some(){elements.2=elements.2.max(mla.num_heads.checked_mul(mla.qk_rope_dim).ok_or("MLA rotary row overflow")?);}}}}
+    fn selected_mla_workspace_row_elements(
+        &self,
+        geometry: DsaPrefillWorkspaceGeometry,
+    ) -> Result<(usize, usize, usize), String> {
+        let canonical = geometry
+            .mla_num_heads
+            .checked_mul(geometry.mla_ckv_cache_dim)
+            .ok_or("MLA scratch geometry overflow")?;
+        let mut elements = (canonical, canonical, 0);
+        if self.ordered_mla_f32.is_some() {
+            for layer in &self.layer_weights {
+                if let Some(mla) = &layer.mla_prefill {
+                    if layer.dsa_prefill.is_none() {
+                        continue;
+                    }
+                    let widths = crate::mla_f32::workspace_row_elements(
+                        mla.num_heads,
+                        mla.ckv_cache_dim,
+                        mla.q_lora_rank,
+                        mla.kv_lora_rank,
+                        mla.qk_nope_dim,
+                        mla.qk_rope_dim,
+                    )?;
+                    elements.0 = elements.0.max(widths.0);
+                    elements.1 = elements.1.max(widths.1);
+                    if self.common_mla.is_some() {
+                        elements.2 = elements.2.max(
+                            mla.num_heads
+                                .checked_mul(mla.qk_rope_dim)
+                                .ok_or("MLA rotary row overflow")?,
+                        );
+                    }
+                }
+            }
+        }
         Ok(elements)
     }
     fn minimum_dsa_prefill_workspace_bytes(
@@ -43613,7 +44881,8 @@ impl PrefillEngine {
         )?;
         let minimum_transient_workspace_bytes = one_row_plan
             .workspace_row_bytes
-            .max(dsa_mla_minimum_transient_workspace_bytes(geometry)?).max(self.common_mla_minimum_transient_workspace_bytes(geometry)?);
+            .max(dsa_mla_minimum_transient_workspace_bytes(geometry)?)
+            .max(self.common_mla_minimum_transient_workspace_bytes(geometry)?);
         let query_bytes = chunk_rows
             .checked_mul(geometry.index_n_heads)
             .and_then(|value| value.checked_mul(geometry.index_head_dim))
@@ -43623,9 +44892,15 @@ impl PrefillEngine {
             .checked_mul(geometry.output_topk)
             .and_then(|value| value.checked_mul(std::mem::size_of::<i32>()))
             .ok_or_else(|| "DSA prefill selected workspace byte size overflow".to_string())?;
-        let widths=self.selected_mla_workspace_row_elements(geometry)?;
+        let widths = self.selected_mla_workspace_row_elements(geometry)?;
         let mla_bytes = chunk_rows
-            .checked_mul(widths.0.checked_add(widths.1).and_then(|n|n.checked_add(widths.2)).ok_or("MLA combined row widths overflow")?)
+            .checked_mul(
+                widths
+                    .0
+                    .checked_add(widths.1)
+                    .and_then(|n| n.checked_add(widths.2))
+                    .ok_or("MLA combined row widths overflow")?,
+            )
             .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| "DSA prefill MLA workspace byte size overflow".to_string())?;
         query_bytes
@@ -43669,15 +44944,12 @@ impl PrefillEngine {
         if measured_deficit_bytes == 0 || current_chunk_rows <= 128 {
             return Ok(None);
         }
-        let current_required = estimate_scratch_vram_for_prompt(
-            &self.config,
-            current_chunk_rows,
-            prompt_tokens,
-        )
-        .checked_add(
-            self.minimum_dsa_prefill_workspace_bytes(current_chunk_rows, prompt_tokens)?,
-        )
-        .ok_or_else(|| "DSA retry combined workspace size overflow".to_string())?;
+        let current_required =
+            estimate_scratch_vram_for_prompt(&self.config, current_chunk_rows, prompt_tokens)
+                .checked_add(
+                    self.minimum_dsa_prefill_workspace_bytes(current_chunk_rows, prompt_tokens)?,
+                )
+                .ok_or_else(|| "DSA retry combined workspace size overflow".to_string())?;
         let retry_budget = current_required
             .checked_sub(measured_deficit_bytes)
             .ok_or_else(|| {
@@ -43770,7 +45042,8 @@ impl PrefillEngine {
         )?;
         let minimum_transient_workspace_bytes = minimum_plan
             .workspace_row_bytes
-            .max(dsa_mla_minimum_transient_workspace_bytes(geometry)?).max(self.common_mla_minimum_transient_workspace_bytes(geometry)?);
+            .max(dsa_mla_minimum_transient_workspace_bytes(geometry)?)
+            .max(self.common_mla_minimum_transient_workspace_bytes(geometry)?);
         let minimum_total = self.minimum_dsa_prefill_workspace_bytes(chunk_rows, context_end)?;
         let fixed_bytes = minimum_total
             .checked_sub(minimum_transient_workspace_bytes)
@@ -43805,8 +45078,8 @@ impl PrefillEngine {
                     let (evicted, freed_mb, cache_fast_snapshot, num_experts_per_layer) = unsafe {
                         let store = &mut *(self.prefill_hcs_store_addr
                             as *mut crate::gpu_decode::GpuDecodeStore);
-                        let (evicted, freed_mb) = store
-                            .hcs_evict_additional_for_prefill(deficit_bytes, context_end);
+                        let (evicted, freed_mb) =
+                            store.hcs_evict_additional_for_prefill(deficit_bytes, context_end);
                         let (cache_fast, ne) = store.export_hcs_snapshot();
                         (evicted, freed_mb, cache_fast.to_vec(), ne)
                     };
@@ -43819,10 +45092,8 @@ impl PrefillEngine {
                             let mut free_after_evict = 0usize;
                             let mut total_after_evict = 0usize;
                             unsafe {
-                                cuda_sys::lib().cuMemGetInfo_v2(
-                                    &mut free_after_evict,
-                                    &mut total_after_evict,
-                                );
+                                cuda_sys::lib()
+                                    .cuMemGetInfo_v2(&mut free_after_evict, &mut total_after_evict);
                             }
                             vram_ledger_log!(
                                 "VRAM LEDGER dsa_workspace_extra_hcs_evict prompt_tokens={} requested_deficit_mb={:.1} evicted={} freed_mb={:.1} free_before_mb={:.1} free_after_mb={:.1} required_floor_mb={:.1} fixed_workspace_mb={:.1} observed_alloc_overhead_mb={:.1} minimum_score_workspace_mb={:.1} hcs_cached_after={}",
@@ -43977,10 +45248,8 @@ impl PrefillEngine {
             .ok_or_else(|| {
                 format!("DSA MLA grouped-exact layer {layer_idx} inv-sum bytes overflow")
             })?;
-        let (bytes_per_row, alignment_reserve) = dsa_mla_grouped_exact_workspace_row_layout(
-            num_heads,
-            selected.selected_per_row,
-        )?;
+        let (bytes_per_row, alignment_reserve) =
+            dsa_mla_grouped_exact_workspace_row_layout(num_heads, selected.selected_per_row)?;
         let capacity_bytes = workspace.selection_workspace_capacity_bytes;
         let tile_capacity = capacity_bytes
             .saturating_sub(alignment_reserve)
@@ -44317,62 +45586,275 @@ impl PrefillEngine {
 
     #[allow(clippy::too_many_arguments)]
     /// Common measured F32 attention/WVC, borrowing real request and model owners.
-    fn run_common_mla_prefill(&self,layer_idx:usize,mla:&MlaPrefillDescriptor,selected:DsaPrefillSelectedIndexView,rows:usize)->Result<(),String>{
-        use crate::{stable_mla_gemm::{Span,Element},stable_mla_ops::{Gather,Codec},stable_mla_path::{Geometry,Inputs,Work},sequence_external_owner::BorrowedGpuRegion};
-        let shared=self.common_mla.as_ref().ok_or("common MLA bank not installed")?;
-        let diagnostic=if let Some(invocation)=self.matched_prefill_invocation.as_ref(){
-            crate::matched_prefill_capture::target(Some(invocation),"mla_common_stages",layer_idx,invocation.logical_tokens(),None)?
-        }else{None};
-        let diagnostic_limit=diagnostic.as_ref().map(|_|crate::matched_probe::capture_maximum_bytes("mla_common_stages",layer_idx,self.matched_prefill_invocation.as_ref().map(|i|i.logical_tokens()))).transpose()?;
-        let mut bank=shared.lock().map_err(|_|"common MLA bank is poisoned")?;
-        let owner=bank.layer(layer_idx)?;
-        let request=self.dsa_prefill_workspace.as_ref().ok_or("common MLA actual request workspace absent")?;
-        if selected.ptr!=*request.d_selected_indices.device_ptr()||selected.rows!=rows{return Err("common MLA selected view differs from actual request allocation".into())}
-        let g=Geometry{heads:mla.num_heads,ccd:mla.ckv_cache_dim,rope:mla.qk_rope_dim,values:mla.v_head_dim,slots:selected.selected_per_row,codec:match self.kv_format{7=>Codec::K6,9=>Codec::K4,_=>return Err("common MLA requires actual K4/K6 cache".into())}};
-        let one=g.work_elements(1)?;
-        let widths=[one[0],one[1].max(one[5]),one[2],one[3]];
-        let row_bytes=widths.iter().try_fold(0usize,|n,v|n.checked_add(*v).ok_or("common MLA transient width overflow"))?.checked_mul(4).ok_or("common MLA transient bytes overflow")?;
-        let alignment=DSA_MLA_WORKSPACE_ALIGNMENT_BYTES;
-        let reserve=(widths.len()-1).checked_mul(alignment-1).ok_or("common MLA alignment overflow")?;
-        let capacity=request.selection_workspace_capacity_bytes;
-        let tile_rows=capacity.saturating_sub(reserve).checked_div(row_bytes).ok_or("common MLA empty row size")?.min(rows);
-        if tile_rows==0{return Err(format!("actual common MLA workspace {capacity} cannot hold one {row_bytes}-byte row plus alignment {reserve}"))}
-        let mut offsets=[0usize;4];let mut extent=0usize;
-        for (index,width) in widths.iter().enumerate(){if index>0{extent=extent.checked_add(alignment-1).ok_or("common MLA alignment overflow")?&!(alignment-1)}offsets[index]=extent;extent=extent.checked_add(tile_rows.checked_mul(*width).and_then(|n|n.checked_mul(4)).ok_or("common MLA tile extent overflow")?).ok_or("common MLA plane extent overflow")?;}
-        if extent>capacity{return Err("common MLA tile layout exceeds actual retained allocation".into())}
-        let temporary=BorrowedGpuRegion::retained(&self.device,&request.d_selection_workspace)?;
-        let absorbed=BorrowedGpuRegion::retained(&self.device,&request.d_mla_q_absorbed)?;
-        let attention=BorrowedGpuRegion::retained(&self.device,&request.d_mla_attention)?;
-        let indices=BorrowedGpuRegion::retained(&self.device,&request.d_selected_indices)?;
-        let positions=BorrowedGpuRegion::retained(&self.device,&self.scratch.d_positions)?;
-        let final_output=BorrowedGpuRegion::retained(&self.device,&self.scratch.d_attn_out)?;
-        let gemm_workspace=BorrowedGpuRegion::retained(&self.device,&self.scratch.d_moe_accum)?;
-        let rope_owner=request.d_mla_packed_rope.as_ref().map(|b|BorrowedGpuRegion::retained(&self.device,b)).transpose()?;
-        let rope_span=rope_owner.as_ref().map(|o|unsafe{Span::region(o,0,rows*g.heads*g.rope*4,Element::F32)}).transpose()?;
-        unsafe{
-            if let Some(packed)=&rope_span{let source=Span::region(&attention,0,rows*g.heads*(mla.qk_nope_dim+g.rope)*4,Element::F32)?;bank.ops.pack_rope(&source,packed,rows,g.heads,mla.qk_nope_dim,g.rope,self.stream)?;}
-            let input=Inputs{q_abs:Span::region(&absorbed,0,rows*g.heads*g.ccd*4,Element::F32)?,q_rope:rope_span,ckv:owner.compressed_view()?,kpe:owner.positional_view()?,selected:Span::region(&indices,0,rows*g.slots*4,Element::I32)?,positions:Span::region(&positions,0,rows*4,Element::I32)?,wvc:owner.weight_view()?};
-            let workspace=Span::region(&gemm_workspace,0,bank.workspace_capacity,Element::Bytes)?;
-            let mut row=0;while row<rows{let count=tile_rows.min(rows-row);let e=g.work_elements(count)?;
-                let query=Span::region(&temporary,offsets[1],count*widths[1]*4,Element::F32)?;
-                let projected=Span::region(&temporary,offsets[1],e[5]*4,Element::F32)?;
-                let work=Work{gathered:Span::region(&temporary,offsets[0],e[0]*4,Element::F32)?,query,scores:Span::region(&temporary,offsets[2],e[2]*4,Element::F32)?,weights:Span::region(&temporary,offsets[3],e[3]*4,Element::F32)?,attention:Span::region(&attention,row*g.heads*g.ccd*4,e[4]*4,Element::F32)?,projected,output:Span::region(&final_output,row*g.heads*g.values*2,e[6]*2,Element::Bf16)?};
-                let gather=Gather{row_start:row,rows:count,heads:g.heads,ccd:g.ccd,rope:g.rope,slots:g.slots,context:selected.context_end,q_abs_row_stride:g.heads*g.ccd,q_abs_head_stride:g.ccd,q_rope_row_stride:g.heads*g.rope,q_rope_head_stride:g.rope,codec:g.codec};
-                bank.prepare(layer_idx,g,gather,&input,&work,Some(&workspace),mla.sm_scale,self.stream)?;
-                if let (Some(target),Some(maximum))=(&diagnostic,diagnostic_limit){
-                    let absolute_start=self.active_prefill_chunk_start.checked_add(row).ok_or("MLA diagnostic tile start overflow")?;
-                    let end=absolute_start.checked_add(count).ok_or("MLA diagnostic tile end overflow")?;
-                    if target.row>=absolute_start&&target.row<end{
+    fn run_common_mla_prefill(
+        &self,
+        layer_idx: usize,
+        mla: &MlaPrefillDescriptor,
+        selected: DsaPrefillSelectedIndexView,
+        rows: usize,
+    ) -> Result<(), String> {
+        use crate::{
+            sequence_external_owner::BorrowedGpuRegion,
+            stable_mla_gemm::{Element, Span},
+            stable_mla_ops::{Codec, Gather},
+            stable_mla_path::{Geometry, Inputs, Work},
+        };
+        let shared = self
+            .common_mla
+            .as_ref()
+            .ok_or("common MLA bank not installed")?;
+        let diagnostic = if let Some(invocation) = self.matched_prefill_invocation.as_ref() {
+            crate::matched_prefill_capture::target(
+                Some(invocation),
+                "mla_common_stages",
+                layer_idx,
+                invocation.logical_tokens(),
+                None,
+            )?
+        } else {
+            None
+        };
+        let diagnostic_limit = diagnostic
+            .as_ref()
+            .map(|_| {
+                crate::matched_probe::capture_maximum_bytes(
+                    "mla_common_stages",
+                    layer_idx,
+                    self.matched_prefill_invocation
+                        .as_ref()
+                        .map(|i| i.logical_tokens()),
+                )
+            })
+            .transpose()?;
+        let mut bank = shared.lock().map_err(|_| "common MLA bank is poisoned")?;
+        let owner = bank.layer(layer_idx)?;
+        let request = self
+            .dsa_prefill_workspace
+            .as_ref()
+            .ok_or("common MLA actual request workspace absent")?;
+        if selected.ptr != *request.d_selected_indices.device_ptr() || selected.rows != rows {
+            return Err("common MLA selected view differs from actual request allocation".into());
+        }
+        let g = Geometry {
+            heads: mla.num_heads,
+            ccd: mla.ckv_cache_dim,
+            rope: mla.qk_rope_dim,
+            values: mla.v_head_dim,
+            slots: selected.selected_per_row,
+            codec: match self.kv_format {
+                7 => Codec::K6,
+                9 => Codec::K4,
+                _ => return Err("common MLA requires actual K4/K6 cache".into()),
+            },
+        };
+        let one = g.work_elements(1)?;
+        let widths = [one[0], one[1].max(one[5]), one[2], one[3]];
+        let row_bytes = widths
+            .iter()
+            .try_fold(0usize, |n, v| {
+                n.checked_add(*v)
+                    .ok_or("common MLA transient width overflow")
+            })?
+            .checked_mul(4)
+            .ok_or("common MLA transient bytes overflow")?;
+        let alignment = DSA_MLA_WORKSPACE_ALIGNMENT_BYTES;
+        let reserve = (widths.len() - 1)
+            .checked_mul(alignment - 1)
+            .ok_or("common MLA alignment overflow")?;
+        let capacity = request.selection_workspace_capacity_bytes;
+        let tile_rows = capacity
+            .saturating_sub(reserve)
+            .checked_div(row_bytes)
+            .ok_or("common MLA empty row size")?
+            .min(rows);
+        if tile_rows == 0 {
+            return Err(format!("actual common MLA workspace {capacity} cannot hold one {row_bytes}-byte row plus alignment {reserve}"));
+        }
+        let mut offsets = [0usize; 4];
+        let mut extent = 0usize;
+        for (index, width) in widths.iter().enumerate() {
+            if index > 0 {
+                extent = extent
+                    .checked_add(alignment - 1)
+                    .ok_or("common MLA alignment overflow")?
+                    & !(alignment - 1)
+            }
+            offsets[index] = extent;
+            extent = extent
+                .checked_add(
+                    tile_rows
+                        .checked_mul(*width)
+                        .and_then(|n| n.checked_mul(4))
+                        .ok_or("common MLA tile extent overflow")?,
+                )
+                .ok_or("common MLA plane extent overflow")?;
+        }
+        if extent > capacity {
+            return Err("common MLA tile layout exceeds actual retained allocation".into());
+        }
+        let temporary = BorrowedGpuRegion::retained(&self.device, &request.d_selection_workspace)?;
+        let absorbed = BorrowedGpuRegion::retained(&self.device, &request.d_mla_q_absorbed)?;
+        let attention = BorrowedGpuRegion::retained(&self.device, &request.d_mla_attention)?;
+        let indices = BorrowedGpuRegion::retained(&self.device, &request.d_selected_indices)?;
+        let positions = BorrowedGpuRegion::retained(&self.device, &self.scratch.d_positions)?;
+        let final_output = BorrowedGpuRegion::retained(&self.device, &self.scratch.d_attn_out)?;
+        let gemm_workspace = BorrowedGpuRegion::retained(&self.device, &self.scratch.d_moe_accum)?;
+        let rope_owner = request
+            .d_mla_packed_rope
+            .as_ref()
+            .map(|b| BorrowedGpuRegion::retained(&self.device, b))
+            .transpose()?;
+        let rope_span = rope_owner
+            .as_ref()
+            .map(|o| unsafe { Span::region(o, 0, rows * g.heads * g.rope * 4, Element::F32) })
+            .transpose()?;
+        unsafe {
+            if let Some(packed) = &rope_span {
+                let source = Span::region(
+                    &attention,
+                    0,
+                    rows * g.heads * (mla.qk_nope_dim + g.rope) * 4,
+                    Element::F32,
+                )?;
+                bank.ops.pack_rope(
+                    &source,
+                    packed,
+                    rows,
+                    g.heads,
+                    mla.qk_nope_dim,
+                    g.rope,
+                    self.stream,
+                )?;
+            }
+            let input = Inputs {
+                q_abs: Span::region(&absorbed, 0, rows * g.heads * g.ccd * 4, Element::F32)?,
+                q_rope: rope_span,
+                ckv: owner.compressed_view()?,
+                kpe: owner.positional_view()?,
+                selected: Span::region(&indices, 0, rows * g.slots * 4, Element::I32)?,
+                positions: Span::region(&positions, 0, rows * 4, Element::I32)?,
+                wvc: owner.weight_view()?,
+            };
+            let workspace =
+                Span::region(&gemm_workspace, 0, bank.workspace_capacity, Element::Bytes)?;
+            let mut row = 0;
+            while row < rows {
+                let count = tile_rows.min(rows - row);
+                let e = g.work_elements(count)?;
+                let query =
+                    Span::region(&temporary, offsets[1], count * widths[1] * 4, Element::F32)?;
+                let projected = Span::region(&temporary, offsets[1], e[5] * 4, Element::F32)?;
+                let work = Work {
+                    gathered: Span::region(&temporary, offsets[0], e[0] * 4, Element::F32)?,
+                    query,
+                    scores: Span::region(&temporary, offsets[2], e[2] * 4, Element::F32)?,
+                    weights: Span::region(&temporary, offsets[3], e[3] * 4, Element::F32)?,
+                    attention: Span::region(
+                        &attention,
+                        row * g.heads * g.ccd * 4,
+                        e[4] * 4,
+                        Element::F32,
+                    )?,
+                    projected,
+                    output: Span::region(
+                        &final_output,
+                        row * g.heads * g.values * 2,
+                        e[6] * 2,
+                        Element::Bf16,
+                    )?,
+                };
+                let gather = Gather {
+                    row_start: row,
+                    rows: count,
+                    heads: g.heads,
+                    ccd: g.ccd,
+                    rope: g.rope,
+                    slots: g.slots,
+                    context: selected.context_end,
+                    q_abs_row_stride: g.heads * g.ccd,
+                    q_abs_head_stride: g.ccd,
+                    q_rope_row_stride: g.heads * g.rope,
+                    q_rope_head_stride: g.rope,
+                    codec: g.codec,
+                };
+                bank.prepare(
+                    layer_idx,
+                    g,
+                    gather,
+                    &input,
+                    &work,
+                    Some(&workspace),
+                    mla.sm_scale,
+                    self.stream,
+                )?;
+                if let (Some(target), Some(maximum)) = (&diagnostic, diagnostic_limit) {
+                    let absolute_start = self
+                        .active_prefill_chunk_start
+                        .checked_add(row)
+                        .ok_or("MLA diagnostic tile start overflow")?;
+                    let end = absolute_start
+                        .checked_add(count)
+                        .ok_or("MLA diagnostic tile end overflow")?;
+                    if target.row >= absolute_start && target.row < end {
                         target.write("common-geometry.json",&serde_json::to_vec_pretty(&serde_json::json!({"layer":layer_idx,"absolute_row":target.row,"tile_start":absolute_start,"tile_rows":count,"heads":g.heads,"ccd":g.ccd,"rope":g.rope,"values":g.values,"slots":g.slots,"codec":self.kv_format,"context":gather.context,"maximum_bytes_per_stage":maximum,"diagnostic_gpu_allocation_bytes":0})).map_err(|e|e.to_string())?)?;
-                        let observer=|stage:&str,span:&Span<'_>,layout:crate::matched_mla_stage::Layout|{
-                            let observed_row=if stage=="wvc_weights"{0}else{target.row-absolute_start};
-                            let base=if stage=="wvc_weights"{target.row}else{absolute_start};
-                            crate::matched_mla_stage::prefill(target,stage,span,layout,observed_row,base,maximum,self.stream)
-                        };
-                        bank.enqueue_observed(g,gather,&input,&work,Some(&workspace),mla.sm_scale,self.stream,Some(&observer))?;
-                    }else{bank.enqueue(g,gather,&input,&work,Some(&workspace),mla.sm_scale,self.stream)?;}
-                }else{bank.enqueue(g,gather,&input,&work,Some(&workspace),mla.sm_scale,self.stream)?;}
-                row+=count;
+                        let observer =
+                            |stage: &str,
+                             span: &Span<'_>,
+                             layout: crate::matched_mla_stage::Layout| {
+                                let observed_row = if stage == "wvc_weights" {
+                                    0
+                                } else {
+                                    target.row - absolute_start
+                                };
+                                let base = if stage == "wvc_weights" {
+                                    target.row
+                                } else {
+                                    absolute_start
+                                };
+                                crate::matched_mla_stage::prefill(
+                                    target,
+                                    stage,
+                                    span,
+                                    layout,
+                                    observed_row,
+                                    base,
+                                    maximum,
+                                    self.stream,
+                                )
+                            };
+                        bank.enqueue_observed(
+                            g,
+                            gather,
+                            &input,
+                            &work,
+                            Some(&workspace),
+                            mla.sm_scale,
+                            self.stream,
+                            Some(&observer),
+                        )?;
+                    } else {
+                        bank.enqueue(
+                            g,
+                            gather,
+                            &input,
+                            &work,
+                            Some(&workspace),
+                            mla.sm_scale,
+                            self.stream,
+                        )?;
+                    }
+                } else {
+                    bank.enqueue(
+                        g,
+                        gather,
+                        &input,
+                        &work,
+                        Some(&workspace),
+                        mla.sm_scale,
+                        self.stream,
+                    )?;
+                }
+                row += count;
             }
         }
         Ok(())
@@ -45081,11 +46563,8 @@ impl PrefillEngine {
         let output_elements_per_row = num_heads
             .checked_mul(value_head_dim)
             .ok_or_else(|| format!("DSA MLA WVC GEMM layer {layer_idx} output row overflow"))?;
-        let (bytes_per_row, alignment_reserve) = dsa_mla_wvc_workspace_row_layout(
-            num_heads,
-            ckv_cache_dim,
-            value_head_dim,
-        )?;
+        let (bytes_per_row, alignment_reserve) =
+            dsa_mla_wvc_workspace_row_layout(num_heads, ckv_cache_dim, value_head_dim)?;
         let capacity_bytes = workspace.selection_workspace_capacity_bytes;
         let tile_capacity = capacity_bytes
             .saturating_sub(alignment_reserve)
@@ -45354,14 +46833,36 @@ impl PrefillEngine {
         q_lora_residual_ptr: u64,
         observed: Option<&crate::matched_probe::Target>,
     ) -> Result<(), String> {
-        let mut index_target=if let Some(inv)=self.matched_prefill_invocation.as_ref(){crate::matched_prefill_capture::target(Some(inv),"indexer_common_stages",layer_idx,inv.logical_tokens(),None)?}else{None};
-        if let Some(t)=index_target.as_mut(){
-            let end=chunk_start.checked_add(rows).ok_or("index observed chunk overflow")?;
-            if t.row<chunk_start||t.row>=end{index_target=None;}else{t.row-=chunk_start;}
+        let mut index_target = if let Some(inv) = self.matched_prefill_invocation.as_ref() {
+            crate::matched_prefill_capture::target(
+                Some(inv),
+                "indexer_common_stages",
+                layer_idx,
+                inv.logical_tokens(),
+                None,
+            )?
+        } else {
+            None
+        };
+        if let Some(t) = index_target.as_mut() {
+            let end = chunk_start
+                .checked_add(rows)
+                .ok_or("index observed chunk overflow")?;
+            if t.row < chunk_start || t.row >= end {
+                index_target = None;
+            } else {
+                t.row -= chunk_start;
+            }
         }
-        if observed.is_some()&&index_target.is_some(){return Err("two index observer contracts selected for one owner".into())}
-        let minimal=index_target.is_some();
-        let observed=if minimal{index_target.as_ref()}else{observed};
+        if observed.is_some() && index_target.is_some() {
+            return Err("two index observer contracts selected for one owner".into());
+        }
+        let minimal = index_target.is_some();
+        let observed = if minimal {
+            index_target.as_ref()
+        } else {
+            observed
+        };
         let layer = self
             .layer_weights
             .get(layer_idx)
@@ -45430,71 +46931,358 @@ impl PrefillEngine {
                 head_weight_elements,
             ));
         }
-        self.populate_dsa_prefill_owner_key_cache(layer_idx, chunk_start, rows,observed)?;
+        self.populate_dsa_prefill_owner_key_cache(layer_idx, chunk_start, rows, observed)?;
         let raw_queries_ptr = *self.scratch.d_q.device_ptr();
         let head_weights_ptr = *self.scratch.d_scratch1.device_ptr();
-        self.dsa_owner_query_projection_gemm(q_lora_residual_ptr, &owner.wq_b, raw_queries_ptr, rows)?;
+        self.dsa_owner_query_projection_gemm(
+            q_lora_residual_ptr,
+            &owner.wq_b,
+            raw_queries_ptr,
+            rows,
+        )?;
         self.dsa_owner_projection_gemm(
             *self.scratch.d_hidden.device_ptr(),
             &owner.weights_proj,
             head_weights_ptr,
             rows,
         )?;
-        if let Some(target)=observed.filter(|_|!minimal) {
-            if target.row>=rows {return Err("index operands observation requires admitted chunk row".into());}
-            let prefix=chunk_start.checked_add(target.row).and_then(|v|v.checked_add(1)).ok_or("index observed causal prefix overflow")?;
-            let width=registration.index_n_heads.checked_mul(registration.index_head_dim).ok_or("index observed query width overflow")?;
-            crate::mla_probe::row(target,"indexer-hidden.bf16",*self.scratch.d_hidden.device_ptr(),target.row,self.config.hidden_size,2,self.stream)?;
-            crate::mla_probe::row(target,"indexer-lora.bf16",q_lora_residual_ptr,target.row,owner.wq_b.k,2,self.stream)?;
-            crate::mla_probe::row(target,"indexer-raw-query.bf16",raw_queries_ptr,target.row,width,2,self.stream)?;
-            crate::mla_probe::row(target,"indexer-head-weights.bf16",head_weights_ptr,target.row,registration.index_n_heads,2,self.stream)?;
-            crate::mla_probe::block(target,"indexer-key-prefix.bf16",owner.key_cache_ptr,prefix.checked_mul(registration.index_head_dim).ok_or("index observed key prefix extent overflow")?,2,self.stream)?;
-            for (name,weight) in [("wq_b",&owner.wq_b),("wk",&owner.wk),("weights_proj",&owner.weights_proj)] {
-                crate::mla_probe::block(target,&format!("indexer-weight-{name}.bf16"),weight.ptr,weight.n.checked_mul(weight.k).ok_or("index observed weight extent overflow")?,2,self.stream)?;
+        if let Some(target) = observed.filter(|_| !minimal) {
+            if target.row >= rows {
+                return Err("index operands observation requires admitted chunk row".into());
             }
-            crate::mla_probe::block(target,"indexer-norm-weight.bf16",owner.norm_weight_ptr,registration.index_head_dim,2,self.stream)?;
-            crate::mla_probe::block(target,"indexer-norm-bias.bf16",owner.norm_bias_ptr,registration.index_head_dim,2,self.stream)?;
-            crate::mla_probe::row(target,"indexer-position.i32",*self.scratch.d_positions.device_ptr(),target.row,1,4,self.stream)?;
-            if registration.qk_rope_head_dim>0 {
-                crate::mla_probe::row(target,"indexer-rope-cos.f32",self.rope_cos_ptr,prefix-1,registration.qk_rope_head_dim/2,4,self.stream)?;
-                crate::mla_probe::row(target,"indexer-rope-sin.f32",self.rope_sin_ptr,prefix-1,registration.qk_rope_head_dim/2,4,self.stream)?;
+            let prefix = chunk_start
+                .checked_add(target.row)
+                .and_then(|v| v.checked_add(1))
+                .ok_or("index observed causal prefix overflow")?;
+            let width = registration
+                .index_n_heads
+                .checked_mul(registration.index_head_dim)
+                .ok_or("index observed query width overflow")?;
+            crate::mla_probe::row(
+                target,
+                "indexer-hidden.bf16",
+                *self.scratch.d_hidden.device_ptr(),
+                target.row,
+                self.config.hidden_size,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::row(
+                target,
+                "indexer-lora.bf16",
+                q_lora_residual_ptr,
+                target.row,
+                owner.wq_b.k,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::row(
+                target,
+                "indexer-raw-query.bf16",
+                raw_queries_ptr,
+                target.row,
+                width,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::row(
+                target,
+                "indexer-head-weights.bf16",
+                head_weights_ptr,
+                target.row,
+                registration.index_n_heads,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::block(
+                target,
+                "indexer-key-prefix.bf16",
+                owner.key_cache_ptr,
+                prefix
+                    .checked_mul(registration.index_head_dim)
+                    .ok_or("index observed key prefix extent overflow")?,
+                2,
+                self.stream,
+            )?;
+            for (name, weight) in [
+                ("wq_b", &owner.wq_b),
+                ("wk", &owner.wk),
+                ("weights_proj", &owner.weights_proj),
+            ] {
+                crate::mla_probe::block(
+                    target,
+                    &format!("indexer-weight-{name}.bf16"),
+                    weight.ptr,
+                    weight
+                        .n
+                        .checked_mul(weight.k)
+                        .ok_or("index observed weight extent overflow")?,
+                    2,
+                    self.stream,
+                )?;
             }
-            let score_prefix=if registration.index_kpool_compress {crate::mla_probe::causal_score_count(prefix,registration.index_kpool)?}else{prefix};
+            crate::mla_probe::block(
+                target,
+                "indexer-norm-weight.bf16",
+                owner.norm_weight_ptr,
+                registration.index_head_dim,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::block(
+                target,
+                "indexer-norm-bias.bf16",
+                owner.norm_bias_ptr,
+                registration.index_head_dim,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::row(
+                target,
+                "indexer-position.i32",
+                *self.scratch.d_positions.device_ptr(),
+                target.row,
+                1,
+                4,
+                self.stream,
+            )?;
+            if registration.qk_rope_head_dim > 0 {
+                crate::mla_probe::row(
+                    target,
+                    "indexer-rope-cos.f32",
+                    self.rope_cos_ptr,
+                    prefix - 1,
+                    registration.qk_rope_head_dim / 2,
+                    4,
+                    self.stream,
+                )?;
+                crate::mla_probe::row(
+                    target,
+                    "indexer-rope-sin.f32",
+                    self.rope_sin_ptr,
+                    prefix - 1,
+                    registration.qk_rope_head_dim / 2,
+                    4,
+                    self.stream,
+                )?;
+            }
+            let score_prefix = if registration.index_kpool_compress {
+                crate::mla_probe::causal_score_count(prefix, registration.index_kpool)?
+            } else {
+                prefix
+            };
             if registration.index_kpool_compress {
-                if owner.index_kpool!=registration.index_kpool || owner.pool_key_cache_ptr==0 || owner.gate_cache_ptr==0 || owner.kpool_ape_ptr==0 {return Err("actual observed pooled index resources invalid".into());}
-                crate::mla_probe::logical_block(target,"indexer-pool-key-prefix.bf16",owner.pool_key_cache_ptr,score_prefix.checked_mul(registration.index_head_dim).ok_or("observed pooled index prefix overflow")?,2,self.stream)?;
-                crate::mla_probe::block(target,"indexer-gate-prefix.bf16",owner.gate_cache_ptr,prefix.checked_mul(registration.index_head_dim).ok_or("observed index gate prefix overflow")?,2,self.stream)?;
-                crate::mla_probe::block(target,"indexer-pool-ape.bf16",owner.kpool_ape_ptr,registration.index_kpool.checked_mul(registration.index_head_dim).ok_or("observed index APE extent overflow")?,2,self.stream)?;
-                let gate=owner.kpool_gate.as_ref().ok_or("actual observed index gate weight absent")?;
-                crate::mla_probe::block(target,"indexer-weight-kpool_gate.bf16",gate.ptr,gate.n.checked_mul(gate.k).ok_or("observed index gate matrix overflow")?,2,self.stream)?;
-                crate::mla_probe::row(target,"indexer-raw-gate.bf16",owner.gate_cache_ptr,prefix-1,registration.index_head_dim,2,self.stream)?;
+                if owner.index_kpool != registration.index_kpool
+                    || owner.pool_key_cache_ptr == 0
+                    || owner.gate_cache_ptr == 0
+                    || owner.kpool_ape_ptr == 0
+                {
+                    return Err("actual observed pooled index resources invalid".into());
+                }
+                crate::mla_probe::logical_block(
+                    target,
+                    "indexer-pool-key-prefix.bf16",
+                    owner.pool_key_cache_ptr,
+                    score_prefix
+                        .checked_mul(registration.index_head_dim)
+                        .ok_or("observed pooled index prefix overflow")?,
+                    2,
+                    self.stream,
+                )?;
+                crate::mla_probe::block(
+                    target,
+                    "indexer-gate-prefix.bf16",
+                    owner.gate_cache_ptr,
+                    prefix
+                        .checked_mul(registration.index_head_dim)
+                        .ok_or("observed index gate prefix overflow")?,
+                    2,
+                    self.stream,
+                )?;
+                crate::mla_probe::block(
+                    target,
+                    "indexer-pool-ape.bf16",
+                    owner.kpool_ape_ptr,
+                    registration
+                        .index_kpool
+                        .checked_mul(registration.index_head_dim)
+                        .ok_or("observed index APE extent overflow")?,
+                    2,
+                    self.stream,
+                )?;
+                let gate = owner
+                    .kpool_gate
+                    .as_ref()
+                    .ok_or("actual observed index gate weight absent")?;
+                crate::mla_probe::block(
+                    target,
+                    "indexer-weight-kpool_gate.bf16",
+                    gate.ptr,
+                    gate.n
+                        .checked_mul(gate.k)
+                        .ok_or("observed index gate matrix overflow")?,
+                    2,
+                    self.stream,
+                )?;
+                crate::mla_probe::row(
+                    target,
+                    "indexer-raw-gate.bf16",
+                    owner.gate_cache_ptr,
+                    prefix - 1,
+                    registration.index_head_dim,
+                    2,
+                    self.stream,
+                )?;
             }
             target.write("indexer-operands.json",serde_json::to_vec_pretty(&serde_json::json!({"path":"actual_prefill_owner","chunk_start":chunk_start,"chunk_rows":rows,"local_row":target.row,"absolute_row":prefix-1,"prefix":prefix,"score_prefix":score_prefix,"pooled":registration.index_kpool_compress,"pool_ratio":registration.index_kpool,"always_select_tail":registration.index_kpool_always_select_tail,"score_topk":workspace.configured_topk,"raw_output_topk":workspace.output_topk,"scoring_key_file":if registration.index_kpool_compress{"indexer-pool-key-prefix.bf16"}else{"indexer-key-prefix.bf16"},"heads":registration.index_n_heads,"head_dim":registration.index_head_dim,"rope_dim":registration.qk_rope_head_dim,"layer_norm_eps":owner.layer_norm_eps,"projection_shapes":{"wq_b":[owner.wq_b.n,owner.wq_b.k],"wk":[owner.wk.n,owner.wk.k],"weights_proj":[owner.weights_proj.n,owner.weights_proj.k]},"projection_operands":"raw BF16 consumed by actual projection call; no synthetic matrix or dtype reinterpretation","device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?.as_slice())?;
         }
-        if minimal{
-            let target=observed.ok_or("minimal index observer missing")?;
-            let prefix=chunk_start.checked_add(target.row).and_then(|n|n.checked_add(1)).ok_or("index observed prefix overflow")?;
-            let score_prefix=crate::mla_probe::causal_score_count(prefix,if registration.index_kpool_compress{registration.index_kpool}else{1})?;
-            let limit=crate::matched_probe::capture_maximum_bytes("indexer_common_stages",layer_idx,self.matched_prefill_invocation.as_ref().map(|i|i.logical_tokens()))?;
-            let key_elements=score_prefix.checked_mul(registration.index_head_dim).ok_or("index observed key extent overflow")?;
-            if key_elements.checked_mul(2).map_or(true,|n|n>limit)||registration.index_n_heads.checked_mul(registration.index_head_dim).and_then(|n|n.checked_mul(2)).map_or(true,|n|n>limit)||score_prefix.checked_mul(4).map_or(true,|n|n>limit){return Err("index prefill observations exceed explicit byte bound".into())}
-            if self.ordered_mla_f32.is_none()||owner.wq_b.k!=registration.q_lora_rank||owner.wq_b.n!=registration.index_n_heads.checked_mul(registration.index_head_dim).ok_or("index query observed rows overflow")?{return Err("index query observation requires actual common normalized latent and registered matrix".into())}
-            let weight_elements=owner.wq_b.n.checked_mul(owner.wq_b.k).ok_or("observed query weight extent overflow")?;
-            let input_f32_bytes=owner.wq_b.k.checked_mul(4).ok_or("observed query input extent overflow")?;
-            let hidden_bytes=self.config.hidden_size.checked_mul(2).ok_or("observed query hidden extent overflow")?;
-            if weight_elements.checked_mul(2).map_or(true,|n|n>limit)||input_f32_bytes>limit||hidden_bytes>limit{return Err("query projector observation exceeds explicit byte bound".into())}
-            let latent=self.dsa_prefill_workspace.as_ref().ok_or("actual observed query latent owner absent")?;
-            crate::mla_probe::row(target,"indexer-query-input.bf16",q_lora_residual_ptr,target.row,owner.wq_b.k,2,self.stream)?;
-            crate::mla_probe::row(target,"indexer-query-input.f32",*latent.d_mla_q_absorbed.device_ptr(),target.row,owner.wq_b.k,4,self.stream)?;
-            crate::mla_probe::row(target,"indexer-hidden.bf16",*self.scratch.d_hidden.device_ptr(),target.row,self.config.hidden_size,2,self.stream)?;
-            crate::mla_probe::row(target,"indexer-raw-query.bf16",raw_queries_ptr,target.row,owner.wq_b.n,2,self.stream)?;
-            crate::mla_probe::block(target,"indexer-query-weights.bf16",owner.wq_b.ptr,weight_elements,2,self.stream)?;
-            let mut math_mode=0u32;
-            let status=unsafe{cublas_sys::lib().cublasGetMathMode(self.cublas_handle,(&mut math_mode as *mut u32).cast::<cublas_sys::cublasMath_t>())};
-            if status!=cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS{return Err(format!("query projection math-mode observation: {status:?}"))}
+        if minimal {
+            let target = observed.ok_or("minimal index observer missing")?;
+            let prefix = chunk_start
+                .checked_add(target.row)
+                .and_then(|n| n.checked_add(1))
+                .ok_or("index observed prefix overflow")?;
+            let score_prefix = crate::mla_probe::causal_score_count(
+                prefix,
+                if registration.index_kpool_compress {
+                    registration.index_kpool
+                } else {
+                    1
+                },
+            )?;
+            let limit = crate::matched_probe::capture_maximum_bytes(
+                "indexer_common_stages",
+                layer_idx,
+                self.matched_prefill_invocation
+                    .as_ref()
+                    .map(|i| i.logical_tokens()),
+            )?;
+            let key_elements = score_prefix
+                .checked_mul(registration.index_head_dim)
+                .ok_or("index observed key extent overflow")?;
+            if key_elements.checked_mul(2).map_or(true, |n| n > limit)
+                || registration
+                    .index_n_heads
+                    .checked_mul(registration.index_head_dim)
+                    .and_then(|n| n.checked_mul(2))
+                    .map_or(true, |n| n > limit)
+                || score_prefix.checked_mul(4).map_or(true, |n| n > limit)
+            {
+                return Err("index prefill observations exceed explicit byte bound".into());
+            }
+            if self.ordered_mla_f32.is_none()
+                || owner.wq_b.k != registration.q_lora_rank
+                || owner.wq_b.n
+                    != registration
+                        .index_n_heads
+                        .checked_mul(registration.index_head_dim)
+                        .ok_or("index query observed rows overflow")?
+            {
+                return Err("index query observation requires actual common normalized latent and registered matrix".into());
+            }
+            let weight_elements = owner
+                .wq_b
+                .n
+                .checked_mul(owner.wq_b.k)
+                .ok_or("observed query weight extent overflow")?;
+            let input_f32_bytes = owner
+                .wq_b
+                .k
+                .checked_mul(4)
+                .ok_or("observed query input extent overflow")?;
+            let hidden_bytes = self
+                .config
+                .hidden_size
+                .checked_mul(2)
+                .ok_or("observed query hidden extent overflow")?;
+            if weight_elements.checked_mul(2).map_or(true, |n| n > limit)
+                || input_f32_bytes > limit
+                || hidden_bytes > limit
+            {
+                return Err("query projector observation exceeds explicit byte bound".into());
+            }
+            let latent = self
+                .dsa_prefill_workspace
+                .as_ref()
+                .ok_or("actual observed query latent owner absent")?;
+            crate::mla_probe::row(
+                target,
+                "indexer-query-input.bf16",
+                q_lora_residual_ptr,
+                target.row,
+                owner.wq_b.k,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::row(
+                target,
+                "indexer-query-input.f32",
+                *latent.d_mla_q_absorbed.device_ptr(),
+                target.row,
+                owner.wq_b.k,
+                4,
+                self.stream,
+            )?;
+            crate::mla_probe::row(
+                target,
+                "indexer-hidden.bf16",
+                *self.scratch.d_hidden.device_ptr(),
+                target.row,
+                self.config.hidden_size,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::row(
+                target,
+                "indexer-raw-query.bf16",
+                raw_queries_ptr,
+                target.row,
+                owner.wq_b.n,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::block(
+                target,
+                "indexer-query-weights.bf16",
+                owner.wq_b.ptr,
+                weight_elements,
+                2,
+                self.stream,
+            )?;
+            let mut math_mode = 0u32;
+            let status = unsafe {
+                cublas_sys::lib().cublasGetMathMode(
+                    self.cublas_handle,
+                    (&mut math_mode as *mut u32).cast::<cublas_sys::cublasMath_t>(),
+                )
+            };
+            if status != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                return Err(format!(
+                    "query projection math-mode observation: {status:?}"
+                ));
+            }
             target.write("indexer-projector.json",&serde_json::to_vec_pretty(&serde_json::json!({"absolute_row":prefix-1,"chunk_start":chunk_start,"chunk_rows":rows,"local_row":target.row,"query_rank":owner.wq_b.k,"query_rows":owner.wq_b.n,"query_cols":owner.wq_b.k,"hidden":self.config.hidden_size,"rope":registration.qk_rope_head_dim,"weight_dtype":"bfloat16","input_dtype":"bfloat16","output_dtype":"bfloat16","input_f32_source":"actual still-live normalized MLA latent before KV overwrite","cublas_math_mode":math_mode as usize,"row_independent":dsa_owner_row_independent_projection_enabled()?,"projection":if self.ordered_kda_projection.is_some(){"bf16_projection_tensorcomp"}else{"native cuBLAS BF16"},"diagnostic_gpu_allocation_bytes":0})).map_err(|e|e.to_string())?)?;
-            crate::mla_probe::row(target,"indexer-head-weights.bf16",head_weights_ptr,target.row,registration.index_n_heads,2,self.stream)?;
-            crate::mla_probe::logical_block(target,"indexer-pool-key-prefix.bf16",if registration.index_kpool_compress{owner.pool_key_cache_ptr}else{owner.key_cache_ptr},key_elements,2,self.stream)?;
+            crate::mla_probe::row(
+                target,
+                "indexer-head-weights.bf16",
+                head_weights_ptr,
+                target.row,
+                registration.index_n_heads,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::logical_block(
+                target,
+                "indexer-pool-key-prefix.bf16",
+                if registration.index_kpool_compress {
+                    owner.pool_key_cache_ptr
+                } else {
+                    owner.key_cache_ptr
+                },
+                key_elements,
+                2,
+                self.stream,
+            )?;
         }
         let selection_timing_events = if self.gqa_timing_enabled.get()
             && !self.gqa_timing_start_event.is_null()
@@ -45509,7 +47297,11 @@ impl PrefillEngine {
         };
         let selection_timing = launch_dsa_prefill_selection_chunk(
             DsaPrefillSelectionKernels {
-                score_tensorcomp: self.ordered_kda_projection.as_ref().map(|bank|bank.score_kernel()).transpose()?,
+                score_tensorcomp: self
+                    .ordered_kda_projection
+                    .as_ref()
+                    .map(|bank| bank.score_kernel())
+                    .transpose()?,
                 rope_query_bf16: self.kernels.dsa_prefill_rope_query_bf16,
                 fused_scores: self.kernels.dsa_prefill_fused_scores,
                 accumulate_gemm_scores: self.kernels.dsa_prefill_accumulate_gemm_scores,
@@ -45550,8 +47342,8 @@ impl PrefillEngine {
                 })?,
             workspace,
             selection_timing_events,
-        observed,
-)?;
+            observed,
+        )?;
         for (source, target) in [
             (
                 DSA_PREFILL_SELECTION_TIMING_QUERY,
@@ -45631,19 +47423,75 @@ impl PrefillEngine {
         Ok(())
     }
 
-    fn observe_mla_prefill_projection(&self,t:&crate::matched_probe::Target,layer:usize,name:&str,projection:&DeepseekV4ProjectionPrefillDescriptor,input:u64,output:u64,tokens:usize,chunk_start:usize)->Result<(),String>{
-        if t.row>=tokens{return Err("MLA observed projection row outside current batch".into());}
-        let DeepseekV4ProjectionPrefillDescriptor::Hqq{tensor_name,desc}=projection else{return Err("MLA observation requires actual HQQ6 source, not a fabricated representation".into());};
-        let layout=self.ordered_kda_layout(projection)?;
-        crate::mla_probe::weights(t,&format!("{name}-weights"),&layout,serde_json::json!({"tensor_name":tensor_name,"layout":desc.layout,"packed_dtype":desc.packed_dtype,"scales_dtype":desc.scales_dtype,"zeros_dtype":desc.zeros_dtype,"tensor_bytes":desc.tensor_bytes,"actual_path":if self.ordered_mla_f32.is_some(){if name=="o"{"prefill_ordered_bf16"}else{"prefill_ordered_f32_with_bf16_cooutput"}}else{"prefill_bf16"}}),self.stream)?;
-        crate::mla_probe::row(t,&format!("{name}-input.bf16"),input,t.row,layout.cols,2,self.stream)?;
-        crate::mla_probe::row(t,&format!("{name}-output.bf16"),output,t.row,layout.rows,2,self.stream)?;
-        let actual_materialized=self.config.hqq_prefill_materialize_bf16 && self.ordered_mla_f32.is_none();
+    fn observe_mla_prefill_projection(
+        &self,
+        t: &crate::matched_probe::Target,
+        layer: usize,
+        name: &str,
+        projection: &DeepseekV4ProjectionPrefillDescriptor,
+        input: u64,
+        output: u64,
+        tokens: usize,
+        chunk_start: usize,
+    ) -> Result<(), String> {
+        if t.row >= tokens {
+            return Err("MLA observed projection row outside current batch".into());
+        }
+        let DeepseekV4ProjectionPrefillDescriptor::Hqq { tensor_name, desc } = projection else {
+            return Err(
+                "MLA observation requires actual HQQ6 source, not a fabricated representation"
+                    .into(),
+            );
+        };
+        let layout = self.ordered_kda_layout(projection)?;
+        crate::mla_probe::weights(
+            t,
+            &format!("{name}-weights"),
+            &layout,
+            serde_json::json!({"tensor_name":tensor_name,"layout":desc.layout,"packed_dtype":desc.packed_dtype,"scales_dtype":desc.scales_dtype,"zeros_dtype":desc.zeros_dtype,"tensor_bytes":desc.tensor_bytes,"actual_path":if self.ordered_mla_f32.is_some(){if name=="o"{"prefill_ordered_bf16"}else{"prefill_ordered_f32_with_bf16_cooutput"}}else{"prefill_bf16"}}),
+            self.stream,
+        )?;
+        crate::mla_probe::row(
+            t,
+            &format!("{name}-input.bf16"),
+            input,
+            t.row,
+            layout.cols,
+            2,
+            self.stream,
+        )?;
+        crate::mla_probe::row(
+            t,
+            &format!("{name}-output.bf16"),
+            output,
+            t.row,
+            layout.rows,
+            2,
+            self.stream,
+        )?;
+        let actual_materialized =
+            self.config.hqq_prefill_materialize_bf16 && self.ordered_mla_f32.is_none();
         if actual_materialized {
-            let w=self.scratch.d_hqq_bf16_weight.as_ref().ok_or("actual MLA materialization scratch absent")?;
-            let extent=layout.rows.checked_mul(layout.cols).ok_or("MLA materialized weight extent overflow")?;
-            if w.len()<extent{return Err("actual MLA materialization scratch extent invalid".into());}
-            crate::mla_probe::block(t,&format!("{name}-materialized.bf16"),*w.device_ptr(),extent,2,self.stream)?;
+            let w = self
+                .scratch
+                .d_hqq_bf16_weight
+                .as_ref()
+                .ok_or("actual MLA materialization scratch absent")?;
+            let extent = layout
+                .rows
+                .checked_mul(layout.cols)
+                .ok_or("MLA materialized weight extent overflow")?;
+            if w.len() < extent {
+                return Err("actual MLA materialization scratch extent invalid".into());
+            }
+            crate::mla_probe::block(
+                t,
+                &format!("{name}-materialized.bf16"),
+                *w.device_ptr(),
+                extent,
+                2,
+                self.stream,
+            )?;
         }
         t.write(&format!("{name}-projection.json"),serde_json::to_vec_pretty(&serde_json::json!({"layer":layer,"height":self.matched_prefill_invocation.as_ref().ok_or("observed MLA projection invocation absent")?.logical_tokens(),"chunk_end":chunk_start.checked_add(tokens).ok_or("MLA projection observed height overflow")?,"chunk_start":chunk_start,"chunk_rows":tokens,"local_row":t.row,"absolute_row":chunk_start+t.row,"tensor_name":tensor_name,"rows":layout.rows,"cols":layout.cols,"input_dtype":"bf16","output_dtype":"bf16","materialized_bf16":actual_materialized,"configured_materialized_bf16":self.config.hqq_prefill_materialize_bf16,"primary_output_dtype":if self.ordered_mla_f32.is_some() && name!="o"{"float32"}else{"bfloat16"},"captured_output_role":if self.ordered_mla_f32.is_some() && name!="o"{"real_bf16_cooutput_for_existing_consumers"}else{"primary_bf16"},"actual_materialization_capture":"only if the real materialized branch ran; require payload when true"})).map_err(|e|e.to_string())?.as_slice())
     }
@@ -45927,35 +47775,135 @@ impl PrefillEngine {
         // Request-owned F32 staging. All phases below are ordered on self.stream:
         // qA -> normalized qB/index input -> qB; KV replaces qA after selection;
         // cache finishes before absorption replaces KV; attention replaces qB last.
-        let selected_mla = if let Some(ops)=&self.ordered_mla_f32 {
-            if !sparse_dsa || qlr==0 {return Err("selected F32 MLA requires cold-admitted sparse LoRA path".into());}
-            let work=self.dsa_prefill_workspace.as_ref().ok_or("selected MLA request workspace absent")?;
-            let latent=m.checked_mul(qlr.max(kv_a_width).max(nh.checked_mul(ccd).ok_or("MLA latent width overflow")?)).ok_or("MLA latent extent overflow")?;
-            let query=m.checked_mul(q_width.max(nh.checked_mul(ccd).ok_or("MLA attention width overflow")?)).ok_or("MLA query extent overflow")?;
-            if work.d_mla_q_absorbed.len()<latent || work.d_mla_attention.len()<query{return Err("actual selected MLA F32 workspace capacity below loaded dimensions".into());}
-            Some((ops,*work.d_mla_q_absorbed.device_ptr(),*work.d_mla_attention.device_ptr()))
-        }else{None};
+        let selected_mla = if let Some(ops) = &self.ordered_mla_f32 {
+            if !sparse_dsa || qlr == 0 {
+                return Err("selected F32 MLA requires cold-admitted sparse LoRA path".into());
+            }
+            let work = self
+                .dsa_prefill_workspace
+                .as_ref()
+                .ok_or("selected MLA request workspace absent")?;
+            let latent = m
+                .checked_mul(
+                    qlr.max(kv_a_width)
+                        .max(nh.checked_mul(ccd).ok_or("MLA latent width overflow")?),
+                )
+                .ok_or("MLA latent extent overflow")?;
+            let query = m
+                .checked_mul(
+                    q_width.max(nh.checked_mul(ccd).ok_or("MLA attention width overflow")?),
+                )
+                .ok_or("MLA query extent overflow")?;
+            if work.d_mla_q_absorbed.len() < latent || work.d_mla_attention.len() < query {
+                return Err(
+                    "actual selected MLA F32 workspace capacity below loaded dimensions".into(),
+                );
+            }
+            Some((
+                ops,
+                *work.d_mla_q_absorbed.device_ptr(),
+                *work.d_mla_attention.device_ptr(),
+            ))
+        } else {
+            None
+        };
         let trace_position = start_pos + m - 1;
         let trace_row = m - 1;
         let trace_chunk = start_pos;
-        let mla_probe=crate::mla_probe::prefill_target(self.matched_prefill_invocation.as_ref(),"mla_prefill_operands",layer_idx,start_pos,m)?;
-        let mla_prefix_probe=crate::mla_probe::prefill_target(self.matched_prefill_invocation.as_ref(),"mla_prefix_operands",layer_idx,start_pos,m)?;
-        if let Some(t)=&mla_probe {
-            if t.row>=m||!sparse_dsa||qlr==0{return Err("MLA observation requires an admitted actual HQQ LoRA sparse chunk row".into());}
+        let mla_probe = crate::mla_probe::prefill_target(
+            self.matched_prefill_invocation.as_ref(),
+            "mla_prefill_operands",
+            layer_idx,
+            start_pos,
+            m,
+        )?;
+        let mla_prefix_probe = crate::mla_probe::prefill_target(
+            self.matched_prefill_invocation.as_ref(),
+            "mla_prefix_operands",
+            layer_idx,
+            start_pos,
+            m,
+        )?;
+        if let Some(t) = &mla_probe {
+            if t.row >= m || !sparse_dsa || qlr == 0 {
+                return Err(
+                    "MLA observation requires an admitted actual HQQ LoRA sparse chunk row".into(),
+                );
+            }
         }
-        if let Some(t)=&mla_prefix_probe {
-            if t.row.checked_add(1)!=Some(m)||!sparse_dsa||qlr==0{return Err("MLA prefix observation requires an admitted sparse LoRA chunk last row".into());}
+        if let Some(t) = &mla_prefix_probe {
+            if t.row.checked_add(1) != Some(m) || !sparse_dsa || qlr == 0 {
+                return Err(
+                    "MLA prefix observation requires an admitted sparse LoRA chunk last row".into(),
+                );
+            }
             t.write("prefix-descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({"path":"prefill_prefix_only","layer":layer_idx,"height":self.matched_prefill_invocation.as_ref().ok_or("observed MLA invocation absent")?.logical_tokens(),"chunk_end":start_pos.checked_add(m).ok_or("MLA observed height overflow")?,"chunk_start":start_pos,"chunk_rows":m,"local_last_row":t.row,"absolute_last_row":start_pos+t.row,"copied_rows":m,"hidden":cfg.hidden_size,"q_lora_rank":qlr,"kv_a_width":kv_a_width,"dtype":"bf16","scope":"one layer current-chunk suffix producer arrays only; never a reconstructed global prefix","device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?.as_slice())?;
         }
-        for t in [mla_probe.as_ref(),mla_prefix_probe.as_ref()].into_iter().flatten(){crate::mla_probe::block(t,"input-chunk-prefix.bf16",hidden,t.row.checked_add(1).and_then(|r|r.checked_mul(cfg.hidden_size)).ok_or("MLA observed prefix extent overflow")?,2,self.stream)?;}
-        if let Some(t)=&mla_probe {
-            crate::mla_probe::row(t,"input.bf16",hidden,t.row,cfg.hidden_size,2,self.stream)?;
-            crate::mla_probe::row(t,"position.i32",*self.scratch.d_positions.device_ptr(),t.row,1,4,self.stream)?;
-            crate::mla_probe::block(t,"input_norm.bf16",lw.input_norm,cfg.hidden_size,2,self.stream)?;
-            crate::mla_probe::block(t,"q_a_norm.f32",mla.q_a_norm_ptr,qlr,4,self.stream)?;
-            crate::mla_probe::block(t,"kv_a_norm.f32",mla.kv_a_norm_ptr,klr,4,self.stream)?;
-            crate::mla_probe::block(t,"w_kc.bf16",mla.w_kc_ptr,nh.checked_mul(nope).and_then(|v|v.checked_mul(ccd)).ok_or("MLA observed WKC extent overflow")?,2,self.stream)?;
-            crate::mla_probe::block(t,"w_vc.bf16",mla.w_vc_ptr,nh.checked_mul(vhd).and_then(|v|v.checked_mul(ccd)).ok_or("MLA observed WVC extent overflow")?,2,self.stream)?;
+        for t in [mla_probe.as_ref(), mla_prefix_probe.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            crate::mla_probe::block(
+                t,
+                "input-chunk-prefix.bf16",
+                hidden,
+                t.row
+                    .checked_add(1)
+                    .and_then(|r| r.checked_mul(cfg.hidden_size))
+                    .ok_or("MLA observed prefix extent overflow")?,
+                2,
+                self.stream,
+            )?;
+        }
+        if let Some(t) = &mla_probe {
+            crate::mla_probe::row(
+                t,
+                "input.bf16",
+                hidden,
+                t.row,
+                cfg.hidden_size,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::row(
+                t,
+                "position.i32",
+                *self.scratch.d_positions.device_ptr(),
+                t.row,
+                1,
+                4,
+                self.stream,
+            )?;
+            crate::mla_probe::block(
+                t,
+                "input_norm.bf16",
+                lw.input_norm,
+                cfg.hidden_size,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::block(t, "q_a_norm.f32", mla.q_a_norm_ptr, qlr, 4, self.stream)?;
+            crate::mla_probe::block(t, "kv_a_norm.f32", mla.kv_a_norm_ptr, klr, 4, self.stream)?;
+            crate::mla_probe::block(
+                t,
+                "w_kc.bf16",
+                mla.w_kc_ptr,
+                nh.checked_mul(nope)
+                    .and_then(|v| v.checked_mul(ccd))
+                    .ok_or("MLA observed WKC extent overflow")?,
+                2,
+                self.stream,
+            )?;
+            crate::mla_probe::block(
+                t,
+                "w_vc.bf16",
+                mla.w_vc_ptr,
+                nh.checked_mul(vhd)
+                    .and_then(|v| v.checked_mul(ccd))
+                    .ok_or("MLA observed WVC extent overflow")?,
+                2,
+                self.stream,
+            )?;
             t.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({"path":"prefill_sparse_mla","layer":layer_idx,"height":self.matched_prefill_invocation.as_ref().ok_or("observed MLA invocation absent")?.logical_tokens(),"chunk_end":start_pos.checked_add(m).ok_or("MLA observed height overflow")?,"chunk_start":start_pos,"chunk_rows":m,"local_row":t.row,"absolute_row":start_pos+t.row,"hidden":cfg.hidden_size,"heads":nh,"kv_lora_rank":klr,"cache_dim":ccd,"nope":nope,"rope":rope,"value_dim":vhd,"q_lora_rank":qlr,"eps":cfg.rms_norm_eps,"kv_format":self.kv_format,"projection_output_dtype":if selected_mla.is_some(){"float32_with_bfloat16_cooutput"}else{"bfloat16"},"norm_input_dtype":if selected_mla.is_some(){"float32"}else{"bfloat16"},"materialize_bf16":self.config.hqq_prefill_materialize_bf16 && selected_mla.is_none(),"configured_materialize_bf16":self.config.hqq_prefill_materialize_bf16,"forcing":crate::matched_projection_transfer::forcing_label().is_some(),"device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?.as_slice())?;
         }
         self.record_prefill_device_trace_bf16_row(
@@ -45992,16 +47940,86 @@ impl PrefillEngine {
         if qlr > 0 {
             let qa = mla.q_a_proj.as_ref().expect("validated q_a_proj");
             let qb = mla.q_b_proj.as_ref().expect("validated q_b_proj");
-            if let Some((_,latent,_))=selected_mla {unsafe{self.ordered_kda_projection.as_ref().ok_or("selected projection bank absent")?.enqueue_f32(&self.ordered_kda_layout(qa)?,hidden,scratch1,latent,m,self.stream)?;}}
-            else{self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, qa, hidden, scratch1, m)?;}
-            if let Some(t)=&mla_probe {self.observe_mla_prefill_projection(t,layer_idx,"q_a",qa,hidden,scratch1,m,start_pos)?;}
-        if let (Some(t),Some((_,latent,_)))=(&mla_probe,selected_mla){crate::mla_probe::row(t,"q_a-output.f32",latent,t.row,qlr,4,self.stream)?;}
-            for t in [mla_probe.as_ref(),mla_prefix_probe.as_ref()].into_iter().flatten(){crate::mla_probe::block(t,"q_a-chunk-prefix.bf16",scratch1,t.row.checked_add(1).and_then(|r|r.checked_mul(qlr)).ok_or("MLA observed prefix extent overflow")?,2,self.stream)?;}
-            if let Some((ops,latent,_))=selected_mla{unsafe{ops.norm(latent,mla.q_a_norm_ptr,scratch2,m,qlr,qlr,qlr,cfg.rms_norm_eps,self.stream)?;}}
-            else{self.launch_rmsnorm_fp32w(scratch2, scratch1, mla.q_a_norm_ptr, m, qlr)?;}
-            if let Some(t)=&mla_probe {crate::mla_probe::row(t,"q_norm.bf16",scratch2,t.row,qlr,2,self.stream)?;}
-        if let (Some(t),Some((_,latent,_)))=(&mla_probe,selected_mla){crate::mla_probe::row(t,"q_norm.f32",latent,t.row,qlr,4,self.stream)?;}
-            for t in [mla_probe.as_ref(),mla_prefix_probe.as_ref()].into_iter().flatten(){crate::mla_probe::block(t,"q_norm-chunk-prefix.bf16",scratch2,t.row.checked_add(1).and_then(|r|r.checked_mul(qlr)).ok_or("MLA observed prefix extent overflow")?,2,self.stream)?;}
+            if let Some((_, latent, _)) = selected_mla {
+                unsafe {
+                    self.ordered_kda_projection
+                        .as_ref()
+                        .ok_or("selected projection bank absent")?
+                        .enqueue_f32(
+                            &self.ordered_kda_layout(qa)?,
+                            hidden,
+                            scratch1,
+                            latent,
+                            m,
+                            self.stream,
+                        )?;
+                }
+            } else {
+                self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, qa, hidden, scratch1, m)?;
+            }
+            if let Some(t) = &mla_probe {
+                self.observe_mla_prefill_projection(
+                    t, layer_idx, "q_a", qa, hidden, scratch1, m, start_pos,
+                )?;
+            }
+            if let (Some(t), Some((_, latent, _))) = (&mla_probe, selected_mla) {
+                crate::mla_probe::row(t, "q_a-output.f32", latent, t.row, qlr, 4, self.stream)?;
+            }
+            for t in [mla_probe.as_ref(), mla_prefix_probe.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                crate::mla_probe::block(
+                    t,
+                    "q_a-chunk-prefix.bf16",
+                    scratch1,
+                    t.row
+                        .checked_add(1)
+                        .and_then(|r| r.checked_mul(qlr))
+                        .ok_or("MLA observed prefix extent overflow")?,
+                    2,
+                    self.stream,
+                )?;
+            }
+            if let Some((ops, latent, _)) = selected_mla {
+                unsafe {
+                    ops.norm(
+                        latent,
+                        mla.q_a_norm_ptr,
+                        scratch2,
+                        m,
+                        qlr,
+                        qlr,
+                        qlr,
+                        cfg.rms_norm_eps,
+                        self.stream,
+                    )?;
+                }
+            } else {
+                self.launch_rmsnorm_fp32w(scratch2, scratch1, mla.q_a_norm_ptr, m, qlr)?;
+            }
+            if let Some(t) = &mla_probe {
+                crate::mla_probe::row(t, "q_norm.bf16", scratch2, t.row, qlr, 2, self.stream)?;
+            }
+            if let (Some(t), Some((_, latent, _))) = (&mla_probe, selected_mla) {
+                crate::mla_probe::row(t, "q_norm.f32", latent, t.row, qlr, 4, self.stream)?;
+            }
+            for t in [mla_probe.as_ref(), mla_prefix_probe.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                crate::mla_probe::block(
+                    t,
+                    "q_norm-chunk-prefix.bf16",
+                    scratch2,
+                    t.row
+                        .checked_add(1)
+                        .and_then(|r| r.checked_mul(qlr))
+                        .ok_or("MLA observed prefix extent overflow")?,
+                    2,
+                    self.stream,
+                )?;
+            }
             finish_mla_stage!(HQQ_MLA_TIMING_Q_A_NORM);
             self.record_prefill_device_trace_bf16_row(
                 PDT_LAYER_MLA_Q_LORA_NORM_LAST,
@@ -46028,13 +48046,40 @@ impl PrefillEngine {
                     .dsa_prefill
                     .map_or(false, |registration| registration.owner_weights_present)
             {
-                self.execute_dsa_prefill_owner_selection(layer_idx, m, start_pos, scratch2,mla_probe.as_ref().or(mla_prefix_probe.as_ref()))?;
+                self.execute_dsa_prefill_owner_selection(
+                    layer_idx,
+                    m,
+                    start_pos,
+                    scratch2,
+                    mla_probe.as_ref().or(mla_prefix_probe.as_ref()),
+                )?;
             }
             finish_mla_stage!(HQQ_MLA_TIMING_OWNER_SELECT);
-            if let Some((_,_,query))=selected_mla{unsafe{self.ordered_kda_projection.as_ref().ok_or("selected projection bank absent")?.enqueue_f32(&self.ordered_kda_layout(qb)?,scratch2,q_raw,query,m,self.stream)?;}}
-            else{self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, qb, scratch2, q_raw, m)?;}
-            if let Some(t)=&mla_probe {self.observe_mla_prefill_projection(t,layer_idx,"q_b",qb,scratch2,q_raw,m,start_pos)?;}
-        if let (Some(t),Some((_,_,query)))=(&mla_probe,selected_mla){crate::mla_probe::row(t,"q_b-output.f32",query,t.row,q_width,4,self.stream)?;}
+            if let Some((_, _, query)) = selected_mla {
+                unsafe {
+                    self.ordered_kda_projection
+                        .as_ref()
+                        .ok_or("selected projection bank absent")?
+                        .enqueue_f32(
+                            &self.ordered_kda_layout(qb)?,
+                            scratch2,
+                            q_raw,
+                            query,
+                            m,
+                            self.stream,
+                        )?;
+                }
+            } else {
+                self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, qb, scratch2, q_raw, m)?;
+            }
+            if let Some(t) = &mla_probe {
+                self.observe_mla_prefill_projection(
+                    t, layer_idx, "q_b", qb, scratch2, q_raw, m, start_pos,
+                )?;
+            }
+            if let (Some(t), Some((_, _, query))) = (&mla_probe, selected_mla) {
+                crate::mla_probe::row(t, "q_b-output.f32", query, t.row, q_width, 4, self.stream)?;
+            }
             finish_mla_stage!(HQQ_MLA_TIMING_Q_B);
             self.record_prefill_device_trace_bf16_row(
                 PDT_LAYER_MLA_Q_RAW_LAST,
@@ -46069,45 +48114,138 @@ impl PrefillEngine {
             finish_mla_stage!(HQQ_MLA_TIMING_OWNER_SELECT);
             finish_mla_stage!(HQQ_MLA_TIMING_Q_B);
         }
-        if let Some((_,latent,_))=selected_mla{unsafe{self.ordered_kda_projection.as_ref().ok_or("selected projection bank absent")?.enqueue_f32(&self.ordered_kda_layout(&mla.kv_a_proj_with_mqa)?,hidden,scratch2,latent,m,self.stream)?;}}
-        else{        self.deepseek_v4_projection_prefill_gemm_bf16(
-            layer_idx,
-            &mla.kv_a_proj_with_mqa,
-            hidden,
-            scratch2,
-            m,
-        )?;}
-
-        if let Some(t)=&mla_probe {self.observe_mla_prefill_projection(t,layer_idx,"kv_a",&mla.kv_a_proj_with_mqa,hidden,scratch2,m,start_pos)?;}
-        if let (Some(t),Some((_,latent,_)))=(&mla_probe,selected_mla){crate::mla_probe::row(t,"kv_a-output.f32",latent,t.row,kv_a_width,4,self.stream)?;}
-        for t in [mla_probe.as_ref(),mla_prefix_probe.as_ref()].into_iter().flatten(){crate::mla_probe::block(t,"kv_a-chunk-prefix.bf16",scratch2,t.row.checked_add(1).and_then(|r|r.checked_mul(kv_a_width)).ok_or("MLA observed prefix extent overflow")?,2,self.stream)?;}
-        if let Some((ops,latent,_))=selected_mla{unsafe{ops.norm(latent,mla.kv_a_norm_ptr,scratch2,m,klr,kv_a_width,kv_a_width,cfg.rms_norm_eps,self.stream)?;}}
-        else{        let norm_threads = std::cmp::max(32, std::cmp::min(1024, klr).next_power_of_two()) as u32;
-        let mut n0 = scratch2;
-        let mut n1 = mla.kv_a_norm_ptr;
-        let mut n2 = kv_a_width as i32;
-        let mut n3 = klr as i32;
-        let mut n4 = cfg.rms_norm_eps;
-        unsafe {
-            launch(
-                self.kernels.mla_rmsnorm_prefix_bf16_fp32w,
-                (m as u32, 1, 1),
-                (norm_threads, 1, 1),
-                norm_threads * 4,
-                self.stream,
-                &mut [
-                    &mut n0 as *mut _ as *mut std::ffi::c_void,
-                    &mut n1 as *mut _ as *mut std::ffi::c_void,
-                    &mut n2 as *mut _ as *mut std::ffi::c_void,
-                    &mut n3 as *mut _ as *mut std::ffi::c_void,
-                    &mut n4 as *mut _ as *mut std::ffi::c_void,
-                ],
+        if let Some((_, latent, _)) = selected_mla {
+            unsafe {
+                self.ordered_kda_projection
+                    .as_ref()
+                    .ok_or("selected projection bank absent")?
+                    .enqueue_f32(
+                        &self.ordered_kda_layout(&mla.kv_a_proj_with_mqa)?,
+                        hidden,
+                        scratch2,
+                        latent,
+                        m,
+                        self.stream,
+                    )?;
+            }
+        } else {
+            self.deepseek_v4_projection_prefill_gemm_bf16(
+                layer_idx,
+                &mla.kv_a_proj_with_mqa,
+                hidden,
+                scratch2,
+                m,
             )?;
         }
-}
-        if let Some(t)=&mla_probe {crate::mla_probe::row(t,"kv_norm.bf16",scratch2,t.row,kv_a_width,2,self.stream)?;}
-        if let (Some(t),Some((_,latent,_)))=(&mla_probe,selected_mla){crate::mla_probe::row(t,"kv_norm.f32",latent,t.row,kv_a_width,4,self.stream)?;}
-        for t in [mla_probe.as_ref(),mla_prefix_probe.as_ref()].into_iter().flatten(){crate::mla_probe::block(t,"kv_norm-chunk-prefix.bf16",scratch2,t.row.checked_add(1).and_then(|r|r.checked_mul(kv_a_width)).ok_or("MLA observed prefix extent overflow")?,2,self.stream)?;}
+
+        if let Some(t) = &mla_probe {
+            self.observe_mla_prefill_projection(
+                t,
+                layer_idx,
+                "kv_a",
+                &mla.kv_a_proj_with_mqa,
+                hidden,
+                scratch2,
+                m,
+                start_pos,
+            )?;
+        }
+        if let (Some(t), Some((_, latent, _))) = (&mla_probe, selected_mla) {
+            crate::mla_probe::row(
+                t,
+                "kv_a-output.f32",
+                latent,
+                t.row,
+                kv_a_width,
+                4,
+                self.stream,
+            )?;
+        }
+        for t in [mla_probe.as_ref(), mla_prefix_probe.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            crate::mla_probe::block(
+                t,
+                "kv_a-chunk-prefix.bf16",
+                scratch2,
+                t.row
+                    .checked_add(1)
+                    .and_then(|r| r.checked_mul(kv_a_width))
+                    .ok_or("MLA observed prefix extent overflow")?,
+                2,
+                self.stream,
+            )?;
+        }
+        if let Some((ops, latent, _)) = selected_mla {
+            unsafe {
+                ops.norm(
+                    latent,
+                    mla.kv_a_norm_ptr,
+                    scratch2,
+                    m,
+                    klr,
+                    kv_a_width,
+                    kv_a_width,
+                    cfg.rms_norm_eps,
+                    self.stream,
+                )?;
+            }
+        } else {
+            let norm_threads =
+                std::cmp::max(32, std::cmp::min(1024, klr).next_power_of_two()) as u32;
+            let mut n0 = scratch2;
+            let mut n1 = mla.kv_a_norm_ptr;
+            let mut n2 = kv_a_width as i32;
+            let mut n3 = klr as i32;
+            let mut n4 = cfg.rms_norm_eps;
+            unsafe {
+                launch(
+                    self.kernels.mla_rmsnorm_prefix_bf16_fp32w,
+                    (m as u32, 1, 1),
+                    (norm_threads, 1, 1),
+                    norm_threads * 4,
+                    self.stream,
+                    &mut [
+                        &mut n0 as *mut _ as *mut std::ffi::c_void,
+                        &mut n1 as *mut _ as *mut std::ffi::c_void,
+                        &mut n2 as *mut _ as *mut std::ffi::c_void,
+                        &mut n3 as *mut _ as *mut std::ffi::c_void,
+                        &mut n4 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )?;
+            }
+        }
+        if let Some(t) = &mla_probe {
+            crate::mla_probe::row(
+                t,
+                "kv_norm.bf16",
+                scratch2,
+                t.row,
+                kv_a_width,
+                2,
+                self.stream,
+            )?;
+        }
+        if let (Some(t), Some((_, latent, _))) = (&mla_probe, selected_mla) {
+            crate::mla_probe::row(t, "kv_norm.f32", latent, t.row, kv_a_width, 4, self.stream)?;
+        }
+        for t in [mla_probe.as_ref(), mla_prefix_probe.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            crate::mla_probe::block(
+                t,
+                "kv_norm-chunk-prefix.bf16",
+                scratch2,
+                t.row
+                    .checked_add(1)
+                    .and_then(|r| r.checked_mul(kv_a_width))
+                    .ok_or("MLA observed prefix extent overflow")?,
+                2,
+                self.stream,
+            )?;
+        }
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MLA_CKV_NORM_LAST,
             layer_idx,
@@ -46222,7 +48360,28 @@ impl PrefillEngine {
                 ],
             )?;
         }
-        if let Some((ops,latent,query))=selected_mla{unsafe{ops.prepare_query(query,latent,q,m,self.rope_cos_ptr,self.rope_sin_ptr,*self.scratch.d_positions.device_ptr(),cfg.max_seq_len,m,nh,nope,rope,klr,kv_a_width,mla.rope_interleave,self.stream)?;}}
+        if let Some((ops, latent, query)) = selected_mla {
+            unsafe {
+                ops.prepare_query(
+                    query,
+                    latent,
+                    q,
+                    m,
+                    self.rope_cos_ptr,
+                    self.rope_sin_ptr,
+                    *self.scratch.d_positions.device_ptr(),
+                    cfg.max_seq_len,
+                    m,
+                    nh,
+                    nope,
+                    rope,
+                    klr,
+                    kv_a_width,
+                    mla.rope_interleave,
+                    self.stream,
+                )?;
+            }
+        }
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MLA_K_PACKED_LAST,
             layer_idx,
@@ -46265,84 +48424,138 @@ impl PrefillEngine {
         )?;
 
         if capture_kv_cache {
-            if let Some((ops,latent,_))=selected_mla{
-                let admitted_end=start_pos.checked_add(m).ok_or("selected cache logical extent overflow")?;
-                if admitted_end>cfg.max_seq_len{return Err("selected cache append exceeds registered model context".into());}
-                unsafe{ops.cache(mla.ckv_cache_ptr,mla.kpe_cache_ptr,latent,m,start_pos,admitted_end,klr,kv_a_width,ccd,rope,self.kv_format,self.stream)?;}
-            }else{
-            let cache_append_kernel = native_mla_kernel_for_format(
-                self.kv_format,
-                self.kernels.mla_cache_append_k4,
-                self.kernels.mla_cache_append_k6,
-            )?;
-            let cache_blocks = std::cmp::max(ccd, rope) / 16;
-            if cache_blocks > 1024 {
-                return Err(format!(
+            if let Some((ops, latent, _)) = selected_mla {
+                let admitted_end = start_pos
+                    .checked_add(m)
+                    .ok_or("selected cache logical extent overflow")?;
+                if admitted_end > cfg.max_seq_len {
+                    return Err("selected cache append exceeds registered model context".into());
+                }
+                unsafe {
+                    ops.cache(
+                        mla.ckv_cache_ptr,
+                        mla.kpe_cache_ptr,
+                        latent,
+                        m,
+                        start_pos,
+                        admitted_end,
+                        klr,
+                        kv_a_width,
+                        ccd,
+                        rope,
+                        self.kv_format,
+                        self.stream,
+                    )?;
+                }
+            } else {
+                let cache_append_kernel = native_mla_kernel_for_format(
+                    self.kv_format,
+                    self.kernels.mla_cache_append_k4,
+                    self.kernels.mla_cache_append_k6,
+                )?;
+                let cache_blocks = std::cmp::max(ccd, rope) / 16;
+                if cache_blocks > 1024 {
+                    return Err(format!(
                     "HQQ MLA layer {} compact cache needs {} CUDA threads per token, exceeding the device launch contract",
                     layer_idx, cache_blocks
                 ));
+                }
+                let cache_threads = std::cmp::max(32, ((cache_blocks + 31) / 32) * 32) as u32;
+                let mut c0 = mla.ckv_cache_ptr;
+                let mut c1 = mla.kpe_cache_ptr;
+                let mut c2 = scratch2;
+                let mut c3 = k;
+                let mut c4 = i32::try_from(start_pos).map_err(|_| {
+                    format!(
+                        "HQQ MLA layer {} cache start position exceeds native i32 contract: {}",
+                        layer_idx, start_pos
+                    )
+                })?;
+                let mut c5 = token_count_i32;
+                let mut c6 = kv_a_width_i32;
+                let mut c7 = i32::try_from(klr).map_err(|_| {
+                    format!(
+                        "HQQ MLA layer {} KV rank exceeds native i32 contract: {}",
+                        layer_idx, klr
+                    )
+                })?;
+                let mut c8 = i32::try_from(ccd).map_err(|_| {
+                    format!(
+                        "HQQ MLA layer {} cache width exceeds native i32 contract: {}",
+                        layer_idx, ccd
+                    )
+                })?;
+                let mut c9 = num_heads_i32;
+                let mut c10 = qk_dim_i32;
+                let mut c11 = nope_i32;
+                let mut c12 = rope_i32;
+                unsafe {
+                    launch(
+                        cache_append_kernel,
+                        (m as u32, 1, 1),
+                        (cache_threads, 1, 1),
+                        0,
+                        self.stream,
+                        &mut [
+                            &mut c0 as *mut _ as *mut std::ffi::c_void,
+                            &mut c1 as *mut _ as *mut std::ffi::c_void,
+                            &mut c2 as *mut _ as *mut std::ffi::c_void,
+                            &mut c3 as *mut _ as *mut std::ffi::c_void,
+                            &mut c4 as *mut _ as *mut std::ffi::c_void,
+                            &mut c5 as *mut _ as *mut std::ffi::c_void,
+                            &mut c6 as *mut _ as *mut std::ffi::c_void,
+                            &mut c7 as *mut _ as *mut std::ffi::c_void,
+                            &mut c8 as *mut _ as *mut std::ffi::c_void,
+                            &mut c9 as *mut _ as *mut std::ffi::c_void,
+                            &mut c10 as *mut _ as *mut std::ffi::c_void,
+                            &mut c11 as *mut _ as *mut std::ffi::c_void,
+                            &mut c12 as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )?;
+                }
             }
-            let cache_threads = std::cmp::max(32, ((cache_blocks + 31) / 32) * 32) as u32;
-            let mut c0 = mla.ckv_cache_ptr;
-            let mut c1 = mla.kpe_cache_ptr;
-            let mut c2 = scratch2;
-            let mut c3 = k;
-            let mut c4 = i32::try_from(start_pos).map_err(|_| {
-                format!(
-                    "HQQ MLA layer {} cache start position exceeds native i32 contract: {}",
-                    layer_idx, start_pos
-                )
-            })?;
-            let mut c5 = token_count_i32;
-            let mut c6 = kv_a_width_i32;
-            let mut c7 = i32::try_from(klr).map_err(|_| {
-                format!(
-                    "HQQ MLA layer {} KV rank exceeds native i32 contract: {}",
-                    layer_idx, klr
-                )
-            })?;
-            let mut c8 = i32::try_from(ccd).map_err(|_| {
-                format!(
-                    "HQQ MLA layer {} cache width exceeds native i32 contract: {}",
-                    layer_idx, ccd
-                )
-            })?;
-            let mut c9 = num_heads_i32;
-            let mut c10 = qk_dim_i32;
-            let mut c11 = nope_i32;
-            let mut c12 = rope_i32;
-            unsafe {
-                launch(
-                    cache_append_kernel,
-                    (m as u32, 1, 1),
-                    (cache_threads, 1, 1),
-                    0,
-                    self.stream,
-                    &mut [
-                        &mut c0 as *mut _ as *mut std::ffi::c_void,
-                        &mut c1 as *mut _ as *mut std::ffi::c_void,
-                        &mut c2 as *mut _ as *mut std::ffi::c_void,
-                        &mut c3 as *mut _ as *mut std::ffi::c_void,
-                        &mut c4 as *mut _ as *mut std::ffi::c_void,
-                        &mut c5 as *mut _ as *mut std::ffi::c_void,
-                        &mut c6 as *mut _ as *mut std::ffi::c_void,
-                        &mut c7 as *mut _ as *mut std::ffi::c_void,
-                        &mut c8 as *mut _ as *mut std::ffi::c_void,
-                        &mut c9 as *mut _ as *mut std::ffi::c_void,
-                        &mut c10 as *mut _ as *mut std::ffi::c_void,
-                        &mut c11 as *mut _ as *mut std::ffi::c_void,
-                        &mut c12 as *mut _ as *mut std::ffi::c_void,
-                    ],
-                )?;
-            }
-}
         }
         finish_mla_stage!(HQQ_MLA_TIMING_KV_PREP);
-        if let Some(t)=&mla_prefix_probe {crate::mla_probe::cache(t,start_pos.checked_add(m).ok_or("MLA prefix cache height overflow")?,ccd,rope,self.kv_format,mla.ckv_cache_ptr,mla.kpe_cache_ptr,self.stream)?;}
-        if let (Some(t),Some((_,_,query)))=(&mla_probe,selected_mla){crate::mla_probe::row(t,"query-prepared.f32",query,t.row,q_width,4,self.stream)?;}
-        if let Some(t)=&mla_probe {
-            crate::mla_probe::cache(t,start_pos.checked_add(t.row).and_then(|r|r.checked_add(1)).ok_or("MLA common prefix overflow")?,ccd,rope,self.kv_format,mla.ckv_cache_ptr,mla.kpe_cache_ptr,self.stream)?;
-            crate::mla_probe::head_rows(t,"query",q,t.row,m,nh,qk_dim,self.stream)?;
+        if let Some(t) = &mla_prefix_probe {
+            crate::mla_probe::cache(
+                t,
+                start_pos
+                    .checked_add(m)
+                    .ok_or("MLA prefix cache height overflow")?,
+                ccd,
+                rope,
+                self.kv_format,
+                mla.ckv_cache_ptr,
+                mla.kpe_cache_ptr,
+                self.stream,
+            )?;
+        }
+        if let (Some(t), Some((_, _, query))) = (&mla_probe, selected_mla) {
+            crate::mla_probe::row(
+                t,
+                "query-prepared.f32",
+                query,
+                t.row,
+                q_width,
+                4,
+                self.stream,
+            )?;
+        }
+        if let Some(t) = &mla_probe {
+            crate::mla_probe::cache(
+                t,
+                start_pos
+                    .checked_add(t.row)
+                    .and_then(|r| r.checked_add(1))
+                    .ok_or("MLA common prefix overflow")?,
+                ccd,
+                rope,
+                self.kv_format,
+                mla.ckv_cache_ptr,
+                mla.kpe_cache_ptr,
+                self.stream,
+            )?;
+            crate::mla_probe::head_rows(t, "query", q, t.row, m, nh, qk_dim, self.stream)?;
         }
 
         if sparse_dsa {
@@ -46411,7 +48624,18 @@ impl PrefillEngine {
             )?;
             let selected =
                 workspace.resolve_for_layer(layer_idx, registration, start_pos, m, context_end)?;
-            if let Some(t)=&mla_probe {crate::mla_probe::row(t,"selected.i32",selected.ptr,t.row,selected.selected_per_row,4,self.stream)?;t.write("selection.json",serde_json::to_vec_pretty(&serde_json::json!({"selected_per_row":selected.selected_per_row,"row":t.row,"causal_position":start_pos+t.row,"context_end":context_end,"invalid_slots":"preserve actual integer sentinels; do not treat capacity as valid count"})).map_err(|e|e.to_string())?.as_slice())?;}
+            if let Some(t) = &mla_probe {
+                crate::mla_probe::row(
+                    t,
+                    "selected.i32",
+                    selected.ptr,
+                    t.row,
+                    selected.selected_per_row,
+                    4,
+                    self.stream,
+                )?;
+                t.write("selection.json",serde_json::to_vec_pretty(&serde_json::json!({"selected_per_row":selected.selected_per_row,"row":t.row,"causal_position":start_pos+t.row,"context_end":context_end,"invalid_slots":"preserve actual integer sentinels; do not treat capacity as valid count"})).map_err(|e|e.to_string())?.as_slice())?;
+            }
             self.record_prefill_device_trace_i32_slice(
                 PDT_LAYER_MLA_DSA_SELECTED_LAST,
                 layer_idx,
@@ -46487,33 +48711,58 @@ impl PrefillEngine {
             let mut a6 = nope_i32;
             let mut a7 = i32::try_from(ccd)
                 .map_err(|_| format!("DSA sparse MLA layer {} cKV width exceeds i32", layer_idx))?;
-            if let Some((ops,_,query))=selected_mla{unsafe{ops.absorb(*workspace.d_mla_q_absorbed.device_ptr(),query,mla.w_kc_ptr,m,nh,nope,rope,ccd,self.stream)?;}}
-            else{            unsafe {
-                launch(
-                    self.kernels.mla_prefill_absorb_wkc,
-                    (
-                        u32::try_from(nh).map_err(|_| "DSA MLA heads exceed u32")?,
-                        u32::try_from(m).map_err(|_| "DSA MLA rows exceed u32")?,
-                        1,
-                    ),
-                    (threads, 1, 1),
-                    0,
+            if let Some((ops, _, query)) = selected_mla {
+                unsafe {
+                    ops.absorb(
+                        *workspace.d_mla_q_absorbed.device_ptr(),
+                        query,
+                        mla.w_kc_ptr,
+                        m,
+                        nh,
+                        nope,
+                        rope,
+                        ccd,
+                        self.stream,
+                    )?;
+                }
+            } else {
+                unsafe {
+                    launch(
+                        self.kernels.mla_prefill_absorb_wkc,
+                        (
+                            u32::try_from(nh).map_err(|_| "DSA MLA heads exceed u32")?,
+                            u32::try_from(m).map_err(|_| "DSA MLA rows exceed u32")?,
+                            1,
+                        ),
+                        (threads, 1, 1),
+                        0,
+                        self.stream,
+                        &mut [
+                            &mut a0 as *mut _ as *mut _,
+                            &mut a1 as *mut _ as *mut _,
+                            &mut a2 as *mut _ as *mut _,
+                            &mut a3 as *mut _ as *mut _,
+                            &mut a4 as *mut _ as *mut _,
+                            &mut a5 as *mut _ as *mut _,
+                            &mut a6 as *mut _ as *mut _,
+                            &mut a7 as *mut _ as *mut _,
+                        ],
+                    )?;
+                }
+            }
+            finish_mla_stage!(HQQ_MLA_TIMING_ABSORB_WKC);
+            if let Some(t) = &mla_probe {
+                crate::mla_probe::row(
+                    t,
+                    "q_absorbed.f32",
+                    *workspace.d_mla_q_absorbed.device_ptr(),
+                    t.row,
+                    nh.checked_mul(ccd)
+                        .ok_or("MLA q absorbed extent overflow")?,
+                    4,
                     self.stream,
-                    &mut [
-                        &mut a0 as *mut _ as *mut _,
-                        &mut a1 as *mut _ as *mut _,
-                        &mut a2 as *mut _ as *mut _,
-                        &mut a3 as *mut _ as *mut _,
-                        &mut a4 as *mut _ as *mut _,
-                        &mut a5 as *mut _ as *mut _,
-                        &mut a6 as *mut _ as *mut _,
-                        &mut a7 as *mut _ as *mut _,
-                    ],
                 )?;
             }
-}
-            finish_mla_stage!(HQQ_MLA_TIMING_ABSORB_WKC);
-            if let Some(t)=&mla_probe {crate::mla_probe::row(t,"q_absorbed.f32",*workspace.d_mla_q_absorbed.device_ptr(),t.row,nh.checked_mul(ccd).ok_or("MLA q absorbed extent overflow")?,4,self.stream)?;}
             self.record_prefill_device_trace_f32_slice(
                 PDT_LAYER_MLA_Q_ABSORBED_LAST,
                 layer_idx,
@@ -46630,11 +48879,19 @@ impl PrefillEngine {
             })?;
             let mut s15 = i32::try_from(context_end)
                 .map_err(|_| format!("DSA sparse MLA layer {} context exceeds i32", layer_idx))?;
-            let common_projected=if self.common_mla.is_some(){
-                if !use_gathered_gemm || !use_gathered_wvc || use_score_reuse || use_grouped_exact{return Err("common MLA requires the admitted gathered attention and WVC modes".into())}
-                self.run_common_mla_prefill(layer_idx,mla,selected,m)?;true
-            }else{false};
-            if common_projected { } else if use_grouped_exact {
+            let common_projected = if self.common_mla.is_some() {
+                if !use_gathered_gemm || !use_gathered_wvc || use_score_reuse || use_grouped_exact {
+                    return Err(
+                        "common MLA requires the admitted gathered attention and WVC modes".into(),
+                    );
+                }
+                self.run_common_mla_prefill(layer_idx, mla, selected, m)?;
+                true
+            } else {
+                false
+            };
+            if common_projected {
+            } else if use_grouped_exact {
                 self.run_dsa_mla_grouped_exact_attention(
                     layer_idx,
                     *workspace.d_mla_attention.device_ptr(),
@@ -46707,7 +48964,17 @@ impl PrefillEngine {
                 }
             }
             finish_mla_stage!(HQQ_MLA_TIMING_ATTENTION);
-            if let Some(t)=&mla_probe {crate::mla_probe::row(t,"attention.f32",*workspace.d_mla_attention.device_ptr(),t.row,nh.checked_mul(ccd).ok_or("MLA attention extent overflow")?,4,self.stream)?;}
+            if let Some(t) = &mla_probe {
+                crate::mla_probe::row(
+                    t,
+                    "attention.f32",
+                    *workspace.d_mla_attention.device_ptr(),
+                    t.row,
+                    nh.checked_mul(ccd).ok_or("MLA attention extent overflow")?,
+                    4,
+                    self.stream,
+                )?;
+            }
             self.record_prefill_device_trace_f32_slice(
                 PDT_LAYER_MLA_SPARSE_ATTN_LAST,
                 layer_idx,
@@ -46752,12 +49019,13 @@ impl PrefillEngine {
                 && self.prefill_device_trace_all_layers.get();
             if dsa_mla_scalar_trace_shadow_enabled(
                 use_gathered_gemm,
-                self.prefill_device_trace_enabled.get()
-                    || self.prefill_device_trace_mla_only.get(),
+                self.prefill_device_trace_enabled.get() || self.prefill_device_trace_mla_only.get(),
                 self.prefill_device_trace_layer.get() == layer_idx,
                 trace_grouped_shadow_all_layers,
             ) {
-                if common_projected{return Err("scalar repeat shadow would overwrite the common MLA latent result; use a separate native diagnostic configuration".into())}
+                if common_projected {
+                    return Err("scalar repeat shadow would overwrite the common MLA latent result; use a separate native diagnostic configuration".into());
+                }
                 unsafe {
                     launch(
                         scalar_baseline_kernel,
@@ -46831,7 +49099,8 @@ impl PrefillEngine {
                 )?;
             }
 
-            if common_projected { } else if use_gathered_wvc {
+            if common_projected {
+            } else if use_gathered_wvc {
                 self.run_dsa_mla_wvc_gemm(
                     layer_idx,
                     attn_out,
@@ -46874,7 +49143,17 @@ impl PrefillEngine {
                 }
             }
             finish_mla_stage!(HQQ_MLA_TIMING_APPLY_WVC);
-            if let Some(t)=&mla_probe {crate::mla_probe::row(t,"wvc_output.bf16",attn_out,t.row,v_width,2,self.stream)?;}
+            if let Some(t) = &mla_probe {
+                crate::mla_probe::row(
+                    t,
+                    "wvc_output.bf16",
+                    attn_out,
+                    t.row,
+                    v_width,
+                    2,
+                    self.stream,
+                )?;
+            }
             self.record_prefill_device_trace_bf16_row(
                 PDT_LAYER_MLA_WVC_OUT_LAST,
                 layer_idx,
@@ -46930,20 +49209,29 @@ impl PrefillEngine {
             finish_mla_stage!(HQQ_MLA_TIMING_APPLY_WVC);
         }
 
-        if selected_mla.is_some(){        self.kda_projection_prefill(
-            layer_idx,
-            &mla.o_proj,
-            attn_out,
-            scratch1,
-            m,
-        )?;}else{        self.deepseek_v4_projection_prefill_gemm_bf16(
-            layer_idx,
-            &mla.o_proj,
-            attn_out,
-            scratch1,
-            m,
-        )?;}
-        if let Some(t)=&mla_probe {self.observe_mla_prefill_projection(t,layer_idx,"o",&mla.o_proj,attn_out,scratch1,m,start_pos)?;}
+        if selected_mla.is_some() {
+            self.kda_projection_prefill(layer_idx, &mla.o_proj, attn_out, scratch1, m)?;
+        } else {
+            self.deepseek_v4_projection_prefill_gemm_bf16(
+                layer_idx,
+                &mla.o_proj,
+                attn_out,
+                scratch1,
+                m,
+            )?;
+        }
+        if let Some(t) = &mla_probe {
+            self.observe_mla_prefill_projection(
+                t,
+                layer_idx,
+                "o",
+                &mla.o_proj,
+                attn_out,
+                scratch1,
+                m,
+                start_pos,
+            )?;
+        }
         self.memcpy_d2d(
             attn_out,
             scratch1,
@@ -47052,41 +49340,114 @@ impl PrefillEngine {
         let hidden = *self.scratch.d_hidden.device_ptr();
         let raw_keys = *self.scratch.d_scratch1.device_ptr();
         self.dsa_owner_projection_gemm(hidden, &owner.wk, raw_keys, token_count)?;
-        if let Some(target)=observed {if target.row>=token_count{return Err("index raw-key observed row outside actual chunk".into());}crate::mla_probe::row(target,"indexer-raw-key.bf16",raw_keys,target.row,owner.index_head_dim,2,self.stream)?;}
+        if let Some(target) = observed {
+            if target.row >= token_count {
+                return Err("index raw-key observed row outside actual chunk".into());
+            }
+            crate::mla_probe::row(
+                target,
+                "indexer-raw-key.bf16",
+                raw_keys,
+                target.row,
+                owner.index_head_dim,
+                2,
+                self.stream,
+            )?;
+        }
 
         // Explicit producer capture: actual original batch, loaded operands and contract.
-        let key_probe = self.matched_prefill_target("glm5_index_key", layer_idx, token_count,None)?;
+        let key_probe =
+            self.matched_prefill_target("glm5_index_key", layer_idx, token_count, None)?;
         if let Some(target) = key_probe.as_ref() {
             if chunk_start != 0 {
-                return Err("index-key producer probe requires the actual initial whole batch".into());
+                return Err(
+                    "index-key producer probe requires the actual initial whole batch".into(),
+                );
             }
-            let bytes = |rows: usize, width: usize, item: usize| rows.checked_mul(width).and_then(|n|n.checked_mul(item)).ok_or("index-key capture size overflow");
-            target.device("input.bf16", hidden, bytes(token_count,owner.wk.k,2)?, self.stream)?;
-            target.device("loaded-weight.bf16", owner.wk.ptr, bytes(owner.wk.n,owner.wk.k,2)?, self.stream)?;
-            target.device("raw-keys.bf16", raw_keys, bytes(token_count,owner.index_head_dim,2)?, self.stream)?;
-            target.device("norm-weight.bf16", owner.norm_weight_ptr, bytes(1,owner.index_head_dim,2)?, self.stream)?;
-            target.device("norm-bias.bf16", owner.norm_bias_ptr, bytes(1,owner.index_head_dim,2)?, self.stream)?;
-            target.device("positions.i32", *self.scratch.d_positions.device_ptr(), bytes(token_count,1,4)?, self.stream)?;
+            let bytes = |rows: usize, width: usize, item: usize| {
+                rows.checked_mul(width)
+                    .and_then(|n| n.checked_mul(item))
+                    .ok_or("index-key capture size overflow")
+            };
+            target.device(
+                "input.bf16",
+                hidden,
+                bytes(token_count, owner.wk.k, 2)?,
+                self.stream,
+            )?;
+            target.device(
+                "loaded-weight.bf16",
+                owner.wk.ptr,
+                bytes(owner.wk.n, owner.wk.k, 2)?,
+                self.stream,
+            )?;
+            target.device(
+                "raw-keys.bf16",
+                raw_keys,
+                bytes(token_count, owner.index_head_dim, 2)?,
+                self.stream,
+            )?;
+            target.device(
+                "norm-weight.bf16",
+                owner.norm_weight_ptr,
+                bytes(1, owner.index_head_dim, 2)?,
+                self.stream,
+            )?;
+            target.device(
+                "norm-bias.bf16",
+                owner.norm_bias_ptr,
+                bytes(1, owner.index_head_dim, 2)?,
+                self.stream,
+            )?;
+            target.device(
+                "positions.i32",
+                *self.scratch.d_positions.device_ptr(),
+                bytes(token_count, 1, 4)?,
+                self.stream,
+            )?;
             if owner.qk_rope_head_dim > 0 {
-                target.device("rope-cos.f32",self.rope_cos_ptr,bytes(context_end,owner.qk_rope_head_dim/2,4)?,self.stream)?;
-                target.device("rope-sin.f32",self.rope_sin_ptr,bytes(context_end,owner.qk_rope_head_dim/2,4)?,self.stream)?;
+                target.device(
+                    "rope-cos.f32",
+                    self.rope_cos_ptr,
+                    bytes(context_end, owner.qk_rope_head_dim / 2, 4)?,
+                    self.stream,
+                )?;
+                target.device(
+                    "rope-sin.f32",
+                    self.rope_sin_ptr,
+                    bytes(context_end, owner.qk_rope_head_dim / 2, 4)?,
+                    self.stream,
+                )?;
             }
             #[cfg(has_prefill_kernels)]
-            target.write("loaded-prefill.ptx",PREFILL_KERNELS_PTX.as_bytes())?;
-            let mut math=0u32;
-            let mut atomics=cublas_sys::cublasAtomicsMode_t::CUBLAS_ATOMICS_NOT_ALLOWED;
-            let mut pointer=cublas_sys::cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;
-            let mut version=0i32;let mut sm_count=0i32;let mut stream=std::ptr::null_mut();
-            let results=unsafe {[
-                cublas_sys::lib().cublasGetMathMode(self.cublas_handle,(&mut math as *mut u32).cast::<cublas_sys::cublasMath_t>()),
-                cublas_sys::lib().cublasGetAtomicsMode(self.cublas_handle,&mut atomics),
-                cublas_sys::lib().cublasGetPointerMode_v2(self.cublas_handle,&mut pointer),
-                cublas_sys::lib().cublasGetVersion_v2(self.cublas_handle,&mut version),
-                cublas_sys::lib().cublasGetSmCountTarget(self.cublas_handle,&mut sm_count),
-                cublas_sys::lib().cublasGetStream_v2(self.cublas_handle,&mut stream),
-            ]};
-            if results.iter().any(|r|*r!=cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS)||stream as usize!=self.stream as usize {
-                return Err(format!("index-key cuBLAS contract query failed: {results:?}"));
+            target.write("loaded-prefill.ptx", PREFILL_KERNELS_PTX.as_bytes())?;
+            let mut math = 0u32;
+            let mut atomics = cublas_sys::cublasAtomicsMode_t::CUBLAS_ATOMICS_NOT_ALLOWED;
+            let mut pointer = cublas_sys::cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;
+            let mut version = 0i32;
+            let mut sm_count = 0i32;
+            let mut stream = std::ptr::null_mut();
+            let results = unsafe {
+                [
+                    cublas_sys::lib().cublasGetMathMode(
+                        self.cublas_handle,
+                        (&mut math as *mut u32).cast::<cublas_sys::cublasMath_t>(),
+                    ),
+                    cublas_sys::lib().cublasGetAtomicsMode(self.cublas_handle, &mut atomics),
+                    cublas_sys::lib().cublasGetPointerMode_v2(self.cublas_handle, &mut pointer),
+                    cublas_sys::lib().cublasGetVersion_v2(self.cublas_handle, &mut version),
+                    cublas_sys::lib().cublasGetSmCountTarget(self.cublas_handle, &mut sm_count),
+                    cublas_sys::lib().cublasGetStream_v2(self.cublas_handle, &mut stream),
+                ]
+            };
+            if results
+                .iter()
+                .any(|r| *r != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS)
+                || stream as usize != self.stream as usize
+            {
+                return Err(format!(
+                    "index-key cuBLAS contract query failed: {results:?}"
+                ));
             }
             target.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({
                 "layer":layer_idx,"owner":owner.owner_layer_idx,"height":token_count,"chunk_start":chunk_start,"selected_row":target.row,
@@ -47170,7 +49531,14 @@ impl PrefillEngine {
             )?;
         }
         if let Some(target) = key_probe.as_ref() {
-            target.device("key-cache.bf16", owner.key_cache_ptr, raw_key_elems.checked_mul(2).ok_or("key cache capture size overflow")?, self.stream)?;
+            target.device(
+                "key-cache.bf16",
+                owner.key_cache_ptr,
+                raw_key_elems
+                    .checked_mul(2)
+                    .ok_or("key cache capture size overflow")?,
+                self.stream,
+            )?;
         }
         if owner.index_kpool > 1 {
             let gate = owner
@@ -55064,9 +57432,7 @@ impl PrefillEngine {
         let cfg = &self.config;
         let lw = &self.layer_weights[layer_idx];
         if let Some(hqq) = &lw.hqq_linear_attention {
-            self.validate_hqq_quantized_prefill_tensor_desc("in_proj_qkvz", &hqq.in_proj_qkvz)?;
-            self.validate_hqq_quantized_prefill_tensor_desc("in_proj_ba", &hqq.in_proj_ba)?;
-            self.validate_hqq_quantized_prefill_tensor_desc("out_proj", &hqq.out_proj)?;
+            self.validate_linear_attention_projection_bindings(layer_idx, hqq)?;
         }
         let nk = cfg.la_num_k_heads;
         let nv = cfg.la_num_v_heads;
@@ -55449,6 +57815,15 @@ impl PrefillEngine {
             proj_buf,
             m,
         )?;
+        self.observe_gdn_prefill_projection(
+            layer_idx,
+            "in_proj_qkvz",
+            m,
+            chunk_start,
+            hidden,
+            proj_buf,
+            lw.hqq_linear_attention.as_ref().map(|h| &h.in_proj_qkvz),
+        )?;
         if self.trace_prefill_layer_summary_enabled(trace_step, layer_idx) {
             for (abs_pos, row_idx) in Self::trace_input_row_positions_for_chunk(chunk_start, m) {
                 self.trace_emit_bf16_row_summary(
@@ -55809,6 +58184,15 @@ impl PrefillEngine {
                 proj_buf,
                 m,
             )?;
+            self.observe_gdn_prefill_projection(
+                layer_idx,
+                "in_proj_ba",
+                m,
+                chunk_start,
+                hidden,
+                proj_buf,
+                lw.hqq_linear_attention.as_ref().map(|h| &h.in_proj_ba),
+            )?;
             if let Some(t) = lt_ba {
                 self.stream_sync()?;
                 self.t_la_ba_proj
@@ -55923,7 +58307,7 @@ impl PrefillEngine {
             // ── BF16 optimized pipeline (FLA path) ──
             // Fused kernels: conv outputs BF16 directly, gate_beta outputs BF16,
             // fused repeat+l2norm, no FP32/BF16 conversion overhead.
-            if self.fla.is_some() {
+            if self.fla.is_some() || self.scalar_native_selected() {
                 rmsnorm_out = la_v; // [M, nv*dv] FP32 = 2x needed for BF16
                 let fp32_scratch = *self.scratch.d_fp32_scratch.device_ptr();
                 let lt1 = Instant::now();
@@ -55947,6 +58331,12 @@ impl PrefillEngine {
                     );
                 }
 
+                self.observe_gdn_prefill_point(
+                    layer_idx,
+                    m,
+                    chunk_start,
+                    GdnPrefillPoint::ConvBefore,
+                )?;
                 // Fused conv1d+SiLU: 3 BF16 inputs -> 3 BF16 outputs (single kernel)
                 // Replaces: concat + conv + transpose + split (4 kernels, ~458ms -> ~100ms)
                 // Conv output goes to la_q/la_k/la_v FP32 buffers used at BF16 (half capacity)
@@ -56359,6 +58749,12 @@ impl PrefillEngine {
                     );
                 }
 
+                self.observe_gdn_prefill_point(
+                    layer_idx,
+                    m,
+                    chunk_start,
+                    GdnPrefillPoint::ConvAfter,
+                )?;
                 // Fused repeat-interleave + L2 norm (BF16 in, BF16 out)
                 // Reads [M, nk, dk] BF16, writes [M, nv, dk] BF16 normalized
                 // Eliminates: 2 repeat_interleave + 2 l2norm + intermediate buffers
@@ -56675,237 +59071,118 @@ impl PrefillEngine {
                 self.t_la_convert.set(0.0); // explicit zero for reporting
                 let lt4 = Instant::now();
 
-                // Buffer assignments for FLA intermediates
-                // All FLA intermediate dtypes match what compile_kernels.py compiled:
-                //   BF16: q, k, v, beta, gate, w, u, h, v_new, o, Ai
-                //   FP32: g_cumsum, A, h0, ht
-                let a_fla = *self.d_fla_a.as_ref().ok_or("no fla_a")?.device_ptr();
-                let ai_fla = *self.d_fla_ai.as_ref().ok_or("no fla_ai")?.device_ptr();
-                let w_fla = *self.d_fla_w.as_ref().ok_or("no fla_w")?.device_ptr();
-                let u_fla = *self.d_fla_u.as_ref().ok_or("no fla_u")?.device_ptr();
-                let h_fla = *self.d_fla_h.as_ref().ok_or("no fla_h")?.device_ptr();
-                let h0_fla = lw.la_recur_state_ptr;
-                let ht_fla = *self
-                    .d_fla_final_state
-                    .as_ref()
-                    .ok_or("no fla_final_state")?
-                    .device_ptr();
-                let v_new_fla = *self
-                    .d_fla_v_new
-                    .as_ref()
-                    .ok_or("no fla_v_new")?
-                    .device_ptr();
-                let o_fla = *self.d_fla_o.as_ref().ok_or("no fla_o")?.device_ptr();
-
-                let fla = self.fla.as_ref().unwrap();
-                let t_arg = fla_total as i32;
-                if reference_layer1_la_trace {
-                    self.push_reference_stage_metadata(
-                        "layer1_la_fla_workspace_metadata",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        serde_json::json!({
-                            "fla_bt": fla_bt,
-                            "fla_pad": fla_pad,
-                            "fla_total": fla_total,
-                            "fla_nt": fla_nt,
-                            "a_fla_ptr": format!("0x{:x}", a_fla),
-                            "ai_fla_ptr": format!("0x{:x}", ai_fla),
-                            "w_fla_ptr": format!("0x{:x}", w_fla),
-                            "u_fla_ptr": format!("0x{:x}", u_fla),
-                            "h_fla_ptr": format!("0x{:x}", h_fla),
-                            "h0_fla_ptr": format!("0x{:x}", h0_fla),
-                            "ht_fla_ptr": format!("0x{:x}", ht_fla),
-                            "v_new_fla_ptr": format!("0x{:x}", v_new_fla),
-                            "o_fla_ptr": format!("0x{:x}", o_fla),
-                        }),
-                    );
-                }
-
-                // DEBUG: sync before FLA to catch conv/gate/repeat kernel errors
-
-                // Zero per-call FLA outputs. The persistent FP32 recurrent state
-                // is supplied directly as h0; the fused recurrence keeps the
-                // accumulator in FP32 between its internal token blocks.
-                unsafe {
-                    let _ = cuda_sys::lib().cuMemsetD8Async(
-                        a_fla,
-                        0,
-                        (fla_total * nv * fla_bt * 4) as usize,
-                        self.stream,
-                    );
-                    let _ = cuda_sys::lib().cuMemsetD8Async(
-                        ai_fla,
-                        0,
-                        (fla_total * nv * fla_bt * 2) as usize,
-                        self.stream,
-                    );
-                    let _ = cuda_sys::lib().cuMemsetD8Async(
-                        h_fla,
-                        0,
-                        (fla_nt * nv * dk * dv * 2) as usize,
-                        self.stream,
-                    );
-                }
-                let stream_ptr = self.stream as *mut std::ffi::c_void;
-
-                let g_cum_fla = *self
-                    .d_fla_g_cumsum
-                    .as_ref()
-                    .ok_or("no fla_g_cumsum")?
-                    .device_ptr();
                 let trace_la_mixer = self
                     .trace
                     .as_ref()
                     .map_or(false, |t| t.should_emit(0, Some(layer_idx), "la_mixer"));
                 let mut trace_stage_summaries: Vec<(&'static str, f32, usize, f32, f32)> =
                     Vec::new();
-                let mut trace_g_cumsum_chunk_fp32_gate_ref: Option<Vec<f32>> = None;
-                let mut trace_value_corrected_chunk_fp32_gate_ref: Option<Vec<f32>> = None;
+                #[cfg(feature = "scalar-gdn-test")]
+                let scalar_output = if self.selected_scalar_gdn.is_some() {
+                    Some(self.scalar_native_prefill_output(layer_idx, m, chunk_start)?)
+                } else {
+                    None
+                };
+                #[cfg(not(feature = "scalar-gdn-test"))]
+                let scalar_output: Option<u64> = None;
+                let o_fla = if let Some(output) = scalar_output {
+                    output
+                } else {
+                    // Buffer assignments for FLA intermediates
+                    // All FLA intermediate dtypes match what compile_kernels.py compiled:
+                    //   BF16: q, k, v, beta, gate, w, u, h, v_new, o, Ai
+                    //   FP32: g_cumsum, A, h0, ht
+                    let a_fla = *self.d_fla_a.as_ref().ok_or("no fla_a")?.device_ptr();
+                    let ai_fla = *self.d_fla_ai.as_ref().ok_or("no fla_ai")?.device_ptr();
+                    let w_fla = *self.d_fla_w.as_ref().ok_or("no fla_w")?.device_ptr();
+                    let u_fla = *self.d_fla_u.as_ref().ok_or("no fla_u")?.device_ptr();
+                    let h_fla = *self.d_fla_h.as_ref().ok_or("no fla_h")?.device_ptr();
+                    let h0_fla = lw.la_recur_state_ptr;
+                    let ht_fla = *self
+                        .d_fla_final_state
+                        .as_ref()
+                        .ok_or("no fla_final_state")?
+                        .device_ptr();
+                    let v_new_fla = *self
+                        .d_fla_v_new
+                        .as_ref()
+                        .ok_or("no fla_v_new")?
+                        .device_ptr();
+                    let o_fla = *self.d_fla_o.as_ref().ok_or("no fla_o")?.device_ptr();
 
-                // Step 1: compute gate in FP32 and cumsum in FP32.
-                // The established chunked path keeps gate/cumsum in FP32; feeding
-                // BF16 gate into the vendored cumsum drifts enough on QCN to alter
-                // the exp-weighted decay factors materially on the exact failing
-                // prompt. Keep beta on the existing BF16 fast path, but restore FP32
-                // gate accumulation before entering the vendored FLA chain.
-                let gate_fp32_token_major = fp32_scratch; // [T, nv]
-                {
-                    let gt = std::cmp::max(32, ((std::cmp::min(1024, nv) + 31) / 32) * 32) as u32;
-                    let mut g0 = g_cum_fla; // throwaway beta FP32 output
-                    let mut g1 = gate_fp32_token_major;
-                    let mut g2 = la_b;
-                    let mut g3 = la_a;
-                    let mut g4 = lw.la_a_log_ptr;
-                    let mut g5 = lw.la_dt_bias_ptr;
-                    let mut g6 = nv as i32;
-                    unsafe {
-                        launch(
-                            self.kernels.la_compute_gate_beta,
-                            (m as u32, 1, 1),
-                            (gt, 1, 1),
+                    let fla = self.fla.as_ref().unwrap();
+                    let t_arg = fla_total as i32;
+                    if reference_layer1_la_trace {
+                        self.push_reference_stage_metadata(
+                            "layer1_la_fla_workspace_metadata",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
                             0,
-                            self.stream,
-                            &mut [
-                                &mut g0 as *mut _ as *mut std::ffi::c_void,
-                                &mut g1 as *mut _ as *mut std::ffi::c_void,
-                                &mut g2 as *mut _ as *mut std::ffi::c_void,
-                                &mut g3 as *mut _ as *mut std::ffi::c_void,
-                                &mut g4 as *mut _ as *mut std::ffi::c_void,
-                                &mut g5 as *mut _ as *mut std::ffi::c_void,
-                                &mut g6 as *mut _ as *mut std::ffi::c_void,
-                            ],
-                        )?;
+                            serde_json::json!({
+                                "fla_bt": fla_bt,
+                                "fla_pad": fla_pad,
+                                "fla_total": fla_total,
+                                "fla_nt": fla_nt,
+                                "a_fla_ptr": format!("0x{:x}", a_fla),
+                                "ai_fla_ptr": format!("0x{:x}", ai_fla),
+                                "w_fla_ptr": format!("0x{:x}", w_fla),
+                                "u_fla_ptr": format!("0x{:x}", u_fla),
+                                "h_fla_ptr": format!("0x{:x}", h_fla),
+                                "h0_fla_ptr": format!("0x{:x}", h0_fla),
+                                "ht_fla_ptr": format!("0x{:x}", ht_fla),
+                                "v_new_fla_ptr": format!("0x{:x}", v_new_fla),
+                                "o_fla_ptr": format!("0x{:x}", o_fla),
+                            }),
+                        );
                     }
-                }
-                if fla_pad > 0 {
+
+                    // DEBUG: sync before FLA to catch conv/gate/repeat kernel errors
+
+                    // Zero per-call FLA outputs. The persistent FP32 recurrent state
+                    // is supplied directly as h0; the fused recurrence keeps the
+                    // accumulator in FP32 between its internal token blocks.
                     unsafe {
                         let _ = cuda_sys::lib().cuMemsetD8Async(
-                            gate_fp32_token_major + (m * nv * 4) as u64,
+                            a_fla,
                             0,
-                            (fla_pad * nv * 4) as usize,
+                            (fla_total * nv * fla_bt * 4) as usize,
+                            self.stream,
+                        );
+                        let _ = cuda_sys::lib().cuMemsetD8Async(
+                            ai_fla,
+                            0,
+                            (fla_total * nv * fla_bt * 2) as usize,
+                            self.stream,
+                        );
+                        let _ = cuda_sys::lib().cuMemsetD8Async(
+                            h_fla,
+                            0,
+                            (fla_nt * nv * dk * dv * 2) as usize,
                             self.stream,
                         );
                     }
-                }
-                // la_cumsum expects head-major [nv, num_chunks, BT], while the FLA
-                // kernels consume token-major [T, nv]. Transpose into head-major for
-                // the prefix sum, then transpose the FP32 cumulative gate back.
-                let lt_fla_cumsum = if lt { Some(Instant::now()) } else { None };
-                self.launch_transpose_f32(g_cum_fla, gate_fp32_token_major, fla_total, nv)?;
-                {
-                    let mut cs0 = fp32_scratch; // head-major FP32 cumsum scratch
-                    let mut cs1 = g_cum_fla; // head-major FP32 gate input
-                    let mut cs2 = fla_nt as i32;
-                    let mut cs3 = fla_bt as i32;
-                    unsafe {
-                        launch(
-                            self.kernels.la_cumsum,
-                            (nv as u32, fla_nt as u32, 1),
-                            (1, 1, 1),
-                            0,
-                            self.stream,
-                            &mut [
-                                &mut cs0 as *mut _ as *mut std::ffi::c_void,
-                                &mut cs1 as *mut _ as *mut std::ffi::c_void,
-                                &mut cs2 as *mut _ as *mut std::ffi::c_void,
-                                &mut cs3 as *mut _ as *mut std::ffi::c_void,
-                            ],
-                        )?;
-                    }
-                }
-                self.launch_transpose_f32(g_cum_fla, fp32_scratch, nv, fla_total)?;
-                if let Some(t) = lt_fla_cumsum {
-                    self.stream_sync()?;
-                    self.t_la_fla_cumsum
-                        .set(self.t_la_fla_cumsum.get() + t.elapsed().as_secs_f64() * 1000.0);
-                }
-                if trace_la_projection_summary {
-                    self.trace_emit_f32_row_summary(
-                        0,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_gate_fp32_last",
-                        gate_fp32_token_major,
-                        trace_last_row,
-                        nv,
-                    );
-                    self.trace_emit_f32_row_summary(
-                        0,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_g_cumsum_last",
-                        g_cum_fla,
-                        trace_last_row,
-                        nv,
-                    );
-                }
-                if reference_layer1_la_trace {
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_gate_fp32_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(
-                            gate_fp32_token_major + ((trace_last_row * nv * 4) as u64),
-                            nv,
-                        ),
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_g_cumsum_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(g_cum_fla + ((trace_last_row * nv * 4) as u64), nv),
-                    );
-                    self.push_reference_stage_metadata(
-                        "layer1_la_cumsum_metadata",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        serde_json::json!({
-                            "gate_fp32_token_major_ptr": format!("0x{:x}", gate_fp32_token_major),
-                            "g_cum_fla_ptr": format!("0x{:x}", g_cum_fla),
-                            "fp32_scratch_ptr": format!("0x{:x}", fp32_scratch),
-                            "layout": "token-major-after-transpose-back",
-                            "width": nv,
-                        }),
-                    );
-                }
-                if trace_la_mixer {
-                    let last_pos = m.saturating_sub(1);
-                    let beta_trace_scratch = a_fla; // trace-only scratch; kkt overwrites A afterwards
-                    let gate_trace_snapshot = {
+                    let stream_ptr = self.stream as *mut std::ffi::c_void;
+
+                    let g_cum_fla = *self
+                        .d_fla_g_cumsum
+                        .as_ref()
+                        .ok_or("no fla_g_cumsum")?
+                        .device_ptr();
+                    let mut trace_g_cumsum_chunk_fp32_gate_ref: Option<Vec<f32>> = None;
+                    let mut trace_value_corrected_chunk_fp32_gate_ref: Option<Vec<f32>> = None;
+
+                    // Step 1: compute gate in FP32 and cumsum in FP32.
+                    // The established chunked path keeps gate/cumsum in FP32; feeding
+                    // BF16 gate into the vendored cumsum drifts enough on QCN to alter
+                    // the exp-weighted decay factors materially on the exact failing
+                    // prompt. Keep beta on the existing BF16 fast path, but restore FP32
+                    // gate accumulation before entering the vendored FLA chain.
+                    let gate_fp32_token_major = fp32_scratch; // [T, nv]
+                    {
                         let gt =
                             std::cmp::max(32, ((std::cmp::min(1024, nv) + 31) / 32) * 32) as u32;
-                        let mut g0 = beta_trace_scratch;
+                        let mut g0 = g_cum_fla; // throwaway beta FP32 output
                         let mut g1 = gate_fp32_token_major;
                         let mut g2 = la_b;
                         let mut g3 = la_a;
@@ -56930,179 +59207,377 @@ impl PrefillEngine {
                                 ],
                             )?;
                         }
-                        if fla_pad > 0 {
-                            unsafe {
-                                let _ = cuda_sys::lib().cuMemsetD8Async(
-                                    gate_fp32_token_major + (m * nv * 4) as u64,
-                                    0,
-                                    (fla_pad * nv * 4) as usize,
-                                    self.stream,
-                                );
-                            }
+                    }
+                    if fla_pad > 0 {
+                        unsafe {
+                            let _ = cuda_sys::lib().cuMemsetD8Async(
+                                gate_fp32_token_major + (m * nv * 4) as u64,
+                                0,
+                                (fla_pad * nv * 4) as usize,
+                                self.stream,
+                            );
                         }
-                        (
-                            self.diag_download_f32(
-                                beta_trace_scratch + ((last_pos * nv * 4) as u64),
+                    }
+                    // Observe raw gate while its actual token-major producer is live.
+                    if trace_la_projection_summary {
+                        self.trace_emit_f32_row_summary(
+                            0,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_gate_fp32_last",
+                            gate_fp32_token_major,
+                            trace_last_row,
+                            nv,
+                        );
+                    }
+                    if reference_layer1_la_trace {
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_gate_fp32_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                gate_fp32_token_major + ((trace_last_row * nv * 4) as u64),
                                 nv,
                             ),
-                            self.diag_download_f32(
-                                gate_fp32_token_major + ((last_pos * nv * 4) as u64),
-                                nv,
-                            ),
-                            self.diag_compute_fla_g_cumsum_chunk_cpu_from_gate_f32(
-                                gate_fp32_token_major,
-                                m,
-                                nv,
-                                fla_bt,
-                            ),
-                        )
+                        );
+                    }
+                    self.observe_gdn_prefill_point(
+                        layer_idx,
+                        m,
+                        chunk_start,
+                        GdnPrefillPoint::Prepared,
+                    )?;
+                    let gdn_observation =
+                        crate::matched_probe::target("gdn_fla_operands", layer_idx, m)?;
+                    let gdn_geometry = crate::gdn_observe::Geometry {
+                        real_rows: m,
+                        padded_rows: fla_total,
+                        block_rows: fla_bt,
+                        absolute_start: chunk_start,
+                        heads: nv,
+                        key_dim: dk,
+                        value_dim: dv,
                     };
-                    let q_last_vendor = self.diag_download_bf16(
-                        fla_q_bf16 + ((last_pos * nv * dk * 2) as u64),
-                        nv * dk,
-                    );
-                    let q_last_fp32_ref =
-                        self.diag_compute_repeat_l2norm_last_cpu(conv_q_bf16, m, nk, dk, hr, scale);
-                    let q_summary = self.trace_emit_compare_summary(
-                        0,
-                        last_pos,
-                        0,
+                    let gdn_maximum = if gdn_observation.is_some() {
+                        crate::matched_probe::capture_maximum_bytes(
+                            "gdn_fla_operands",
+                            layer_idx,
+                            Some(m),
+                        )?
+                    } else {
+                        0
+                    };
+                    if let Some(target) = gdn_observation.as_ref() {
+                        gdn_geometry.inputs(
+                            target,
+                            gdn_maximum,
+                            fla_q_bf16,
+                            fla_k_bf16,
+                            fla_v_bf16,
+                            fla_beta_bf16,
+                            gate_fp32_token_major,
+                            h0_fla,
+                            la_a,
+                            la_b,
+                            lw.la_a_log_ptr,
+                            lw.la_dt_bias_ptr,
+                            self.stream,
+                        )?;
+                    }
+                    // la_cumsum expects head-major [nv, num_chunks, BT], while the FLA
+                    // kernels consume token-major [T, nv]. Transpose into head-major for
+                    // the prefix sum, then transpose the FP32 cumulative gate back.
+                    let lt_fla_cumsum = if lt { Some(Instant::now()) } else { None };
+                    self.launch_transpose_f32(g_cum_fla, gate_fp32_token_major, fla_total, nv)?;
+                    {
+                        let mut cs0 = fp32_scratch; // head-major FP32 cumsum scratch
+                        let mut cs1 = g_cum_fla; // head-major FP32 gate input
+                        let mut cs2 = fla_nt as i32;
+                        let mut cs3 = fla_bt as i32;
+                        unsafe {
+                            launch(
+                                self.kernels.la_cumsum,
+                                (nv as u32, fla_nt as u32, 1),
+                                (1, 1, 1),
+                                0,
+                                self.stream,
+                                &mut [
+                                    &mut cs0 as *mut _ as *mut std::ffi::c_void,
+                                    &mut cs1 as *mut _ as *mut std::ffi::c_void,
+                                    &mut cs2 as *mut _ as *mut std::ffi::c_void,
+                                    &mut cs3 as *mut _ as *mut std::ffi::c_void,
+                                ],
+                            )?;
+                        }
+                    }
+                    self.launch_transpose_f32(g_cum_fla, fp32_scratch, nv, fla_total)?;
+                    if let Some(target) = gdn_observation.as_ref() {
+                        gdn_geometry.cumulative(target, gdn_maximum, g_cum_fla, self.stream)?;
+                    }
+                    if let Some(t) = lt_fla_cumsum {
+                        self.stream_sync()?;
+                        self.t_la_fla_cumsum
+                            .set(self.t_la_fla_cumsum.get() + t.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    if trace_la_projection_summary {
+                        self.trace_emit_f32_row_summary(
+                            0,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_g_cumsum_last",
+                            g_cum_fla,
+                            trace_last_row,
+                            nv,
+                        );
+                    }
+                    if reference_layer1_la_trace {
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_g_cumsum_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                g_cum_fla + ((trace_last_row * nv * 4) as u64),
+                                nv,
+                            ),
+                        );
+                        self.push_reference_stage_metadata(
+                        "layer1_la_cumsum_metadata",
                         Some(layer_idx),
-                        "la_mixer",
-                        "prep_q_vs_fp32_ref",
-                        "q_last_vendor",
-                        "q_last_fp32_ref",
-                        &q_last_vendor,
-                        &q_last_fp32_ref,
+                        trace_step,
+                        trace_last_pos,
+                        0,
+                        serde_json::json!({
+                            "gate_fp32_token_major_ptr": format!("0x{:x}", gate_fp32_token_major),
+                            "g_cum_fla_ptr": format!("0x{:x}", g_cum_fla),
+                            "fp32_scratch_ptr": format!("0x{:x}", fp32_scratch),
+                            "layout": "token-major-after-transpose-back",
+                            "width": nv,
+                        }),
                     );
-                    trace_stage_summaries.push((
-                        "prep_q_vs_fp32_ref",
-                        q_summary.max_abs,
-                        q_summary.max_abs_idx,
-                        q_summary.actual_at_max,
-                        q_summary.expected_at_max,
-                    ));
-                    let k_last_vendor = self.diag_download_bf16(
-                        fla_k_bf16 + ((last_pos * nv * dk * 2) as u64),
-                        nv * dk,
-                    );
-                    let k_last_fp32_ref =
-                        self.diag_compute_repeat_l2norm_last_cpu(conv_k_bf16, m, nk, dk, hr, 1.0);
-                    let k_summary = self.trace_emit_compare_summary(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "prep_k_vs_fp32_ref",
-                        "k_last_vendor",
-                        "k_last_fp32_ref",
-                        &k_last_vendor,
-                        &k_last_fp32_ref,
-                    );
-                    trace_stage_summaries.push((
-                        "prep_k_vs_fp32_ref",
-                        k_summary.max_abs,
-                        k_summary.max_abs_idx,
-                        k_summary.actual_at_max,
-                        k_summary.expected_at_max,
-                    ));
-                    let beta_last_vendor =
-                        self.diag_download_bf16(fla_beta_bf16 + ((last_pos * nv * 2) as u64), nv);
-                    let (beta_last_fp32_ref, gate_last_fp32_ref, g_cumsum_chunk_fp32_gate_ref) =
-                        gate_trace_snapshot;
-                    trace_g_cumsum_chunk_fp32_gate_ref = Some(g_cumsum_chunk_fp32_gate_ref.clone());
-                    let g_cumsum_last_fp32_gate_ref = g_cumsum_chunk_fp32_gate_ref
-                        [((last_pos % fla_bt) * nv)..(((last_pos % fla_bt) + 1) * nv)]
-                        .to_vec();
-                    let beta_summary = self.trace_emit_compare_summary(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "prep_beta_vs_fp32_ref",
-                        "beta_last_vendor",
-                        "beta_last_fp32_ref",
-                        &beta_last_vendor,
-                        &beta_last_fp32_ref,
-                    );
-                    trace_stage_summaries.push((
-                        "prep_beta_vs_fp32_ref",
-                        beta_summary.max_abs,
-                        beta_summary.max_abs_idx,
-                        beta_summary.actual_at_max,
-                        beta_summary.expected_at_max,
-                    ));
-                    self.trace_emit_f32_row(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "g_cumsum_last",
-                        g_cum_fla,
-                        last_pos,
-                        nv,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "gate_last_fp32_ref",
-                        &gate_last_fp32_ref,
-                    );
-                    let g_cumsum_last_vendor =
-                        self.diag_download_f32(g_cum_fla + ((last_pos * nv * 4) as u64), nv);
-                    let g_cumsum_last_vendor_minus_fp32_gate_ref = g_cumsum_last_vendor
-                        .iter()
-                        .zip(g_cumsum_last_fp32_gate_ref.iter())
-                        .map(|(vendor, cpu)| vendor - cpu)
-                        .collect::<Vec<f32>>();
-                    let g_cumsum_summary = self.trace_emit_compare_summary(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "g_cumsum_vs_fp32_gate_ref",
-                        "g_cumsum_last_vendor",
-                        "g_cumsum_last_fp32_gate_ref",
-                        &g_cumsum_last_vendor,
-                        &g_cumsum_last_fp32_gate_ref,
-                    );
-                    trace_stage_summaries.push((
-                        "g_cumsum_vs_fp32_gate_ref",
-                        g_cumsum_summary.max_abs,
-                        g_cumsum_summary.max_abs_idx,
-                        g_cumsum_summary.actual_at_max,
-                        g_cumsum_summary.expected_at_max,
-                    ));
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "g_cumsum_last_fp32_gate_ref",
-                        &g_cumsum_last_fp32_gate_ref,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "g_cumsum_last_vendor_minus_fp32_gate_ref",
-                        &g_cumsum_last_vendor_minus_fp32_gate_ref,
-                    );
-                }
-                if la_diag {
-                    self.stream_sync()?;
-                    let g_head0 = self.diag_download_f32(g_cum_fla, (nv * 4).max(4));
-                    eprintln!(
+                    }
+                    if trace_la_mixer {
+                        let last_pos = m.saturating_sub(1);
+                        let beta_trace_scratch = a_fla; // trace-only scratch; kkt overwrites A afterwards
+                        let gate_trace_snapshot = {
+                            let gt = std::cmp::max(32, ((std::cmp::min(1024, nv) + 31) / 32) * 32)
+                                as u32;
+                            let mut g0 = beta_trace_scratch;
+                            let mut g1 = gate_fp32_token_major;
+                            let mut g2 = la_b;
+                            let mut g3 = la_a;
+                            let mut g4 = lw.la_a_log_ptr;
+                            let mut g5 = lw.la_dt_bias_ptr;
+                            let mut g6 = nv as i32;
+                            unsafe {
+                                launch(
+                                    self.kernels.la_compute_gate_beta,
+                                    (m as u32, 1, 1),
+                                    (gt, 1, 1),
+                                    0,
+                                    self.stream,
+                                    &mut [
+                                        &mut g0 as *mut _ as *mut std::ffi::c_void,
+                                        &mut g1 as *mut _ as *mut std::ffi::c_void,
+                                        &mut g2 as *mut _ as *mut std::ffi::c_void,
+                                        &mut g3 as *mut _ as *mut std::ffi::c_void,
+                                        &mut g4 as *mut _ as *mut std::ffi::c_void,
+                                        &mut g5 as *mut _ as *mut std::ffi::c_void,
+                                        &mut g6 as *mut _ as *mut std::ffi::c_void,
+                                    ],
+                                )?;
+                            }
+                            if fla_pad > 0 {
+                                unsafe {
+                                    let _ = cuda_sys::lib().cuMemsetD8Async(
+                                        gate_fp32_token_major + (m * nv * 4) as u64,
+                                        0,
+                                        (fla_pad * nv * 4) as usize,
+                                        self.stream,
+                                    );
+                                }
+                            }
+                            (
+                                self.diag_download_f32(
+                                    beta_trace_scratch + ((last_pos * nv * 4) as u64),
+                                    nv,
+                                ),
+                                self.diag_download_f32(
+                                    gate_fp32_token_major + ((last_pos * nv * 4) as u64),
+                                    nv,
+                                ),
+                                self.diag_compute_fla_g_cumsum_chunk_cpu_from_gate_f32(
+                                    gate_fp32_token_major,
+                                    m,
+                                    nv,
+                                    fla_bt,
+                                ),
+                            )
+                        };
+                        let q_last_vendor = self.diag_download_bf16(
+                            fla_q_bf16 + ((last_pos * nv * dk * 2) as u64),
+                            nv * dk,
+                        );
+                        let q_last_fp32_ref = self.diag_compute_repeat_l2norm_last_cpu(
+                            conv_q_bf16,
+                            m,
+                            nk,
+                            dk,
+                            hr,
+                            scale,
+                        );
+                        let q_summary = self.trace_emit_compare_summary(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "prep_q_vs_fp32_ref",
+                            "q_last_vendor",
+                            "q_last_fp32_ref",
+                            &q_last_vendor,
+                            &q_last_fp32_ref,
+                        );
+                        trace_stage_summaries.push((
+                            "prep_q_vs_fp32_ref",
+                            q_summary.max_abs,
+                            q_summary.max_abs_idx,
+                            q_summary.actual_at_max,
+                            q_summary.expected_at_max,
+                        ));
+                        let k_last_vendor = self.diag_download_bf16(
+                            fla_k_bf16 + ((last_pos * nv * dk * 2) as u64),
+                            nv * dk,
+                        );
+                        let k_last_fp32_ref = self.diag_compute_repeat_l2norm_last_cpu(
+                            conv_k_bf16,
+                            m,
+                            nk,
+                            dk,
+                            hr,
+                            1.0,
+                        );
+                        let k_summary = self.trace_emit_compare_summary(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "prep_k_vs_fp32_ref",
+                            "k_last_vendor",
+                            "k_last_fp32_ref",
+                            &k_last_vendor,
+                            &k_last_fp32_ref,
+                        );
+                        trace_stage_summaries.push((
+                            "prep_k_vs_fp32_ref",
+                            k_summary.max_abs,
+                            k_summary.max_abs_idx,
+                            k_summary.actual_at_max,
+                            k_summary.expected_at_max,
+                        ));
+                        let beta_last_vendor = self
+                            .diag_download_bf16(fla_beta_bf16 + ((last_pos * nv * 2) as u64), nv);
+                        let (beta_last_fp32_ref, gate_last_fp32_ref, g_cumsum_chunk_fp32_gate_ref) =
+                            gate_trace_snapshot;
+                        trace_g_cumsum_chunk_fp32_gate_ref =
+                            Some(g_cumsum_chunk_fp32_gate_ref.clone());
+                        let g_cumsum_last_fp32_gate_ref = g_cumsum_chunk_fp32_gate_ref
+                            [((last_pos % fla_bt) * nv)..(((last_pos % fla_bt) + 1) * nv)]
+                            .to_vec();
+                        let beta_summary = self.trace_emit_compare_summary(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "prep_beta_vs_fp32_ref",
+                            "beta_last_vendor",
+                            "beta_last_fp32_ref",
+                            &beta_last_vendor,
+                            &beta_last_fp32_ref,
+                        );
+                        trace_stage_summaries.push((
+                            "prep_beta_vs_fp32_ref",
+                            beta_summary.max_abs,
+                            beta_summary.max_abs_idx,
+                            beta_summary.actual_at_max,
+                            beta_summary.expected_at_max,
+                        ));
+                        self.trace_emit_f32_row(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "g_cumsum_last",
+                            g_cum_fla,
+                            last_pos,
+                            nv,
+                        );
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "gate_last_fp32_ref",
+                            &gate_last_fp32_ref,
+                        );
+                        let g_cumsum_last_vendor =
+                            self.diag_download_f32(g_cum_fla + ((last_pos * nv * 4) as u64), nv);
+                        let g_cumsum_last_vendor_minus_fp32_gate_ref = g_cumsum_last_vendor
+                            .iter()
+                            .zip(g_cumsum_last_fp32_gate_ref.iter())
+                            .map(|(vendor, cpu)| vendor - cpu)
+                            .collect::<Vec<f32>>();
+                        let g_cumsum_summary = self.trace_emit_compare_summary(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "g_cumsum_vs_fp32_gate_ref",
+                            "g_cumsum_last_vendor",
+                            "g_cumsum_last_fp32_gate_ref",
+                            &g_cumsum_last_vendor,
+                            &g_cumsum_last_fp32_gate_ref,
+                        );
+                        trace_stage_summaries.push((
+                            "g_cumsum_vs_fp32_gate_ref",
+                            g_cumsum_summary.max_abs,
+                            g_cumsum_summary.max_abs_idx,
+                            g_cumsum_summary.actual_at_max,
+                            g_cumsum_summary.expected_at_max,
+                        ));
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "g_cumsum_last_fp32_gate_ref",
+                            &g_cumsum_last_fp32_gate_ref,
+                        );
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "g_cumsum_last_vendor_minus_fp32_gate_ref",
+                            &g_cumsum_last_vendor_minus_fp32_gate_ref,
+                        );
+                    }
+                    if la_diag {
+                        self.stream_sync()?;
+                        let g_head0 = self.diag_download_f32(g_cum_fla, (nv * 4).max(4));
+                        eprintln!(
                         "[DIAG L{:02} FLA] step1_cumsum: g_head0[0..4]=[{:.4},{:.4},{:.4},{:.4}]",
                         layer_idx,
                         *g_head0.get(0).unwrap_or(&0.0),
@@ -57110,99 +59585,102 @@ impl PrefillEngine {
                         *g_head0.get(nv * 2).unwrap_or(&0.0),
                         *g_head0.get(nv * 3).unwrap_or(&0.0),
                     );
-                }
+                    }
 
-                // Step 2: kkt — k, g_cumsum, beta → A
-                // Grid: (NT, B*H) = (fla_nt, nv)
-                let trace_chunk_start = (trace_last_row / fla_bt) * fla_bt;
-                let trace_chunk_rows = fla_bt.min(fla_total.saturating_sub(trace_chunk_start));
-                let trace_chunk_k_offset = trace_chunk_start * nv * dk;
-                let trace_chunk_beta_offset = trace_chunk_start * nv;
-                let trace_chunk_a_offset = trace_chunk_start * nv * fla_bt;
-                if reference_layer1_la_trace {
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_kkt_k_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        fla_k_bf16,
-                        trace_last_row,
-                        nv * dk,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_kkt_beta_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        fla_beta_bf16,
-                        trace_last_row,
-                        nv,
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_kkt_g_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(g_cum_fla + ((trace_last_row * nv * 4) as u64), nv),
-                    );
-                    self.push_reference_stage_bf16_chunk_snapshot(
-                        "layer1_la_kkt_k_input_chunk",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        fla_k_bf16 + ((trace_chunk_k_offset * 2) as u64),
-                        trace_chunk_rows,
-                        nv * dk,
-                        trace_chunk_start,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_kkt_beta_input_chunk",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        fla_beta_bf16 + ((trace_chunk_beta_offset * 2) as u64),
-                        0,
-                        trace_chunk_rows * nv,
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_kkt_g_input_chunk",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(
-                            g_cum_fla + ((trace_chunk_beta_offset * 4) as u64),
+                    // Step 2: kkt — k, g_cumsum, beta → A
+                    // Grid: (NT, B*H) = (fla_nt, nv)
+                    let trace_chunk_start = (trace_last_row / fla_bt) * fla_bt;
+                    let trace_chunk_rows = fla_bt.min(fla_total.saturating_sub(trace_chunk_start));
+                    let trace_chunk_k_offset = trace_chunk_start * nv * dk;
+                    let trace_chunk_beta_offset = trace_chunk_start * nv;
+                    let trace_chunk_a_offset = trace_chunk_start * nv * fla_bt;
+                    if reference_layer1_la_trace {
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_kkt_k_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            fla_k_bf16,
+                            trace_last_row,
+                            nv * dk,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_kkt_beta_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            fla_beta_bf16,
+                            trace_last_row,
+                            nv,
+                        );
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_kkt_g_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                g_cum_fla + ((trace_last_row * nv * 4) as u64),
+                                nv,
+                            ),
+                        );
+                        self.push_reference_stage_bf16_chunk_snapshot(
+                            "layer1_la_kkt_k_input_chunk",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            fla_k_bf16 + ((trace_chunk_k_offset * 2) as u64),
+                            trace_chunk_rows,
+                            nv * dk,
+                            trace_chunk_start,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_kkt_beta_input_chunk",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            fla_beta_bf16 + ((trace_chunk_beta_offset * 2) as u64),
+                            0,
                             trace_chunk_rows * nv,
-                        ),
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_kkt_a_pre_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(
-                            a_fla + ((trace_last_row * nv * fla_bt * 4) as u64),
-                            nv * fla_bt,
-                        ),
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_kkt_a_pre_call_chunk",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(
-                            a_fla + ((trace_chunk_a_offset * 4) as u64),
-                            trace_chunk_rows * nv * fla_bt,
-                        ),
-                    );
-                    self.push_reference_stage_metadata(
+                        );
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_kkt_g_input_chunk",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                g_cum_fla + ((trace_chunk_beta_offset * 4) as u64),
+                                trace_chunk_rows * nv,
+                            ),
+                        );
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_kkt_a_pre_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                a_fla + ((trace_last_row * nv * fla_bt * 4) as u64),
+                                nv * fla_bt,
+                            ),
+                        );
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_kkt_a_pre_call_chunk",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                a_fla + ((trace_chunk_a_offset * 4) as u64),
+                                trace_chunk_rows * nv * fla_bt,
+                            ),
+                        );
+                        self.push_reference_stage_metadata(
                         "layer1_la_kkt_call_metadata_pre",
                         Some(layer_idx),
                         trace_step,
@@ -57280,60 +59758,60 @@ impl PrefillEngine {
                             "sync_method": "cuStreamSynchronize(self.stream) via snapshot download",
                         }),
                     );
-                }
-                let lt_fla_kkt = if lt { Some(Instant::now()) } else { None };
-                let rc = unsafe {
-                    (fla.kkt)(
-                        fla_k_bf16,
-                        g_cum_fla,
-                        fla_beta_bf16,
-                        a_fla,
-                        0,
-                        0,
-                        t_arg,
-                        fla_nt as u32,
-                        nv as u32,
-                        1,
-                        stream_ptr,
-                    )
-                };
-                let kkt_sync_after_launch = if reference_layer1_la_trace {
-                    Some(unsafe { cuda_sys::lib().cuStreamSynchronize(self.stream) })
-                } else {
-                    None
-                };
-                if rc != 0 {
-                    return Err(format!("FLA kkt failed: {}", rc));
-                }
-                if let Some(t) = lt_fla_kkt {
-                    self.stream_sync()?;
-                    self.t_la_fla_kkt
-                        .set(self.t_la_fla_kkt.get() + t.elapsed().as_secs_f64() * 1000.0);
-                }
-                if reference_layer1_la_trace {
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_kkt_a_post_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(
-                            a_fla + ((trace_last_row * nv * fla_bt * 4) as u64),
-                            nv * fla_bt,
-                        ),
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_kkt_a_post_call_chunk",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(
-                            a_fla + ((trace_chunk_a_offset * 4) as u64),
-                            trace_chunk_rows * nv * fla_bt,
-                        ),
-                    );
-                    self.push_reference_stage_metadata(
+                    }
+                    let lt_fla_kkt = if lt { Some(Instant::now()) } else { None };
+                    let rc = unsafe {
+                        (fla.kkt)(
+                            fla_k_bf16,
+                            g_cum_fla,
+                            fla_beta_bf16,
+                            a_fla,
+                            0,
+                            0,
+                            t_arg,
+                            fla_nt as u32,
+                            nv as u32,
+                            1,
+                            stream_ptr,
+                        )
+                    };
+                    let kkt_sync_after_launch = if reference_layer1_la_trace {
+                        Some(unsafe { cuda_sys::lib().cuStreamSynchronize(self.stream) })
+                    } else {
+                        None
+                    };
+                    if rc != 0 {
+                        return Err(format!("FLA kkt failed: {}", rc));
+                    }
+                    if let Some(t) = lt_fla_kkt {
+                        self.stream_sync()?;
+                        self.t_la_fla_kkt
+                            .set(self.t_la_fla_kkt.get() + t.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    if reference_layer1_la_trace {
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_kkt_a_post_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                a_fla + ((trace_last_row * nv * fla_bt * 4) as u64),
+                                nv * fla_bt,
+                            ),
+                        );
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_kkt_a_post_call_chunk",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                a_fla + ((trace_chunk_a_offset * 4) as u64),
+                                trace_chunk_rows * nv * fla_bt,
+                            ),
+                        );
+                        self.push_reference_stage_metadata(
                         "layer1_la_kkt_call_metadata_post",
                         Some(layer_idx),
                         trace_step,
@@ -57374,569 +59852,533 @@ impl PrefillEngine {
 	                            "sync_method": "cuStreamSynchronize(self.stream) via post-call A download",
 	                        }),
 	                    );
-                }
-                if trace_la_mixer {
-                    let last_pos = m.saturating_sub(1);
-                    self.trace_emit_f32_row(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "a_last",
-                        a_fla,
-                        last_pos,
-                        nv * fla_bt,
-                    );
-                    let vendor_a = self.diag_download_f32(
-                        a_fla + ((last_pos * nv * fla_bt * 4) as u64),
-                        nv * fla_bt,
-                    );
-                    let cpu_a = self.diag_compute_fla_a_last_cpu(
-                        fla_k_bf16,
-                        g_cum_fla,
-                        fla_beta_bf16,
-                        m,
-                        nv,
-                        dk,
-                        fla_bt,
-                    );
-                    let vendor_a_minus_cpu = vendor_a
-                        .iter()
-                        .zip(cpu_a.iter())
-                        .map(|(vendor, cpu)| vendor - cpu)
-                        .collect::<Vec<f32>>();
-                    let cpu_a_from_fp32_gate_ref = self.diag_compute_fla_a_last_cpu_from_g_chunk(
-                        fla_k_bf16,
-                        fla_beta_bf16,
-                        trace_g_cumsum_chunk_fp32_gate_ref
-                            .as_ref()
-                            .ok_or("missing trace fp32 gate cumsum chunk")?,
-                        m,
-                        nv,
-                        dk,
-                        fla_bt,
-                    );
-                    let vendor_a_minus_fp32_gate_ref = vendor_a
-                        .iter()
-                        .zip(cpu_a_from_fp32_gate_ref.iter())
-                        .map(|(vendor, cpu)| vendor - cpu)
-                        .collect::<Vec<f32>>();
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "a_last_cpu_ref",
-                        &cpu_a,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "a_last_cpu_ref_from_fp32_gate_ref",
-                        &cpu_a_from_fp32_gate_ref,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "a_last_vendor_minus_cpu_ref",
-                        &vendor_a_minus_cpu,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "a_last_vendor_minus_fp32_gate_ref",
-                        &vendor_a_minus_fp32_gate_ref,
-                    );
-                    let summary = self.trace_emit_compare_summary(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "kkt",
-                        "a_last_vendor",
-                        "a_last_cpu_ref",
-                        &vendor_a,
-                        &cpu_a,
-                    );
-                    trace_stage_summaries.push((
-                        "kkt",
-                        summary.max_abs,
-                        summary.max_abs_idx,
-                        summary.actual_at_max,
-                        summary.expected_at_max,
-                    ));
-                    let fp32_gate_summary = self.trace_emit_compare_summary(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "kkt_vs_fp32_gate_ref",
-                        "a_last_vendor",
-                        "a_last_cpu_ref_from_fp32_gate_ref",
-                        &vendor_a,
-                        &cpu_a_from_fp32_gate_ref,
-                    );
-                    trace_stage_summaries.push((
-                        "kkt_vs_fp32_gate_ref",
-                        fp32_gate_summary.max_abs,
-                        fp32_gate_summary.max_abs_idx,
-                        fp32_gate_summary.actual_at_max,
-                        fp32_gate_summary.expected_at_max,
-                    ));
-                }
-
-                // Step 3: solve_tril — A → Ai
-                // Grid: (NT, B*H) = (fla_nt, nv)
-                if reference_layer1_la_trace {
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_solve_a_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(
-                            a_fla + ((trace_last_row * nv * fla_bt * 4) as u64),
+                    }
+                    if trace_la_mixer {
+                        let last_pos = m.saturating_sub(1);
+                        self.trace_emit_f32_row(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "a_last",
+                            a_fla,
+                            last_pos,
                             nv * fla_bt,
-                        ),
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_solve_ai_pre_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        ai_fla,
-                        trace_last_row,
-                        nv * fla_bt,
-                    );
-                    self.push_reference_stage_metadata(
-                        "layer1_la_solve_call_metadata_pre",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        serde_json::json!({
-                            "kernel": "krasis_fla_merge_16x16_to_64x64_inverse_kernel",
-                            "a_ptr": format!("0x{:x}", a_fla),
-                            "ai_output_ptr": format!("0x{:x}", ai_fla),
-                            "stream_ptr": format!("0x{:x}", stream_ptr as usize),
-                            "dtypes": {
-                                "a": "fp32",
-                                "ai_output": "bf16"
-                            },
-                            "shape": {
-                                "m": m,
-                                "fla_total": fla_total,
-                                "fla_nt": fla_nt,
-                                "fla_bt": fla_bt,
-                                "nv": nv,
-                                "trace_last_pos": trace_last_pos,
-                                "trace_last_row": trace_last_row
-                            },
-                            "params": {
-                                "t_arg": t_arg,
-                                "grid_x": fla_nt,
-                                "grid_y": nv,
-                                "grid_z": 1
-                            },
-                            "sync_before_snapshot": true,
-                        }),
-                    );
-                }
-                let lt_fla_solve = if lt { Some(Instant::now()) } else { None };
-                let rc = unsafe {
-                    (fla.solve_tril)(
-                        a_fla,
-                        ai_fla,
-                        0,
-                        0,
-                        t_arg,
-                        fla_nt as u32,
-                        nv as u32,
-                        1,
-                        stream_ptr,
-                    )
-                };
-                if rc != 0 {
-                    return Err(format!("FLA solve_tril failed: {}", rc));
-                }
-                if let Some(t) = lt_fla_solve {
-                    self.stream_sync()?;
-                    self.t_la_fla_solve
-                        .set(self.t_la_fla_solve.get() + t.elapsed().as_secs_f64() * 1000.0);
-                }
-                if reference_layer1_la_trace {
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_solve_ai_post_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        ai_fla,
-                        trace_last_row,
-                        nv * fla_bt,
-                    );
-                    self.push_reference_stage_metadata(
-                        "layer1_la_solve_call_metadata_post",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        serde_json::json!({
-                            "kernel": "krasis_fla_merge_16x16_to_64x64_inverse_kernel",
-                            "ai_output_ptr": format!("0x{:x}", ai_fla),
-                            "stream_ptr": format!("0x{:x}", stream_ptr as usize),
-                            "sync_before_snapshot": true,
-                        }),
-                    );
-                }
-                if trace_la_mixer {
-                    let last_pos = m.saturating_sub(1);
-                    self.trace_emit_bf16_row(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "ai_last",
-                        ai_fla,
-                        last_pos,
-                        nv * fla_bt,
-                    );
-                    let vendor_ai = self.diag_download_bf16(
-                        ai_fla + ((last_pos * nv * fla_bt * 2) as u64),
-                        nv * fla_bt,
-                    );
-                    let cpu_ai_from_vendor_a =
-                        self.diag_compute_fla_ai_last_cpu_from_a(a_fla, m, nv, fla_bt);
-                    let vendor_ai_minus_cpu = vendor_ai
-                        .iter()
-                        .zip(cpu_ai_from_vendor_a.iter())
-                        .map(|(vendor, cpu)| vendor - cpu)
-                        .collect::<Vec<f32>>();
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "ai_last_cpu_ref_from_vendor_a",
-                        &cpu_ai_from_vendor_a,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "ai_last_vendor_minus_cpu_ref",
-                        &vendor_ai_minus_cpu,
-                    );
-                    let summary = self.trace_emit_compare_summary(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "solve_tril",
-                        "ai_last_vendor",
-                        "ai_last_cpu_ref_from_vendor_a",
-                        &vendor_ai,
-                        &cpu_ai_from_vendor_a,
-                    );
-                    trace_stage_summaries.push((
-                        "solve_tril",
-                        summary.max_abs,
-                        summary.max_abs_idx,
-                        summary.actual_at_max,
-                        summary.expected_at_max,
-                    ));
-                }
-                if la_diag {
-                    self.stream_sync()?;
-                    let a_h0p0 = self.diag_l2_norm_f32(a_fla, 0, nv * fla_bt, fla_bt);
-                    let ai_h0p0 = self.diag_l2_norm(ai_fla, 0, nv * fla_bt, fla_bt);
-                    eprintln!(
-                        "[DIAG L{:02} FLA] step3_solve: A_h0p0={:.6} Ai_h0p0={:.6}",
-                        layer_idx, a_h0p0, ai_h0p0
-                    );
-                }
+                        );
+                        let vendor_a = self.diag_download_f32(
+                            a_fla + ((last_pos * nv * fla_bt * 4) as u64),
+                            nv * fla_bt,
+                        );
+                        let cpu_a = self.diag_compute_fla_a_last_cpu(
+                            fla_k_bf16,
+                            g_cum_fla,
+                            fla_beta_bf16,
+                            m,
+                            nv,
+                            dk,
+                            fla_bt,
+                        );
+                        let vendor_a_minus_cpu = vendor_a
+                            .iter()
+                            .zip(cpu_a.iter())
+                            .map(|(vendor, cpu)| vendor - cpu)
+                            .collect::<Vec<f32>>();
+                        let cpu_a_from_fp32_gate_ref = self
+                            .diag_compute_fla_a_last_cpu_from_g_chunk(
+                                fla_k_bf16,
+                                fla_beta_bf16,
+                                trace_g_cumsum_chunk_fp32_gate_ref
+                                    .as_ref()
+                                    .ok_or("missing trace fp32 gate cumsum chunk")?,
+                                m,
+                                nv,
+                                dk,
+                                fla_bt,
+                            );
+                        let vendor_a_minus_fp32_gate_ref = vendor_a
+                            .iter()
+                            .zip(cpu_a_from_fp32_gate_ref.iter())
+                            .map(|(vendor, cpu)| vendor - cpu)
+                            .collect::<Vec<f32>>();
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "a_last_cpu_ref",
+                            &cpu_a,
+                        );
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "a_last_cpu_ref_from_fp32_gate_ref",
+                            &cpu_a_from_fp32_gate_ref,
+                        );
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "a_last_vendor_minus_cpu_ref",
+                            &vendor_a_minus_cpu,
+                        );
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "a_last_vendor_minus_fp32_gate_ref",
+                            &vendor_a_minus_fp32_gate_ref,
+                        );
+                        let summary = self.trace_emit_compare_summary(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "kkt",
+                            "a_last_vendor",
+                            "a_last_cpu_ref",
+                            &vendor_a,
+                            &cpu_a,
+                        );
+                        trace_stage_summaries.push((
+                            "kkt",
+                            summary.max_abs,
+                            summary.max_abs_idx,
+                            summary.actual_at_max,
+                            summary.expected_at_max,
+                        ));
+                        let fp32_gate_summary = self.trace_emit_compare_summary(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "kkt_vs_fp32_gate_ref",
+                            "a_last_vendor",
+                            "a_last_cpu_ref_from_fp32_gate_ref",
+                            &vendor_a,
+                            &cpu_a_from_fp32_gate_ref,
+                        );
+                        trace_stage_summaries.push((
+                            "kkt_vs_fp32_gate_ref",
+                            fp32_gate_summary.max_abs,
+                            fp32_gate_summary.max_abs_idx,
+                            fp32_gate_summary.actual_at_max,
+                            fp32_gate_summary.expected_at_max,
+                        ));
+                    }
 
-                // Step 4: recompute_w_u — k, v, beta, Ai, g → w, u
-                // Grid: (NT, B*H) = (fla_nt, nv)
-                // Note: after step 3, A (la_conv_out) is dead, so u can reuse that space
-                if reference_layer1_la_trace {
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_wy_k_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        fla_k_bf16,
-                        trace_last_row,
-                        nv * dk,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_wy_v_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        fla_v_bf16,
-                        trace_last_row,
-                        nv * dv,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_wy_beta_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        fla_beta_bf16,
-                        trace_last_row,
-                        nv,
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_wy_g_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(g_cum_fla + ((trace_last_row * nv * 4) as u64), nv),
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_wy_w_pre_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        w_fla,
-                        trace_last_row,
-                        nv * dk,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_wy_u_pre_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        u_fla,
-                        trace_last_row,
-                        nv * dv,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_wy_ai_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        ai_fla,
-                        trace_last_row,
-                        nv * fla_bt,
-                    );
-                    self.push_reference_stage_metadata(
-                        "layer1_la_wy_call_metadata_pre",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        serde_json::json!({
-                            "kernel": "krasis_fla_chunk_wy_repr",
-                            "k_ptr": format!("0x{:x}", fla_k_bf16),
-                            "v_ptr": format!("0x{:x}", fla_v_bf16),
-                            "beta_ptr": format!("0x{:x}", fla_beta_bf16),
-                            "w_output_ptr": format!("0x{:x}", w_fla),
-                            "u_output_ptr": format!("0x{:x}", u_fla),
-                            "ai_ptr": format!("0x{:x}", ai_fla),
-                            "g_ptr": format!("0x{:x}", g_cum_fla),
-                            "stream_ptr": format!("0x{:x}", stream_ptr as usize),
-                            "dtypes": {
-                                "k": "bf16",
-                                "v": "bf16",
-                                "beta": "bf16",
-                                "w_output": "bf16",
-                                "u_output": "bf16",
-                                "ai": "bf16",
-                                "g": "fp32"
-                            },
-                            "shape": {
-                                "m": m,
-                                "fla_total": fla_total,
-                                "fla_nt": fla_nt,
-                                "fla_bt": fla_bt,
-                                "nv": nv,
-                                "dk": dk,
-                                "dv": dv,
-                                "trace_last_pos": trace_last_pos,
-                                "trace_last_row": trace_last_row,
-                            },
-                            "strides": {
-                                "k_token_stride_elements": nv * dk,
-                                "v_token_stride_elements": nv * dv,
-                                "beta_token_stride_elements": nv,
-                                "w_token_stride_elements": nv * dk,
-                                "u_token_stride_elements": nv * dv,
-                                "ai_token_stride_elements": nv * fla_bt,
-                                "g_token_stride_elements": nv,
-                            },
-                            "params": {
-                                "t_arg": t_arg,
-                                "grid_x": fla_nt,
-                                "grid_y": nv,
-                                "grid_z": 1,
-                            },
-                            "sync_before_snapshot": true,
-                            "kv_cache_applicable": false,
-                            "rope_applicable": false,
-                        }),
-                    );
-                }
-                let lt_fla_wy = if lt { Some(Instant::now()) } else { None };
-                let rc = unsafe {
-                    (fla.wy_repr)(
-                        fla_k_bf16,
-                        fla_v_bf16,
-                        fla_beta_bf16,
-                        w_fla,
-                        u_fla,
-                        ai_fla,
-                        g_cum_fla,
-                        0,
-                        0,
-                        t_arg,
-                        fla_nt as u32,
-                        nv as u32,
-                        1,
-                        stream_ptr,
-                    )
-                };
-                if rc != 0 {
-                    return Err(format!("FLA wy_repr failed: {}", rc));
-                }
-                if let Some(t) = lt_fla_wy {
-                    self.stream_sync()?;
-                    self.t_la_fla_wy
-                        .set(self.t_la_fla_wy.get() + t.elapsed().as_secs_f64() * 1000.0);
-                }
-                if reference_layer1_la_trace {
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_wy_w_post_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        w_fla,
-                        trace_last_row,
-                        nv * dk,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_wy_u_post_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        u_fla,
-                        trace_last_row,
-                        nv * dv,
-                    );
-                    self.push_reference_stage_metadata(
-                        "layer1_la_wy_call_metadata_post",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        serde_json::json!({
-                            "kernel": "krasis_fla_chunk_wy_repr",
-                            "w_output_ptr": format!("0x{:x}", w_fla),
-                            "u_output_ptr": format!("0x{:x}", u_fla),
-                            "stream_ptr": format!("0x{:x}", stream_ptr as usize),
-                            "sync_before_snapshot": true,
-                        }),
-                    );
-                }
-                if trace_la_mixer {
-                    let last_pos = m.saturating_sub(1);
-                    self.trace_emit_bf16_row(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "w_last",
-                        w_fla,
-                        last_pos,
-                        nv * dk,
-                    );
-                    self.trace_emit_bf16_row(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "u_last",
-                        u_fla,
-                        last_pos,
-                        nv * dv,
-                    );
-                    let vendor_w =
-                        self.diag_download_bf16(w_fla + ((last_pos * nv * dk * 2) as u64), nv * dk);
-                    let vendor_u =
-                        self.diag_download_bf16(u_fla + ((last_pos * nv * dv * 2) as u64), nv * dv);
-                    let (cpu_w, cpu_u) = self.diag_compute_fla_wy_last_cpu(
-                        ai_fla,
-                        fla_k_bf16,
-                        fla_v_bf16,
-                        fla_beta_bf16,
-                        g_cum_fla,
-                        m,
-                        nv,
-                        dk,
-                        dv,
-                        fla_bt,
-                    );
-                    let vendor_w_minus_cpu = vendor_w
-                        .iter()
-                        .zip(cpu_w.iter())
-                        .map(|(vendor, cpu)| vendor - cpu)
-                        .collect::<Vec<f32>>();
-                    let vendor_u_minus_cpu = vendor_u
-                        .iter()
-                        .zip(cpu_u.iter())
-                        .map(|(vendor, cpu)| vendor - cpu)
-                        .collect::<Vec<f32>>();
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "w_last_cpu_ref",
-                        &cpu_w,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "u_last_cpu_ref",
-                        &cpu_u,
-                    );
-                    let custom_value_corrected = self
-                        .diag_compute_custom_value_corrected_last_from_fla_inputs(
+                    // Step 3: solve_tril — A → Ai
+                    // Grid: (NT, B*H) = (fla_nt, nv)
+                    if reference_layer1_la_trace {
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_solve_a_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                a_fla + ((trace_last_row * nv * fla_bt * 4) as u64),
+                                nv * fla_bt,
+                            ),
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_solve_ai_pre_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            ai_fla,
+                            trace_last_row,
+                            nv * fla_bt,
+                        );
+                        self.push_reference_stage_metadata(
+                            "layer1_la_solve_call_metadata_pre",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            serde_json::json!({
+                                "kernel": "krasis_fla_merge_16x16_to_64x64_inverse_kernel",
+                                "a_ptr": format!("0x{:x}", a_fla),
+                                "ai_output_ptr": format!("0x{:x}", ai_fla),
+                                "stream_ptr": format!("0x{:x}", stream_ptr as usize),
+                                "dtypes": {
+                                    "a": "fp32",
+                                    "ai_output": "bf16"
+                                },
+                                "shape": {
+                                    "m": m,
+                                    "fla_total": fla_total,
+                                    "fla_nt": fla_nt,
+                                    "fla_bt": fla_bt,
+                                    "nv": nv,
+                                    "trace_last_pos": trace_last_pos,
+                                    "trace_last_row": trace_last_row
+                                },
+                                "params": {
+                                    "t_arg": t_arg,
+                                    "grid_x": fla_nt,
+                                    "grid_y": nv,
+                                    "grid_z": 1
+                                },
+                                "sync_before_snapshot": true,
+                            }),
+                        );
+                    }
+                    let lt_fla_solve = if lt { Some(Instant::now()) } else { None };
+                    let rc = unsafe {
+                        (fla.solve_tril)(
+                            a_fla,
+                            ai_fla,
+                            0,
+                            0,
+                            t_arg,
+                            fla_nt as u32,
+                            nv as u32,
+                            1,
+                            stream_ptr,
+                        )
+                    };
+                    if rc != 0 {
+                        return Err(format!("FLA solve_tril failed: {}", rc));
+                    }
+                    if let Some(t) = lt_fla_solve {
+                        self.stream_sync()?;
+                        self.t_la_fla_solve
+                            .set(self.t_la_fla_solve.get() + t.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    if reference_layer1_la_trace {
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_solve_ai_post_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            ai_fla,
+                            trace_last_row,
+                            nv * fla_bt,
+                        );
+                        self.push_reference_stage_metadata(
+                            "layer1_la_solve_call_metadata_post",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            serde_json::json!({
+                                "kernel": "krasis_fla_merge_16x16_to_64x64_inverse_kernel",
+                                "ai_output_ptr": format!("0x{:x}", ai_fla),
+                                "stream_ptr": format!("0x{:x}", stream_ptr as usize),
+                                "sync_before_snapshot": true,
+                            }),
+                        );
+                    }
+                    if trace_la_mixer {
+                        let last_pos = m.saturating_sub(1);
+                        self.trace_emit_bf16_row(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "ai_last",
+                            ai_fla,
+                            last_pos,
+                            nv * fla_bt,
+                        );
+                        let vendor_ai = self.diag_download_bf16(
+                            ai_fla + ((last_pos * nv * fla_bt * 2) as u64),
+                            nv * fla_bt,
+                        );
+                        let cpu_ai_from_vendor_a =
+                            self.diag_compute_fla_ai_last_cpu_from_a(a_fla, m, nv, fla_bt);
+                        let vendor_ai_minus_cpu = vendor_ai
+                            .iter()
+                            .zip(cpu_ai_from_vendor_a.iter())
+                            .map(|(vendor, cpu)| vendor - cpu)
+                            .collect::<Vec<f32>>();
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "ai_last_cpu_ref_from_vendor_a",
+                            &cpu_ai_from_vendor_a,
+                        );
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "ai_last_vendor_minus_cpu_ref",
+                            &vendor_ai_minus_cpu,
+                        );
+                        let summary = self.trace_emit_compare_summary(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "solve_tril",
+                            "ai_last_vendor",
+                            "ai_last_cpu_ref_from_vendor_a",
+                            &vendor_ai,
+                            &cpu_ai_from_vendor_a,
+                        );
+                        trace_stage_summaries.push((
+                            "solve_tril",
+                            summary.max_abs,
+                            summary.max_abs_idx,
+                            summary.actual_at_max,
+                            summary.expected_at_max,
+                        ));
+                    }
+                    if la_diag {
+                        self.stream_sync()?;
+                        let a_h0p0 = self.diag_l2_norm_f32(a_fla, 0, nv * fla_bt, fla_bt);
+                        let ai_h0p0 = self.diag_l2_norm(ai_fla, 0, nv * fla_bt, fla_bt);
+                        eprintln!(
+                            "[DIAG L{:02} FLA] step3_solve: A_h0p0={:.6} Ai_h0p0={:.6}",
+                            layer_idx, a_h0p0, ai_h0p0
+                        );
+                    }
+
+                    // Step 4: recompute_w_u — k, v, beta, Ai, g → w, u
+                    // Grid: (NT, B*H) = (fla_nt, nv)
+                    // Note: after step 3, A (la_conv_out) is dead, so u can reuse that space
+                    if reference_layer1_la_trace {
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_wy_k_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            fla_k_bf16,
+                            trace_last_row,
+                            nv * dk,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_wy_v_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            fla_v_bf16,
+                            trace_last_row,
+                            nv * dv,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_wy_beta_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            fla_beta_bf16,
+                            trace_last_row,
+                            nv,
+                        );
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_wy_g_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                g_cum_fla + ((trace_last_row * nv * 4) as u64),
+                                nv,
+                            ),
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_wy_w_pre_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            w_fla,
+                            trace_last_row,
+                            nv * dk,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_wy_u_pre_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            u_fla,
+                            trace_last_row,
+                            nv * dv,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_wy_ai_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            ai_fla,
+                            trace_last_row,
+                            nv * fla_bt,
+                        );
+                        self.push_reference_stage_metadata(
+                            "layer1_la_wy_call_metadata_pre",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            serde_json::json!({
+                                "kernel": "krasis_fla_chunk_wy_repr",
+                                "k_ptr": format!("0x{:x}", fla_k_bf16),
+                                "v_ptr": format!("0x{:x}", fla_v_bf16),
+                                "beta_ptr": format!("0x{:x}", fla_beta_bf16),
+                                "w_output_ptr": format!("0x{:x}", w_fla),
+                                "u_output_ptr": format!("0x{:x}", u_fla),
+                                "ai_ptr": format!("0x{:x}", ai_fla),
+                                "g_ptr": format!("0x{:x}", g_cum_fla),
+                                "stream_ptr": format!("0x{:x}", stream_ptr as usize),
+                                "dtypes": {
+                                    "k": "bf16",
+                                    "v": "bf16",
+                                    "beta": "bf16",
+                                    "w_output": "bf16",
+                                    "u_output": "bf16",
+                                    "ai": "bf16",
+                                    "g": "fp32"
+                                },
+                                "shape": {
+                                    "m": m,
+                                    "fla_total": fla_total,
+                                    "fla_nt": fla_nt,
+                                    "fla_bt": fla_bt,
+                                    "nv": nv,
+                                    "dk": dk,
+                                    "dv": dv,
+                                    "trace_last_pos": trace_last_pos,
+                                    "trace_last_row": trace_last_row,
+                                },
+                                "strides": {
+                                    "k_token_stride_elements": nv * dk,
+                                    "v_token_stride_elements": nv * dv,
+                                    "beta_token_stride_elements": nv,
+                                    "w_token_stride_elements": nv * dk,
+                                    "u_token_stride_elements": nv * dv,
+                                    "ai_token_stride_elements": nv * fla_bt,
+                                    "g_token_stride_elements": nv,
+                                },
+                                "params": {
+                                    "t_arg": t_arg,
+                                    "grid_x": fla_nt,
+                                    "grid_y": nv,
+                                    "grid_z": 1,
+                                },
+                                "sync_before_snapshot": true,
+                                "kv_cache_applicable": false,
+                                "rope_applicable": false,
+                            }),
+                        );
+                    }
+                    let lt_fla_wy = if lt { Some(Instant::now()) } else { None };
+                    let rc = unsafe {
+                        (fla.wy_repr)(
+                            fla_k_bf16,
+                            fla_v_bf16,
+                            fla_beta_bf16,
+                            w_fla,
+                            u_fla,
+                            ai_fla,
+                            g_cum_fla,
+                            0,
+                            0,
+                            t_arg,
+                            fla_nt as u32,
+                            nv as u32,
+                            1,
+                            stream_ptr,
+                        )
+                    };
+                    if rc != 0 {
+                        return Err(format!("FLA wy_repr failed: {}", rc));
+                    }
+                    if let Some(t) = lt_fla_wy {
+                        self.stream_sync()?;
+                        self.t_la_fla_wy
+                            .set(self.t_la_fla_wy.get() + t.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    if reference_layer1_la_trace {
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_wy_w_post_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            w_fla,
+                            trace_last_row,
+                            nv * dk,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_wy_u_post_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            u_fla,
+                            trace_last_row,
+                            nv * dv,
+                        );
+                        self.push_reference_stage_metadata(
+                            "layer1_la_wy_call_metadata_post",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            serde_json::json!({
+                                "kernel": "krasis_fla_chunk_wy_repr",
+                                "w_output_ptr": format!("0x{:x}", w_fla),
+                                "u_output_ptr": format!("0x{:x}", u_fla),
+                                "stream_ptr": format!("0x{:x}", stream_ptr as usize),
+                                "sync_before_snapshot": true,
+                            }),
+                        );
+                    }
+                    if trace_la_mixer {
+                        let last_pos = m.saturating_sub(1);
+                        self.trace_emit_bf16_row(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "w_last",
+                            w_fla,
+                            last_pos,
+                            nv * dk,
+                        );
+                        self.trace_emit_bf16_row(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "u_last",
+                            u_fla,
+                            last_pos,
+                            nv * dv,
+                        );
+                        let vendor_w = self
+                            .diag_download_bf16(w_fla + ((last_pos * nv * dk * 2) as u64), nv * dk);
+                        let vendor_u = self
+                            .diag_download_bf16(u_fla + ((last_pos * nv * dv * 2) as u64), nv * dv);
+                        let (cpu_w, cpu_u) = self.diag_compute_fla_wy_last_cpu(
+                            ai_fla,
                             fla_k_bf16,
                             fla_v_bf16,
                             fla_beta_bf16,
@@ -57947,579 +60389,624 @@ impl PrefillEngine {
                             dv,
                             fla_bt,
                         );
-                    let custom_value_corrected_chunk_fp32_gate_ref = self
-                        .diag_compute_custom_value_corrected_chunk_from_g_chunk(
-                            fla_k_bf16,
-                            fla_v_bf16,
-                            fla_beta_bf16,
-                            trace_g_cumsum_chunk_fp32_gate_ref
-                                .as_ref()
-                                .ok_or("missing trace fp32 gate cumsum chunk")?,
-                            m,
-                            nv,
-                            dk,
-                            dv,
-                            fla_bt,
+                        let vendor_w_minus_cpu = vendor_w
+                            .iter()
+                            .zip(cpu_w.iter())
+                            .map(|(vendor, cpu)| vendor - cpu)
+                            .collect::<Vec<f32>>();
+                        let vendor_u_minus_cpu = vendor_u
+                            .iter()
+                            .zip(cpu_u.iter())
+                            .map(|(vendor, cpu)| vendor - cpu)
+                            .collect::<Vec<f32>>();
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "w_last_cpu_ref",
+                            &cpu_w,
                         );
-                    trace_value_corrected_chunk_fp32_gate_ref =
-                        Some(custom_value_corrected_chunk_fp32_gate_ref.clone());
-                    let custom_value_corrected_fp32_gate_ref =
-                        custom_value_corrected_chunk_fp32_gate_ref[((last_pos % fla_bt) * nv * dv)
-                            ..(((last_pos % fla_bt) + 1) * nv * dv)]
-                            .to_vec();
-                    let vendor_u_minus_custom = vendor_u
-                        .iter()
-                        .zip(custom_value_corrected.iter())
-                        .map(|(vendor, custom)| vendor - custom)
-                        .collect::<Vec<f32>>();
-                    let vendor_u_minus_fp32_gate_ref = vendor_u
-                        .iter()
-                        .zip(custom_value_corrected_fp32_gate_ref.iter())
-                        .map(|(vendor, custom)| vendor - custom)
-                        .collect::<Vec<f32>>();
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "w_last_vendor_minus_cpu_ref",
-                        &vendor_w_minus_cpu,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "u_last_vendor_minus_cpu_ref",
-                        &vendor_u_minus_cpu,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "value_corrected_last_custom_ref",
-                        &custom_value_corrected,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "value_corrected_last_fp32_gate_ref",
-                        &custom_value_corrected_fp32_gate_ref,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "u_last_vendor_minus_custom_ref",
-                        &vendor_u_minus_custom,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "u_last_vendor_minus_fp32_gate_ref",
-                        &vendor_u_minus_fp32_gate_ref,
-                    );
-                    let w_summary = self.trace_emit_compare_summary(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "wy_repr_w",
-                        "w_last_vendor",
-                        "w_last_cpu_ref",
-                        &vendor_w,
-                        &cpu_w,
-                    );
-                    trace_stage_summaries.push((
-                        "wy_repr_w",
-                        w_summary.max_abs,
-                        w_summary.max_abs_idx,
-                        w_summary.actual_at_max,
-                        w_summary.expected_at_max,
-                    ));
-                    let u_summary = self.trace_emit_compare_summary(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "wy_repr_u_vs_vendor_cpu_ref",
-                        "u_last_vendor",
-                        "u_last_cpu_ref",
-                        &vendor_u,
-                        &cpu_u,
-                    );
-                    trace_stage_summaries.push((
-                        "wy_repr_u_vs_vendor_cpu_ref",
-                        u_summary.max_abs,
-                        u_summary.max_abs_idx,
-                        u_summary.actual_at_max,
-                        u_summary.expected_at_max,
-                    ));
-                    let custom_summary = self.trace_emit_compare_summary(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "wy_repr_u_vs_custom_value_corrected",
-                        "u_last_vendor",
-                        "value_corrected_last_custom_ref",
-                        &vendor_u,
-                        &custom_value_corrected,
-                    );
-                    trace_stage_summaries.push((
-                        "wy_repr_u_vs_custom_value_corrected",
-                        custom_summary.max_abs,
-                        custom_summary.max_abs_idx,
-                        custom_summary.actual_at_max,
-                        custom_summary.expected_at_max,
-                    ));
-                    let fp32_gate_u_summary = self.trace_emit_compare_summary(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "wy_repr_u_vs_fp32_gate_ref",
-                        "u_last_vendor",
-                        "value_corrected_last_fp32_gate_ref",
-                        &vendor_u,
-                        &custom_value_corrected_fp32_gate_ref,
-                    );
-                    trace_stage_summaries.push((
-                        "wy_repr_u_vs_fp32_gate_ref",
-                        fp32_gate_u_summary.max_abs,
-                        fp32_gate_u_summary.max_abs_idx,
-                        fp32_gate_u_summary.actual_at_max,
-                        fp32_gate_u_summary.expected_at_max,
-                    ));
-                }
-                if la_diag {
-                    self.stream_sync()?;
-                    let w_h0p0 = self.diag_l2_norm(w_fla, 0, nv * dk, dk);
-                    let u_h0p0 = self.diag_l2_norm(u_fla, 0, nv * dv, dv);
-                    let w_h0plast = self.diag_l2_norm(w_fla, m - 1, nv * dk, dk);
-                    let u_h0plast = self.diag_l2_norm(u_fla, m - 1, nv * dv, dv);
-                    eprintln!(
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "u_last_cpu_ref",
+                            &cpu_u,
+                        );
+                        let custom_value_corrected = self
+                            .diag_compute_custom_value_corrected_last_from_fla_inputs(
+                                fla_k_bf16,
+                                fla_v_bf16,
+                                fla_beta_bf16,
+                                g_cum_fla,
+                                m,
+                                nv,
+                                dk,
+                                dv,
+                                fla_bt,
+                            );
+                        let custom_value_corrected_chunk_fp32_gate_ref = self
+                            .diag_compute_custom_value_corrected_chunk_from_g_chunk(
+                                fla_k_bf16,
+                                fla_v_bf16,
+                                fla_beta_bf16,
+                                trace_g_cumsum_chunk_fp32_gate_ref
+                                    .as_ref()
+                                    .ok_or("missing trace fp32 gate cumsum chunk")?,
+                                m,
+                                nv,
+                                dk,
+                                dv,
+                                fla_bt,
+                            );
+                        trace_value_corrected_chunk_fp32_gate_ref =
+                            Some(custom_value_corrected_chunk_fp32_gate_ref.clone());
+                        let custom_value_corrected_fp32_gate_ref =
+                            custom_value_corrected_chunk_fp32_gate_ref[((last_pos % fla_bt)
+                                * nv
+                                * dv)
+                                ..(((last_pos % fla_bt) + 1) * nv * dv)]
+                                .to_vec();
+                        let vendor_u_minus_custom = vendor_u
+                            .iter()
+                            .zip(custom_value_corrected.iter())
+                            .map(|(vendor, custom)| vendor - custom)
+                            .collect::<Vec<f32>>();
+                        let vendor_u_minus_fp32_gate_ref = vendor_u
+                            .iter()
+                            .zip(custom_value_corrected_fp32_gate_ref.iter())
+                            .map(|(vendor, custom)| vendor - custom)
+                            .collect::<Vec<f32>>();
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "w_last_vendor_minus_cpu_ref",
+                            &vendor_w_minus_cpu,
+                        );
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "u_last_vendor_minus_cpu_ref",
+                            &vendor_u_minus_cpu,
+                        );
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "value_corrected_last_custom_ref",
+                            &custom_value_corrected,
+                        );
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "value_corrected_last_fp32_gate_ref",
+                            &custom_value_corrected_fp32_gate_ref,
+                        );
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "u_last_vendor_minus_custom_ref",
+                            &vendor_u_minus_custom,
+                        );
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "u_last_vendor_minus_fp32_gate_ref",
+                            &vendor_u_minus_fp32_gate_ref,
+                        );
+                        let w_summary = self.trace_emit_compare_summary(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "wy_repr_w",
+                            "w_last_vendor",
+                            "w_last_cpu_ref",
+                            &vendor_w,
+                            &cpu_w,
+                        );
+                        trace_stage_summaries.push((
+                            "wy_repr_w",
+                            w_summary.max_abs,
+                            w_summary.max_abs_idx,
+                            w_summary.actual_at_max,
+                            w_summary.expected_at_max,
+                        ));
+                        let u_summary = self.trace_emit_compare_summary(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "wy_repr_u_vs_vendor_cpu_ref",
+                            "u_last_vendor",
+                            "u_last_cpu_ref",
+                            &vendor_u,
+                            &cpu_u,
+                        );
+                        trace_stage_summaries.push((
+                            "wy_repr_u_vs_vendor_cpu_ref",
+                            u_summary.max_abs,
+                            u_summary.max_abs_idx,
+                            u_summary.actual_at_max,
+                            u_summary.expected_at_max,
+                        ));
+                        let custom_summary = self.trace_emit_compare_summary(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "wy_repr_u_vs_custom_value_corrected",
+                            "u_last_vendor",
+                            "value_corrected_last_custom_ref",
+                            &vendor_u,
+                            &custom_value_corrected,
+                        );
+                        trace_stage_summaries.push((
+                            "wy_repr_u_vs_custom_value_corrected",
+                            custom_summary.max_abs,
+                            custom_summary.max_abs_idx,
+                            custom_summary.actual_at_max,
+                            custom_summary.expected_at_max,
+                        ));
+                        let fp32_gate_u_summary = self.trace_emit_compare_summary(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "wy_repr_u_vs_fp32_gate_ref",
+                            "u_last_vendor",
+                            "value_corrected_last_fp32_gate_ref",
+                            &vendor_u,
+                            &custom_value_corrected_fp32_gate_ref,
+                        );
+                        trace_stage_summaries.push((
+                            "wy_repr_u_vs_fp32_gate_ref",
+                            fp32_gate_u_summary.max_abs,
+                            fp32_gate_u_summary.max_abs_idx,
+                            fp32_gate_u_summary.actual_at_max,
+                            fp32_gate_u_summary.expected_at_max,
+                        ));
+                    }
+                    if la_diag {
+                        self.stream_sync()?;
+                        let w_h0p0 = self.diag_l2_norm(w_fla, 0, nv * dk, dk);
+                        let u_h0p0 = self.diag_l2_norm(u_fla, 0, nv * dv, dv);
+                        let w_h0plast = self.diag_l2_norm(w_fla, m - 1, nv * dk, dk);
+                        let u_h0plast = self.diag_l2_norm(u_fla, m - 1, nv * dv, dv);
+                        eprintln!(
                         "[DIAG L{:02} FLA] step4_wy: w_h0p0={:.6} u_h0p0={:.6} w_h0plast={:.6} u_h0plast={:.6}",
                         layer_idx, w_h0p0, u_h0p0, w_h0plast, u_h0plast
                     );
-                }
+                    }
 
-                // Step 5: state_recurrence — k, u, w, g, h0 → h, v_new, ht
-                // Grid: (cdiv(V, BV), B*H); BV is selected by the loaded FLA symbol.
-                // "blockdim64" in the kernel name refers to BT=64 (chunk time dim), NOT BV.
-                // C wrapper params: k, v(=u), w, v_new, g, h, h0, ht, T
-                // h0 and ht are FP32. Per-chunk `h` remains the kernel's BF16
-                // output, but the fused recurrence carries its FP32 accumulator
-                // directly between internal blocks.
-                let state_bv = if fla.state_recurrence_bv64_enabled {
-                    64usize
-                } else {
-                    32usize
-                };
-                let sr_grid_x = ((dv + state_bv - 1) / state_bv) as u32;
-                let state_recurrence = if fla.state_recurrence_bv64_enabled {
-                    fla.state_recurrence_bv64
-                        .ok_or("FLA BV64 state recurrence requested but symbol is not loaded")?
-                } else {
-                    fla.state_recurrence
-                };
-                if reference_layer1_la_trace {
-                    let current_chunk = trace_last_row / fla_bt;
-                    let state_row = current_chunk * nv;
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_state_k_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        fla_k_bf16,
-                        trace_last_row,
-                        nv * dk,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_state_u_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        u_fla,
-                        trace_last_row,
-                        nv * dv,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_state_w_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        w_fla,
-                        trace_last_row,
-                        nv * dk,
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_state_g_input_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(g_cum_fla + ((trace_last_row * nv * 4) as u64), nv),
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_state_v_new_pre_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        v_new_fla,
-                        trace_last_row,
-                        nv * dv,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_state_h_pre_call_chunk_head0",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        h_fla,
-                        state_row,
-                        dk * dv,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_state_h0_pre_call_head0",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        h0_fla,
-                        0,
-                        dk * dv,
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_state_ht_pre_call_head0",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(ht_fla, dk * dv),
-                    );
-                    self.push_reference_stage_metadata(
-                        "layer1_la_state_recurrence_metadata_pre",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        serde_json::json!({
-                            "kernel": "krasis_fla_chunk_state_recurrence",
-                            "k_ptr": format!("0x{:x}", fla_k_bf16),
-                            "u_input_ptr": format!("0x{:x}", u_fla),
-                            "w_input_ptr": format!("0x{:x}", w_fla),
-                            "v_new_output_ptr": format!("0x{:x}", v_new_fla),
-                            "g_ptr": format!("0x{:x}", g_cum_fla),
-                            "h_output_ptr": format!("0x{:x}", h_fla),
-                            "h0_ptr": format!("0x{:x}", h0_fla),
-                            "ht_output_ptr": format!("0x{:x}", ht_fla),
-                            "stream_ptr": format!("0x{:x}", stream_ptr as usize),
-                            "dtypes": {
-                                "k": "bf16",
-                                "u_input": "bf16",
-                                "w_input": "bf16",
-                                "v_new_output": "bf16",
-                                "g": "fp32",
-                                "h_output": "bf16",
-                                "h0": "fp32",
-                                "ht_output": "fp32"
-                            },
-                            "shape": {
-                                "m": m,
-                                "fla_total": fla_total,
-                                "fla_nt": fla_nt,
-                                "fla_bt": fla_bt,
-                                "nv": nv,
-                                "dk": dk,
-                                "dv": dv,
-                                "trace_last_pos": trace_last_pos,
-                                "trace_last_row": trace_last_row,
-                                "current_chunk": current_chunk,
-                            },
-                            "strides": {
-                                "k_token_stride_elements": nv * dk,
-                                "u_token_stride_elements": nv * dv,
-                                "w_token_stride_elements": nv * dk,
-                                "v_new_token_stride_elements": nv * dv,
-                                "g_token_stride_elements": nv,
-                                "h_chunk_stride_elements": nv * dk * dv,
-                                "h_head_stride_elements": dk * dv,
-                            },
-                            "params": {
-                                "t_arg": t_arg,
-                                "grid_x": sr_grid_x,
-                                "grid_y": nv,
-                                "grid_z": 1,
-                                "bv": state_bv,
-                            },
-                            "sync_before_snapshot": true,
-                            "kv_cache_applicable": false,
-                            "rope_applicable": false,
-                        }),
-                    );
-                }
-                if self.trace_prefill_layer_summary_enabled(trace_step, layer_idx) {
-                    let final_block_row = fla_total.saturating_sub(fla_bt);
-                    let final_block_real_rows = m.saturating_sub(final_block_row).min(fla_bt);
-                    self.trace_emit_bf16_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_recurrence_k_final_block",
-                        fla_k_bf16 + (final_block_row * nv * dk * 2) as u64,
-                        0,
-                        fla_bt * nv * dk,
-                    );
-                    self.trace_emit_bf16_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_recurrence_u_final_block",
-                        u_fla + (final_block_row * nv * dv * 2) as u64,
-                        0,
-                        fla_bt * nv * dv,
-                    );
-                    self.trace_emit_bf16_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_recurrence_w_final_block",
-                        w_fla + (final_block_row * nv * dk * 2) as u64,
-                        0,
-                        fla_bt * nv * dk,
-                    );
-                    self.trace_emit_f32_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_recurrence_g_final_block",
-                        g_cum_fla + (final_block_row * nv * 4) as u64,
-                        0,
-                        fla_bt * nv,
-                    );
-                    self.trace_emit_bf16_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_wy_v_final_block_real_rows",
-                        fla_v_bf16 + (final_block_row * nv * dv * 2) as u64,
-                        0,
-                        final_block_real_rows * nv * dv,
-                    );
-                    self.trace_emit_bf16_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_wy_beta_final_block_real_rows",
-                        fla_beta_bf16 + (final_block_row * nv * 2) as u64,
-                        0,
-                        final_block_real_rows * nv,
-                    );
-                    self.trace_emit_bf16_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_wy_ai_final_block_real_rows",
-                        ai_fla + (final_block_row * nv * fla_bt * 2) as u64,
-                        0,
-                        final_block_real_rows * nv * fla_bt,
-                    );
-                    self.trace_emit_bf16_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_recurrence_u_final_block_real_rows",
-                        u_fla + (final_block_row * nv * dv * 2) as u64,
-                        0,
-                        final_block_real_rows * nv * dv,
-                    );
-                    self.trace_emit_bf16_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_recurrence_w_final_block_real_rows",
-                        w_fla + (final_block_row * nv * dk * 2) as u64,
-                        0,
-                        final_block_real_rows * nv * dk,
-                    );
-                    self.trace_emit_f32_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_recurrence_g_final_block_real_rows",
-                        g_cum_fla + (final_block_row * nv * 4) as u64,
-                        0,
-                        final_block_real_rows * nv,
-                    );
-                    self.trace_emit_f32_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_recurrence_h0_pre_call",
-                        h0_fla,
-                        0,
-                        la_state_elements,
-                    );
-                }
-                let lt_fla_state = if lt { Some(Instant::now()) } else { None };
-                let rc = unsafe {
-                    (state_recurrence)(
-                        fla_k_bf16, // k (BF16)
-                        u_fla,      // v (kernel param) = Python's u (BF16)
-                        w_fla,      // w (kernel param) = Python's w (BF16)
-                        v_new_fla,  // v_new output (BF16)
-                        g_cum_fla,  // g (cumsum gate, FP32)
-                        0,          // gk (unused — USE_GK=False constexpr)
-                        h_fla,      // h output (BF16, per-chunk states)
-                        h0_fla,     // h0 (FP32 persistent recurrent state)
-                        ht_fla,     // ht (FP32, final state output)
-                        0, 0, // cu_seqlens, chunk_offsets (IS_VARLEN=False)
-                        t_arg, sr_grid_x, nv as u32, 1, stream_ptr,
-                    )
-                };
-                if rc != 0 {
-                    return Err(format!("FLA state_recurrence failed: {}", rc));
-                }
-                if let Some(t) = lt_fla_state {
-                    self.stream_sync()?;
-                    self.t_la_fla_state
-                        .set(self.t_la_fla_state.get() + t.elapsed().as_secs_f64() * 1000.0);
-                }
-                if reference_layer1_la_trace {
-                    let current_chunk = trace_last_row / fla_bt;
-                    let state_row = current_chunk * nv;
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_state_v_new_post_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        v_new_fla,
-                        trace_last_row,
-                        nv * dv,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_state_h_post_call_chunk_head0",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        h_fla,
-                        state_row,
-                        dk * dv,
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_state_ht_post_call_head0",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(ht_fla, dk * dv),
-                    );
-                    self.push_reference_stage_metadata(
-                        "layer1_la_state_recurrence_metadata_post",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        serde_json::json!({
-                            "kernel": "krasis_fla_chunk_state_recurrence",
-                            "v_new_output_ptr": format!("0x{:x}", v_new_fla),
-                            "h_output_ptr": format!("0x{:x}", h_fla),
-                            "ht_output_ptr": format!("0x{:x}", ht_fla),
-                            "stream_ptr": format!("0x{:x}", stream_ptr as usize),
-                            "sync_before_snapshot": true,
-                        }),
-                    );
-                }
-                if self.trace_prefill_layer_summary_enabled(trace_step, layer_idx) {
-                    let final_chunk = fla_nt.saturating_sub(1);
-                    self.trace_emit_bf16_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_recurrence_h_final_block_entry",
-                        h_fla + (final_chunk * la_state_elements * 2) as u64,
-                        0,
-                        la_state_elements,
-                    );
-                    self.trace_emit_bf16_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_recurrence_v_new_final_block",
-                        v_new_fla + ((fla_total - fla_bt) * nv * dv * 2) as u64,
-                        0,
-                        fla_bt * nv * dv,
-                    );
-                    self.trace_emit_f32_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_recurrence_ht_post_call",
-                        ht_fla,
-                        0,
-                        la_state_elements,
-                    );
-                }
-                if trace_la_mixer {
-                    let last_pos = m.saturating_sub(1);
-                    self.trace_emit_bf16_row(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "v_new_last",
-                        v_new_fla,
-                        last_pos,
-                        nv * dv,
-                    );
-                }
-                if la_diag {
-                    self.stream_sync()?;
-                    let h_chunk0h0 = self.diag_l2_norm(h_fla, 0, dk * dv, dk * dv);
-                    let vnew_h0p0 = self.diag_l2_norm(v_new_fla, 0, nv * dv, dv);
-                    let vnew_h0plast = self.diag_l2_norm(v_new_fla, m - 1, nv * dv, dv);
-                    let ht_h0 = self.diag_l2_norm_f32(ht_fla, 0, dk * dv, dk * dv);
-                    let vnew_last_raw =
-                        self.diag_download_bf16(v_new_fla + (((m - 1) * nv * dv) * 2) as u64, 4);
-                    eprintln!(
+                    // Step 5: state_recurrence — k, u, w, g, h0 → h, v_new, ht
+                    // Grid: (cdiv(V, BV), B*H); BV is selected by the loaded FLA symbol.
+                    // "blockdim64" in the kernel name refers to BT=64 (chunk time dim), NOT BV.
+                    // C wrapper params: k, v(=u), w, v_new, g, h, h0, ht, T
+                    // h0 and ht are FP32. Per-chunk `h` remains the kernel's BF16
+                    // output, but the fused recurrence carries its FP32 accumulator
+                    // directly between internal blocks.
+                    let state_bv = if fla.state_recurrence_bv64_enabled {
+                        64usize
+                    } else {
+                        32usize
+                    };
+                    let sr_grid_x = ((dv + state_bv - 1) / state_bv) as u32;
+                    let state_recurrence = if fla.state_recurrence_bv64_enabled {
+                        fla.state_recurrence_bv64
+                            .ok_or("FLA BV64 state recurrence requested but symbol is not loaded")?
+                    } else {
+                        fla.state_recurrence
+                    };
+                    if reference_layer1_la_trace {
+                        let current_chunk = trace_last_row / fla_bt;
+                        let state_row = current_chunk * nv;
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_state_k_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            fla_k_bf16,
+                            trace_last_row,
+                            nv * dk,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_state_u_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            u_fla,
+                            trace_last_row,
+                            nv * dv,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_state_w_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            w_fla,
+                            trace_last_row,
+                            nv * dk,
+                        );
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_state_g_input_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                g_cum_fla + ((trace_last_row * nv * 4) as u64),
+                                nv,
+                            ),
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_state_v_new_pre_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            v_new_fla,
+                            trace_last_row,
+                            nv * dv,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_state_h_pre_call_chunk_head0",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            h_fla,
+                            state_row,
+                            dk * dv,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_state_h0_pre_call_head0",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            h0_fla,
+                            0,
+                            dk * dv,
+                        );
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_state_ht_pre_call_head0",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(ht_fla, dk * dv),
+                        );
+                        self.push_reference_stage_metadata(
+                            "layer1_la_state_recurrence_metadata_pre",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            serde_json::json!({
+                                "kernel": "krasis_fla_chunk_state_recurrence",
+                                "k_ptr": format!("0x{:x}", fla_k_bf16),
+                                "u_input_ptr": format!("0x{:x}", u_fla),
+                                "w_input_ptr": format!("0x{:x}", w_fla),
+                                "v_new_output_ptr": format!("0x{:x}", v_new_fla),
+                                "g_ptr": format!("0x{:x}", g_cum_fla),
+                                "h_output_ptr": format!("0x{:x}", h_fla),
+                                "h0_ptr": format!("0x{:x}", h0_fla),
+                                "ht_output_ptr": format!("0x{:x}", ht_fla),
+                                "stream_ptr": format!("0x{:x}", stream_ptr as usize),
+                                "dtypes": {
+                                    "k": "bf16",
+                                    "u_input": "bf16",
+                                    "w_input": "bf16",
+                                    "v_new_output": "bf16",
+                                    "g": "fp32",
+                                    "h_output": "bf16",
+                                    "h0": "fp32",
+                                    "ht_output": "fp32"
+                                },
+                                "shape": {
+                                    "m": m,
+                                    "fla_total": fla_total,
+                                    "fla_nt": fla_nt,
+                                    "fla_bt": fla_bt,
+                                    "nv": nv,
+                                    "dk": dk,
+                                    "dv": dv,
+                                    "trace_last_pos": trace_last_pos,
+                                    "trace_last_row": trace_last_row,
+                                    "current_chunk": current_chunk,
+                                },
+                                "strides": {
+                                    "k_token_stride_elements": nv * dk,
+                                    "u_token_stride_elements": nv * dv,
+                                    "w_token_stride_elements": nv * dk,
+                                    "v_new_token_stride_elements": nv * dv,
+                                    "g_token_stride_elements": nv,
+                                    "h_chunk_stride_elements": nv * dk * dv,
+                                    "h_head_stride_elements": dk * dv,
+                                },
+                                "params": {
+                                    "t_arg": t_arg,
+                                    "grid_x": sr_grid_x,
+                                    "grid_y": nv,
+                                    "grid_z": 1,
+                                    "bv": state_bv,
+                                },
+                                "sync_before_snapshot": true,
+                                "kv_cache_applicable": false,
+                                "rope_applicable": false,
+                            }),
+                        );
+                    }
+                    if self.trace_prefill_layer_summary_enabled(trace_step, layer_idx) {
+                        let final_block_row = fla_total.saturating_sub(fla_bt);
+                        let final_block_real_rows = m.saturating_sub(final_block_row).min(fla_bt);
+                        self.trace_emit_bf16_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_recurrence_k_final_block",
+                            fla_k_bf16 + (final_block_row * nv * dk * 2) as u64,
+                            0,
+                            fla_bt * nv * dk,
+                        );
+                        self.trace_emit_bf16_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_recurrence_u_final_block",
+                            u_fla + (final_block_row * nv * dv * 2) as u64,
+                            0,
+                            fla_bt * nv * dv,
+                        );
+                        self.trace_emit_bf16_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_recurrence_w_final_block",
+                            w_fla + (final_block_row * nv * dk * 2) as u64,
+                            0,
+                            fla_bt * nv * dk,
+                        );
+                        self.trace_emit_f32_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_recurrence_g_final_block",
+                            g_cum_fla + (final_block_row * nv * 4) as u64,
+                            0,
+                            fla_bt * nv,
+                        );
+                        self.trace_emit_bf16_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_wy_v_final_block_real_rows",
+                            fla_v_bf16 + (final_block_row * nv * dv * 2) as u64,
+                            0,
+                            final_block_real_rows * nv * dv,
+                        );
+                        self.trace_emit_bf16_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_wy_beta_final_block_real_rows",
+                            fla_beta_bf16 + (final_block_row * nv * 2) as u64,
+                            0,
+                            final_block_real_rows * nv,
+                        );
+                        self.trace_emit_bf16_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_wy_ai_final_block_real_rows",
+                            ai_fla + (final_block_row * nv * fla_bt * 2) as u64,
+                            0,
+                            final_block_real_rows * nv * fla_bt,
+                        );
+                        self.trace_emit_bf16_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_recurrence_u_final_block_real_rows",
+                            u_fla + (final_block_row * nv * dv * 2) as u64,
+                            0,
+                            final_block_real_rows * nv * dv,
+                        );
+                        self.trace_emit_bf16_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_recurrence_w_final_block_real_rows",
+                            w_fla + (final_block_row * nv * dk * 2) as u64,
+                            0,
+                            final_block_real_rows * nv * dk,
+                        );
+                        self.trace_emit_f32_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_recurrence_g_final_block_real_rows",
+                            g_cum_fla + (final_block_row * nv * 4) as u64,
+                            0,
+                            final_block_real_rows * nv,
+                        );
+                        self.trace_emit_f32_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_recurrence_h0_pre_call",
+                            h0_fla,
+                            0,
+                            la_state_elements,
+                        );
+                    }
+                    let lt_fla_state = if lt { Some(Instant::now()) } else { None };
+                    let rc = unsafe {
+                        (state_recurrence)(
+                            fla_k_bf16, // k (BF16)
+                            u_fla,      // v (kernel param) = Python's u (BF16)
+                            w_fla,      // w (kernel param) = Python's w (BF16)
+                            v_new_fla,  // v_new output (BF16)
+                            g_cum_fla,  // g (cumsum gate, FP32)
+                            0,          // gk (unused — USE_GK=False constexpr)
+                            h_fla,      // h output (BF16, per-chunk states)
+                            h0_fla,     // h0 (FP32 persistent recurrent state)
+                            ht_fla,     // ht (FP32, final state output)
+                            0, 0, // cu_seqlens, chunk_offsets (IS_VARLEN=False)
+                            t_arg, sr_grid_x, nv as u32, 1, stream_ptr,
+                        )
+                    };
+                    if rc != 0 {
+                        return Err(format!("FLA state_recurrence failed: {}", rc));
+                    }
+                    if let Some(t) = lt_fla_state {
+                        self.stream_sync()?;
+                        self.t_la_fla_state
+                            .set(self.t_la_fla_state.get() + t.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    if reference_layer1_la_trace {
+                        let current_chunk = trace_last_row / fla_bt;
+                        let state_row = current_chunk * nv;
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_state_v_new_post_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            v_new_fla,
+                            trace_last_row,
+                            nv * dv,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_state_h_post_call_chunk_head0",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            h_fla,
+                            state_row,
+                            dk * dv,
+                        );
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_state_ht_post_call_head0",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(ht_fla, dk * dv),
+                        );
+                        self.push_reference_stage_metadata(
+                            "layer1_la_state_recurrence_metadata_post",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            serde_json::json!({
+                                "kernel": "krasis_fla_chunk_state_recurrence",
+                                "v_new_output_ptr": format!("0x{:x}", v_new_fla),
+                                "h_output_ptr": format!("0x{:x}", h_fla),
+                                "ht_output_ptr": format!("0x{:x}", ht_fla),
+                                "stream_ptr": format!("0x{:x}", stream_ptr as usize),
+                                "sync_before_snapshot": true,
+                            }),
+                        );
+                    }
+                    if self.trace_prefill_layer_summary_enabled(trace_step, layer_idx) {
+                        let final_chunk = fla_nt.saturating_sub(1);
+                        self.trace_emit_bf16_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_recurrence_h_final_block_entry",
+                            h_fla + (final_chunk * la_state_elements * 2) as u64,
+                            0,
+                            la_state_elements,
+                        );
+                        self.trace_emit_bf16_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_recurrence_v_new_final_block",
+                            v_new_fla + ((fla_total - fla_bt) * nv * dv * 2) as u64,
+                            0,
+                            fla_bt * nv * dv,
+                        );
+                        self.trace_emit_f32_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_recurrence_ht_post_call",
+                            ht_fla,
+                            0,
+                            la_state_elements,
+                        );
+                    }
+                    if trace_la_mixer {
+                        let last_pos = m.saturating_sub(1);
+                        self.trace_emit_bf16_row(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "v_new_last",
+                            v_new_fla,
+                            last_pos,
+                            nv * dv,
+                        );
+                    }
+                    if la_diag {
+                        self.stream_sync()?;
+                        let h_chunk0h0 = self.diag_l2_norm(h_fla, 0, dk * dv, dk * dv);
+                        let vnew_h0p0 = self.diag_l2_norm(v_new_fla, 0, nv * dv, dv);
+                        let vnew_h0plast = self.diag_l2_norm(v_new_fla, m - 1, nv * dv, dv);
+                        let ht_h0 = self.diag_l2_norm_f32(ht_fla, 0, dk * dv, dk * dv);
+                        let vnew_last_raw = self
+                            .diag_download_bf16(v_new_fla + (((m - 1) * nv * dv) * 2) as u64, 4);
+                        eprintln!(
                         "[DIAG L{:02} FLA] step5_recur: h_chunk0h0={:.6} vnew_h0p0={:.6} vnew_h0plast={:.6} ht_h0={:.6} vnew_last_raw=[{:.6},{:.6},{:.6},{:.6}]",
                         layer_idx,
                         h_chunk0h0,
@@ -58531,370 +61018,335 @@ impl PrefillEngine {
                         *vnew_last_raw.get(2).unwrap_or(&0.0),
                         *vnew_last_raw.get(3).unwrap_or(&0.0),
                     );
-                }
+                    }
 
-                // Step 6: output — q, k, v_new, h, g → o
-                // Grid: (cdiv(V, BV), NT, B*H) = (cdiv(dv, BV), fla_nt, nv) — 3D grid
-                // BV for chunk_fwd_kernel_o was autotuned. With 8 warps: BV=128, BK=128.
-                let o_bv = 128usize; // from autotune: Config(BK=128, BV=128, num_warps=8)
-                let o_grid_x = ((dv + o_bv - 1) / o_bv) as u32;
-                // q was already pre-scaled by `scale` in step 9 (L2 norm).
-                // chunk_fwd_kernel_o multiplies ALL output by its `scale` arg (line 122:
-                //   b_o = b_o * scale + dot(A, v) * scale).
-                // Passing scale=1.0 avoids double-scaling.
-                if reference_layer1_la_trace {
-                    let current_chunk = trace_last_row / fla_bt;
-                    let state_row = current_chunk * nv;
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_fla_output_pre_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        o_fla,
-                        trace_last_row,
-                        nv * dv,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_fla_v_new_pre_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        v_new_fla,
-                        trace_last_row,
-                        nv * dv,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_fla_h_state_pre_call_chunk_head0",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        h_fla,
-                        state_row,
-                        dk * dv,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_fla_h0_pre_call_head0",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        h0_fla,
-                        0,
-                        dk * dv,
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_fla_ht_pre_call_head0",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(ht_fla, dk * dv),
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_fla_g_cumsum_pre_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(g_cum_fla + ((trace_last_row * nv * 4) as u64), nv),
-                    );
-                    self.push_reference_stage_metadata(
-                        "layer1_la_fla_output_call_metadata_pre",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        serde_json::json!({
-                            "kernel": "krasis_fla_chunk_fwd_kernel_o",
-                            "q_ptr": format!("0x{:x}", fla_q_bf16),
-                            "k_ptr": format!("0x{:x}", fla_k_bf16),
-                            "v_new_ptr": format!("0x{:x}", v_new_fla),
-                            "h_ptr": format!("0x{:x}", h_fla),
-                            "g_ptr": format!("0x{:x}", g_cum_fla),
-                            "output_ptr": format!("0x{:x}", o_fla),
-                            "h0_ptr": format!("0x{:x}", h0_fla),
-                            "ht_ptr": format!("0x{:x}", ht_fla),
-                            "stream_ptr": format!("0x{:x}", stream_ptr as usize),
-                            "q_dtype": "bf16",
-                            "k_dtype": "bf16",
-                            "v_new_dtype": "bf16",
-                            "h_dtype": "bf16",
-                            "g_dtype": "fp32",
-                            "output_dtype": "bf16",
-                            "shape": {
-                                "m": m,
-                                "fla_total": fla_total,
-                                "fla_nt": fla_nt,
-                                "fla_bt": fla_bt,
-                                "nv": nv,
-                                "dk": dk,
-                                "dv": dv,
-                                "trace_last_pos": trace_last_pos,
-                                "trace_last_row": trace_last_row,
-                                "current_chunk": current_chunk,
-                            },
-                            "strides": {
-                                "q_token_stride_elements": nv * dk,
-                                "k_token_stride_elements": nv * dk,
-                                "v_new_token_stride_elements": nv * dv,
-                                "output_token_stride_elements": nv * dv,
-                                "h_chunk_stride_elements": nv * dk * dv,
-                                "h_head_stride_elements": dk * dv,
-                                "g_token_stride_elements": nv,
-                            },
-                            "params": {
-                                "scale": 1.0f32,
-                                "grid_x": o_grid_x,
-                                "grid_y": fla_nt,
-                                "grid_z": nv,
-                                "o_bv": o_bv,
-                                "t_arg": t_arg,
-                            },
-                            "sync_before_snapshot": true,
-                            "kv_cache_applicable": false,
-                            "rope_applicable": false,
-                        }),
-                    );
-                }
-                let lt_fla_output = if lt { Some(Instant::now()) } else { None };
-                let rc = unsafe {
-                    (fla.output)(
-                        fla_q_bf16, // q (already includes scale from fused repeat+l2norm)
-                        fla_k_bf16, // k
-                        v_new_fla,  // v (kernel param) = v_new from step 5
-                        h_fla,      // h (per-chunk states from step 5)
-                        g_cum_fla,  // g (cumsum gate, FP32)
-                        0,          // g_gamma (unused — USE_G_GAMMA=False constexpr)
-                        o_fla,      // o (output, BF16)
-                        0,
-                        0,      // cu_seqlens, chunk_indices (IS_VARLEN=False)
-                        1.0f32, // scale=1.0 since q is already pre-scaled
-                        t_arg,
-                        o_grid_x,
-                        fla_nt as u32,
-                        nv as u32,
-                        stream_ptr,
-                    )
-                };
-                if rc != 0 {
-                    return Err(format!("FLA output failed: {}", rc));
-                }
-                if let Some(t) = lt_fla_output {
-                    self.stream_sync()?;
-                    self.t_la_fla_output
-                        .set(self.t_la_fla_output.get() + t.elapsed().as_secs_f64() * 1000.0);
-                }
-                if reference_layer1_la_trace {
-                    let current_chunk = trace_last_row / fla_bt;
-                    let state_row = current_chunk * nv;
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_fla_output_post_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        o_fla,
-                        trace_last_row,
-                        nv * dv,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_fla_v_new_post_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        v_new_fla,
-                        trace_last_row,
-                        nv * dv,
-                    );
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_fla_h_state_post_call_chunk_head0",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        h_fla,
-                        state_row,
-                        dk * dv,
-                    );
-                    self.push_reference_stage_f32_snapshot(
-                        "layer1_la_fla_g_cumsum_post_call_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        &self.diag_download_f32(g_cum_fla + ((trace_last_row * nv * 4) as u64), nv),
-                    );
-                    self.push_reference_stage_metadata(
-                        "layer1_la_fla_output_call_metadata_post",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        serde_json::json!({
-                            "kernel": "krasis_fla_chunk_fwd_kernel_o",
-                            "rc": rc,
-                            "output_ptr": format!("0x{:x}", o_fla),
-                            "v_new_ptr": format!("0x{:x}", v_new_fla),
-                            "h_ptr": format!("0x{:x}", h_fla),
-                            "g_ptr": format!("0x{:x}", g_cum_fla),
-                            "stream_ptr": format!("0x{:x}", stream_ptr as usize),
-                            "sync_after_snapshot": true,
-                            "shape": {
-                                "m": m,
-                                "fla_total": fla_total,
-                                "fla_nt": fla_nt,
-                                "fla_bt": fla_bt,
-                                "nv": nv,
-                                "dk": dk,
-                                "dv": dv,
-                                "trace_last_pos": trace_last_pos,
-                                "trace_last_row": trace_last_row,
-                                "current_chunk": current_chunk,
-                            },
-                        }),
-                    );
-                }
-                if trace_la_projection_summary {
-                    self.trace_emit_bf16_row_summary(
-                        0,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_fla_output_last",
-                        o_fla,
-                        trace_last_row,
-                        nv * dv,
-                    );
-                }
-                if reference_layer1_la_trace {
-                    self.push_reference_stage_snapshot(
-                        "layer1_la_fla_output_last",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        o_fla,
-                        trace_last_row,
-                        nv * dv,
-                    );
-                    self.push_reference_stage_metadata(
-                        "layer1_la_fla_output_metadata",
-                        Some(layer_idx),
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        serde_json::json!({
-                            "o_fla_ptr": format!("0x{:x}", o_fla),
-                            "h_fla_ptr": format!("0x{:x}", h_fla),
-                            "ht_fla_ptr": format!("0x{:x}", ht_fla),
-                            "g_cum_fla_ptr": format!("0x{:x}", g_cum_fla),
-                            "v_new_fla_ptr": format!("0x{:x}", v_new_fla),
-                            "stream_ptr": format!("0x{:x}", stream_ptr as usize),
-                            "width": nv * dv,
-                        }),
-                    );
-                }
-                if trace_la_mixer {
-                    let last_pos = m.saturating_sub(1);
-                    self.trace_emit_bf16_row(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "output_last",
-                        o_fla,
-                        last_pos,
-                        nv * dv,
-                    );
-                    let vendor_output =
-                        self.diag_download_bf16(o_fla + ((last_pos * nv * dv * 2) as u64), nv * dv);
-                    let (cpu_output, cpu_state_term, cpu_local_term) = self
-                        .diag_compute_fla_output_last_cpu(
-                            fla_q_bf16, fla_k_bf16, v_new_fla, h_fla, g_cum_fla, m, nv, dk, dv,
-                            fla_bt,
+                    // Step 6: output — q, k, v_new, h, g → o
+                    // Grid: (cdiv(V, BV), NT, B*H) = (cdiv(dv, BV), fla_nt, nv) — 3D grid
+                    // BV for chunk_fwd_kernel_o was autotuned. With 8 warps: BV=128, BK=128.
+                    let o_bv = 128usize; // from autotune: Config(BK=128, BV=128, num_warps=8)
+                    let o_grid_x = ((dv + o_bv - 1) / o_bv) as u32;
+                    // q was already pre-scaled by `scale` in step 9 (L2 norm).
+                    // chunk_fwd_kernel_o multiplies ALL output by its `scale` arg (line 122:
+                    //   b_o = b_o * scale + dot(A, v) * scale).
+                    // Passing scale=1.0 avoids double-scaling.
+                    if reference_layer1_la_trace {
+                        let current_chunk = trace_last_row / fla_bt;
+                        let state_row = current_chunk * nv;
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_fla_output_pre_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            o_fla,
+                            trace_last_row,
+                            nv * dv,
                         );
-                    let vendor_minus_cpu = vendor_output
-                        .iter()
-                        .zip(cpu_output.iter())
-                        .map(|(vendor, cpu)| vendor - cpu)
-                        .collect::<Vec<f32>>();
-                    let mut cpu_local_output_fp32_gate_ref: Option<Vec<f32>> = None;
-                    if last_pos / fla_bt == 0 {
-                        cpu_local_output_fp32_gate_ref = Some(
-                            self.diag_compute_fla_local_output_last_from_g_chunk_and_v_chunk(
-                                fla_q_bf16,
-                                fla_k_bf16,
-                                trace_value_corrected_chunk_fp32_gate_ref
-                                    .as_ref()
-                                    .ok_or("missing trace fp32 gate value-corrected chunk")?,
-                                trace_g_cumsum_chunk_fp32_gate_ref
-                                    .as_ref()
-                                    .ok_or("missing trace fp32 gate cumsum chunk")?,
-                                m,
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_fla_v_new_pre_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            v_new_fla,
+                            trace_last_row,
+                            nv * dv,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_fla_h_state_pre_call_chunk_head0",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            h_fla,
+                            state_row,
+                            dk * dv,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_fla_h0_pre_call_head0",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            h0_fla,
+                            0,
+                            dk * dv,
+                        );
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_fla_ht_pre_call_head0",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(ht_fla, dk * dv),
+                        );
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_fla_g_cumsum_pre_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                g_cum_fla + ((trace_last_row * nv * 4) as u64),
                                 nv,
-                                dk,
-                                dv,
-                                fla_bt,
                             ),
                         );
+                        self.push_reference_stage_metadata(
+                            "layer1_la_fla_output_call_metadata_pre",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            serde_json::json!({
+                                "kernel": "krasis_fla_chunk_fwd_kernel_o",
+                                "q_ptr": format!("0x{:x}", fla_q_bf16),
+                                "k_ptr": format!("0x{:x}", fla_k_bf16),
+                                "v_new_ptr": format!("0x{:x}", v_new_fla),
+                                "h_ptr": format!("0x{:x}", h_fla),
+                                "g_ptr": format!("0x{:x}", g_cum_fla),
+                                "output_ptr": format!("0x{:x}", o_fla),
+                                "h0_ptr": format!("0x{:x}", h0_fla),
+                                "ht_ptr": format!("0x{:x}", ht_fla),
+                                "stream_ptr": format!("0x{:x}", stream_ptr as usize),
+                                "q_dtype": "bf16",
+                                "k_dtype": "bf16",
+                                "v_new_dtype": "bf16",
+                                "h_dtype": "bf16",
+                                "g_dtype": "fp32",
+                                "output_dtype": "bf16",
+                                "shape": {
+                                    "m": m,
+                                    "fla_total": fla_total,
+                                    "fla_nt": fla_nt,
+                                    "fla_bt": fla_bt,
+                                    "nv": nv,
+                                    "dk": dk,
+                                    "dv": dv,
+                                    "trace_last_pos": trace_last_pos,
+                                    "trace_last_row": trace_last_row,
+                                    "current_chunk": current_chunk,
+                                },
+                                "strides": {
+                                    "q_token_stride_elements": nv * dk,
+                                    "k_token_stride_elements": nv * dk,
+                                    "v_new_token_stride_elements": nv * dv,
+                                    "output_token_stride_elements": nv * dv,
+                                    "h_chunk_stride_elements": nv * dk * dv,
+                                    "h_head_stride_elements": dk * dv,
+                                    "g_token_stride_elements": nv,
+                                },
+                                "params": {
+                                    "scale": 1.0f32,
+                                    "grid_x": o_grid_x,
+                                    "grid_y": fla_nt,
+                                    "grid_z": nv,
+                                    "o_bv": o_bv,
+                                    "t_arg": t_arg,
+                                },
+                                "sync_before_snapshot": true,
+                                "kv_cache_applicable": false,
+                                "rope_applicable": false,
+                            }),
+                        );
                     }
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "output_last_cpu_ref",
-                        &cpu_output,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "output_last_cpu_state_ref",
-                        &cpu_state_term,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "output_last_cpu_local_ref",
-                        &cpu_local_term,
-                    );
-                    self.trace_emit_f32_values(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "output_last_vendor_minus_cpu_ref",
-                        &vendor_minus_cpu,
-                    );
-                    if let Some(cpu_local_output_fp32_gate_ref) =
-                        cpu_local_output_fp32_gate_ref.as_ref()
-                    {
-                        let vendor_minus_fp32_gate_ref = vendor_output
+                    let lt_fla_output = if lt { Some(Instant::now()) } else { None };
+                    let rc = unsafe {
+                        (fla.output)(
+                            fla_q_bf16, // q (already includes scale from fused repeat+l2norm)
+                            fla_k_bf16, // k
+                            v_new_fla,  // v (kernel param) = v_new from step 5
+                            h_fla,      // h (per-chunk states from step 5)
+                            g_cum_fla,  // g (cumsum gate, FP32)
+                            0,          // g_gamma (unused — USE_G_GAMMA=False constexpr)
+                            o_fla,      // o (output, BF16)
+                            0,
+                            0,      // cu_seqlens, chunk_indices (IS_VARLEN=False)
+                            1.0f32, // scale=1.0 since q is already pre-scaled
+                            t_arg,
+                            o_grid_x,
+                            fla_nt as u32,
+                            nv as u32,
+                            stream_ptr,
+                        )
+                    };
+                    if rc != 0 {
+                        return Err(format!("FLA output failed: {}", rc));
+                    }
+                    if let Some(target) = gdn_observation.as_ref() {
+                        gdn_geometry.outputs(target, gdn_maximum, o_fla, ht_fla, self.stream)?;
+                    }
+                    if let Some(t) = lt_fla_output {
+                        self.stream_sync()?;
+                        self.t_la_fla_output
+                            .set(self.t_la_fla_output.get() + t.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    if reference_layer1_la_trace {
+                        let current_chunk = trace_last_row / fla_bt;
+                        let state_row = current_chunk * nv;
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_fla_output_post_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            o_fla,
+                            trace_last_row,
+                            nv * dv,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_fla_v_new_post_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            v_new_fla,
+                            trace_last_row,
+                            nv * dv,
+                        );
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_fla_h_state_post_call_chunk_head0",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            h_fla,
+                            state_row,
+                            dk * dv,
+                        );
+                        self.push_reference_stage_f32_snapshot(
+                            "layer1_la_fla_g_cumsum_post_call_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            &self.diag_download_f32(
+                                g_cum_fla + ((trace_last_row * nv * 4) as u64),
+                                nv,
+                            ),
+                        );
+                        self.push_reference_stage_metadata(
+                            "layer1_la_fla_output_call_metadata_post",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            serde_json::json!({
+                                "kernel": "krasis_fla_chunk_fwd_kernel_o",
+                                "rc": rc,
+                                "output_ptr": format!("0x{:x}", o_fla),
+                                "v_new_ptr": format!("0x{:x}", v_new_fla),
+                                "h_ptr": format!("0x{:x}", h_fla),
+                                "g_ptr": format!("0x{:x}", g_cum_fla),
+                                "stream_ptr": format!("0x{:x}", stream_ptr as usize),
+                                "sync_after_snapshot": true,
+                                "shape": {
+                                    "m": m,
+                                    "fla_total": fla_total,
+                                    "fla_nt": fla_nt,
+                                    "fla_bt": fla_bt,
+                                    "nv": nv,
+                                    "dk": dk,
+                                    "dv": dv,
+                                    "trace_last_pos": trace_last_pos,
+                                    "trace_last_row": trace_last_row,
+                                    "current_chunk": current_chunk,
+                                },
+                            }),
+                        );
+                    }
+                    if trace_la_projection_summary {
+                        self.trace_emit_bf16_row_summary(
+                            0,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_fla_output_last",
+                            o_fla,
+                            trace_last_row,
+                            nv * dv,
+                        );
+                    }
+                    if reference_layer1_la_trace {
+                        self.push_reference_stage_snapshot(
+                            "layer1_la_fla_output_last",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            o_fla,
+                            trace_last_row,
+                            nv * dv,
+                        );
+                        self.push_reference_stage_metadata(
+                            "layer1_la_fla_output_metadata",
+                            Some(layer_idx),
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            serde_json::json!({
+                                "o_fla_ptr": format!("0x{:x}", o_fla),
+                                "h_fla_ptr": format!("0x{:x}", h_fla),
+                                "ht_fla_ptr": format!("0x{:x}", ht_fla),
+                                "g_cum_fla_ptr": format!("0x{:x}", g_cum_fla),
+                                "v_new_fla_ptr": format!("0x{:x}", v_new_fla),
+                                "stream_ptr": format!("0x{:x}", stream_ptr as usize),
+                                "width": nv * dv,
+                            }),
+                        );
+                    }
+                    if trace_la_mixer {
+                        let last_pos = m.saturating_sub(1);
+                        self.trace_emit_bf16_row(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "output_last",
+                            o_fla,
+                            last_pos,
+                            nv * dv,
+                        );
+                        let vendor_output = self
+                            .diag_download_bf16(o_fla + ((last_pos * nv * dv * 2) as u64), nv * dv);
+                        let (cpu_output, cpu_state_term, cpu_local_term) = self
+                            .diag_compute_fla_output_last_cpu(
+                                fla_q_bf16, fla_k_bf16, v_new_fla, h_fla, g_cum_fla, m, nv, dk, dv,
+                                fla_bt,
+                            );
+                        let vendor_minus_cpu = vendor_output
                             .iter()
-                            .zip(cpu_local_output_fp32_gate_ref.iter())
+                            .zip(cpu_output.iter())
                             .map(|(vendor, cpu)| vendor - cpu)
                             .collect::<Vec<f32>>();
+                        let mut cpu_local_output_fp32_gate_ref: Option<Vec<f32>> = None;
+                        if last_pos / fla_bt == 0 {
+                            cpu_local_output_fp32_gate_ref = Some(
+                                self.diag_compute_fla_local_output_last_from_g_chunk_and_v_chunk(
+                                    fla_q_bf16,
+                                    fla_k_bf16,
+                                    trace_value_corrected_chunk_fp32_gate_ref
+                                        .as_ref()
+                                        .ok_or("missing trace fp32 gate value-corrected chunk")?,
+                                    trace_g_cumsum_chunk_fp32_gate_ref
+                                        .as_ref()
+                                        .ok_or("missing trace fp32 gate cumsum chunk")?,
+                                    m,
+                                    nv,
+                                    dk,
+                                    dv,
+                                    fla_bt,
+                                ),
+                            );
+                        }
                         self.trace_emit_f32_values(
                             0,
                             last_pos,
                             0,
                             Some(layer_idx),
                             "la_mixer",
-                            "output_last_cpu_local_fp32_gate_ref",
-                            cpu_local_output_fp32_gate_ref,
+                            "output_last_cpu_ref",
+                            &cpu_output,
                         );
                         self.trace_emit_f32_values(
                             0,
@@ -58902,56 +61354,101 @@ impl PrefillEngine {
                             0,
                             Some(layer_idx),
                             "la_mixer",
-                            "output_last_vendor_minus_fp32_gate_ref",
-                            &vendor_minus_fp32_gate_ref,
+                            "output_last_cpu_state_ref",
+                            &cpu_state_term,
                         );
-                        let output_fp32_gate_summary = self.trace_emit_compare_summary(
+                        self.trace_emit_f32_values(
                             0,
                             last_pos,
                             0,
                             Some(layer_idx),
                             "la_mixer",
-                            "output_vs_fp32_gate_ref",
+                            "output_last_cpu_local_ref",
+                            &cpu_local_term,
+                        );
+                        self.trace_emit_f32_values(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "output_last_vendor_minus_cpu_ref",
+                            &vendor_minus_cpu,
+                        );
+                        if let Some(cpu_local_output_fp32_gate_ref) =
+                            cpu_local_output_fp32_gate_ref.as_ref()
+                        {
+                            let vendor_minus_fp32_gate_ref = vendor_output
+                                .iter()
+                                .zip(cpu_local_output_fp32_gate_ref.iter())
+                                .map(|(vendor, cpu)| vendor - cpu)
+                                .collect::<Vec<f32>>();
+                            self.trace_emit_f32_values(
+                                0,
+                                last_pos,
+                                0,
+                                Some(layer_idx),
+                                "la_mixer",
+                                "output_last_cpu_local_fp32_gate_ref",
+                                cpu_local_output_fp32_gate_ref,
+                            );
+                            self.trace_emit_f32_values(
+                                0,
+                                last_pos,
+                                0,
+                                Some(layer_idx),
+                                "la_mixer",
+                                "output_last_vendor_minus_fp32_gate_ref",
+                                &vendor_minus_fp32_gate_ref,
+                            );
+                            let output_fp32_gate_summary = self.trace_emit_compare_summary(
+                                0,
+                                last_pos,
+                                0,
+                                Some(layer_idx),
+                                "la_mixer",
+                                "output_vs_fp32_gate_ref",
+                                "output_last_vendor",
+                                "output_last_cpu_local_fp32_gate_ref",
+                                &vendor_output,
+                                cpu_local_output_fp32_gate_ref,
+                            );
+                            trace_stage_summaries.push((
+                                "output_vs_fp32_gate_ref",
+                                output_fp32_gate_summary.max_abs,
+                                output_fp32_gate_summary.max_abs_idx,
+                                output_fp32_gate_summary.actual_at_max,
+                                output_fp32_gate_summary.expected_at_max,
+                            ));
+                        }
+                        let output_summary = self.trace_emit_compare_summary(
+                            0,
+                            last_pos,
+                            0,
+                            Some(layer_idx),
+                            "la_mixer",
+                            "output",
                             "output_last_vendor",
-                            "output_last_cpu_local_fp32_gate_ref",
+                            "output_last_cpu_ref",
                             &vendor_output,
-                            cpu_local_output_fp32_gate_ref,
+                            &cpu_output,
                         );
                         trace_stage_summaries.push((
-                            "output_vs_fp32_gate_ref",
-                            output_fp32_gate_summary.max_abs,
-                            output_fp32_gate_summary.max_abs_idx,
-                            output_fp32_gate_summary.actual_at_max,
-                            output_fp32_gate_summary.expected_at_max,
+                            "output",
+                            output_summary.max_abs,
+                            output_summary.max_abs_idx,
+                            output_summary.actual_at_max,
+                            output_summary.expected_at_max,
                         ));
-                    }
-                    let output_summary = self.trace_emit_compare_summary(
-                        0,
-                        last_pos,
-                        0,
-                        Some(layer_idx),
-                        "la_mixer",
-                        "output",
-                        "output_last_vendor",
-                        "output_last_cpu_ref",
-                        &vendor_output,
-                        &cpu_output,
-                    );
-                    trace_stage_summaries.push((
-                        "output",
-                        output_summary.max_abs,
-                        output_summary.max_abs_idx,
-                        output_summary.actual_at_max,
-                        output_summary.expected_at_max,
-                    ));
-                    let first_bad = trace_stage_summaries.iter().find(
-                        |(stage, max_abs, _, _, _)| match *stage {
-                            "kkt" => *max_abs > 5e-3,
-                            _ => *max_abs > 2e-2,
-                        },
-                    );
-                    if let Some((stage, max_abs, idx, actual, expected)) = first_bad {
-                        trace_emit_prefill_mark(
+                        let first_bad =
+                            trace_stage_summaries
+                                .iter()
+                                .find(|(stage, max_abs, _, _, _)| match *stage {
+                                    "kkt" => *max_abs > 5e-3,
+                                    _ => *max_abs > 2e-2,
+                                });
+                        if let Some((stage, max_abs, idx, actual, expected)) = first_bad {
+                            trace_emit_prefill_mark(
                             self.trace.as_ref(),
                             0,
                             last_pos,
@@ -58963,25 +61460,25 @@ impl PrefillEngine {
                                 stage, max_abs, idx, actual, expected
                             ),
                         );
-                    } else {
-                        trace_emit_prefill_mark(
-                            self.trace.as_ref(),
-                            0,
-                            last_pos,
-                            0,
-                            Some(layer_idx),
-                            "la_mixer",
-                            "first_mismatch stage=none",
-                        );
+                        } else {
+                            trace_emit_prefill_mark(
+                                self.trace.as_ref(),
+                                0,
+                                last_pos,
+                                0,
+                                Some(layer_idx),
+                                "la_mixer",
+                                "first_mismatch stage=none",
+                            );
+                        }
                     }
-                }
-                if la_diag {
-                    self.stream_sync()?;
-                    let o_h0p0 = self.diag_l2_norm(o_fla, 0, nv * dv, dv);
-                    let o_h0plast = self.diag_l2_norm(o_fla, m - 1, nv * dv, dv);
-                    let o_last_raw =
-                        self.diag_download_bf16(o_fla + (((m - 1) * nv * dv) * 2) as u64, 4);
-                    eprintln!(
+                    if la_diag {
+                        self.stream_sync()?;
+                        let o_h0p0 = self.diag_l2_norm(o_fla, 0, nv * dv, dv);
+                        let o_h0plast = self.diag_l2_norm(o_fla, m - 1, nv * dv, dv);
+                        let o_last_raw =
+                            self.diag_download_bf16(o_fla + (((m - 1) * nv * dv) * 2) as u64, 4);
+                        eprintln!(
                         "[DIAG L{:02} FLA] step6_output: o_h0p0={:.6} o_h0plast={:.6} o_last_raw=[{:.6},{:.6},{:.6},{:.6}]",
                         layer_idx,
                         o_h0p0,
@@ -58991,62 +61488,65 @@ impl PrefillEngine {
                         *o_last_raw.get(2).unwrap_or(&0.0),
                         *o_last_raw.get(3).unwrap_or(&0.0),
                     );
-                }
-                if std::env::var("KRASIS_FLA_DEBUG").is_ok() {
-                    self.stream_sync()
-                        .map_err(|e| format!("FLA output sync: {e}"))?;
-                    eprintln!("[FLA-DBG] step6 output OK");
-                }
-                if lt {
-                    self.stream_sync()?;
-                    self.t_la_fla
-                        .set(self.t_la_fla.get() + lt4.elapsed().as_secs_f64() * 1000.0);
-                }
-                let lt5 = Instant::now();
+                    }
+                    if std::env::var("KRASIS_FLA_DEBUG").is_ok() {
+                        self.stream_sync()
+                            .map_err(|e| format!("FLA output sync: {e}"))?;
+                        eprintln!("[FLA-DBG] step6 output OK");
+                    }
+                    if lt {
+                        self.stream_sync()?;
+                        self.t_la_fla
+                            .set(self.t_la_fla.get() + lt4.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    let lt5 = Instant::now();
 
-                // Copy final state to decode state buffer (FP32, unchanged)
-                if lw.la_recur_state_ptr != 0 {
-                    self.memcpy_d2d(lw.la_recur_state_ptr, ht_fla, (nv * dk * dv * 4) as u64)?;
-                }
+                    // Copy final state to decode state buffer (FP32, unchanged)
+                    if lw.la_recur_state_ptr != 0 {
+                        self.memcpy_d2d(lw.la_recur_state_ptr, ht_fla, (nv * dk * dv * 4) as u64)?;
+                    }
 
-                // These synchronized full-state hashes are diagnostic-only and
-                // allow continuation forensics to distinguish a bad snapshot
-                // or non-composable state transition from a later output-path
-                // difference. They are inert unless prefill_layer_summary
-                // tracing is explicitly enabled.
-                if self.trace_prefill_layer_summary_enabled(trace_step, layer_idx) {
-                    self.trace_emit_f32_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_recurrent_state_after_prefill",
-                        lw.la_recur_state_ptr,
-                        0,
-                        la_state_elements,
-                    );
-                    self.trace_emit_f32_row_summary(
-                        trace_step,
-                        trace_last_pos,
-                        0,
-                        layer_idx,
-                        "la_conv_state_after_prefill",
-                        lw.la_conv_state_ptr,
-                        0,
-                        conv_dim.checked_mul(kernel_dim).ok_or_else(|| {
-                            format!(
-                                "linear-attention layer {} convolution state size overflows",
-                                layer_idx
-                            )
-                        })?,
-                    );
-                }
+                    // These synchronized full-state hashes are diagnostic-only and
+                    // allow continuation forensics to distinguish a bad snapshot
+                    // or non-composable state transition from a later output-path
+                    // difference. They are inert unless prefill_layer_summary
+                    // tracing is explicitly enabled.
+                    if self.trace_prefill_layer_summary_enabled(trace_step, layer_idx) {
+                        self.trace_emit_f32_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_recurrent_state_after_prefill",
+                            lw.la_recur_state_ptr,
+                            0,
+                            la_state_elements,
+                        );
+                        self.trace_emit_f32_row_summary(
+                            trace_step,
+                            trace_last_pos,
+                            0,
+                            layer_idx,
+                            "la_conv_state_after_prefill",
+                            lw.la_conv_state_ptr,
+                            0,
+                            conv_dim.checked_mul(kernel_dim).ok_or_else(|| {
+                                format!(
+                                    "linear-attention layer {} convolution state size overflows",
+                                    layer_idx
+                                )
+                            })?,
+                        );
+                    }
 
-                if lt {
-                    self.stream_sync()?;
-                    self.t_la_postfla
-                        .set(self.t_la_postfla.get() + lt5.elapsed().as_secs_f64() * 1000.0);
-                }
+                    if lt {
+                        self.stream_sync()?;
+                        self.t_la_postfla
+                            .set(self.t_la_postfla.get() + lt5.elapsed().as_secs_f64() * 1000.0);
+                    }
+
+                    o_fla
+                };
 
                 // Gated RMSNorm after FLA. Default stays on the direct BF16-input kernel,
                 // but a debug switch can force BF16->FP32 conversion and reuse the
@@ -59143,7 +61643,7 @@ impl PrefillEngine {
                         layer_idx,
                         "la_grmsnorm_out_last",
                         rmsnorm_out,
-                        trace_last_pos,
+                        trace_last_row,
                         nv * dv,
                     );
                 }
@@ -60259,7 +62759,7 @@ impl PrefillEngine {
 
             // Gated RMSNorm for non-FLA fallback path (FP32 input from chunk recurrence)
             // FLA path has its own BF16 gated_rmsnorm above
-            if self.fla.is_none() {
+            if self.fla.is_none() && !self.scalar_native_selected() {
                 // Output is [M, nv*dv] BF16. When value_dim > hidden_size,
                 // d_attn_out is too small. Use la_v_beta ([nv, M, dv] FP32) as temp.
                 // la_v (input to this kernel) can't be reused here.
@@ -60384,6 +62884,15 @@ impl PrefillEngine {
                 o_temp,
                 m,
             )?;
+            self.observe_gdn_prefill_projection(
+                layer_idx,
+                "out_proj",
+                m,
+                chunk_start,
+                rmsnorm_out,
+                o_temp,
+                lw.hqq_linear_attention.as_ref().map(|h| &h.out_proj),
+            )?;
             if trace_la_projection_summary {
                 self.trace_emit_bf16_row_summary(
                     0,
@@ -60392,7 +62901,7 @@ impl PrefillEngine {
                     layer_idx,
                     "la_out_proj_output_last",
                     o_temp,
-                    trace_last_pos,
+                    trace_last_row,
                     cfg.hidden_size,
                 );
             }
@@ -60617,11 +63126,21 @@ impl PrefillEngine {
         }
     }
 
-    fn dense_prefill_weight_gemm(&self,name:&str,input:u64,marlin:&Option<MarlinWeight>,bf16:&Option<Bf16Weight>,output:u64,m:usize)->Result<(),String>{
-        if let (Some(bank),None,Some(w))=(&self.ordered_kda_projection,marlin,bf16){
-            return unsafe {bank.enqueue_dense_bf16(w.ptr,input,output,w.n,w.k,m,self.stream)};
+    fn dense_prefill_weight_gemm(
+        &self,
+        name: &str,
+        input: u64,
+        marlin: &Option<MarlinWeight>,
+        bf16: &Option<Bf16Weight>,
+        output: u64,
+        m: usize,
+    ) -> Result<(), String> {
+        if let (Some(bank), None, Some(w)) = (&self.ordered_kda_projection, marlin, bf16) {
+            return unsafe {
+                bank.enqueue_dense_bf16(w.ptr, input, output, w.n, w.k, m, self.stream)
+            };
         }
-        self.prefill_weight_gemm(name,input,marlin,bf16,output,m)
+        self.prefill_weight_gemm(name, input, marlin, bf16, output, m)
     }
     fn prefill_weight_shape(
         marlin: &Option<MarlinWeight>,
@@ -60712,15 +63231,47 @@ impl PrefillEngine {
             ));
         }
 
-        let dense_probe=self.matched_prefill_target("dense_prefill_operands",layer_idx,m,None)?;
-        if let Some(t)=&dense_probe {
-            if self.active_prefill_chunk_start!=0 {return Err("dense diagnostic requires actual initial complete prefill".into());}
-            crate::dense_ffn_probe::row(t,"input.bf16",input,t.row,self.config.hidden_size,self.stream)?;
-            for (name,w,b) in [("gate",&lw.dense_gate,&lw.dense_gate_bf16),("up",&lw.dense_up,&lw.dense_up_bf16),("down",&lw.dense_down,&lw.dense_down_bf16)] {
-                match (w,b) {
-                    (Some(w),None)=>crate::dense_ffn_probe::marlin(t,name,w.packed,w.scales,w.n,w.k,w.num_groups,w.group_size,w.num_bits,self.stream)?,
-                    (None,Some(b))=>crate::dense_ffn_probe::bf16(t,name,b.ptr,b.n,b.k,self.stream)?,
-                    _=>return Err("dense diagnostic requires one actual loaded weight representation".into()),
+        let dense_probe =
+            self.matched_prefill_target("dense_prefill_operands", layer_idx, m, None)?;
+        if let Some(t) = &dense_probe {
+            if self.active_prefill_chunk_start != 0 {
+                return Err("dense diagnostic requires actual initial complete prefill".into());
+            }
+            crate::dense_ffn_probe::row(
+                t,
+                "input.bf16",
+                input,
+                t.row,
+                self.config.hidden_size,
+                self.stream,
+            )?;
+            for (name, w, b) in [
+                ("gate", &lw.dense_gate, &lw.dense_gate_bf16),
+                ("up", &lw.dense_up, &lw.dense_up_bf16),
+                ("down", &lw.dense_down, &lw.dense_down_bf16),
+            ] {
+                match (w, b) {
+                    (Some(w), None) => crate::dense_ffn_probe::marlin(
+                        t,
+                        name,
+                        w.packed,
+                        w.scales,
+                        w.n,
+                        w.k,
+                        w.num_groups,
+                        w.group_size,
+                        w.num_bits,
+                        self.stream,
+                    )?,
+                    (None, Some(b)) => {
+                        crate::dense_ffn_probe::bf16(t, name, b.ptr, b.n, b.k, self.stream)?
+                    }
+                    _ => {
+                        return Err(
+                            "dense diagnostic requires one actual loaded weight representation"
+                                .into(),
+                        )
+                    }
                 }
             }
             t.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({"actual_execution_path":"prefill","layer":layer_idx,"height":m,"row":t.row,"hidden":self.config.hidden_size,"intermediate":inter,"forcing":crate::matched_projection_transfer::forcing_label().is_some(),"device_diagnostic_allocation_bytes":0,"activation":format!("{:?}",lw.moe_activation)})).map_err(|e|e.to_string())?.as_slice())?;
@@ -60741,12 +63292,14 @@ impl PrefillEngine {
             up_buf,
             m,
         )?;
-        if let Some(t)=&dense_probe {
-            crate::dense_ffn_probe::row(t,"gate.bf16",gate_buf,t.row,inter,self.stream)?;
-            crate::dense_ffn_probe::row(t,"up.bf16",up_buf,t.row,inter,self.stream)?;
+        if let Some(t) = &dense_probe {
+            crate::dense_ffn_probe::row(t, "gate.bf16", gate_buf, t.row, inter, self.stream)?;
+            crate::dense_ffn_probe::row(t, "up.bf16", up_buf, t.row, inter, self.stream)?;
         }
         self.launch_gated_activation_split(act_buf, gate_buf, up_buf, lw.moe_activation, m, inter)?;
-        if let Some(t)=&dense_probe {crate::dense_ffn_probe::row(t,"activation.bf16",act_buf,t.row,inter,self.stream)?;}
+        if let Some(t) = &dense_probe {
+            crate::dense_ffn_probe::row(t, "activation.bf16", act_buf, t.row, inter, self.stream)?;
+        }
         self.dense_prefill_weight_gemm(
             "dense_down",
             act_buf,
@@ -60755,7 +63308,16 @@ impl PrefillEngine {
             output,
             m,
         )?;
-        if let Some(t)=&dense_probe {crate::dense_ffn_probe::row(t,"output.bf16",output,t.row,self.config.hidden_size,self.stream)?;}
+        if let Some(t) = &dense_probe {
+            crate::dense_ffn_probe::row(
+                t,
+                "output.bf16",
+                output,
+                t.row,
+                self.config.hidden_size,
+                self.stream,
+            )?;
+        }
         Ok(())
     }
 
@@ -61466,40 +64028,46 @@ impl PrefillEngine {
                 "not_launched",
             )?;
         }
-        let gate_gemm_result = if let Some(bank)=&self.ordered_kda_projection {unsafe{bank.enqueue_router(gate_ptr,hidden,gate_out,n_experts,h,m,self.stream)}} else {unsafe {
-            use cudarc::cublas::result as cublas_result;
-            use cudarc::cublas::sys as cublas_sys;
-            match cublas_result::set_stream(
-                self.cublas_handle,
-                self.stream as cublas_sys::cudaStream_t,
-            )
-            .map_err(|e| format!("cublas set_stream: {:?}", e))
-            {
-                Ok(()) => cublas_result::gemm_ex(
+        let gate_gemm_result = if let Some(program) = &self.native_bf16_projection {
+            unsafe { program.enqueue(gate_ptr, hidden, gate_out, n_experts, h, m, self.stream) }
+        } else if let Some(bank) = &self.ordered_kda_projection {
+            unsafe { bank.enqueue_router(gate_ptr, hidden, gate_out, n_experts, h, m, self.stream) }
+        } else {
+            unsafe {
+                use cudarc::cublas::result as cublas_result;
+                use cudarc::cublas::sys as cublas_sys;
+                match cublas_result::set_stream(
                     self.cublas_handle,
-                    cublas_sys::cublasOperation_t::CUBLAS_OP_T,
-                    cublas_sys::cublasOperation_t::CUBLAS_OP_N,
-                    n_experts as i32,
-                    m as i32,
-                    h as i32,
-                    &alpha as *const f32 as *const std::ffi::c_void,
-                    gate_ptr as *const std::ffi::c_void,
-                    cublas_sys::cudaDataType::CUDA_R_16BF,
-                    h as i32,
-                    hidden as *const std::ffi::c_void,
-                    cublas_sys::cudaDataType::CUDA_R_16BF,
-                    h as i32,
-                    &beta as *const f32 as *const std::ffi::c_void,
-                    gate_out as *mut std::ffi::c_void,
-                    cublas_sys::cudaDataType::CUDA_R_32F,
-                    n_experts as i32,
-                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                    cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                    self.stream as cublas_sys::cudaStream_t,
                 )
-                .map_err(|e| format!("cublas gate GEMM: {:?}", e)),
-                Err(err) => Err(err),
+                .map_err(|e| format!("cublas set_stream: {:?}", e))
+                {
+                    Ok(()) => cublas_result::gemm_ex(
+                        self.cublas_handle,
+                        cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                        cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                        n_experts as i32,
+                        m as i32,
+                        h as i32,
+                        &alpha as *const f32 as *const std::ffi::c_void,
+                        gate_ptr as *const std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                        h as i32,
+                        hidden as *const std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                        h as i32,
+                        &beta as *const f32 as *const std::ffi::c_void,
+                        gate_out as *mut std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_32F,
+                        n_experts as i32,
+                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                        cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                    )
+                    .map_err(|e| format!("cublas gate GEMM: {:?}", e)),
+                    Err(err) => Err(err),
+                }
             }
-        }};
+        };
         let gate_gemm_status = match &gate_gemm_result {
             Ok(()) => "ok".to_string(),
             Err(err) => format!("error({})", err),
@@ -61732,7 +64300,39 @@ impl PrefillEngine {
                 })?;
         }
         // BEGIN selected prefill row actual routing
-        crate::matched_prefill_row::capture_routes(self.matched_prefill_invocation.as_ref(),layer_idx, m, router_input, expert_input, h, expert_h, n_experts, topk, gate_out, topk_ids_ptr, topk_weights_ptr, self.stream)?;
+        crate::matched_prefill_row::capture_routes(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+            router_input,
+            expert_input,
+            h,
+            expert_h,
+            n_experts,
+            topk,
+            gate_out,
+            topk_ids_ptr,
+            topk_weights_ptr,
+            self.stream,
+        )?;
+        crate::matched_prefill_row::capture_router_weights(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+            [
+                gate_ptr,
+                self.layer_weights[layer_idx].router_per_expert_scale,
+                self.layer_weights[layer_idx].moe_e_score_corr_ptr,
+                self.layer_weights[layer_idx].moe_vl_bias_ptr,
+                self.layer_weights[layer_idx].moe_hash_table_ptr,
+            ],
+            n_experts,
+            h,
+            scoring_func,
+            norm_topk_prob,
+            scale_factor,
+            self.stream,
+        )?;
         // END selected prefill row actual routing
         let trace_moe_last_row = m.saturating_sub(1);
         let trace_router_hidden_row = hidden + ((trace_moe_last_row * h * 2) as u64);
@@ -63215,7 +65815,10 @@ impl PrefillEngine {
             .windows(2)
             .any(|pair| pair[0] != pair[1]);
         let layer_expert_bits = expert_precision_bits.first().copied().ok_or_else(|| {
-            format!("routed expert precision table is empty at layer {}", layer_idx)
+            format!(
+                "routed expert precision table is empty at layer {}",
+                layer_idx
+            )
         })?;
         let hcs_layer_idx = moe_layer_idx.unwrap_or(layer_idx);
         let pinning_layer_idx = self
@@ -64324,6 +66927,16 @@ impl PrefillEngine {
             }
         }
 
+        crate::matched_prefill_row::capture_slots(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+            "w1-input-slots.bf16",
+            fused_input_ptr,
+            expert_h,
+            topk,
+            self.stream,
+        )?;
         // 7. Call MarlinDefault for w1 (gate_up projection)
         set_vram_phase("routed_w1");
         // Both w1 and w2 use top_k=1 trick: sorted_id is used as direct index.
@@ -64442,10 +67055,67 @@ impl PrefillEngine {
             None
         };
         // BEGIN selected prefill row W1 weights
-        crate::matched_prefill_row::capture_weights(self.matched_prefill_invocation.as_ref(),layer_idx, m, "w1", expert_h, w1_n, self.config.group_size, &expert_precision_bits, topk, use_ptr_table, [w1_ptrs_gpu,w1s_ptrs_gpu], [w1_base,w1s_base], [self.w1_packed_per_expert,self.w1_scales_per_expert], activation as usize, swiglu_limit, deepseek_v4_activation, scale_factor, self.stream)?;
+        crate::matched_prefill_row::capture_weights(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+            "w1",
+            expert_h,
+            w1_n,
+            self.config.group_size,
+            &expert_precision_bits,
+            topk,
+            use_ptr_table,
+            [w1_ptrs_gpu, w1s_ptrs_gpu],
+            [w1_base, w1s_base],
+            [self.w1_packed_per_expert, self.w1_scales_per_expert],
+            activation as usize,
+            swiglu_limit,
+            deepseek_v4_activation,
+            scale_factor,
+            self.stream,
+        )?;
         // END selected prefill row W1 weights
+        // Passive actual-consumption observation; ordinary arithmetic is unchanged.
+        crate::moe_w1_observe::capture(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+            crate::moe_w1_observe::Geometry {
+                topk,
+                hidden: expert_h,
+                output: w1_n,
+                experts: n_experts,
+                sorted: total_sorted,
+                block: usize::try_from(block_size).map_err(|_| "negative MoE block")?,
+                group: usize::try_from(gs).map_err(|_| "negative MoE group")?,
+                bits: layer_expert_bits as usize,
+                sms: self.config.sms,
+                workspace: ws_len,
+                temporary: w1_ctmp_floats,
+                pointer_table: use_ptr_table,
+                mixed: layer_has_mixed_precision,
+                alternative: tileq_layer.is_some() || self.ordered_kda_projection.is_some(),
+            },
+            [
+                fused_input_ptr,
+                sorted_ids_val,
+                fused_expert_ids_val,
+                num_tokens_post_val,
+                topk_weights_ptr,
+            ],
+            self.stream,
+        )?;
         // BEGIN bounded routed W1 lane enable
-        let matched_w1_lane_guard=crate::matched_prefill_row::lane_selection(self.matched_prefill_invocation.as_ref(),layer_idx,m,w1_n,topk)?.map(MatchedW1LaneGuard::begin).transpose()?;
+        let matched_w1_lane_guard = crate::matched_prefill_row::lane_selection(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+            w1_n,
+            topk,
+        )?
+        .map(MatchedW1LaneGuard::begin)
+        .transpose()?;
         // END bounded routed W1 lane enable
         let fused_block_count = total_sorted.div_ceil(block_size as usize);
         self.record_prefill_device_trace_i32_slice(
@@ -64717,13 +67387,50 @@ impl PrefillEngine {
                 ),
             ];
             let launch_count = if layer_has_mixed_precision { 2 } else { 1 };
-            for (launch_index,&(expert_ids_ptr, launch_q_type_ptr)) in mixed_launches[..launch_count].iter().enumerate() {
-                if let Some(bank)=&self.ordered_kda_projection {
-                    let launch_bits=if layer_has_mixed_precision {if launch_index==0{4}else{8}}else{bits as usize};
-                    let geometry=crate::common_marlin::Geometry{rows:w1_n,cols:expert_h,group:usize::try_from(gs).map_err(|_|"negative common expert scale group")?.min(expert_h),bits:launch_bits};
-                    unsafe {bank.marlin.as_ref().ok_or("common grouped expert program not admitted")?.enqueue_grouped(
-                        geometry,w1_b_param,w1s_b_param,if use_ptr_table{w1_ptrs_gpu}else{0},if use_ptr_table{w1s_ptrs_gpu}else{0},fused_input_ptr,fused_inter_ptr,sorted_ids_val,expert_ids_ptr,num_tokens_post_val,
-                        usize::try_from(block_size).map_err(|_|"invalid expert sort block")?,n_experts,m_topk,total_sorted,self.stream)?;}
+            for (launch_index, &(expert_ids_ptr, launch_q_type_ptr)) in
+                mixed_launches[..launch_count].iter().enumerate()
+            {
+                if let Some(bank) = &self.ordered_kda_projection {
+                    let launch_bits = if layer_has_mixed_precision {
+                        if launch_index == 0 {
+                            4
+                        } else {
+                            8
+                        }
+                    } else {
+                        bits as usize
+                    };
+                    let geometry = crate::common_marlin::Geometry {
+                        rows: w1_n,
+                        cols: expert_h,
+                        group: usize::try_from(gs)
+                            .map_err(|_| "negative common expert scale group")?
+                            .min(expert_h),
+                        bits: launch_bits,
+                    };
+                    unsafe {
+                        bank.marlin
+                            .as_ref()
+                            .ok_or("common grouped expert program not admitted")?
+                            .enqueue_grouped(
+                                geometry,
+                                w1_b_param,
+                                w1s_b_param,
+                                if use_ptr_table { w1_ptrs_gpu } else { 0 },
+                                if use_ptr_table { w1s_ptrs_gpu } else { 0 },
+                                fused_input_ptr,
+                                fused_inter_ptr,
+                                sorted_ids_val,
+                                expert_ids_ptr,
+                                num_tokens_post_val,
+                                usize::try_from(block_size)
+                                    .map_err(|_| "invalid expert sort block")?,
+                                n_experts,
+                                m_topk,
+                                total_sorted,
+                                self.stream,
+                            )?;
+                    }
                     continue;
                 }
                 unsafe {
@@ -64734,188 +67441,341 @@ impl PrefillEngine {
                         w1_ctmp_floats,
                         self.stream,
                     );
-                fused_fn(
-                    fused_input_ptr as *const _,      // A: [m*topk, K=hidden] replicated
-                    w1_b_param as *const _, // B: base ref (ptr table overrides per-expert)
-                    fused_inter_ptr as *mut _, // C: written at sorted_id positions [0..m*topk)
-                    fused_c_tmp_ptr as *mut _, // C_tmp
-                    std::ptr::null(),       // b_bias (none)
-                    w1s_b_param as *const _, // scales: base ref (ptr table overrides)
-                    std::ptr::null(),       // s2 (none)
-                    std::ptr::null(),       // zp (none)
-                    std::ptr::null(),       // g_idx (none)
-                    std::ptr::null(),       // perm (none)
-                    std::ptr::null(),       // a_tmp (none)
-                    sorted_ids_val as *const _, // sorted_ids (vLLM format: token*topk+slot)
-                    expert_ids_ptr as *const _, // expert_ids (precision-filtered when mixed)
-                    num_tokens_post_val as *const _, // num_tokens_post_padded
-                    topk_weights_ptr as *const _, // topk_weights
-                    block_size,             // moe_block_size
-                    1i32,                   // top_k=1: sorted_id/1 = direct index into A
-                    false,                  // mul_topk_weights (false for w1)
-                    marlin_moe_uses_sparse_block_filter(layer_has_mixed_precision),
-                    // is_ep/sparse block filtering: required for -1 entries
-                    m_topk as i32,          // size_m = m*topk (padding threshold = m*topk*1)
-                    w1_n as i32,            // size_n
-                    expert_h as i32,        // size_k
-                    *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
-                    launch_q_type_ptr,      // q_type_ptr
-                    false,                  // has_bias
-                    false,                  // has_act_order
-                    true,                   // is_k_full
-                    false,                  // has_zp
-                    num_groups_w1,          // num_groups
-                    gs,                     // group_size
-                    0,                      // dev
-                    stream_ptr,             // stream_ptr (our compute stream)
-                    -1,                     // thread_k (auto)
-                    -1,                     // thread_n (auto)
-                    self.config.sms as i32, // sms
-                    false,                  // use_atomic
-                    true,                   // fp32_reduce
-                    false,                  // is_zp_float
-                    if use_ptr_table {
-                        w1_ptrs_gpu as *const _
-                    } else {
-                        std::ptr::null()
-                    }, // B_expert_ptrs
-                    if use_ptr_table {
-                        w1s_ptrs_gpu as *const _
-                    } else {
-                        std::ptr::null()
-                    }, // S_expert_ptrs
-                );
+                    fused_fn(
+                        fused_input_ptr as *const _,     // A: [m*topk, K=hidden] replicated
+                        w1_b_param as *const _, // B: base ref (ptr table overrides per-expert)
+                        fused_inter_ptr as *mut _, // C: written at sorted_id positions [0..m*topk)
+                        fused_c_tmp_ptr as *mut _, // C_tmp
+                        std::ptr::null(),       // b_bias (none)
+                        w1s_b_param as *const _, // scales: base ref (ptr table overrides)
+                        std::ptr::null(),       // s2 (none)
+                        std::ptr::null(),       // zp (none)
+                        std::ptr::null(),       // g_idx (none)
+                        std::ptr::null(),       // perm (none)
+                        std::ptr::null(),       // a_tmp (none)
+                        sorted_ids_val as *const _, // sorted_ids (vLLM format: token*topk+slot)
+                        expert_ids_ptr as *const _, // expert_ids (precision-filtered when mixed)
+                        num_tokens_post_val as *const _, // num_tokens_post_padded
+                        topk_weights_ptr as *const _, // topk_weights
+                        block_size,             // moe_block_size
+                        1i32,                   // top_k=1: sorted_id/1 = direct index into A
+                        false,                  // mul_topk_weights (false for w1)
+                        marlin_moe_uses_sparse_block_filter(layer_has_mixed_precision),
+                        // is_ep/sparse block filtering: required for -1 entries
+                        m_topk as i32, // size_m = m*topk (padding threshold = m*topk*1)
+                        w1_n as i32,   // size_n
+                        expert_h as i32, // size_k
+                        *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
+                        launch_q_type_ptr, // q_type_ptr
+                        false,         // has_bias
+                        false,         // has_act_order
+                        true,          // is_k_full
+                        false,         // has_zp
+                        num_groups_w1, // num_groups
+                        gs,            // group_size
+                        0,             // dev
+                        stream_ptr,    // stream_ptr (our compute stream)
+                        -1,            // thread_k (auto)
+                        -1,            // thread_n (auto)
+                        self.config.sms as i32, // sms
+                        false,         // use_atomic
+                        true,          // fp32_reduce
+                        false,         // is_zp_float
+                        if use_ptr_table {
+                            w1_ptrs_gpu as *const _
+                        } else {
+                            std::ptr::null()
+                        }, // B_expert_ptrs
+                        if use_ptr_table {
+                            w1s_ptrs_gpu as *const _
+                        } else {
+                            std::ptr::null()
+                        }, // S_expert_ptrs
+                    );
                 }
             }
         }
         // BEGIN bounded routed W1 lane finish
-        if let Some(guard)=matched_w1_lane_guard {guard.finish(self.stream,fused_inter_ptr,w1_n)?;}
+        if let Some(guard) = matched_w1_lane_guard {
+            guard.finish(self.stream, fused_inter_ptr, w1_n)?;
+        }
         // END bounded routed W1 lane finish
         // BEGIN bounded same-operator partition replay
-        if let Some(plan)=crate::matched_prefill_row::partition_target(self.matched_prefill_invocation.as_ref(),layer_idx,m)? {
-            let partition=plan.target;
-            let counter_grid=plan.policy.grid(total_sorted,usize::try_from(block_size).map_err(|_|"negative MoE block")?,self.config.group_size,expert_h)?;
-            let variant=plan.policy.label();
-            if tileq_layer.is_some() || layer_has_mixed_precision || !matches!(bits,4|8) {return Err("selected W1 partition replay requires an ordinary homogeneous Marlin launch".into());}
-            // The unchanged host wrapper selects exactly one block per requested SM for its large-M templates.
-            if block_size <= 16 || expert_h%16!=0 || w1_n%16!=0 {return Err("one-block partition requires the large-M one-block-per-SM launch contract".into());}
-            let sizes=[m_topk,w1_n,expert_h,self.config.sms];
-            if sizes.iter().any(|&x|x==0||i32::try_from(x).is_err()) {return Err("partition launch dimensions exceed actual ABI".into());}
-            // Conservative bound across all supported template tile sizes, before the one-block kernel's int arithmetic.
-            let upper_tiles=(expert_h/16).checked_mul(w1_n/16).and_then(|x|x.checked_mul(fused_block_count)).ok_or("partition tile count overflow")?;
-            if upper_tiles==0 || upper_tiles>i32::MAX as usize {return Err("one-block partition exceeds CUDA work-index range".into());}
-            let output_bytes=m_topk.checked_mul(w1_n).and_then(|x|x.checked_mul(2)).ok_or("partition output bytes overflow")?;
-            let input_bytes=m_topk.checked_mul(expert_h).and_then(|x|x.checked_mul(2)).ok_or("partition input bytes overflow")?;
-            let mut operands=vec![("actual-A",fused_input_ptr,input_bytes),("sorted-ids",sorted_ids_val,total_sorted.checked_mul(4).ok_or("sorted bytes overflow")?),("expert-block-ids",fused_expert_ids_val,fused_block_count.checked_mul(4).ok_or("expert block bytes overflow")?),("post-count",num_tokens_post_val,4),("topk-weights",topk_weights_ptr,m_topk.checked_mul(4).ok_or("route weight bytes overflow")?)];
-            if use_ptr_table {operands.push(("W1-pointer-table",w1_ptrs_gpu,n_experts.checked_mul(8).ok_or("pointer table bytes overflow")?));operands.push(("W1-scale-pointer-table",w1s_ptrs_gpu,n_experts.checked_mul(8).ok_or("scale pointer table bytes overflow")?));}
-            let digest_operands=|| -> Result<Vec<serde_json::Value>,String>{operands.iter().map(|&(name,ptr,bytes)|Ok(serde_json::json!({"name":name,"pointer":format!("0x{ptr:x}"),"bytes":bytes,"sha256":crate::matched_prefill_row::device_digest(ptr,bytes,self.stream)?}))).collect()};
-            let before_operands=digest_operands()?;
-            let original_output_sha=crate::matched_prefill_row::device_digest(fused_inter_ptr,output_bytes,self.stream)?;
-            let replay=|grid_blocks:i32,events:Option<&crate::matched_prefill_row::PartitionEvents>| -> Result<Option<f32>,String>{
-                unsafe {
-                    for (ptr,count) in [(ws_ptr,ws_len),(fused_c_tmp_ptr,w1_ctmp_floats)] {
-                        let rc=cuda_sys::lib().cuMemsetD32Async(ptr,0,count,self.stream);
-                        if rc!=cuda_sys::CUresult::CUDA_SUCCESS {return Err(format!("partition scratch reset: {rc:?}"));}
-                    }
-                if let Some(timer)=events {timer.begin(self.stream)?;}
-                fused_fn(
-                    fused_input_ptr as *const _,      // A: [m*topk, K=hidden] replicated
-                    w1_b_param as *const _, // B: base ref (ptr table overrides per-expert)
-                    fused_inter_ptr as *mut _, // C: written at sorted_id positions [0..m*topk)
-                    fused_c_tmp_ptr as *mut _, // C_tmp
-                    std::ptr::null(),       // b_bias (none)
-                    w1s_b_param as *const _, // scales: base ref (ptr table overrides)
-                    std::ptr::null(),       // s2 (none)
-                    std::ptr::null(),       // zp (none)
-                    std::ptr::null(),       // g_idx (none)
-                    std::ptr::null(),       // perm (none)
-                    std::ptr::null(),       // a_tmp (none)
-                    sorted_ids_val as *const _, // sorted_ids (vLLM format: token*topk+slot)
-                    fused_expert_ids_val as *const _, // expert_ids (precision-filtered when mixed)
-                    num_tokens_post_val as *const _, // num_tokens_post_padded
-                    topk_weights_ptr as *const _, // topk_weights
-                    block_size,             // moe_block_size
-                    1i32,                   // top_k=1: sorted_id/1 = direct index into A
-                    false,                  // mul_topk_weights (false for w1)
-                    marlin_moe_uses_sparse_block_filter(layer_has_mixed_precision),
-                    // is_ep/sparse block filtering: required for -1 entries
-                    m_topk as i32,          // size_m = m*topk (padding threshold = m*topk*1)
-                    w1_n as i32,            // size_n
-                    expert_h as i32,        // size_k
-                    *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
-                    q_type_ptr,      // q_type_ptr
-                    false,                  // has_bias
-                    false,                  // has_act_order
-                    true,                   // is_k_full
-                    false,                  // has_zp
-                    num_groups_w1,          // num_groups
-                    gs,                     // group_size
-                    0,                      // dev
-                    stream_ptr,             // stream_ptr (our compute stream)
-                    -1,                     // thread_k (auto)
-                    -1,                     // thread_n (auto)
-                    grid_blocks, // Explicit diagnostic grid; all other actual launch arguments unchanged.
-                    false,                  // use_atomic
-                    true,                   // fp32_reduce
-                    false,                  // is_zp_float
-                    if use_ptr_table {
-                        w1_ptrs_gpu as *const _
-                    } else {
-                        std::ptr::null()
-                    }, // B_expert_ptrs
-                    if use_ptr_table {
-                        w1s_ptrs_gpu as *const _
-                    } else {
-                        std::ptr::null()
-                    }, // S_expert_ptrs
+        if let Some(plan) = crate::matched_prefill_row::partition_target(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+        )? {
+            let partition = plan.target;
+            let counter_grid = plan.policy.grid(
+                total_sorted,
+                usize::try_from(block_size).map_err(|_| "negative MoE block")?,
+                self.config.group_size,
+                expert_h,
+            )?;
+            let variant = plan.policy.label();
+            if tileq_layer.is_some() || layer_has_mixed_precision || !matches!(bits, 4 | 8) {
+                return Err(
+                    "selected W1 partition replay requires an ordinary homogeneous Marlin launch"
+                        .into(),
                 );
-                    if let Some(timer)=events {timer.end(self.stream)?;}
-                    let rc=cuda_sys::lib().cuStreamSynchronize(self.stream);
-                    if rc!=cuda_sys::CUresult::CUDA_SUCCESS {return Err(format!("partition operator replay fence: {rc:?}"));}
-                }
-                events.map(|timer|timer.elapsed()).transpose()
+            }
+            // The unchanged host wrapper selects exactly one block per requested SM for its large-M templates.
+            if block_size <= 16 || expert_h % 16 != 0 || w1_n % 16 != 0 {
+                return Err(
+                    "one-block partition requires the large-M one-block-per-SM launch contract"
+                        .into(),
+                );
+            }
+            let sizes = [m_topk, w1_n, expert_h, self.config.sms];
+            if sizes.iter().any(|&x| x == 0 || i32::try_from(x).is_err()) {
+                return Err("partition launch dimensions exceed actual ABI".into());
+            }
+            // Conservative bound across all supported template tile sizes, before the one-block kernel's int arithmetic.
+            let upper_tiles = (expert_h / 16)
+                .checked_mul(w1_n / 16)
+                .and_then(|x| x.checked_mul(fused_block_count))
+                .ok_or("partition tile count overflow")?;
+            if upper_tiles == 0 || upper_tiles > i32::MAX as usize {
+                return Err("one-block partition exceeds CUDA work-index range".into());
+            }
+            let output_bytes = m_topk
+                .checked_mul(w1_n)
+                .and_then(|x| x.checked_mul(2))
+                .ok_or("partition output bytes overflow")?;
+            let input_bytes = m_topk
+                .checked_mul(expert_h)
+                .and_then(|x| x.checked_mul(2))
+                .ok_or("partition input bytes overflow")?;
+            let mut operands = vec![
+                ("actual-A", fused_input_ptr, input_bytes),
+                (
+                    "sorted-ids",
+                    sorted_ids_val,
+                    total_sorted.checked_mul(4).ok_or("sorted bytes overflow")?,
+                ),
+                (
+                    "expert-block-ids",
+                    fused_expert_ids_val,
+                    fused_block_count
+                        .checked_mul(4)
+                        .ok_or("expert block bytes overflow")?,
+                ),
+                ("post-count", num_tokens_post_val, 4),
+                (
+                    "topk-weights",
+                    topk_weights_ptr,
+                    m_topk.checked_mul(4).ok_or("route weight bytes overflow")?,
+                ),
+            ];
+            if use_ptr_table {
+                operands.push((
+                    "W1-pointer-table",
+                    w1_ptrs_gpu,
+                    n_experts
+                        .checked_mul(8)
+                        .ok_or("pointer table bytes overflow")?,
+                ));
+                operands.push((
+                    "W1-scale-pointer-table",
+                    w1s_ptrs_gpu,
+                    n_experts
+                        .checked_mul(8)
+                        .ok_or("scale pointer table bytes overflow")?,
+                ));
+            }
+            let digest_operands = || -> Result<Vec<serde_json::Value>, String> {
+                operands.iter().map(|&(name,ptr,bytes)|Ok(serde_json::json!({"name":name,"pointer":format!("0x{ptr:x}"),"bytes":bytes,"sha256":crate::matched_prefill_row::device_digest(ptr,bytes,self.stream)?}))).collect()
             };
-            let mut measurement=serde_json::Value::Null;
-            let counterfactual=(|| -> Result<(),String>{
-                let lane=crate::matched_prefill_row::lane_variant(self.matched_prefill_invocation.as_ref(),layer_idx,m,w1_n,topk,variant)?;
-                let guard=MatchedW1LaneGuard::begin(lane)?;
-                replay(counter_grid,None)?; // Explicit concurrent or serial diagnostic; no serving adoption.
-                guard.finish(self.stream,fused_inter_ptr,w1_n)?;
-                let row_bytes=topk.checked_mul(w1_n).and_then(|x|x.checked_mul(2)).ok_or("partition selected row bytes overflow")?;
-                let row_offset=partition.row.checked_mul(row_bytes).and_then(|x|fused_inter_ptr.checked_add(x as u64)).ok_or("partition selected row offset overflow")?;
-                partition.device(&format!("{variant}-w1-slots.bf16"),row_offset,row_bytes,self.stream)?;
-                if let Some(count)=plan.samples {
-                    let free_before=crate::matched_prefill_row::free_device_bytes()?;
-                    let events=crate::matched_prefill_row::PartitionEvents::new()?;
-                    let free_with_events=crate::matched_prefill_row::free_device_bytes()?;
-                    let ordinary=i32::try_from(self.config.sms).map_err(|_|"ordinary grid exceeds ABI")?;
-                    replay(ordinary,None)?;replay(counter_grid,None)?; // Explicit warm-up of each actual operator.
-                    let mut ordinary_ms=Vec::with_capacity(count);let mut counter_ms=Vec::with_capacity(count);
-                    for sample in 0..count {
-                        for (grid,original) in if sample%2==0 {[(ordinary,true),(counter_grid,false)]} else {[(counter_grid,false),(ordinary,true)]} {
-                            let elapsed=replay(grid,Some(&events))?.ok_or("missing explicit event measurement")?;
-                            if original {ordinary_ms.push(elapsed)}else{counter_ms.push(elapsed)}
+            let before_operands = digest_operands()?;
+            let original_output_sha = crate::matched_prefill_row::device_digest(
+                fused_inter_ptr,
+                output_bytes,
+                self.stream,
+            )?;
+            let replay = |grid_blocks: i32,
+                          events: Option<&crate::matched_prefill_row::PartitionEvents>|
+             -> Result<Option<f32>, String> {
+                unsafe {
+                    for (ptr, count) in [(ws_ptr, ws_len), (fused_c_tmp_ptr, w1_ctmp_floats)] {
+                        let rc = cuda_sys::lib().cuMemsetD32Async(ptr, 0, count, self.stream);
+                        if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!("partition scratch reset: {rc:?}"));
                         }
                     }
-                    let free_after_launches=crate::matched_prefill_row::free_device_bytes()?;
+                    if let Some(timer) = events {
+                        timer.begin(self.stream)?;
+                    }
+                    fused_fn(
+                        fused_input_ptr as *const _,      // A: [m*topk, K=hidden] replicated
+                        w1_b_param as *const _, // B: base ref (ptr table overrides per-expert)
+                        fused_inter_ptr as *mut _, // C: written at sorted_id positions [0..m*topk)
+                        fused_c_tmp_ptr as *mut _, // C_tmp
+                        std::ptr::null(),       // b_bias (none)
+                        w1s_b_param as *const _, // scales: base ref (ptr table overrides)
+                        std::ptr::null(),       // s2 (none)
+                        std::ptr::null(),       // zp (none)
+                        std::ptr::null(),       // g_idx (none)
+                        std::ptr::null(),       // perm (none)
+                        std::ptr::null(),       // a_tmp (none)
+                        sorted_ids_val as *const _, // sorted_ids (vLLM format: token*topk+slot)
+                        fused_expert_ids_val as *const _, // expert_ids (precision-filtered when mixed)
+                        num_tokens_post_val as *const _,  // num_tokens_post_padded
+                        topk_weights_ptr as *const _,     // topk_weights
+                        block_size,                       // moe_block_size
+                        1i32,  // top_k=1: sorted_id/1 = direct index into A
+                        false, // mul_topk_weights (false for w1)
+                        marlin_moe_uses_sparse_block_filter(layer_has_mixed_precision),
+                        // is_ep/sparse block filtering: required for -1 entries
+                        m_topk as i32, // size_m = m*topk (padding threshold = m*topk*1)
+                        w1_n as i32,   // size_n
+                        expert_h as i32, // size_k
+                        *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
+                        q_type_ptr,    // q_type_ptr
+                        false,         // has_bias
+                        false,         // has_act_order
+                        true,          // is_k_full
+                        false,         // has_zp
+                        num_groups_w1, // num_groups
+                        gs,            // group_size
+                        0,             // dev
+                        stream_ptr,    // stream_ptr (our compute stream)
+                        -1,            // thread_k (auto)
+                        -1,            // thread_n (auto)
+                        grid_blocks, // Explicit diagnostic grid; all other actual launch arguments unchanged.
+                        false,       // use_atomic
+                        true,        // fp32_reduce
+                        false,       // is_zp_float
+                        if use_ptr_table {
+                            w1_ptrs_gpu as *const _
+                        } else {
+                            std::ptr::null()
+                        }, // B_expert_ptrs
+                        if use_ptr_table {
+                            w1s_ptrs_gpu as *const _
+                        } else {
+                            std::ptr::null()
+                        }, // S_expert_ptrs
+                    );
+                    if let Some(timer) = events {
+                        timer.end(self.stream)?;
+                    }
+                    let rc = cuda_sys::lib().cuStreamSynchronize(self.stream);
+                    if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!("partition operator replay fence: {rc:?}"));
+                    }
+                }
+                events.map(|timer| timer.elapsed()).transpose()
+            };
+            let mut measurement = serde_json::Value::Null;
+            let counterfactual = (|| -> Result<(), String> {
+                let lane = crate::matched_prefill_row::lane_variant(
+                    self.matched_prefill_invocation.as_ref(),
+                    layer_idx,
+                    m,
+                    w1_n,
+                    topk,
+                    variant,
+                )?;
+                let guard = MatchedW1LaneGuard::begin(lane)?;
+                replay(counter_grid, None)?; // Explicit concurrent or serial diagnostic; no serving adoption.
+                guard.finish(self.stream, fused_inter_ptr, w1_n)?;
+                let row_bytes = topk
+                    .checked_mul(w1_n)
+                    .and_then(|x| x.checked_mul(2))
+                    .ok_or("partition selected row bytes overflow")?;
+                let row_offset = partition
+                    .row
+                    .checked_mul(row_bytes)
+                    .and_then(|x| fused_inter_ptr.checked_add(x as u64))
+                    .ok_or("partition selected row offset overflow")?;
+                partition.device(
+                    &format!("{variant}-w1-slots.bf16"),
+                    row_offset,
+                    row_bytes,
+                    self.stream,
+                )?;
+                if let Some(count) = plan.samples {
+                    let free_before = crate::matched_prefill_row::free_device_bytes()?;
+                    let events = crate::matched_prefill_row::PartitionEvents::new()?;
+                    let free_with_events = crate::matched_prefill_row::free_device_bytes()?;
+                    let ordinary =
+                        i32::try_from(self.config.sms).map_err(|_| "ordinary grid exceeds ABI")?;
+                    replay(ordinary, None)?;
+                    replay(counter_grid, None)?; // Explicit warm-up of each actual operator.
+                    let mut ordinary_ms = Vec::with_capacity(count);
+                    let mut counter_ms = Vec::with_capacity(count);
+                    for sample in 0..count {
+                        for (grid, original) in if sample % 2 == 0 {
+                            [(ordinary, true), (counter_grid, false)]
+                        } else {
+                            [(counter_grid, false), (ordinary, true)]
+                        } {
+                            let elapsed = replay(grid, Some(&events))?
+                                .ok_or("missing explicit event measurement")?;
+                            if original {
+                                ordinary_ms.push(elapsed)
+                            } else {
+                                counter_ms.push(elapsed)
+                            }
+                        }
+                    }
+                    let free_after_launches = crate::matched_prefill_row::free_device_bytes()?;
                     drop(events);
-                    let free_after_destroy=crate::matched_prefill_row::free_device_bytes()?;
-                    measurement=serde_json::json!({"diagnostic_operator_measurement":true,"production_speed_benchmark":false,"lane_capture_disabled":true,"samples_each":count,"alternating_order":true,"warmup_launches_each":1,"scratch_reset_excluded":true,"ordinary_milliseconds":ordinary_ms,"counterfactual_milliseconds":counter_ms,"free_before_events":free_before,"free_with_events":free_with_events,"free_after_launches":free_after_launches,"free_after_destroy":free_after_destroy});
+                    let free_after_destroy = crate::matched_prefill_row::free_device_bytes()?;
+                    measurement = serde_json::json!({"diagnostic_operator_measurement":true,"production_speed_benchmark":false,"lane_capture_disabled":true,"samples_each":count,"alternating_order":true,"warmup_launches_each":1,"scratch_reset_excluded":true,"ordinary_milliseconds":ordinary_ms,"counterfactual_milliseconds":counter_ms,"free_before_events":free_before,"free_with_events":free_with_events,"free_after_launches":free_after_launches,"free_after_destroy":free_after_destroy});
                 }
                 Ok(())
             })();
             // Restore by executing the unchanged ordinary operator, including on capture error.
-            replay(i32::try_from(self.config.sms).map_err(|_|"ordinary grid exceeds ABI")?,None)?;
-            let restored_output_sha=crate::matched_prefill_row::device_digest(fused_inter_ptr,output_bytes,self.stream)?;
-            let after_operands=digest_operands()?;
-            if original_output_sha!=restored_output_sha||before_operands!=after_operands {return Err("partition replay changed ordinary output or immutable operands; request rejected".into());}
-            crate::matched_prefill_row::capture_weights(self.matched_prefill_invocation.as_ref(),layer_idx,m,"w1",expert_h,w1_n,self.config.group_size,&expert_precision_bits,topk,use_ptr_table,[w1_ptrs_gpu,w1s_ptrs_gpu],[w1_base,w1s_base],[self.w1_packed_per_expert,self.w1_scales_per_expert],activation as usize,swiglu_limit,deepseek_v4_activation,scale_factor,self.stream)?;
+            replay(
+                i32::try_from(self.config.sms).map_err(|_| "ordinary grid exceeds ABI")?,
+                None,
+            )?;
+            let restored_output_sha = crate::matched_prefill_row::device_digest(
+                fused_inter_ptr,
+                output_bytes,
+                self.stream,
+            )?;
+            let after_operands = digest_operands()?;
+            if original_output_sha != restored_output_sha || before_operands != after_operands {
+                return Err("partition replay changed ordinary output or immutable operands; request rejected".into());
+            }
+            crate::matched_prefill_row::capture_weights(
+                self.matched_prefill_invocation.as_ref(),
+                layer_idx,
+                m,
+                "w1",
+                expert_h,
+                w1_n,
+                self.config.group_size,
+                &expert_precision_bits,
+                topk,
+                use_ptr_table,
+                [w1_ptrs_gpu, w1s_ptrs_gpu],
+                [w1_base, w1s_base],
+                [self.w1_packed_per_expert, self.w1_scales_per_expert],
+                activation as usize,
+                swiglu_limit,
+                deepseek_v4_activation,
+                scale_factor,
+                self.stream,
+            )?;
             counterfactual?;
             partition.write("replay-control.json",serde_json::to_vec_pretty(&serde_json::json!({"diagnostic_only":true,"qualifies_candidate":false,"actual_library_and_weights_reused":true,"ordinary_grid_argument":self.config.sms,"counterfactual_grid_argument":counter_grid,"counterfactual_policy":variant,"operator_measurement":measurement,"top_k":1,"moe_block_size":block_size,"size_m":m_topk,"size_n":w1_n,"size_k":expert_h,"group_size":gs,"num_groups":num_groups_w1,"bits":bits,"actual_padded_sorted_count":total_sorted,"workspace_u32":ws_len,"C_tmp_f32":w1_ctmp_floats,"thread_k_argument":-1,"thread_n_argument":-1,"use_atomic":false,"fp32_reduce":true,"is_ep":false,"use_ptr_table":use_ptr_table,"valid_output_bytes":output_bytes,"original_output_sha256":original_output_sha,"restored_output_sha256":restored_output_sha,"operands_before":before_operands,"operands_after":after_operands,"selected_weight_recapture_exact":true,"ordinary_output_restored_exact":true,"additional_gpu_buffer_bytes":0})).map_err(|e|e.to_string())?.as_slice())?;
         }
         // END bounded same-operator partition replay
         // BEGIN selected prefill row W1 output
-        crate::matched_prefill_row::capture_slots(self.matched_prefill_invocation.as_ref(),layer_idx, m, "w1-slots.bf16", fused_inter_ptr, w1_n, topk, self.stream)?;
+        crate::matched_prefill_row::capture_slots(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+            "w1-slots.bf16",
+            fused_inter_ptr,
+            w1_n,
+            topk,
+            self.stream,
+        )?;
         // END selected prefill row W1 output
         let w1_output_values = m_topk
             .checked_mul(w1_n)
@@ -65905,7 +68765,16 @@ impl PrefillEngine {
             fused_inter_ptr
         };
         // BEGIN selected prefill row activation output
-        crate::matched_prefill_row::capture_slots(self.matched_prefill_invocation.as_ref(),layer_idx, m, "activation-slots.bf16", activation_ptr, inter, topk, self.stream)?;
+        crate::matched_prefill_row::capture_slots(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+            "activation-slots.bf16",
+            activation_ptr,
+            inter,
+            topk,
+            self.stream,
+        )?;
         // END selected prefill row activation output
         self.capture_tileq_routed_inputs(
             layer_idx,
@@ -66065,7 +68934,26 @@ impl PrefillEngine {
             }
         }
         // BEGIN selected prefill row W2 weights after DMA wait
-        crate::matched_prefill_row::capture_weights(self.matched_prefill_invocation.as_ref(),layer_idx, m, "w2", inter, expert_h, self.config.group_size, &expert_precision_bits, topk, use_ptr_table, [w2_ptrs_gpu,w2s_ptrs_gpu], [w2_base,w2s_base], [self.w2_packed_per_expert,self.w2_scales_per_expert], activation as usize, swiglu_limit, deepseek_v4_activation, scale_factor, self.stream)?;
+        crate::matched_prefill_row::capture_weights(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+            "w2",
+            inter,
+            expert_h,
+            self.config.group_size,
+            &expert_precision_bits,
+            topk,
+            use_ptr_table,
+            [w2_ptrs_gpu, w2s_ptrs_gpu],
+            [w2_base, w2s_base],
+            [self.w2_packed_per_expert, self.w2_scales_per_expert],
+            activation as usize,
+            swiglu_limit,
+            deepseek_v4_activation,
+            scale_factor,
+            self.stream,
+        )?;
         // END selected prefill row W2 weights after DMA wait
         let mt3 = if mt { Some(Instant::now()) } else { None };
 
@@ -66219,13 +69107,50 @@ impl PrefillEngine {
                 ),
             ];
             let launch_count = if layer_has_mixed_precision { 2 } else { 1 };
-            for (launch_index,&(expert_ids_ptr, launch_q_type_ptr)) in mixed_launches[..launch_count].iter().enumerate() {
-                if let Some(bank)=&self.ordered_kda_projection {
-                    let launch_bits=if layer_has_mixed_precision {if launch_index==0{4}else{8}}else{bits as usize};
-                    let geometry=crate::common_marlin::Geometry{rows:expert_h,cols:inter,group:usize::try_from(gs).map_err(|_|"negative common expert scale group")?.min(inter),bits:launch_bits};
-                    unsafe {bank.marlin.as_ref().ok_or("common grouped expert program not admitted")?.enqueue_grouped(
-                        geometry,w2_b_param,w2s_b_param,if use_ptr_table{w2_ptrs_gpu}else{0},if use_ptr_table{w2s_ptrs_gpu}else{0},w2_input,fused_output_ptr,sorted_ids_val,expert_ids_ptr,num_tokens_post_val,
-                        usize::try_from(block_size).map_err(|_|"invalid expert sort block")?,n_experts,m_topk,total_sorted,self.stream)?;}
+            for (launch_index, &(expert_ids_ptr, launch_q_type_ptr)) in
+                mixed_launches[..launch_count].iter().enumerate()
+            {
+                if let Some(bank) = &self.ordered_kda_projection {
+                    let launch_bits = if layer_has_mixed_precision {
+                        if launch_index == 0 {
+                            4
+                        } else {
+                            8
+                        }
+                    } else {
+                        bits as usize
+                    };
+                    let geometry = crate::common_marlin::Geometry {
+                        rows: expert_h,
+                        cols: inter,
+                        group: usize::try_from(gs)
+                            .map_err(|_| "negative common expert scale group")?
+                            .min(inter),
+                        bits: launch_bits,
+                    };
+                    unsafe {
+                        bank.marlin
+                            .as_ref()
+                            .ok_or("common grouped expert program not admitted")?
+                            .enqueue_grouped(
+                                geometry,
+                                w2_b_param,
+                                w2s_b_param,
+                                if use_ptr_table { w2_ptrs_gpu } else { 0 },
+                                if use_ptr_table { w2s_ptrs_gpu } else { 0 },
+                                w2_input,
+                                fused_output_ptr,
+                                sorted_ids_val,
+                                expert_ids_ptr,
+                                num_tokens_post_val,
+                                usize::try_from(block_size)
+                                    .map_err(|_| "invalid expert sort block")?,
+                                n_experts,
+                                m_topk,
+                                total_sorted,
+                                self.stream,
+                            )?;
+                    }
                     continue;
                 }
                 unsafe {
@@ -66236,57 +69161,57 @@ impl PrefillEngine {
                         w2_ctmp_floats,
                         self.stream,
                     );
-                fused_fn(
-                    w2_input as *const _,             // A: [m*topk, K=inter] indexed by sorted_id
-                    w2_b_param as *const _, // B: base ref (ptr table overrides per-expert)
-                    fused_output_ptr as *mut _, // C: written at sorted_id positions [0..m*topk)
-                    fused_c_tmp_ptr as *mut _, // C_tmp
-                    std::ptr::null(),       // b_bias (none)
-                    w2s_b_param as *const _, // scales: base ref (ptr table overrides)
-                    std::ptr::null(),       // s2 (none)
-                    std::ptr::null(),       // zp (none)
-                    std::ptr::null(),       // g_idx (none)
-                    std::ptr::null(),       // perm (none)
-                    std::ptr::null(),       // a_tmp (none)
-                    sorted_ids_val as *const _, // sorted_ids (vLLM format)
-                    expert_ids_ptr as *const _, // expert_ids (precision-filtered when mixed)
-                    num_tokens_post_val as *const _, // num_tokens_post_padded
-                    topk_weights_ptr as *const _, // topk_weights
-                    block_size,             // moe_block_size
-                    1i32,                   // top_k=1: sorted_id/1 = direct index into A
-                    false,                  // mul_topk_weights=false (scatter handles it)
-                    marlin_moe_uses_sparse_block_filter(layer_has_mixed_precision),
-                    // is_ep/sparse block filtering: required for -1 entries
-                    m_topk as i32,          // size_m = m*topk (padding threshold = m*topk*1)
-                    expert_h as i32,        // size_n
-                    inter as i32,           // size_k
-                    *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
-                    launch_q_type_ptr,      // q_type_ptr
-                    false,                  // has_bias
-                    false,                  // has_act_order
-                    true,                   // is_k_full
-                    false,                  // has_zp
-                    num_groups_w2,          // num_groups
-                    gs,                     // group_size
-                    0,                      // dev
-                    stream_ptr,             // stream_ptr
-                    -1,                     // thread_k (auto)
-                    -1,                     // thread_n (auto)
-                    self.config.sms as i32, // sms
-                    false,                  // use_atomic
-                    true,                   // fp32_reduce
-                    false,                  // is_zp_float
-                    if use_ptr_table {
-                        w2_ptrs_gpu as *const _
-                    } else {
-                        std::ptr::null()
-                    }, // B_expert_ptrs
-                    if use_ptr_table {
-                        w2s_ptrs_gpu as *const _
-                    } else {
-                        std::ptr::null()
-                    }, // S_expert_ptrs
-                );
+                    fused_fn(
+                        w2_input as *const _,            // A: [m*topk, K=inter] indexed by sorted_id
+                        w2_b_param as *const _, // B: base ref (ptr table overrides per-expert)
+                        fused_output_ptr as *mut _, // C: written at sorted_id positions [0..m*topk)
+                        fused_c_tmp_ptr as *mut _, // C_tmp
+                        std::ptr::null(),       // b_bias (none)
+                        w2s_b_param as *const _, // scales: base ref (ptr table overrides)
+                        std::ptr::null(),       // s2 (none)
+                        std::ptr::null(),       // zp (none)
+                        std::ptr::null(),       // g_idx (none)
+                        std::ptr::null(),       // perm (none)
+                        std::ptr::null(),       // a_tmp (none)
+                        sorted_ids_val as *const _, // sorted_ids (vLLM format)
+                        expert_ids_ptr as *const _, // expert_ids (precision-filtered when mixed)
+                        num_tokens_post_val as *const _, // num_tokens_post_padded
+                        topk_weights_ptr as *const _, // topk_weights
+                        block_size,             // moe_block_size
+                        1i32,                   // top_k=1: sorted_id/1 = direct index into A
+                        false,                  // mul_topk_weights=false (scatter handles it)
+                        marlin_moe_uses_sparse_block_filter(layer_has_mixed_precision),
+                        // is_ep/sparse block filtering: required for -1 entries
+                        m_topk as i32, // size_m = m*topk (padding threshold = m*topk*1)
+                        expert_h as i32, // size_n
+                        inter as i32,  // size_k
+                        *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
+                        launch_q_type_ptr, // q_type_ptr
+                        false,         // has_bias
+                        false,         // has_act_order
+                        true,          // is_k_full
+                        false,         // has_zp
+                        num_groups_w2, // num_groups
+                        gs,            // group_size
+                        0,             // dev
+                        stream_ptr,    // stream_ptr
+                        -1,            // thread_k (auto)
+                        -1,            // thread_n (auto)
+                        self.config.sms as i32, // sms
+                        false,         // use_atomic
+                        true,          // fp32_reduce
+                        false,         // is_zp_float
+                        if use_ptr_table {
+                            w2_ptrs_gpu as *const _
+                        } else {
+                            std::ptr::null()
+                        }, // B_expert_ptrs
+                        if use_ptr_table {
+                            w2s_ptrs_gpu as *const _
+                        } else {
+                            std::ptr::null()
+                        }, // S_expert_ptrs
+                    );
                 }
             }
         }
@@ -66315,10 +69240,8 @@ impl PrefillEngine {
 
                 let row_topk_ids =
                     download_device_i32(topk_ids_ptr + ((row * topk * 4) as u64), topk)?;
-                let row_topk_weights = download_device_f32(
-                    topk_weights_ptr + ((row * topk * 4) as u64),
-                    topk,
-                )?;
+                let row_topk_weights =
+                    download_device_f32(topk_weights_ptr + ((row * topk * 4) as u64), topk)?;
                 let row_input_bits = download_device_u16(
                     w2_input + ((row * topk * inter * 2) as u64),
                     topk * inter,
@@ -66367,15 +69290,9 @@ impl PrefillEngine {
                     }
 
                     let input_row = &row_input_bits[slot * inter..(slot + 1) * inter];
-                    let actual_bits =
-                        &row_actual_bits[slot * expert_h..(slot + 1) * expert_h];
+                    let actual_bits = &row_actual_bits[slot * expert_h..(slot + 1) * expert_h];
                     let reference = if bits == 16 {
-                        compute_bf16_gemm_row_cpu_reference(
-                            input_row,
-                            packed_ptr,
-                            expert_h,
-                            inter,
-                        )?
+                        compute_bf16_gemm_row_cpu_reference(input_row, packed_ptr, expert_h, inter)?
                     } else {
                         let weight = MarlinWeight {
                             packed: packed_ptr,
@@ -66420,8 +69337,7 @@ impl PrefillEngine {
                         row_topk_weights.get(slot).copied().unwrap_or(0.0) * scale_factor;
                     for output_idx in 0..expert_h {
                         actual_weighted[output_idx] += actual[output_idx] * scaled_weight;
-                        reference_weighted[output_idx] +=
-                            reference[output_idx] * scaled_weight;
+                        reference_weighted[output_idx] += reference[output_idx] * scaled_weight;
                     }
 
                     details.push(serde_json::json!({
@@ -66741,7 +69657,16 @@ impl PrefillEngine {
             );
         }
         // BEGIN selected prefill row W2 output
-        crate::matched_prefill_row::capture_slots(self.matched_prefill_invocation.as_ref(),layer_idx, m, "w2-slots.bf16", fused_output_ptr, expert_h, topk, self.stream)?;
+        crate::matched_prefill_row::capture_slots(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+            "w2-slots.bf16",
+            fused_output_ptr,
+            expert_h,
+            topk,
+            self.stream,
+        )?;
         // END selected prefill row W2 output
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MLA_MOE_W2_OUTPUT_FULL,
@@ -67195,8 +70120,23 @@ impl PrefillEngine {
                 layer_idx, total_sorted, m_topk, m, topk
             ));
         }
-        if let Some(bank)=&self.ordered_kda_projection {
-            unsafe{bank.moe_combine.as_ref().ok_or("common MoE reduction program not admitted")?.enqueue_reduce(fused_output_ptr,topk_weights_ptr,moe_accum,0,expert_h,topk,m,scale_factor,scatter_stream)?;}
+        if let Some(bank) = &self.ordered_kda_projection {
+            unsafe {
+                bank.moe_combine
+                    .as_ref()
+                    .ok_or("common MoE reduction program not admitted")?
+                    .enqueue_reduce(
+                        fused_output_ptr,
+                        topk_weights_ptr,
+                        moe_accum,
+                        0,
+                        expert_h,
+                        topk,
+                        m,
+                        scale_factor,
+                        scatter_stream,
+                    )?;
+            }
         } else if use_driver_scatter {
             unsafe {
                 cuda_sys::lib().cuMemsetD32Async(moe_accum, 0, m * expert_h, scatter_stream);
@@ -67370,7 +70310,14 @@ impl PrefillEngine {
             );
         }
         // BEGIN selected prefill row routed accumulator
-        crate::matched_prefill_row::capture_accumulator(self.matched_prefill_invocation.as_ref(),layer_idx, m, moe_accum, expert_h, scatter_stream)?;
+        crate::matched_prefill_row::capture_accumulator(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+            moe_accum,
+            expert_h,
+            scatter_stream,
+        )?;
         // END selected prefill row routed accumulator
         self.record_prefill_device_trace_f32_slice(
             PDT_LAYER_MOE_ROUTED_ACCUM_PRE_SHARED_LAST,
@@ -68690,6 +71637,20 @@ impl PrefillEngine {
                 );
             }
 
+            if !latent_moe {
+                crate::matched_prefill_row::capture_shared_operands(
+                    self.matched_prefill_invocation.as_ref(),
+                    layer_idx,
+                    m,
+                    hidden,
+                    s1_buf,
+                    moe_accum,
+                    h,
+                    false,
+                    sg_ptr != 0,
+                    add_stream,
+                )?;
+            }
             // Standard MoE accumulates shared expert output directly into the FP32
             // routed accumulator. LatentMoE must project routed output back to full
             // hidden first, so it records the full-hidden shared output for a later
@@ -68707,44 +71668,83 @@ impl PrefillEngine {
                 let gate_out = *self.scratch.d_gate_out.device_ptr();
                 let alpha: f32 = 1.0;
                 let beta: f32 = 0.0;
-                if let Some(bank)=&self.ordered_kda_projection { unsafe { bank.enqueue_router(sg_ptr,hidden,gate_out,lw_ref.shared_gate_rows,lw_ref.shared_gate_cols,m,add_stream)?; } } else { unsafe {
-                    use cudarc::cublas::result as cublas_result;
-                    use cudarc::cublas::sys as cublas_sys;
-                    let gate_handle = if shared_add_on_shared_stream {
-                        self.shared_cublas_handle
-                    } else {
-                        self.cublas_handle
-                    };
-                    let gate_stream = if shared_add_on_shared_stream {
-                        self.shared_stream
-                    } else {
-                        self.stream
-                    };
-                    cublas_result::set_stream(gate_handle, gate_stream as cublas_sys::cudaStream_t)
+                if let Some(program) = &self.native_bf16_projection {
+                    unsafe {
+                        program.enqueue(
+                            sg_ptr,
+                            hidden,
+                            gate_out,
+                            lw_ref.shared_gate_rows,
+                            lw_ref.shared_gate_cols,
+                            m,
+                            add_stream,
+                        )?;
+                    }
+                } else if let Some(bank) = &self.ordered_kda_projection {
+                    unsafe {
+                        bank.enqueue_router(
+                            sg_ptr,
+                            hidden,
+                            gate_out,
+                            lw_ref.shared_gate_rows,
+                            lw_ref.shared_gate_cols,
+                            m,
+                            add_stream,
+                        )?;
+                    }
+                } else {
+                    unsafe {
+                        use cudarc::cublas::result as cublas_result;
+                        use cudarc::cublas::sys as cublas_sys;
+                        let gate_handle = if shared_add_on_shared_stream {
+                            self.shared_cublas_handle
+                        } else {
+                            self.cublas_handle
+                        };
+                        let gate_stream = if shared_add_on_shared_stream {
+                            self.shared_stream
+                        } else {
+                            self.stream
+                        };
+                        cublas_result::set_stream(
+                            gate_handle,
+                            gate_stream as cublas_sys::cudaStream_t,
+                        )
                         .map_err(|e| format!("cublas set_stream: {:?}", e))?;
-                    cublas_result::gemm_ex(
-                        gate_handle,
-                        cublas_sys::cublasOperation_t::CUBLAS_OP_T,
-                        cublas_sys::cublasOperation_t::CUBLAS_OP_N,
-                        lw_ref.shared_gate_rows as i32,
-                        m as i32,
-                        lw_ref.shared_gate_cols as i32,
-                        &alpha as *const f32 as *const std::ffi::c_void,
-                        sg_ptr as *const std::ffi::c_void,
-                        cublas_sys::cudaDataType::CUDA_R_16BF,
-                        lw_ref.shared_gate_cols as i32,
-                        hidden as *const std::ffi::c_void,
-                        cublas_sys::cudaDataType::CUDA_R_16BF,
-                        h as i32,
-                        &beta as *const f32 as *const std::ffi::c_void,
-                        gate_out as *mut std::ffi::c_void,
-                        cublas_sys::cudaDataType::CUDA_R_32F,
-                        lw_ref.shared_gate_rows as i32,
-                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                        cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
-                    )
-                    .map_err(|e| format!("shared gate GEMM: {:?}", e))?;
-                } }
+                        cublas_result::gemm_ex(
+                            gate_handle,
+                            cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                            cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                            lw_ref.shared_gate_rows as i32,
+                            m as i32,
+                            lw_ref.shared_gate_cols as i32,
+                            &alpha as *const f32 as *const std::ffi::c_void,
+                            sg_ptr as *const std::ffi::c_void,
+                            cublas_sys::cudaDataType::CUDA_R_16BF,
+                            lw_ref.shared_gate_cols as i32,
+                            hidden as *const std::ffi::c_void,
+                            cublas_sys::cudaDataType::CUDA_R_16BF,
+                            h as i32,
+                            &beta as *const f32 as *const std::ffi::c_void,
+                            gate_out as *mut std::ffi::c_void,
+                            cublas_sys::cudaDataType::CUDA_R_32F,
+                            lw_ref.shared_gate_rows as i32,
+                            cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                            cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                        )
+                        .map_err(|e| format!("shared gate GEMM: {:?}", e))?;
+                    }
+                }
+                crate::matched_prefill_row::capture_shared_gate(
+                    self.matched_prefill_invocation.as_ref(),
+                    layer_idx,
+                    m,
+                    sg_ptr,
+                    gate_out,
+                    lw_ref.shared_gate_rows,
+                    lw_ref.shared_gate_cols,
+                    add_stream,
+                )?;
                 if diag_moe
                     && std::env::var("KRASIS_PREFILL_DIAG_MOE_DETAIL").is_ok()
                     && Self::diag_layer_enabled(layer_idx)
@@ -68761,22 +71761,33 @@ impl PrefillEngine {
                 let mut as2 = gate_out;
                 let mut as3 = m as i32;
                 let mut as4 = h as i32;
-                if let Some(bank)=&self.ordered_kda_projection { unsafe { bank.moe_combine.as_ref().ok_or("common gated shared program not admitted")?.enqueue_combine(moe_accum,s1_buf,gate_out,0,moe_accum,h,m,1.0,add_stream)?; } } else { unsafe {
-                    launch(
-                        self.kernels.moe_add_shared_gated,
-                        (m as u32, 1, 1),
-                        (ast, 1, 1),
-                        0,
-                        add_stream,
-                        &mut [
-                            &mut as0 as *mut _ as *mut std::ffi::c_void,
-                            &mut as1 as *mut _ as *mut std::ffi::c_void,
-                            &mut as2 as *mut _ as *mut std::ffi::c_void,
-                            &mut as3 as *mut _ as *mut std::ffi::c_void,
-                            &mut as4 as *mut _ as *mut std::ffi::c_void,
-                        ],
-                    )?;
-                } }
+                if let Some(bank) = &self.ordered_kda_projection {
+                    unsafe {
+                        bank.moe_combine
+                            .as_ref()
+                            .ok_or("common gated shared program not admitted")?
+                            .enqueue_combine(
+                                moe_accum, s1_buf, gate_out, 0, moe_accum, h, m, 1.0, add_stream,
+                            )?;
+                    }
+                } else {
+                    unsafe {
+                        launch(
+                            self.kernels.moe_add_shared_gated,
+                            (m as u32, 1, 1),
+                            (ast, 1, 1),
+                            0,
+                            add_stream,
+                            &mut [
+                                &mut as0 as *mut _ as *mut std::ffi::c_void,
+                                &mut as1 as *mut _ as *mut std::ffi::c_void,
+                                &mut as2 as *mut _ as *mut std::ffi::c_void,
+                                &mut as3 as *mut _ as *mut std::ffi::c_void,
+                                &mut as4 as *mut _ as *mut std::ffi::c_void,
+                            ],
+                        )?;
+                    }
+                }
             } else {
                 // No gate, add directly
                 let ast = std::cmp::max(32, ((std::cmp::min(1024, h) + 31) / 32) * 32) as u32;
@@ -68784,21 +71795,32 @@ impl PrefillEngine {
                 let mut as1 = s1_buf;
                 let mut as2 = m as i32;
                 let mut as3 = h as i32;
-                if let Some(bank)=&self.ordered_kda_projection { unsafe { bank.moe_combine.as_ref().ok_or("common shared program not admitted")?.enqueue_combine(moe_accum,s1_buf,0,0,moe_accum,h,m,1.0,add_stream)?; } } else { unsafe {
-                    launch(
-                        self.kernels.moe_add_shared,
-                        (m as u32, 1, 1),
-                        (ast, 1, 1),
-                        0,
-                        add_stream,
-                        &mut [
-                            &mut as0 as *mut _ as *mut std::ffi::c_void,
-                            &mut as1 as *mut _ as *mut std::ffi::c_void,
-                            &mut as2 as *mut _ as *mut std::ffi::c_void,
-                            &mut as3 as *mut _ as *mut std::ffi::c_void,
-                        ],
-                    )?;
-                } }
+                if let Some(bank) = &self.ordered_kda_projection {
+                    unsafe {
+                        bank.moe_combine
+                            .as_ref()
+                            .ok_or("common shared program not admitted")?
+                            .enqueue_combine(
+                                moe_accum, s1_buf, 0, 0, moe_accum, h, m, 1.0, add_stream,
+                            )?;
+                    }
+                } else {
+                    unsafe {
+                        launch(
+                            self.kernels.moe_add_shared,
+                            (m as u32, 1, 1),
+                            (ast, 1, 1),
+                            0,
+                            add_stream,
+                            &mut [
+                                &mut as0 as *mut _ as *mut std::ffi::c_void,
+                                &mut as1 as *mut _ as *mut std::ffi::c_void,
+                                &mut as2 as *mut _ as *mut std::ffi::c_void,
+                                &mut as3 as *mut _ as *mut std::ffi::c_void,
+                            ],
+                        )?;
+                    }
+                }
             }
             if !latent_moe && shared_add_on_shared_stream {
                 unsafe {
@@ -70183,6 +73205,17 @@ impl PrefillEngine {
             }
         }
 
+        if !latent_moe {
+            crate::matched_prefill_row::capture_combined_output(
+                self.matched_prefill_invocation.as_ref(),
+                layer_idx,
+                m,
+                moe_accum,
+                output,
+                h,
+                self.stream,
+            )?;
+        }
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MLA_MOE_OUTPUT_FULL,
             layer_idx,
@@ -70354,36 +73387,49 @@ impl PrefillEngine {
         let gate_ptr = lw.moe_gate_ptr;
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
-        if let Some(bank)=&self.ordered_kda_projection {unsafe{bank.enqueue_router(gate_ptr,hidden,gate_out,n_experts,h,m,self.stream)?;}} else {unsafe {
-            use cudarc::cublas::result as cublas_result;
-            use cudarc::cublas::sys as cublas_sys;
+        if let Some(program) = &self.native_bf16_projection {
+            unsafe {
+                program.enqueue(gate_ptr, hidden, gate_out, n_experts, h, m, self.stream)?;
+            }
+        } else if let Some(bank) = &self.ordered_kda_projection {
+            unsafe {
+                bank.enqueue_router(gate_ptr, hidden, gate_out, n_experts, h, m, self.stream)?;
+            }
+        } else {
+            unsafe {
+                use cudarc::cublas::result as cublas_result;
+                use cudarc::cublas::sys as cublas_sys;
 
-            cublas_result::set_stream(self.cublas_handle, self.stream as cublas_sys::cudaStream_t)
+                cublas_result::set_stream(
+                    self.cublas_handle,
+                    self.stream as cublas_sys::cudaStream_t,
+                )
                 .map_err(|e| format!("cublas set_stream: {:?}", e))?;
 
-            cublas_result::gemm_ex(
-                self.cublas_handle,
-                cublas_sys::cublasOperation_t::CUBLAS_OP_T,
-                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
-                n_experts as i32,
-                m as i32,
-                h as i32,
-                &alpha as *const f32 as *const std::ffi::c_void,
-                gate_ptr as *const std::ffi::c_void,
-                cublas_sys::cudaDataType::CUDA_R_16BF,
-                h as i32,
-                hidden as *const std::ffi::c_void,
-                cublas_sys::cudaDataType::CUDA_R_16BF,
-                h as i32,
-                &beta as *const f32 as *const std::ffi::c_void,
-                gate_out as *mut std::ffi::c_void,
-                cublas_sys::cudaDataType::CUDA_R_32F,
-                n_experts as i32,
-                cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
-            )
-            .map_err(|e| format!("cublas gate GEMM: {:?}", e))?;
-        }}
+                cublas_result::gemm_ex(
+                    self.cublas_handle,
+                    cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                    cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                    n_experts as i32,
+                    m as i32,
+                    h as i32,
+                    &alpha as *const f32 as *const std::ffi::c_void,
+                    gate_ptr as *const std::ffi::c_void,
+                    cublas_sys::cudaDataType::CUDA_R_16BF,
+                    h as i32,
+                    hidden as *const std::ffi::c_void,
+                    cublas_sys::cudaDataType::CUDA_R_16BF,
+                    h as i32,
+                    &beta as *const f32 as *const std::ffi::c_void,
+                    gate_out as *mut std::ffi::c_void,
+                    cublas_sys::cudaDataType::CUDA_R_32F,
+                    n_experts as i32,
+                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                    cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                )
+                .map_err(|e| format!("cublas gate GEMM: {:?}", e))?;
+            }
+        }
 
         // 2. Top-K routing (GPU-only)
         let topk_ids_ptr = *self.scratch.d_topk_ids.device_ptr();
@@ -74111,6 +77157,18 @@ impl PrefillEngine {
                     }),
                 );
             }
+            crate::matched_prefill_row::capture_shared_operands(
+                self.matched_prefill_invocation.as_ref(),
+                layer_idx,
+                m,
+                hidden,
+                s1_buf,
+                moe_accum,
+                h,
+                round_routed_before_shared,
+                sg_ptr != 0,
+                self.stream,
+            )?;
             if sg_ptr != 0 {
                 // Compute shared gate: hidden [m, h] @ gate [h, 1] -> gate_out [m, 1] FP32
                 let gate_out = *self.scratch.d_gate_out.device_ptr(); // reuse gate_out buffer (has room for m * n_experts, m*1 is fine)
@@ -74126,37 +77184,61 @@ impl PrefillEngine {
                         liveness_moe_t0.elapsed().as_secs_f64() * 1000.0,
                     );
                 }
-                unsafe {
-                    use cudarc::cublas::result as cublas_result;
-                    use cudarc::cublas::sys as cublas_sys;
-                    cublas_result::set_stream(
-                        self.cublas_handle,
-                        self.stream as cublas_sys::cudaStream_t,
-                    )
-                    .map_err(|e| format!("cublas set_stream: {:?}", e))?;
-                    cublas_result::gemm_ex(
-                        self.cublas_handle,
-                        cublas_sys::cublasOperation_t::CUBLAS_OP_T,
-                        cublas_sys::cublasOperation_t::CUBLAS_OP_N,
-                        lw.shared_gate_rows as i32,
-                        m as i32,
-                        lw.shared_gate_cols as i32,
-                        &alpha as *const f32 as *const std::ffi::c_void,
-                        sg_ptr as *const std::ffi::c_void,
-                        cublas_sys::cudaDataType::CUDA_R_16BF,
-                        lw.shared_gate_cols as i32,
-                        hidden as *const std::ffi::c_void,
-                        cublas_sys::cudaDataType::CUDA_R_16BF,
-                        h as i32,
-                        &beta as *const f32 as *const std::ffi::c_void,
-                        gate_out as *mut std::ffi::c_void,
-                        cublas_sys::cudaDataType::CUDA_R_32F,
-                        lw.shared_gate_rows as i32,
-                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                        cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
-                    )
-                    .map_err(|e| format!("shared gate GEMM: {:?}", e))?;
+                if let Some(program) = &self.native_bf16_projection {
+                    unsafe {
+                        program.enqueue(
+                            sg_ptr,
+                            hidden,
+                            gate_out,
+                            lw.shared_gate_rows,
+                            lw.shared_gate_cols,
+                            m,
+                            self.stream,
+                        )?;
+                    }
+                } else {
+                    unsafe {
+                        use cudarc::cublas::result as cublas_result;
+                        use cudarc::cublas::sys as cublas_sys;
+                        cublas_result::set_stream(
+                            self.cublas_handle,
+                            self.stream as cublas_sys::cudaStream_t,
+                        )
+                        .map_err(|e| format!("cublas set_stream: {:?}", e))?;
+                        cublas_result::gemm_ex(
+                            self.cublas_handle,
+                            cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                            cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                            lw.shared_gate_rows as i32,
+                            m as i32,
+                            lw.shared_gate_cols as i32,
+                            &alpha as *const f32 as *const std::ffi::c_void,
+                            sg_ptr as *const std::ffi::c_void,
+                            cublas_sys::cudaDataType::CUDA_R_16BF,
+                            lw.shared_gate_cols as i32,
+                            hidden as *const std::ffi::c_void,
+                            cublas_sys::cudaDataType::CUDA_R_16BF,
+                            h as i32,
+                            &beta as *const f32 as *const std::ffi::c_void,
+                            gate_out as *mut std::ffi::c_void,
+                            cublas_sys::cudaDataType::CUDA_R_32F,
+                            lw.shared_gate_rows as i32,
+                            cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                            cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                        )
+                        .map_err(|e| format!("shared gate GEMM: {:?}", e))?;
+                    }
                 }
+                crate::matched_prefill_row::capture_shared_gate(
+                    self.matched_prefill_invocation.as_ref(),
+                    layer_idx,
+                    m,
+                    sg_ptr,
+                    gate_out,
+                    lw.shared_gate_rows,
+                    lw.shared_gate_cols,
+                    self.stream,
+                )?;
                 if liveness_detail {
                     let sync_t0 = Instant::now();
                     prefill_liveness!(
@@ -74666,6 +77748,15 @@ impl PrefillEngine {
                 )?;
             }
         }
+        crate::matched_prefill_row::capture_combined_output(
+            self.matched_prefill_invocation.as_ref(),
+            layer_idx,
+            m,
+            moe_accum,
+            output,
+            h,
+            self.stream,
+        )?;
         if let Some(capture) = hqq_consume_boundary_capture.as_ref() {
             let accum_ptr = moe_accum + ((trace_row * h * std::mem::size_of::<f32>()) as u64);
             let output_ptr = output + ((trace_row * h * std::mem::size_of::<u16>()) as u64);
@@ -74806,7 +77897,7 @@ impl PrefillEngine {
         if self.ordered_kda_projection.is_some() {
             // Same actual shared stream, fork/join events and distinct shared scratch;
             // common Marlin admission is enforced by marlin_gemm_on_stream.
-            return self.launch_shared_expert_on_shared_stream(layer_idx,m);
+            return self.launch_shared_expert_on_shared_stream(layer_idx, m);
         }
         // Use shared_stream + d_shared_fp32_scratch + d_shared_workspace
         // to avoid data races with the main stream's routed expert dispatch
@@ -74899,7 +77990,14 @@ impl PrefillEngine {
             );
         }
 
-        self.capture_matched_shared_row(layer_idx, m, "w1.bf16", s1_buf, sw1.n, self.shared_stream)?;
+        self.capture_matched_shared_row(
+            layer_idx,
+            m,
+            "w1.bf16",
+            s1_buf,
+            sw1.n,
+            self.shared_stream,
+        )?;
 
         // Activation on shared_stream
         if gated {
@@ -74913,7 +78011,14 @@ impl PrefillEngine {
                 deepseek_v4_activation,
                 self.shared_stream,
             )?;
-            self.capture_matched_shared_row(layer_idx, m, "activation.bf16", s2_buf, shared_inter, self.shared_stream)?;
+            self.capture_matched_shared_row(
+                layer_idx,
+                m,
+                "activation.bf16",
+                s2_buf,
+                shared_inter,
+                self.shared_stream,
+            )?;
             // Zero workspace + C_tmp before w2 GEMM
             unsafe {
                 cuda_sys::lib().cuMemsetD32Async(shared_ws, 0, shared_ws_len, self.shared_stream);
@@ -74953,7 +78058,14 @@ impl PrefillEngine {
                     false,
                 );
             }
-            self.capture_matched_shared_row(layer_idx, m, "w2.bf16", s1_buf, sw2.n, self.shared_stream)?;
+            self.capture_matched_shared_row(
+                layer_idx,
+                m,
+                "w2.bf16",
+                s1_buf,
+                sw2.n,
+                self.shared_stream,
+            )?;
         } else {
             let act_t = std::cmp::max(32, ((std::cmp::min(1024, shared_inter) + 31) / 32) * 32);
             let mut ac0 = s1_buf;
@@ -75026,19 +78138,45 @@ impl PrefillEngine {
     }
 
     fn capture_matched_shared_input(
-        &self, layer: usize, m: usize, hidden: u64, w1: &MarlinWeight,
-        w2: &MarlinWeight, stream: cuda_sys::CUstream,
+        &self,
+        layer: usize,
+        m: usize,
+        hidden: u64,
+        w1: &MarlinWeight,
+        w2: &MarlinWeight,
+        stream: cuda_sys::CUstream,
     ) -> Result<(), String> {
-        let Some(target) = self.matched_prefill_target("shared_expert", layer, m,None)? else { return Ok(()) };
+        let Some(target) = self.matched_prefill_target("shared_expert", layer, m, None)? else {
+            return Ok(());
+        };
         if !self.layer_weights[layer].moe_gated {
             return Err("matched shared probe requires gated activation".into());
         }
         target.row("input.bf16", hidden, w1.k, stream)?;
         for (name, weight) in [("w1", w1), ("w2", w2)] {
-            let packed_bytes = weight.k.checked_mul(weight.n).and_then(|n| n.checked_mul(weight.num_bits as usize)).map(|n| n / 8).ok_or("shared probe packed overflow")?;
-            let scale_bytes = weight.num_groups.checked_mul(weight.n).and_then(|n| n.checked_mul(2)).ok_or("shared probe scale overflow")?;
-            target.device(&format!("{name}-packed.bin"), weight.packed, packed_bytes, stream)?;
-            target.device(&format!("{name}-scales.bf16"), weight.scales, scale_bytes, stream)?;
+            let packed_bytes = weight
+                .k
+                .checked_mul(weight.n)
+                .and_then(|n| n.checked_mul(weight.num_bits as usize))
+                .map(|n| n / 8)
+                .ok_or("shared probe packed overflow")?;
+            let scale_bytes = weight
+                .num_groups
+                .checked_mul(weight.n)
+                .and_then(|n| n.checked_mul(2))
+                .ok_or("shared probe scale overflow")?;
+            target.device(
+                &format!("{name}-packed.bin"),
+                weight.packed,
+                packed_bytes,
+                stream,
+            )?;
+            target.device(
+                &format!("{name}-scales.bf16"),
+                weight.scales,
+                scale_bytes,
+                stream,
+            )?;
             target.write(&format!("{name}-descriptor.json"), serde_json::to_string_pretty(&serde_json::json!({
                 "n":weight.n,"k":weight.k,"bits":weight.num_bits,"groups":weight.num_groups,
                 "group_size":weight.group_size,"packed_ptr":weight.packed,"scales_ptr":weight.scales,
@@ -75052,10 +78190,15 @@ impl PrefillEngine {
     }
 
     fn capture_matched_shared_row(
-        &self, layer: usize, m: usize, name: &str, ptr: u64,
-        width: usize, stream: cuda_sys::CUstream,
+        &self,
+        layer: usize,
+        m: usize,
+        name: &str,
+        ptr: u64,
+        width: usize,
+        stream: cuda_sys::CUstream,
     ) -> Result<(), String> {
-        if let Some(target) = self.matched_prefill_target("shared_expert", layer, m,None)? {
+        if let Some(target) = self.matched_prefill_target("shared_expert", layer, m, None)? {
             target.row(name, ptr, width, stream)?;
         }
         Ok(())
@@ -75271,7 +78414,14 @@ impl PrefillEngine {
                     shared_inter,
                 );
             }
-            self.capture_matched_shared_row(layer_idx, m, "activation.bf16", s2_buf, shared_inter, self.stream)?;
+            self.capture_matched_shared_row(
+                layer_idx,
+                m,
+                "activation.bf16",
+                s2_buf,
+                shared_inter,
+                self.stream,
+            )?;
             self.expert_marlin_gemm(s2_buf, sw2, s1_buf, m)?;
             self.capture_matched_shared_row(layer_idx, m, "w2.bf16", s1_buf, sw2.n, self.stream)?;
             if trace_shared_stages {
@@ -76090,37 +79240,63 @@ impl PrefillEngine {
             // Gate GEMM: [total_m, hidden] @ [hidden, n_experts] -> [total_m, n_experts] FP32
             let alpha: f32 = 1.0;
             let beta: f32 = 0.0;
-            if let Some(bank)=&self.ordered_kda_projection {unsafe{bank.enqueue_router(gate_ptr,hidden,gate_out,n_experts,h,total_m,self.stream)?;}} else {unsafe {
-                use cudarc::cublas::result as cublas_result;
-                use cudarc::cublas::sys as cublas_sys;
-                cublas_result::set_stream(
-                    self.cublas_handle,
-                    self.stream as cublas_sys::cudaStream_t,
-                )
-                .map_err(|e| format!("prescan cublas set_stream: {:?}", e))?;
-                cublas_result::gemm_ex(
-                    self.cublas_handle,
-                    cublas_sys::cublasOperation_t::CUBLAS_OP_T,
-                    cublas_sys::cublasOperation_t::CUBLAS_OP_N,
-                    n_experts as i32,
-                    total_m as i32,
-                    h as i32,
-                    &alpha as *const f32 as *const std::ffi::c_void,
-                    gate_ptr as *const std::ffi::c_void,
-                    cublas_sys::cudaDataType::CUDA_R_16BF,
-                    h as i32,
-                    hidden as *const std::ffi::c_void,
-                    cublas_sys::cudaDataType::CUDA_R_16BF,
-                    h as i32,
-                    &beta as *const f32 as *const std::ffi::c_void,
-                    gate_out as *mut std::ffi::c_void,
-                    cublas_sys::cudaDataType::CUDA_R_32F,
-                    n_experts as i32,
-                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                    cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
-                )
-                .map_err(|e| format!("prescan gate GEMM layer {}: {:?}", layer_idx, e))?;
-            }}
+            if let Some(program) = &self.native_bf16_projection {
+                unsafe {
+                    program.enqueue(
+                        gate_ptr,
+                        hidden,
+                        gate_out,
+                        n_experts,
+                        h,
+                        total_m,
+                        self.stream,
+                    )?;
+                }
+            } else if let Some(bank) = &self.ordered_kda_projection {
+                unsafe {
+                    bank.enqueue_router(
+                        gate_ptr,
+                        hidden,
+                        gate_out,
+                        n_experts,
+                        h,
+                        total_m,
+                        self.stream,
+                    )?;
+                }
+            } else {
+                unsafe {
+                    use cudarc::cublas::result as cublas_result;
+                    use cudarc::cublas::sys as cublas_sys;
+                    cublas_result::set_stream(
+                        self.cublas_handle,
+                        self.stream as cublas_sys::cudaStream_t,
+                    )
+                    .map_err(|e| format!("prescan cublas set_stream: {:?}", e))?;
+                    cublas_result::gemm_ex(
+                        self.cublas_handle,
+                        cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                        cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                        n_experts as i32,
+                        total_m as i32,
+                        h as i32,
+                        &alpha as *const f32 as *const std::ffi::c_void,
+                        gate_ptr as *const std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                        h as i32,
+                        hidden as *const std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                        h as i32,
+                        &beta as *const f32 as *const std::ffi::c_void,
+                        gate_out as *mut std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_32F,
+                        n_experts as i32,
+                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                        cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                    )
+                    .map_err(|e| format!("prescan gate GEMM layer {}: {:?}", layer_idx, e))?;
+                }
+            }
 
             // Top-K routing
             {
@@ -76321,7 +79497,8 @@ impl PrefillEngine {
         if moe_layer_indices.len() != num_moe_layers {
             return Err(format!(
                 "prefill pinning routed layer count mismatch: gates={} prescan={}",
-                moe_layer_indices.len(), num_moe_layers,
+                moe_layer_indices.len(),
+                num_moe_layers,
             ));
         }
         let mut expert_payload_bytes = Vec::with_capacity(num_moe_layers);
@@ -76428,11 +79605,8 @@ impl PrefillEngine {
             .unwrap_or(usize::MAX);
         let pool_budget = pool_budget.min(measured_budget);
 
-        let pin_experts = select_prefill_pinning_experts(
-            prescan_counts,
-            &expert_payload_bytes,
-            pool_budget,
-        )?;
+        let pin_experts =
+            select_prefill_pinning_experts(prescan_counts, &expert_payload_bytes, pool_budget)?;
         let total_pinned: usize = pin_experts.iter().map(Vec::len).sum();
         if total_pinned == 0 {
             if stderr_debug_enabled() {
@@ -76441,16 +79615,17 @@ impl PrefillEngine {
             }
             return Ok(0);
         }
-        let pool_bytes = pin_experts
-            .iter()
-            .enumerate()
-            .try_fold(0usize, |total, (layer, experts)| {
-                experts.iter().try_fold(total, |subtotal, &expert| {
-                    subtotal
-                        .checked_add(expert_payload_bytes[layer][expert])
-                        .ok_or_else(|| "prefill pinning pool byte overflow".to_string())
-                })
-            })?;
+        let pool_bytes =
+            pin_experts
+                .iter()
+                .enumerate()
+                .try_fold(0usize, |total, (layer, experts)| {
+                    experts.iter().try_fold(total, |subtotal, &expert| {
+                        subtotal
+                            .checked_add(expert_payload_bytes[layer][expert])
+                            .ok_or_else(|| "prefill pinning pool byte overflow".to_string())
+                    })
+                })?;
         let max_pinned_per_layer = pin_experts.iter().map(Vec::len).max().unwrap_or(0);
 
         if stderr_debug_enabled() {
@@ -76517,8 +79692,7 @@ impl PrefillEngine {
         // error cannot leak the raw CUDA allocation.
         let t_pin = Instant::now();
         let fill_result = (|| -> Result<Vec<Vec<Option<usize>>>, String> {
-            let mut offsets: Vec<Vec<Option<usize>>> =
-                vec![vec![None; n_experts]; num_moe_layers];
+            let mut offsets: Vec<Vec<Option<usize>>> = vec![vec![None; n_experts]; num_moe_layers];
             let mut pool_offset = 0usize;
             for (mi, &layer_idx) in moe_layer_indices.iter().enumerate() {
                 let moe_idx = self.layer_weights[layer_idx].moe_layer_idx.ok_or_else(|| {
@@ -76842,7 +80016,14 @@ impl PrefillEngine {
             shared_ws,
         )?;
 
-        self.capture_matched_shared_row(layer_idx, m, "w1.bf16", s1_buf, sw1.n, self.shared_stream)?;
+        self.capture_matched_shared_row(
+            layer_idx,
+            m,
+            "w1.bf16",
+            s1_buf,
+            sw1.n,
+            self.shared_stream,
+        )?;
 
         // Activation
         if gated {
@@ -76856,7 +80037,14 @@ impl PrefillEngine {
                 deepseek_v4_activation,
                 self.shared_stream,
             )?;
-            self.capture_matched_shared_row(layer_idx, m, "activation.bf16", s2_buf, shared_inter, self.shared_stream)?;
+            self.capture_matched_shared_row(
+                layer_idx,
+                m,
+                "activation.bf16",
+                s2_buf,
+                shared_inter,
+                self.shared_stream,
+            )?;
             self.expert_marlin_gemm_on_stream(
                 s2_buf,
                 sw2,
@@ -76866,7 +80054,14 @@ impl PrefillEngine {
                 shared_scratch,
                 shared_ws,
             )?;
-            self.capture_matched_shared_row(layer_idx, m, "w2.bf16", s1_buf, sw2.n, self.shared_stream)?;
+            self.capture_matched_shared_row(
+                layer_idx,
+                m,
+                "w2.bf16",
+                s1_buf,
+                sw2.n,
+                self.shared_stream,
+            )?;
         } else {
             let act_t = std::cmp::max(32, ((std::cmp::min(1024, shared_inter) + 31) / 32) * 32);
             let mut ac0 = s1_buf;
@@ -77664,7 +80859,17 @@ impl PrefillEngine {
         let h = cfg.hidden_size;
         let v = cfg.vocab_size;
 
-        let first_logits_observer = crate::matched_prefill_logits::begin(self.matched_prefill_invocation.as_ref(), temperature, v, h, m, self.scratch.max_tokens, self.scratch.d_hidden.len(), self.scratch.d_logits.len(), *self.scratch.d_hidden.device_ptr())?;
+        let first_logits_observer = crate::matched_prefill_logits::begin(
+            self.matched_prefill_invocation.as_ref(),
+            temperature,
+            v,
+            h,
+            m,
+            self.scratch.max_tokens,
+            self.scratch.d_hidden.len(),
+            self.scratch.d_logits.len(),
+            *self.scratch.d_hidden.device_ptr(),
+        )?;
         let last_tok = *self.scratch.d_hidden.device_ptr() + ((m - 1) * h * 2) as u64;
         let debug_reference_trace = self.reference_debug_trace_enabled;
         let margin_projection_target = self.first_token_margin_projection_target()?;
@@ -77738,7 +80943,13 @@ impl PrefillEngine {
         } else {
             return Err("No LM head (neither Marlin nor BF16)".to_string());
         }
-        if let Some(selected)=&self.selected_kda {selected.enqueue_serving_guard(*self.scratch.d_logits.device_ptr(),self.scratch.d_logits.len()*4,self.stream)?;}
+        if let Some(selected) = &self.selected_kda {
+            selected.enqueue_serving_guard(
+                *self.scratch.d_logits.device_ptr(),
+                self.scratch.d_logits.len() * 4,
+                self.stream,
+            )?;
+        }
 
         // Download logits
         self.h_logits.resize(v, 0.0);
@@ -77757,10 +80968,29 @@ impl PrefillEngine {
             }
         }
         self.stream_sync()?;
-        if let Some(observer) = &first_logits_observer { observer.raw(&self.h_logits, last_tok, self.stream, self.final_logit_softcap, lm_head_kind)?; }
-        if self.selected_kda.is_some() && self.h_logits.first().is_some_and(|v|v.is_nan()) {return Err("selected prefill recurrence rejected invalid state/operands before sampling".into());}
+        if let Some(observer) = &first_logits_observer {
+            observer.raw(
+                &self.h_logits,
+                last_tok,
+                self.stream,
+                self.final_logit_softcap,
+                lm_head_kind,
+            )?;
+        }
+        #[cfg(feature = "scalar-gdn-test")]
+        if let Some(storage) = &self.selected_scalar_gdn {
+            storage.require_active_health()?;
+        }
+        if self.selected_kda.is_some() && self.h_logits.first().is_some_and(|v| v.is_nan()) {
+            return Err(
+                "selected prefill recurrence rejected invalid state/operands before sampling"
+                    .into(),
+            );
+        }
         apply_logit_softcap_in_place(&mut self.h_logits, self.final_logit_softcap);
-        if let Some(observer) = &first_logits_observer { observer.softcap(&self.h_logits)?; }
+        if let Some(observer) = &first_logits_observer {
+            observer.softcap(&self.h_logits)?;
+        }
 
         let logits_before_suppression = if debug_reference_trace {
             Some(self.h_logits.clone())
@@ -77775,7 +81005,9 @@ impl PrefillEngine {
             }
         }
 
-        if let Some(observer) = &first_logits_observer { observer.policy(&self.h_logits, suppress_tokens)?; }
+        if let Some(observer) = &first_logits_observer {
+            observer.policy(&self.h_logits, suppress_tokens)?;
+        }
         // Sample
         let first_token = if temperature < 1e-6 {
             // Greedy
@@ -78006,7 +81238,9 @@ impl PrefillEngine {
             }));
         }
 
-        if let Some(observer) = &first_logits_observer { observer.selected(&self.h_logits, first_token)?; }
+        if let Some(observer) = &first_logits_observer {
+            observer.selected(&self.h_logits, first_token)?;
+        }
         Ok(first_token)
     }
 }
@@ -80536,7 +83770,10 @@ pub fn allocate_scratch_for_prompt(
             None
         },
         d_la_b: if has_la {
-            Some(Arc::new(alloc_u16(la_max_len * config.la_num_v_heads, "la_b")?))
+            Some(Arc::new(alloc_u16(
+                la_max_len * config.la_num_v_heads,
+                "la_b",
+            )?))
         } else {
             None
         },
@@ -80662,8 +83899,22 @@ pub fn allocate_scratch_for_prompt(
 type SidecarAbiVersionFn = unsafe extern "C" fn() -> u32;
 type SidecarBuildIdFn = unsafe extern "C" fn() -> *const libc::c_char;
 
+/// Common cross-platform owned loader. Required native context callers retain
+/// this handle through all module/context destruction; no legacy fallback.
+pub(crate) unsafe fn open_owned_sidecar_library(
+    path: &std::path::Path,
+    label: &str,
+) -> Result<libloading::Library, String> {
+    libloading::Library::new(path).map_err(|error| {
+        format!(
+            "loading {label} sidecar failed: path={} error={error}",
+            path.display()
+        )
+    })
+}
+
 unsafe fn open_sidecar_library(path: &str, label: &str) -> Option<&'static libloading::Library> {
-    match libloading::Library::new(path) {
+    match open_owned_sidecar_library(std::path::Path::new(path), label) {
         Ok(lib) => Some(Box::leak(Box::new(lib))),
         Err(err) => {
             log::warn!(
@@ -81010,7 +84261,7 @@ fn load_flash_attn_fp8kv() -> Option<FlashAttnFwdFn> {
 
 /// Find a vendored .so file built by the sidecar build step.
 /// Searches: 1) env var, 2) installed package, 3) next to executable.
-fn find_vendor_so(name: &str) -> Option<String> {
+pub(crate) fn find_vendor_so(name: &str) -> Option<String> {
     // 1. Look in env var (uppercase, dots/hyphens → underscore)
     for candidate_name in sidecar_name_candidates(name) {
         let env_name = candidate_name
@@ -81293,16 +84544,16 @@ mod chunk_plan_tests {
         build_balanced_prefill_chunk_plan, build_balanced_prefill_chunk_plan_at_boundary,
         build_image_aware_prefill_chunk_plan, build_prefill_chunk_plan,
         build_prefill_chunk_plan_at_boundary, deepseek_v4_native_prefix_rows_to_restore,
-        dsa_mla_gathered_gemm_workspace_row_layout,
-        dsa_mla_grouped_exact_workspace_row_layout, dsa_mla_wvc_workspace_row_layout,
-        dsa_prefill_workspace_deficit_bytes,
-        glm5_hc_temp_state_elements_from_geometry, kimi_delta_state_elements_from_geometry,
-        is_prefill_cancelled_error, marlin_moe_uses_sparse_block_filter,
+        dsa_mla_gathered_gemm_workspace_row_layout, dsa_mla_grouped_exact_workspace_row_layout,
+        dsa_mla_wvc_workspace_row_layout, dsa_prefill_workspace_deficit_bytes,
         fused_moe_fp32_reduce_floats, fused_moe_fp32_reduce_floats_for_precisions,
+        glm5_hc_temp_state_elements_from_geometry, is_prefill_cancelled_error,
+        kimi_delta_state_elements_from_geometry, marlin_moe_uses_sparse_block_filter,
         portable_predicted_w1_requires_exact_resize, prefill_chunk_guard_prompt_tokens,
-        project_prefill_runtime_reserve_bytes, shared_moe_inter_scratch_elements,
-        select_prefill_pinning_experts, stage_exact_export_launch_scalars, stage_exact_export_range,
-        synchronous_cold_staging_reuse_requires_host_wait, PortablePredictedW1Policy,
+        project_prefill_runtime_reserve_bytes, select_prefill_pinning_experts,
+        shared_moe_inter_scratch_elements, stage_exact_export_launch_scalars,
+        stage_exact_export_range, synchronous_cold_staging_reuse_requires_host_wait,
+        PortablePredictedW1Policy,
     };
 
     #[test]
@@ -81345,7 +84596,10 @@ mod chunk_plan_tests {
             dsa_mla_grouped_exact_workspace_row_layout(2, 3).unwrap(),
             (56, 510),
         );
-        assert_eq!(dsa_mla_wvc_workspace_row_layout(2, 4, 3).unwrap(), (28, 255));
+        assert_eq!(
+            dsa_mla_wvc_workspace_row_layout(2, 4, 3).unwrap(),
+            (28, 255)
+        );
         assert!(dsa_mla_gathered_gemm_workspace_row_layout(usize::MAX, 2, 1, 0).is_err());
     }
 
@@ -81359,19 +84613,43 @@ mod chunk_plan_tests {
     fn prefill_precision_scratch_covers_wider_int4_tiles_than_int8() {
         let int4 = fused_moe_fp32_reduce_floats(64, 4096, 2048, 4, 128, 1, 99 * 1024);
         let int8 = fused_moe_fp32_reduce_floats(64, 4096, 2048, 8, 128, 1, 99 * 1024);
-        assert!(int4 > int8, "precision changes the legal N tile at this shared-memory limit");
-        assert_eq!(fused_moe_fp32_reduce_floats_for_precisions(
-            64, 4096, 2048, &[4, 8], 128, 1, 99 * 1024), int4);
+        assert!(
+            int4 > int8,
+            "precision changes the legal N tile at this shared-memory limit"
+        );
+        assert_eq!(
+            fused_moe_fp32_reduce_floats_for_precisions(64, 4096, 2048, &[4, 8], 128, 1, 99 * 1024),
+            int4
+        );
         for shared_mem in [48 * 1024, 99 * 1024, 163 * 1024] {
-            for (n, k, group_size, sms) in [(4096, 2048, 128, 1), (768, 1024, 32, 7), (1024, 768, 64, 3)] {
+            for (n, k, group_size, sms) in
+                [(4096, 2048, 128, 1), (768, 1024, 32, 7), (1024, 768, 64, 3)]
+            {
                 let mixed = fused_moe_fp32_reduce_floats_for_precisions(
-                    64, n, k, &[4, 8], group_size, sms, shared_mem);
+                    64,
+                    n,
+                    k,
+                    &[4, 8],
+                    group_size,
+                    sms,
+                    shared_mem,
+                );
                 for bits in [4, 8] {
-                    let homogeneous = fused_moe_fp32_reduce_floats(
-                        64, n, k, bits, group_size, sms, shared_mem);
+                    let homogeneous =
+                        fused_moe_fp32_reduce_floats(64, n, k, bits, group_size, sms, shared_mem);
                     assert!(mixed >= homogeneous);
-                    assert_eq!(fused_moe_fp32_reduce_floats_for_precisions(
-                        64, n, k, &[bits as u8], group_size, sms, shared_mem), homogeneous);
+                    assert_eq!(
+                        fused_moe_fp32_reduce_floats_for_precisions(
+                            64,
+                            n,
+                            k,
+                            &[bits as u8],
+                            group_size,
+                            sms,
+                            shared_mem
+                        ),
+                        homogeneous
+                    );
                 }
             }
         }
@@ -83338,7 +86616,8 @@ mod kernel_tests {
         for pool in [2usize, 4, 8] {
             for capacity in [1usize, 2, 5] {
                 let width = capacity * pool + pool - 1;
-                let mut contexts = vec![0, 1, pool - 1, pool, pool + 1, width - 1, width, width + 1];
+                let mut contexts =
+                    vec![0, 1, pool - 1, pool, pool + 1, width - 1, width, width + 1];
                 contexts.sort_unstable();
                 contexts.dedup();
                 for context in contexts {
@@ -87129,10 +90408,10 @@ mod kernel_tests {
                     .unwrap();
                 }
 
-                let mut c0 = *d_output.device_ptr() as u64
-                    + (guard * std::mem::size_of::<f32>()) as u64;
-                let mut c1 = *d_kv_state.device_ptr() as u64
-                    + (guard * std::mem::size_of::<f32>()) as u64;
+                let mut c0 =
+                    *d_output.device_ptr() as u64 + (guard * std::mem::size_of::<f32>()) as u64;
+                let mut c1 =
+                    *d_kv_state.device_ptr() as u64 + (guard * std::mem::size_of::<f32>()) as u64;
                 let mut c2 = *d_score_state.device_ptr() as u64
                     + (guard * std::mem::size_of::<f32>()) as u64;
                 let mut c3 = *kv_input.device_ptr() as u64;
@@ -87201,15 +90480,11 @@ mod kernel_tests {
             assert!(kv[guard + state_elems..]
                 .iter()
                 .all(|bits| *bits == f32_canary_bits));
-            assert!(score[..guard]
-                .iter()
-                .all(|bits| *bits == f32_canary_bits));
+            assert!(score[..guard].iter().all(|bits| *bits == f32_canary_bits));
             assert!(score[guard + state_elems..]
                 .iter()
                 .all(|bits| *bits == f32_canary_bits));
-            assert!(output[..guard]
-                .iter()
-                .all(|bits| *bits == f32_canary_bits));
+            assert!(output[..guard].iter().all(|bits| *bits == f32_canary_bits));
             assert!(output[guard + head_dim..]
                 .iter()
                 .all(|bits| *bits == f32_canary_bits));
@@ -87687,8 +90962,8 @@ mod kernel_tests {
             },
             None,
             &mut selection_timing,
-        None,
-)
+            None,
+        )
         .expect("DSA prefill causal selection dispatcher");
         assert_eq!(launched_plan, topk_plan);
         self::cuda_sync();
@@ -87839,8 +91114,8 @@ mod kernel_tests {
             },
             None,
             &mut direct_selection_timing,
-        None,
-)
+            None,
+        )
         .expect("DSA direct one-run dispatcher");
         assert_eq!(direct_launched_plan, direct_plan);
         self::cuda_sync();
@@ -87952,8 +91227,8 @@ mod kernel_tests {
                 },
                 None,
                 &mut timing,
-            None,
-)
+                None,
+            )
             .expect("production-shape top-k launch");
             assert_eq!(launched, plan);
             self::cuda_sync();
@@ -88178,8 +91453,8 @@ mod kernel_tests {
                     },
                     None,
                     &mut timing,
-                None,
-)
+                    None,
+                )
                 .expect("DeepSeek-V4 index-score GEMM dispatcher");
                 assert_eq!(launched, topk_plan);
                 self::cuda_sync();
@@ -95866,15 +99141,21 @@ mod kernel_tests {
             let (serial_base, chunk_base) = glm53_kda_chunk_fixture(base_tokens);
             let (serial_extended, chunk_extended) = glm53_kda_chunk_fixture(extended_tokens);
             assert!(serial_extended.len() > serial_base.len());
-            assert_eq!(serial_base, serial_extended[..serial_base.len()],
-                "serial recurrent oracle changed its causal prefix");
+            assert_eq!(
+                serial_base,
+                serial_extended[..serial_base.len()],
+                "serial recurrent oracle changed its causal prefix"
+            );
             let mut differing_values = 0usize;
             let mut first_difference = None;
             let mut max_abs = 0.0f64;
             let mut error_squared = 0.0f64;
             let mut reference_squared = 0.0f64;
-            for (index, (a, b)) in chunk_base.chunks_exact(2)
-                .zip(chunk_extended[..chunk_base.len()].chunks_exact(2)).enumerate() {
+            for (index, (a, b)) in chunk_base
+                .chunks_exact(2)
+                .zip(chunk_extended[..chunk_base.len()].chunks_exact(2))
+                .enumerate()
+            {
                 let a_bits = u16::from_le_bytes(a.try_into().unwrap());
                 let b_bits = u16::from_le_bytes(b.try_into().unwrap());
                 let a = half::bf16::from_bits(a_bits).to_f32() as f64;
@@ -95884,19 +99165,22 @@ mod kernel_tests {
                     differing_values += 1;
                     first_difference.get_or_insert(index);
                 }
-                max_abs = max_abs.max((a-b).abs());
-                error_squared += (a-b).powi(2);
+                max_abs = max_abs.max((a - b).abs());
+                error_squared += (a - b).powi(2);
                 reference_squared += a.powi(2);
             }
             assert!(reference_squared > 0.0);
-            eprintln!("{}", serde_json::json!({
-                "diagnostic":"kda_appended_prefix", "campaign_exact_gate_waived":false,
-                "base_tokens":base_tokens,"extended_tokens":extended_tokens,
-                "serial_oracle_prefix_bit_exact":true,"values_compared":chunk_base.len()/2,
-                "parallel_prefix_bit_exact":differing_values==0,
-                "differing_values":differing_values,"first_difference_flat_index":first_difference,
-                "max_abs":max_abs,"relative_l2":(error_squared/reference_squared).sqrt()
-            }));
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "diagnostic":"kda_appended_prefix", "campaign_exact_gate_waived":false,
+                    "base_tokens":base_tokens,"extended_tokens":extended_tokens,
+                    "serial_oracle_prefix_bit_exact":true,"values_compared":chunk_base.len()/2,
+                    "parallel_prefix_bit_exact":differing_values==0,
+                    "differing_values":differing_values,"first_difference_flat_index":first_difference,
+                    "max_abs":max_abs,"relative_l2":(error_squared/reference_squared).sqrt()
+                })
+            );
         }
     }
 
@@ -96588,13 +99872,49 @@ fn find_marlin_so() -> Option<String> {
 }
 
 impl PrefillEngine {
-    pub(crate) fn retained_kda_prefill_source(&self,layer:usize,rows:usize,reserve:usize)->Result<crate::kda_prefix_owner::RetainedPrefillKdaSource,String>{
-        let desc=self.layer_weights.get(layer).and_then(|x|x.kimi_delta.as_ref()).ok_or("actual prefill KDA layer geometry")?;
-        if self.stream!=self.prefill_stream_owner.handle(){return Err("actual prefill stream owner mismatch".into());}
-        let beta=self.scratch.d_la_b.as_ref().ok_or("actual prefill beta absent")?.clone();
-        let raw=[self.scratch.d_q.clone(),self.scratch.d_k.clone(),self.scratch.d_v.clone(),self.scratch.d_scratch2.clone(),beta];
-        let addresses=raw.iter().map(|x|*x.device_ptr()).collect::<Vec<_>>();
-        let source=crate::kda_prefix_owner::RetainedPrefillKdaSource::from_model_storage(self.prefill_stream_owner.clone(),raw,rows,desc.num_heads,desc.head_dim,reserve)?;
-        if source.addresses()!=addresses{return Err("actual prefill source pointers differ".into());}Ok(source)
+    pub(crate) fn retained_kda_prefill_source(
+        &self,
+        layer: usize,
+        rows: usize,
+        reserve: usize,
+    ) -> Result<crate::kda_prefix_owner::RetainedPrefillKdaSource, String> {
+        let desc = self
+            .layer_weights
+            .get(layer)
+            .and_then(|x| x.kimi_delta.as_ref())
+            .ok_or("actual prefill KDA layer geometry")?;
+        if self.stream != self.prefill_stream_owner.handle() {
+            return Err("actual prefill stream owner mismatch".into());
+        }
+        let beta = self
+            .scratch
+            .d_la_b
+            .as_ref()
+            .ok_or("actual prefill beta absent")?
+            .clone();
+        let raw = [
+            self.scratch.d_q.clone(),
+            self.scratch.d_k.clone(),
+            self.scratch.d_v.clone(),
+            self.scratch.d_scratch2.clone(),
+            beta,
+        ];
+        let addresses = raw.iter().map(|x| *x.device_ptr()).collect::<Vec<_>>();
+        let source = crate::kda_prefix_owner::RetainedPrefillKdaSource::from_model_storage(
+            self.prefill_stream_owner.clone(),
+            raw,
+            rows,
+            desc.num_heads,
+            desc.head_dim,
+            reserve,
+        )?;
+        if source.addresses() != addresses {
+            return Err("actual prefill source pointers differ".into());
+        }
+        Ok(source)
     }
 }
+
+include!("scalar_gdn_prefill.rs");
+
+include!("gdn_prefill_producer_observe.rs");

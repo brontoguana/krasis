@@ -323,6 +323,21 @@ run_repo_python() {
     PYTHONNOUSERSITE=1 PYTHONPATH="$REPO_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}" LD_LIBRARY_PATH="$ld_path" "$PYTHON" "$@"
 }
 
+run_repo_sanitized_python() {
+    local sanitizer="$1" sanitizer_port="$2"
+    shift 2
+    [[ "$sanitizer" = /* && -x "$sanitizer" && "$sanitizer_port" =~ ^[0-9]{1,5}$ ]] || err "Explicit executable sanitizer and valid port required"
+    sanitizer_port="$((10#$sanitizer_port))"
+    [[ "$sanitizer_port" -gt 0 && "$sanitizer_port" -le 65535 ]] || err "Sanitizer port out of range"
+    local ld_path
+    ld_path="$(build_base_ld_library_path)"
+    if [[ -d "$REPO_LIBPATH" ]]; then ld_path="$REPO_LIBPATH${ld_path:+:$ld_path}"; fi
+    # Complete shell/environment preparation before instrumenting Python.
+    # Wrapping bash itself can retain forked shell startup locks in the tool.
+    PYTHONNOUSERSITE=1 PYTHONPATH="$REPO_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}" LD_LIBRARY_PATH="$ld_path" \
+        "$sanitizer" --tool memcheck --leak-check full --show-backtrace yes --print-limit 0 --target-processes all --port "$sanitizer_port" --error-exitcode 117 "$PYTHON" "$@"
+}
+
 exec_repo_python() {
     local ld_path
     ld_path="$(build_base_ld_library_path)"
@@ -708,7 +723,7 @@ do_build_fla() {
     fi
 
     info "Compiling FLA kernels for GPU architectures: ${archs[*]/#/sm_}..."
-    local fla_output="/tmp/fla_build"
+    local fla_output="$SCRIPT_DIR/target/fla-build"
 
     set +e
     KRASIS_DEV_SCRIPT=1 "$PYTHON" "$fla_script" --output-dir "$fla_output" \
@@ -792,9 +807,12 @@ do_build_sidecars() {
     phase_start=$(build_timer_start)
     info "Building Marlin/FlashAttention sidecars..."
     local args=(build)
-    if [[ "${1:-}" == "--force" ]]; then
-        args+=(--force)
-    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force|--marlin-only) args+=("$1"); shift ;;
+            *) err "Usage: ./dev build-sidecars [--force] [--marlin-only]" ;;
+        esac
+    done
     set +e
     KRASIS_DEV_SCRIPT=1 "$PYTHON" "$SCRIPT_DIR/scripts/build_sidecars.py" "${args[@]}"
     local status=$?
@@ -931,10 +949,11 @@ PY
 }
 
 do_conditional_projection_build() {
-    [[ ( $# -eq 1 || ( $# -eq 2 && ( "$2" == --copy-lifecycle-test || "$2" == --shared-kda-test ) ) ) && "$1" = /* && -f "$1" ]] || err "Usage: ./dev conditional-projection-build <absolute frozen sidecar bank.json> [--copy-lifecycle-test|--shared-kda-test]"
+    [[ ( $# -eq 1 || ( $# -eq 2 && ( "$2" == --copy-lifecycle-test || "$2" == --shared-kda-test || "$2" == --scalar-gdn-test ) ) ) && "$1" = /* && -f "$1" ]] || err "Usage: ./dev conditional-projection-build <absolute frozen sidecar bank.json> [--copy-lifecycle-test|--shared-kda-test|--scalar-gdn-test]"
     local diagnostic_features=()
     if [[ "${2:-}" == --copy-lifecycle-test ]]; then diagnostic_features=(--features copy-lifecycle-test); fi
     if [[ "${2:-}" == --shared-kda-test ]]; then diagnostic_features=(--features shared-kda-test); fi
+    if [[ "${2:-}" == --scalar-gdn-test ]]; then diagnostic_features=(--features shared-kda-test,scalar-gdn-test); fi
     local admitted_bank="$1"
     local build_start
     build_start=$(build_timer_start)
@@ -1027,7 +1046,9 @@ do_run() {
     exec_repo_python -m krasis.server --config "$conf" "$@"
 }
 
-do_launcher_run() {
+do_launcher_run_common() {
+    local sanitizer="$1" sanitizer_port="$2"
+    shift 2
     [[ $# -lt 1 ]] && err "Usage: ./dev launcher-run <config> [--benchmark] [extra args...]"
     local conf
     conf=$(resolve_config "$1")
@@ -1043,7 +1064,21 @@ do_launcher_run() {
     verify_repo_imports
     export KRASIS_RUN_DIR="$run_dir"
     export KRASIS_RUN_TYPE="dev-launcher-run"
-    exec_repo_python -m krasis.launcher --config "$conf" "$@"
+    if [[ -n "$sanitizer" ]]; then
+        run_repo_sanitized_python "$sanitizer" "$sanitizer_port" -m krasis.launcher --config "$conf" "$@"
+    else
+        exec_repo_python -m krasis.launcher --config "$conf" "$@"
+    fi
+}
+
+do_launcher_run() { do_launcher_run_common "" "" "$@"; }
+do_launcher_run_sanitized() {
+    [[ $# -ge 3 && "$1" = /* && -x "$1" && "$2" =~ ^[0-9]{1,5}$ ]] || err "Usage: ./dev launcher-run-sanitize <absolute sanitizer> <port> <config> [flags]"
+    local sanitizer_port="$((10#$2))"
+    [[ "$sanitizer_port" -gt 0 && "$sanitizer_port" -le 65535 ]] || err "Sanitizer port out of range"
+    local sanitizer="$1"
+    shift 2
+    do_launcher_run_common "$sanitizer" "$sanitizer_port" "$@"
 }
 
 do_test() {
@@ -2045,7 +2080,9 @@ do_test_kernels_sanitize() {
 }
 
 do_rust_test() {
-    [[ $# -le 1 ]] || err "Usage: ./dev rust-test [filter]"
+    [[ $# -le 2 && ( $# -lt 2 || "$2" == --scalar-gdn-test ) ]] || err "Usage: ./dev rust-test [filter] [--scalar-gdn-test]"
+    local -a test_features=()
+    if [[ "${2:-}" == --scalar-gdn-test ]]; then test_features=(--features shared-kda-test,scalar-gdn-test); fi
     local pyver
     pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
     local pylibdir
@@ -2058,7 +2095,7 @@ do_rust_test() {
         LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
             PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
-            cargo test --release --lib ${filter:+"$filter"} -- --nocapture
+            cargo test --release --lib "${test_features[@]}" ${filter:+"$filter"} -- --nocapture
     )
 }
 
@@ -2077,6 +2114,14 @@ do_prefix_digest_library_tests() {
         PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
             cargo "${digest_args[@]}"
     )
+}
+
+do_scalar_gdn_check() {
+    [[ $# -eq 0 ]] || err "Usage: ./dev scalar-gdn-check"
+    info "Checking native64 scalar-GDN typed resource integration (no model or install)..."
+    cd "$SCRIPT_DIR"
+    PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+        cargo check --release --lib --features shared-kda-test,scalar-gdn-test
 }
 
 do_glm53_check() {
@@ -5144,6 +5189,8 @@ shift || true
 dispatch_dev_command() {
 case "$cmd" in
     build)          do_build ;;
+    build-fla)      [[ $# == 0 ]] || err "build-fla takes no arguments"; do_build_fla ;;
+    fla-wrapper-test) [[ $# == 0 ]] || err "fla-wrapper-test takes no arguments"; KRASIS_DEV_SCRIPT=1 "$PYTHON" "$SCRIPT_DIR/tests/test_fla_context_wrapper.py" ;;
     build-fla-windows-sources) do_build_fla_windows_sources ;;
     build-sidecars) do_build_sidecars "$@" ;;
     verify-sidecars) do_verify_sidecars ;;
@@ -5152,6 +5199,7 @@ case "$cmd" in
     restore-sidecar-bundle) do_restore_sidecar_bundle "$@" ;;
     upload-sidecar-bundle) do_upload_sidecar_bundle ;;
     run)            do_run "$@" ;;
+    launcher-run-sanitize) do_launcher_run_sanitized "$@" ;;
     launcher-run)   do_launcher_run "$@" ;;
     test)           do_test "$@" ;;
     benchmark)      do_benchmark "$@" ;;
@@ -5385,6 +5433,27 @@ case "$cmd" in
     prefill-capture-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/matched_prefill_capture.rs ;;
     prefill-capture-fmt) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/matched_prefill_capture.rs ;;
     conditional-projection-fmt) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/matched_projection_transfer.rs ;;
+    scalar-gdn-fixture-sanitize)
+        [[ $# -eq 3 ]] || err "Usage: ./dev scalar-gdn-fixture-sanitize owner|graph <plan> <fresh-output>"
+        scalar_sanitizer="$(command -v compute-sanitizer || true)"
+        [[ -n "$scalar_sanitizer" ]] || scalar_sanitizer="/usr/local/cuda/bin/compute-sanitizer"
+        [[ -x "$scalar_sanitizer" ]] || err "CUDA Compute Sanitizer unavailable"
+        KRASIS_DEV_SCRIPT=1 PYTHONNOUSERSITE=1 PYTHONPATH="$REPO_PYTHONPATH" \
+            LD_LIBRARY_PATH="$(build_base_ld_library_path)" \
+            "$scalar_sanitizer" --tool memcheck --leak-check full --error-exitcode 117 \
+            "$PYTHON" "$SCRIPT_DIR/tests/scalar_gdn_installed_fixture.py" "$@" ;;
+    scalar-gdn-observer-sanitize)
+        [[ $# -ge 5 && "$1" = /* && -x "$1" && "$3" = /* && -f "$3" ]] || err "Usage: ./dev scalar-gdn-observer-sanitize <absolute sanitizer> <port> <absolute guarded observer> <plan> <fresh-output> [args]"
+        observer_sanitizer="$1"; observer_port="$2"; observer_script="$3"; shift 3
+        KRASIS_DEV_SCRIPT=1 run_repo_sanitized_python "$observer_sanitizer" "$observer_port" "$observer_script" "$@" ;;
+    scalar-gdn-observer)
+        [[ $# -ge 3 && "$1" = /* && -f "$1" ]] || err "Usage: ./dev scalar-gdn-observer <absolute guarded observer> <plan> <fresh-output> [args]"
+        observer_script="$1"; shift
+        KRASIS_DEV_SCRIPT=1 run_repo_python "$observer_script" "$@" ;;
+    scalar-gdn-fixture)
+        [[ $# -ge 2 ]] || err "Usage: ./dev scalar-gdn-fixture owner|graph <plan> [fresh-output]"
+        KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/scalar_gdn_installed_fixture.py" "$@" ;;
+    scalar-gdn-check) do_scalar_gdn_check "$@" ;;
     rust-test)      do_rust_test "$@" ;;
     glm53-check)    do_glm53_check ;;
     cpu-tail-calibrate) do_cpu_tail_calibrate "$@" ;;

@@ -1,4 +1,5 @@
 pub mod adaptive_cold_drop;
+mod bf16_row_projection;
 mod capture_phase;
 mod capture_window;
 pub mod chat_template;
@@ -17,17 +18,22 @@ pub mod gpu_prefill;
 pub mod hqq;
 pub mod kernel;
 pub mod manager;
+mod owned_cuda_warmup;
+mod setup_transfer;
 // BEGIN selected prefill row module
 mod dense_ffn_probe;
 mod matched_prefill_capture;
 mod matched_prefill_row;
 mod mla_probe;
 // END selected prefill row module
+mod gdn_observe;
+mod hqq_observation_layout;
 mod matched_hqq_rounding;
 mod matched_mla_stage;
 mod matched_prefill_logits;
 mod matched_probe;
 mod matched_router_capture;
+mod moe_w1_observe;
 // BEGIN bounded model KDA diagnostic module
 mod matched_kda_model;
 // END bounded model KDA diagnostic module
@@ -44,11 +50,32 @@ mod cuda_region;
 pub mod moe;
 pub mod numa;
 pub mod pcie_batch;
+#[cfg(feature = "scalar-gdn-test")]
+mod publication_failure_control;
+#[cfg(feature = "scalar-gdn-test")]
+mod scalar_gdn_fixture;
+#[cfg(feature = "scalar-gdn-test")]
+mod scalar_gdn_layout;
+#[cfg(feature = "scalar-gdn-test")]
+mod scalar_gdn_native;
+#[cfg(feature = "scalar-gdn-test")]
+mod scalar_gdn_owner;
+#[cfg(feature = "scalar-gdn-test")]
+mod scalar_gdn_phase;
+#[cfg(feature = "scalar-gdn-test")]
+mod scalar_gdn_producer;
+#[cfg(feature = "scalar-gdn-test")]
+mod scalar_gdn_projection;
+#[cfg(feature = "scalar-gdn-test")]
+mod scalar_gdn_runtime;
+mod scalar_gdn_select;
 mod sequence_copy_completion;
 pub mod sequence_external_owner;
 mod sequence_restore_validity;
 pub mod server;
 pub mod session_cache;
+#[cfg(feature = "scalar-gdn-test")]
+mod shared_gdn_workspace;
 mod synthetic_repack;
 pub mod syscheck;
 pub mod text_only_messages;
@@ -61,6 +88,7 @@ use pyo3::prelude::*;
 #[pymodule]
 fn krasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = env_logger::try_init();
+    m.add_function(wrap_pyfunction!(owned_cuda_warmup::warmup_int8_cuda, m)?)?;
     m.add_class::<moe::KrasisEngine>()?;
     m.add_class::<weights::WeightStore>()?;
     m.add_class::<decode::CpuDecodeStore>()?;
@@ -80,6 +108,31 @@ fn krasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "shared-kda-test")]
     m.add_function(wrap_pyfunction!(
         model_tensor_owner::model_tensor_widen_fixture,
+        m
+    )?)?;
+    #[cfg(feature = "scalar-gdn-test")]
+    m.add_function(wrap_pyfunction!(
+        scalar_gdn_fixture::scalar_gdn_fixture_preflight,
+        m
+    )?)?;
+    #[cfg(feature = "scalar-gdn-test")]
+    m.add_function(wrap_pyfunction!(
+        scalar_gdn_fixture::scalar_gdn_fixture_installed,
+        m
+    )?)?;
+    #[cfg(feature = "scalar-gdn-test")]
+    m.add_function(wrap_pyfunction!(
+        scalar_gdn_fixture::scalar_gdn_phase_preflight,
+        m
+    )?)?;
+    #[cfg(feature = "scalar-gdn-test")]
+    m.add_function(wrap_pyfunction!(
+        scalar_gdn_fixture::scalar_gdn_phase_installed,
+        m
+    )?)?;
+    #[cfg(feature = "scalar-gdn-test")]
+    m.add_function(wrap_pyfunction!(
+        gpu_decode::hqq_observation_preflight::hqq_prefill_observation_preflight,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(syscheck::system_check, m)?)?;

@@ -29,6 +29,7 @@ $InstallerVersion = (Get-Content -Raw $VersionPath).Trim()
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 $RuntimeRoot = Join-Path $InstallRoot "runtime"
 $ReleasesRoot = Join-Path $RuntimeRoot "releases"
+$ArtifactsRoot = Join-Path $RuntimeRoot "artifacts"
 New-Item -ItemType Directory -Force -Path $ReleasesRoot | Out-Null
 
 $StagingName = ".staging-$([Guid]::NewGuid().ToString('N'))"
@@ -76,6 +77,199 @@ function Test-KrasisPythonTreeInUse {
     return $false
 }
 
+function Remove-KrasisLegacyRuntimeTrees {
+    foreach ($LegacyPath in @(
+        (Join-Path $InstallRoot "python"),
+        (Join-Path $InstallRoot "venv")
+    )) {
+        if (Test-Path $LegacyPath) {
+            if (Test-KrasisPythonTreeInUse -TreeRoot $LegacyPath) {
+                Write-Warning "Legacy runtime is still in use and was retained: $LegacyPath"
+            } else {
+                try {
+                    Remove-Item -Recurse -Force $LegacyPath
+                    Write-Host "Removed legacy runtime: $LegacyPath"
+                } catch {
+                    Write-Warning "Could not remove inactive legacy runtime ${LegacyPath}: $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+}
+
+function Test-KrasisRuntimeManifestIdentity {
+    param(
+        [Parameter(Mandatory = $true)]
+        $InstalledManifest,
+        [Parameter(Mandatory = $true)]
+        $ExpectedManifest
+    )
+
+    foreach ($PropertyName in @(
+        "schema_version",
+        "bundle_id",
+        "release_version",
+        "python_version",
+        "python_runtime_archive_sha256",
+        "python_cache_tag",
+        "architecture",
+        "krasis_version",
+        "torch_version",
+        "torch_cuda",
+        "torch_url",
+        "payload_sha256"
+    )) {
+        $InstalledProperty = $InstalledManifest.PSObject.Properties[$PropertyName]
+        $ExpectedProperty = $ExpectedManifest.PSObject.Properties[$PropertyName]
+        if ($null -eq $InstalledProperty -or $null -eq $ExpectedProperty) {
+            return $false
+        }
+        if (-not [string]::Equals(
+            "$($InstalledProperty.Value)",
+            "$($ExpectedProperty.Value)",
+            [StringComparison]::Ordinal
+        )) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-KrasisReusableRuntime {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CurrentPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ReleasesRoot,
+        [Parameter(Mandatory = $true)]
+        $ExpectedManifest
+    )
+
+    if (-not (Test-Path $CurrentPath -PathType Leaf)) {
+        return $null
+    }
+
+    try {
+        $CurrentName = (Get-Content -Raw $CurrentPath).Trim()
+        if ($CurrentName -notmatch "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$") {
+            throw "activation pointer is invalid"
+        }
+        $InstalledRoot = Join-Path $ReleasesRoot $CurrentName
+        $InstalledManifest = Read-KrasisRuntimeManifest -RuntimeRoot $InstalledRoot
+        if (-not (Test-KrasisRuntimeManifestIdentity `
+            -InstalledManifest $InstalledManifest `
+            -ExpectedManifest $ExpectedManifest)) {
+            return $null
+        }
+
+        $ActivationPath = Join-Path $InstalledRoot "activation.json"
+        if (-not (Test-Path $ActivationPath -PathType Leaf)) {
+            throw "activation record is missing"
+        }
+        $Activation = Get-Content -Raw $ActivationPath | ConvertFrom-Json
+        if (
+            [int]$Activation.schema_version -ne 1 -or
+            "$($Activation.release_version)" -ne "$($ExpectedManifest.release_version)" -or
+            "$($Activation.bundle_id)" -ne "$($ExpectedManifest.bundle_id)" -or
+            "$($Activation.payload_sha256)" -ne "$($ExpectedManifest.payload_sha256)" -or
+            "$($Activation.python_version)" -ne "$($ExpectedManifest.python_version)" -or
+            "$($Activation.python_cache_tag)" -ne "$($ExpectedManifest.python_cache_tag)" -or
+            "$($Activation.krasis_version)" -ne "$($ExpectedManifest.krasis_version)" -or
+            "$($Activation.torch_version)" -ne "$($ExpectedManifest.torch_version)" -or
+            "$($Activation.torch_cuda)" -ne "$($ExpectedManifest.torch_cuda)"
+        ) {
+            throw "activation record does not match the runtime manifest"
+        }
+
+        $Probe = Assert-KrasisPrivateRuntime `
+            -RuntimeRoot $InstalledRoot `
+            -Manifest $InstalledManifest `
+            -IncludeTorch
+        return [PSCustomObject]@{
+            name = $CurrentName
+            root = $InstalledRoot
+            probe = $Probe
+        }
+    } catch {
+        Write-Host (
+            "Existing Krasis runtime cannot be reused and will be repaired: " +
+            $_.Exception.Message
+        ) -ForegroundColor Yellow
+        return $null
+    }
+}
+
+function Get-KrasisTorchArtifact {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PrivatePython,
+        [Parameter(Mandatory = $true)]
+        [string]$ArtifactsRoot,
+        [Parameter(Mandatory = $true)]
+        $Manifest
+    )
+
+    $TorchUri = [Uri]"$($Manifest.torch_url)"
+    if ($TorchUri.Fragment -notmatch "^#sha256=([0-9a-f]{64})$") {
+        throw "Pinned CUDA PyTorch URL does not contain a valid SHA-256 fragment."
+    }
+    $TorchSha256 = $Matches[1]
+    $TorchFileName = [Uri]::UnescapeDataString(
+        [IO.Path]::GetFileName($TorchUri.AbsolutePath)
+    )
+    if ($TorchFileName -notmatch "^[A-Za-z0-9._+-]+\.whl$") {
+        throw "Pinned CUDA PyTorch wheel filename is invalid: $TorchFileName"
+    }
+
+    $TorchArtifactsRoot = Join-Path $ArtifactsRoot "torch"
+    New-Item -ItemType Directory -Force -Path $TorchArtifactsRoot | Out-Null
+    $TorchArtifactRoot = Join-Path $TorchArtifactsRoot $TorchSha256
+    New-Item -ItemType Directory -Force -Path $TorchArtifactRoot | Out-Null
+    $TorchArtifactPath = Join-Path $TorchArtifactRoot $TorchFileName
+    if (Test-Path $TorchArtifactPath -PathType Leaf) {
+        $CachedSha256 = Get-KrasisFileSha256 -Path $TorchArtifactPath
+        if ($CachedSha256 -ne $TorchSha256) {
+            throw (
+                "Cached CUDA PyTorch wheel SHA-256 mismatch: expected " +
+                "$TorchSha256, got $CachedSha256. Remove the invalid artifact " +
+                "and rerun the installer: $TorchArtifactPath"
+            )
+        }
+        Write-Host "Using verified cached CUDA PyTorch wheel: $TorchArtifactPath"
+        return $TorchArtifactPath
+    }
+
+    $DownloadRoot = Join-Path $TorchArtifactsRoot ".download-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Force -Path $DownloadRoot | Out-Null
+        Write-Host "Downloading pinned CUDA PyTorch $($Manifest.torch_version)..."
+        Write-Host "This is a large one-time download and can take several minutes."
+        & $PrivatePython -I -B -m pip download `
+            --no-cache-dir `
+            --disable-pip-version-check `
+            --no-deps `
+            --only-binary ":all:" `
+            --dest $DownloadRoot `
+            "$($Manifest.torch_url)" | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "Pinned CUDA PyTorch download failed with status $LASTEXITCODE."
+        }
+
+        $DownloadedWheels = @(Get-ChildItem -Path $DownloadRoot -File -Filter "*.whl")
+        if ($DownloadedWheels.Count -ne 1) {
+            throw "Pinned CUDA PyTorch download produced $($DownloadedWheels.Count) wheel files instead of one."
+        }
+        $DownloadedSha256 = Get-KrasisFileSha256 -Path $DownloadedWheels[0].FullName
+        if ($DownloadedSha256 -ne $TorchSha256) {
+            throw "Downloaded CUDA PyTorch wheel SHA-256 mismatch: expected $TorchSha256, got $DownloadedSha256."
+        }
+        [IO.File]::Move($DownloadedWheels[0].FullName, $TorchArtifactPath)
+        return $TorchArtifactPath
+    } finally {
+        Remove-Item -Recurse -Force $DownloadRoot -ErrorAction SilentlyContinue
+    }
+}
+
 if (Test-Path $CurrentPath -PathType Leaf) {
     $OldCurrent = (Get-Content -Raw $CurrentPath).Trim()
 }
@@ -118,21 +312,48 @@ try {
     if ($SafeBundleId -notmatch "^[A-Za-z0-9._-]+$") {
         throw "Private-runtime bundle ID contains unsafe characters: $SafeBundleId"
     }
+    [void](Assert-KrasisPrivateRuntime -RuntimeRoot $NewRuntime -Manifest $StagedManifest)
+
+    $ReusableRuntime = Get-KrasisReusableRuntime `
+        -CurrentPath $CurrentPath `
+        -ReleasesRoot $ReleasesRoot `
+        -ExpectedManifest $StagedManifest
+    if ($null -ne $ReusableRuntime) {
+        Remove-Item -Recurse -Force $NewRuntime
+        Remove-KrasisLegacyRuntimeTrees
+        Write-Host ""
+        Write-Host (
+            "Krasis private runtime already matches this installer; " +
+            "reusing the validated installation."
+        ) -ForegroundColor Green
+        Write-Host "  Python: $($ReusableRuntime.probe.python_version) ($($ReusableRuntime.probe.python_cache_tag))"
+        Write-Host "  Krasis: $($ReusableRuntime.probe.krasis_version)"
+        Write-Host "  PyTorch: $($ReusableRuntime.probe.torch_version), CUDA $($ReusableRuntime.probe.torch_cuda)"
+        Write-Host "  Runtime: $($ReusableRuntime.root)"
+        return
+    }
+
     $ActivationName = "$SafeBundleId-$([Guid]::NewGuid().ToString('N'))"
     $ActivatedRuntime = Join-Path $ReleasesRoot $ActivationName
     [System.IO.Directory]::Move($NewRuntime, $ActivatedRuntime)
     $NewRuntime = $ActivatedRuntime
-    [void](Assert-KrasisPrivateRuntime -RuntimeRoot $NewRuntime -Manifest $StagedManifest)
 
     $PrivatePython = Join-Path $NewRuntime "python.exe"
-    Write-Host "Installing pinned CUDA PyTorch $($StagedManifest.torch_version)..."
-    Write-Host "This is a large first-install download and can take several minutes."
+    $TorchArtifactPath = Get-KrasisTorchArtifact `
+        -PrivatePython $PrivatePython `
+        -ArtifactsRoot $ArtifactsRoot `
+        -Manifest $StagedManifest
+    Write-Host (
+        "Installing pinned CUDA PyTorch $($StagedManifest.torch_version) " +
+        "into the new Krasis runtime..."
+    )
     & $PrivatePython -I -B -m pip install `
         --no-cache-dir `
         --disable-pip-version-check `
         --no-deps `
+        --no-index `
         --only-binary ":all:" `
-        "$($StagedManifest.torch_url)"
+        $TorchArtifactPath
     if ($LASTEXITCODE -ne 0) {
         throw "Pinned CUDA PyTorch installation failed with status $LASTEXITCODE."
     }
@@ -177,23 +398,7 @@ try {
 
     Remove-Item -Force $CurrentBackupPath -ErrorAction SilentlyContinue
 
-    foreach ($LegacyPath in @(
-        (Join-Path $InstallRoot "python"),
-        (Join-Path $InstallRoot "venv")
-    )) {
-        if (Test-Path $LegacyPath) {
-            if (Test-KrasisPythonTreeInUse -TreeRoot $LegacyPath) {
-                Write-Warning "Legacy runtime is still in use and was retained: $LegacyPath"
-            } else {
-                try {
-                    Remove-Item -Recurse -Force $LegacyPath
-                    Write-Host "Removed legacy runtime: $LegacyPath"
-                } catch {
-                    Write-Warning "Could not remove inactive legacy runtime ${LegacyPath}: $($_.Exception.Message)"
-                }
-            }
-        }
-    }
+    Remove-KrasisLegacyRuntimeTrees
 
     Write-Host ""
     Write-Host "Krasis private runtime is ready." -ForegroundColor Green

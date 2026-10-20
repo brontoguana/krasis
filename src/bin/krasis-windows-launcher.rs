@@ -84,13 +84,14 @@ fn resolve_launch_paths(executable: &Path) -> Result<LaunchPaths, String> {
 
 fn validate_launch_arguments(arguments: &[OsString]) -> Result<(), String> {
     if arguments.is_empty()
+        || arguments == [OsString::from("--test-endpoints")]
         || arguments
             .first()
             .is_some_and(|argument| argument.eq_ignore_ascii_case("manager"))
     {
         return Ok(());
     }
-    Err("Usage: Krasis.exe [manager [--port PORT] [--lan] [--no-open]] [--probe]".to_string())
+    Err("Usage: Krasis.exe [--test-endpoints] | manager [--port PORT] [--lan] [--no-open] | --probe".to_string())
 }
 
 fn launch_krasis(paths: &LaunchPaths, arguments: &[OsString]) -> Result<ExitStatus, String> {
@@ -224,6 +225,12 @@ mod tests {
     #[test]
     fn accepts_only_interactive_or_manager_launch_arguments() {
         assert!(validate_launch_arguments(&[]).is_ok());
+        assert!(validate_launch_arguments(&[OsString::from("--test-endpoints")]).is_ok());
+        assert!(validate_launch_arguments(&[
+            OsString::from("--test-endpoints"),
+            OsString::from("--config"),
+        ])
+        .is_err());
         assert!(validate_launch_arguments(&[OsString::from("manager")]).is_ok());
         assert!(validate_launch_arguments(&[
             OsString::from("manager"),

@@ -1,6 +1,11 @@
 import json
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
+
+from krasis import attention_backend as attention_backend_module
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -474,6 +479,58 @@ def test_hqq6_probe_quantizer_uses_true_packed_storage() -> None:
     assert tensors["packed"].numel() < padded_cols * rows
 
 
+def test_manifest_concurrent_full_writes_are_atomic_and_own_their_temporaries() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "manifest.json"
+        barrier = threading.Barrier(2)
+        original_replace = os.replace
+        sources = []
+        payloads = [{"writer": name, "content": name * 2048} for name in ("left", "right")]
+        def replace_after_both_writes(source, destination):
+            sources.append(source)
+            barrier.wait(timeout=10)
+            return original_replace(source, destination)
+        with patch.object(attention_backend_module.os, "replace", side_effect=replace_after_both_writes):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(attention_backend_module._save_hqq_attention_manifest_to_path, str(path), payload) for payload in payloads]
+                for future in futures:
+                    future.result(timeout=15)
+        assert len(set(sources)) == 2
+        assert json.loads(path.read_text(encoding="utf-8")) in payloads
+        assert [entry.name for entry in Path(tmp).iterdir()] == ["manifest.json"]
+
+
+def test_manifest_failed_replace_preserves_previous_document_and_cleans_owned_file() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "manifest.json"
+        original = b'{"previous":true}\n'
+        path.write_bytes(original)
+        with patch.object(attention_backend_module.os, "replace", side_effect=OSError("explicit replacement failure")):
+            try:
+                attention_backend_module._save_hqq_attention_manifest_to_path(str(path), {"new": True})
+            except OSError as error:
+                assert "explicit replacement failure" in str(error)
+            else:
+                raise AssertionError("failed manifest replacement was accepted")
+        assert path.read_bytes() == original
+        assert [entry.name for entry in Path(tmp).iterdir()] == ["manifest.json"]
+
+
+def test_manifest_serialization_failure_preserves_previous_document() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "manifest.json"
+        original = b'{"previous":true}\n'
+        path.write_bytes(original)
+        try:
+            attention_backend_module._save_hqq_attention_manifest_to_path(str(path), {"invalid": object()})
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("invalid manifest serialization was accepted")
+        assert path.read_bytes() == original
+        assert [entry.name for entry in Path(tmp).iterdir()] == ["manifest.json"]
+
+
 if __name__ == "__main__":
     test_profile_path_resolution()
     test_quant_config_profile_validation()
@@ -486,4 +543,7 @@ if __name__ == "__main__":
     test_hqq_auto_partial_budget_never_selects_zero_gain()
     test_hqq6_packed_roundtrip_contract()
     test_hqq6_probe_quantizer_uses_true_packed_storage()
+    test_manifest_concurrent_full_writes_are_atomic_and_own_their_temporaries()
+    test_manifest_failed_replace_preserves_previous_document_and_cleans_owned_file()
+    test_manifest_serialization_failure_preserves_previous_document()
     print("ok")

@@ -20,7 +20,7 @@ impl Cudnn {
     pub fn new(device: Arc<CudaDevice>) -> Result<Arc<Self>, CudnnError> {
         device.bind_to_thread().unwrap();
         let handle = result::create_handle()?;
-        unsafe { result::set_stream(handle, device.stream as *mut _) }?;
+        unsafe { result::set_stream(handle, *device.cu_stream() as *mut _) }?;
         Ok(Arc::new(Self { handle, device }))
     }
 
@@ -33,7 +33,7 @@ impl Cudnn {
     pub unsafe fn set_stream(&self, opt_stream: Option<&CudaStream>) -> Result<(), CudnnError> {
         match opt_stream {
             Some(s) => result::set_stream(self.handle, s.stream as *mut _),
-            None => result::set_stream(self.handle, self.device.stream as *mut _),
+            None => result::set_stream(self.handle, *self.device.cu_stream() as *mut _),
         }
     }
 }
