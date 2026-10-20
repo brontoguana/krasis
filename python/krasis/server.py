@@ -580,13 +580,11 @@ def _mixed_expert_manifest_metadata(path: Optional[str]) -> Optional[dict[str, A
             f"mixed routed-expert manifest root is not an object: {manifest_path}"
         )
     budget = manifest.get("budget")
-    source_int4 = manifest.get("source_int4")
-    source_int8 = manifest.get("source_int8")
-    if not all(isinstance(value, dict) for value in (budget, source_int4, source_int8)):
+    if not isinstance(budget, dict):
         raise RuntimeError(
-            f"mixed routed-expert manifest lacks budget/source identity: {manifest_path}"
+            f"mixed routed-expert manifest lacks budget identity: {manifest_path}"
         )
-    return {
+    metadata = {
         "sha256": hashlib.sha256(raw).hexdigest(),
         "basename": os.path.basename(manifest_path),
         "format": manifest.get("format"),
@@ -595,9 +593,33 @@ def _mixed_expert_manifest_metadata(path: Optional[str]) -> Optional[dict[str, A
         "cache_namespace": manifest.get("cache_namespace"),
         "requested_basis_points": budget.get("requested_basis_points"),
         "achieved_added_bytes": budget.get("achieved_added_bytes"),
-        "source_int4_sha256": source_int4.get("sha256"),
-        "source_int8_sha256": source_int8.get("sha256"),
     }
+    if manifest.get("schema_version") == 1:
+        source_int4 = manifest.get("source_int4")
+        source_int8 = manifest.get("source_int8")
+        if not all(isinstance(value, dict) for value in (source_int4, source_int8)):
+            raise RuntimeError(f"mixed routed-expert manifest lacks source identity: {manifest_path}")
+        metadata.update(source_int4_sha256=source_int4.get("sha256"),
+                        source_int8_sha256=source_int8.get("sha256"))
+    elif manifest.get("schema_version") in (2, 3, 4):
+        compact = manifest.get("compact_cache")
+        if not isinstance(compact, dict):
+            raise RuntimeError(f"mixed routed-expert manifest lacks compact cache identity: {manifest_path}")
+        metadata.update(compact_cache_sha256=compact.get("sha256"),
+                        compact_cache_header_sha256=compact.get("header_sha256"),
+                        compact_cache_region_map_sha256=compact.get("region_map_sha256"))
+        if manifest.get("schema_version") == 4:
+            from krasis.vram_budget import validate_scales_only_contract
+            validate_scales_only_contract(manifest)
+            provenance = manifest["scales_only"]
+            metadata.update(experiment_method=provenance["method"],
+                            source_reserve_sha256=provenance["source_reserve_sha256"],
+                            original_amax_sha256=provenance["original_amax"]["sha256"],
+                            coverage_sha256=provenance["coverage_sha256"],
+                            protocol_sha256=provenance["protocol_sha256"])
+    else:
+        raise RuntimeError(f"unsupported mixed routed-expert manifest schema: {manifest_path}")
+    return metadata
 
 
 def _runtime_heatmap_capture_config(args) -> dict[str, Any]:
@@ -3602,6 +3624,8 @@ def main():
             f"({int(mixed_metadata['achieved_added_bytes']):,} added bytes, "
             f"INT4 {args.gpu_expert_int4_calib}) g{args.expert_group_size}"
         )
+        if mixed_metadata["schema_version"] == 4:
+            expert_detail = f"Experts: experimental scales-only INT4 (searched + original amax reserve replacements) g{args.expert_group_size}"
     else:
         expert_detail = f"Experts: GPU INT{args.gpu_expert_bits} g{args.expert_group_size}"
     if args.gpu_expert_bits == 4 and not args.mixed_expert_manifest:

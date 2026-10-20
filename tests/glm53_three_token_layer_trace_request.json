@@ -1,0 +1,16 @@
+{
+  "input_token_ids": [
+    154822,
+    154824,
+    154826
+  ],
+  "max_tokens": 1,
+  "top_logprobs": 10,
+  "stop_token_ids": [],
+  "debug_prompt_trace": true,
+  "debug_prefill_device_trace": true,
+  "debug_prefill_device_trace_all_layers": true,
+  "debug_prefill_device_trace_rows": [
+    2
+  ]
+}

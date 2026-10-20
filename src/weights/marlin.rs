@@ -1574,6 +1574,22 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn test_quantizer_ties_match_offline_ranking_contract() {
+        let source8 = [127.0, 0.5, -0.5, 2.5, -2.5, 1.5, -1.5, 0.0].map(f32_to_bf16);
+        let quant8 = quantize_int8(&source8, 1, 8, 8);
+        assert_eq!(
+            dequantize_int8(&quant8),
+            vec![127.0, 1.0, -1.0, 3.0, -3.0, 2.0, -2.0, 0.0]
+        );
+        let source4 = [7.0, 0.5, -0.5, 2.5, -2.5, 1.5, -1.5, 0.0].map(f32_to_bf16);
+        let quant4 = quantize_int4(&source4, 1, 8, 8);
+        assert_eq!(
+            dequantize_int4(&quant4),
+            vec![7.0, 1.0, -1.0, 3.0, -3.0, 2.0, -2.0, 0.0]
+        );
+    }
+
+    #[test]
     fn test_quantize_roundtrip_synthetic() {
         // Small synthetic test: 4 rows, 128 cols (one group)
         let rows = 4;

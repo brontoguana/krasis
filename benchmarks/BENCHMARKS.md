@@ -1,5 +1,319 @@
 # Krasis Benchmark Results
 
+## QCN candidate163 fixed speed gate — 2026-10-16
+
+No-argument `./dev speed-test`, fixed HQQ4/k4v4 INT4 configuration, optional timing/capture/forcing disabled, full runtime calibration and600MB margin retained. Core SHA256: `06613ea100e8c9c2264ec269055488ca8db52e29a99cf5e43b3317a2caecc352`.
+
+| Measurement | Token lengths | All rates, tok/s |
+|---|---|---|
+| Formal internal prefill | 1000 / 5000 / 10000 / 20000 / 35000 / 39920 | 1256.9 / 2303.3 / 2529.5 / 2548.7 / 2517.9 / 2475.9 |
+| Formal internal decode | 50 / 100 / 250 | 59.06 / 58.75 / 58.3 |
+| HTTP-request engine prefill, including warmup | 10 / 57 / 62 / 57 | 19.3 / 109.9 / 119.1 / 110.2 |
+| HTTP-request engine decode, including warmup | 7 / 49 / 99 / 249 | 56.9 / 59.6 / 59.3 / 58.5 |
+| Legacy displayed HTTP interval | 50 / 100 / 250 | 104.86 / 75.51 / 64.13 |
+
+Whole HTTP durations: 3.14 / 3.94 / 6.55seconds. HCS 24576/24576; minimum formal decode free VRAM 3903MB. This native QCN workload does not qualify GLM throughput or repair QCN conversation correctness. All additional printed warmup/engine readings remain in the full stdout and private qualification163/speed/REVIEW.json.
+
+Full logs and identity receipts: [benchmark_report.log](20261016_qcn_pickup163_fixed_speed_benchmark_report.log), [benchmark_stdout.log](20261016_qcn_pickup163_fixed_speed_benchmark_stdout.log), [runtime.log](20261016_qcn_pickup163_fixed_speed_runtime.log), [outer.log](20261016_qcn_pickup163_fixed_speed_outer.log), [command.log](20261016_qcn_pickup163_fixed_speed_command.log), [status](20261016_qcn_pickup163_fixed_speed_status), [gpu-metadata.csv](20261016_qcn_pickup163_fixed_speed_gpu-metadata.csv), [cpu-metadata.txt](20261016_qcn_pickup163_fixed_speed_cpu-metadata.txt), [config.sha256](20261016_qcn_pickup163_fixed_speed_config.sha256), [before-identity.json](20261016_qcn_pickup163_fixed_speed_before-identity.json), [after-identity.json](20261016_qcn_pickup163_fixed_speed_after-identity.json).
+
+## QCN diagnostic143 fixed speed gate — 2026-10-16
+
+No-argument `./dev speed-test`, fixed HQQ4/k4v4 INT4 configuration, optional timing/capture/forcing disabled, full runtime calibration and600MB margin retained. Core SHA256: `342946e9627ed62499f9a6ca9befbe155673d5def9b25d32f039ffe79b1e6ad5`.
+
+| Measurement | Token lengths | All rates, tok/s |
+|---|---|---|
+| Formal internal prefill | 1000 / 5000 / 10000 / 20000 / 35000 / 39920 | 1225.7 / 2349.6 / 2522.1 / 2540 / 2500.6 / 2466 |
+| Formal internal decode | 50 / 100 / 250 | 58.49 / 59.1 / 58.05 |
+| HTTP-request engine prefill, including warmup | 10 / 57 / 62 / 57 | 19.1 / 91.4 / 99.2 / 108.7 |
+| HTTP-request engine decode, including warmup | 7 / 49 / 99 / 249 | 57.7 / 59.3 / 59.1 / 58 |
+| Legacy displayed HTTP interval | 50 / 100 / 250 | 121.52 / 79.06 / 64.39 |
+
+Whole HTTP durations: 3.22 / 4.06 / 6.58seconds. HCS 24576/24576; minimum formal decode free VRAM 3903MB. This native QCN workload does not qualify GLM throughput or repair QCN conversation correctness. All additional printed warmup/engine readings remain in the full stdout and private speed147/REVIEW.json.
+
+Full logs and identity receipts: [benchmark_report.log](20261016_qcn_pickup143_fixed_speed_benchmark_report.log), [benchmark_stdout.log](20261016_qcn_pickup143_fixed_speed_benchmark_stdout.log), [runtime.log](20261016_qcn_pickup143_fixed_speed_runtime.log), [outer.log](20261016_qcn_pickup143_fixed_speed_outer.log), [command.log](20261016_qcn_pickup143_fixed_speed_command.log), [status](20261016_qcn_pickup143_fixed_speed_status), [gpu-metadata.csv](20261016_qcn_pickup143_fixed_speed_gpu-metadata.csv), [cpu-metadata.txt](20261016_qcn_pickup143_fixed_speed_cpu-metadata.txt), [config.sha256](20261016_qcn_pickup143_fixed_speed_config.sha256), [before-identity.json](20261016_qcn_pickup143_fixed_speed_before-identity.json), [after-identity.json](20261016_qcn_pickup143_fixed_speed_after-identity.json).
+
+## QCN retained-parent fixed speed control — 2026-10-16
+
+No-argument `./dev speed-test`, same fixed config and RTX A6000 as the candidate run below. Optional timing, capture and forcing were disabled; full calibration and the 600 MiB margin remained enabled. Retained-parent extension SHA256: `d4deecae4213424aff042813b080c6c063655498cbb684630d1b4f83c1cdc182`.
+
+| Measurement | Token lengths | All rates, tok/s |
+|---|---|---|
+| Internal prefill | 1,000 / 5,000 / 10,000 / 20,000 / 35,000 / 39,920 | 1232.7 / 2294.0 / 2508.6 / 2559.8 / 2516.1 / 2469.4 |
+| Internal decode | 50 / 100 / 250 | 58.54 / 58.79 / 58.16 |
+| HTTP-request engine prefill | 57 / 62 / 57 | 108.8 / 118.9 / 108.8 |
+| HTTP-request engine decode | 49 / 99 / 249 | 59.6 / 59.1 / 58.2 |
+| Legacy displayed HTTP interval | 50 / 100 / 250 | 104.77 / 74.92 / 63.28 |
+
+Network warmup: prefill 19.3 tok/s (10 tokens), decode 57.6 tok/s (7 tokens). Whole HTTP durations: 3.13 / 4.00 / 6.53 seconds. Displayed intervals exclude buffered initial content and are separate from engine decode. All 24,576 experts remained resident; minimum formal decode free VRAM was 3,903 MiB.
+
+Candidate versus this adjacent parent: prefill -3.22% / 0.48% / 0.62% / -0.14% / -0.10% / -0.15%; internal decode 0.97% / 0.24% / -0.14%. The candidate's 1K result remains lower; one pair does not establish variance or causality. No configuration or measurement was altered to conceal it.
+
+Full logs: [benchmark_report.log](20261016_qcn_pickup128_parent_fixed_speed_benchmark_report.log), [benchmark_stdout.log](20261016_qcn_pickup128_parent_fixed_speed_benchmark_stdout.log), [runtime.log](20261016_qcn_pickup128_parent_fixed_speed_runtime.log), [outer.log](20261016_qcn_pickup128_parent_fixed_speed_outer.log), [command.log](20261016_qcn_pickup128_parent_fixed_speed_command.log), [status](20261016_qcn_pickup128_parent_fixed_speed_status), [gpu-metadata.csv](20261016_qcn_pickup128_parent_fixed_speed_gpu-metadata.csv), [cpu-metadata.txt](20261016_qcn_pickup128_parent_fixed_speed_cpu-metadata.txt), [config.sha256](20261016_qcn_pickup128_parent_fixed_speed_config.sha256).
+
+## QCN fixed speed validation — 2026-10-16
+
+No-argument `./dev speed-test` completed on RTX A6000 using the unchanged `tests/qcn-k4v4-hqq4-int4-benchmark.conf` (SHA256 `3b8732f1a85b7def36ee8b1cab21c17ec9069a82aa2d5f822bd989d2c8bb4c56`). Optional timing, capture, forcing, tracing and `--vram-report` were disabled; complete calibration and the 600 MiB margin remained active. Unreleased candidate extension SHA256: `f52ea82956926449c20a014e833194aa4a41bc97debececf36226728d4d34d18`. A matching quick startup heatmap was generated by the built command before measurement.
+
+| Measurement | Token lengths | All rates, tok/s |
+|---|---|---|
+| Internal prefill | 1,000 / 5,000 / 10,000 / 20,000 / 35,000 / 39,920 | 1193.0 / 2305.0 / 2524.2 / 2556.2 / 2513.5 / 2465.8 |
+| Internal decode | 50 / 100 / 250 | 59.11 / 58.93 / 58.08 |
+| HTTP-request engine prefill | 57 / 62 / 57 | 91.3 / 119.2 / 109.8 |
+| HTTP-request engine decode | 49 / 99 / 249 | 59.3 / 59.1 / 58.3 |
+| Legacy displayed HTTP interval | 50 / 100 / 250 | 121.48 / 79.15 / 63.28 |
+
+Network warmup printed engine prefill 19.1 tok/s (10 tokens) and decode 57.7 tok/s (7 tokens). Whole HTTP durations: 3.28 / 4.00 / 6.55 seconds. Displayed HTTP intervals exclude buffered initial content; they are separate from engine decode and whole-request latency.
+
+HCS retained all 24,576/24,576 experts. The formal decode floor was 3,903 MiB; extra free VRAM cannot increase expert residency beyond 100%. HCS budget/no-slot/copy-failure counters were zero. Versus the 2026-10-08 fixed run, prefill differences were -5.23% / +0.85% / -0.36% / +0.27% / -0.25% / -0.60%, and internal decode differences were -0.45% / -0.89% / -0.45%. The 1K prefill result is 5.23% lower; its cause is unmeasured. One comparison does not establish variance or causality. This QCN benchmark does not qualify conversation consistency or another model's throughput.
+
+Full logs: [benchmark_report.log](20261016_qcn_pickup136_fixed_speed_benchmark_report.log), [benchmark_stdout.log](20261016_qcn_pickup136_fixed_speed_benchmark_stdout.log), [runtime.log](20261016_qcn_pickup136_fixed_speed_runtime.log), [outer.log](20261016_qcn_pickup136_fixed_speed_outer.log), [command.log](20261016_qcn_pickup136_fixed_speed_command.log), [status](20261016_qcn_pickup136_fixed_speed_status), [GPU metadata](20261016_qcn_pickup136_fixed_speed_gpu-metadata.csv), [CPU metadata](20261016_qcn_pickup136_fixed_speed_cpu-metadata.txt), [config hash](20261016_qcn_pickup136_fixed_speed_config.sha256).
+
+## QCN candidate3 fixed speed — 2026-10-08
+
+No-argument `./dev speed-test` passed on RTX A6000 using `tests/qcn-k4v4-hqq4-int4-benchmark.conf`. Optional timing, capture, forcing, trace and `--vram-report` were disabled; complete calibration and the 600 MiB margin remained active. Extension SHA256: `73c35efefab6be6fe545257b2087c96ce7136b2e2f8cffdfdf4c6d7374ba23d4`.
+
+| Measurement | Token lengths | All rates, tok/s |
+|---|---|---|
+| Internal prefill | 1,000 / 5,000 / 10,000 / 20,000 / 35,000 / 39,920 | 1258.9 / 2285.5 / 2533.2 / 2549.2 / 2519.7 / 2480.7 |
+| Internal decode | 50 / 100 / 250 | 59.38 / 59.46 / 58.34 |
+| Legacy displayed HTTP | 50 / 100 / 250 | 108.78 / 74.68 / 64.18 |
+
+Whole HTTP durations: 3.18 / 4.00 / 6.54 seconds. Displayed HTTP interval rates exclude buffered initial content and are separate from internal engine decode. Report-time RSS: 79.2 GiB; decode floor: 3818 MiB; HCS: 24576/24576 experts. Internal decode changes versus R138: +0.68% / +0.83% / +0.15%. Prefill changes: -2.65% / +0.65% / +0.87% / +0.00% / +0.57% / -0.35%. One comparison does not establish variance or causality.
+
+Full logs: [benchmark_report.log](20261008_qcn_consistency_r13_candidate3_fixed_speed_benchmark_report.log), [benchmark_stdout.log](20261008_qcn_consistency_r13_candidate3_fixed_speed_benchmark_stdout.log), [command.log](20261008_qcn_consistency_r13_candidate3_fixed_speed_command.log), [outer.log](20261008_qcn_consistency_r13_candidate3_fixed_speed_outer.log), [runtime.log](20261008_qcn_consistency_r13_candidate3_fixed_speed_runtime.log), [status](20261008_qcn_consistency_r13_candidate3_fixed_speed_status).
+
+
+## QCN post-support fixed speed R138 — 2026-10-07
+
+No-argument `./dev speed-test` completed with optional timing, capture, trace and `--vram-report` disabled. Complete calibration and the 600 MiB margin remained active. This is one comparison and does not establish variance.
+
+| Measurement | Token lengths | All rates, tok/s |
+|---|---|---|
+| Internal prefill | 1,000 / 5,000 / 10,000 / 20,000 / 35,000 / 39,920 | 1293.2 / 2270.7 / 2511.3 / 2549.2 / 2505.4 / 2489.5 |
+| Internal decode | 50 / 100 / 250 | 58.98 / 58.97 / 58.25 |
+| Legacy displayed HTTP | 50 / 100 / 250 | 100.3 / 74.41 / 63.15 |
+
+Whole HTTP durations: 3.11 / 3.91 / 6.54 seconds. Displayed HTTP interval rates exclude buffered initial content and are separate from internal decode. Decode floor: 3818 MiB; HCS: 24576/24576 experts. Internal decode changes versus R97: -0.42% / 0.08% / 0.03%.
+
+Full logs: [benchmark_report.log](20261007_qcn_post_support_r138_benchmark_report.log), [benchmark_stdout.log](20261007_qcn_post_support_r138_benchmark_stdout.log), [command.log](20261007_qcn_post_support_r138_command.log), [outer.log](20261007_qcn_post_support_r138_outer.log), [runtime.log](20261007_qcn_post_support_r138_runtime.log), [status](20261007_qcn_post_support_r138_status).
+
+
+## QCN fixed speed repeat R97 — 2026-10-07
+
+No-argument ./dev speed-test passed with clean shutdown on RTX A6000 using tests/qcn-k4v4-hqq4-int4-benchmark.conf. Optional diagnostics/timing were disabled; complete calibration and the 600 MiB margin remained active. Extension SHA256: 13aafa78d6d57795e5f84f816f355f332aaefe12b8306970496978fa2b95e310.
+
+| Measurement | Lengths | All rates, tok/s |
+|---|---|---|
+| Internal prefill | 1K / 5K / 10K / 20K / 35K / 39,920 | 1255.8 / 2297.0 / 2532.3 / 2558.2 / 2513.9 / 2473.9 |
+| Internal decode | 50 / 100 / 250 | 59.23 / 58.92 / 58.23 |
+| Legacy displayed HTTP | 50 / 100 / 250 | 98.51 / 73.77 / 63.29 |
+
+Whole HTTP durations: 3.13 / 3.97 / 6.51 seconds. Displayed HTTP interval rates exclude buffered initial content and are separate from internal decode. Report-time RSS: 79.2 GiB; decode floor: 3818 MiB; HCS: 24576/24576 experts. Versus the prior fixed run, internal decode changes are -0.15% / -0.10% / -0.09%. Prefill 1K/5K is -2.42% / -2.31%; long-prompt rates are close. One comparison does not establish variance or the cause of short-prompt changes; all repetitions are retained separately.
+
+Full logs: [benchmark_report.log](20261007_qcn_fixed_speed_validation_r97_benchmark_report.log), [benchmark_stdout.log](20261007_qcn_fixed_speed_validation_r97_benchmark_stdout.log), [runtime.log](20261007_qcn_fixed_speed_validation_r97_runtime.log), [outer.log](20261007_qcn_fixed_speed_validation_r97_outer.log), [command.log](20261007_qcn_fixed_speed_validation_r97_command.log), [status](20261007_qcn_fixed_speed_validation_r97_status).
+
+## QCN fixed speed repeat R96 — 2026-10-07
+
+No-argument ./dev speed-test passed with clean shutdown on RTX A6000 using tests/qcn-k4v4-hqq4-int4-benchmark.conf. Optional diagnostics/timing were disabled; complete calibration and the 600 MiB margin remained active. Extension SHA256: 13aafa78d6d57795e5f84f816f355f332aaefe12b8306970496978fa2b95e310.
+
+| Measurement | Lengths | All rates, tok/s |
+|---|---|---|
+| Internal prefill | 1K / 5K / 10K / 20K / 35K / 39,920 | 1296.0 / 2318.6 / 2515.7 / 2555.0 / 2510.0 / 2479.8 |
+| Internal decode | 50 / 100 / 250 | 59.20 / 58.81 / 58.25 |
+| Legacy displayed HTTP | 50 / 100 / 250 | 100.81 / 80.44 / 63.98 |
+
+Whole HTTP durations: 3.08 / 3.93 / 6.56 seconds. Displayed HTTP interval rates exclude buffered initial content and are separate from internal decode. Report-time RSS: 79.2 GiB; decode floor: 3818 MiB; HCS: 24576/24576 experts. Versus the prior fixed run, internal decode changes are -0.20% / -0.29% / -0.05%. Prefill 1K/5K is 0.70% / -1.39%; long-prompt rates are close. One comparison does not establish variance or the cause of short-prompt changes; all repetitions are retained separately.
+
+Full logs: [benchmark_report.log](20261007_qcn_fixed_speed_validation_r96_benchmark_report.log), [benchmark_stdout.log](20261007_qcn_fixed_speed_validation_r96_benchmark_stdout.log), [runtime.log](20261007_qcn_fixed_speed_validation_r96_runtime.log), [outer.log](20261007_qcn_fixed_speed_validation_r96_outer.log), [command.log](20261007_qcn_fixed_speed_validation_r96_command.log), [status](20261007_qcn_fixed_speed_validation_r96_status).
+
+## QCN fixed speed validation — 2026-10-07
+
+No-argument ./dev speed-test passed with clean shutdown on RTX A6000 using tests/qcn-k4v4-hqq4-int4-benchmark.conf. Optional diagnostics/timing were disabled; complete calibration and the 600 MiB margin remained active. Extension SHA256: 13aafa78d6d57795e5f84f816f355f332aaefe12b8306970496978fa2b95e310.
+
+| Measurement | Lengths | All rates, tok/s |
+|---|---|---|
+| Internal prefill | 1K / 5K / 10K / 20K / 35K / 39,920 | 1240.9 / 2285.5 / 2539.1 / 2562.4 / 2516.7 / 2480.0 |
+| Internal decode | 50 / 100 / 250 | 59.31 / 59.12 / 58.16 |
+| Legacy displayed HTTP | 50 / 100 / 250 | 100.94 / 74.36 / 63.74 |
+
+Whole HTTP durations: 3.13 / 3.89 / 6.57 seconds. Displayed HTTP interval rates exclude buffered initial content and are separate from internal decode. Report-time RSS: 79.2 GiB; decode floor: 3818 MiB; all 24576 experts resident. Versus the prior fixed run, internal decode changes are -0.02% / 0.24% / -0.21%. Prefill 1K/5K is -3.58% / -2.79%; long-prompt rates are close. One comparison does not establish variance or the cause of short-prompt changes; further identical runs are planned.
+
+Full logs: [benchmark_report.log](20261007_qcn_fixed_speed_validation_r90_benchmark_report.log), [benchmark_stdout.log](20261007_qcn_fixed_speed_validation_r90_benchmark_stdout.log), [runtime.log](20261007_qcn_fixed_speed_validation_r90_runtime.log), [outer.log](20261007_qcn_fixed_speed_validation_r90_outer.log), [command.log](20261007_qcn_fixed_speed_validation_r90_command.log), [status](20261007_qcn_fixed_speed_validation_r90_status).
+
+## QCN fixed speed validation — 2026-10-06
+
+The no-argument `./dev speed-test` passed with clean shutdown on RTX A6000, using the built fixed config `tests/qcn-k4v4-hqq4-int4-benchmark.conf`. Optional diagnostics and timing were disabled; normal calibration and the 600 MiB margin remained active. Extension SHA256: `5c03457bb8e9fecc81d2f52c4307a4672c9c78098356cf6b090cbcec654c061e`.
+
+| Measurement | Lengths | All rates, tok/s |
+|---|---|---|
+| Internal prefill | 1K / 5K / 10K / 20K / 35K / 39,920 | 1287.0 / 2351.2 / 2532.6 / 2563.4 / 2523.8 / 2479.7 |
+| Internal decode | 50 / 100 / 250 | 59.32 / 58.98 / 58.28 |
+| Legacy displayed HTTP | 50 / 100 / 250 | 100.21 / 75.37 / 63.75 |
+
+Whole HTTP durations: 3.09 / 3.87 / 6.60 seconds. Displayed HTTP interval rates exclude buffered initial content and are separate from internal decode. Report-time RSS: 79.2 GiB; decode floor: 3818 MiB; all 24576 experts resident, so additional headroom cannot increase expert residency. Relative to the 2026-10-04 fixed run, internal decode changes are +0.14% / 0.00% / -0.32%; this single comparison does not estimate variance.
+
+Full logs: [report](20261006_qcn_consistency_r5_fixed_speed_test_benchmark_report.log), [stdout](20261006_qcn_consistency_r5_fixed_speed_test_benchmark_stdout.log), [runtime](20261006_qcn_consistency_r5_fixed_speed_test_runtime.log), [outer](20261006_qcn_consistency_r5_fixed_speed_test_outer.log), [command](20261006_qcn_consistency_r5_fixed_speed_test_command.log), [status](20261006_qcn_consistency_r5_fixed_speed_test_status).
+
+## GLM cache-investigation speed validation — 2026-10-04
+
+Separately identified standard runs use extension SHA256
+`a66bbc0a2ab7a5ede61f5e8293c8fe0f1a9bdb7c2ffe0e1b9f4ea39b1be1931f`.
+Each GLM treatment retains its frozen config, manifest and heatmap; QCN uses
+`./dev speed-test` with no arguments and its built fixed config. All commands ran
+in tmux with optional instrumentation, trace, forced synchronization and
+`--vram-report` disabled. Normal runtime calibration, autotuning, safety monitoring
+and the 600 MiB margin remained active. All six lifecycles closed with status 0;
+source/config identities, archive checksums and clean shutdowns verify.
+These speed measurements do not clear the outstanding GLM exact cache oracle.
+Treatment names use the verified bank/manifest identity. The unchanged raw report's
+generic GPU/CPU expert-bit headings describe base config fields and do not describe
+mixed or full-INT8 manifest overrides; those headings must not be used as precision
+evidence.
+
+| Treatment | Internal prefill: 1K / 5K / 10K / 20K / 35K / 39,920 tok/s | Internal decode: 50 / 100 / 250 tok/s | Displayed HTTP: 50 / 100 / 250 tok/s |
+|---|---|---|---|
+| [GLM amax INT4](20261004_glm53_cache_investigation_r4_amax_hqq6_k6v6_pro_no_vram_report_benchmark_report.log) | 149.6 / 575.3 / 895.0 / 1280.0 / 1537.6 / 1553.6 | 17.61 / 19.67 / 18.95 | 26.99 / 25.00 / 20.31 |
+| [GLM minimum reserve](20261004_glm53_cache_investigation_r4_mixed_expected_minimum_reserve_hqq6_k6v6_pro_no_vram_report_benchmark_report.log) | 150.0 / 565.3 / 886.7 / 1296.9 / 1525.4 / 1560.0 | 18.71 / 19.48 / 18.41 | 32.94 / 24.30 / 20.02 |
+| [GLM tail +5%](20261004_glm53_cache_investigation_r4_mixed_tail_plus_5_hqq6_k6v6_pro_no_vram_report_benchmark_report.log) | 144.2 / 549.1 / 872.2 / 1276.0 / 1513.0 / 1531.5 | 17.56 / 18.09 / 17.45 | 30.50 / 22.25 / 18.87 |
+| [GLM tail +10%](20261004_glm53_cache_investigation_r4_mixed_tail_plus_10_hqq6_k6v6_pro_no_vram_report_benchmark_report.log) | 139.6 / 529.0 / 851.5 / 1243.2 / 1489.9 / 1511.5 | 15.15 / 16.44 / 15.72 | 23.28 / 20.77 / 17.03 |
+| [GLM full routed INT8](20261004_glm53_cache_investigation_r4_mixed_expected_full_int8_hqq6_k6v6_pro_no_vram_report_benchmark_report.log) | 84.0 / 351.2 / 600.8 / 937.2 / 1194.4 / 1229.3 | 5.71 / 6.25 / 5.73 | 9.62 / 7.87 / 6.18 |
+| [QCN fixed speed-test](20261004_qcn_cache_investigation_r4_fixed_speed_test_benchmark_report.log) | 1259.6 / 2330.7 / 2528.8 / 2560.7 / 2499.8 / 2476.2 | 59.24 / 58.98 / 58.47 | 104.89 / 79.74 / 63.94 |
+
+| Treatment | Whole HTTP duration: 50 / 100 / 250 seconds | Report-time RSS, GiB | Decode floor, MiB | HCS experts resident |
+|---|---|---:|---:|---:|
+| GLM amax INT4 | 10.33 / 12.67 / 20.85 | 163.0 | 1206 | 5640 / 12096 |
+| GLM minimum reserve | 10.10 / 12.73 / 21.13 | 164.7 | 1312 | 5604 / 12096 |
+| GLM tail +5% | 10.34 / 13.27 / 21.92 | 170.3 | 1174 | 5413 / 12096 |
+| GLM tail +10% | 11.07 / 13.75 / 23.60 | 177.6 | 1308 | 5206 / 12096 |
+| GLM full routed INT8 | 18.63 / 25.97 / 53.52 | 304.8 | 1166 | 2850 / 12096 |
+| QCN fixed speed-test | 3.18 / 4.02 / 6.69 | 79.2 | 3819 | 24576 / 24576 |
+
+The unchanged standard HTTP path uses a legacy Python streaming client; internal
+engine timing is Rust. Displayed HTTP interval rates exclude buffered initial
+content and are neither internal decode nor whole-request throughput. Rounded
+whole HTTP durations are reported separately; no rate is inferred from requested
+output lengths. Report-time RSS is not peak startup or productive-task memory.
+Full INT8 startup was separately observed at about 515 GiB RSS, later 303 GiB;
+two samples are not a peak measurement. All observed normal decode floors exceed
+600 MiB, and no below-safety log or HCS copy failure was produced. GLM floors
+include the existing guard based on runtime-measured chunk sizes; the guard and
+margin were preserved. QCN has all experts resident, so excess headroom cannot
+increase expert residency. One run per treatment does not estimate variance or
+isolate optional reporting overhead.
+
+Historical task outcomes, numerical warnings, the unisolated scale-only gain and
+unqualified short startup capture remain unchanged. Full-INT8/current-build amax
+productive tasks remain unrun pending the explicit experimental-policy decision.
+No default promotion or new all-five task acceptance is claimed.
+
+GLM amax INT4 full logs: [command](20261004_glm53_cache_investigation_r4_amax_hqq6_k6v6_pro_no_vram_report_command.log), [outer](20261004_glm53_cache_investigation_r4_amax_hqq6_k6v6_pro_no_vram_report_outer.log), [benchmark_stdout](20261004_glm53_cache_investigation_r4_amax_hqq6_k6v6_pro_no_vram_report_benchmark_stdout.log), [runtime](20261004_glm53_cache_investigation_r4_amax_hqq6_k6v6_pro_no_vram_report_runtime.log).
+
+GLM minimum reserve full logs: [command](20261004_glm53_cache_investigation_r4_mixed_expected_minimum_reserve_hqq6_k6v6_pro_no_vram_report_command.log), [outer](20261004_glm53_cache_investigation_r4_mixed_expected_minimum_reserve_hqq6_k6v6_pro_no_vram_report_outer.log), [benchmark_stdout](20261004_glm53_cache_investigation_r4_mixed_expected_minimum_reserve_hqq6_k6v6_pro_no_vram_report_benchmark_stdout.log), [runtime](20261004_glm53_cache_investigation_r4_mixed_expected_minimum_reserve_hqq6_k6v6_pro_no_vram_report_runtime.log).
+
+GLM tail +5% full logs: [command](20261004_glm53_cache_investigation_r4_mixed_tail_plus_5_hqq6_k6v6_pro_no_vram_report_command.log), [outer](20261004_glm53_cache_investigation_r4_mixed_tail_plus_5_hqq6_k6v6_pro_no_vram_report_outer.log), [benchmark_stdout](20261004_glm53_cache_investigation_r4_mixed_tail_plus_5_hqq6_k6v6_pro_no_vram_report_benchmark_stdout.log), [runtime](20261004_glm53_cache_investigation_r4_mixed_tail_plus_5_hqq6_k6v6_pro_no_vram_report_runtime.log).
+
+GLM tail +10% full logs: [command](20261004_glm53_cache_investigation_r4_mixed_tail_plus_10_hqq6_k6v6_pro_no_vram_report_command.log), [outer](20261004_glm53_cache_investigation_r4_mixed_tail_plus_10_hqq6_k6v6_pro_no_vram_report_outer.log), [benchmark_stdout](20261004_glm53_cache_investigation_r4_mixed_tail_plus_10_hqq6_k6v6_pro_no_vram_report_benchmark_stdout.log), [runtime](20261004_glm53_cache_investigation_r4_mixed_tail_plus_10_hqq6_k6v6_pro_no_vram_report_runtime.log).
+
+GLM full routed INT8 full logs: [command](20261004_glm53_cache_investigation_r4_mixed_expected_full_int8_hqq6_k6v6_pro_no_vram_report_command.log), [outer](20261004_glm53_cache_investigation_r4_mixed_expected_full_int8_hqq6_k6v6_pro_no_vram_report_outer.log), [benchmark_stdout](20261004_glm53_cache_investigation_r4_mixed_expected_full_int8_hqq6_k6v6_pro_no_vram_report_benchmark_stdout.log), [runtime](20261004_glm53_cache_investigation_r4_mixed_expected_full_int8_hqq6_k6v6_pro_no_vram_report_runtime.log).
+
+QCN fixed speed-test full logs: [command](20261004_qcn_cache_investigation_r4_fixed_speed_test_command.log), [outer](20261004_qcn_cache_investigation_r4_fixed_speed_test_outer.log), [benchmark_stdout](20261004_qcn_cache_investigation_r4_fixed_speed_test_benchmark_stdout.log), [runtime](20261004_qcn_cache_investigation_r4_fixed_speed_test_runtime.log).
+
+## QCN fixed regression after GLM reserve work — 2026-10-04
+
+The single fixed, no-argument `./dev speed-test` completed with exit 0 and clean
+shutdown on RTX A6000, using `tests/qcn-k4v4-hqq4-int4-benchmark.conf`.
+Component profiling, trace and forced synchronization were disabled; the command
+did not enable optional `--vram-report`. Normal runtime VRAM calibration and
+the safety monitor remained active. This independent QCN check does not clear
+the separate GLM +10% conversation-cache correctness failure.
+
+| Measurement | Request lengths | All rates, tok/s |
+|---|---|---|
+| Internal prefill | 1K / 5K / 10K / 20K / 35K / 39,920 | 1232.2 / 2341.0 / 2529.0 / 2576.1 / 2518.2 / 2473.9 |
+| Internal decode | 50 / 100 / 250 | 58.66 / 59.12 / 58.02 |
+| Legacy displayed HTTP | 50 / 100 / 250 | 107.07 / 76.55 / 63.98 |
+
+Whole HTTP durations: 3.11 / 3.95 / 6.58 seconds. Displayed HTTP rates exclude
+the buffered initial-content interval and are not whole-request throughput.
+Best internal prefill/decode: 2576.1 / 59.12 tok/s. Report-time process RSS:
+79.3 GiB; decode minimum free VRAM: 3819 MiB. All 24,576/24,576 experts were
+resident, so extra headroom cannot increase expert residency. Final HCS hit
+rate 100%, copy failures 0; the default 600 MiB margin was unchanged.
+
+Compared with the fixed September 14 run, internal decode changes by
+-0.27% / +0.39% / +0.24%. The 1K prefill reading is 5.69% lower; the other five
+change by -0.72% to +0.80%. Whole HTTP durations are lower at all three lengths,
+while displayed interval rates are lower. One run per date does not estimate
+variance or isolate runtime changes from driver/platform history.
+
+Evidence: [report](20261004_qcn_hqq4_k4v4_a6000_reserve_r4_regression_benchmark_report.log),
+[command](20261004_qcn_hqq4_k4v4_a6000_reserve_r4_regression_command.log),
+[full output](20261004_qcn_hqq4_k4v4_a6000_reserve_r4_regression_benchmark_stdout.log),
+[outer/shutdown log](20261004_qcn_hqq4_k4v4_a6000_reserve_r4_regression_outer.log),
+[runtime log](20261004_qcn_hqq4_k4v4_a6000_reserve_r4_regression_runtime.log).
+
+## GLM-5.3-Flash reserve treatment comparison — 2026-10-04
+
+This profiling-disabled standard matrix uses the same HQQ6/k6v6 configuration
+and treatment-specific heatmaps. Rows are added only after clean completion
+and independent artifact checks. All five rows are closed; these
+measurements do not establish quality qualification or a production default.
+All five commands enabled `--vram-report`, which adds optional event memory
+queries and report storage. Its overhead is unmeasured; these are observed
+report-enabled rates, not fully uninstrumented speed measurements.
+
+| Treatment | Internal prefill, 1K/5K/10K/20K/35K/39,920 tok/s | Internal decode, 50/100/250 tok/s | Legacy displayed HTTP, 50/100/250 tok/s | Whole HTTP seconds, 50/100/250 | Report-time process RSS GiB | Decode minimum free MiB |
+|---|---|---|---|---|---:|---:|
+| Baseline amax | 146.2 / 565.9 / 902.9 / 1266.5 / 1524.5 / 1545.0 | 17.70 / 19.62 / 18.96 | 27.23 / 24.93 / 20.32 | 10.40 / 12.66 / 20.93 | 163.0 | 1206 |
+| Searched INT4 + minimum reserve (+1.146% payload) | 146.5 / 563.5 / 887.7 / 1298.0 / 1532.2 / 1555.8 | 19.08 / 19.45 / 18.37 | 33.47 / 24.68 / 20.33 | 10.16 / 12.77 / 20.93 | 164.7 | 1312 |
+| Selected tail +5% (+4.994% payload) | 142.7 / 555.5 / 873.2 / 1276.9 / 1508.6 / 1532.3 | 17.74 / 18.08 / 17.14 | 30.31 / 22.63 / 18.48 | 10.33 / 13.07 / 22.19 | 170.3 | 1174 |
+| Selected tail +10% (+9.997% payload) | 139.4 / 531.0 / 851.0 / 1254.5 / 1492.6 / 1510.6 | 14.76 / 16.49 / 15.74 | 23.74 / 20.78 / 17.35 | 10.99 / 13.77 / 23.29 | 177.6 | 1308 |
+| Full routed INT8 control (+96.970% payload) | 85.6 / 350.6 / 592.3 / 938.1 / 1195.1 / 1234.2 | 5.71 / 6.26 / 5.73 | 9.85 / 7.88 / 6.32 | 18.53 / 26.05 / 52.53 | 304.8 | 1166 |
+
+The displayed HTTP rate excludes the buffered first-content interval and is
+not whole-request throughput. Whole-request durations are shown separately.
+RAM is report-time process RSS, not peak RSS or whole-host use. The runtime
+safety margin remains 600 MiB; the baseline decode floor is above it, and the
+calibration/residency evidence is retained for review.
+
+Baseline evidence: [report](20261004_glm53_reserve_r4_amax_hqq6_k6v6_pro_benchmark_report.log),
+[command](20261004_glm53_reserve_r4_amax_hqq6_k6v6_pro_command.log),
+[full output](20261004_glm53_reserve_r4_amax_hqq6_k6v6_pro_benchmark_stdout.log),
+[runtime log](20261004_glm53_reserve_r4_amax_hqq6_k6v6_pro_runtime.log).
+
+Minimum-reserve evidence: [report](20261004_glm53_reserve_r4_mixed_expected_minimum_reserve_hqq6_k6v6_pro_benchmark_report.log),
+[command](20261004_glm53_reserve_r4_mixed_expected_minimum_reserve_hqq6_k6v6_pro_command.log),
+[full output](20261004_glm53_reserve_r4_mixed_expected_minimum_reserve_hqq6_k6v6_pro_benchmark_stdout.log),
+[runtime log](20261004_glm53_reserve_r4_mixed_expected_minimum_reserve_hqq6_k6v6_pro_runtime.log).
+This single paired run changes prefill by -1.68% to +2.49% and internal decode
+by -3.11% to +7.80%, depending on request length. Quantized treatments can
+generate different continuations and routes; these are treatment throughput
+measurements, not an isolated kernel regression or a variance estimate.
+
+Selected +5% evidence: [report](20261004_glm53_reserve_r4_mixed_tail_plus_5_hqq6_k6v6_pro_benchmark_report.log),
+[command](20261004_glm53_reserve_r4_mixed_tail_plus_5_hqq6_k6v6_pro_command.log),
+[full output](20261004_glm53_reserve_r4_mixed_tail_plus_5_hqq6_k6v6_pro_benchmark_stdout.log),
+[runtime log](20261004_glm53_reserve_r4_mixed_tail_plus_5_hqq6_k6v6_pro_runtime.log).
+Its measured internal decode changes by +0.23% / -7.85% / -9.60% relative
+to baseline. More payload has not demonstrated uniformly better throughput.
+
+Selected +10% evidence: [report](20261004_glm53_reserve_r4_mixed_tail_plus_10_hqq6_k6v6_pro_benchmark_report.log),
+[command](20261004_glm53_reserve_r4_mixed_tail_plus_10_hqq6_k6v6_pro_command.log),
+[full output](20261004_glm53_reserve_r4_mixed_tail_plus_10_hqq6_k6v6_pro_benchmark_stdout.log),
+[runtime log](20261004_glm53_reserve_r4_mixed_tail_plus_10_hqq6_k6v6_pro_runtime.log).
+Its internal decode is 15.95–16.98% below baseline across these three prompts.
+Quality and task outcomes remain separate from this throughput comparison.
+
+Full INT8 evidence: [report](20261004_glm53_reserve_r4_mixed_expected_full_int8_hqq6_k6v6_pro_benchmark_report.log),
+[command](20261004_glm53_reserve_r4_mixed_expected_full_int8_hqq6_k6v6_pro_command.log),
+[full output](20261004_glm53_reserve_r4_mixed_expected_full_int8_hqq6_k6v6_pro_benchmark_stdout.log),
+[runtime log](20261004_glm53_reserve_r4_mixed_expected_full_int8_hqq6_k6v6_pro_runtime.log).
+Its internal decode is 67.74–69.78% below baseline; internal prefill is
+20.12–41.45% below baseline. Full-run sampled free-VRAM minima for the five
+rows are 652 / 724 / 724 / 724 / 724 MiB. No safety margin or calibration was
+changed. Productive qualification remains separate; the current QCN regression
+is closed in the entry above.
+
 ## QCN homogeneous guard after mixed-mode admission checks — 2026-09-14
 
 The fixed timing-disabled `./dev speed-test` completed once with exit 0 and

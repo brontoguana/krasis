@@ -10,6 +10,40 @@ from krasis import server
 
 
 class ApprovedHeatmapAutoTest(unittest.TestCase):
+    def test_mixed_heatmap_identity_retains_legacy_source_hashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.json"
+            path.write_text(json.dumps({"schema_version": 1, "budget": {},
+                "source_int4": {"sha256": "11" * 32}, "source_int8": {"sha256": "22" * 32}}))
+            result = server._mixed_expert_manifest_metadata(str(path))
+            self.assertEqual(result["source_int4_sha256"], "11" * 32)
+            self.assertEqual(result["source_int8_sha256"], "22" * 32)
+            self.assertNotIn("compact_cache_sha256", result)
+
+    def test_mixed_heatmap_identity_binds_compact_v2_and_v3_treatments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "compact.json"
+            for version in (2, 3):
+                value = {"schema_version": version, "budget": {}, "compact_cache": {
+                    "sha256": "11" * 32, "header_sha256": "22" * 32,
+                    "region_map_sha256": "33" * 32}}
+                path.write_text(json.dumps(value))
+                before = server._mixed_expert_manifest_metadata(str(path))
+                self.assertEqual(before["compact_cache_sha256"], "11" * 32)
+                self.assertEqual(before["compact_cache_region_map_sha256"], "33" * 32)
+                self.assertNotIn("source_int4_sha256", before)
+                value["compact_cache"]["sha256"] = "44" * 32
+                path.write_text(json.dumps(value))
+                after = server._mixed_expert_manifest_metadata(str(path))
+                self.assertNotEqual(before, after)
+
+    def test_mixed_heatmap_identity_rejects_unpublished_compact_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "unpublished.json"
+            path.write_text(json.dumps({"schema_version": 3, "budget": {}}))
+            with self.assertRaisesRegex(RuntimeError, "lacks compact cache identity"):
+                server._mixed_expert_manifest_metadata(str(path))
+
     def test_runtime_heatmap_counts_preserve_exact_values_and_sort_by_route(self):
         counts = {
             "4,2": 17,

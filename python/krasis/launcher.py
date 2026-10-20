@@ -864,6 +864,7 @@ def scan_gguf_files(search_dir: str) -> List[Dict[str, Any]]:
 CONFIG_KEYS = [
     "MODEL_PATH", "CFG_SELECTED_GPUS", "CFG_PP_PARTITION", "CFG_LAYER_GROUP_SIZE",
     "CFG_KV_CACHE_MB", "CFG_MAX_CONTEXT_TOKENS", "CFG_KV_DTYPE", "CFG_RING_WINDOW_KV", "CFG_VISION_QUANT", "CFG_GPU_EXPERT_BITS",
+    "CFG_MIXED_EXPERT_MANIFEST", "CFG_MIXED_EXPERT_BUILD_PLAN", "CFG_MIXED_EXPERT_CALIBRATION",
     "CFG_EXPERT_GROUP_SIZE", "CFG_CPU_EXPERT_BITS",
     "CFG_GPU_EXPERT_INT4_CALIB",
     "CFG_ATTENTION_QUANT", "CFG_HQQ_CACHE_PROFILE", "CFG_HQQ_GROUP_SIZE", "CFG_HQQ_AUTO_BUDGET_PCT", "CFG_HQQ46_AUTO_BUDGET_MB", "CFG_HQQ_SIDECAR_MANIFEST",
@@ -949,6 +950,8 @@ class LauncherConfig:
         self._kv_dtype_explicit: bool = False
         self.gpu_expert_bits: int = 4
         self.mixed_expert_manifest: str = ""
+        self.mixed_expert_build_plan: str = ""
+        self.mixed_expert_calibration: str = ""
         self.expert_group_size: int = 128
         self.gpu_expert_int4_calib: str = "amax"
         self.cpu_expert_bits: int = 4
@@ -1067,6 +1070,14 @@ class LauncherConfig:
         if "CFG_MIXED_EXPERT_MANIFEST" in saved:
             self.mixed_expert_manifest = os.path.expanduser(
                 saved["CFG_MIXED_EXPERT_MANIFEST"].strip()
+            )
+        if "CFG_MIXED_EXPERT_BUILD_PLAN" in saved:
+            self.mixed_expert_build_plan = os.path.expanduser(
+                saved["CFG_MIXED_EXPERT_BUILD_PLAN"].strip()
+            )
+        if "CFG_MIXED_EXPERT_CALIBRATION" in saved:
+            self.mixed_expert_calibration = os.path.expanduser(
+                saved["CFG_MIXED_EXPERT_CALIBRATION"].strip()
             )
         if "CFG_EXPERT_GROUP_SIZE" in saved:
             try:
@@ -1310,6 +1321,8 @@ class LauncherConfig:
             "CFG_KV_DTYPE": self.kv_dtype,
             "CFG_GPU_EXPERT_BITS": str(self.gpu_expert_bits),
             "CFG_MIXED_EXPERT_MANIFEST": self.mixed_expert_manifest,
+            "CFG_MIXED_EXPERT_BUILD_PLAN": self.mixed_expert_build_plan,
+            "CFG_MIXED_EXPERT_CALIBRATION": self.mixed_expert_calibration,
             "CFG_EXPERT_GROUP_SIZE": str(self.expert_group_size),
             "CFG_GPU_EXPERT_INT4_CALIB": self.gpu_expert_int4_calib,
             "CFG_CPU_EXPERT_BITS": str(self.cpu_expert_bits),
@@ -1410,6 +1423,10 @@ OPTIONS = [
                  choices=[4], affects_budget=True),
     ConfigOption("Mixed expert manifest", "mixed_expert_manifest",
                  opt_type="text", affects_budget=True, advanced=True),
+    ConfigOption("Mixed build plan", "mixed_expert_build_plan",
+                 opt_type="text", advanced=True),
+    ConfigOption("Mixed calibration", "mixed_expert_calibration",
+                 opt_type="text", advanced=True),
     ConfigOption("Expert group size", "expert_group_size",
                  choices=[32, 64, 128], affects_budget=True, advanced=True),
     ConfigOption("Expert INT4 calib", "gpu_expert_int4_calib",
@@ -2296,13 +2313,53 @@ class Launcher:
         if self.cfg.mixed_expert_manifest:
             from krasis.checkpoint_identity import cache_namespace, checkpoint_identity
 
+            if self.cfg.force_rebuild_cache:
+                raise ValueError(
+                    "The generic Marlin rebuild switch cannot rebuild a compact mixed cache. "
+                    "Use ./dev mixed-cache-prepare with a new immutable output identity; "
+                    "normal startup never deletes or falls back from a published mixed cache."
+                )
             manifest_path = os.path.abspath(
                 os.path.expanduser(self.cfg.mixed_expert_manifest)
             )
             if not os.path.isfile(manifest_path):
-                raise ValueError(
-                    f"Mixed routed-expert manifest does not exist: {manifest_path}"
+                plan_path = os.path.abspath(
+                    os.path.expanduser(self.cfg.mixed_expert_build_plan)
+                ) if self.cfg.mixed_expert_build_plan else ""
+                calibration_path = os.path.abspath(
+                    os.path.expanduser(self.cfg.mixed_expert_calibration)
+                ) if self.cfg.mixed_expert_calibration else ""
+                if not plan_path or not calibration_path:
+                    raise ValueError(
+                        f"Mixed routed-expert manifest does not exist: {manifest_path}. "
+                        "Provide CFG_MIXED_EXPERT_BUILD_PLAN and "
+                        "CFG_MIXED_EXPERT_CALIBRATION to run the supported "
+                        "offline cache-preparation stage; no homogeneous fallback is allowed."
+                    )
+                if not os.path.isfile(plan_path) or not os.path.isfile(calibration_path):
+                    raise ValueError(
+                        "Mixed cache preparation inputs are missing: "
+                        f"plan={plan_path}, calibration={calibration_path}"
+                    )
+                cache_path = os.path.splitext(manifest_path)[0] + ".krmx"
+                from krasis import WeightStore
+
+                print(
+                    "Preparing the requested compact mixed routed-expert cache "
+                    "before server load...",
+                    flush=True,
                 )
+                WeightStore.prepare_compact_mixed_cache(
+                    os.path.abspath(os.path.expanduser(self.cfg.model_path)),
+                    plan_path,
+                    calibration_path,
+                    cache_path,
+                    manifest_path,
+                )
+                if not os.path.isfile(manifest_path):
+                    raise ValueError(
+                        "Compact mixed cache preparation returned without publishing its manifest."
+                    )
             try:
                 with open(manifest_path, "rb") as handle:
                     manifest_raw = handle.read()
@@ -2319,8 +2376,10 @@ class Launcher:
                 )
             budget = manifest.get("budget")
             calibration = manifest.get("calibration")
+            schema_version = manifest.get("schema_version")
             source4 = manifest.get("source_int4")
             source8 = manifest.get("source_int8")
+            compact = manifest.get("compact_cache")
             checkpoint = checkpoint_identity(self.cfg.model_path)
             model_config_path = os.path.join(self.cfg.model_path, "config.json")
             with open(model_config_path, "rb") as handle:
@@ -2331,29 +2390,61 @@ class Launcher:
                 raise ValueError("Selected model text_config must be an object.")
             experts_gated = model_text_config.get("mlp_hidden_act") != "relu2"
             if (
-                manifest.get("format") != "Krasis routed mixed Marlin INT4/INT8"
-                or manifest.get("schema_version") != 1
+                (manifest.get("format"), schema_version) not in (
+                    ("Krasis routed mixed Marlin INT4/INT8", 1),
+                    ("Krasis routed mixed Marlin INT4/INT8", 2),
+                    ("Krasis routed mixed Marlin INT4/INT8", 3),
+                    ("Krasis experimental scales-only Marlin INT4", 4))
                 or manifest.get("checkpoint_sha256") != checkpoint["sha256"]
                 or manifest.get("cache_namespace") != cache_namespace(self.cfg.model_path)
                 or manifest.get("config_sha256")
                 != hashlib.sha256(model_config_raw).hexdigest()
                 or manifest.get("experts_gated") is not experts_gated
                 or manifest.get("default_bits") != 4
+                or manifest.get("group_size") != self.cfg.expert_group_size
                 or not isinstance(budget, dict)
-                or budget.get("requested_basis_points") not in (500, 1000, 1500, 2000)
+                or budget.get("requested_basis_points") not in (0, 500, 1000, 1500, 2000, 10_000)
                 or not isinstance(calibration, dict)
-                or not isinstance(source4, dict)
-                or source4.get("bits") != 4
-                or not isinstance(source8, dict)
-                or source8.get("bits") != 8
+                or (
+                    schema_version == 1
+                    and (
+                        not isinstance(source4, dict)
+                        or source4.get("bits") != 4
+                        or not isinstance(source8, dict)
+                        or source8.get("bits") != 8
+                        or compact is not None
+                    )
+                )
+                or (
+                    schema_version in (2, 3, 4)
+                    and (
+                        source4 is not None
+                        or source8 is not None
+                        or not isinstance(compact, dict)
+                        or self.cfg.gpu_expert_int4_calib != "search_rmse"
+                        or not isinstance(
+                            calibration.get("search_rmse_calibration_sha256"), str
+                        )
+                    )
+                )
             ):
                 raise ValueError(
                     "Mixed routed-expert manifest is not a validated contract for "
-                    "the selected checkpoint and supported +5/+10/+15/+20% budgets."
+                    "the selected checkpoint and supported 0/+5/+10/+15/+20/full-INT8 budgets."
                 )
             manifest_dir = os.path.dirname(manifest_path)
+            if schema_version in (3, 4) or manifest.get("scales_only") is not None:
+                from krasis.vram_budget import validate_mixed_coverage_contract
+                validate_mixed_coverage_contract(manifest)
+            if schema_version == 4:
+                coverage_path = os.path.join(manifest_dir, "source-coverage.json")
+                with open(coverage_path, "rb") as handle:
+                    coverage_raw = handle.read()
+                if hashlib.sha256(coverage_raw).hexdigest() != manifest["scales_only"]["coverage_sha256"]:
+                    raise ValueError("Experimental scales-only coverage identity mismatch.")
             _validate_mixed_ranking_evidence(manifest_path, calibration)
-            for source, bits in ((source4, 4), (source8, 8)):
+            sources = ((source4, 4), (source8, 8)) if schema_version == 1 else ((compact, None),)
+            for source, bits in sources:
                 basename = source.get("basename")
                 expected_bytes = source.get("bytes")
                 if (
@@ -2364,12 +2455,12 @@ class Launcher:
                     or expected_bytes <= 0
                 ):
                     raise ValueError(
-                        f"Mixed routed-expert INT{bits} source identity is invalid."
+                        f"Mixed routed-expert {'compact' if bits is None else f'INT{bits} source'} identity is invalid."
                     )
                 source_path = os.path.join(manifest_dir, basename)
                 if not os.path.isfile(source_path) or os.path.getsize(source_path) != expected_bytes:
                     raise ValueError(
-                        f"Mixed routed-expert INT{bits} source is missing or has the wrong size: "
+                        f"Mixed routed-expert {'compact cache' if bits is None else f'INT{bits} source'} is missing or has the wrong size: "
                         f"{source_path}"
                     )
             if self.cfg.multi_gpu_mode == "peer" or self.cfg.dynamic_peer:
@@ -3637,7 +3728,8 @@ class Launcher:
         print()
 
     def launch_server(self, benchmark: bool = False, benchmark_only: bool = False,
-                      stress_test: bool = False, vram_report: bool = False) -> None:
+                      stress_test: bool = False, vram_report: bool = False,
+                      test_endpoints: bool = False) -> None:
         """Write a temp config file and exec the Krasis server with --config."""
         import tempfile
 
@@ -3673,6 +3765,8 @@ class Launcher:
             cmd_args.append("--stress-test")
         if vram_report:
             cmd_args.append("--vram-report")
+        if test_endpoints:
+            cmd_args.append("--test-endpoints")
 
         # Set CUDA_VISIBLE_DEVICES to selected GPUs
         cvd = ""
@@ -3871,6 +3965,8 @@ def parse_args() -> argparse.Namespace:
                         help="Run benchmark suite (optional: path to TOML config)")
     parser.add_argument("--vram-report", action="store_true",
                         help="Generate VRAM report CSV in the current run directory")
+    parser.add_argument("--test-endpoints", action="store_true",
+                        help="Enable internal diagnostic HTTP endpoints for this run")
     parser.add_argument("--skip-setup", action="store_true",
                         help="(ignored — handled by bash wrapper)")
     parser.add_argument("--venv", default=None,
@@ -4254,6 +4350,24 @@ def _validate_manager_preload_budget(launcher: "Launcher") -> Dict[str, Any]:
             f"rank {worst_rank} requires {rank['total_mb']:.0f} MB, "
             f"GPU capacity is {budget['gpu_vram_mb']:.0f} MB."
         )
+    context_tokens = int(budget.get("max_context_tokens", 0))
+    kv_shortfalls = [
+        rank for rank in budget.get("ranks", [])
+        if rank.get("kv_capacity_relevant", False)
+        and int(rank.get("kv_alloc_tokens", 0)) < context_tokens
+    ]
+    if kv_shortfalls:
+        worst = min(kv_shortfalls, key=lambda rank: int(rank.get("kv_alloc_tokens", 0)))
+        minimum_mb = math.ceil(
+            max(float(rank.get("kv_required_mb", 0.0)) for rank in kv_shortfalls)
+        )
+        raise ValueError(
+            f"Manager configuration KV cache cannot hold the configured "
+            f"{context_tokens:,}-token context: rank {int(worst['rank'])} holds "
+            f"{int(worst.get('kv_alloc_tokens', 0)):,} tokens. Increase "
+            f"CFG_KV_CACHE_MB from {int(budget.get('kv_cache_mb', 0)):,} to "
+            f"at least {minimum_mb:,} MB."
+        )
     required_ram_mb = float(budget.get("ram_total_mb", 0.0))
     available_ram_mb = float(budget.get("total_ram_gb", 0.0)) * 1024.0
     if required_ram_mb > available_ram_mb:
@@ -4569,7 +4683,8 @@ def main():
             print("Krasis launcher validation passed.")
             return
         launcher.launch_server(benchmark=args.benchmark,
-                               vram_report=getattr(args, 'vram_report', False))
+                               vram_report=getattr(args, 'vram_report', False),
+                               test_endpoints=args.test_endpoints)
     else:
         # Interactive TUI
         if launcher.run_interactive():
@@ -4612,6 +4727,7 @@ def main():
                 benchmark_only=(launch_mode == "benchmark_only"),
                 stress_test=(launch_mode == "stress_test"),
                 vram_report=getattr(args, 'vram_report', False),
+                test_endpoints=args.test_endpoints,
             )
         else:
             print("Aborted.")

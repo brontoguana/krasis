@@ -11,6 +11,44 @@ Initial scope: measured supported models at `INT4/HQQ4/k4v4` and
 
 Detailed benchmark logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](benchmarks/BENCHMARKS.md).
 
+A separately identified October 4 cache-investigation validation completed all
+five GLM standard benchmarks and a fixed QCN rerun with optional instrumentation,
+trace and `--vram-report` disabled. Normal calibration and the 600 MiB safety
+margin remained active. GLM internal decode at 50/100/250-token request labels:
+amax **17.61/19.67/18.95**, minimum reserve **18.71/19.48/18.41**, tail +5%
+**17.56/18.09/17.45**, tail +10% **15.15/16.44/15.72**, and full routed INT8
+**5.71/6.25/5.73 tok/s**. QCN's fixed `./dev speed-test` reports
+**59.24/58.98/58.47 tok/s**. Relative to the earlier same-day fixed QCN run,
+decode changes -0.24% to +0.99% and prefill -0.74% to +2.23%; one run per cohort
+does not estimate variance or identify a cause. All six runs and shutdowns
+closed with status 0. [All prefill, internal decode, legacy displayed HTTP,
+whole-request durations, memory readings and full logs](benchmarks/BENCHMARKS.md#glm-cache-investigation-speed-validation--2026-10-04)
+remain separate from the preserved failed GLM exact cache gate. Generic raw
+report precision headings use base config fields; verified manifests identify
+mixed treatments. Full INT8 report-time RSS was 304.8 GiB, while a separate
+startup sample reached about 515 GiB; neither establishes productive-task peak
+memory. These measurements do not promote a model default or alter task outcomes.
+
+The October 4 fixed QCN `./dev speed-test` on RTX A6000 completed with clean
+shutdown. Internal prefill was **1232.2/2341.0/2529.0/2576.1/2518.2/2473.9
+tok/s**, and internal decode **58.66/59.12/58.02 tok/s**. All 24,576 experts were
+resident, copy failures 0, report-time RSS 79.3 GiB and decode floor 3819 MiB.
+Decode is within 0.40% of September 14; the 1K prefill point is 5.69% lower,
+without a measured cause or variance estimate. [All speed readings, HTTP
+durations and full logs](benchmarks/BENCHMARKS.md#qcn-fixed-regression-after-glm-reserve-work--2026-10-04)
+are retained. This separate check does not clear the GLM cache gate failure.
+
+The five GLM-5.3-Flash reserve speed trials are independently verified. The
+commands enabled optional `--vram-report`; its overhead is unmeasured, so
+these report-enabled rates do not establish fully uninstrumented performance.
+The baseline records internal prefill **146.2/565.9/902.9/1266.5/1524.5/1545.0 tok/s**
+and decode **17.70/19.62/18.96 tok/s**. Minimum reserve decodes at
+**19.08/19.45/18.37**, selected +5% at **17.74/18.08/17.14**, selected +10% at
+**14.76/16.49/15.74**, and full routed INT8 at **5.71/6.26/5.73 tok/s**.
+Displayed HTTP rates, RAM, VRAM, all prefill rates and whole-request
+durations are kept separate in the [complete series and logs](benchmarks/BENCHMARKS.md#glm-53-flash-reserve-treatment-comparison--2026-10-04).
+These experiment measurements do not establish a qualified model default.
+
 The GLM-5.2 PCIe programme measured six final RTX PRO 6000 + A4500 rows.
 Peer serving plus bit-exact GPU expert compression and `75/8` cold-mass pruning
 improved best internal decode from `4.75` to `5.97 tok/s` (**1.257x, +25.68%**)

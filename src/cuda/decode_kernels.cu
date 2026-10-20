@@ -2336,7 +2336,11 @@ __device__ __forceinline__ void dsa_kpool_expand_body(
     int slot = blockIdx.x * blockDim.x + threadIdx.x;
     if (slot >= raw_capacity || pool_size <= 0) return;
     int complete_pools = max(seq_len, 0) / pool_size;
-    int expanded_capacity = selected_pool_capacity * pool_size;
+    // Publish a compact causal prefix, including the incomplete raw tail.
+    // Graph attention consumes min(seq_len, raw_capacity), so placing the tail
+    // after unused configured pool slots would hide it on short contexts.
+    int selected_pool_count = min(selected_pool_capacity, complete_pools);
+    int expanded_capacity = selected_pool_count * pool_size;
     int value = -1;
     if (slot < expanded_capacity) {
         int selected_slot = slot / pool_size;
@@ -4597,6 +4601,8 @@ extern "C" __global__ void kimi_delta_recurrent_scan_bf16(
             __syncthreads();
         }
         const float q_inv = rsqrtf(reduce_shared[0] + norm_eps) * q_scale;
+        // Every warp must finish reading the Q sum before K reuses its storage.
+        __syncthreads();
         reduce_shared[tid] = tid < dim ? kv * kv : 0.0f;
         __syncthreads();
         for (int stride = (int)blockDim.x / 2; stride > 0; stride >>= 1) {

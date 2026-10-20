@@ -15,10 +15,9 @@ import sys
 import time
 from typing import Any
 
-from tokenizers import Tokenizer
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from krasis.tokenizer import Tokenizer
 from tests.adq_build_witness_inputs import _sha256, _source_paths
 
 
@@ -35,26 +34,21 @@ def _hash_ids(values: list[int]) -> str:
     return hashlib.sha256(",".join(str(value) for value in values).encode("ascii")).hexdigest()
 
 
-def _render(messages: list[dict[str, str]], *, generation_prompt: bool = True) -> str:
-    rendered = "<｜begin▁of▁sentence｜>"
-    for message in messages:
-        if message["role"] == "user":
-            rendered += "<｜User｜>" + message["content"]
-        elif message["role"] == "assistant":
-            rendered += (
-                "<｜Assistant｜></think>"
-                + message["content"]
-                + "<｜end▁of▁sentence｜>"
-            )
-        else:
-            raise ValueError(f"unsupported role in ADQ renderer: {message['role']!r}")
-    if generation_prompt:
-        rendered += "<｜Assistant｜></think>"
-    return rendered
+def _chat_ids(
+    tokenizer: Tokenizer,
+    messages: list[dict[str, str]],
+    *,
+    generation_prompt: bool = True,
+) -> list[int]:
+    return tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=generation_prompt,
+        enable_thinking=False,
+    )
 
 
 def _token_count(tokenizer: Tokenizer, messages: list[dict[str, str]]) -> int:
-    return len(tokenizer.encode(_render(messages), add_special_tokens=False).ids)
+    return len(_chat_ids(tokenizer, messages))
 
 
 def _decode_slice(tokenizer: Tokenizer, values: list[int]) -> str:
@@ -62,7 +56,11 @@ def _decode_slice(tokenizer: Tokenizer, values: list[int]) -> str:
     # tokenizer would choose a different merge if re-encoded in isolation.
     # Exactness is therefore asserted on the complete rendered conversation,
     # not on an arbitrary interior slice.
-    return tokenizer.decode(values, skip_special_tokens=False)
+    return tokenizer.tokenizer.decode(
+        values,
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
 
 
 def _content_with_record(
@@ -103,26 +101,23 @@ def _fit_final_turn(
         f"reply with exactly {EXPECTED} and no other text."
     )
 
-    def candidate(count: int) -> tuple[dict[str, str], list[int]]:
+    def candidate(count: int, alignment: str = "") -> tuple[dict[str, str], list[int]]:
         values = corpus_ids[start : start + count]
         split = min(len(values), max(0, int(len(values) * 0.875)))
         content = (
             _decode_slice(tokenizer, values[:split])
             + record
             + _decode_slice(tokenizer, values[split:])
+            + alignment
             + query
         )
         message = {"role": "user", "content": content}
-        ids = tokenizer.encode(
-            _render(messages + [message]), add_special_tokens=False
-        ).ids
+        ids = _chat_ids(tokenizer, messages + [message])
         return message, ids
 
     empty_message = {"role": "user", "content": record + query}
     fixed_tokens = len(
-        tokenizer.encode(
-            _render(messages + [empty_message]), add_special_tokens=False
-        ).ids
+        _chat_ids(tokenizer, messages + [empty_message])
     )
     count = min(len(corpus_ids) - start, max(1, target_tokens - fixed_tokens))
     exact: tuple[dict[str, str], list[int]] | None = None
@@ -136,13 +131,28 @@ def _fit_final_turn(
         if next_count == count:
             break
         count = next_count
+    closest_below: tuple[int, int] | None = None
     if exact is None:
         for nearby_count in range(
-            max(1, count - 64), min(len(corpus_ids) - start, count + 64) + 1
+            max(1, count - 256), min(len(corpus_ids) - start, count + 256) + 1
         ):
             value = candidate(nearby_count)
             if len(value[1]) == target_tokens:
                 exact = value
+                break
+            if len(value[1]) < target_tokens:
+                gap = target_tokens - len(value[1])
+                if closest_below is None or gap < closest_below[0]:
+                    closest_below = (gap, nearby_count)
+    if exact is None and closest_below is not None:
+        gap, nearby_count = closest_below
+        for unit in (" x", " .", "\n", " ", "\t", "\u200b"):
+            for repeats in range(max(1, gap - 12), max(32, gap + 12) + 1):
+                value = candidate(nearby_count, unit * repeats)
+                if len(value[1]) == target_tokens:
+                    exact = value
+                    break
+            if exact is not None:
                 break
     if exact is None:
         raise RuntimeError(f"could not construct exact {target_tokens:,}-token session prompt")
@@ -158,7 +168,7 @@ def _real_corpus_ids(tokenizer: Tokenizer, repo_root: Path) -> list[int]:
             f"SHA256 {_sha256(raw)} =====\n"
         )
         values.extend(
-            tokenizer.encode(header + raw.decode("utf-8"), add_special_tokens=False).ids
+            tokenizer.tokenizer.encode(header + raw.decode("utf-8"), add_special_tokens=False)
         )
     return values
 
@@ -166,16 +176,16 @@ def _real_corpus_ids(tokenizer: Tokenizer, repo_root: Path) -> list[int]:
 def _exact_single_user(
     tokenizer: Tokenizer, corpus_ids: list[int], target_tokens: int
 ) -> tuple[list[dict[str, str]], list[int]]:
-    framing = tokenizer.encode(
-        "<｜begin▁of▁sentence｜><｜User｜><｜Assistant｜></think>",
-        add_special_tokens=False,
-    ).ids
-    def candidate(count: int) -> tuple[list[dict[str, str]], list[int]]:
-        messages = [{"role": "user", "content": _decode_slice(tokenizer, corpus_ids[:count])}]
-        ids = tokenizer.encode(_render(messages), add_special_tokens=False).ids
+    def candidate(count: int, alignment: str = "") -> tuple[list[dict[str, str]], list[int]]:
+        messages = [{
+            "role": "user",
+            "content": _decode_slice(tokenizer, corpus_ids[:count]) + alignment,
+        }]
+        ids = _chat_ids(tokenizer, messages)
         return messages, ids
 
-    count = min(len(corpus_ids), max(1, target_tokens - len(framing)))
+    framing = len(_chat_ids(tokenizer, [{"role": "user", "content": ""}]))
+    count = min(len(corpus_ids), max(1, target_tokens - framing))
     for _ in range(8):
         value = candidate(count)
         delta = target_tokens - len(value[1])
@@ -185,10 +195,22 @@ def _exact_single_user(
         if next_count == count:
             break
         count = next_count
-    for nearby_count in range(max(1, count - 128), min(len(corpus_ids), count + 128) + 1):
+    closest_below: tuple[int, int] | None = None
+    for nearby_count in range(max(1, count - 256), min(len(corpus_ids), count + 256) + 1):
         value = candidate(nearby_count)
         if len(value[1]) == target_tokens:
             return value
+        if len(value[1]) < target_tokens:
+            gap = target_tokens - len(value[1])
+            if closest_below is None or gap < closest_below[0]:
+                closest_below = (gap, nearby_count)
+    if closest_below is not None:
+        gap, nearby_count = closest_below
+        for unit in (" x", " .", "\n", " ", "\t", "\u200b"):
+            for repeats in range(max(1, gap - 12), max(32, gap + 12) + 1):
+                value = candidate(nearby_count, unit * repeats)
+                if len(value[1]) == target_tokens:
+                    return value
     raise RuntimeError(f"could not build exact {target_tokens:,}-token boundary prompt")
 
 
@@ -313,7 +335,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=14_400)
     args = parser.parse_args()
 
-    tokenizer = Tokenizer.from_file(str(args.model_dir / "tokenizer.json"))
+    tokenizer = Tokenizer(str(args.model_dir))
     source = json.loads(args.input_source.read_text(encoding="utf-8"))
     source_turn = min(
         (
@@ -324,11 +346,10 @@ def main() -> int:
         ),
         key=lambda turn: len(turn["input_token_ids"]),
     )
-    framing = source["framing"]
-    source_ids = [int(value) for value in source_turn["input_token_ids"]]
-    corpus_ids = source_ids[
-        int(framing["prefix_tokens"]) : len(source_ids) - int(framing["suffix_tokens"])
-    ]
+    corpus_ids = [int(value) for value in source.get("corpus_token_ids", [])]
+    corpus_digest = _hash_ids(corpus_ids)
+    if not corpus_ids or corpus_digest != source.get("corpus_token_sha256"):
+        raise RuntimeError("staged input lacks an intact checkpoint-native corpus token stream")
     if len(corpus_ids) < 400_000:
         raise RuntimeError("staged input does not contain enough real-content tokens")
 

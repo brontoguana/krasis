@@ -14,9 +14,11 @@
 //! such as vendored Marlin/FlashAttention/FLA libraries.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -24,6 +26,8 @@ use cudarc::cublas::{result as cublas_result, sys as cublas_sys};
 use cudarc::driver::sys as cuda_sys;
 use cudarc::driver::{CudaDevice, CudaFunction, CudaSlice, DevicePtr};
 use pyo3::prelude::*;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::weights::marlin::{
     bf16_to_f32, dequantize_marlin, dequantize_marlin_int8, generate_scale_perms,
@@ -160,7 +164,7 @@ fn optional_bool_env(name: &str) -> Result<Option<bool>, String> {
     }
 }
 
-fn glm53_kda_recurrent_oracle_enabled() -> Result<bool, String> {
+pub(crate) fn glm53_kda_recurrent_oracle_enabled() -> Result<bool, String> {
     static ENABLED: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
     ENABLED
         .get_or_init(
@@ -224,6 +228,21 @@ fn dsa_mla_gathered_default_enabled(
     grouped_exact_enabled: bool,
 ) -> bool {
     native_dsa_registered && !score_reuse_enabled && !grouped_exact_enabled
+}
+
+fn dsa_mla_scalar_trace_shadow_enabled(
+    gathered_gemm_enabled: bool,
+    trace_enabled: bool,
+    selected_layer: bool,
+    grouped_exact_all_layers: bool,
+) -> bool {
+    // The scalar shadow overwrites the production attention output. It is a
+    // diagnostic replay for scalar/grouped paths, not part of production
+    // gathered-GEMM tracing. Gathered-GEMM traces must retain and summarize
+    // the actual production output without replacing it before WVC.
+    !gathered_gemm_enabled
+        && trace_enabled
+        && (selected_layer || grouped_exact_all_layers)
 }
 
 fn dsa_mla_gathered_gemm_enabled(default_enabled: bool) -> Result<bool, String> {
@@ -5495,6 +5514,21 @@ fn max_shared_mem_for_device(device_ordinal: usize) -> usize {
     max_shared_mem.max(0) as usize
 }
 
+fn fused_moe_fp32_reduce_floats_for_precisions(
+    moe_block_size: usize,
+    prob_n: usize,
+    prob_k: usize,
+    precisions: &[u8],
+    group_size: usize,
+    sms: usize,
+    max_shared_mem: usize,
+) -> usize {
+    precisions.iter().map(|&bits| fused_moe_fp32_reduce_floats(
+        moe_block_size, prob_n, prob_k, bits as usize,
+        group_size, sms, max_shared_mem,
+    )).max().unwrap_or(0)
+}
+
 pub fn fused_moe_ctmp_floats_for_config(config: &PrefillModelConfig) -> (usize, usize) {
     if config.n_routed_experts == 0 {
         return (0, 0);
@@ -5502,7 +5536,9 @@ pub fn fused_moe_ctmp_floats_for_config(config: &PrefillModelConfig) -> (usize, 
     let moe_block_size = 64;
     let hidden_size = config.hidden_size;
     let moe_intermediate_size = config.moe_intermediate_size;
-    let expert_bits = config.max_expert_bits as usize;
+    // A wider weight precision can select a narrower kernel tile under the
+    // device's shared-memory limit. Cover both possible dispatch geometries.
+    let expert_precisions = [config.expert_bits, config.max_expert_bits];
     let group_size = config.group_size.max(1);
     let max_shared_mem = max_shared_mem_for_device(config.device_ordinal);
     let w1_n = if config.moe_gated {
@@ -5510,20 +5546,20 @@ pub fn fused_moe_ctmp_floats_for_config(config: &PrefillModelConfig) -> (usize, 
     } else {
         moe_intermediate_size
     };
-    let w1_ctmp_floats = fused_moe_fp32_reduce_floats(
+    let w1_ctmp_floats = fused_moe_fp32_reduce_floats_for_precisions(
         moe_block_size,
         w1_n,
         hidden_size,
-        expert_bits,
+        &expert_precisions,
         group_size,
         config.sms,
         max_shared_mem,
     );
-    let w2_ctmp_floats = fused_moe_fp32_reduce_floats(
+    let w2_ctmp_floats = fused_moe_fp32_reduce_floats_for_precisions(
         moe_block_size,
         hidden_size,
         moe_intermediate_size,
-        expert_bits,
+        &expert_precisions,
         group_size,
         config.sms,
         max_shared_mem,
@@ -5562,10 +5598,13 @@ fn installed_package_sidecar(name: &str) -> Option<String> {
 // GpuBuf uses cuMemAlloc_v2/cuMemFree_v2 (synchronous, no pool) so
 // allocation and deallocation are immediate and deterministic.
 
+include!("prefix_prefill_stream.rs");
+
 pub struct GpuBuf<T: Copy> {
     ptr: u64,   // CUdeviceptr
     len: usize, // element count (not bytes)
     device_ordinal: i32,
+    allocation_context: cuda_sys::CUcontext,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -5574,20 +5613,24 @@ unsafe impl<T: Copy + Sync> Sync for GpuBuf<T> {}
 
 impl<T: Copy> GpuBuf<T> {
     pub fn alloc_uninit(count: usize) -> Result<Self, String> {
-        let bytes = count * std::mem::size_of::<T>();
+        let bytes = count.checked_mul(std::mem::size_of::<T>()).ok_or("native GPU allocation byte count overflow")?;
         if bytes == 0 {
             return Ok(Self {
                 ptr: 0,
                 len: 0,
                 device_ordinal: 0,
+                allocation_context: std::ptr::null_mut(),
                 _phantom: std::marker::PhantomData,
             });
         }
         // Get current device ordinal for drop
         let mut dev: i32 = 0;
+        let mut allocation_context=std::ptr::null_mut();
         unsafe {
-            cuda_sys::lib().cuCtxGetDevice(&mut dev);
+            cuda_sys::lib().cuCtxGetDevice(&mut dev).result().map_err(|e|format!("native allocation device: {e}"))?;
+            cuda_sys::lib().cuCtxGetCurrent(&mut allocation_context).result().map_err(|e|format!("native allocation context: {e}"))?;
         }
+        if allocation_context.is_null(){return Err("native GPU allocation has no current context".into())}
         let mut ptr: u64 = 0;
         let err = unsafe { cuda_sys::lib().cuMemAlloc_v2(&mut ptr, bytes) };
         if err != cuda_sys::CUresult::CUDA_SUCCESS {
@@ -5597,6 +5640,7 @@ impl<T: Copy> GpuBuf<T> {
             ptr,
             len: count,
             device_ordinal: dev,
+            allocation_context,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -5609,9 +5653,7 @@ impl<T: Copy> GpuBuf<T> {
         }
         let err = unsafe { cuda_sys::lib().cuMemsetD8_v2(buf.ptr, 0, bytes) };
         if err != cuda_sys::CUresult::CUDA_SUCCESS {
-            unsafe {
-                cuda_sys::lib().cuMemFree_v2(buf.ptr);
-            }
+            // The real buffer owner releases its allocation once on this error.
             return Err(format!("cuMemsetD8({} bytes) failed: {:?}", bytes, err));
         }
         Ok(buf)
@@ -5621,6 +5663,8 @@ impl<T: Copy> GpuBuf<T> {
     pub fn device_ptr(&self) -> &u64 {
         &self.ptr
     }
+
+    pub(crate) fn allocation_context(&self)->cuda_sys::CUcontext{self.allocation_context}
 
     pub fn len(&self) -> usize {
         self.len
@@ -6271,7 +6315,7 @@ fn native_mla_kernel_for_format(
     }
 }
 
-fn native_mla_block_bytes(kv_format: u32) -> Result<usize, String> {
+pub(crate) fn native_mla_block_bytes(kv_format: u32) -> Result<usize, String> {
     match kv_format {
         9 => Ok(10),
         7 => Ok(14),
@@ -6720,6 +6764,57 @@ struct MoeW2LaneDiagEntry {
 type MoeW2LaneDiagConfigFn = unsafe extern "C" fn(i32, i32, *const i32, i32) -> i32;
 type MoeW2LaneDiagFetchFn = unsafe extern "C" fn(*mut MoeW2LaneDiagEntry, i32, *mut i32) -> i32;
 
+// BEGIN bounded routed W1 lane guard
+struct MatchedW1LaneGuard {
+    selection: crate::matched_prefill_row::LaneSelection,
+    config: MoeW2LaneDiagConfigFn,
+    fetch: MoeW2LaneDiagFetchFn,
+    active: bool,
+}
+impl MatchedW1LaneGuard {
+    fn begin(selection:crate::matched_prefill_row::LaneSelection)->Result<Self,String>{
+        let (config,fetch)=load_moe_w2_lane_diag().ok_or("existing MoE lane diagnostic symbols unavailable")?;
+        let guard=Self{selection,config,fetch,active:true};
+        let rc=unsafe{(guard.config)(1,guard.selection.sorted_row,guard.selection.coordinates.as_ptr(),i32::try_from(guard.selection.coordinates.len()).map_err(|_|"lane coordinate count exceeds ABI")?)};
+        if rc!=0{return Err(format!("selected W1 lane enable failed: cuda_error={rc}"))}
+        Ok(guard)
+    }
+    fn finish(mut self,stream:cuda_sys::CUstream,output:u64,width:usize)->Result<(),String>{
+        let rc=unsafe{cuda_sys::lib().cuStreamSynchronize(stream)};
+        if rc!=cuda_sys::CUresult::CUDA_SUCCESS{return Err(format!("selected W1 lane stream sync failed: {rc:?}"))}
+        let mut entries=[MoeW2LaneDiagEntry::default();128]; // Exact capacity of the existing exported CUDA diagnostic ABI.
+        let mut count=0i32;
+        let fetch_rc=unsafe{(self.fetch)(entries.as_mut_ptr(),entries.len() as i32,&mut count)};
+        let disable_rc=unsafe{(self.config)(0,0,std::ptr::null(),0)};
+        if disable_rc!=0{return Err(format!("selected W1 lane disable failed: cuda_error={disable_rc}"))}
+        self.active=false;
+        if fetch_rc!=0{return Err(format!("selected W1 lane fetch failed: cuda_error={fetch_rc}"))}
+        let count=usize::try_from(count).map_err(|_|"negative selected W1 lane entry count")?;
+        if count==0||count>=entries.len(){return Err("missing or possibly truncated selected W1 lane evidence".into())}
+        let entries=&entries[..count];
+        for e in entries {
+            if e.expert_id!=self.selection.expert||e.sorted_row!=self.selection.sorted_row||!self.selection.coordinates.contains(&e.target_dim)||![1,2].contains(&e.stage)||[e.acc0,e.acc1,e.scale0,e.scale1].iter().any(|x|!x.is_finite()){return Err("invalid/nonfinite selected W1 lane entry; attribution refused".into())}
+        }
+        for &coordinate in &self.selection.coordinates {
+            if ![1,2].iter().all(|stage|entries.iter().any(|e|e.target_dim==coordinate&&e.stage==*stage)){return Err("selected W1 lane missing pre-round or final-store stage".into())}
+            let element=usize::try_from(self.selection.sorted_row).map_err(|_|"negative sorted lane row")?.checked_mul(width).and_then(|x|x.checked_add(coordinate as usize)).ok_or("selected W1 output offset overflow")?;
+            let ptr=element.checked_mul(2).and_then(|x|output.checked_add(x as u64)).ok_or("selected W1 output pointer overflow")?;
+            let name=format!("coordinate-{coordinate}.bf16");self.selection.target.device(&name,ptr,2,stream)?;
+            let raw=std::fs::read(self.selection.target.directory.join(&name)).map_err(|e|e.to_string())?;
+            let bits=u16::from_le_bytes(raw.try_into().map_err(|_|"invalid selected W1 output bytes")?) as u32;
+            if entries.iter().filter(|e|e.target_dim==coordinate&&e.stage==2).any(|e|e.final_bits!=bits){return Err("selected W1 final-store capture disagrees with actual output".into())}
+        }
+        let binary=unsafe{std::slice::from_raw_parts(entries.as_ptr().cast::<u8>(),std::mem::size_of_val(entries))};
+        self.selection.target.write("entries.native.bin",binary)?;
+        let rows=entries.iter().map(|e|serde_json::json!({"stage":e.stage,"block_idx":e.block_idx,"thread_idx":e.thread_idx,"slice_col":e.slice_col,"slice_idx":e.slice_idx,"slice_count":e.slice_count,"moe_block_id":e.moe_block_id,"expert_id":e.expert_id,"sorted_row":e.sorted_row,"slot_in_block":e.slot_in_block,"target_dim":e.target_dim,"target_lane":e.target_lane,"c_pack":e.c_pack,"c_lane":e.c_lane,"sh_half2_idx":e.sh_half2_idx,"sh_int4_idx":e.sh_int4_idx,"true_idx":e.true_idx,"flags":e.flags,"acc0":e.acc0,"acc1":e.acc1,"scale0":e.scale0,"scale1":e.scale1,"scale0_bits":e.scale0_bits,"scale1_bits":e.scale1_bits,"bf16_0_bits":e.bf16_0_bits,"bf16_1_bits":e.bf16_1_bits,"final_bits":e.final_bits})).collect::<Vec<_>>();
+        self.selection.target.write("entries.json",serde_json::to_vec_pretty(&serde_json::json!({"operation":"actual production W1; existing CUDA lane diagnostic","entry_bytes":std::mem::size_of::<MoeW2LaneDiagEntry>(),"native_little_endian":cfg!(target_endian="little"),"device_diagnostic_allocation_bytes":0,"disabled_after_capture":true,"entries":rows})).map_err(|e|e.to_string())?.as_slice())
+    }
+}
+impl Drop for MatchedW1LaneGuard {
+    fn drop(&mut self){if self.active{let rc=unsafe{(self.config)(0,0,std::ptr::null(),0)};if rc!=0{eprintln!("ERROR: selected W1 lane cleanup failed: cuda_error={rc}; evidence is invalid");}}}
+}
+// END bounded routed W1 lane guard
+
 type FusedMoeScatterFn = unsafe extern "C" fn(
     /*accum*/ *mut std::ffi::c_void,
     /*src*/ *const std::ffi::c_void,
@@ -7054,6 +7149,9 @@ pub struct PrefillModelConfig {
     pub head_dim: usize,
     pub max_gqa_q_dim: usize,
     pub max_gqa_kv_dim: usize,
+    /// Full-history K/V staging width from actual GQA execution descriptors.
+    /// Projection widths for compressed MLA or recurrent layers are chunk-local.
+    pub full_history_gqa_kv_dim: usize,
     pub vocab_size: usize,
     pub rms_norm_eps: f32,
     pub max_seq_len: usize,
@@ -7352,10 +7450,173 @@ struct DsaPrefillWorkspaceGeometry {
     index_head_dim: usize,
     mla_num_heads: usize,
     mla_ckv_cache_dim: usize,
+    mla_qk_rope_dim: usize,
+    mla_v_head_dim: usize,
 }
 
 fn dsa_score_context_rows(logical_context_rows: usize, context_divisor: usize) -> usize {
     logical_context_rows / context_divisor.max(1)
+}
+
+fn dsa_prefill_workspace_deficit_bytes(
+    free_bytes: usize,
+    required_free_floor_bytes: usize,
+    fixed_workspace_bytes: usize,
+    observed_allocation_overhead_bytes: usize,
+    minimum_score_workspace_bytes: usize,
+) -> Result<usize, String> {
+    let required_bytes = required_free_floor_bytes
+        .checked_add(fixed_workspace_bytes)
+        .and_then(|value| value.checked_add(observed_allocation_overhead_bytes))
+        .and_then(|value| value.checked_add(minimum_score_workspace_bytes))
+        .ok_or_else(|| "DSA prefill minimum live-VRAM requirement overflow".to_string())?;
+    Ok(required_bytes.saturating_sub(free_bytes))
+}
+
+const DSA_MLA_WORKSPACE_ALIGNMENT_BYTES: usize = 256;
+
+fn dsa_mla_grouped_exact_workspace_row_layout(
+    num_heads: usize,
+    selected_per_row: usize,
+) -> Result<(usize, usize), String> {
+    let score_bytes_per_row = num_heads
+        .checked_mul(selected_per_row)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "DSA MLA grouped-exact workspace row overflow".to_string())?;
+    let inv_bytes_per_row = num_heads
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "DSA MLA grouped-exact inverse-sum row overflow".to_string())?;
+    let bytes_per_row = score_bytes_per_row
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(inv_bytes_per_row))
+        .ok_or_else(|| "DSA MLA grouped-exact workspace byte size overflow".to_string())?;
+    Ok((bytes_per_row, 2 * (DSA_MLA_WORKSPACE_ALIGNMENT_BYTES - 1)))
+}
+
+fn dsa_mla_gathered_gemm_workspace_row_layout(
+    num_heads: usize,
+    selected_per_row: usize,
+    ckv_cache_dim: usize,
+    qk_rope_dim: usize,
+) -> Result<(usize, usize), String> {
+    let combined_dim = ckv_cache_dim
+        .checked_add(qk_rope_dim)
+        .ok_or_else(|| "DSA MLA gathered-GEMM combined width overflow".to_string())?;
+    let gathered_elements = selected_per_row
+        .checked_mul(combined_dim)
+        .ok_or_else(|| "DSA MLA gathered-GEMM gathered row overflow".to_string())?;
+    let query_elements = num_heads
+        .checked_mul(combined_dim)
+        .ok_or_else(|| "DSA MLA gathered-GEMM query row overflow".to_string())?;
+    let score_elements = num_heads
+        .checked_mul(selected_per_row)
+        .ok_or_else(|| "DSA MLA gathered-GEMM score row overflow".to_string())?;
+    let elements_per_row = gathered_elements
+        .checked_add(query_elements)
+        .and_then(|value| value.checked_add(score_elements))
+        .and_then(|value| value.checked_add(score_elements))
+        .ok_or_else(|| "DSA MLA gathered-GEMM workspace row overflow".to_string())?;
+    let bytes_per_row = elements_per_row
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "DSA MLA gathered-GEMM workspace byte size overflow".to_string())?;
+    Ok((bytes_per_row, 3 * (DSA_MLA_WORKSPACE_ALIGNMENT_BYTES - 1)))
+}
+
+fn dsa_mla_wvc_workspace_row_layout(
+    num_heads: usize,
+    ckv_cache_dim: usize,
+    value_head_dim: usize,
+) -> Result<(usize, usize), String> {
+    let input_elements = num_heads
+        .checked_mul(ckv_cache_dim)
+        .ok_or_else(|| "DSA MLA WVC input row overflow".to_string())?;
+    let output_elements = num_heads
+        .checked_mul(value_head_dim)
+        .ok_or_else(|| "DSA MLA WVC output row overflow".to_string())?;
+    let bytes_per_row = input_elements
+        .checked_add(output_elements)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+        .ok_or_else(|| "DSA MLA WVC workspace byte size overflow".to_string())?;
+    Ok((bytes_per_row, DSA_MLA_WORKSPACE_ALIGNMENT_BYTES - 1))
+}
+
+fn dsa_mla_minimum_transient_workspace_bytes(
+    geometry: DsaPrefillWorkspaceGeometry,
+) -> Result<usize, String> {
+    if geometry.mla_num_heads == 0 {
+        return Ok(0);
+    }
+    let score_reuse = dsa_mla_score_reuse_enabled()?;
+    let grouped_exact = dsa_mla_grouped_exact_enabled()?;
+    let gathered_gemm = dsa_mla_gathered_gemm_enabled(dsa_mla_gathered_default_enabled(
+        true,
+        score_reuse,
+        grouped_exact,
+    ))?;
+    if usize::from(gathered_gemm) + usize::from(score_reuse) + usize::from(grouped_exact) > 1 {
+        return Err(
+            "KRASIS_DSA_MLA_GATHERED_GEMM, KRASIS_DSA_MLA_SCORE_REUSE, and KRASIS_DSA_MLA_GROUPED_EXACT are mutually exclusive"
+                .to_string(),
+        );
+    }
+    let mut minimum = 0usize;
+    if grouped_exact {
+        let (row_bytes, alignment_reserve) = dsa_mla_grouped_exact_workspace_row_layout(
+            geometry.mla_num_heads,
+            geometry.output_topk,
+        )?;
+        minimum = minimum.max(row_bytes.checked_add(alignment_reserve).ok_or_else(|| {
+            "DSA MLA grouped-exact minimum workspace overflow".to_string()
+        })?);
+    } else if gathered_gemm {
+        let (row_bytes, alignment_reserve) = dsa_mla_gathered_gemm_workspace_row_layout(
+            geometry.mla_num_heads,
+            geometry.output_topk,
+            geometry.mla_ckv_cache_dim,
+            geometry.mla_qk_rope_dim,
+        )?;
+        minimum = minimum.max(row_bytes.checked_add(alignment_reserve).ok_or_else(|| {
+            "DSA MLA gathered-GEMM minimum workspace overflow".to_string()
+        })?);
+    }
+    if dsa_mla_gathered_wvc_enabled(gathered_gemm)? {
+        let (row_bytes, alignment_reserve) = dsa_mla_wvc_workspace_row_layout(
+            geometry.mla_num_heads,
+            geometry.mla_ckv_cache_dim,
+            geometry.mla_v_head_dim,
+        )?;
+        minimum = minimum.max(
+            row_bytes
+                .checked_add(alignment_reserve)
+                .ok_or_else(|| "DSA MLA WVC minimum workspace overflow".to_string())?,
+        );
+    }
+    Ok(minimum)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DsaPrefillWorkspaceConfigureError {
+    InsufficientLiveVram {
+        deficit_bytes: usize,
+        detail: String,
+    },
+    Fatal(String),
+}
+
+impl From<String> for DsaPrefillWorkspaceConfigureError {
+    fn from(error: String) -> Self {
+        Self::Fatal(error)
+    }
+}
+
+impl std::fmt::Display for DsaPrefillWorkspaceConfigureError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InsufficientLiveVram { detail, .. } | Self::Fatal(detail) => {
+                formatter.write_str(detail)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7503,6 +7764,7 @@ struct DsaPrefillSelectionBuffers {
 
 #[derive(Clone, Copy)]
 struct DsaPrefillSelectionKernels {
+    score_tensorcomp: Option<crate::dsa_score::Kernel>,
     rope_query_bf16: RawCuFunc,
     fused_scores: RawCuFunc,
     accumulate_gemm_scores: RawCuFunc,
@@ -7623,6 +7885,7 @@ pub(crate) struct DsaPrefillRequestWorkspace {
     mla_ckv_cache_dim: usize,
     d_mla_q_absorbed: GpuBuf<f32>,
     d_mla_attention: GpuBuf<f32>,
+    d_mla_packed_rope: Option<GpuBuf<f32>>,
     active_owner_layer_idx: Cell<Option<usize>>,
     active_chunk_start: Cell<usize>,
     active_chunk_rows: Cell<usize>,
@@ -7652,6 +7915,7 @@ impl DsaPrefillRequestWorkspace {
         mla_num_heads: usize,
         mla_ckv_cache_dim: usize,
         workspace_capacity_bytes: usize,
+        mla_scratch_row_elements: (usize,usize,usize),
     ) -> Result<Self, String> {
         if index_n_heads == 0 || index_head_dim == 0 {
             return Err(format!(
@@ -7683,10 +7947,10 @@ impl DsaPrefillRequestWorkspace {
             .checked_mul(index_n_heads)
             .and_then(|value| value.checked_mul(index_head_dim))
             .ok_or_else(|| "DSA prefill query workspace size overflow".to_string())?;
-        let mla_elements = chunk_rows
-            .checked_mul(mla_num_heads)
-            .and_then(|value| value.checked_mul(mla_ckv_cache_dim))
-            .ok_or_else(|| "DSA prefill MLA workspace size overflow".to_string())?;
+        let canonical_mla = mla_num_heads.checked_mul(mla_ckv_cache_dim).ok_or("MLA workspace geometry overflow")?;
+        if mla_scratch_row_elements.0<canonical_mla || mla_scratch_row_elements.1<canonical_mla{return Err("MLA scratch extent below canonical attention requirement".into());}
+        let mla_latent_elements=chunk_rows.checked_mul(mla_scratch_row_elements.0).ok_or("MLA latent workspace extent overflow")?;
+        let mla_query_elements=chunk_rows.checked_mul(mla_scratch_row_elements.1).ok_or("MLA query workspace extent overflow")?;
         Ok(Self {
             max_chunk_rows: chunk_rows,
             max_context_end: context_end,
@@ -7719,10 +7983,11 @@ impl DsaPrefillRequestWorkspace {
             },
             mla_num_heads,
             mla_ckv_cache_dim,
-            d_mla_q_absorbed: GpuBuf::alloc_zeroed(mla_elements)
+            d_mla_q_absorbed: GpuBuf::alloc_zeroed(mla_latent_elements)
                 .map_err(|error| format!("alloc DSA prefill absorbed queries: {error}"))?,
-            d_mla_attention: GpuBuf::alloc_zeroed(mla_elements)
+            d_mla_attention: GpuBuf::alloc_zeroed(mla_query_elements)
                 .map_err(|error| format!("alloc DSA prefill MLA attention: {error}"))?,
+            d_mla_packed_rope: if mla_scratch_row_elements.2==0 {None}else{Some(GpuBuf::alloc_zeroed(chunk_rows.checked_mul(mla_scratch_row_elements.2).ok_or("MLA packed rotary extent overflow")?).map_err(|e|format!("alloc actual MLA packed F32 rotary queries: {e}"))?)},
             active_owner_layer_idx: Cell::new(None),
             active_chunk_start: Cell::new(0),
             active_chunk_rows: Cell::new(0),
@@ -8188,6 +8453,9 @@ fn launch_dsa_prefill_gemm_scores(
                     .ok_or_else(|| "DSA prefill GEMM query-head pointer overflow".to_string())?;
                 let head_count_i32 = i32::try_from(head_count)
                     .map_err(|_| format!("DSA prefill GEMM head batch {head_count} exceeds i32"))?;
+                if let (Some(score), false)=(kernels.score_tensorcomp,temporary_is_bf16) {
+                    unsafe{score.enqueue(key_cache_ptr,query_band_ptr,buffers.score_temp_ptr,band_rows,score_context_end,index_n_heads,index_head_dim,head_start,head_count,score_scale,stream)?;}
+                } else {
                 unsafe {
                     cublas_result::gemm_strided_batched_ex(
                         cublas_handle,
@@ -8232,6 +8500,7 @@ fn launch_dsa_prefill_gemm_scores(
                             error
                         )
                     })?;
+                }
                 }
                 let mut e0 = output_band_ptr;
                 let mut e1 = buffers.score_temp_ptr;
@@ -8328,6 +8597,7 @@ fn launch_dsa_prefill_selection_rows(
     buffers: DsaPrefillSelectionBuffers,
     timing_events: Option<DsaPrefillSelectionTimingEvents>,
     timing: &mut DsaPrefillSelectionTiming,
+    observed_row: Option<(&crate::matched_probe::Target,usize)>,
 ) -> Result<crate::gpu_decode::DsaTopkPlan, String> {
     if rows == 0 || context_end == 0 {
         return Err(format!(
@@ -8582,6 +8852,18 @@ fn launch_dsa_prefill_selection_rows(
         timing,
     )?;
 
+    if let Some((target,row))=observed_row {
+        if row>=rows {return Err("indexer observation requires actual score tile row".into());}
+        let absolute_row=causal_position_start.checked_add(row).ok_or("index score observed position overflow")?;
+        let raw_prefix=absolute_row.checked_add(1).ok_or("index score observed prefix overflow")?;
+        let prefix=crate::mla_probe::causal_score_count(raw_prefix,causal_position_divisor)?;
+        if prefix>context_end{return Err("index observed score prefix exceeds actual context".into());}
+        crate::mla_probe::row(target,"indexer-rope-query.bf16",rope_queries_ptr,row,index_n_heads.checked_mul(index_head_dim).ok_or("index observed query extent overflow")?,2,stream)?;
+        let score_at=buffers.scores_ptr.checked_add(row.checked_mul(context_end).and_then(|v|v.checked_mul(4)).ok_or("index observed score offset overflow")? as u64).ok_or("index observed score pointer overflow")?;
+        crate::mla_probe::logical_block(target,"indexer-scores.f32",score_at,prefix,4,stream)?;
+        target.write("indexer-score-layout.json",serde_json::to_vec_pretty(&serde_json::json!({"absolute_row":absolute_row,"tile_local_row":row,"tile_rows":rows,"score_row_stride":context_end,"copied_causal_scores":prefix,"raw_prefix":raw_prefix,"causal_position_divisor":causal_position_divisor,"causal_context_row_span":causal_context_row_span,"index_heads":index_n_heads,"index_head_dim":index_head_dim,"score_scale":score_scale,"score_mode":format!("{:?}",index_score_mode),"topk_mode":format!("{:?}",topk_mode),"scope":"actual current score tile before top-k; excludes future masked positions; no last-tile scratch substitution"})).map_err(|e|e.to_string())?.as_slice())?;
+    }
+
     let selected_i32 = i32::try_from(plan.selected)
         .map_err(|_| format!("DSA selected count {} exceeds i32", plan.selected))?;
     let candidate_stride_i32 = i32::try_from(plan.candidate_capacity).map_err(|_| {
@@ -8783,6 +9065,7 @@ fn launch_dsa_prefill_selection_chunk(
     cublas_workspace_bytes: usize,
     workspace: &DsaPrefillRequestWorkspace,
     timing_events: Option<DsaPrefillSelectionTimingEvents>,
+    observed: Option<&crate::matched_probe::Target>,
 ) -> Result<DsaPrefillSelectionTiming, String> {
     if chunk_rows > workspace.max_chunk_rows || context_end > workspace.max_context_end {
         return Err(format!(
@@ -9007,7 +9290,8 @@ fn launch_dsa_prefill_selection_chunk(
             },
             timing_events,
             &mut timing,
-        )?;
+        observed.and_then(|target|target.row.checked_sub(row_start).filter(|&row|row<rows).map(|row|(target,row))),
+)?;
     }
     workspace.mark_owner_result(
         owner_layer_idx,
@@ -9348,7 +9632,7 @@ pub struct PrefillScratch {
     pub d_hidden: GpuBuf<u16>,
     pub d_residual: GpuBuf<u16>,
     pub d_scratch1: GpuBuf<u16>,
-    pub d_scratch2: GpuBuf<u16>,
+    pub d_scratch2: Arc<GpuBuf<u16>>,
     pub d_hqq_bf16_weight: Option<GpuBuf<u16>>,
     pub d_fp32_scratch: GpuBuf<f32>,
     pub d_workspace: GpuBuf<i32>,
@@ -9378,9 +9662,9 @@ pub struct PrefillScratch {
     /// persistent per-layer BF16 mirror.
     pub d_deepseek_v4_native_history: Option<GpuBuf<u16>>,
     pub d_attn_out: GpuBuf<u16>,
-    pub d_q: GpuBuf<u16>,
-    pub d_k: GpuBuf<u16>,
-    pub d_v: GpuBuf<u16>,
+    pub d_q: Arc<GpuBuf<u16>>,
+    pub d_k: Arc<GpuBuf<u16>>,
+    pub d_v: Arc<GpuBuf<u16>>,
     pub d_logits: GpuBuf<f32>,
     pub d_mamba2_conv_state: Option<GpuBuf<f32>>,
     pub d_mamba2_ssm_state: Option<GpuBuf<f32>>,
@@ -9427,7 +9711,7 @@ pub struct PrefillScratch {
     pub d_la_k: Option<GpuBuf<f32>>,    // [max_tokens, nv, dk] FP32
     pub d_la_v: Option<GpuBuf<f32>>,    // [max_tokens, nv, dv] FP32
     pub d_la_z: Option<GpuBuf<u16>>,    // [max_tokens, nv, dv] BF16 (gate)
-    pub d_la_b: Option<GpuBuf<u16>>,    // [max_tokens, nv] BF16
+    pub d_la_b: Option<Arc<GpuBuf<u16>>>,    // [max_tokens, nv] BF16
     pub d_la_a: Option<GpuBuf<u16>>,    // [max_tokens, nv] BF16
     pub d_la_beta: Option<GpuBuf<f32>>, // [max_tokens, nv] FP32
     pub d_la_gate: Option<GpuBuf<f32>>, // [max_tokens, nv] FP32
@@ -9476,24 +9760,87 @@ pub struct PrefillLogitPosition {
 
 const TILEQ_CAPTURE_MAGIC: &[u8; 4] = b"KTC1";
 const TILEQ_CAPTURE_VERSION: u32 = 2;
+const TILEQ_REQUEST_MANIFEST_VERSION: u32 = 1;
+
+#[derive(Clone)]
+struct TileQCaptureLayerSpec {
+    model_layer: usize,
+    expert_input_size: usize,
+    intermediate_size: usize,
+    topk: usize,
+    expert_count: usize,
+}
+
+struct TileQCaptureRequest {
+    temp_dir: PathBuf,
+    request_sha256: String,
+    sequence_start: usize,
+    prompt_tokens: usize,
+    target_rows: usize,
+    rows_per_layer: Vec<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TileQRequestLayerManifest {
+    model_layer: usize,
+    file: String,
+    bytes: u64,
+    sha256: String,
+    rows: usize,
+    expert_input_size: usize,
+    intermediate_size: usize,
+    topk: usize,
+    expert_count: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TileQRequestManifest {
+    schema_version: u32,
+    format: String,
+    calibration_sha256: String,
+    request_sha256: String,
+    sequence_start: usize,
+    prompt_tokens: usize,
+    rows_per_layer: usize,
+    layers: Vec<TileQRequestLayerManifest>,
+}
 
 /// Calibration-only capture of real routed expert inputs. This object is
 /// absent during ordinary inference. It performs no work unless an explicit
 /// `KRASIS_TILEQ_CAPTURE_DIR` is supplied by the built TileQ workflow.
 pub struct TileQCalibrationCapture {
+    phase: Option<crate::capture_phase::CapturePhase>,
+    window: Option<crate::capture_window::CaptureWindow>,
+    persist_windows: bool,
     dir: PathBuf,
     arm_file: PathBuf,
+    calibration_sha256: String,
     max_tokens_per_layer: usize,
     max_tokens_per_request: usize,
     tokens_per_layer: Vec<usize>,
+    layer_specs: Vec<Option<TileQCaptureLayerSpec>>,
+    accepted_request_hashes: HashSet<String>,
+    accepted_requests: usize,
+    active_request: Option<TileQCaptureRequest>,
 }
 
 impl TileQCalibrationCapture {
+    fn phase(&mut self, name: &str, layer: Option<usize>, rows: usize) -> Result<(), String> {
+        if let Some(sink) = self.phase.as_mut() {
+            sink.mark(name, layer, rows)?;
+        }
+        Ok(())
+    }
     fn from_env(
         config: &PrefillModelConfig,
         layers: &[PrefillLayerWeights],
     ) -> Result<Option<Self>, String> {
         let Some(raw_dir) = std::env::var_os("KRASIS_TILEQ_CAPTURE_DIR") else {
+            if std::env::var_os("KRASIS_TILEQ_CAPTURE_WINDOW_BYTES").is_some() {
+                return Err("KRASIS_TILEQ_CAPTURE_WINDOW_BYTES requires KRASIS_TILEQ_CAPTURE_DIR".into());
+            }
             return Ok(None);
         };
         if !cfg!(target_endian = "little") {
@@ -9501,6 +9848,8 @@ impl TileQCalibrationCapture {
                 "TileQ calibration capture currently requires a little-endian host".to_string(),
             );
         }
+        let mut phase = crate::capture_phase::CapturePhase::from_env()?;
+        if let Some(sink) = phase.as_mut() { sink.mark("capture_init_begin", None, 0)?; }
         let dir = PathBuf::from(raw_dir);
         if dir.as_os_str().is_empty() {
             return Err("KRASIS_TILEQ_CAPTURE_DIR must not be empty".to_string());
@@ -9559,22 +9908,42 @@ impl TileQCalibrationCapture {
                 dir.display()
             )
         })?;
-        if std::fs::read_dir(&dir)
-            .map_err(|e| {
-                format!(
-                    "failed to inspect TileQ capture directory {}: {e}",
-                    dir.display()
-                )
-            })?
-            .next()
-            .is_some()
-        {
-            return Err(format!(
-                "TileQ capture directory {} is not empty; use a new directory so calibration data cannot be mixed",
-                dir.display()
-            ));
-        }
-
+        let layer_specs = layers
+            .iter()
+            .enumerate()
+            .map(|(model_layer, layer)| {
+                (layer.moe_gate_ptr != 0).then(|| TileQCaptureLayerSpec {
+                    model_layer,
+                    expert_input_size: if layer.moe_input_size > 0 {
+                        layer.moe_input_size
+                    } else {
+                        config.hidden_size
+                    },
+                    intermediate_size: config.moe_intermediate_size,
+                    topk: layer.moe_topk,
+                    expert_count: layer.moe_num_experts,
+                })
+            })
+            .collect::<Vec<_>>();
+        let window = match std::env::var_os("KRASIS_TILEQ_CAPTURE_WINDOW_BYTES") {
+            None => None,
+            Some(raw) => {
+                use crate::session_cache::MemoryAvailabilityProbe;
+                let bytes = raw.to_str().ok_or("capture window size must be UTF-8")?
+                    .parse::<usize>().map_err(|_| "KRASIS_TILEQ_CAPTURE_WINDOW_BYTES must be a positive byte count")?;
+                let available = crate::session_cache::SystemMemoryAvailabilityProbe.availability()?.effective_available_bytes;
+                let window = crate::capture_window::CaptureWindow::new(bytes, available)?;
+                for spec in layer_specs.iter().flatten() {
+                    let geometry = crate::capture_window::Geometry {
+                        input: spec.expert_input_size, intermediate: spec.intermediate_size, topk: spec.topk,
+                    };
+                    let rows = window.rows(geometry, max_tokens_per_request)?;
+                    eprintln!("[TILEQ-CAPTURE] bounded layer={} staging_bytes={} rows_per_window={} persist_each_window=true",
+                        spec.model_layer, window.bytes(), rows);
+                }
+                Some(window)
+            }
+        };
         let routed_layers = layers
             .iter()
             .enumerate()
@@ -9595,6 +9964,8 @@ impl TileQCalibrationCapture {
         let metadata = serde_json::json!({
             "schema_version": TILEQ_CAPTURE_VERSION,
             "format": "KTC1",
+            "transactional_request_shards": true,
+            "request_manifest_version": TILEQ_REQUEST_MANIFEST_VERSION,
             "includes_router_weights": true,
             "calibration_sha256": calibration_sha256.to_ascii_lowercase(),
             "arm_file": arm_file,
@@ -9607,43 +9978,511 @@ impl TileQCalibrationCapture {
         let metadata_bytes = serde_json::to_vec_pretty(&metadata)
             .map_err(|e| format!("failed to serialize TileQ capture metadata: {e}"))?;
         let metadata_path = dir.join("capture.json");
-        let mut metadata_file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&metadata_path)
-            .map_err(|e| format!("failed to create {}: {e}", metadata_path.display()))?;
-        metadata_file
-            .write_all(&metadata_bytes)
-            .and_then(|_| metadata_file.sync_all())
-            .map_err(|e| format!("failed to publish {}: {e}", metadata_path.display()))?;
+        if metadata_path.exists() {
+            let existing = std::fs::read(&metadata_path)
+                .map_err(|e| format!("failed to read {}: {e}", metadata_path.display()))?;
+            let existing_json: serde_json::Value = serde_json::from_slice(&existing)
+                .map_err(|e| format!("invalid capture metadata {}: {e}", metadata_path.display()))?;
+            if existing_json != metadata {
+                return Err(format!(
+                    "TileQ capture metadata {} does not match the requested runtime/corpus identity",
+                    metadata_path.display()
+                ));
+            }
+        } else if std::fs::read_dir(&dir)
+            .map_err(|e| format!("failed to inspect TileQ capture directory {}: {e}", dir.display()))?
+            .next()
+            .is_some()
+        {
+            return Err(format!(
+                "TileQ capture directory {} has artifacts but no capture.json identity",
+                dir.display()
+            ));
+        } else {
+            let mut metadata_file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&metadata_path)
+                .map_err(|e| format!("failed to create {}: {e}", metadata_path.display()))?;
+            metadata_file
+                .write_all(&metadata_bytes)
+                .and_then(|_| metadata_file.sync_all())
+                .map_err(|e| format!("failed to publish {}: {e}", metadata_path.display()))?;
+        }
+        let requests_dir = dir.join("requests");
+        std::fs::create_dir_all(&requests_dir).map_err(|e| {
+            format!("failed to create TileQ request directory {}: {e}", requests_dir.display())
+        })?;
+        let (tokens_per_layer, accepted_request_hashes, accepted_requests) =
+            Self::load_accepted_requests(
+                &requests_dir,
+                &calibration_sha256.to_ascii_lowercase(),
+                max_tokens_per_layer,
+                &layer_specs,
+            )?;
 
         eprintln!(
-            "[TILEQ-CAPTURE] enabled dir={} tokens_per_layer={} tokens_per_request={} calibration_sha256={}",
+            "[TILEQ-CAPTURE] enabled dir={} tokens_per_layer={} tokens_per_request={} calibration_sha256={} resumed_requests={} resumed_rows={}",
             dir.display(),
             max_tokens_per_layer,
             max_tokens_per_request,
             calibration_sha256.to_ascii_lowercase(),
+            accepted_requests,
+            tokens_per_layer.iter().copied().max().unwrap_or(0),
         );
+        if let Some(sink) = phase.as_mut() { sink.mark("capture_init_done", None, accepted_requests)?; }
         Ok(Some(Self {
+            phase,
+            persist_windows: window.is_some(),
+            window,
             dir,
             arm_file,
+            calibration_sha256: calibration_sha256.to_ascii_lowercase(),
             max_tokens_per_layer,
             max_tokens_per_request,
-            tokens_per_layer: vec![0; layers.len()],
+            tokens_per_layer,
+            layer_specs,
+            accepted_request_hashes,
+            accepted_requests,
+            active_request: None,
         }))
     }
 
-    fn remaining(&self, model_layer: usize, request_chunk_start: usize) -> usize {
+    fn begin_request(&mut self, token_ids: &[u32], sequence_start: usize) -> Result<(), String> {
         if !self.arm_file.is_file() {
-            return 0;
+            return Ok(());
         }
-        let corpus_remaining = self
-            .max_tokens_per_layer
-            .saturating_sub(self.tokens_per_layer.get(model_layer).copied().unwrap_or(0));
-        let request_remaining = self
-            .max_tokens_per_request
-            .saturating_sub(request_chunk_start);
-        corpus_remaining.min(request_remaining)
+        self.phase("armed_request_begin", None, token_ids.len())?;
+        if self.active_request.is_some() {
+            return Err("TileQ capture still has an uncommitted prior request".to_string());
+        }
+        let min_remaining = self
+            .layer_specs
+            .iter()
+            .enumerate()
+            .filter_map(|(layer, spec)| spec.as_ref().map(|_| {
+                self.max_tokens_per_layer.saturating_sub(self.tokens_per_layer[layer])
+            }))
+            .min()
+            .unwrap_or(0);
+        let target_rows = token_ids
+            .len()
+            .min(self.max_tokens_per_request)
+            .min(min_remaining);
+        if target_rows == 0 {
+            return Ok(());
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"Krasis KTC1 transactional request v1\0");
+        hasher.update(self.calibration_sha256.as_bytes());
+        hasher.update((sequence_start as u64).to_le_bytes());
+        hasher.update((token_ids.len() as u64).to_le_bytes());
+        for token in token_ids {
+            hasher.update(token.to_le_bytes());
+        }
+        let request_sha256 = format!("{:x}", hasher.finalize());
+        if self.accepted_request_hashes.contains(&request_sha256) {
+            // A resumed corpus driver deliberately replays the complete corpus.  A
+            // request whose transaction was already published must therefore be a
+            // verified no-op, not an error and never a second contribution to the
+            // statistics.  `load_accepted_requests` has already rehashed every
+            // manifest and shard before placing this identity in the set.
+            eprintln!(
+                "[TILEQ-CAPTURE] request={} already accepted; verified replay is a no-op",
+                request_sha256
+            );
+            return Ok(());
+        }
+        let requests_dir = self.dir.join("requests");
+        let temp_dir = requests_dir.join(format!(
+            ".request-{}-{}.tmp",
+            std::process::id(),
+            &request_sha256[..16]
+        ));
+        if temp_dir.exists() {
+            return Err(format!(
+                "TileQ temporary request directory already exists: {}",
+                temp_dir.display()
+            ));
+        }
+        std::fs::create_dir(&temp_dir).map_err(|e| {
+            format!("failed to create TileQ request transaction {}: {e}", temp_dir.display())
+        })?;
+        self.active_request = Some(TileQCaptureRequest {
+            temp_dir,
+            request_sha256,
+            sequence_start,
+            prompt_tokens: token_ids.len(),
+            target_rows,
+            rows_per_layer: vec![0; self.layer_specs.len()],
+        });
+        self.phase("transaction_created", None, target_rows)?;
+        Ok(())
+    }
+
+    fn remaining(&self, model_layer: usize) -> usize {
+        self.active_request
+            .as_ref()
+            .map(|request| {
+                request
+                    .target_rows
+                    .saturating_sub(request.rows_per_layer.get(model_layer).copied().unwrap_or(0))
+            })
+            .unwrap_or(0)
+    }
+
+    fn sha256_path(path: &std::path::Path) -> Result<String, String> {
+        let mut file = File::open(path)
+            .map_err(|e| format!("failed to open TileQ shard {}: {e}", path.display()))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 8 * 1024 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|e| format!("failed to hash TileQ shard {}: {e}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn validate_layer_shard(
+        path: &std::path::Path,
+        spec: &TileQCaptureLayerSpec,
+        expected_rows: usize,
+        expected_bytes: u64,
+        expected_sha256: &str,
+    ) -> Result<(), String> {
+        let metadata = std::fs::metadata(path)
+            .map_err(|e| format!("failed to stat TileQ shard {}: {e}", path.display()))?;
+        if !metadata.is_file() || metadata.len() != expected_bytes {
+            return Err(format!(
+                "TileQ shard {} size mismatch: expected {} got {}",
+                path.display(), expected_bytes, metadata.len()
+            ));
+        }
+        let actual_sha256 = Self::sha256_path(path)?;
+        if actual_sha256 != expected_sha256 {
+            return Err(format!(
+                "TileQ shard {} SHA-256 mismatch: expected {} got {}",
+                path.display(), expected_sha256, actual_sha256
+            ));
+        }
+        let mut file = File::open(path)
+            .map_err(|e| format!("failed to validate TileQ shard {}: {e}", path.display()))?;
+        let mut header = [0u8; 32];
+        file.read_exact(&mut header)
+            .map_err(|e| format!("truncated TileQ shard header {}: {e}", path.display()))?;
+        let u32_at = |offset: usize| {
+            u32::from_le_bytes(header[offset..offset + 4].try_into().expect("fixed header"))
+        };
+        if &header[..4] != TILEQ_CAPTURE_MAGIC
+            || u32_at(4) != TILEQ_CAPTURE_VERSION
+            || u32_at(8) as usize != spec.model_layer
+            || u32_at(12) as usize != spec.expert_input_size
+            || u32_at(16) as usize != spec.intermediate_size
+            || u32_at(20) as usize != spec.topk
+            || u32_at(24) as usize != spec.expert_count
+            || u32_at(28) != 0
+        {
+            return Err(format!("TileQ shard {} has incompatible geometry", path.display()));
+        }
+        let mut offset = 32u64;
+        let mut rows_total = 0usize;
+        while offset < expected_bytes {
+            let mut row_bytes = [0u8; 4];
+            file.read_exact(&mut row_bytes).map_err(|e| {
+                format!("truncated TileQ shard row count {}: {e}", path.display())
+            })?;
+            offset += 4;
+            let rows = u32::from_le_bytes(row_bytes) as usize;
+            if rows == 0 {
+                return Err(format!("TileQ shard {} contains an empty chunk", path.display()));
+            }
+            let payload = rows
+                .checked_mul(spec.expert_input_size)
+                .and_then(|v| v.checked_mul(2))
+                .and_then(|v| {
+                    rows.checked_mul(spec.topk)
+                        .and_then(|count| count.checked_mul(8))
+                        .and_then(|route_bytes| v.checked_add(route_bytes))
+                })
+                .and_then(|v| {
+                    rows.checked_mul(spec.topk)
+                        .and_then(|count| count.checked_mul(spec.intermediate_size))
+                        .and_then(|count| count.checked_mul(2))
+                        .and_then(|down_bytes| v.checked_add(down_bytes))
+                })
+                .ok_or_else(|| format!("TileQ shard payload overflow: {}", path.display()))?;
+            offset = offset
+                .checked_add(payload as u64)
+                .ok_or_else(|| format!("TileQ shard offset overflow: {}", path.display()))?;
+            if offset > expected_bytes {
+                return Err(format!("TileQ shard {} has a truncated payload", path.display()));
+            }
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|e| format!("failed to seek TileQ shard {}: {e}", path.display()))?;
+            rows_total = rows_total
+                .checked_add(rows)
+                .ok_or_else(|| format!("TileQ shard row overflow: {}", path.display()))?;
+        }
+        if offset != expected_bytes || rows_total != expected_rows {
+            return Err(format!(
+                "TileQ shard {} row/length mismatch: rows {}/{} bytes {}/{}",
+                path.display(), rows_total, expected_rows, offset, expected_bytes
+            ));
+        }
+        Ok(())
+    }
+
+    fn load_accepted_requests(
+        requests_dir: &std::path::Path,
+        calibration_sha256: &str,
+        max_tokens_per_layer: usize,
+        layer_specs: &[Option<TileQCaptureLayerSpec>],
+    ) -> Result<(Vec<usize>, HashSet<String>, usize), String> {
+        let mut entries = std::fs::read_dir(requests_dir)
+            .map_err(|e| format!("failed to scan TileQ requests {}: {e}", requests_dir.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("failed to enumerate TileQ requests {}: {e}", requests_dir.display()))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut totals = vec![0usize; layer_specs.len()];
+        let mut hashes = HashSet::new();
+        let mut accepted = 0usize;
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".request-") && name.ends_with(".tmp") {
+                eprintln!(
+                    "[TILEQ-CAPTURE] rejected incomplete request transaction {}",
+                    entry.path().display()
+                );
+                continue;
+            }
+            if !name.starts_with("request-") || !entry.path().is_dir() {
+                return Err(format!(
+                    "unrecognized TileQ request artifact {}; only published request directories and preserved .tmp transactions are allowed",
+                    entry.path().display()
+                ));
+            }
+            let manifest_path = entry.path().join("request.json");
+            let manifest_bytes = std::fs::read(&manifest_path)
+                .map_err(|e| format!("failed to read {}: {e}", manifest_path.display()))?;
+            let manifest: TileQRequestManifest = serde_json::from_slice(&manifest_bytes)
+                .map_err(|e| format!("invalid TileQ request manifest {}: {e}", manifest_path.display()))?;
+            if manifest.schema_version != TILEQ_REQUEST_MANIFEST_VERSION
+                || manifest.format != "Krasis KTC1 transactional request"
+                || manifest.calibration_sha256 != calibration_sha256
+                || manifest.request_sha256.len() != 64
+                || !manifest.request_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                || manifest.rows_per_layer == 0
+            {
+                return Err(format!("TileQ request manifest {} has an incompatible identity", manifest_path.display()));
+            }
+            if !hashes.insert(manifest.request_sha256.clone()) {
+                return Err(format!("duplicate TileQ request identity {}", manifest.request_sha256));
+            }
+            let routed_count = layer_specs.iter().filter(|spec| spec.is_some()).count();
+            if manifest.layers.len() != routed_count {
+                return Err(format!(
+                    "TileQ request {} layer cardinality mismatch: expected {} got {}",
+                    manifest.request_sha256, routed_count, manifest.layers.len()
+                ));
+            }
+            let mut expected_files = HashSet::from(["request.json".to_string()]);
+            for layer in &manifest.layers {
+                let spec = layer_specs
+                    .get(layer.model_layer)
+                    .and_then(|value| value.as_ref())
+                    .ok_or_else(|| format!("TileQ request references non-routed layer {}", layer.model_layer))?;
+                let expected_name = format!("layer_{:05}.ktc", layer.model_layer);
+                if layer.file != expected_name
+                    || layer.rows != manifest.rows_per_layer
+                    || layer.expert_input_size != spec.expert_input_size
+                    || layer.intermediate_size != spec.intermediate_size
+                    || layer.topk != spec.topk
+                    || layer.expert_count != spec.expert_count
+                    || layer.sha256.len() != 64
+                    || !layer.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    return Err(format!(
+                        "TileQ request {} layer {} manifest mismatch",
+                        manifest.request_sha256, layer.model_layer
+                    ));
+                }
+                expected_files.insert(layer.file.clone());
+                let shard_path = entry.path().join(&layer.file);
+                Self::validate_layer_shard(
+                    &shard_path,
+                    spec,
+                    layer.rows,
+                    layer.bytes,
+                    &layer.sha256,
+                )?;
+                totals[layer.model_layer] = totals[layer.model_layer]
+                    .checked_add(layer.rows)
+                    .ok_or_else(|| "TileQ resumed row count overflow".to_string())?;
+                if totals[layer.model_layer] > max_tokens_per_layer {
+                    return Err(format!(
+                        "TileQ resumed layer {} exceeds row target: {} > {}",
+                        layer.model_layer, totals[layer.model_layer], max_tokens_per_layer
+                    ));
+                }
+            }
+            let actual_files = std::fs::read_dir(entry.path())
+                .map_err(|e| format!("failed to inspect {}: {e}", entry.path().display()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("failed to enumerate {}: {e}", entry.path().display()))?;
+            if actual_files.len() != expected_files.len()
+                || actual_files.iter().any(|file| {
+                    !expected_files.contains(&file.file_name().to_string_lossy().into_owned())
+                })
+            {
+                return Err(format!(
+                    "TileQ request {} contains unrecognized artifacts",
+                    manifest.request_sha256
+                ));
+            }
+            accepted += 1;
+        }
+        let routed_totals = layer_specs
+            .iter()
+            .enumerate()
+            .filter_map(|(layer, spec)| spec.as_ref().map(|_| totals[layer]))
+            .collect::<Vec<_>>();
+        if routed_totals.windows(2).any(|pair| pair[0] != pair[1]) {
+            return Err(format!(
+                "TileQ accepted request shards have nonuniform routed-layer totals: {:?}",
+                routed_totals
+            ));
+        }
+        Ok((totals, hashes, accepted))
+    }
+
+    fn sync_directory(path: &std::path::Path) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            let directory = File::open(path)
+                .map_err(|e| format!("failed to open directory {} for sync: {e}", path.display()))?;
+            directory
+                .sync_all()
+                .map_err(|e| format!("failed to sync directory {}: {e}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    fn commit_request(&mut self) -> Result<(), String> {
+        let Some(request) = self.active_request.take() else {
+            return Ok(());
+        };
+        for (layer, spec) in self.layer_specs.iter().enumerate() {
+            if spec.is_some() && request.rows_per_layer[layer] != request.target_rows {
+                return Err(format!(
+                    "TileQ request {} is incomplete at layer {}: rows {}/{}; transaction retained at {}",
+                    request.request_sha256,
+                    layer,
+                    request.rows_per_layer[layer],
+                    request.target_rows,
+                    request.temp_dir.display()
+                ));
+            }
+            if spec.is_none() && request.rows_per_layer[layer] != 0 {
+                return Err(format!("TileQ request recorded rows for non-routed layer {layer}"));
+            }
+        }
+        let mut layers = Vec::new();
+        for spec in self.layer_specs.iter().flatten() {
+            let file_name = format!("layer_{:05}.ktc", spec.model_layer);
+            let path = request.temp_dir.join(&file_name);
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("failed to open completed TileQ shard {}: {e}", path.display()))?;
+            file.sync_all()
+                .map_err(|e| format!("failed to sync completed TileQ shard {}: {e}", path.display()))?;
+            let bytes = file
+                .metadata()
+                .map_err(|e| format!("failed to stat completed TileQ shard {}: {e}", path.display()))?
+                .len();
+            let sha256 = Self::sha256_path(&path)?;
+            Self::validate_layer_shard(
+                &path,
+                spec,
+                request.target_rows,
+                bytes,
+                &sha256,
+            )?;
+            layers.push(TileQRequestLayerManifest {
+                model_layer: spec.model_layer,
+                file: file_name,
+                bytes,
+                sha256,
+                rows: request.target_rows,
+                expert_input_size: spec.expert_input_size,
+                intermediate_size: spec.intermediate_size,
+                topk: spec.topk,
+                expert_count: spec.expert_count,
+            });
+        }
+        let manifest = TileQRequestManifest {
+            schema_version: TILEQ_REQUEST_MANIFEST_VERSION,
+            format: "Krasis KTC1 transactional request".to_string(),
+            calibration_sha256: self.calibration_sha256.clone(),
+            request_sha256: request.request_sha256.clone(),
+            sequence_start: request.sequence_start,
+            prompt_tokens: request.prompt_tokens,
+            rows_per_layer: request.target_rows,
+            layers,
+        };
+        let manifest_path = request.temp_dir.join("request.json");
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|e| format!("failed to encode TileQ request manifest: {e}"))?;
+        let mut manifest_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&manifest_path)
+            .map_err(|e| format!("failed to create {}: {e}", manifest_path.display()))?;
+        manifest_file
+            .write_all(&manifest_bytes)
+            .and_then(|_| manifest_file.sync_all())
+            .map_err(|e| format!("failed to publish {}: {e}", manifest_path.display()))?;
+        Self::sync_directory(&request.temp_dir)?;
+        let final_dir = self.dir.join("requests").join(format!(
+            "request-{:05}-{}",
+            self.accepted_requests,
+            &request.request_sha256[..16]
+        ));
+        if final_dir.exists() {
+            return Err(format!("TileQ published request already exists: {}", final_dir.display()));
+        }
+        std::fs::rename(&request.temp_dir, &final_dir).map_err(|e| {
+            format!(
+                "failed to atomically publish TileQ request {} -> {}: {e}",
+                request.temp_dir.display(), final_dir.display()
+            )
+        })?;
+        Self::sync_directory(&self.dir.join("requests"))?;
+        for (layer, spec) in self.layer_specs.iter().enumerate() {
+            if spec.is_some() {
+                self.tokens_per_layer[layer] = self.tokens_per_layer[layer]
+                    .checked_add(request.target_rows)
+                    .ok_or_else(|| "TileQ committed row count overflow".to_string())?;
+            }
+        }
+        self.accepted_request_hashes
+            .insert(request.request_sha256.clone());
+        self.accepted_requests += 1;
+        eprintln!(
+            "[TILEQ-CAPTURE] committed request={} rows_per_layer={} accepted_requests={} accepted_rows={} dir={}",
+            request.request_sha256,
+            request.target_rows,
+            self.accepted_requests,
+            self.tokens_per_layer.iter().copied().max().unwrap_or(0),
+            final_dir.display(),
+        );
+        Ok(())
     }
 
     fn append_chunk(
@@ -9684,8 +10523,12 @@ impl TileQCalibrationCapture {
                 ));
             }
         }
-        let existing = self.tokens_per_layer[model_layer];
-        let path = self.dir.join(format!("layer_{model_layer:05}.ktc"));
+        let request = self
+            .active_request
+            .as_mut()
+            .ok_or_else(|| "TileQ capture append has no active request transaction".to_string())?;
+        let existing = request.rows_per_layer[model_layer];
+        let path = request.temp_dir.join(format!("layer_{model_layer:05}.ktc"));
         let mut file = if existing == 0 {
             let mut file = OpenOptions::new()
                 .create_new(true)
@@ -9721,22 +10564,263 @@ impl TileQCalibrationCapture {
         write_native_le_slice(&mut file, down_inputs, &path)?;
         file.flush()
             .map_err(|e| format!("failed to flush TileQ capture {}: {e}", path.display()))?;
-        self.tokens_per_layer[model_layer] = existing.saturating_add(rows);
-        if self.tokens_per_layer[model_layer] == self.max_tokens_per_layer {
-            file.sync_all().map_err(|e| {
-                format!(
-                    "failed to sync completed TileQ capture {}: {e}",
-                    path.display()
-                )
-            })?;
-            eprintln!(
-                "[TILEQ-CAPTURE] layer={} complete tokens={} file={}",
-                model_layer,
-                self.tokens_per_layer[model_layer],
-                path.display(),
-            );
+        if self.persist_windows {
+            file.sync_data()
+                .map_err(|e| format!("failed to persist TileQ capture window {}: {e}", path.display()))?;
         }
+        request.rows_per_layer[model_layer] = existing.saturating_add(rows);
         Ok(())
+    }
+
+    fn capture_bounded_inputs(&mut self, model_layer: usize, rows: usize,
+        geometry: crate::capture_window::Geometry, expert_count: usize,
+        pointers: [u64; 4]) -> Result<(), String> {
+        let mut window = self.window.take().ok_or("bounded capture staging is missing")?;
+        let result = (|| {
+            let step = window.rows(geometry, rows)?;
+            let mut offset = 0;
+            let mut windows = 0;
+            let mut copy_ms = 0.0;
+            let mut persist_ms = 0.0;
+            while offset < rows {
+                let count = step.min(rows - offset);
+                let started = Instant::now();
+                let batch = window.copy_device(geometry, count, offset, pointers)?;
+                copy_ms += started.elapsed().as_secs_f64() * 1000.0;
+                let started = Instant::now();
+                self.append_chunk(model_layer, geometry.input, geometry.intermediate, geometry.topk,
+                    expert_count, batch.inputs, batch.ids, batch.weights, batch.down)?;
+                persist_ms += started.elapsed().as_secs_f64() * 1000.0;
+                offset += count;
+                windows += 1;
+            }
+            eprintln!("[TILEQ-CAPTURE] bounded layer={model_layer} rows={rows} windows={windows} staging_bytes={} copy_ms={copy_ms:.3} persist_ms={persist_ms:.3}", window.bytes());
+            Ok(())
+        })();
+        self.window = Some(window);
+        result
+    }
+}
+
+#[cfg(test)]
+mod tileq_transaction_tests {
+    use super::*;
+
+    fn test_dir(label: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "krasis-tileq-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("requests")).unwrap();
+        dir
+    }
+
+    fn test_specs() -> Vec<Option<TileQCaptureLayerSpec>> {
+        vec![
+            None,
+            Some(TileQCaptureLayerSpec {
+                model_layer: 1,
+                expert_input_size: 2,
+                intermediate_size: 2,
+                topk: 1,
+                expert_count: 2,
+            }),
+            Some(TileQCaptureLayerSpec {
+                model_layer: 2,
+                expert_input_size: 2,
+                intermediate_size: 2,
+                topk: 1,
+                expert_count: 2,
+            }),
+        ]
+    }
+
+    fn capture_for(dir: PathBuf) -> TileQCalibrationCapture {
+        let arm_file = dir.join("armed");
+        std::fs::write(&arm_file, b"armed").unwrap();
+        TileQCalibrationCapture {
+            phase: None,
+            window: None,
+            persist_windows: false,
+            dir,
+            arm_file,
+            calibration_sha256: "11".repeat(32),
+            max_tokens_per_layer: 8,
+            max_tokens_per_request: 4,
+            tokens_per_layer: vec![0; 3],
+            layer_specs: test_specs(),
+            accepted_request_hashes: HashSet::new(),
+            accepted_requests: 0,
+            active_request: None,
+        }
+    }
+
+    fn append_two_rows(capture: &mut TileQCalibrationCapture, layer: usize) {
+        capture
+            .append_chunk(
+                layer,
+                2,
+                2,
+                1,
+                2,
+                &[0x3f80, 0x4000, 0x4040, 0x4080],
+                &[0, 1],
+                &[0.75, 0.25],
+                &[0x3f80, 0x4000, 0x4040, 0x4080],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn tileq_request_commit_resume_and_duplicate_noop() {
+        let dir = test_dir("resume");
+        let mut capture = capture_for(dir.clone());
+        let tokens = [1u32, 2];
+        capture.begin_request(&tokens, 0).unwrap();
+        assert_eq!(
+            capture.active_request.as_ref().unwrap().request_sha256,
+            "b2a0b65212c293b7a88c30764a362de4ac49bf03f57b04e843afad87c2f676b7"
+        );
+        append_two_rows(&mut capture, 1);
+        append_two_rows(&mut capture, 2);
+        capture.commit_request().unwrap();
+        assert_eq!(capture.tokens_per_layer, vec![0, 2, 2]);
+        assert_eq!(capture.accepted_requests, 1);
+        capture.begin_request(&tokens, 0).unwrap();
+        assert!(capture.active_request.is_none());
+        capture.commit_request().unwrap();
+        assert_eq!(capture.tokens_per_layer, vec![0, 2, 2]);
+        assert_eq!(capture.accepted_requests, 1);
+
+        let abandoned = dir.join("requests/.request-abandoned.tmp");
+        std::fs::create_dir(&abandoned).unwrap();
+        std::fs::write(abandoned.join("partial"), b"not accepted").unwrap();
+        let (rows, hashes, requests) = TileQCalibrationCapture::load_accepted_requests(
+            &dir.join("requests"),
+            &"11".repeat(32),
+            8,
+            &test_specs(),
+        )
+        .unwrap();
+        assert_eq!(rows, vec![0, 2, 2]);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(requests, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tileq_incomplete_request_is_not_published() {
+        let dir = test_dir("partial");
+        let mut capture = capture_for(dir.clone());
+        capture.begin_request(&[3u32, 4], 0).unwrap();
+        append_two_rows(&mut capture, 1);
+        let error = capture.commit_request().unwrap_err();
+        assert!(error.contains("incomplete at layer 2"));
+        assert!(std::fs::read_dir(dir.join("requests"))
+            .unwrap()
+            .all(|entry| entry.unwrap().file_name().to_string_lossy().starts_with('.')));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tileq_corrupt_published_shard_fails_resume() {
+        let dir = test_dir("corrupt");
+        let mut capture = capture_for(dir.clone());
+        capture.begin_request(&[5u32, 6], 0).unwrap();
+        append_two_rows(&mut capture, 1);
+        append_two_rows(&mut capture, 2);
+        capture.commit_request().unwrap();
+        let request_dir = std::fs::read_dir(dir.join("requests"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let shard = request_dir.join("layer_00001.ktc");
+        let mut bytes = std::fs::read(&shard).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        std::fs::write(&shard, bytes).unwrap();
+        let error = TileQCalibrationCapture::load_accepted_requests(
+            &dir.join("requests"),
+            &"11".repeat(32),
+            8,
+            &test_specs(),
+        )
+        .unwrap_err();
+        assert!(error.contains("SHA-256 mismatch"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bounded_gpu_capture_matches_legacy_tuples_on_all_devices() {
+        use crate::capture_window::{CaptureWindow, Geometry};
+        fn tuples(path: &std::path::Path, g: Geometry) -> [Vec<u8>; 4] {
+            let bytes = std::fs::read(path).unwrap();
+            let mut offset = 32;
+            let mut result: [Vec<u8>; 4] = Default::default();
+            while offset < bytes.len() {
+                let rows = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+                for (index, stride) in [g.input * 2, g.topk * 4, g.topk * 4, g.topk * g.intermediate * 2].iter().enumerate() {
+                    let end = offset + rows * stride;
+                    result[index].extend_from_slice(&bytes[offset..end]);
+                    offset = end;
+                }
+            }
+            result
+        }
+        let count = CudaDevice::count().unwrap();
+        assert!(count > 0, "bounded capture equality requires a real CUDA device");
+        for device in 0..count as usize {
+            let dev = CudaDevice::new(device).unwrap();
+            let g = Geometry { input: 3, intermediate: 3, topk: 2 };
+            let rows = 7;
+            let inputs = dev.htod_copy((0..rows * g.input).map(|x| 0x3f00 + x as u16).collect::<Vec<_>>()).unwrap();
+            let ids = dev.htod_copy((0..rows * g.topk).map(|x| (x % 2) as i32).collect::<Vec<_>>()).unwrap();
+            let weights = dev.htod_copy((0..rows * g.topk).map(|x| (x + 1) as f32 / 16.0).collect::<Vec<_>>()).unwrap();
+            let down = dev.htod_copy((0..rows * g.topk * g.intermediate).map(|x| 0x4000 + x as u16).collect::<Vec<_>>()).unwrap();
+            dev.synchronize().unwrap();
+            let pointers = [*inputs.device_ptr(), *ids.device_ptr(), *weights.device_ptr(), *down.device_ptr()];
+            let legacy_dir = test_dir("gpu-legacy");
+            let bounded_dir = test_dir("gpu-bounded");
+            let mut legacy = capture_for(legacy_dir.clone());
+            let mut bounded = capture_for(bounded_dir.clone());
+            for capture in [&mut legacy, &mut bounded] {
+                capture.max_tokens_per_request = rows;
+                capture.layer_specs = vec![Some(TileQCaptureLayerSpec {
+                    model_layer: 0, expert_input_size: g.input, intermediate_size: g.intermediate,
+                    topk: g.topk, expert_count: 2,
+                })];
+                capture.tokens_per_layer = vec![0];
+                capture.begin_request(&(0..rows as u32).collect::<Vec<_>>(), 0).unwrap();
+            }
+            bounded.window = Some(CaptureWindow::new(104, 104).unwrap());
+            bounded.persist_windows = true;
+            assert_eq!(bounded.window.as_ref().unwrap().rows(g, rows).unwrap(), 3);
+            legacy.append_chunk(0, g.input, g.intermediate, g.topk, 2,
+                &download_device_u16(pointers[0], rows * g.input).unwrap(),
+                &download_device_i32(pointers[1], rows * g.topk).unwrap(),
+                &download_device_f32(pointers[2], rows * g.topk).unwrap(),
+                &download_device_u16(pointers[3], rows * g.topk * g.intermediate).unwrap()).unwrap();
+            bounded.capture_bounded_inputs(0, rows, g, 2, pointers).unwrap();
+            assert_eq!(tuples(&legacy.active_request.as_ref().unwrap().temp_dir.join("layer_00000.ktc"), g),
+                tuples(&bounded.active_request.as_ref().unwrap().temp_dir.join("layer_00000.ktc"), g));
+            legacy.commit_request().unwrap();
+            bounded.commit_request().unwrap();
+            assert_eq!(legacy.accepted_request_hashes, bounded.accepted_request_hashes);
+            let (accepted_rows, hashes, requests) = TileQCalibrationCapture::load_accepted_requests(
+                &bounded_dir.join("requests"), &"11".repeat(32), 8, &bounded.layer_specs).unwrap();
+            assert_eq!(accepted_rows, vec![rows]);
+            assert_eq!(hashes, legacy.accepted_request_hashes);
+            assert_eq!(requests, 1);
+            eprintln!("BOUNDED_CAPTURE_EXACT_TUPLES_PASS device={device} rows={rows} windows=3");
+            std::fs::remove_dir_all(legacy_dir).unwrap();
+            std::fs::remove_dir_all(bounded_dir).unwrap();
+        }
     }
 }
 
@@ -9904,6 +10988,10 @@ fn select_prefill_pinning_experts(
 }
 
 pub struct PrefillEngine {
+    pub(crate) selected_kda: Option<Arc<crate::kda_prefix_owner::KdaEngineRequestStorage>>,
+    pub(crate) ordered_kda_projection: Option<Arc<crate::ordered_projection::OrderedProjection>>,
+    pub(crate) ordered_mla_f32: Option<Arc<crate::mla_f32::MlaF32Ops>>,
+    pub(crate) common_mla: Option<Arc<std::sync::Mutex<crate::stable_mla_runtime::Bank>>>,
     pub device: Arc<CudaDevice>,
     pub kernels: PrefillKernels,
     pub trace: Option<PrefillTraceConfig>,
@@ -9985,6 +11073,7 @@ pub struct PrefillEngine {
     /// `prepare_for_prefill`. Set only after an exact token-prefix match.
     pub active_stage_prefix_tokens: Option<usize>,
     pub stream: cuda_sys::CUstream,
+    pub(crate) prefill_stream_owner: Arc<PrefillComputeStream>,
     pub copy_stream: cuda_sys::CUstream,
     pub cublas_handle: cudarc::cublas::sys::cublasHandle_t,
     pub shared_cublas_handle: cudarc::cublas::sys::cublasHandle_t,
@@ -10137,8 +11226,14 @@ pub struct PrefillEngine {
     pub last_cold_staging_failure: Option<ColdStagingFailure>,
     pub prefill_runtime_chunk_cap: Option<usize>,
     pub active_prefill_prompt_tokens: usize,
+    pub(crate) matched_prefill_invocation: Option<crate::matched_prefill_capture::Invocation>,
+    pub(crate) matched_prefill_request_label: Option<String>,
     pub active_prefill_chunk_idx: usize,
     pub active_prefill_chunk_start: usize,
+    /// Optional request-scoped peer-disconnect signal. Calibration,
+    /// benchmarks, internal endpoints, and non-streaming requests leave this
+    /// unset; the HTTP server installs it only for an active streaming prefill.
+    pub prefill_cancel_signal: Option<Arc<AtomicBool>>,
     pub(crate) dsa_prefill_workspace: Option<DsaPrefillRequestWorkspace>,
     pub(crate) dsa_mla_gather_autotune:
         RefCell<std::collections::HashMap<DsaMlaGatherAutotuneKey, DsaMlaGatherMode>>,
@@ -10296,6 +11391,9 @@ pub struct PrefillEngine {
     pub t_moe_shared: Cell<f64>,    // shared expert (wait + add)
     // FLA (Flash Linear Attention) vendored kernels — replaces custom LA chunk recurrence
     pub fla: Option<FlaKernels>,
+    // BEGIN bounded model KDA diagnostic ownership
+    pub(crate) matched_kda_intra: Option<crate::matched_kda_model::ModelKdaDiagnostic>,
+    // END bounded model KDA diagnostic ownership
     // FLA intermediate buffers (allocated once at engine init if FLA available)
     pub d_fla_g_cumsum: Option<CudaSlice<f32>>, // [B, T, H] FP32 cumsum of gate
     pub d_fla_a: Option<CudaSlice<f32>>,        // [B, T, H, BT] FP32 attention matrix
@@ -10367,6 +11465,19 @@ unsafe impl Sync for PrefillEngine {}
 
 impl Drop for PrefillEngine {
     fn drop(&mut self) {
+        // Teardown only: every producer must finish while scratch, event and
+        // pointer-table owners are still alive, including an error/unwind exit.
+        if let Err(e) = self.device.bind_to_thread() {
+            crate::vram_monitor::fatal_cuda_context_error("prefill teardown context", &e.to_string());
+        }
+        for stream in [self.stream, self.copy_stream, self.shared_stream] {
+            if !stream.is_null() {
+                let rc = unsafe { cuda_sys::lib().cuStreamSynchronize(stream) };
+                if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                    crate::vram_monitor::fatal_cuda_context_error("prefill teardown completion", &format!("{rc:?}"));
+                }
+            }
+        }
         self.release_reusable_ptr_tables();
         unsafe {
             if !self.shared_event.is_null() {
@@ -10411,9 +11522,7 @@ impl Drop for PrefillEngine {
             if !self.copy_stream.is_null() {
                 let _ = cuda_sys::lib().cuStreamDestroy_v2(self.copy_stream);
             }
-            if !self.stream.is_null() {
-                let _ = cuda_sys::lib().cuStreamDestroy_v2(self.stream);
-            }
+            // The real retained owner destroys the compute stream after all source leases release.
             if !self.shared_cublas_handle.is_null() {
                 let _ = cudarc::cublas::result::destroy_handle(self.shared_cublas_handle);
             }
@@ -10434,6 +11543,23 @@ struct ExpertHqqRuntimePrefillSingleBlockGpuDiagnosticOutput {
 }
 
 impl PrefillEngine {
+    pub(crate) fn with_matched_prefill_request<T>(&mut self, request: &str, run: impl FnOnce(&mut Self) -> Result<T,String>) -> Result<T,String> {
+        if self.matched_prefill_invocation.is_some() || self.matched_prefill_request_label.is_some() { return Err("nested prefill capture request".into()); }
+        if crate::matched_probe::enabled()? { self.matched_prefill_request_label=Some(request.to_owned()); }
+        let result=run(self);
+        self.matched_prefill_request_label=None;
+        result
+    }
+    fn with_prefill_capture<T>(&mut self, tokens:&[u32], start:usize, run:impl FnOnce(&mut Self)->Result<T,String>)->Result<T,String> {
+        if self.matched_prefill_invocation.is_some() { return Err("nested actual prefill capture invocation".into()); }
+        self.matched_prefill_invocation=crate::matched_prefill_capture::Invocation::begin(self.config.device_ordinal,self.matched_prefill_request_label.as_deref(),tokens,start)?;
+        let result=run(self);
+        self.matched_prefill_invocation=None;
+        result
+    }
+    fn matched_prefill_target(&self,operation:&str,layer:usize,height:usize,label:Option<&str>)->Result<Option<crate::matched_probe::Target>,String>{
+        crate::matched_prefill_capture::target(self.matched_prefill_invocation.as_ref(),operation,layer,height,label)
+    }
     pub(crate) fn portable_predicted_w1_policy_label(&self) -> String {
         self.portable_prefill_predicted_w1_policy.label()
     }
@@ -10517,31 +11643,44 @@ impl PrefillEngine {
         let remaining = self
             .tileq_capture
             .as_ref()
-            .map(|capture| capture.remaining(model_layer, self.active_prefill_chunk_start))
+            .map(|capture| capture.remaining(model_layer))
             .unwrap_or(0);
         let capture_rows = rows.min(remaining);
         if capture_rows == 0 {
             return Ok(());
         }
+        self.tileq_capture.as_mut().unwrap().phase("stream_sync_begin", Some(model_layer), capture_rows)?;
         self.stream_sync()?;
+        if self.tileq_capture.as_ref().unwrap().persist_windows {
+            let capture = self.tileq_capture.as_mut().unwrap();
+            capture.phase("bounded_copy_begin", Some(model_layer), capture_rows)?;
+            capture.capture_bounded_inputs(model_layer, capture_rows,
+                crate::capture_window::Geometry { input: expert_input_size, intermediate: intermediate_size, topk },
+                expert_count, [expert_input_ptr, topk_ids_ptr, topk_weights_ptr, down_input_ptr])?;
+            return capture.phase("append_done", Some(model_layer), capture_rows);
+        }
+        self.tileq_capture.as_mut().unwrap().phase("inputs_copy_begin", Some(model_layer), capture_rows)?;
         let expert_inputs = download_device_u16(
             expert_input_ptr,
             capture_rows
                 .checked_mul(expert_input_size)
                 .ok_or_else(|| "TileQ gate/up capture length overflow".to_string())?,
         )?;
+        self.tileq_capture.as_mut().unwrap().phase("routes_copy_begin", Some(model_layer), capture_rows)?;
         let topk_ids = download_device_i32(
             topk_ids_ptr,
             capture_rows
                 .checked_mul(topk)
                 .ok_or_else(|| "TileQ route capture length overflow".to_string())?,
         )?;
+        self.tileq_capture.as_mut().unwrap().phase("weights_copy_begin", Some(model_layer), capture_rows)?;
         let topk_weights = download_device_f32(
             topk_weights_ptr,
             capture_rows
                 .checked_mul(topk)
                 .ok_or_else(|| "TileQ route-weight capture length overflow".to_string())?,
         )?;
+        self.tileq_capture.as_mut().unwrap().phase("down_copy_begin", Some(model_layer), capture_rows)?;
         let down_inputs = download_device_u16(
             down_input_ptr,
             capture_rows
@@ -10549,6 +11688,7 @@ impl PrefillEngine {
                 .and_then(|v| v.checked_mul(intermediate_size))
                 .ok_or_else(|| "TileQ down capture length overflow".to_string())?,
         )?;
+        self.tileq_capture.as_mut().unwrap().phase("append_begin", Some(model_layer), capture_rows)?;
         self.tileq_capture
             .as_mut()
             .ok_or_else(|| "TileQ calibration capture disappeared during append".to_string())?
@@ -10562,7 +11702,8 @@ impl PrefillEngine {
                 &topk_ids,
                 &topk_weights,
                 &down_inputs,
-            )
+            )?;
+        self.tileq_capture.as_mut().unwrap().phase("append_done", Some(model_layer), capture_rows)
     }
 
     fn prompt_hcs_shadow_env_enabled() -> bool {
@@ -14911,12 +16052,49 @@ impl PrefillEngine {
         row_idx: usize,
         width: usize,
     ) -> Result<(), String> {
+        // BEGIN selected prefill row stage capture
+        crate::matched_prefill_row::capture_stage(self.matched_prefill_invocation.as_ref(),prefill_device_trace_stage_label(stage_id), layer_idx, absolute_position.checked_add(1).ok_or("selected stage height overflow")?, chunk_idx, absolute_position, ptr, width, self.stream,self.active_prefill_chunk_start)?;
+        // END selected prefill row stage capture
+        // BEGIN bounded binary prefill stage capture
+        if let Some(operation) = crate::matched_probe::prefill_stage_operation(
+            prefill_device_trace_stage_label(stage_id),
+        ) {
+            let height = row_idx.checked_add(1).ok_or("matched stage height overflow")?;
+            if let Some(target) = self.matched_prefill_target(operation, layer_idx, height,None)? {
+                if target.row != 0 || chunk_idx != 0 || absolute_position != row_idx {
+                    return Err("matched whole stage requires an initial complete prefill batch".into());
+                }
+                let bytes = height.checked_mul(width).and_then(|n| n.checked_mul(2))
+                    .ok_or("matched stage byte count overflow")?;
+                target.device("values.bf16", ptr, bytes, self.stream)?;
+                target.write("descriptor.json", serde_json::to_vec_pretty(&serde_json::json!({
+                    "operation": operation, "stage": prefill_device_trace_stage_label(stage_id),
+                    "layer": layer_idx, "height": height, "width": width,
+                    "dtype": "bf16", "chunk_index": chunk_idx,
+                    "chunk_start": absolute_position - row_idx,
+                    "device_diagnostic_allocation_bytes": 0
+                })).map_err(|e| e.to_string())?.as_slice())?;
+            }
+        }
+        // END bounded binary prefill stage capture
         if !self.prefill_device_trace_enabled.get()
             || !self.prefill_device_trace_all_layers.get()
             || width == 0
         {
             return Ok(());
         }
+        self.push_reference_stage_bf16_selected_row_details(
+            prefill_device_trace_stage_label(stage_id),
+            Some(layer_idx),
+            chunk_idx,
+            absolute_position,
+            token_id,
+            ptr,
+            row_idx + 1,
+            width,
+            absolute_position.saturating_sub(row_idx),
+            "selected causal rows; event position/token identifies the final row",
+        );
         self.record_prefill_device_trace_bf16_row_unfiltered(
             stage_id,
             layer_idx,
@@ -18217,6 +19395,29 @@ impl PrefillEngine {
 
     pub fn clear_prefill_runtime_chunk_cap(&mut self) {
         self.prefill_runtime_chunk_cap = None;
+    }
+
+    pub fn set_prefill_cancel_signal(&mut self, signal: Option<Arc<AtomicBool>>) {
+        self.prefill_cancel_signal = signal;
+    }
+
+    fn check_prefill_cancelled(
+        &self,
+        phase: &str,
+        chunk_idx: usize,
+        completed_tokens: usize,
+    ) -> Result<(), String> {
+        if self
+            .prefill_cancel_signal
+            .as_ref()
+            .is_some_and(|signal| signal.load(Ordering::Acquire))
+        {
+            return Err(format!(
+                "{} phase={} chunk={} completed_tokens={}",
+                PREFILL_CANCELLED_ERROR_PREFIX, phase, chunk_idx, completed_tokens,
+            ));
+        }
+        Ok(())
     }
 
     pub fn cold_staging_retry_chunk_cap(&self) -> Option<usize> {
@@ -23337,6 +24538,47 @@ impl PrefillEngine {
         Ok(())
     }
 
+    #[cfg(feature = "copy-lifecycle-test")]
+    pub(crate) fn installed_external_copy_lifecycle_rust(&mut self, store_addr: usize, snapshot: &crate::session_cache::SessionSnapshot) -> Result<serde_json::Value,String> {
+        let tokens=snapshot.consumed_token_ids.len();
+        if !snapshot.state_blobs.iter().any(|blob| crate::session_cache::is_prefill_stage_kind(&blob.kind)) {
+            return Ok(serde_json::json!({"external_active":false,"allocations":0,"scope":"actual saved boundary has no temporary stage allocations"}));
+        }
+        self.set_prefill_hcs_guard_store_addr(store_addr);
+        let result=(|| {
+            self.prepare_for_prefill_session_cache_exact(tokens)?;
+            let store=unsafe { &mut *(store_addr as *mut crate::gpu_decode::GpuDecodeStore) };
+            let allocations=self.stage_exact_sequence_allocations(store.device_ordinal() as usize)?;
+            if allocations.is_empty() { return Ok(serde_json::json!({"external_active":false,"allocations":0,"scope":"current backend has no temporary stage allocations"})); }
+            self.restore_stage_exact_sequence_state(snapshot,tokens)?;
+            let owners: [&dyn crate::sequence_external_owner::CudaRegion;2]=[
+                self.prefill_kv_temp_k.as_ref().ok_or("missing live K owner")?,self.prefill_kv_temp_v.as_ref().ok_or("missing live V owner")?
+            ];
+            // Empty/wrong owner descriptors must reject before any copy.
+            crate::copy_fault::take();
+            if store.snapshot_external_sequence_state_rust(&allocations,tokens,&[]).is_ok() {return Err("external copy accepted absent owners".into());}
+            let (count,_)=crate::copy_fault::take();if count!=0{return Err("owner admission queued work".into());}
+            let result=store.installed_external_copy_lifecycle_rust(&allocations,&owners,tokens)?;
+            Ok(serde_json::json!({"external_active":true,"owner_admission_rejected_before_enqueue":true,"controls":result}))
+        })();
+        let cleanup=self.release_scratch();
+        self.clear_prefill_hcs_guard_store_addr();
+        let store=unsafe { &mut *(store_addr as *mut crate::gpu_decode::GpuDecodeStore) };
+        let decode_cleanup=store.prepare_runtime_for_decode_rust();
+        match (result,cleanup,decode_cleanup) {
+            (Ok(value),Ok(()),Ok(()))=>Ok(value),
+            (Err(error),_,_)=>Err(error),
+            (_,Err(error),_)=>Err(error),
+            (_,_,Err(error))=>Err(error),
+        }
+    }
+
+    pub fn capture_matched_stage_state_rust(&self, logical_tokens: usize, directory: std::path::PathBuf) -> Result<(),String> {
+        self.device.bind_to_thread().map_err(|e|e.to_string())?;
+        let target=crate::matched_probe::Target {row:0,directory};
+        target.allocations(&self.stage_exact_sequence_allocations(self.config.device_ordinal)?,logical_tokens)
+    }
+
     fn stage_exact_sequence_allocations(
         &self,
         device_ordinal: usize,
@@ -23453,6 +24695,10 @@ impl PrefillEngine {
         let device_ordinal = usize::try_from(store.device_ordinal())
             .map_err(|_| "stage-exact device ordinal is negative".to_string())?;
         let allocations = self.stage_exact_sequence_allocations(device_ordinal)?;
+        let owners: [&dyn crate::sequence_external_owner::CudaRegion; 2] = [
+            self.prefill_kv_temp_k.as_ref().ok_or("external sequence K owner is unavailable")?,
+            self.prefill_kv_temp_v.as_ref().ok_or("external sequence V owner is unavailable")?,
+        ];
         if let Some(base) = incremental_base {
             let previous_blobs: Vec<_> = base
                 .state_blobs
@@ -23467,9 +24713,10 @@ impl PrefillEngine {
                 base.consumed_token_ids.len(),
                 logical_tokens,
                 &previous_blobs,
+                &owners,
             )
         } else {
-            store.snapshot_external_sequence_state_rust(&allocations, logical_tokens)
+            store.snapshot_external_sequence_state_rust(&allocations, logical_tokens, &owners)
         }
     }
 
@@ -23756,10 +25003,15 @@ impl PrefillEngine {
                 "compressed-KV continuation snapshot has no exact prefill-stage K/V".to_string(),
             );
         }
+        let owners: [&dyn crate::sequence_external_owner::CudaRegion; 2] = [
+            self.prefill_kv_temp_k.as_ref().ok_or("external sequence K owner is unavailable")?,
+            self.prefill_kv_temp_v.as_ref().ok_or("external sequence V owner is unavailable")?,
+        ];
         store.restore_external_sequence_state_rust(
             &allocations,
             matched_prefix_tokens,
             &stage_blobs,
+            &owners,
         )
     }
 
@@ -23810,10 +25062,15 @@ impl PrefillEngine {
                     "compressed prefill boundary has no exact stage blobs to calibrate".to_string(),
                 );
             }
+        let owners: [&dyn crate::sequence_external_owner::CudaRegion; 2] = [
+            self.prefill_kv_temp_k.as_ref().ok_or("external sequence K owner is unavailable")?,
+            self.prefill_kv_temp_v.as_ref().ok_or("external sequence V owner is unavailable")?,
+        ];
             restore_ms += store.restore_external_sequence_state_rust(
                 &stage_allocations,
                 logical_tokens,
                 &stage_blobs,
+                &owners,
             )?;
         } else if !stage_blobs.is_empty() {
             return Err(
@@ -24065,6 +25322,9 @@ impl PrefillEngine {
         configure_dsa_workspace: bool,
         session_cache_exact_stage: bool,
     ) -> Result<(), String> {
+        if self.prefill_hcs_store_addr != 0 {
+            unsafe { &*(self.prefill_hcs_store_addr as *const crate::gpu_decode::GpuDecodeStore) }.require_sequence_state_ready_rust()?;
+        }
         self.bind_cuda_context()?;
         self.refresh_trace_config();
         trace_emit_prefill_global_mark(
@@ -24076,7 +25336,8 @@ impl PrefillEngine {
         // 1. Synchronize all GPU work (ensures pending cuMemFreeAsync from HCS
         //    soft eviction have completed on cudarc's internal stream).
         unsafe {
-            cuda_sys::lib().cuCtxSynchronize();
+            let rc=cuda_sys::lib().cuCtxSynchronize();
+            if rc!=cuda_sys::CUresult::CUDA_SUCCESS {return Err(format!("complete work before prefill allocation: {rc:?}"));}
         }
 
         // 2. Trim cudarc's default memory pool to release HCS soft VRAM back to OS.
@@ -24116,6 +25377,7 @@ impl PrefillEngine {
             }
         }
 
+        if let Some(storage)=&self.selected_kda { storage.retire_before_release("scratch reallocation")?; }
         // 3. Drop old scratch to free its VRAM (GpuBuf::drop = cuMemFree_v2, immediate).
         //    Also free prefill-only GPU buffers from previous request.
         let old_tokens = self.scratch.max_tokens;
@@ -24424,8 +25686,19 @@ impl PrefillEngine {
         //    retry instead of trusting the linear model right at the boundary.
         let mut attempt = 0usize;
         let mut post_alloc_free_bytes = free_bytes;
+        let dsa_required_free_floor_bytes =
+            safety_bytes.saturating_add(post_scratch_runtime_reserve_bytes);
+        let mut dsa_plan = None;
         loop {
             attempt += 1;
+
+            let mut attempt_pre_alloc_free_bytes = 0usize;
+            unsafe {
+                cuda_sys::lib().cuMemGetInfo_v2(
+                    &mut attempt_pre_alloc_free_bytes,
+                    &mut total_bytes,
+                );
+            }
 
             self.d_cold_staging = None;
             self.max_cold_experts = 0;
@@ -24593,7 +25866,8 @@ impl PrefillEngine {
             self.last_prepare_post_alloc_free_mb = post_alloc_free_bytes / (1024 * 1024);
             let estimated_scratch_bytes =
                 estimate_scratch_vram_for_prompt(&self.config, scratch_tokens, prompt_tokens);
-            let actual_alloc_bytes = free_bytes.saturating_sub(post_alloc_free_bytes);
+            let actual_alloc_bytes =
+                attempt_pre_alloc_free_bytes.saturating_sub(post_alloc_free_bytes);
             let observed_overhead = actual_alloc_bytes.saturating_sub(estimated_scratch_bytes);
             if observed_overhead > self.measured_scratch_alloc_overhead_bytes {
                 self.measured_scratch_alloc_overhead_bytes = observed_overhead;
@@ -24608,7 +25882,7 @@ impl PrefillEngine {
                     attempt,
                     scratch_tokens,
                     prompt_tokens,
-                    free_bytes / (1024 * 1024),
+                    attempt_pre_alloc_free_bytes / (1024 * 1024),
                     post_alloc_free_bytes / (1024 * 1024),
                     actual_alloc_bytes as f64 / (1024.0 * 1024.0),
                     estimated_scratch_bytes as f64 / (1024.0 * 1024.0),
@@ -24672,8 +25946,92 @@ impl PrefillEngine {
                 .saturating_add(post_scratch_runtime_reserve_bytes)
                 .saturating_add(minimum_dsa_workspace_bytes);
             if post_alloc_free_bytes >= post_alloc_required_bytes {
-                self.config.prefill_chunk_size = scratch_tokens;
-                break;
+                if configure_dsa_workspace {
+                    let dsa_chunk_rows = scratch_tokens.min(prompt_tokens);
+                    match self.configure_dsa_prefill_workspace_from_live_vram(
+                        dsa_chunk_rows,
+                        prompt_tokens,
+                        dsa_required_free_floor_bytes,
+                    ) {
+                        Ok(plan) => {
+                            dsa_plan = plan;
+                            self.config.prefill_chunk_size = scratch_tokens;
+                            break;
+                        }
+                        Err(DsaPrefillWorkspaceConfigureError::InsufficientLiveVram {
+                            deficit_bytes,
+                            detail,
+                        }) => {
+                            let next_tokens = self
+                                .dsa_retry_chunk_cap_for_measured_deficit(
+                                    scratch_tokens,
+                                    prompt_tokens,
+                                    deficit_bytes,
+                                )?;
+                            if ledger_enabled {
+                                vram_ledger_log!(
+                                    "VRAM LEDGER dsa_workspace_scratch_retry attempt={} prompt_tokens={} scratch_tokens={} measured_deficit_mb={:.3} next_tokens={:?} required_floor_mb={:.1}",
+                                    attempt,
+                                    prompt_tokens,
+                                    scratch_tokens,
+                                    deficit_bytes as f64 / (1024.0 * 1024.0),
+                                    next_tokens,
+                                    dsa_required_free_floor_bytes as f64 / (1024.0 * 1024.0),
+                                );
+                            }
+                            trace_emit_prefill_global_mark(
+                                self.trace.as_ref(),
+                                "prefill",
+                                &format!(
+                                    "phase=dsa_workspace_scratch_retry attempt={} scratch_tokens={} measured_deficit_bytes={} next_tokens={:?}",
+                                    attempt, scratch_tokens, deficit_bytes, next_tokens,
+                                ),
+                            );
+                            if stderr_debug_enabled() {
+                                eprintln!(
+                                    "[PREFILL] Retry chunk size {} -> {:?} after measured DSA workspace deficit {:.3} MB on attempt {}",
+                                    scratch_tokens,
+                                    next_tokens,
+                                    deficit_bytes as f64 / (1024.0 * 1024.0),
+                                    attempt,
+                                );
+                            }
+                            self.release_prefill_allocation_attempt().map_err(
+                                |cleanup_error| {
+                                    format!(
+                                        "{detail}; additionally failed to release prefill allocations for retry: {cleanup_error}"
+                                    )
+                                },
+                            )?;
+                            let Some(next_tokens) = next_tokens else {
+                                self.release_prefill_kv_temp();
+                                return Err(detail);
+                            };
+                            if next_tokens >= scratch_tokens {
+                                self.release_prefill_kv_temp();
+                                return Err(format!(
+                                    "{detail}; measured-deficit retry did not reduce scratch chunk below {} tokens",
+                                    scratch_tokens,
+                                ));
+                            }
+                            scratch_tokens = next_tokens;
+                            continue;
+                        }
+                        Err(DsaPrefillWorkspaceConfigureError::Fatal(error)) => {
+                            let cleanup = self.release_prefill_allocation_attempt();
+                            self.release_prefill_kv_temp();
+                            return Err(match cleanup {
+                                Ok(()) => error,
+                                Err(cleanup_error) => format!(
+                                    "{error}; additionally failed to release prefill allocations: {cleanup_error}"
+                                ),
+                            });
+                        }
+                    }
+                } else {
+                    self.config.prefill_chunk_size = scratch_tokens;
+                    break;
+                }
             }
             if scratch_tokens <= 128 {
                 let free_mb = post_alloc_free_bytes / (1024 * 1024);
@@ -24784,31 +26142,7 @@ impl PrefillEngine {
             scratch_tokens = next_tokens;
         }
 
-        let dsa_required_free_floor_bytes =
-            safety_bytes.saturating_add(post_scratch_runtime_reserve_bytes);
         let dsa_chunk_rows = scratch_tokens.min(prompt_tokens);
-        let dsa_plan = if configure_dsa_workspace {
-            match self.configure_dsa_prefill_workspace_from_live_vram(
-                dsa_chunk_rows,
-                prompt_tokens,
-                dsa_required_free_floor_bytes,
-            ) {
-                Ok(plan) => plan,
-                Err(error) => {
-                    let cleanup = self.release_scratch();
-                    return Err(match cleanup {
-                        Ok(()) => error,
-                        Err(cleanup_error) => {
-                            format!(
-                                "{error}; additionally failed to release scratch: {cleanup_error}"
-                            )
-                        }
-                    });
-                }
-            }
-        } else {
-            None
-        };
         if dsa_plan.is_some() {
             unsafe {
                 cuda_sys::lib().cuCtxSynchronize();
@@ -24886,6 +26220,12 @@ impl PrefillEngine {
             );
         }
 
+        if let Some(storage)=&self.selected_kda {
+            let sources=storage.layers().iter().map(|&layer|self.retained_kda_prefill_source(layer,self.scratch.max_tokens,storage.reserve)).collect::<Result<Vec<_>,_>>()?;
+            storage.attach_after_prepare(sources,self.scratch.max_tokens)?;
+            storage.admit_serving_logits(*self.scratch.d_logits.device_ptr(),self.scratch.d_logits.len()*4,self.stream)?;
+        }
+
         trace_emit_prefill_global_mark(
             self.trace.as_ref(),
             "prefill",
@@ -24899,6 +26239,50 @@ impl PrefillEngine {
             ),
         );
 
+        Ok(())
+    }
+
+    fn release_prefill_allocation_attempt(&mut self) -> Result<(), String> {
+        self.dsa_prefill_workspace = None;
+        self.scratch = allocate_scratch(&self.device, &self.config, 0)
+            .map_err(|error| format!("alloc empty scratch while retrying prefill: {error}"))?;
+        self.d_cold_staging = None;
+        self.d_shared_bf16_scratch1 = None;
+        self.d_shared_bf16_scratch2 = None;
+        self.d_shared_fp32_scratch = None;
+        self.d_shared_workspace = None;
+        self.d_fla_g_cumsum = None;
+        self.d_fla_a = None;
+        self.d_fla_ai = None;
+        self.d_fla_w = None;
+        self.d_fla_u = None;
+        self.d_fla_h = None;
+        self.d_fla_final_state = None;
+        self.d_fla_v_new = None;
+        self.d_fla_o = None;
+        self.clear_kda_chunk_scratch();
+        unsafe {
+            let sync_error = cuda_sys::lib().cuCtxSynchronize();
+            if sync_error != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "synchronize prefill allocation retry cleanup: {:?}",
+                    sync_error,
+                ));
+            }
+            let mut pool: cuda_sys::CUmemoryPool = std::ptr::null_mut();
+            let mut device: i32 = 0;
+            cuda_sys::lib().cuCtxGetDevice(&mut device);
+            let pool_error = cuda_sys::lib().cuDeviceGetDefaultMemPool(&mut pool, device);
+            if pool_error == cuda_sys::CUresult::CUDA_SUCCESS && !pool.is_null() {
+                let trim_error = cuda_sys::lib().cuMemPoolTrimTo(pool, 0);
+                if trim_error != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "trim CUDA pool while retrying prefill allocation: {:?}",
+                        trim_error,
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -24924,6 +26308,7 @@ impl PrefillEngine {
                 ));
             }
         }
+        if let Some(storage)=&self.selected_kda { storage.retire_before_release("scratch release")?; }
         self.release_pinning_pool();
         self.release_reusable_ptr_tables();
         // Replace scratch with zero-capacity (drops old, frees VRAM immediately).
@@ -25212,6 +26597,27 @@ impl PrefillEngine {
         temperature: f32,
         suppress_tokens: &[u32],
     ) -> Result<(PrefillResult, Option<PrefillSequenceBoundaryCapture>), String> {
+        let storage = self.selected_kda.clone();
+        self.with_prefill_capture(token_ids,sequence_start,|engine| {
+            if let Some(storage) = storage {
+                storage.with_serving_execution(engine.stream,||storage.with_prefill_phase(token_ids, sequence_start, |phase| engine.run_prefill_from_state_inner(token_ids,sequence_start,reset_sequence_state,capture_boundary,incremental_base,temperature,suppress_tokens,Some(phase))))
+            } else {
+                engine.run_prefill_from_state_inner(token_ids,sequence_start,reset_sequence_state,capture_boundary,incremental_base,temperature,suppress_tokens,None)
+            }
+        })
+    }
+
+    fn run_prefill_from_state_inner(
+        &mut self,
+        token_ids: &[u32],
+        sequence_start: usize,
+        reset_sequence_state: bool,
+        capture_boundary: Option<usize>,
+        incremental_base: Option<&crate::session_cache::SessionSnapshot>,
+        temperature: f32,
+        suppress_tokens: &[u32],
+        kda_phase: Option<&crate::kda_prefix_owner::KdaPrefillExecutionPhase<'_, '_>>,
+    ) -> Result<(PrefillResult, Option<PrefillSequenceBoundaryCapture>), String> {
         // Bind CUDA context to calling thread (needed for cross-thread use)
         self.bind_cuda_context()?;
         self.refresh_trace_config();
@@ -25220,6 +26626,7 @@ impl PrefillEngine {
         let total_prompt_tokens = sequence_start
             .checked_add(total_m)
             .ok_or_else(|| "prefill continuation position overflows".to_string())?;
+        self.check_prefill_cancelled("run_start", 0, 0)?;
         // Memory and sequence-state accounting use the complete logical
         // prompt. Predicted-W1 admission instead uses the suffix actually
         // computed by this request: a large restored cache prefix does not
@@ -25341,6 +26748,10 @@ impl PrefillEngine {
         };
         let num_chunks = chunk_plan.len();
         let chunk_size = chunk_plan.iter().copied().max().unwrap_or(0);
+        if let Some(capture) = self.tileq_capture.as_mut() {
+            capture.phase("prefill_enter", None, token_ids.len())?;
+            capture.begin_request(token_ids, sequence_start)?;
+        }
         self.reset_prefill_prescan_accuracy_measurement(total_m, &chunk_plan);
         if liveness_timing {
             prefill_liveness!(
@@ -25463,32 +26874,8 @@ impl PrefillEngine {
                         );
                     }
                 }
-                if let Some(kda) = lw.kimi_delta.as_ref() {
-                    let (conv_state_elements, recurrent_state_elements) =
-                        kimi_delta_state_elements_from_geometry(
-                            kda.num_heads,
-                            kda.head_dim,
-                            kda.kernel_dim,
-                        )
-                        .map_err(|error| {
-                            format!("GLM-5.3 KDA layer {} state reset: {}", layer_idx, error)
-                        })?;
-                    unsafe {
-                        cuda_sys::lib().cuMemsetD32Async(
-                            kda.conv_state_ptr,
-                            0,
-                            conv_state_elements,
-                            self.stream,
-                        );
-                        cuda_sys::lib().cuMemsetD32Async(
-                            kda.recur_state_ptr,
-                            0,
-                            recurrent_state_elements,
-                            self.stream,
-                        );
-                    }
-                }
             }
+            self.reset_kimi_delta_states()?;
         }
 
         let use_fused = self.kernels.fused_moe_fn.is_some()
@@ -25912,6 +27299,7 @@ impl PrefillEngine {
         let mut boundary_capture: Option<PrefillSequenceBoundaryCapture> = None;
         let mut suffix_chunk_start = 0usize;
         for (chunk_idx, &planned_chunk_tokens) in chunk_plan.iter().enumerate() {
+            self.check_prefill_cancelled("chunk_start", chunk_idx, suffix_chunk_start)?;
             let suffix_chunk_end =
                 std::cmp::min(suffix_chunk_start + planned_chunk_tokens, total_m);
             let m = suffix_chunk_end.saturating_sub(suffix_chunk_start);
@@ -26126,7 +27514,7 @@ impl PrefillEngine {
                         )?;
                         glm5_hc_initialized = true;
                     }
-                    self.forward_glm5_layer(layer_idx, m, chunk_idx, chunk_start, chunk_last_tok)
+                    self.forward_glm5_layer(layer_idx, m, chunk_idx, chunk_start, chunk_last_tok, kda_phase)
                         .map_err(|error| format!("GLM-5.3 layer {}: {}", layer_idx, error))?;
                     continue;
                 }
@@ -28493,6 +29881,7 @@ impl PrefillEngine {
                 "prefill_chunk",
                 &format!("phase=chunk_end chunk_tokens={}", m),
             );
+            self.check_prefill_cancelled("chunk_complete", chunk_idx, suffix_chunk_end)?;
             if capture_boundary == Some(chunk_end) {
                 // Stage-exact compressed KV modes write prefill K/V into a
                 // temporary FP8 cache. Materialize this exact prefix into the
@@ -28528,6 +29917,7 @@ impl PrefillEngine {
             suffix_chunk_start = suffix_chunk_end;
         }
 
+        self.check_prefill_cancelled("before_final_logits", num_chunks, total_m)?;
         // Use last chunk's m for final processing
         let m = chunk_plan.last().copied().unwrap_or(total_m);
         let deepseek_v4_prefill = self.deepseek_v4_head.is_some();
@@ -29787,6 +31177,11 @@ impl PrefillEngine {
                 capture_boundary
             ));
         }
+        if let Some(capture) = self.tileq_capture.as_mut() {
+            capture.phase("commit_begin", None, 0)?;
+            capture.commit_request()?;
+            capture.phase("commit_done", None, 0)?;
+        }
         Ok((
             PrefillResult {
                 first_token,
@@ -29927,7 +31322,7 @@ impl PrefillEngine {
                 return Err(format!("debug DSA positions H2D: {:?}", position_copy));
             }
         }
-        self.populate_dsa_prefill_owner_key_cache(layer_idx, 0, positions.len())?;
+        self.populate_dsa_prefill_owner_key_cache(layer_idx, 0, positions.len(),None)?;
         self.stream_sync()
     }
 
@@ -30029,7 +31424,7 @@ impl PrefillEngine {
                 ));
             }
         }
-        self.populate_dsa_prefill_owner_key_cache(layer_idx, 0, rows)?;
+        self.populate_dsa_prefill_owner_key_cache(layer_idx, 0, rows,None)?;
         unsafe {
             let q_residual_copy = cuda_sys::lib().cuMemcpyHtoD_v2(
                 *self.scratch.d_scratch2.device_ptr(),
@@ -30046,7 +31441,7 @@ impl PrefillEngine {
 
         let raw_queries_ptr = *self.scratch.d_q.device_ptr();
         let head_weights_ptr = *self.scratch.d_scratch1.device_ptr();
-        self.dsa_owner_projection_gemm(
+        self.dsa_owner_query_projection_gemm(
             *self.scratch.d_scratch2.device_ptr(),
             &wq_b,
             raw_queries_ptr,
@@ -30074,6 +31469,7 @@ impl PrefillEngine {
             0,
             0,
             score_row_bytes,
+            (0,0,0),
         )?;
         let plan = plan_dsa_prefill_selection(
             rows,
@@ -30091,6 +31487,7 @@ impl PrefillEngine {
         }
         launch_dsa_prefill_selection_chunk(
             DsaPrefillSelectionKernels {
+                score_tensorcomp: self.ordered_kda_projection.as_ref().map(|bank|bank.score_kernel()).transpose()?,
                 rope_query_bf16: self.kernels.dsa_prefill_rope_query_bf16,
                 fused_scores: self.kernels.dsa_prefill_fused_scores,
                 accumulate_gemm_scores: self.kernels.dsa_prefill_accumulate_gemm_scores,
@@ -30121,7 +31518,8 @@ impl PrefillEngine {
             0,
             &workspace,
             None,
-        )?;
+        None,
+)?;
         let owner_view =
             workspace.resolve_for_layer(layer_idx, registration, 0, rows, context_end)?;
         let shared_registration = DsaPrefillLayerDescriptor {
@@ -30159,6 +31557,35 @@ impl PrefillEngine {
         Ok(selected)
     }
 
+    /// Reset KDA state for either fresh-prefill entry point; continuation
+    /// deliberately never calls this.
+    fn reset_kimi_delta_states(&self) -> Result<(), String> {
+        for (layer_idx, lw) in self.layer_weights.iter().enumerate() {
+            let Some(kda) = lw.kimi_delta.as_ref() else {
+                continue;
+            };
+            let (conv_elements, recurrent_elements) = kimi_delta_state_elements_from_geometry(
+                kda.num_heads,
+                kda.head_dim,
+                kda.kernel_dim,
+            )
+            .map_err(|error| format!("GLM-5.3 KDA layer {layer_idx} state reset: {error}"))?;
+            for (label, ptr, elements) in [
+                ("convolution", kda.conv_state_ptr, conv_elements),
+                ("recurrent", kda.recur_state_ptr, recurrent_elements),
+            ] {
+                let result =
+                    unsafe { cuda_sys::lib().cuMemsetD32Async(ptr, 0, elements, self.stream) };
+                if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "GLM-5.3 KDA layer {layer_idx} {label} state reset failed: {result:?}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Run prefill and extract top-k logprobs at sampled positions.
     /// Used by the /v1/internal/prefill_logits test endpoint.
     pub fn run_prefill_logits(
@@ -30168,6 +31595,23 @@ impl PrefillEngine {
         sample_every: usize,
         target_token_ids: Option<&[u32]>,
     ) -> Result<Vec<PrefillLogitPosition>, String> {
+        let storage=self.selected_kda.clone();
+        self.with_prefill_capture(token_ids,0,|engine| {
+            if let Some(storage)=storage {
+                storage.with_serving_execution(engine.stream,||storage.with_prefill_phase(token_ids,0,|phase|engine.run_prefill_logits_inner(token_ids,top_k,sample_every,target_token_ids,Some(phase))))
+            } else {engine.run_prefill_logits_inner(token_ids,top_k,sample_every,target_token_ids,None)}
+        })
+    }
+
+    fn run_prefill_logits_inner(
+        &mut self,
+        token_ids: &[u32],
+        top_k: usize,
+        sample_every: usize,
+        target_token_ids: Option<&[u32]>,
+        kda_phase: Option<&crate::kda_prefix_owner::KdaPrefillExecutionPhase<'_, '_>>,
+    ) -> Result<Vec<PrefillLogitPosition>, String> {
+        self.active_prefill_chunk_start=0;
         self.bind_cuda_context()?;
 
         let t0 = Instant::now();
@@ -30261,6 +31705,10 @@ impl PrefillEngine {
             }
         }
 
+        // This endpoint is a fresh sequence, just like ordinary fresh prefill.
+        // KDA buffers are persistent and must never leak an earlier request.
+        self.reset_kimi_delta_states()?;
+
         // 1. Upload token IDs and positions
         self.upload_tokens_with_offset(token_ids, 0)?;
 
@@ -30343,6 +31791,7 @@ impl PrefillEngine {
                     0,
                     0,
                     token_ids.last().copied().unwrap_or(0) as usize,
+                    kda_phase,
                 )
                 .map_err(|error| format!("GLM-5.3 prefill-logit layer {}: {}", layer_idx, error))?;
                 continue;
@@ -30634,6 +32083,8 @@ impl PrefillEngine {
                 return Err("No LM head (neither Marlin nor BF16)".to_string());
             }
 
+            if let Some(selected)=&self.selected_kda {selected.enqueue_serving_guard(*self.scratch.d_logits.device_ptr(),self.scratch.d_logits.len()*4,self.stream)?;}
+
             // Download logits
             unsafe {
                 let err = cuda_sys::lib().cuMemcpyDtoHAsync_v2(
@@ -30647,7 +32098,8 @@ impl PrefillEngine {
                 }
             }
             self.stream_sync()?;
-            apply_logit_softcap_in_place(&mut self.h_logits, self.final_logit_softcap);
+            if self.selected_kda.is_some() && self.h_logits.first().is_some_and(|v|v.is_nan()) {return Err("selected prefill recurrence rejected invalid state/operands before sampling".into());}
+        apply_logit_softcap_in_place(&mut self.h_logits, self.final_logit_softcap);
 
             let target_token_id = target_token_ids
                 .and_then(|targets| targets.get(pos))
@@ -30851,6 +32303,22 @@ impl PrefillEngine {
         hc_eps: f32,
         m: usize,
     ) -> Result<(u64, u64), String> {
+        self.launch_deepseek_v4_hc_prepare_observed_sublayer(state,hidden_out,function,base,scale,hc_mult,sinkhorn_iters,hc_eps,m,None)
+    }
+
+    fn launch_deepseek_v4_hc_prepare_observed_sublayer(
+        &self,
+        state: u64,
+        hidden_out: u64,
+        function: &F32Weight,
+        base: u64,
+        scale: u64,
+        hc_mult: usize,
+        sinkhorn_iters: usize,
+        hc_eps: f32,
+        m: usize,
+        observed: Option<(&crate::matched_probe::Target,usize)>,
+    ) -> Result<(u64, u64), String> {
         if m == 0 || hc_mult == 0 || sinkhorn_iters == 0 {
             return Err("DeepSeek-V4 HC prepare requires non-zero rows, multiplicity, and Sinkhorn iterations".to_string());
         }
@@ -30893,6 +32361,7 @@ impl PrefillEngine {
         let post_ptr = pre_ptr + (m * hc_mult * std::mem::size_of::<f32>()) as u64;
         let comb_ptr = post_ptr + (m * hc_mult * std::mem::size_of::<f32>()) as u64;
 
+        if let Some((target,row))=observed {target.hc_prepare_operands(row,m,h,hc_mult,state,function.ptr,base,scale,self.stream,self.deepseek_v4_prefill_hc_project_mode.label(),self.config.rms_norm_eps,hc_eps,sinkhorn_iters)?;}
         let reduction_threads =
             std::cmp::max(32, std::cmp::min(1024, flat).next_power_of_two()) as u32;
         let mut i0 = inv_ptr;
@@ -30922,8 +32391,11 @@ impl PrefillEngine {
             inv_rms_timing,
         )?;
 
+        if let Some((target,row))=observed {target.hc_observed_row("inverse-rms.f32",inv_ptr,row,1,4,self.stream)?;}
         let project_timing = self.deepseek_v4_hc_internal_timing_start();
-        match self.deepseek_v4_prefill_hc_project_mode {
+        if let Some(bank)=&self.ordered_kda_projection {
+            unsafe {bank.enqueue_hc(state,inv_ptr,function.ptr,mixes_ptr,mix_width,flat,m,self.stream)?;}
+        } else {match self.deepseek_v4_prefill_hc_project_mode {
             DeepseekV4PrefillHcProjectMode::Scalar => {
                 let mut j0 = mixes_ptr;
                 let mut j1 = state;
@@ -31065,6 +32537,9 @@ impl PrefillEngine {
                                     &mut n4 as *mut _ as *mut std::ffi::c_void,
                                 ],
                             )?;
+                            if let Some((target,row))=observed {
+                                if row>=token_start && row<token_start+tile_rows {target.hc_observed_row("normalized.f32",normalized_ptr,row-token_start,flat,4,self.stream)?;}
+                            }
                             cublas_result::gemm_ex(
                                 self.cublas_handle,
                                 cublas_sys::cublasOperation_t::CUBLAS_OP_T,
@@ -31113,12 +32588,13 @@ impl PrefillEngine {
                 }
                 project_result?;
             }
-        }
+        }}
         self.deepseek_v4_hc_internal_timing_finish(
             DEEPSEEK_V4_HC_INTERNAL_TIMING_STAGE_PROJECT,
             project_timing,
         )?;
 
+        if let Some((target,row))=observed {target.hc_observed_row("mixes.f32",mixes_ptr,row,mix_width,4,self.stream)?;}
         let mut k0 = pre_ptr;
         let mut k1 = post_ptr;
         let mut k2 = comb_ptr;
@@ -31156,6 +32632,11 @@ impl PrefillEngine {
             prepare_timing,
         )?;
 
+        if let Some((target,row))=observed {
+            target.hc_observed_row("pre.f32",pre_ptr,row,hc_mult,4,self.stream)?;
+            target.hc_observed_row("post.f32",post_ptr,row,hc_mult,4,self.stream)?;
+            target.hc_observed_row("comb.f32",comb_ptr,row,hc_mult.checked_mul(hc_mult).ok_or("HC observed comb overflow")?,4,self.stream)?;
+        }
         let hidden_threads = std::cmp::max(32, ((std::cmp::min(1024, h) + 31) / 32) * 32) as u32;
         let mut r0 = hidden_out;
         let mut r1 = state;
@@ -31376,6 +32857,7 @@ impl PrefillEngine {
     }
 
     fn launch_rmsnorm(&self, out: u64, x: u64, w: u64, m: usize, d: usize) -> Result<(), String> {
+        if let Some(bank)=&self.ordered_kda_projection {return unsafe{bank.norm.as_ref().ok_or("common RMSNorm not admitted")?.enqueue(out,x,w,d,m,self.config.rms_norm_eps,self.stream)};}
         let t = std::cmp::max(32, ((std::cmp::min(1024, d) + 31) / 32) * 32) as u32;
         let mut p0 = out;
         let mut p1 = x;
@@ -34018,6 +35500,22 @@ impl PrefillEngine {
 
     // ── Marlin GEMM ──
 
+    // Shared/expert-only backend selection. Generic dense paths retain83c arithmetic.
+    fn expert_marlin_gemm_on_stream(&self,a:u64,w:&MarlinWeight,c:u64,m:usize,stream:cuda_sys::CUstream,fp32_scratch:u64,workspace:u64)->Result<(),String>{
+        if let Some(bank)=&self.ordered_kda_projection {
+            return unsafe{bank.marlin.as_ref().ok_or("common expert program not admitted")?.enqueue(crate::common_marlin::Geometry{rows:w.n,cols:w.k,group:if w.num_groups==1{w.k}else{w.group_size},bits:w.num_bits as usize},w.packed,w.scales,a,c,0,m,stream)};
+        }
+        self.marlin_gemm_on_stream(a,w,c,m,stream,fp32_scratch,workspace)
+    }
+    fn expert_marlin_gemm(&self,a:u64,w:&MarlinWeight,c:u64,m:usize)->Result<(),String>{self.expert_marlin_gemm_on_stream(a,w,c,m,self.stream,*self.scratch.d_fp32_scratch.device_ptr(),*self.scratch.d_workspace.device_ptr())}
+    fn expert_gated_activation(&self,out:u64,gate_up:u64,activation:u8,m:usize,inter:usize,limit:f32,raw:bool)->Result<(),String>{self.expert_gated_activation_on_stream(out,gate_up,activation,m,inter,limit,raw,self.stream)}
+    fn expert_gated_activation_on_stream(&self,out:u64,gate_up:u64,activation:u8,m:usize,inter:usize,limit:f32,raw:bool,stream:cuda_sys::CUstream)->Result<(),String>{
+        if let Some(bank)=&self.ordered_kda_projection {
+            let stride=inter.checked_mul(if activation==1{1}else{2}).ok_or("common expert activation stride overflow")?;
+            return unsafe{bank.marlin.as_ref().ok_or("common expert activation program not admitted")?.enqueue_activation(gate_up,out,0,inter,activation,limit,raw,stride,inter,m,stream)};
+        }
+        self.launch_gated_activation_on_stream(out,gate_up,activation,m,inter,limit,raw,stream)
+    }
     fn marlin_gemm_on_stream(
         &self,
         a: u64,
@@ -34161,6 +35659,15 @@ impl PrefillEngine {
             w.n,
             w.k,
         )
+    }
+
+    // The selected DSA query contract uses fixed tensor arithmetic in every batch.
+    // Native strided-batched cuBLAS remains batch-count dependent at real dimensions.
+    fn dsa_owner_query_projection_gemm(&self, input:u64, w:&Bf16Weight, output:u64, rows:usize)->Result<(),String>{
+        if let Some(bank)=&self.ordered_kda_projection {
+            return unsafe{bank.enqueue_dense_bf16(w.ptr,input,output,w.n,w.k,rows,self.stream)};
+        }
+        self.dsa_owner_projection_gemm(input,w,output,rows)
     }
 
     fn dsa_owner_projection_gemm(
@@ -34756,6 +36263,7 @@ impl PrefillEngine {
         };
         let selection_timing = launch_dsa_prefill_selection_chunk(
             DsaPrefillSelectionKernels {
+                score_tensorcomp: self.ordered_kda_projection.as_ref().map(|bank|bank.score_kernel()).transpose()?,
                 rope_query_bf16: self.kernels.dsa_prefill_rope_query_bf16,
                 fused_scores: self.kernels.dsa_prefill_fused_scores,
                 accumulate_gemm_scores: self.kernels.dsa_prefill_accumulate_gemm_scores,
@@ -34790,7 +36298,8 @@ impl PrefillEngine {
                 })?,
             workspace,
             selection_timing_events,
-        )?;
+        None,
+)?;
         for (source, target) in [
             (
                 DSA_PREFILL_SELECTION_TIMING_QUERY,
@@ -38024,6 +39533,7 @@ impl PrefillEngine {
         chunk_idx: usize,
         chunk_start: usize,
         last_token_id: usize,
+        kda_phase: Option<&crate::kda_prefix_owner::KdaPrefillExecutionPhase<'_, '_>>,
     ) -> Result<(), String> {
         let h = self.config.hidden_size;
         let state = *self
@@ -38040,13 +39550,16 @@ impl PrefillEngine {
         let temp_state = *temp_state_buffer.device_ptr();
         let hidden = *self.scratch.d_hidden.device_ptr();
         let trace_position = chunk_start.saturating_add(m.saturating_sub(1));
+        let hc_producer_capture=crate::matched_prefill_capture::target(self.matched_prefill_invocation.as_ref(),"hc_prepare_operands",layer_idx,chunk_start.checked_add(m).ok_or("HC producer height overflow")?,None)?;
+        let hc_producer_row=hc_producer_capture.as_ref().map(|target|target.row.checked_sub(chunk_start).filter(|&row|row<m).ok_or("HC producer row outside chunk")).transpose()?;
+        let hc_observed=hc_producer_capture.as_ref().zip(hc_producer_row);
         let attn_hc_timing = self.glm5_timing_start("glm5 attn_hc_prep_norm")?;
         let (attn_post, attn_comb, hc_mult) = {
             let hc = self.layer_weights[layer_idx]
                 .hyper_connection
                 .as_ref()
                 .ok_or_else(|| format!("GLM-5.3 layer {} mHC descriptor is missing", layer_idx))?;
-            let prepared = self.launch_deepseek_v4_hc_prepare_sublayer(
+            let prepared = self.launch_deepseek_v4_hc_prepare_observed_sublayer(
                 state,
                 hidden,
                 &hc.attn_fn,
@@ -38056,6 +39569,7 @@ impl PrefillEngine {
                 hc.sinkhorn_iters,
                 hc.eps,
                 m,
+                hc_observed,
             )?;
             (prepared.0, prepared.1, hc.mult)
         };
@@ -38125,6 +39639,7 @@ impl PrefillEngine {
                 chunk_idx,
                 trace_position,
                 last_token_id,
+                kda_phase,
             )?,
             Glm5AttentionOutputLocation::AttentionScratch => {
                 let dsa_timing = self.glm5_timing_start("glm5 dsa_attention")?;
@@ -38168,10 +39683,20 @@ impl PrefillEngine {
             m.saturating_sub(1),
             h,
         )?;
+        let hc_capture=crate::matched_prefill_capture::target(self.matched_prefill_invocation.as_ref(),"hc_post_operands",layer_idx,
+            self.active_prefill_chunk_start.checked_add(m).ok_or("HC capture height overflow")?,None)?;
+        let hc_capture_row=hc_capture.as_ref().map(|target|target.row.checked_sub(self.active_prefill_chunk_start).filter(|&row|row<m).ok_or("HC capture row outside chunk")).transpose()?;
+        if let (Some(target),Some(row))=(&hc_capture,hc_capture_row) {
+            target.hc_post_operands(row,m,h,hc_mult,hidden,state,attn_post,attn_comb,temp_state,self.stream,"deepseek_v4_hc_post_kernel")?;
+        }
         let attn_hc_post_timing = self.glm5_timing_start("glm5 attn_hc_post")?;
         self.launch_deepseek_v4_hc_post(
             temp_state, hidden, state, attn_post, attn_comb, hc_mult, m,
         )?;
+        if let (Some(target),Some(row))=(&hc_capture,hc_capture_row) {
+            let bytes=h.checked_mul(hc_mult).and_then(|n|n.checked_mul(2)).ok_or("HC output extent overflow")?;
+            target.device("output.bf16",temp_state.checked_add(row.checked_mul(bytes).ok_or("HC output row overflow")? as u64).ok_or("HC output pointer overflow")?,bytes,self.stream)?;
+        }
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_POST_ATTN_STATE_LAST,
             layer_idx,
@@ -38480,6 +40005,36 @@ impl PrefillEngine {
             .map_err(|_| format!("GLM-5.3 layer {} token count exceeds i32", layer_idx))?;
         let stream_ptr = self.stream as *mut std::ffi::c_void;
 
+        let batch_label = format!("prompt-{}", self.active_prefill_prompt_tokens);
+        let batch_probe = self.matched_prefill_target("kda_full_batch", layer_idx, m, Some(&batch_label))?;
+        let tensor_bytes = m.checked_mul(heads).and_then(|n| n.checked_mul(desc.head_dim)).and_then(|n| n.checked_mul(2)).ok_or("KDA batch tensor bytes overflow")?;
+        let recurrent_bytes = heads.checked_mul(desc.head_dim).and_then(|n| n.checked_mul(desc.head_dim)).and_then(|n| n.checked_mul(4)).ok_or("KDA batch state bytes overflow")?;
+        if let Some(target) = &batch_probe {
+            let actual_end = self.active_prefill_chunk_start.checked_add(m).ok_or("KDA batch absolute end overflow")?;
+            let checkpoint = self.active_prefill_chunk_start.checked_add(target.row).ok_or("KDA batch checkpoint overflow")?;
+            if self.active_prefill_prompt_tokens == 0 || actual_end != self.active_prefill_prompt_tokens || target.row == 0 {
+                return Err("full-batch recurrence capture requires a bounded interior checkpoint in the actual final prompt batch".into());
+            }
+            let beta_bytes = m.checked_mul(heads).and_then(|n| n.checked_mul(2)).ok_or("KDA batch beta bytes overflow")?;
+            let bias_bytes = heads.checked_mul(desc.head_dim).and_then(|n| n.checked_mul(4)).ok_or("KDA batch bias bytes overflow")?;
+            for (name,ptr,bytes) in [
+                ("raw-q.bf16",q,tensor_bytes),("raw-k.bf16",k,tensor_bytes),("raw-v.bf16",v,tensor_bytes),
+                ("raw-gates.bf16",gate,tensor_bytes),("raw-beta.bf16",beta,beta_bytes),
+                ("a-log.f32",desc.a_log_ptr,heads.checked_mul(4).ok_or("KDA batch A bytes overflow")?),
+                ("dt-bias.f32",desc.dt_bias_ptr,bias_bytes),("actual-incoming-state.f32",desc.recur_state_ptr,recurrent_bytes)
+            ] { target.device(name,ptr,bytes,self.stream)?; }
+            target.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({
+                "layer":layer_idx,"height":m,"heads":heads,"dim":desc.head_dim,
+                "actual_prompt_tokens":self.active_prefill_prompt_tokens,"actual_batch_start":self.active_prefill_chunk_start,
+                "checkpoint_consumed_rows":target.row,"checkpoint_absolute_tokens":checkpoint,
+                "block_tokens":block_tokens,"checkpoint_block":target.row/block_tokens,"checkpoint_in_block":target.row%block_tokens,
+                "gate_lower_bound":desc.gate_lower_bound,"q_scale":q_scale,"normalization_epsilon":1e-6,
+                "incoming_state":"actual full-prompt execution before native recurrence",
+                "block_h_dtype":"BF16, not the F32 register carry","interior_f32_state_available":false,
+                "device_diagnostic_allocation_bytes":0,"qualifies_candidate":false
+            })).map_err(|e|e.to_string())?.as_slice())?;
+        }
+
         // Match the published KDA decomposition: unit L2-normalized Q/K,
         // beta sigmoid, then apply 1/sqrt(K) in the attention products.
         let prep_threads = desc.head_dim.next_power_of_two().min(1024);
@@ -38558,7 +40113,12 @@ impl PrefillEngine {
                 layer_idx, rc
             ));
         }
-        let rc = unsafe {
+        // BEGIN bounded model KDA diagnostic launch
+        let rc = if let Some(diagnostic) = self.matched_kda_intra.as_ref() {
+            unsafe { diagnostic.launch((heads, desc.head_dim, desc.gate_lower_bound), q, k, g, beta, aqk, akkd, q_scale, t_arg, self.stream)?; }
+            0
+        } else {
+            unsafe {
             (fla.kda_intra)(
                 q,
                 k,
@@ -38575,7 +40135,9 @@ impl PrefillEngine {
                 u32::try_from(heads).map_err(|_| "chunked KDA head grid exceeds u32")?,
                 stream_ptr,
             )
+            }
         };
+        // END bounded model KDA diagnostic launch
         if rc != 0 {
             return Err(format!(
                 "GLM-5.3 layer {} KDA intra solve failed: {}",
@@ -38634,6 +40196,16 @@ impl PrefillEngine {
                 layer_idx, rc
             ));
         }
+        if let Some(target) = &batch_probe {
+            let beta_bytes = m.checked_mul(heads).and_then(|n|n.checked_mul(2)).ok_or("KDA prepared beta bytes overflow")?;
+            let gate_bytes = tensor_bytes.checked_mul(2).ok_or("KDA prepared gate bytes overflow")?;
+            let aqk_bytes = m.checked_mul(heads).and_then(|n|n.checked_mul(block_tokens)).and_then(|n|n.checked_mul(2)).ok_or("KDA Aqk bytes overflow")?;
+            for (name,ptr,bytes) in [
+                ("prepared-q.bf16",q,tensor_bytes),("prepared-k.bf16",k,tensor_bytes),("prepared-beta.bf16",beta,beta_bytes),
+                ("native-g.f32",g,gate_bytes),("native-kg.bf16",kg,tensor_bytes),("native-u.bf16",u,tensor_bytes),
+                ("native-w.bf16",w,tensor_bytes),("native-aqk.bf16",aqk,aqk_bytes)
+            ] { target.device(name,ptr,bytes,self.stream)?; }
+        }
         let rc = unsafe {
             (fla.kda_state_recurrence)(
                 kg,
@@ -38661,6 +40233,13 @@ impl PrefillEngine {
                 layer_idx, rc
             ));
         }
+        if let Some(target) = &batch_probe {
+            let h_bytes = chunks.checked_mul(recurrent_bytes/2).ok_or("KDA native block H bytes overflow")?;
+            for (name,ptr,bytes) in [
+                ("native-block-start-h.bf16",h,h_bytes),("native-v-new.bf16",v_new,tensor_bytes),
+                ("native-final-state.f32",final_state,recurrent_bytes)
+            ] { target.device(name,ptr,bytes,self.stream)?; }
+        }
         let rc = unsafe {
             (fla.kda_output)(
                 q,
@@ -38686,6 +40265,7 @@ impl PrefillEngine {
                 layer_idx, rc
             ));
         }
+        if let Some(target) = &batch_probe { target.device("native-full-batch-output.bf16",output,tensor_bytes,self.stream)?; }
         let state_bytes = heads
             .checked_mul(desc.head_dim)
             .and_then(|value| value.checked_mul(desc.head_dim))
@@ -38708,6 +40288,22 @@ impl PrefillEngine {
         Ok(())
     }
 
+    pub(crate) fn ordered_kda_layout(&self,projection:&DeepseekV4ProjectionPrefillDescriptor)->Result<crate::ordered_projection::Layout,String>{
+        let DeepseekV4ProjectionPrefillDescriptor::Hqq{tensor_name,desc}=projection else {return Err("ordered KDA projection requires loaded HQQ6".into());};
+        if self.validate_hqq_row_major_materialize_tensor_desc(tensor_name,desc)?!=6 || desc.cols==0 || desc.group_size==0 || desc.cols%desc.group_size!=0 {
+            return Err("ordered KDA projection requires unpadded HQQ6/F32 coefficients".into());
+        }
+        let parameter_stride=(desc.cols/desc.group_size).checked_mul(4).ok_or("ordered prefill parameter stride overflow")?;
+        Ok(crate::ordered_projection::Layout{packed:desc.packed_ptr,scales:desc.scales_ptr,zeros:desc.zeros_ptr,rows:desc.rows,cols:desc.cols,group:desc.group_size,packed_stride:(desc.cols/4).checked_mul(3).ok_or("ordered prefill packed stride overflow")?,scales_stride:parameter_stride,zeros_stride:parameter_stride})
+    }
+    fn kda_projection_prefill(&self,layer:usize,desc:&DeepseekV4ProjectionPrefillDescriptor,input:u64,output:u64,tokens:usize)->Result<(),String>{
+        if let Some(bank)=&self.ordered_kda_projection {
+            unsafe {bank.enqueue(&self.ordered_kda_layout(desc)?,input,output,tokens,self.stream)}
+        } else {
+            self.deepseek_v4_projection_prefill_gemm_bf16(layer,desc,input,output,tokens)
+        }
+    }
+
     fn forward_kimi_delta_attention(
         &self,
         layer_idx: usize,
@@ -38715,6 +40311,7 @@ impl PrefillEngine {
         chunk_idx: usize,
         trace_position: usize,
         last_token_id: usize,
+        kda_phase: Option<&crate::kda_prefix_owner::KdaPrefillExecutionPhase<'_, '_>>,
     ) -> Result<(), String> {
         let desc = self.layer_weights[layer_idx]
             .kimi_delta
@@ -38770,10 +40367,97 @@ impl PrefillEngine {
         }
 
         let hidden = *self.scratch.d_hidden.device_ptr();
+        let transition=crate::matched_prefill_capture::target(self.matched_prefill_invocation.as_ref(),"kda_transition_row",layer_idx,
+            self.active_prefill_chunk_start.checked_add(m).ok_or("transition height overflow")?,None)?;
+        let transition_row=transition.as_ref().map(|target|target.row.checked_sub(self.active_prefill_chunk_start).filter(|&row|row<m).ok_or("transition row outside actual chunk")).transpose()?;
+        let observe_transition=|name:&str,ptr:u64,cols:usize|->Result<(),String>{
+            if let (Some(target),Some(row))=(&transition,transition_row) {
+                let offset=row.checked_mul(cols).and_then(|n|n.checked_mul(2)).ok_or("transition row offset")?;
+                target.device(name,ptr.checked_add(offset as u64).ok_or("transition pointer overflow")?,cols.checked_mul(2).ok_or("transition bytes overflow")?,self.stream)?;
+            }
+            Ok(())
+        };
+        observe_transition("normalized-input.bf16",hidden,self.config.hidden_size)?;
         let qkv_timing = self.glm5_timing_start("glm5 kda_qkv_proj")?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.q_proj, hidden, q, m)?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.k_proj, hidden, k, m)?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.v_proj, hidden, v, m)?;
+        self.kda_projection_prefill(layer_idx, &desc.q_proj, hidden, q, m)?;
+        // BEGIN bounded full Q projection diagnostic selection
+        let row_q_target = self.matched_prefill_target("q_projection", layer_idx, m,None)?;
+        let full_q_target = self.matched_prefill_target("q_projection_full", layer_idx, m,None)?;
+        if row_q_target.is_some() && full_q_target.is_some() {
+            return Err("ambiguous full and selected-row Q diagnostic targets".into());
+        }
+        let full_q_target_enabled = full_q_target.is_some();
+        // END bounded full Q projection diagnostic selection
+        if let Some(target) = row_q_target.or(full_q_target) {
+            let DeepseekV4ProjectionPrefillDescriptor::Hqq { tensor_name, desc: weight } = &desc.q_proj else {
+                return Err("matched Q probe requires an HQQ projection".into());
+            };
+            let bits = self.validate_hqq_row_major_materialize_tensor_desc(tensor_name, weight)?;
+            let groups = weight.cols.div_ceil(weight.group_size);
+            let padded_cols = groups.checked_mul(weight.group_size).ok_or("Q probe padded columns overflow")?;
+            let packed_stride = match bits { 4 => padded_cols.div_ceil(2), 6 => padded_cols.div_ceil(4) * 3, 8 => padded_cols, _ => unreachable!() };
+            target.row("input.bf16", hidden, weight.cols, self.stream)?;
+            target.row("production-prefill.bf16", q, weight.rows, self.stream)?;
+            target.device("packed.bin", weight.packed_ptr, weight.rows.checked_mul(packed_stride).ok_or("Q probe packed size overflow")?, self.stream)?;
+            let parameter_bytes = weight.rows.checked_mul(groups).and_then(|n| n.checked_mul(4)).ok_or("Q probe parameters overflow")?;
+            target.device("scales.f32", weight.scales_ptr, parameter_bytes, self.stream)?;
+            target.device("zeros.f32", weight.zeros_ptr, parameter_bytes, self.stream)?;
+            if self.config.hqq_prefill_materialize_bf16 && self.ordered_kda_projection.is_none() {
+                let ptr = *self.scratch.d_hqq_bf16_weight.as_ref().ok_or("Q probe materialized weight absent")?.device_ptr();
+                target.device("materialized.bf16", ptr, weight.rows.checked_mul(weight.cols).and_then(|n| n.checked_mul(2)).ok_or("Q probe materialized size overflow")?, self.stream)?;
+            }
+            // BEGIN bounded full Q operand/handle capture
+            if full_q_target_enabled {
+                if !self.config.hqq_prefill_materialize_bf16 || self.ordered_kda_projection.is_some() {
+                    return Err("full Q replay requires actual materialized BF16 weights".into());
+                }
+                let input_bytes = m.checked_mul(weight.cols).and_then(|n|n.checked_mul(2)).ok_or("full Q input bytes overflow")?;
+                let output_bytes = m.checked_mul(weight.rows).and_then(|n|n.checked_mul(2)).ok_or("full Q output bytes overflow")?;
+                target.device("full-input.bf16",hidden,input_bytes,self.stream)?;
+                target.device("full-production-prefill.bf16",q,output_bytes,self.stream)?;
+                use cudarc::cublas::sys as cb;
+                let mut math=0u32;
+                let mut atomics=cb::cublasAtomicsMode_t::CUBLAS_ATOMICS_NOT_ALLOWED;
+                let mut pointer=cb::cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;
+                let mut version=0i32;let mut sm_count=0i32;let mut stream=std::ptr::null_mut();
+                let results=unsafe {[
+                    cb::lib().cublasGetMathMode(self.cublas_handle,(&mut math as *mut u32).cast::<cb::cublasMath_t>()),
+                    cb::lib().cublasGetAtomicsMode(self.cublas_handle,&mut atomics),
+                    cb::lib().cublasGetPointerMode_v2(self.cublas_handle,&mut pointer),
+                    cb::lib().cublasGetVersion_v2(self.cublas_handle,&mut version),
+                    cb::lib().cublasGetSmCountTarget(self.cublas_handle,&mut sm_count),
+                    cb::lib().cublasGetStream_v2(self.cublas_handle,&mut stream),
+                ]};
+                if results.iter().any(|r|*r!=cb::cublasStatus_t::CUBLAS_STATUS_SUCCESS)||stream as usize!=self.stream as usize {
+                    return Err(format!("full Q cuBLAS handle contract query failed/mismatched stream: {results:?}"));
+                }
+                target.write("cublas-contract.json",serde_json::to_vec_pretty(&serde_json::json!({
+                    "version":version,"math_mode":math as u32,"atomics_mode":atomics as u32,"pointer_mode":pointer as u32,"sm_count_target":sm_count,
+                    "stream_ptr":stream as usize,"stream_is_null":stream.is_null(),"stream_matches_production":true,
+                    "workspace_environment":std::env::var("CUBLAS_WORKSPACE_CONFIG").ok(),
+                    "transpose_a":"T","transpose_b":"N","m":weight.rows,"n":m,"k":weight.cols,
+                    "lda":weight.cols,"ldb":weight.cols,"ldc":weight.rows,"alpha":1.0,"beta":0.0,
+                    "input_dtype":"bf16","weights_dtype":"bf16","output_dtype":"bf16","compute":"CUBLAS_COMPUTE_32F","algorithm":"CUBLAS_GEMM_DEFAULT",
+                    "capture_stage":"after actual production GEMM; before next projection or handle mutation",
+                    "device_diagnostic_allocation_bytes":0
+                })).map_err(|e|e.to_string())?.as_slice())?;
+            }
+            // END bounded full Q operand/handle capture
+            target.write("descriptor.json", serde_json::to_string_pretty(&serde_json::json!({
+                "layer":layer_idx,"row":target.row,"height":m,"tensor_name":tensor_name,
+                "rows":weight.rows,"cols":weight.cols,"group_size":weight.group_size,"axis":weight.axis,
+                "nbits":bits,"layout":weight.layout,"packed_dtype":weight.packed_dtype,
+                "scales_dtype":weight.scales_dtype,"zeros_dtype":weight.zeros_dtype,"original_dtype":weight.original_dtype,
+                "tensor_bytes":weight.tensor_bytes,"packed_row_stride_bytes":packed_stride,
+                "scales_row_stride_bytes":groups*4,"zeros_row_stride_bytes":groups*4,
+                "packed_ptr":weight.packed_ptr,"scales_ptr":weight.scales_ptr,"zeros_ptr":weight.zeros_ptr,
+                "materialize_bf16":self.config.hqq_prefill_materialize_bf16 && self.ordered_kda_projection.is_none(),
+                "prefill_contract":self.ordered_kda_projection.as_ref().map(|bank|bank.identity.as_str()).unwrap_or("HQQ dequantization then BF16 rounding; BF16 GEMM with F32 compute and BF16 output"),
+                "device_diagnostic_allocation_bytes":0
+            })).map_err(|e|e.to_string())?.as_bytes())?;
+        }
+        self.kda_projection_prefill(layer_idx, &desc.k_proj, hidden, k, m)?;
+        self.kda_projection_prefill(layer_idx, &desc.v_proj, hidden, v, m)?;
         for (stage, ptr) in [
             (PDT_LAYER_GLM5_KDA_Q_PROJ_LAST, q),
             (PDT_LAYER_GLM5_KDA_K_PROJ_LAST, k),
@@ -38955,21 +40639,50 @@ impl PrefillEngine {
         )?;
 
         let forget_beta_timing = self.glm5_timing_start("glm5 kda_forget_beta_proj")?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(
+        self.kda_projection_prefill(
             layer_idx,
             &desc.f_a_proj,
             hidden,
             low_rank,
             m,
         )?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(
+        self.kda_projection_prefill(
             layer_idx,
             &desc.f_b_proj,
             low_rank,
             gate,
             m,
         )?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.b_proj, hidden, beta, m)?;
+        self.kda_projection_prefill(layer_idx, &desc.b_proj, hidden, beta, m)?;
+        if let Some(target) = self.matched_prefill_target("beta_projection", layer_idx, m,None)? {
+            let DeepseekV4ProjectionPrefillDescriptor::Hqq { tensor_name, desc: weight } = &desc.b_proj else {
+                return Err("matched beta projection requires loaded HQQ weights".into());
+            };
+            let bits = self.validate_hqq_row_major_materialize_tensor_desc(tensor_name, weight)?;
+            let groups = weight.cols.div_ceil(weight.group_size);
+            let padded_cols = groups.checked_mul(weight.group_size).ok_or("beta padded columns overflow")?;
+            let packed_stride = match bits { 4 => padded_cols.div_ceil(2), 6 => padded_cols.div_ceil(4).checked_mul(3).ok_or("beta packed stride overflow")?, 8 => padded_cols, _ => return Err("unsupported beta diagnostic bits".into()) };
+            let packed_bytes = weight.rows.checked_mul(packed_stride).ok_or("beta packed extent overflow")?;
+            let parameter_bytes = weight.rows.checked_mul(groups).and_then(|n|n.checked_mul(4)).ok_or("beta parameter extent overflow")?;
+            target.row("input.bf16",hidden,weight.cols,self.stream)?;
+            target.row("production-prefill.bf16",beta,weight.rows,self.stream)?;
+            target.device("packed.bin",weight.packed_ptr,packed_bytes,self.stream)?;
+            target.device("scales.f32",weight.scales_ptr,parameter_bytes,self.stream)?;
+            target.device("zeros.f32",weight.zeros_ptr,parameter_bytes,self.stream)?;
+            if self.config.hqq_prefill_materialize_bf16 && self.ordered_kda_projection.is_none() {
+                let weight_ptr=*self.scratch.d_hqq_bf16_weight.as_ref().ok_or("actual beta materialized weight absent")?.device_ptr();
+                target.device("materialized.bf16",weight_ptr,weight.rows.checked_mul(weight.cols).and_then(|n|n.checked_mul(2)).ok_or("beta materialized extent overflow")?,self.stream)?;
+            }
+            target.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({
+                "layer":layer_idx,"row":target.row,"height":m,"tensor_name":tensor_name,
+                "rows":weight.rows,"cols":weight.cols,"group_size":weight.group_size,"axis":weight.axis,"nbits":bits,
+                "layout":weight.layout,"packed_dtype":weight.packed_dtype,"scales_dtype":weight.scales_dtype,"zeros_dtype":weight.zeros_dtype,
+                "original_dtype":weight.original_dtype,"tensor_bytes":weight.tensor_bytes,"packed_row_stride_bytes":packed_stride,
+                "scales_row_stride_bytes":groups*4,"zeros_row_stride_bytes":groups*4,
+                "materialize_bf16":self.config.hqq_prefill_materialize_bf16 && self.ordered_kda_projection.is_none(),"actual_input_ptr":hidden,"actual_output_ptr":beta,
+                "device_diagnostic_allocation_bytes":0,"arithmetic_changed":self.ordered_kda_projection.is_some()
+            })).map_err(|e|e.to_string())?.as_slice())?;
+        }
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_KDA_FORGET_GATE_LAST,
             layer_idx,
@@ -38996,8 +40709,32 @@ impl PrefillEngine {
             forget_beta_timing,
         )?;
 
+        if let Some(target)=self.matched_prefill_target("kda_inputs",layer_idx,m,None)? {
+            let elements=m.checked_mul(desc.num_heads).and_then(|v|v.checked_mul(desc.head_dim)).ok_or("matched KDA tensor overflow")?;
+            let row_bytes=desc.num_heads.checked_mul(desc.head_dim).and_then(|n|n.checked_mul(2)).ok_or("matched KDA row overflow")?;
+            let tensor_bytes=elements.checked_mul(2).ok_or("matched KDA byte overflow")?;
+            let beta_bytes=m.checked_mul(desc.num_heads).and_then(|n|n.checked_mul(2)).ok_or("matched KDA beta overflow")?;
+            let a_bytes=desc.num_heads.checked_mul(4).ok_or("matched KDA A overflow")?;
+            let bias_bytes=row_bytes.checked_mul(2).ok_or("matched KDA bias overflow")?;
+            let state_bytes=bias_bytes.checked_mul(desc.head_dim).ok_or("matched KDA state overflow")?;
+            for (name,ptr,bytes) in [
+                ("q.bf16",q,tensor_bytes),("k.bf16",k,tensor_bytes),("v.bf16",v,tensor_bytes),
+                ("gates.bf16",gate,tensor_bytes),("beta.bf16",beta,beta_bytes),
+                ("a-log.f32",desc.a_log_ptr,a_bytes),("dt-bias.f32",desc.dt_bias_ptr,bias_bytes),
+                ("initial-state.f32",desc.recur_state_ptr,state_bytes)
+            ] {target.device(name,ptr,bytes,self.stream)?;}
+            target.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({
+                "layer":layer_idx,"height":m,"row":target.row,"heads":desc.num_heads,"dim":desc.head_dim,
+                "gate_lower_bound":desc.gate_lower_bound,"block_tokens":FLA_PREFILL_BLOCK_TOKENS,
+                "qkv_stage":"after production convolution; before Q/K normalization and beta sigmoid",
+                "q_scale":(desc.head_dim as f32).sqrt().recip(),"normalization_epsilon":1e-6,
+                "initial_state_stage":"before production recurrence","device_diagnostic_allocation_bytes":0
+            })).map_err(|e|e.to_string())?.as_slice())?;
+        }
         let recurrent_timing = self.glm5_timing_start("glm5 kda_recurrent")?;
-        if glm53_kda_recurrent_oracle_enabled()? {
+        if let Some(phase)=kda_phase {
+            phase.enqueue_recurrence(layer_idx,self.active_prefill_chunk_start,m,[q,k,v,gate,beta],recurrent_out,self.matched_prefill_invocation.as_ref())?;
+        } else if glm53_kda_recurrent_oracle_enabled()? {
             self.forward_kimi_delta_recurrent_oracle(
                 layer_idx,
                 desc,
@@ -39022,6 +40759,22 @@ impl PrefillEngine {
                 recurrent_out,
             )?;
         }
+        if let Some(target) = self.matched_prefill_target("kda_inputs", layer_idx, m,None)? {
+            let tensor_bytes = m.checked_mul(desc.num_heads)
+                .and_then(|v| v.checked_mul(desc.head_dim))
+                .and_then(|v| v.checked_mul(2)).ok_or("matched KDA output overflow")?;
+            let beta_bytes = m.checked_mul(desc.num_heads)
+                .and_then(|v| v.checked_mul(2)).ok_or("matched KDA prepared beta overflow")?;
+            for (name, ptr, bytes) in [
+                ("native-output.bf16", recurrent_out, tensor_bytes),
+                ("prepared-q.bf16", q, tensor_bytes),
+                ("prepared-k.bf16", k, tensor_bytes),
+                ("prepared-beta.bf16", beta, beta_bytes),
+            ] {
+                target.device(name, ptr, bytes, self.stream)?;
+            }
+        }
+        observe_transition("recurrence-output.bf16",recurrent_out,width)?;
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_KDA_RECURRENT_LAST,
             layer_idx,
@@ -39039,20 +40792,21 @@ impl PrefillEngine {
         )?;
 
         let output_gate_timing = self.glm5_timing_start("glm5 kda_output_gate_proj")?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(
+        self.kda_projection_prefill(
             layer_idx,
             &desc.g_a_proj,
             hidden,
             low_rank,
             m,
         )?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(
+        self.kda_projection_prefill(
             layer_idx,
             &desc.g_b_proj,
             low_rank,
             gate,
             m,
         )?;
+        observe_transition("output-gate.bf16",gate,width)?;
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_KDA_OUTPUT_GATE_LAST,
             layer_idx,
@@ -39123,6 +40877,7 @@ impl PrefillEngine {
                 ],
             )?;
         }
+        observe_transition("rms-gate.bf16",v,width)?;
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_KDA_RMS_GATE_LAST,
             layer_idx,
@@ -39144,7 +40899,14 @@ impl PrefillEngine {
         // `recurrent_out` silently fed the normalized layer input into mHC and
         // discarded KDA attention on every KDA layer.
         let o_proj_timing = self.glm5_timing_start("glm5 kda_o_proj")?;
-        self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, &desc.o_proj, v, hidden, m)?;
+        self.kda_projection_prefill(layer_idx, &desc.o_proj, v, hidden, m)?;
+        observe_transition("o-projection.bf16",hidden,self.config.hidden_size)?;
+        if let Some(target)=&transition {
+            target.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({"layer":layer_idx,"absolute_row":target.row,"actual_chunk_start":self.active_prefill_chunk_start,
+                "actual_chunk_rows":m,"local_row":transition_row,"heads":desc.num_heads,"dim":desc.head_dim,
+                "hidden_size":self.config.hidden_size,"stream":self.stream as usize,"actual_operator_outputs":true,
+                "diagnostic_gpu_allocation_bytes":0,"forcing":false})).map_err(|e|e.to_string())?.as_slice())?;
+        }
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_KDA_O_PROJ_LAST,
             layer_idx,
@@ -41765,6 +43527,8 @@ impl PrefillEngine {
                 index_head_dim: registration.index_head_dim,
                 mla_num_heads: mla.num_heads,
                 mla_ckv_cache_dim: mla.ckv_cache_dim,
+                mla_qk_rope_dim: mla.qk_rope_dim,
+                mla_v_head_dim: mla.v_head_dim,
             };
             if let Some(expected) = geometry {
                 if expected != current {
@@ -41793,6 +43557,8 @@ impl PrefillEngine {
                 index_head_dim: indexer.index_head_dim,
                 mla_num_heads: 0,
                 mla_ckv_cache_dim: 0,
+                mla_qk_rope_dim: 0,
+                mla_v_head_dim: 0,
             };
             if let Some(expected) = geometry {
                 if expected != current {
@@ -41808,6 +43574,21 @@ impl PrefillEngine {
         Ok(geometry)
     }
 
+    fn common_mla_minimum_transient_workspace_bytes(&self,geometry:DsaPrefillWorkspaceGeometry)->Result<usize,String>{
+        if self.common_mla.is_none(){return Ok(0)}
+        let mut maximum=0;
+        for layer in &self.layer_weights{let Some(mla)=&layer.mla_prefill else{continue};if layer.dsa_prefill.is_none(){continue}
+            let g=crate::stable_mla_path::Geometry{heads:mla.num_heads,ccd:mla.ckv_cache_dim,rope:mla.qk_rope_dim,values:mla.v_head_dim,slots:geometry.output_topk,codec:match self.kv_format{7=>crate::stable_mla_ops::Codec::K6,9=>crate::stable_mla_ops::Codec::K4,_=>return Err("common MLA requires actual K4/K6 cache".into())}};
+            let one=g.work_elements(1)?;let elements=one[0].checked_add(one[1].max(one[5])).and_then(|n|n.checked_add(one[2])).and_then(|n|n.checked_add(one[3])).ok_or("common MLA minimum row extent overflow")?;
+            let bytes=elements.checked_mul(4).and_then(|n|n.checked_add(3*(DSA_MLA_WORKSPACE_ALIGNMENT_BYTES-1))).ok_or("common MLA minimum workspace overflow")?;maximum=maximum.max(bytes);
+        }Ok(maximum)
+    }
+
+    fn selected_mla_workspace_row_elements(&self,geometry:DsaPrefillWorkspaceGeometry)->Result<(usize,usize,usize),String>{
+        let canonical=geometry.mla_num_heads.checked_mul(geometry.mla_ckv_cache_dim).ok_or("MLA scratch geometry overflow")?;let mut elements=(canonical,canonical,0);
+        if self.ordered_mla_f32.is_some(){for layer in &self.layer_weights{if let Some(mla)=&layer.mla_prefill{if layer.dsa_prefill.is_none(){continue;}let widths=crate::mla_f32::workspace_row_elements(mla.num_heads,mla.ckv_cache_dim,mla.q_lora_rank,mla.kv_lora_rank,mla.qk_nope_dim,mla.qk_rope_dim)?;elements.0=elements.0.max(widths.0);elements.1=elements.1.max(widths.1);if self.common_mla.is_some(){elements.2=elements.2.max(mla.num_heads.checked_mul(mla.qk_rope_dim).ok_or("MLA rotary row overflow")?);}}}}
+        Ok(elements)
+    }
     fn minimum_dsa_prefill_workspace_bytes(
         &self,
         chunk_rows: usize,
@@ -41830,6 +43611,9 @@ impl PrefillEngine {
             score_buffer_count,
             geometry.causal_context_row_span,
         )?;
+        let minimum_transient_workspace_bytes = one_row_plan
+            .workspace_row_bytes
+            .max(dsa_mla_minimum_transient_workspace_bytes(geometry)?).max(self.common_mla_minimum_transient_workspace_bytes(geometry)?);
         let query_bytes = chunk_rows
             .checked_mul(geometry.index_n_heads)
             .and_then(|value| value.checked_mul(geometry.index_head_dim))
@@ -41839,16 +43623,15 @@ impl PrefillEngine {
             .checked_mul(geometry.output_topk)
             .and_then(|value| value.checked_mul(std::mem::size_of::<i32>()))
             .ok_or_else(|| "DSA prefill selected workspace byte size overflow".to_string())?;
+        let widths=self.selected_mla_workspace_row_elements(geometry)?;
         let mla_bytes = chunk_rows
-            .checked_mul(geometry.mla_num_heads)
-            .and_then(|value| value.checked_mul(geometry.mla_ckv_cache_dim))
+            .checked_mul(widths.0.checked_add(widths.1).and_then(|n|n.checked_add(widths.2)).ok_or("MLA combined row widths overflow")?)
             .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
-            .and_then(|value| value.checked_mul(2))
             .ok_or_else(|| "DSA prefill MLA workspace byte size overflow".to_string())?;
         query_bytes
             .checked_add(selected_bytes)
             .and_then(|value| value.checked_add(mla_bytes))
-            .and_then(|value| value.checked_add(one_row_plan.workspace_row_bytes))
+            .and_then(|value| value.checked_add(minimum_transient_workspace_bytes))
             .ok_or_else(|| "DSA prefill minimum workspace byte size overflow".to_string())
     }
 
@@ -41875,6 +43658,43 @@ impl PrefillEngine {
             }
         }
         Ok(low)
+    }
+
+    fn dsa_retry_chunk_cap_for_measured_deficit(
+        &self,
+        current_chunk_rows: usize,
+        prompt_tokens: usize,
+        measured_deficit_bytes: usize,
+    ) -> Result<Option<usize>, String> {
+        if measured_deficit_bytes == 0 || current_chunk_rows <= 128 {
+            return Ok(None);
+        }
+        let current_required = estimate_scratch_vram_for_prompt(
+            &self.config,
+            current_chunk_rows,
+            prompt_tokens,
+        )
+        .checked_add(
+            self.minimum_dsa_prefill_workspace_bytes(current_chunk_rows, prompt_tokens)?,
+        )
+        .ok_or_else(|| "DSA retry combined workspace size overflow".to_string())?;
+        let retry_budget = current_required
+            .checked_sub(measured_deficit_bytes)
+            .ok_or_else(|| {
+                format!(
+                    "DSA measured deficit {} exceeds current combined workspace {}",
+                    measured_deficit_bytes, current_required,
+                )
+            })?;
+        let retry_cap = self.cap_chunk_for_dsa_prefill_workspace(
+            current_chunk_rows.saturating_sub(1),
+            prompt_tokens,
+            retry_budget,
+        )?;
+        if retry_cap < 128 {
+            return Ok(None);
+        }
+        Ok(Some(clean_runtime_chunk_tokens(prompt_tokens, retry_cap)))
     }
 
     fn configure_dsa_prefill_workspace(
@@ -41920,6 +43740,7 @@ impl PrefillEngine {
             geometry.mla_num_heads,
             geometry.mla_ckv_cache_dim,
             score_workspace_capacity_bytes,
+            self.selected_mla_workspace_row_elements(geometry)?,
         )?;
         self.dsa_prefill_workspace = Some(workspace);
         Ok(plan)
@@ -41930,7 +43751,7 @@ impl PrefillEngine {
         chunk_rows: usize,
         context_end: usize,
         required_free_floor_bytes: usize,
-    ) -> Result<Option<DsaPrefillSelectionPlan>, String> {
+    ) -> Result<Option<DsaPrefillSelectionPlan>, DsaPrefillWorkspaceConfigureError> {
         let Some(geometry) = self.dsa_prefill_workspace_geometry()? else {
             return Ok(None);
         };
@@ -41947,9 +43768,12 @@ impl PrefillEngine {
             },
             geometry.causal_context_row_span,
         )?;
+        let minimum_transient_workspace_bytes = minimum_plan
+            .workspace_row_bytes
+            .max(dsa_mla_minimum_transient_workspace_bytes(geometry)?).max(self.common_mla_minimum_transient_workspace_bytes(geometry)?);
         let minimum_total = self.minimum_dsa_prefill_workspace_bytes(chunk_rows, context_end)?;
         let fixed_bytes = minimum_total
-            .checked_sub(minimum_plan.workspace_row_bytes)
+            .checked_sub(minimum_transient_workspace_bytes)
             .ok_or_else(|| "DSA prefill fixed workspace size underflow".to_string())?;
         let mut observed_allocation_overhead = 0usize;
         loop {
@@ -41966,15 +43790,72 @@ impl PrefillEngine {
             let score_workspace_capacity = headroom
                 .saturating_sub(fixed_bytes)
                 .saturating_sub(observed_allocation_overhead);
-            if score_workspace_capacity < minimum_plan.workspace_row_bytes {
-                return Err(format!(
-                    "DSA prefill workspace cannot preserve measured free-VRAM floor: free={} bytes floor={} bytes fixed={} bytes observed_alloc_overhead={} bytes minimum_score_workspace={} bytes",
+            if score_workspace_capacity < minimum_transient_workspace_bytes {
+                let deficit_bytes = dsa_prefill_workspace_deficit_bytes(
                     free_before,
                     required_free_floor_bytes,
                     fixed_bytes,
                     observed_allocation_overhead,
-                    minimum_plan.workspace_row_bytes,
-                ));
+                    minimum_transient_workspace_bytes,
+                )?;
+                if deficit_bytes > 0
+                    && self.prefill_hcs_store_addr != 0
+                    && self.hcs_cached_expert_count() > 0
+                {
+                    let (evicted, freed_mb, cache_fast_snapshot, num_experts_per_layer) = unsafe {
+                        let store = &mut *(self.prefill_hcs_store_addr
+                            as *mut crate::gpu_decode::GpuDecodeStore);
+                        let (evicted, freed_mb) = store
+                            .hcs_evict_additional_for_prefill(deficit_bytes, context_end);
+                        let (cache_fast, ne) = store.export_hcs_snapshot();
+                        (evicted, freed_mb, cache_fast.to_vec(), ne)
+                    };
+                    if evicted > 0 {
+                        self.update_hcs_snapshot(&cache_fast_snapshot, num_experts_per_layer);
+                        unsafe {
+                            cuda_sys::lib().cuCtxSynchronize();
+                        }
+                        if vram_ledger_enabled() {
+                            let mut free_after_evict = 0usize;
+                            let mut total_after_evict = 0usize;
+                            unsafe {
+                                cuda_sys::lib().cuMemGetInfo_v2(
+                                    &mut free_after_evict,
+                                    &mut total_after_evict,
+                                );
+                            }
+                            vram_ledger_log!(
+                                "VRAM LEDGER dsa_workspace_extra_hcs_evict prompt_tokens={} requested_deficit_mb={:.1} evicted={} freed_mb={:.1} free_before_mb={:.1} free_after_mb={:.1} required_floor_mb={:.1} fixed_workspace_mb={:.1} observed_alloc_overhead_mb={:.1} minimum_score_workspace_mb={:.1} hcs_cached_after={}",
+                                context_end,
+                                deficit_bytes as f64 / (1024.0 * 1024.0),
+                                evicted,
+                                freed_mb,
+                                free_before as f64 / (1024.0 * 1024.0),
+                                free_after_evict as f64 / (1024.0 * 1024.0),
+                                required_free_floor_bytes as f64 / (1024.0 * 1024.0),
+                                fixed_bytes as f64 / (1024.0 * 1024.0),
+                                observed_allocation_overhead as f64 / (1024.0 * 1024.0),
+                                minimum_transient_workspace_bytes as f64 / (1024.0 * 1024.0),
+                                self.hcs_cached_expert_count(),
+                            );
+                        }
+                        continue;
+                    }
+                }
+                return Err(
+                    DsaPrefillWorkspaceConfigureError::InsufficientLiveVram {
+                        deficit_bytes,
+                        detail: format!(
+                            "DSA prefill workspace cannot preserve measured free-VRAM floor: free={} bytes floor={} bytes fixed={} bytes observed_alloc_overhead={} bytes minimum_score_workspace={} bytes measured_deficit={} bytes",
+                            free_before,
+                            required_free_floor_bytes,
+                            fixed_bytes,
+                            observed_allocation_overhead,
+                            minimum_transient_workspace_bytes,
+                            deficit_bytes,
+                        ),
+                    },
+                );
             }
             let plan = self.configure_dsa_prefill_workspace(
                 chunk_rows,
@@ -41997,7 +43878,7 @@ impl PrefillEngine {
             let actual_allocation = free_before.saturating_sub(free_after);
             let next_overhead = actual_allocation.saturating_sub(theoretical_allocation);
             if next_overhead <= observed_allocation_overhead {
-                return Err(format!(
+                return Err(DsaPrefillWorkspaceConfigureError::Fatal(format!(
                     "DSA prefill workspace allocation did not converge to the measured free-VRAM floor: free_before={} free_after={} floor={} theoretical={} actual={} observed_overhead={}",
                     free_before,
                     free_after,
@@ -42005,7 +43886,7 @@ impl PrefillEngine {
                     theoretical_allocation,
                     actual_allocation,
                     observed_allocation_overhead,
-                ));
+                )));
             }
             observed_allocation_overhead = next_overhead;
         }
@@ -42034,7 +43915,6 @@ impl PrefillEngine {
     ) -> Result<(), String> {
         const CUDA_WARP_SIZE: usize = 32;
         const MLA_BLOCK_ELEMENTS: usize = 16;
-        const BUFFER_ALIGNMENT: usize = 256;
         let mla_block_bytes = native_mla_block_bytes(self.kv_format)?;
         let score_kernel = native_mla_kernel_for_format(
             self.kv_format,
@@ -42097,11 +43977,10 @@ impl PrefillEngine {
             .ok_or_else(|| {
                 format!("DSA MLA grouped-exact layer {layer_idx} inv-sum bytes overflow")
             })?;
-        let bytes_per_row = score_bytes_per_row
-            .checked_mul(2)
-            .and_then(|value| value.checked_add(inv_bytes_per_row))
-            .ok_or_else(|| format!("DSA MLA grouped-exact layer {layer_idx} tile row overflow"))?;
-        let alignment_reserve = 2 * (BUFFER_ALIGNMENT - 1);
+        let (bytes_per_row, alignment_reserve) = dsa_mla_grouped_exact_workspace_row_layout(
+            num_heads,
+            selected.selected_per_row,
+        )?;
         let capacity_bytes = workspace.selection_workspace_capacity_bytes;
         let tile_capacity = capacity_bytes
             .saturating_sub(alignment_reserve)
@@ -42115,8 +43994,8 @@ impl PrefillEngine {
         }
         let align_up = |value: usize| -> Option<usize> {
             value
-                .checked_add(BUFFER_ALIGNMENT - 1)
-                .map(|aligned| aligned & !(BUFFER_ALIGNMENT - 1))
+                .checked_add(DSA_MLA_WORKSPACE_ALIGNMENT_BYTES - 1)
+                .map(|aligned| aligned & !(DSA_MLA_WORKSPACE_ALIGNMENT_BYTES - 1))
         };
         let score_bytes = tile_capacity
             .checked_mul(score_bytes_per_row)
@@ -42437,6 +44316,68 @@ impl PrefillEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Common measured F32 attention/WVC, borrowing real request and model owners.
+    fn run_common_mla_prefill(&self,layer_idx:usize,mla:&MlaPrefillDescriptor,selected:DsaPrefillSelectedIndexView,rows:usize)->Result<(),String>{
+        use crate::{stable_mla_gemm::{Span,Element},stable_mla_ops::{Gather,Codec},stable_mla_path::{Geometry,Inputs,Work},sequence_external_owner::BorrowedGpuRegion};
+        let shared=self.common_mla.as_ref().ok_or("common MLA bank not installed")?;
+        let diagnostic=if let Some(invocation)=self.matched_prefill_invocation.as_ref(){
+            crate::matched_prefill_capture::target(Some(invocation),"mla_common_stages",layer_idx,invocation.logical_tokens(),None)?
+        }else{None};
+        let diagnostic_limit=diagnostic.as_ref().map(|_|crate::matched_probe::capture_maximum_bytes("mla_common_stages",layer_idx,self.matched_prefill_invocation.as_ref().map(|i|i.logical_tokens()))).transpose()?;
+        let mut bank=shared.lock().map_err(|_|"common MLA bank is poisoned")?;
+        let owner=bank.layer(layer_idx)?;
+        let request=self.dsa_prefill_workspace.as_ref().ok_or("common MLA actual request workspace absent")?;
+        if selected.ptr!=*request.d_selected_indices.device_ptr()||selected.rows!=rows{return Err("common MLA selected view differs from actual request allocation".into())}
+        let g=Geometry{heads:mla.num_heads,ccd:mla.ckv_cache_dim,rope:mla.qk_rope_dim,values:mla.v_head_dim,slots:selected.selected_per_row,codec:match self.kv_format{7=>Codec::K6,9=>Codec::K4,_=>return Err("common MLA requires actual K4/K6 cache".into())}};
+        let one=g.work_elements(1)?;
+        let widths=[one[0],one[1].max(one[5]),one[2],one[3]];
+        let row_bytes=widths.iter().try_fold(0usize,|n,v|n.checked_add(*v).ok_or("common MLA transient width overflow"))?.checked_mul(4).ok_or("common MLA transient bytes overflow")?;
+        let alignment=DSA_MLA_WORKSPACE_ALIGNMENT_BYTES;
+        let reserve=(widths.len()-1).checked_mul(alignment-1).ok_or("common MLA alignment overflow")?;
+        let capacity=request.selection_workspace_capacity_bytes;
+        let tile_rows=capacity.saturating_sub(reserve).checked_div(row_bytes).ok_or("common MLA empty row size")?.min(rows);
+        if tile_rows==0{return Err(format!("actual common MLA workspace {capacity} cannot hold one {row_bytes}-byte row plus alignment {reserve}"))}
+        let mut offsets=[0usize;4];let mut extent=0usize;
+        for (index,width) in widths.iter().enumerate(){if index>0{extent=extent.checked_add(alignment-1).ok_or("common MLA alignment overflow")?&!(alignment-1)}offsets[index]=extent;extent=extent.checked_add(tile_rows.checked_mul(*width).and_then(|n|n.checked_mul(4)).ok_or("common MLA tile extent overflow")?).ok_or("common MLA plane extent overflow")?;}
+        if extent>capacity{return Err("common MLA tile layout exceeds actual retained allocation".into())}
+        let temporary=BorrowedGpuRegion::retained(&self.device,&request.d_selection_workspace)?;
+        let absorbed=BorrowedGpuRegion::retained(&self.device,&request.d_mla_q_absorbed)?;
+        let attention=BorrowedGpuRegion::retained(&self.device,&request.d_mla_attention)?;
+        let indices=BorrowedGpuRegion::retained(&self.device,&request.d_selected_indices)?;
+        let positions=BorrowedGpuRegion::retained(&self.device,&self.scratch.d_positions)?;
+        let final_output=BorrowedGpuRegion::retained(&self.device,&self.scratch.d_attn_out)?;
+        let gemm_workspace=BorrowedGpuRegion::retained(&self.device,&self.scratch.d_moe_accum)?;
+        let rope_owner=request.d_mla_packed_rope.as_ref().map(|b|BorrowedGpuRegion::retained(&self.device,b)).transpose()?;
+        let rope_span=rope_owner.as_ref().map(|o|unsafe{Span::region(o,0,rows*g.heads*g.rope*4,Element::F32)}).transpose()?;
+        unsafe{
+            if let Some(packed)=&rope_span{let source=Span::region(&attention,0,rows*g.heads*(mla.qk_nope_dim+g.rope)*4,Element::F32)?;bank.ops.pack_rope(&source,packed,rows,g.heads,mla.qk_nope_dim,g.rope,self.stream)?;}
+            let input=Inputs{q_abs:Span::region(&absorbed,0,rows*g.heads*g.ccd*4,Element::F32)?,q_rope:rope_span,ckv:owner.compressed_view()?,kpe:owner.positional_view()?,selected:Span::region(&indices,0,rows*g.slots*4,Element::I32)?,positions:Span::region(&positions,0,rows*4,Element::I32)?,wvc:owner.weight_view()?};
+            let workspace=Span::region(&gemm_workspace,0,bank.workspace_capacity,Element::Bytes)?;
+            let mut row=0;while row<rows{let count=tile_rows.min(rows-row);let e=g.work_elements(count)?;
+                let query=Span::region(&temporary,offsets[1],count*widths[1]*4,Element::F32)?;
+                let projected=Span::region(&temporary,offsets[1],e[5]*4,Element::F32)?;
+                let work=Work{gathered:Span::region(&temporary,offsets[0],e[0]*4,Element::F32)?,query,scores:Span::region(&temporary,offsets[2],e[2]*4,Element::F32)?,weights:Span::region(&temporary,offsets[3],e[3]*4,Element::F32)?,attention:Span::region(&attention,row*g.heads*g.ccd*4,e[4]*4,Element::F32)?,projected,output:Span::region(&final_output,row*g.heads*g.values*2,e[6]*2,Element::Bf16)?};
+                let gather=Gather{row_start:row,rows:count,heads:g.heads,ccd:g.ccd,rope:g.rope,slots:g.slots,context:selected.context_end,q_abs_row_stride:g.heads*g.ccd,q_abs_head_stride:g.ccd,q_rope_row_stride:g.heads*g.rope,q_rope_head_stride:g.rope,codec:g.codec};
+                bank.prepare(layer_idx,g,gather,&input,&work,Some(&workspace),mla.sm_scale,self.stream)?;
+                if let (Some(target),Some(maximum))=(&diagnostic,diagnostic_limit){
+                    let absolute_start=self.active_prefill_chunk_start.checked_add(row).ok_or("MLA diagnostic tile start overflow")?;
+                    let end=absolute_start.checked_add(count).ok_or("MLA diagnostic tile end overflow")?;
+                    if target.row>=absolute_start&&target.row<end{
+                        target.write("common-geometry.json",&serde_json::to_vec_pretty(&serde_json::json!({"layer":layer_idx,"absolute_row":target.row,"tile_start":absolute_start,"tile_rows":count,"heads":g.heads,"ccd":g.ccd,"rope":g.rope,"values":g.values,"slots":g.slots,"codec":self.kv_format,"context":gather.context,"maximum_bytes_per_stage":maximum,"diagnostic_gpu_allocation_bytes":0})).map_err(|e|e.to_string())?)?;
+                        let observer=|stage:&str,span:&Span<'_>,layout:crate::matched_mla_stage::Layout|{
+                            let observed_row=if stage=="wvc_weights"{0}else{target.row-absolute_start};
+                            let base=if stage=="wvc_weights"{target.row}else{absolute_start};
+                            crate::matched_mla_stage::prefill(target,stage,span,layout,observed_row,base,maximum,self.stream)
+                        };
+                        bank.enqueue_observed(g,gather,&input,&work,Some(&workspace),mla.sm_scale,self.stream,Some(&observer))?;
+                    }else{bank.enqueue(g,gather,&input,&work,Some(&workspace),mla.sm_scale,self.stream)?;}
+                }else{bank.enqueue(g,gather,&input,&work,Some(&workspace),mla.sm_scale,self.stream)?;}
+                row+=count;
+            }
+        }
+        Ok(())
+    }
+
     fn run_dsa_mla_gathered_gemm_attention(
         &self,
         layer_idx: usize,
@@ -42520,29 +44461,12 @@ impl PrefillEngine {
         let output_elements_per_row = num_heads.checked_mul(ckv_cache_dim).ok_or_else(|| {
             format!("DSA MLA gathered-GEMM layer {layer_idx} output row overflow")
         })?;
-        let bytes_per_row = gathered_elements_per_row
-            .checked_mul(std::mem::size_of::<f32>())
-            .and_then(|value| {
-                query_elements_per_row
-                    .checked_mul(std::mem::size_of::<f32>())
-                    .and_then(|bytes| value.checked_add(bytes))
-            })
-            .and_then(|value| {
-                score_elements_per_row
-                    .checked_mul(std::mem::size_of::<f32>())
-                    .and_then(|bytes| value.checked_add(bytes))
-            })
-            .and_then(|value| {
-                score_elements_per_row
-                    .checked_mul(std::mem::size_of::<f32>())
-                    .and_then(|bytes| value.checked_add(bytes))
-            })
-            .ok_or_else(|| {
-                format!("DSA MLA gathered-GEMM layer {layer_idx} tile row byte overflow")
-            })?;
-        const BUFFER_ALIGNMENT: usize = 256;
-        const ALIGNED_BOUNDARIES: usize = 3;
-        let alignment_reserve = ALIGNED_BOUNDARIES * (BUFFER_ALIGNMENT - 1);
+        let (bytes_per_row, alignment_reserve) = dsa_mla_gathered_gemm_workspace_row_layout(
+            num_heads,
+            selected.selected_per_row,
+            ckv_cache_dim,
+            rope_dim,
+        )?;
         let capacity_bytes = workspace.selection_workspace_capacity_bytes;
         let tile_capacity = capacity_bytes
             .saturating_sub(alignment_reserve)
@@ -42562,8 +44486,8 @@ impl PrefillEngine {
         let mut gathered_tile_count = 0usize;
         let align_up = |value: usize| -> Option<usize> {
             value
-                .checked_add(BUFFER_ALIGNMENT - 1)
-                .map(|aligned| aligned & !(BUFFER_ALIGNMENT - 1))
+                .checked_add(DSA_MLA_WORKSPACE_ALIGNMENT_BYTES - 1)
+                .map(|aligned| aligned & !(DSA_MLA_WORKSPACE_ALIGNMENT_BYTES - 1))
         };
         let gathered_bytes = tile_capacity
             .checked_mul(gathered_elements_per_row)
@@ -43157,14 +45081,14 @@ impl PrefillEngine {
         let output_elements_per_row = num_heads
             .checked_mul(value_head_dim)
             .ok_or_else(|| format!("DSA MLA WVC GEMM layer {layer_idx} output row overflow"))?;
-        let bytes_per_row = input_elements_per_row
-            .checked_add(output_elements_per_row)
-            .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
-            .ok_or_else(|| format!("DSA MLA WVC GEMM layer {layer_idx} tile row overflow"))?;
-        const BUFFER_ALIGNMENT: usize = 256;
+        let (bytes_per_row, alignment_reserve) = dsa_mla_wvc_workspace_row_layout(
+            num_heads,
+            ckv_cache_dim,
+            value_head_dim,
+        )?;
         let capacity_bytes = workspace.selection_workspace_capacity_bytes;
         let tile_capacity = capacity_bytes
-            .saturating_sub(BUFFER_ALIGNMENT - 1)
+            .saturating_sub(alignment_reserve)
             .checked_div(bytes_per_row)
             .unwrap_or(0)
             .min(rows);
@@ -43173,7 +45097,7 @@ impl PrefillEngine {
                 "DSA MLA WVC GEMM layer {layer_idx} workspace cannot hold one tile row: capacity={} bytes required_per_row={} alignment_reserve={}",
                 capacity_bytes,
                 bytes_per_row,
-                BUFFER_ALIGNMENT - 1,
+                alignment_reserve,
             ));
         }
         let packed_bytes = tile_capacity
@@ -43181,8 +45105,8 @@ impl PrefillEngine {
             .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
             .ok_or_else(|| format!("DSA MLA WVC GEMM layer {layer_idx} input tile overflow"))?;
         let output_offset = packed_bytes
-            .checked_add(BUFFER_ALIGNMENT - 1)
-            .map(|value| value & !(BUFFER_ALIGNMENT - 1))
+            .checked_add(DSA_MLA_WORKSPACE_ALIGNMENT_BYTES - 1)
+            .map(|value| value & !(DSA_MLA_WORKSPACE_ALIGNMENT_BYTES - 1))
             .ok_or_else(|| format!("DSA MLA WVC GEMM layer {layer_idx} output offset overflow"))?;
         let output_bytes = tile_capacity
             .checked_mul(output_elements_per_row)
@@ -43428,7 +45352,16 @@ impl PrefillEngine {
         rows: usize,
         chunk_start: usize,
         q_lora_residual_ptr: u64,
+        observed: Option<&crate::matched_probe::Target>,
     ) -> Result<(), String> {
+        let mut index_target=if let Some(inv)=self.matched_prefill_invocation.as_ref(){crate::matched_prefill_capture::target(Some(inv),"indexer_common_stages",layer_idx,inv.logical_tokens(),None)?}else{None};
+        if let Some(t)=index_target.as_mut(){
+            let end=chunk_start.checked_add(rows).ok_or("index observed chunk overflow")?;
+            if t.row<chunk_start||t.row>=end{index_target=None;}else{t.row-=chunk_start;}
+        }
+        if observed.is_some()&&index_target.is_some(){return Err("two index observer contracts selected for one owner".into())}
+        let minimal=index_target.is_some();
+        let observed=if minimal{index_target.as_ref()}else{observed};
         let layer = self
             .layer_weights
             .get(layer_idx)
@@ -43497,16 +45430,72 @@ impl PrefillEngine {
                 head_weight_elements,
             ));
         }
-        self.populate_dsa_prefill_owner_key_cache(layer_idx, chunk_start, rows)?;
+        self.populate_dsa_prefill_owner_key_cache(layer_idx, chunk_start, rows,observed)?;
         let raw_queries_ptr = *self.scratch.d_q.device_ptr();
         let head_weights_ptr = *self.scratch.d_scratch1.device_ptr();
-        self.dsa_owner_projection_gemm(q_lora_residual_ptr, &owner.wq_b, raw_queries_ptr, rows)?;
+        self.dsa_owner_query_projection_gemm(q_lora_residual_ptr, &owner.wq_b, raw_queries_ptr, rows)?;
         self.dsa_owner_projection_gemm(
             *self.scratch.d_hidden.device_ptr(),
             &owner.weights_proj,
             head_weights_ptr,
             rows,
         )?;
+        if let Some(target)=observed.filter(|_|!minimal) {
+            if target.row>=rows {return Err("index operands observation requires admitted chunk row".into());}
+            let prefix=chunk_start.checked_add(target.row).and_then(|v|v.checked_add(1)).ok_or("index observed causal prefix overflow")?;
+            let width=registration.index_n_heads.checked_mul(registration.index_head_dim).ok_or("index observed query width overflow")?;
+            crate::mla_probe::row(target,"indexer-hidden.bf16",*self.scratch.d_hidden.device_ptr(),target.row,self.config.hidden_size,2,self.stream)?;
+            crate::mla_probe::row(target,"indexer-lora.bf16",q_lora_residual_ptr,target.row,owner.wq_b.k,2,self.stream)?;
+            crate::mla_probe::row(target,"indexer-raw-query.bf16",raw_queries_ptr,target.row,width,2,self.stream)?;
+            crate::mla_probe::row(target,"indexer-head-weights.bf16",head_weights_ptr,target.row,registration.index_n_heads,2,self.stream)?;
+            crate::mla_probe::block(target,"indexer-key-prefix.bf16",owner.key_cache_ptr,prefix.checked_mul(registration.index_head_dim).ok_or("index observed key prefix extent overflow")?,2,self.stream)?;
+            for (name,weight) in [("wq_b",&owner.wq_b),("wk",&owner.wk),("weights_proj",&owner.weights_proj)] {
+                crate::mla_probe::block(target,&format!("indexer-weight-{name}.bf16"),weight.ptr,weight.n.checked_mul(weight.k).ok_or("index observed weight extent overflow")?,2,self.stream)?;
+            }
+            crate::mla_probe::block(target,"indexer-norm-weight.bf16",owner.norm_weight_ptr,registration.index_head_dim,2,self.stream)?;
+            crate::mla_probe::block(target,"indexer-norm-bias.bf16",owner.norm_bias_ptr,registration.index_head_dim,2,self.stream)?;
+            crate::mla_probe::row(target,"indexer-position.i32",*self.scratch.d_positions.device_ptr(),target.row,1,4,self.stream)?;
+            if registration.qk_rope_head_dim>0 {
+                crate::mla_probe::row(target,"indexer-rope-cos.f32",self.rope_cos_ptr,prefix-1,registration.qk_rope_head_dim/2,4,self.stream)?;
+                crate::mla_probe::row(target,"indexer-rope-sin.f32",self.rope_sin_ptr,prefix-1,registration.qk_rope_head_dim/2,4,self.stream)?;
+            }
+            let score_prefix=if registration.index_kpool_compress {crate::mla_probe::causal_score_count(prefix,registration.index_kpool)?}else{prefix};
+            if registration.index_kpool_compress {
+                if owner.index_kpool!=registration.index_kpool || owner.pool_key_cache_ptr==0 || owner.gate_cache_ptr==0 || owner.kpool_ape_ptr==0 {return Err("actual observed pooled index resources invalid".into());}
+                crate::mla_probe::logical_block(target,"indexer-pool-key-prefix.bf16",owner.pool_key_cache_ptr,score_prefix.checked_mul(registration.index_head_dim).ok_or("observed pooled index prefix overflow")?,2,self.stream)?;
+                crate::mla_probe::block(target,"indexer-gate-prefix.bf16",owner.gate_cache_ptr,prefix.checked_mul(registration.index_head_dim).ok_or("observed index gate prefix overflow")?,2,self.stream)?;
+                crate::mla_probe::block(target,"indexer-pool-ape.bf16",owner.kpool_ape_ptr,registration.index_kpool.checked_mul(registration.index_head_dim).ok_or("observed index APE extent overflow")?,2,self.stream)?;
+                let gate=owner.kpool_gate.as_ref().ok_or("actual observed index gate weight absent")?;
+                crate::mla_probe::block(target,"indexer-weight-kpool_gate.bf16",gate.ptr,gate.n.checked_mul(gate.k).ok_or("observed index gate matrix overflow")?,2,self.stream)?;
+                crate::mla_probe::row(target,"indexer-raw-gate.bf16",owner.gate_cache_ptr,prefix-1,registration.index_head_dim,2,self.stream)?;
+            }
+            target.write("indexer-operands.json",serde_json::to_vec_pretty(&serde_json::json!({"path":"actual_prefill_owner","chunk_start":chunk_start,"chunk_rows":rows,"local_row":target.row,"absolute_row":prefix-1,"prefix":prefix,"score_prefix":score_prefix,"pooled":registration.index_kpool_compress,"pool_ratio":registration.index_kpool,"always_select_tail":registration.index_kpool_always_select_tail,"score_topk":workspace.configured_topk,"raw_output_topk":workspace.output_topk,"scoring_key_file":if registration.index_kpool_compress{"indexer-pool-key-prefix.bf16"}else{"indexer-key-prefix.bf16"},"heads":registration.index_n_heads,"head_dim":registration.index_head_dim,"rope_dim":registration.qk_rope_head_dim,"layer_norm_eps":owner.layer_norm_eps,"projection_shapes":{"wq_b":[owner.wq_b.n,owner.wq_b.k],"wk":[owner.wk.n,owner.wk.k],"weights_proj":[owner.weights_proj.n,owner.weights_proj.k]},"projection_operands":"raw BF16 consumed by actual projection call; no synthetic matrix or dtype reinterpretation","device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?.as_slice())?;
+        }
+        if minimal{
+            let target=observed.ok_or("minimal index observer missing")?;
+            let prefix=chunk_start.checked_add(target.row).and_then(|n|n.checked_add(1)).ok_or("index observed prefix overflow")?;
+            let score_prefix=crate::mla_probe::causal_score_count(prefix,if registration.index_kpool_compress{registration.index_kpool}else{1})?;
+            let limit=crate::matched_probe::capture_maximum_bytes("indexer_common_stages",layer_idx,self.matched_prefill_invocation.as_ref().map(|i|i.logical_tokens()))?;
+            let key_elements=score_prefix.checked_mul(registration.index_head_dim).ok_or("index observed key extent overflow")?;
+            if key_elements.checked_mul(2).map_or(true,|n|n>limit)||registration.index_n_heads.checked_mul(registration.index_head_dim).and_then(|n|n.checked_mul(2)).map_or(true,|n|n>limit)||score_prefix.checked_mul(4).map_or(true,|n|n>limit){return Err("index prefill observations exceed explicit byte bound".into())}
+            if self.ordered_mla_f32.is_none()||owner.wq_b.k!=registration.q_lora_rank||owner.wq_b.n!=registration.index_n_heads.checked_mul(registration.index_head_dim).ok_or("index query observed rows overflow")?{return Err("index query observation requires actual common normalized latent and registered matrix".into())}
+            let weight_elements=owner.wq_b.n.checked_mul(owner.wq_b.k).ok_or("observed query weight extent overflow")?;
+            let input_f32_bytes=owner.wq_b.k.checked_mul(4).ok_or("observed query input extent overflow")?;
+            let hidden_bytes=self.config.hidden_size.checked_mul(2).ok_or("observed query hidden extent overflow")?;
+            if weight_elements.checked_mul(2).map_or(true,|n|n>limit)||input_f32_bytes>limit||hidden_bytes>limit{return Err("query projector observation exceeds explicit byte bound".into())}
+            let latent=self.dsa_prefill_workspace.as_ref().ok_or("actual observed query latent owner absent")?;
+            crate::mla_probe::row(target,"indexer-query-input.bf16",q_lora_residual_ptr,target.row,owner.wq_b.k,2,self.stream)?;
+            crate::mla_probe::row(target,"indexer-query-input.f32",*latent.d_mla_q_absorbed.device_ptr(),target.row,owner.wq_b.k,4,self.stream)?;
+            crate::mla_probe::row(target,"indexer-hidden.bf16",*self.scratch.d_hidden.device_ptr(),target.row,self.config.hidden_size,2,self.stream)?;
+            crate::mla_probe::row(target,"indexer-raw-query.bf16",raw_queries_ptr,target.row,owner.wq_b.n,2,self.stream)?;
+            crate::mla_probe::block(target,"indexer-query-weights.bf16",owner.wq_b.ptr,weight_elements,2,self.stream)?;
+            let mut math_mode=0u32;
+            let status=unsafe{cublas_sys::lib().cublasGetMathMode(self.cublas_handle,(&mut math_mode as *mut u32).cast::<cublas_sys::cublasMath_t>())};
+            if status!=cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS{return Err(format!("query projection math-mode observation: {status:?}"))}
+            target.write("indexer-projector.json",&serde_json::to_vec_pretty(&serde_json::json!({"absolute_row":prefix-1,"chunk_start":chunk_start,"chunk_rows":rows,"local_row":target.row,"query_rank":owner.wq_b.k,"query_rows":owner.wq_b.n,"query_cols":owner.wq_b.k,"hidden":self.config.hidden_size,"rope":registration.qk_rope_head_dim,"weight_dtype":"bfloat16","input_dtype":"bfloat16","output_dtype":"bfloat16","input_f32_source":"actual still-live normalized MLA latent before KV overwrite","cublas_math_mode":math_mode as usize,"row_independent":dsa_owner_row_independent_projection_enabled()?,"projection":if self.ordered_kda_projection.is_some(){"bf16_projection_tensorcomp"}else{"native cuBLAS BF16"},"diagnostic_gpu_allocation_bytes":0})).map_err(|e|e.to_string())?)?;
+            crate::mla_probe::row(target,"indexer-head-weights.bf16",head_weights_ptr,target.row,registration.index_n_heads,2,self.stream)?;
+            crate::mla_probe::logical_block(target,"indexer-pool-key-prefix.bf16",if registration.index_kpool_compress{owner.pool_key_cache_ptr}else{owner.key_cache_ptr},key_elements,2,self.stream)?;
+        }
         let selection_timing_events = if self.gqa_timing_enabled.get()
             && !self.gqa_timing_start_event.is_null()
             && !self.gqa_timing_stop_event.is_null()
@@ -43520,6 +45509,7 @@ impl PrefillEngine {
         };
         let selection_timing = launch_dsa_prefill_selection_chunk(
             DsaPrefillSelectionKernels {
+                score_tensorcomp: self.ordered_kda_projection.as_ref().map(|bank|bank.score_kernel()).transpose()?,
                 rope_query_bf16: self.kernels.dsa_prefill_rope_query_bf16,
                 fused_scores: self.kernels.dsa_prefill_fused_scores,
                 accumulate_gemm_scores: self.kernels.dsa_prefill_accumulate_gemm_scores,
@@ -43560,7 +45550,8 @@ impl PrefillEngine {
                 })?,
             workspace,
             selection_timing_events,
-        )?;
+        observed,
+)?;
         for (source, target) in [
             (
                 DSA_PREFILL_SELECTION_TIMING_QUERY,
@@ -43640,6 +45631,22 @@ impl PrefillEngine {
         Ok(())
     }
 
+    fn observe_mla_prefill_projection(&self,t:&crate::matched_probe::Target,layer:usize,name:&str,projection:&DeepseekV4ProjectionPrefillDescriptor,input:u64,output:u64,tokens:usize,chunk_start:usize)->Result<(),String>{
+        if t.row>=tokens{return Err("MLA observed projection row outside current batch".into());}
+        let DeepseekV4ProjectionPrefillDescriptor::Hqq{tensor_name,desc}=projection else{return Err("MLA observation requires actual HQQ6 source, not a fabricated representation".into());};
+        let layout=self.ordered_kda_layout(projection)?;
+        crate::mla_probe::weights(t,&format!("{name}-weights"),&layout,serde_json::json!({"tensor_name":tensor_name,"layout":desc.layout,"packed_dtype":desc.packed_dtype,"scales_dtype":desc.scales_dtype,"zeros_dtype":desc.zeros_dtype,"tensor_bytes":desc.tensor_bytes,"actual_path":if self.ordered_mla_f32.is_some(){if name=="o"{"prefill_ordered_bf16"}else{"prefill_ordered_f32_with_bf16_cooutput"}}else{"prefill_bf16"}}),self.stream)?;
+        crate::mla_probe::row(t,&format!("{name}-input.bf16"),input,t.row,layout.cols,2,self.stream)?;
+        crate::mla_probe::row(t,&format!("{name}-output.bf16"),output,t.row,layout.rows,2,self.stream)?;
+        let actual_materialized=self.config.hqq_prefill_materialize_bf16 && self.ordered_mla_f32.is_none();
+        if actual_materialized {
+            let w=self.scratch.d_hqq_bf16_weight.as_ref().ok_or("actual MLA materialization scratch absent")?;
+            let extent=layout.rows.checked_mul(layout.cols).ok_or("MLA materialized weight extent overflow")?;
+            if w.len()<extent{return Err("actual MLA materialization scratch extent invalid".into());}
+            crate::mla_probe::block(t,&format!("{name}-materialized.bf16"),*w.device_ptr(),extent,2,self.stream)?;
+        }
+        t.write(&format!("{name}-projection.json"),serde_json::to_vec_pretty(&serde_json::json!({"layer":layer,"height":self.matched_prefill_invocation.as_ref().ok_or("observed MLA projection invocation absent")?.logical_tokens(),"chunk_end":chunk_start.checked_add(tokens).ok_or("MLA projection observed height overflow")?,"chunk_start":chunk_start,"chunk_rows":tokens,"local_row":t.row,"absolute_row":chunk_start+t.row,"tensor_name":tensor_name,"rows":layout.rows,"cols":layout.cols,"input_dtype":"bf16","output_dtype":"bf16","materialized_bf16":actual_materialized,"configured_materialized_bf16":self.config.hqq_prefill_materialize_bf16,"primary_output_dtype":if self.ordered_mla_f32.is_some() && name!="o"{"float32"}else{"bfloat16"},"captured_output_role":if self.ordered_mla_f32.is_some() && name!="o"{"real_bf16_cooutput_for_existing_consumers"}else{"primary_bf16"},"actual_materialization_capture":"only if the real materialized branch ran; require payload when true"})).map_err(|e|e.to_string())?.as_slice())
+    }
     fn forward_mla_chunked(
         &self,
         layer_idx: usize,
@@ -43891,6 +45898,7 @@ impl PrefillEngine {
             || self.scratch.d_q.len < q_elems
             || self.scratch.d_k.len < q_elems
             || self.scratch.d_v.len < v_elems
+            || self.scratch.d_attn_out.len < q_elems.max(hidden_elems)
         {
             return Err(format!(
                 "HQQ MLA layer {} scratch contract not met: scratch1={}/{} scratch2={}/{} q={}/{} k={}/{} v={}/{}",
@@ -43916,9 +45924,40 @@ impl PrefillEngine {
         let q_raw = attn_out;
         let scratch1 = *self.scratch.d_scratch1.device_ptr();
         let scratch2 = *self.scratch.d_scratch2.device_ptr();
+        // Request-owned F32 staging. All phases below are ordered on self.stream:
+        // qA -> normalized qB/index input -> qB; KV replaces qA after selection;
+        // cache finishes before absorption replaces KV; attention replaces qB last.
+        let selected_mla = if let Some(ops)=&self.ordered_mla_f32 {
+            if !sparse_dsa || qlr==0 {return Err("selected F32 MLA requires cold-admitted sparse LoRA path".into());}
+            let work=self.dsa_prefill_workspace.as_ref().ok_or("selected MLA request workspace absent")?;
+            let latent=m.checked_mul(qlr.max(kv_a_width).max(nh.checked_mul(ccd).ok_or("MLA latent width overflow")?)).ok_or("MLA latent extent overflow")?;
+            let query=m.checked_mul(q_width.max(nh.checked_mul(ccd).ok_or("MLA attention width overflow")?)).ok_or("MLA query extent overflow")?;
+            if work.d_mla_q_absorbed.len()<latent || work.d_mla_attention.len()<query{return Err("actual selected MLA F32 workspace capacity below loaded dimensions".into());}
+            Some((ops,*work.d_mla_q_absorbed.device_ptr(),*work.d_mla_attention.device_ptr()))
+        }else{None};
         let trace_position = start_pos + m - 1;
         let trace_row = m - 1;
         let trace_chunk = start_pos;
+        let mla_probe=crate::mla_probe::prefill_target(self.matched_prefill_invocation.as_ref(),"mla_prefill_operands",layer_idx,start_pos,m)?;
+        let mla_prefix_probe=crate::mla_probe::prefill_target(self.matched_prefill_invocation.as_ref(),"mla_prefix_operands",layer_idx,start_pos,m)?;
+        if let Some(t)=&mla_probe {
+            if t.row>=m||!sparse_dsa||qlr==0{return Err("MLA observation requires an admitted actual HQQ LoRA sparse chunk row".into());}
+        }
+        if let Some(t)=&mla_prefix_probe {
+            if t.row.checked_add(1)!=Some(m)||!sparse_dsa||qlr==0{return Err("MLA prefix observation requires an admitted sparse LoRA chunk last row".into());}
+            t.write("prefix-descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({"path":"prefill_prefix_only","layer":layer_idx,"height":self.matched_prefill_invocation.as_ref().ok_or("observed MLA invocation absent")?.logical_tokens(),"chunk_end":start_pos.checked_add(m).ok_or("MLA observed height overflow")?,"chunk_start":start_pos,"chunk_rows":m,"local_last_row":t.row,"absolute_last_row":start_pos+t.row,"copied_rows":m,"hidden":cfg.hidden_size,"q_lora_rank":qlr,"kv_a_width":kv_a_width,"dtype":"bf16","scope":"one layer current-chunk suffix producer arrays only; never a reconstructed global prefix","device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?.as_slice())?;
+        }
+        for t in [mla_probe.as_ref(),mla_prefix_probe.as_ref()].into_iter().flatten(){crate::mla_probe::block(t,"input-chunk-prefix.bf16",hidden,t.row.checked_add(1).and_then(|r|r.checked_mul(cfg.hidden_size)).ok_or("MLA observed prefix extent overflow")?,2,self.stream)?;}
+        if let Some(t)=&mla_probe {
+            crate::mla_probe::row(t,"input.bf16",hidden,t.row,cfg.hidden_size,2,self.stream)?;
+            crate::mla_probe::row(t,"position.i32",*self.scratch.d_positions.device_ptr(),t.row,1,4,self.stream)?;
+            crate::mla_probe::block(t,"input_norm.bf16",lw.input_norm,cfg.hidden_size,2,self.stream)?;
+            crate::mla_probe::block(t,"q_a_norm.f32",mla.q_a_norm_ptr,qlr,4,self.stream)?;
+            crate::mla_probe::block(t,"kv_a_norm.f32",mla.kv_a_norm_ptr,klr,4,self.stream)?;
+            crate::mla_probe::block(t,"w_kc.bf16",mla.w_kc_ptr,nh.checked_mul(nope).and_then(|v|v.checked_mul(ccd)).ok_or("MLA observed WKC extent overflow")?,2,self.stream)?;
+            crate::mla_probe::block(t,"w_vc.bf16",mla.w_vc_ptr,nh.checked_mul(vhd).and_then(|v|v.checked_mul(ccd)).ok_or("MLA observed WVC extent overflow")?,2,self.stream)?;
+            t.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({"path":"prefill_sparse_mla","layer":layer_idx,"height":self.matched_prefill_invocation.as_ref().ok_or("observed MLA invocation absent")?.logical_tokens(),"chunk_end":start_pos.checked_add(m).ok_or("MLA observed height overflow")?,"chunk_start":start_pos,"chunk_rows":m,"local_row":t.row,"absolute_row":start_pos+t.row,"hidden":cfg.hidden_size,"heads":nh,"kv_lora_rank":klr,"cache_dim":ccd,"nope":nope,"rope":rope,"value_dim":vhd,"q_lora_rank":qlr,"eps":cfg.rms_norm_eps,"kv_format":self.kv_format,"projection_output_dtype":if selected_mla.is_some(){"float32_with_bfloat16_cooutput"}else{"bfloat16"},"norm_input_dtype":if selected_mla.is_some(){"float32"}else{"bfloat16"},"materialize_bf16":self.config.hqq_prefill_materialize_bf16 && selected_mla.is_none(),"configured_materialize_bf16":self.config.hqq_prefill_materialize_bf16,"forcing":crate::matched_projection_transfer::forcing_label().is_some(),"device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?.as_slice())?;
+        }
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MLA_INPUT_FULL,
             layer_idx,
@@ -43953,8 +45992,16 @@ impl PrefillEngine {
         if qlr > 0 {
             let qa = mla.q_a_proj.as_ref().expect("validated q_a_proj");
             let qb = mla.q_b_proj.as_ref().expect("validated q_b_proj");
-            self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, qa, hidden, scratch1, m)?;
-            self.launch_rmsnorm_fp32w(scratch2, scratch1, mla.q_a_norm_ptr, m, qlr)?;
+            if let Some((_,latent,_))=selected_mla {unsafe{self.ordered_kda_projection.as_ref().ok_or("selected projection bank absent")?.enqueue_f32(&self.ordered_kda_layout(qa)?,hidden,scratch1,latent,m,self.stream)?;}}
+            else{self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, qa, hidden, scratch1, m)?;}
+            if let Some(t)=&mla_probe {self.observe_mla_prefill_projection(t,layer_idx,"q_a",qa,hidden,scratch1,m,start_pos)?;}
+        if let (Some(t),Some((_,latent,_)))=(&mla_probe,selected_mla){crate::mla_probe::row(t,"q_a-output.f32",latent,t.row,qlr,4,self.stream)?;}
+            for t in [mla_probe.as_ref(),mla_prefix_probe.as_ref()].into_iter().flatten(){crate::mla_probe::block(t,"q_a-chunk-prefix.bf16",scratch1,t.row.checked_add(1).and_then(|r|r.checked_mul(qlr)).ok_or("MLA observed prefix extent overflow")?,2,self.stream)?;}
+            if let Some((ops,latent,_))=selected_mla{unsafe{ops.norm(latent,mla.q_a_norm_ptr,scratch2,m,qlr,qlr,qlr,cfg.rms_norm_eps,self.stream)?;}}
+            else{self.launch_rmsnorm_fp32w(scratch2, scratch1, mla.q_a_norm_ptr, m, qlr)?;}
+            if let Some(t)=&mla_probe {crate::mla_probe::row(t,"q_norm.bf16",scratch2,t.row,qlr,2,self.stream)?;}
+        if let (Some(t),Some((_,latent,_)))=(&mla_probe,selected_mla){crate::mla_probe::row(t,"q_norm.f32",latent,t.row,qlr,4,self.stream)?;}
+            for t in [mla_probe.as_ref(),mla_prefix_probe.as_ref()].into_iter().flatten(){crate::mla_probe::block(t,"q_norm-chunk-prefix.bf16",scratch2,t.row.checked_add(1).and_then(|r|r.checked_mul(qlr)).ok_or("MLA observed prefix extent overflow")?,2,self.stream)?;}
             finish_mla_stage!(HQQ_MLA_TIMING_Q_A_NORM);
             self.record_prefill_device_trace_bf16_row(
                 PDT_LAYER_MLA_Q_LORA_NORM_LAST,
@@ -43981,10 +46028,13 @@ impl PrefillEngine {
                     .dsa_prefill
                     .map_or(false, |registration| registration.owner_weights_present)
             {
-                self.execute_dsa_prefill_owner_selection(layer_idx, m, start_pos, scratch2)?;
+                self.execute_dsa_prefill_owner_selection(layer_idx, m, start_pos, scratch2,mla_probe.as_ref().or(mla_prefix_probe.as_ref()))?;
             }
             finish_mla_stage!(HQQ_MLA_TIMING_OWNER_SELECT);
-            self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, qb, scratch2, q_raw, m)?;
+            if let Some((_,_,query))=selected_mla{unsafe{self.ordered_kda_projection.as_ref().ok_or("selected projection bank absent")?.enqueue_f32(&self.ordered_kda_layout(qb)?,scratch2,q_raw,query,m,self.stream)?;}}
+            else{self.deepseek_v4_projection_prefill_gemm_bf16(layer_idx, qb, scratch2, q_raw, m)?;}
+            if let Some(t)=&mla_probe {self.observe_mla_prefill_projection(t,layer_idx,"q_b",qb,scratch2,q_raw,m,start_pos)?;}
+        if let (Some(t),Some((_,_,query)))=(&mla_probe,selected_mla){crate::mla_probe::row(t,"q_b-output.f32",query,t.row,q_width,4,self.stream)?;}
             finish_mla_stage!(HQQ_MLA_TIMING_Q_B);
             self.record_prefill_device_trace_bf16_row(
                 PDT_LAYER_MLA_Q_RAW_LAST,
@@ -44019,15 +46069,20 @@ impl PrefillEngine {
             finish_mla_stage!(HQQ_MLA_TIMING_OWNER_SELECT);
             finish_mla_stage!(HQQ_MLA_TIMING_Q_B);
         }
-        self.deepseek_v4_projection_prefill_gemm_bf16(
+        if let Some((_,latent,_))=selected_mla{unsafe{self.ordered_kda_projection.as_ref().ok_or("selected projection bank absent")?.enqueue_f32(&self.ordered_kda_layout(&mla.kv_a_proj_with_mqa)?,hidden,scratch2,latent,m,self.stream)?;}}
+        else{        self.deepseek_v4_projection_prefill_gemm_bf16(
             layer_idx,
             &mla.kv_a_proj_with_mqa,
             hidden,
             scratch2,
             m,
-        )?;
+        )?;}
 
-        let norm_threads = std::cmp::max(32, std::cmp::min(1024, klr).next_power_of_two()) as u32;
+        if let Some(t)=&mla_probe {self.observe_mla_prefill_projection(t,layer_idx,"kv_a",&mla.kv_a_proj_with_mqa,hidden,scratch2,m,start_pos)?;}
+        if let (Some(t),Some((_,latent,_)))=(&mla_probe,selected_mla){crate::mla_probe::row(t,"kv_a-output.f32",latent,t.row,kv_a_width,4,self.stream)?;}
+        for t in [mla_probe.as_ref(),mla_prefix_probe.as_ref()].into_iter().flatten(){crate::mla_probe::block(t,"kv_a-chunk-prefix.bf16",scratch2,t.row.checked_add(1).and_then(|r|r.checked_mul(kv_a_width)).ok_or("MLA observed prefix extent overflow")?,2,self.stream)?;}
+        if let Some((ops,latent,_))=selected_mla{unsafe{ops.norm(latent,mla.kv_a_norm_ptr,scratch2,m,klr,kv_a_width,kv_a_width,cfg.rms_norm_eps,self.stream)?;}}
+        else{        let norm_threads = std::cmp::max(32, std::cmp::min(1024, klr).next_power_of_two()) as u32;
         let mut n0 = scratch2;
         let mut n1 = mla.kv_a_norm_ptr;
         let mut n2 = kv_a_width as i32;
@@ -44049,6 +46104,10 @@ impl PrefillEngine {
                 ],
             )?;
         }
+}
+        if let Some(t)=&mla_probe {crate::mla_probe::row(t,"kv_norm.bf16",scratch2,t.row,kv_a_width,2,self.stream)?;}
+        if let (Some(t),Some((_,latent,_)))=(&mla_probe,selected_mla){crate::mla_probe::row(t,"kv_norm.f32",latent,t.row,kv_a_width,4,self.stream)?;}
+        for t in [mla_probe.as_ref(),mla_prefix_probe.as_ref()].into_iter().flatten(){crate::mla_probe::block(t,"kv_norm-chunk-prefix.bf16",scratch2,t.row.checked_add(1).and_then(|r|r.checked_mul(kv_a_width)).ok_or("MLA observed prefix extent overflow")?,2,self.stream)?;}
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MLA_CKV_NORM_LAST,
             layer_idx,
@@ -44163,6 +46222,7 @@ impl PrefillEngine {
                 ],
             )?;
         }
+        if let Some((ops,latent,query))=selected_mla{unsafe{ops.prepare_query(query,latent,q,m,self.rope_cos_ptr,self.rope_sin_ptr,*self.scratch.d_positions.device_ptr(),cfg.max_seq_len,m,nh,nope,rope,klr,kv_a_width,mla.rope_interleave,self.stream)?;}}
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MLA_K_PACKED_LAST,
             layer_idx,
@@ -44205,6 +46265,11 @@ impl PrefillEngine {
         )?;
 
         if capture_kv_cache {
+            if let Some((ops,latent,_))=selected_mla{
+                let admitted_end=start_pos.checked_add(m).ok_or("selected cache logical extent overflow")?;
+                if admitted_end>cfg.max_seq_len{return Err("selected cache append exceeds registered model context".into());}
+                unsafe{ops.cache(mla.ckv_cache_ptr,mla.kpe_cache_ptr,latent,m,start_pos,admitted_end,klr,kv_a_width,ccd,rope,self.kv_format,self.stream)?;}
+            }else{
             let cache_append_kernel = native_mla_kernel_for_format(
                 self.kv_format,
                 self.kernels.mla_cache_append_k4,
@@ -44270,8 +46335,15 @@ impl PrefillEngine {
                     ],
                 )?;
             }
+}
         }
         finish_mla_stage!(HQQ_MLA_TIMING_KV_PREP);
+        if let Some(t)=&mla_prefix_probe {crate::mla_probe::cache(t,start_pos.checked_add(m).ok_or("MLA prefix cache height overflow")?,ccd,rope,self.kv_format,mla.ckv_cache_ptr,mla.kpe_cache_ptr,self.stream)?;}
+        if let (Some(t),Some((_,_,query)))=(&mla_probe,selected_mla){crate::mla_probe::row(t,"query-prepared.f32",query,t.row,q_width,4,self.stream)?;}
+        if let Some(t)=&mla_probe {
+            crate::mla_probe::cache(t,start_pos.checked_add(t.row).and_then(|r|r.checked_add(1)).ok_or("MLA common prefix overflow")?,ccd,rope,self.kv_format,mla.ckv_cache_ptr,mla.kpe_cache_ptr,self.stream)?;
+            crate::mla_probe::head_rows(t,"query",q,t.row,m,nh,qk_dim,self.stream)?;
+        }
 
         if sparse_dsa {
             if !capture_kv_cache {
@@ -44339,6 +46411,7 @@ impl PrefillEngine {
             )?;
             let selected =
                 workspace.resolve_for_layer(layer_idx, registration, start_pos, m, context_end)?;
+            if let Some(t)=&mla_probe {crate::mla_probe::row(t,"selected.i32",selected.ptr,t.row,selected.selected_per_row,4,self.stream)?;t.write("selection.json",serde_json::to_vec_pretty(&serde_json::json!({"selected_per_row":selected.selected_per_row,"row":t.row,"causal_position":start_pos+t.row,"context_end":context_end,"invalid_slots":"preserve actual integer sentinels; do not treat capacity as valid count"})).map_err(|e|e.to_string())?.as_slice())?;}
             self.record_prefill_device_trace_i32_slice(
                 PDT_LAYER_MLA_DSA_SELECTED_LAST,
                 layer_idx,
@@ -44414,7 +46487,8 @@ impl PrefillEngine {
             let mut a6 = nope_i32;
             let mut a7 = i32::try_from(ccd)
                 .map_err(|_| format!("DSA sparse MLA layer {} cKV width exceeds i32", layer_idx))?;
-            unsafe {
+            if let Some((ops,_,query))=selected_mla{unsafe{ops.absorb(*workspace.d_mla_q_absorbed.device_ptr(),query,mla.w_kc_ptr,m,nh,nope,rope,ccd,self.stream)?;}}
+            else{            unsafe {
                 launch(
                     self.kernels.mla_prefill_absorb_wkc,
                     (
@@ -44437,7 +46511,9 @@ impl PrefillEngine {
                     ],
                 )?;
             }
+}
             finish_mla_stage!(HQQ_MLA_TIMING_ABSORB_WKC);
+            if let Some(t)=&mla_probe {crate::mla_probe::row(t,"q_absorbed.f32",*workspace.d_mla_q_absorbed.device_ptr(),t.row,nh.checked_mul(ccd).ok_or("MLA q absorbed extent overflow")?,4,self.stream)?;}
             self.record_prefill_device_trace_f32_slice(
                 PDT_LAYER_MLA_Q_ABSORBED_LAST,
                 layer_idx,
@@ -44498,16 +46574,6 @@ impl PrefillEngine {
                 );
             }
             let use_gathered_wvc = dsa_mla_gathered_wvc_enabled(use_gathered_gemm)?;
-            if use_gathered_gemm
-                && (self.prefill_device_trace_enabled.get()
-                    || self.prefill_device_trace_mla_only.get())
-            {
-                return Err(
-                    "KRASIS_DSA_MLA_GATHERED_GEMM cannot be combined with prefill device tracing"
-                        .to_string(),
-                );
-            }
-
             let num_warps = usize::try_from(threads.div_ceil(32))
                 .map_err(|_| "DSA sparse MLA warp count exceeds usize".to_string())?;
             let shared_floats = ccd
@@ -44564,7 +46630,11 @@ impl PrefillEngine {
             })?;
             let mut s15 = i32::try_from(context_end)
                 .map_err(|_| format!("DSA sparse MLA layer {} context exceeds i32", layer_idx))?;
-            if use_grouped_exact {
+            let common_projected=if self.common_mla.is_some(){
+                if !use_gathered_gemm || !use_gathered_wvc || use_score_reuse || use_grouped_exact{return Err("common MLA requires the admitted gathered attention and WVC modes".into())}
+                self.run_common_mla_prefill(layer_idx,mla,selected,m)?;true
+            }else{false};
+            if common_projected { } else if use_grouped_exact {
                 self.run_dsa_mla_grouped_exact_attention(
                     layer_idx,
                     *workspace.d_mla_attention.device_ptr(),
@@ -44637,6 +46707,7 @@ impl PrefillEngine {
                 }
             }
             finish_mla_stage!(HQQ_MLA_TIMING_ATTENTION);
+            if let Some(t)=&mla_probe {crate::mla_probe::row(t,"attention.f32",*workspace.d_mla_attention.device_ptr(),t.row,nh.checked_mul(ccd).ok_or("MLA attention extent overflow")?,4,self.stream)?;}
             self.record_prefill_device_trace_f32_slice(
                 PDT_LAYER_MLA_SPARSE_ATTN_LAST,
                 layer_idx,
@@ -44679,10 +46750,14 @@ impl PrefillEngine {
             let trace_grouped_shadow_all_layers = use_grouped_exact
                 && self.prefill_device_trace_mla_only.get()
                 && self.prefill_device_trace_all_layers.get();
-            if (self.prefill_device_trace_enabled.get() || self.prefill_device_trace_mla_only.get())
-                && (self.prefill_device_trace_layer.get() == layer_idx
-                    || trace_grouped_shadow_all_layers)
-            {
+            if dsa_mla_scalar_trace_shadow_enabled(
+                use_gathered_gemm,
+                self.prefill_device_trace_enabled.get()
+                    || self.prefill_device_trace_mla_only.get(),
+                self.prefill_device_trace_layer.get() == layer_idx,
+                trace_grouped_shadow_all_layers,
+            ) {
+                if common_projected{return Err("scalar repeat shadow would overwrite the common MLA latent result; use a separate native diagnostic configuration".into())}
                 unsafe {
                     launch(
                         scalar_baseline_kernel,
@@ -44756,7 +46831,7 @@ impl PrefillEngine {
                 )?;
             }
 
-            if use_gathered_wvc {
+            if common_projected { } else if use_gathered_wvc {
                 self.run_dsa_mla_wvc_gemm(
                     layer_idx,
                     attn_out,
@@ -44799,6 +46874,7 @@ impl PrefillEngine {
                 }
             }
             finish_mla_stage!(HQQ_MLA_TIMING_APPLY_WVC);
+            if let Some(t)=&mla_probe {crate::mla_probe::row(t,"wvc_output.bf16",attn_out,t.row,v_width,2,self.stream)?;}
             self.record_prefill_device_trace_bf16_row(
                 PDT_LAYER_MLA_WVC_OUT_LAST,
                 layer_idx,
@@ -44854,13 +46930,20 @@ impl PrefillEngine {
             finish_mla_stage!(HQQ_MLA_TIMING_APPLY_WVC);
         }
 
-        self.deepseek_v4_projection_prefill_gemm_bf16(
+        if selected_mla.is_some(){        self.kda_projection_prefill(
             layer_idx,
             &mla.o_proj,
             attn_out,
             scratch1,
             m,
-        )?;
+        )?;}else{        self.deepseek_v4_projection_prefill_gemm_bf16(
+            layer_idx,
+            &mla.o_proj,
+            attn_out,
+            scratch1,
+            m,
+        )?;}
+        if let Some(t)=&mla_probe {self.observe_mla_prefill_projection(t,layer_idx,"o",&mla.o_proj,attn_out,scratch1,m,start_pos)?;}
         self.memcpy_d2d(
             attn_out,
             scratch1,
@@ -44903,6 +46986,7 @@ impl PrefillEngine {
         layer_idx: usize,
         chunk_start: usize,
         token_count: usize,
+        observed: Option<&crate::matched_probe::Target>,
     ) -> Result<(), String> {
         let Some(owner) = self.layer_weights[layer_idx].dsa_prefill_owner.as_ref() else {
             return Ok(());
@@ -44968,6 +47052,51 @@ impl PrefillEngine {
         let hidden = *self.scratch.d_hidden.device_ptr();
         let raw_keys = *self.scratch.d_scratch1.device_ptr();
         self.dsa_owner_projection_gemm(hidden, &owner.wk, raw_keys, token_count)?;
+        if let Some(target)=observed {if target.row>=token_count{return Err("index raw-key observed row outside actual chunk".into());}crate::mla_probe::row(target,"indexer-raw-key.bf16",raw_keys,target.row,owner.index_head_dim,2,self.stream)?;}
+
+        // Explicit producer capture: actual original batch, loaded operands and contract.
+        let key_probe = self.matched_prefill_target("glm5_index_key", layer_idx, token_count,None)?;
+        if let Some(target) = key_probe.as_ref() {
+            if chunk_start != 0 {
+                return Err("index-key producer probe requires the actual initial whole batch".into());
+            }
+            let bytes = |rows: usize, width: usize, item: usize| rows.checked_mul(width).and_then(|n|n.checked_mul(item)).ok_or("index-key capture size overflow");
+            target.device("input.bf16", hidden, bytes(token_count,owner.wk.k,2)?, self.stream)?;
+            target.device("loaded-weight.bf16", owner.wk.ptr, bytes(owner.wk.n,owner.wk.k,2)?, self.stream)?;
+            target.device("raw-keys.bf16", raw_keys, bytes(token_count,owner.index_head_dim,2)?, self.stream)?;
+            target.device("norm-weight.bf16", owner.norm_weight_ptr, bytes(1,owner.index_head_dim,2)?, self.stream)?;
+            target.device("norm-bias.bf16", owner.norm_bias_ptr, bytes(1,owner.index_head_dim,2)?, self.stream)?;
+            target.device("positions.i32", *self.scratch.d_positions.device_ptr(), bytes(token_count,1,4)?, self.stream)?;
+            if owner.qk_rope_head_dim > 0 {
+                target.device("rope-cos.f32",self.rope_cos_ptr,bytes(context_end,owner.qk_rope_head_dim/2,4)?,self.stream)?;
+                target.device("rope-sin.f32",self.rope_sin_ptr,bytes(context_end,owner.qk_rope_head_dim/2,4)?,self.stream)?;
+            }
+            #[cfg(has_prefill_kernels)]
+            target.write("loaded-prefill.ptx",PREFILL_KERNELS_PTX.as_bytes())?;
+            let mut math=0u32;
+            let mut atomics=cublas_sys::cublasAtomicsMode_t::CUBLAS_ATOMICS_NOT_ALLOWED;
+            let mut pointer=cublas_sys::cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;
+            let mut version=0i32;let mut sm_count=0i32;let mut stream=std::ptr::null_mut();
+            let results=unsafe {[
+                cublas_sys::lib().cublasGetMathMode(self.cublas_handle,(&mut math as *mut u32).cast::<cublas_sys::cublasMath_t>()),
+                cublas_sys::lib().cublasGetAtomicsMode(self.cublas_handle,&mut atomics),
+                cublas_sys::lib().cublasGetPointerMode_v2(self.cublas_handle,&mut pointer),
+                cublas_sys::lib().cublasGetVersion_v2(self.cublas_handle,&mut version),
+                cublas_sys::lib().cublasGetSmCountTarget(self.cublas_handle,&mut sm_count),
+                cublas_sys::lib().cublasGetStream_v2(self.cublas_handle,&mut stream),
+            ]};
+            if results.iter().any(|r|*r!=cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS)||stream as usize!=self.stream as usize {
+                return Err(format!("index-key cuBLAS contract query failed: {results:?}"));
+            }
+            target.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({
+                "layer":layer_idx,"owner":owner.owner_layer_idx,"height":token_count,"chunk_start":chunk_start,"selected_row":target.row,
+                "n":owner.wk.n,"k":owner.wk.k,"head_dim":owner.index_head_dim,"rope_dim":owner.qk_rope_head_dim,"eps":owner.layer_norm_eps,"index_kpool":owner.index_kpool,
+                "projection":{"row_independent":dsa_owner_row_independent_projection_enabled()?,"math_mode":math,"atomics_mode":atomics as u32,"pointer_mode":pointer as u32,"version":version,"sm_count_target":sm_count,"stream_is_null":stream.is_null(),"workspace_environment":std::env::var("CUBLAS_WORKSPACE_CONFIG").ok(),"compute":"CUBLAS_COMPUTE_32F","algorithm":"CUBLAS_GEMM_DEFAULT","input_dtype":"bf16","weights_dtype":"bf16","output_dtype":"bf16"},
+                "normalization":{"kernel":"dsa_prefill_layernorm_rope_key_write_kernel","norm_parameters":"bf16","raw_key":"bf16","reduction":"f32","normalized_store":"bf16","rope_table_load":"f32_to_bf16","rope_products_and_sum":"bf16"},
+                "state_scope":"Actual cache rows produced by initial original full batch, not prefix-only substituted interior state",
+                "device_diagnostic_allocation_bytes":0
+            })).map_err(|e|e.to_string())?.as_slice())?;
+        }
 
         let token_count_i32 = i32::try_from(token_count).map_err(|_| {
             format!(
@@ -45039,6 +47168,9 @@ impl PrefillEngine {
                     &mut p11 as *mut _ as *mut std::ffi::c_void,
                 ],
             )?;
+        }
+        if let Some(target) = key_probe.as_ref() {
+            target.device("key-cache.bf16", owner.key_cache_ptr, raw_key_elems.checked_mul(2).ok_or("key cache capture size overflow")?, self.stream)?;
         }
         if owner.index_kpool > 1 {
             let gate = owner
@@ -58485,6 +60617,12 @@ impl PrefillEngine {
         }
     }
 
+    fn dense_prefill_weight_gemm(&self,name:&str,input:u64,marlin:&Option<MarlinWeight>,bf16:&Option<Bf16Weight>,output:u64,m:usize)->Result<(),String>{
+        if let (Some(bank),None,Some(w))=(&self.ordered_kda_projection,marlin,bf16){
+            return unsafe {bank.enqueue_dense_bf16(w.ptr,input,output,w.n,w.k,m,self.stream)};
+        }
+        self.prefill_weight_gemm(name,input,marlin,bf16,output,m)
+    }
     fn prefill_weight_shape(
         marlin: &Option<MarlinWeight>,
         bf16: &Option<Bf16Weight>,
@@ -58574,7 +60712,20 @@ impl PrefillEngine {
             ));
         }
 
-        self.prefill_weight_gemm(
+        let dense_probe=self.matched_prefill_target("dense_prefill_operands",layer_idx,m,None)?;
+        if let Some(t)=&dense_probe {
+            if self.active_prefill_chunk_start!=0 {return Err("dense diagnostic requires actual initial complete prefill".into());}
+            crate::dense_ffn_probe::row(t,"input.bf16",input,t.row,self.config.hidden_size,self.stream)?;
+            for (name,w,b) in [("gate",&lw.dense_gate,&lw.dense_gate_bf16),("up",&lw.dense_up,&lw.dense_up_bf16),("down",&lw.dense_down,&lw.dense_down_bf16)] {
+                match (w,b) {
+                    (Some(w),None)=>crate::dense_ffn_probe::marlin(t,name,w.packed,w.scales,w.n,w.k,w.num_groups,w.group_size,w.num_bits,self.stream)?,
+                    (None,Some(b))=>crate::dense_ffn_probe::bf16(t,name,b.ptr,b.n,b.k,self.stream)?,
+                    _=>return Err("dense diagnostic requires one actual loaded weight representation".into()),
+                }
+            }
+            t.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({"actual_execution_path":"prefill","layer":layer_idx,"height":m,"row":t.row,"hidden":self.config.hidden_size,"intermediate":inter,"forcing":crate::matched_projection_transfer::forcing_label().is_some(),"device_diagnostic_allocation_bytes":0,"activation":format!("{:?}",lw.moe_activation)})).map_err(|e|e.to_string())?.as_slice())?;
+        }
+        self.dense_prefill_weight_gemm(
             "dense_gate",
             input,
             &lw.dense_gate,
@@ -58582,7 +60733,7 @@ impl PrefillEngine {
             gate_buf,
             m,
         )?;
-        self.prefill_weight_gemm(
+        self.dense_prefill_weight_gemm(
             "dense_up",
             input,
             &lw.dense_up,
@@ -58590,15 +60741,22 @@ impl PrefillEngine {
             up_buf,
             m,
         )?;
+        if let Some(t)=&dense_probe {
+            crate::dense_ffn_probe::row(t,"gate.bf16",gate_buf,t.row,inter,self.stream)?;
+            crate::dense_ffn_probe::row(t,"up.bf16",up_buf,t.row,inter,self.stream)?;
+        }
         self.launch_gated_activation_split(act_buf, gate_buf, up_buf, lw.moe_activation, m, inter)?;
-        self.prefill_weight_gemm(
+        if let Some(t)=&dense_probe {crate::dense_ffn_probe::row(t,"activation.bf16",act_buf,t.row,inter,self.stream)?;}
+        self.dense_prefill_weight_gemm(
             "dense_down",
             act_buf,
             &lw.dense_down,
             &lw.dense_down_bf16,
             output,
             m,
-        )
+        )?;
+        if let Some(t)=&dense_probe {crate::dense_ffn_probe::row(t,"output.bf16",output,t.row,self.config.hidden_size,self.stream)?;}
+        Ok(())
     }
 
     fn forward_gemma4_dense_mlp(
@@ -59308,7 +61466,7 @@ impl PrefillEngine {
                 "not_launched",
             )?;
         }
-        let gate_gemm_result = unsafe {
+        let gate_gemm_result = if let Some(bank)=&self.ordered_kda_projection {unsafe{bank.enqueue_router(gate_ptr,hidden,gate_out,n_experts,h,m,self.stream)}} else {unsafe {
             use cudarc::cublas::result as cublas_result;
             use cudarc::cublas::sys as cublas_sys;
             match cublas_result::set_stream(
@@ -59341,7 +61499,7 @@ impl PrefillEngine {
                 .map_err(|e| format!("cublas gate GEMM: {:?}", e)),
                 Err(err) => Err(err),
             }
-        };
+        }};
         let gate_gemm_status = match &gate_gemm_result {
             Ok(()) => "ok".to_string(),
             Err(err) => format!("error({})", err),
@@ -59573,6 +61731,9 @@ impl PrefillEngine {
                     format!("normalize sigmoid topk weights layer {}: {}", layer_idx, e)
                 })?;
         }
+        // BEGIN selected prefill row actual routing
+        crate::matched_prefill_row::capture_routes(self.matched_prefill_invocation.as_ref(),layer_idx, m, router_input, expert_input, h, expert_h, n_experts, topk, gate_out, topk_ids_ptr, topk_weights_ptr, self.stream)?;
+        // END selected prefill row actual routing
         let trace_moe_last_row = m.saturating_sub(1);
         let trace_router_hidden_row = hidden + ((trace_moe_last_row * h * 2) as u64);
         let trace_router_logits_row = gate_out + ((trace_moe_last_row * n_experts * 4) as u64);
@@ -62280,6 +64441,12 @@ impl PrefillEngine {
         } else {
             None
         };
+        // BEGIN selected prefill row W1 weights
+        crate::matched_prefill_row::capture_weights(self.matched_prefill_invocation.as_ref(),layer_idx, m, "w1", expert_h, w1_n, self.config.group_size, &expert_precision_bits, topk, use_ptr_table, [w1_ptrs_gpu,w1s_ptrs_gpu], [w1_base,w1s_base], [self.w1_packed_per_expert,self.w1_scales_per_expert], activation as usize, swiglu_limit, deepseek_v4_activation, scale_factor, self.stream)?;
+        // END selected prefill row W1 weights
+        // BEGIN bounded routed W1 lane enable
+        let matched_w1_lane_guard=crate::matched_prefill_row::lane_selection(self.matched_prefill_invocation.as_ref(),layer_idx,m,w1_n,topk)?.map(MatchedW1LaneGuard::begin).transpose()?;
+        // END bounded routed W1 lane enable
         let fused_block_count = total_sorted.div_ceil(block_size as usize);
         self.record_prefill_device_trace_i32_slice(
             PDT_LAYER_MLA_MOE_SORTED_IDS_FULL,
@@ -62550,7 +64717,15 @@ impl PrefillEngine {
                 ),
             ];
             let launch_count = if layer_has_mixed_precision { 2 } else { 1 };
-            for &(expert_ids_ptr, launch_q_type_ptr) in &mixed_launches[..launch_count] {
+            for (launch_index,&(expert_ids_ptr, launch_q_type_ptr)) in mixed_launches[..launch_count].iter().enumerate() {
+                if let Some(bank)=&self.ordered_kda_projection {
+                    let launch_bits=if layer_has_mixed_precision {if launch_index==0{4}else{8}}else{bits as usize};
+                    let geometry=crate::common_marlin::Geometry{rows:w1_n,cols:expert_h,group:usize::try_from(gs).map_err(|_|"negative common expert scale group")?.min(expert_h),bits:launch_bits};
+                    unsafe {bank.marlin.as_ref().ok_or("common grouped expert program not admitted")?.enqueue_grouped(
+                        geometry,w1_b_param,w1s_b_param,if use_ptr_table{w1_ptrs_gpu}else{0},if use_ptr_table{w1s_ptrs_gpu}else{0},fused_input_ptr,fused_inter_ptr,sorted_ids_val,expert_ids_ptr,num_tokens_post_val,
+                        usize::try_from(block_size).map_err(|_|"invalid expert sort block")?,n_experts,m_topk,total_sorted,self.stream)?;}
+                    continue;
+                }
                 unsafe {
                     cuda_sys::lib().cuMemsetD32Async(ws_ptr, 0, ws_len, self.stream);
                     cuda_sys::lib().cuMemsetD32Async(
@@ -62613,6 +64788,135 @@ impl PrefillEngine {
                 }
             }
         }
+        // BEGIN bounded routed W1 lane finish
+        if let Some(guard)=matched_w1_lane_guard {guard.finish(self.stream,fused_inter_ptr,w1_n)?;}
+        // END bounded routed W1 lane finish
+        // BEGIN bounded same-operator partition replay
+        if let Some(plan)=crate::matched_prefill_row::partition_target(self.matched_prefill_invocation.as_ref(),layer_idx,m)? {
+            let partition=plan.target;
+            let counter_grid=plan.policy.grid(total_sorted,usize::try_from(block_size).map_err(|_|"negative MoE block")?,self.config.group_size,expert_h)?;
+            let variant=plan.policy.label();
+            if tileq_layer.is_some() || layer_has_mixed_precision || !matches!(bits,4|8) {return Err("selected W1 partition replay requires an ordinary homogeneous Marlin launch".into());}
+            // The unchanged host wrapper selects exactly one block per requested SM for its large-M templates.
+            if block_size <= 16 || expert_h%16!=0 || w1_n%16!=0 {return Err("one-block partition requires the large-M one-block-per-SM launch contract".into());}
+            let sizes=[m_topk,w1_n,expert_h,self.config.sms];
+            if sizes.iter().any(|&x|x==0||i32::try_from(x).is_err()) {return Err("partition launch dimensions exceed actual ABI".into());}
+            // Conservative bound across all supported template tile sizes, before the one-block kernel's int arithmetic.
+            let upper_tiles=(expert_h/16).checked_mul(w1_n/16).and_then(|x|x.checked_mul(fused_block_count)).ok_or("partition tile count overflow")?;
+            if upper_tiles==0 || upper_tiles>i32::MAX as usize {return Err("one-block partition exceeds CUDA work-index range".into());}
+            let output_bytes=m_topk.checked_mul(w1_n).and_then(|x|x.checked_mul(2)).ok_or("partition output bytes overflow")?;
+            let input_bytes=m_topk.checked_mul(expert_h).and_then(|x|x.checked_mul(2)).ok_or("partition input bytes overflow")?;
+            let mut operands=vec![("actual-A",fused_input_ptr,input_bytes),("sorted-ids",sorted_ids_val,total_sorted.checked_mul(4).ok_or("sorted bytes overflow")?),("expert-block-ids",fused_expert_ids_val,fused_block_count.checked_mul(4).ok_or("expert block bytes overflow")?),("post-count",num_tokens_post_val,4),("topk-weights",topk_weights_ptr,m_topk.checked_mul(4).ok_or("route weight bytes overflow")?)];
+            if use_ptr_table {operands.push(("W1-pointer-table",w1_ptrs_gpu,n_experts.checked_mul(8).ok_or("pointer table bytes overflow")?));operands.push(("W1-scale-pointer-table",w1s_ptrs_gpu,n_experts.checked_mul(8).ok_or("scale pointer table bytes overflow")?));}
+            let digest_operands=|| -> Result<Vec<serde_json::Value>,String>{operands.iter().map(|&(name,ptr,bytes)|Ok(serde_json::json!({"name":name,"pointer":format!("0x{ptr:x}"),"bytes":bytes,"sha256":crate::matched_prefill_row::device_digest(ptr,bytes,self.stream)?}))).collect()};
+            let before_operands=digest_operands()?;
+            let original_output_sha=crate::matched_prefill_row::device_digest(fused_inter_ptr,output_bytes,self.stream)?;
+            let replay=|grid_blocks:i32,events:Option<&crate::matched_prefill_row::PartitionEvents>| -> Result<Option<f32>,String>{
+                unsafe {
+                    for (ptr,count) in [(ws_ptr,ws_len),(fused_c_tmp_ptr,w1_ctmp_floats)] {
+                        let rc=cuda_sys::lib().cuMemsetD32Async(ptr,0,count,self.stream);
+                        if rc!=cuda_sys::CUresult::CUDA_SUCCESS {return Err(format!("partition scratch reset: {rc:?}"));}
+                    }
+                if let Some(timer)=events {timer.begin(self.stream)?;}
+                fused_fn(
+                    fused_input_ptr as *const _,      // A: [m*topk, K=hidden] replicated
+                    w1_b_param as *const _, // B: base ref (ptr table overrides per-expert)
+                    fused_inter_ptr as *mut _, // C: written at sorted_id positions [0..m*topk)
+                    fused_c_tmp_ptr as *mut _, // C_tmp
+                    std::ptr::null(),       // b_bias (none)
+                    w1s_b_param as *const _, // scales: base ref (ptr table overrides)
+                    std::ptr::null(),       // s2 (none)
+                    std::ptr::null(),       // zp (none)
+                    std::ptr::null(),       // g_idx (none)
+                    std::ptr::null(),       // perm (none)
+                    std::ptr::null(),       // a_tmp (none)
+                    sorted_ids_val as *const _, // sorted_ids (vLLM format: token*topk+slot)
+                    fused_expert_ids_val as *const _, // expert_ids (precision-filtered when mixed)
+                    num_tokens_post_val as *const _, // num_tokens_post_padded
+                    topk_weights_ptr as *const _, // topk_weights
+                    block_size,             // moe_block_size
+                    1i32,                   // top_k=1: sorted_id/1 = direct index into A
+                    false,                  // mul_topk_weights (false for w1)
+                    marlin_moe_uses_sparse_block_filter(layer_has_mixed_precision),
+                    // is_ep/sparse block filtering: required for -1 entries
+                    m_topk as i32,          // size_m = m*topk (padding threshold = m*topk*1)
+                    w1_n as i32,            // size_n
+                    expert_h as i32,        // size_k
+                    *self.scratch.d_workspace.device_ptr() as *mut _, // workspace
+                    q_type_ptr,      // q_type_ptr
+                    false,                  // has_bias
+                    false,                  // has_act_order
+                    true,                   // is_k_full
+                    false,                  // has_zp
+                    num_groups_w1,          // num_groups
+                    gs,                     // group_size
+                    0,                      // dev
+                    stream_ptr,             // stream_ptr (our compute stream)
+                    -1,                     // thread_k (auto)
+                    -1,                     // thread_n (auto)
+                    grid_blocks, // Explicit diagnostic grid; all other actual launch arguments unchanged.
+                    false,                  // use_atomic
+                    true,                   // fp32_reduce
+                    false,                  // is_zp_float
+                    if use_ptr_table {
+                        w1_ptrs_gpu as *const _
+                    } else {
+                        std::ptr::null()
+                    }, // B_expert_ptrs
+                    if use_ptr_table {
+                        w1s_ptrs_gpu as *const _
+                    } else {
+                        std::ptr::null()
+                    }, // S_expert_ptrs
+                );
+                    if let Some(timer)=events {timer.end(self.stream)?;}
+                    let rc=cuda_sys::lib().cuStreamSynchronize(self.stream);
+                    if rc!=cuda_sys::CUresult::CUDA_SUCCESS {return Err(format!("partition operator replay fence: {rc:?}"));}
+                }
+                events.map(|timer|timer.elapsed()).transpose()
+            };
+            let mut measurement=serde_json::Value::Null;
+            let counterfactual=(|| -> Result<(),String>{
+                let lane=crate::matched_prefill_row::lane_variant(self.matched_prefill_invocation.as_ref(),layer_idx,m,w1_n,topk,variant)?;
+                let guard=MatchedW1LaneGuard::begin(lane)?;
+                replay(counter_grid,None)?; // Explicit concurrent or serial diagnostic; no serving adoption.
+                guard.finish(self.stream,fused_inter_ptr,w1_n)?;
+                let row_bytes=topk.checked_mul(w1_n).and_then(|x|x.checked_mul(2)).ok_or("partition selected row bytes overflow")?;
+                let row_offset=partition.row.checked_mul(row_bytes).and_then(|x|fused_inter_ptr.checked_add(x as u64)).ok_or("partition selected row offset overflow")?;
+                partition.device(&format!("{variant}-w1-slots.bf16"),row_offset,row_bytes,self.stream)?;
+                if let Some(count)=plan.samples {
+                    let free_before=crate::matched_prefill_row::free_device_bytes()?;
+                    let events=crate::matched_prefill_row::PartitionEvents::new()?;
+                    let free_with_events=crate::matched_prefill_row::free_device_bytes()?;
+                    let ordinary=i32::try_from(self.config.sms).map_err(|_|"ordinary grid exceeds ABI")?;
+                    replay(ordinary,None)?;replay(counter_grid,None)?; // Explicit warm-up of each actual operator.
+                    let mut ordinary_ms=Vec::with_capacity(count);let mut counter_ms=Vec::with_capacity(count);
+                    for sample in 0..count {
+                        for (grid,original) in if sample%2==0 {[(ordinary,true),(counter_grid,false)]} else {[(counter_grid,false),(ordinary,true)]} {
+                            let elapsed=replay(grid,Some(&events))?.ok_or("missing explicit event measurement")?;
+                            if original {ordinary_ms.push(elapsed)}else{counter_ms.push(elapsed)}
+                        }
+                    }
+                    let free_after_launches=crate::matched_prefill_row::free_device_bytes()?;
+                    drop(events);
+                    let free_after_destroy=crate::matched_prefill_row::free_device_bytes()?;
+                    measurement=serde_json::json!({"diagnostic_operator_measurement":true,"production_speed_benchmark":false,"lane_capture_disabled":true,"samples_each":count,"alternating_order":true,"warmup_launches_each":1,"scratch_reset_excluded":true,"ordinary_milliseconds":ordinary_ms,"counterfactual_milliseconds":counter_ms,"free_before_events":free_before,"free_with_events":free_with_events,"free_after_launches":free_after_launches,"free_after_destroy":free_after_destroy});
+                }
+                Ok(())
+            })();
+            // Restore by executing the unchanged ordinary operator, including on capture error.
+            replay(i32::try_from(self.config.sms).map_err(|_|"ordinary grid exceeds ABI")?,None)?;
+            let restored_output_sha=crate::matched_prefill_row::device_digest(fused_inter_ptr,output_bytes,self.stream)?;
+            let after_operands=digest_operands()?;
+            if original_output_sha!=restored_output_sha||before_operands!=after_operands {return Err("partition replay changed ordinary output or immutable operands; request rejected".into());}
+            crate::matched_prefill_row::capture_weights(self.matched_prefill_invocation.as_ref(),layer_idx,m,"w1",expert_h,w1_n,self.config.group_size,&expert_precision_bits,topk,use_ptr_table,[w1_ptrs_gpu,w1s_ptrs_gpu],[w1_base,w1s_base],[self.w1_packed_per_expert,self.w1_scales_per_expert],activation as usize,swiglu_limit,deepseek_v4_activation,scale_factor,self.stream)?;
+            counterfactual?;
+            partition.write("replay-control.json",serde_json::to_vec_pretty(&serde_json::json!({"diagnostic_only":true,"qualifies_candidate":false,"actual_library_and_weights_reused":true,"ordinary_grid_argument":self.config.sms,"counterfactual_grid_argument":counter_grid,"counterfactual_policy":variant,"operator_measurement":measurement,"top_k":1,"moe_block_size":block_size,"size_m":m_topk,"size_n":w1_n,"size_k":expert_h,"group_size":gs,"num_groups":num_groups_w1,"bits":bits,"actual_padded_sorted_count":total_sorted,"workspace_u32":ws_len,"C_tmp_f32":w1_ctmp_floats,"thread_k_argument":-1,"thread_n_argument":-1,"use_atomic":false,"fp32_reduce":true,"is_ep":false,"use_ptr_table":use_ptr_table,"valid_output_bytes":output_bytes,"original_output_sha256":original_output_sha,"restored_output_sha256":restored_output_sha,"operands_before":before_operands,"operands_after":after_operands,"selected_weight_recapture_exact":true,"ordinary_output_restored_exact":true,"additional_gpu_buffer_bytes":0})).map_err(|e|e.to_string())?.as_slice())?;
+        }
+        // END bounded same-operator partition replay
+        // BEGIN selected prefill row W1 output
+        crate::matched_prefill_row::capture_slots(self.matched_prefill_invocation.as_ref(),layer_idx, m, "w1-slots.bf16", fused_inter_ptr, w1_n, topk, self.stream)?;
+        // END selected prefill row W1 output
         let w1_output_values = m_topk
             .checked_mul(w1_n)
             .ok_or_else(|| "MLA MoE W1 trace size overflow".to_string())?;
@@ -62839,6 +65143,26 @@ impl PrefillEngine {
                                 })
                                 .sum::<f32>()
                                 .sqrt();
+                            let actual_l2 = diag_l2_norm(&actual_f32);
+                            let normal_ref_l2 = diag_l2_norm(&normal_ref);
+                            let mut normal_max_abs_delta = 0.0f32;
+                            let mut normal_max_abs_delta_dim = 0usize;
+                            for (dim, (&actual, &reference)) in
+                                actual_f32.iter().zip(normal_ref.iter()).enumerate()
+                            {
+                                let abs_delta = (actual - reference).abs();
+                                if abs_delta > normal_max_abs_delta {
+                                    normal_max_abs_delta = abs_delta;
+                                    normal_max_abs_delta_dim = dim;
+                                }
+                            }
+                            let normal_delta_l2_relative_percent = if normal_ref_l2 > 0.0 {
+                                normal_delta_l2 / normal_ref_l2 * 100.0
+                            } else if normal_delta_l2 == 0.0 {
+                                0.0
+                            } else {
+                                f32::INFINITY
+                            };
                             let alt_delta_l2 = actual_f32
                                 .iter()
                                 .zip(alt_layout_ref.iter())
@@ -62992,7 +65316,12 @@ impl PrefillEngine {
                             "compare": {
                                 "normal_seq_bf16_mismatch_count": normal_mismatches,
                                 "normal_seq_first_mismatch_dim": first_normal_mismatch,
+                                "actual_bf16_values_l2": actual_l2,
+                                "normal_seq_fp32_l2": normal_ref_l2,
                                 "normal_seq_f32_l2_vs_actual_bf16_values": normal_delta_l2,
+                                "normal_seq_f32_l2_delta_relative_percent": normal_delta_l2_relative_percent,
+                                "normal_seq_f32_max_abs_delta": normal_max_abs_delta,
+                                "normal_seq_f32_max_abs_delta_dim": normal_max_abs_delta_dim,
                                 "alt_layout_bf16_mismatch_count": alt_mismatches,
                                 "alt_layout_first_mismatch_dim": first_alt_mismatch,
                                 "alt_layout_f32_l2_vs_actual_bf16_values": alt_delta_l2,
@@ -63467,7 +65796,7 @@ impl PrefillEngine {
             let a_ptr = expert_input + (first_token as usize * expert_h * 2) as u64;
             // C = write to a temp area (reuse some scratch)
             let ref_c = *self.scratch.d_scratch2.device_ptr();
-            self.marlin_gemm(a_ptr, &ref_w13, ref_c, 1)?;
+            self.expert_marlin_gemm(a_ptr, &ref_w13, ref_c, 1)?;
             self.stream_sync()?;
             let mut h_ref_w1 = vec![0u16; std::cmp::min(8, w1_n_check)];
             unsafe {
@@ -63540,7 +65869,7 @@ impl PrefillEngine {
         // w1 writes C at sorted_id positions [0..m*topk), so activation grid = m_topk
         let fused_inter2_ptr = *self.scratch.d_moe_inter.device_ptr();
         if gated {
-            self.launch_gated_activation(
+            self.expert_gated_activation(
                 fused_inter2_ptr,
                 fused_inter_ptr,
                 activation,
@@ -63575,6 +65904,9 @@ impl PrefillEngine {
         } else {
             fused_inter_ptr
         };
+        // BEGIN selected prefill row activation output
+        crate::matched_prefill_row::capture_slots(self.matched_prefill_invocation.as_ref(),layer_idx, m, "activation-slots.bf16", activation_ptr, inter, topk, self.stream)?;
+        // END selected prefill row activation output
         self.capture_tileq_routed_inputs(
             layer_idx,
             expert_input,
@@ -63732,6 +66064,9 @@ impl PrefillEngine {
                 self.t_moe_dma.set(self.t_moe_dma.get() + wait_ms);
             }
         }
+        // BEGIN selected prefill row W2 weights after DMA wait
+        crate::matched_prefill_row::capture_weights(self.matched_prefill_invocation.as_ref(),layer_idx, m, "w2", inter, expert_h, self.config.group_size, &expert_precision_bits, topk, use_ptr_table, [w2_ptrs_gpu,w2s_ptrs_gpu], [w2_base,w2s_base], [self.w2_packed_per_expert,self.w2_scales_per_expert], activation as usize, swiglu_limit, deepseek_v4_activation, scale_factor, self.stream)?;
+        // END selected prefill row W2 weights after DMA wait
         let mt3 = if mt { Some(Instant::now()) } else { None };
 
         // Zero workspace and C_tmp before fused w2 GEMM
@@ -63884,7 +66219,15 @@ impl PrefillEngine {
                 ),
             ];
             let launch_count = if layer_has_mixed_precision { 2 } else { 1 };
-            for &(expert_ids_ptr, launch_q_type_ptr) in &mixed_launches[..launch_count] {
+            for (launch_index,&(expert_ids_ptr, launch_q_type_ptr)) in mixed_launches[..launch_count].iter().enumerate() {
+                if let Some(bank)=&self.ordered_kda_projection {
+                    let launch_bits=if layer_has_mixed_precision {if launch_index==0{4}else{8}}else{bits as usize};
+                    let geometry=crate::common_marlin::Geometry{rows:expert_h,cols:inter,group:usize::try_from(gs).map_err(|_|"negative common expert scale group")?.min(inter),bits:launch_bits};
+                    unsafe {bank.marlin.as_ref().ok_or("common grouped expert program not admitted")?.enqueue_grouped(
+                        geometry,w2_b_param,w2s_b_param,if use_ptr_table{w2_ptrs_gpu}else{0},if use_ptr_table{w2s_ptrs_gpu}else{0},w2_input,fused_output_ptr,sorted_ids_val,expert_ids_ptr,num_tokens_post_val,
+                        usize::try_from(block_size).map_err(|_|"invalid expert sort block")?,n_experts,m_topk,total_sorted,self.stream)?;}
+                    continue;
+                }
                 unsafe {
                     cuda_sys::lib().cuMemsetD32Async(ws_ptr, 0, ws_len, self.stream);
                     cuda_sys::lib().cuMemsetD32Async(
@@ -63945,6 +66288,235 @@ impl PrefillEngine {
                     }, // S_expert_ptrs
                 );
                 }
+            }
+        }
+        if reference_routed_stage_trace {
+            let sync_after_w2 = self.stream_sync().is_ok();
+            let row = trace_moe_last_pos;
+            let diag_result: Result<serde_json::Value, String> = (|| {
+                if row >= m {
+                    return Err(format!(
+                        "selected W2 diagnostic row {} is outside token count {}",
+                        row, m
+                    ));
+                }
+                if layer_has_mixed_precision {
+                    return Err(
+                        "full-row W2 CPU reference is not valid for mixed per-expert precision"
+                            .to_string(),
+                    );
+                }
+                if tileq_layer.is_some() || !matches!(bits, 4 | 8 | 16) {
+                    return Err(format!(
+                        "full-row W2 CPU reference supports homogeneous BF16/INT4/INT8 Marlin only (bits={})",
+                        bits
+                    ));
+                }
+
+                let row_topk_ids =
+                    download_device_i32(topk_ids_ptr + ((row * topk * 4) as u64), topk)?;
+                let row_topk_weights = download_device_f32(
+                    topk_weights_ptr + ((row * topk * 4) as u64),
+                    topk,
+                )?;
+                let row_input_bits = download_device_u16(
+                    w2_input + ((row * topk * inter * 2) as u64),
+                    topk * inter,
+                )?;
+                let row_actual_bits = download_device_u16(
+                    fused_output_ptr + ((row * topk * expert_h * 2) as u64),
+                    topk * expert_h,
+                )?;
+                let mut details = Vec::with_capacity(topk);
+                let mut actual_weighted = vec![0.0f32; expert_h];
+                let mut reference_weighted = vec![0.0f32; expert_h];
+
+                for slot in 0..topk {
+                    let expert_raw = row_topk_ids.get(slot).copied().unwrap_or(-1);
+                    if expert_raw < 0 {
+                        details.push(serde_json::json!({
+                            "slot": slot,
+                            "available": false,
+                            "reason": "negative expert id",
+                            "expert_id": expert_raw,
+                        }));
+                        continue;
+                    }
+                    let expert_id = expert_raw as usize;
+                    let (packed_ptr, scales_ptr) = if use_ptr_table {
+                        (
+                            self.h_expert_w2_ptrs.get(expert_id).copied().unwrap_or(0),
+                            self.h_expert_w2s_ptrs.get(expert_id).copied().unwrap_or(0),
+                        )
+                    } else {
+                        (
+                            w2_base + (expert_id * self.w2_packed_per_expert) as u64,
+                            w2s_base + (expert_id * self.w2_scales_per_expert) as u64,
+                        )
+                    };
+                    if packed_ptr == 0 || (bits != 16 && scales_ptr == 0) {
+                        details.push(serde_json::json!({
+                            "slot": slot,
+                            "expert_id": expert_id,
+                            "available": false,
+                            "reason": "missing active W2 weight pointers",
+                            "packed_ptr": format!("0x{:x}", packed_ptr),
+                            "scales_ptr": format!("0x{:x}", scales_ptr),
+                        }));
+                        continue;
+                    }
+
+                    let input_row = &row_input_bits[slot * inter..(slot + 1) * inter];
+                    let actual_bits =
+                        &row_actual_bits[slot * expert_h..(slot + 1) * expert_h];
+                    let reference = if bits == 16 {
+                        compute_bf16_gemm_row_cpu_reference(
+                            input_row,
+                            packed_ptr,
+                            expert_h,
+                            inter,
+                        )?
+                    } else {
+                        let weight = MarlinWeight {
+                            packed: packed_ptr,
+                            scales: scales_ptr,
+                            n: expert_h,
+                            k: inter,
+                            num_groups: scale_group_count(inter, self.config.group_size),
+                            group_size: self.config.group_size,
+                            num_bits: bits,
+                        };
+                        compute_marlin_gemm_row_cpu_reference(input_row, &weight)?
+                    };
+                    let actual = actual_bits
+                        .iter()
+                        .map(|&value| bf16_to_f32(value))
+                        .collect::<Vec<_>>();
+                    let reference_bf16_bits = reference
+                        .iter()
+                        .map(|&value| half::bf16::from_f32(value).to_bits())
+                        .collect::<Vec<_>>();
+                    let mismatch_count = actual_bits
+                        .iter()
+                        .zip(reference_bf16_bits.iter())
+                        .filter(|(actual, expected)| actual != expected)
+                        .count();
+                    let actual_l2 = diag_l2_norm(&actual);
+                    let reference_l2 = diag_l2_norm(&reference);
+                    let mut delta_l2_sq = 0.0f32;
+                    let mut max_abs_delta = 0.0f32;
+                    for (&actual_value, &reference_value) in actual.iter().zip(reference.iter()) {
+                        let delta = actual_value - reference_value;
+                        delta_l2_sq += delta * delta;
+                        max_abs_delta = max_abs_delta.max(delta.abs());
+                    }
+                    let delta_l2 = delta_l2_sq.sqrt();
+                    let delta_relative_percent = if reference_l2 > 0.0 {
+                        delta_l2 / reference_l2 * 100.0
+                    } else {
+                        0.0
+                    };
+                    let scaled_weight =
+                        row_topk_weights.get(slot).copied().unwrap_or(0.0) * scale_factor;
+                    for output_idx in 0..expert_h {
+                        actual_weighted[output_idx] += actual[output_idx] * scaled_weight;
+                        reference_weighted[output_idx] +=
+                            reference[output_idx] * scaled_weight;
+                    }
+
+                    details.push(serde_json::json!({
+                        "slot": slot,
+                        "expert_id": expert_id,
+                        "available": true,
+                        "topk_weight": row_topk_weights.get(slot).copied(),
+                        "scaled_weight": scaled_weight,
+                        "input_hash_fnv1a_u16": format!("0x{:016x}", fnv1a_u16_hash(input_row)),
+                        "actual_hash_fnv1a_u16": format!("0x{:016x}", fnv1a_u16_hash(actual_bits)),
+                        "reference_bf16_hash_fnv1a_u16": format!("0x{:016x}", fnv1a_u16_hash(&reference_bf16_bits)),
+                        "actual_l2": actual_l2,
+                        "reference_sequential_fp32_l2": reference_l2,
+                        "delta_l2_vs_same_weight_cpu_reference": delta_l2,
+                        "delta_l2_relative_percent": delta_relative_percent,
+                        "max_abs_delta": max_abs_delta,
+                        "bf16_mismatch_count": mismatch_count,
+                        "output_width": expert_h,
+                        "packed_ptr": format!("0x{:x}", packed_ptr),
+                        "scales_ptr": format!("0x{:x}", scales_ptr),
+                    }));
+                }
+                let actual_weighted_l2 = diag_l2_norm(&actual_weighted);
+                let reference_weighted_l2 = diag_l2_norm(&reference_weighted);
+                let mut weighted_delta_l2_sq = 0.0f32;
+                let mut weighted_max_abs_delta = 0.0f32;
+                for (&actual_value, &reference_value) in
+                    actual_weighted.iter().zip(reference_weighted.iter())
+                {
+                    let delta = actual_value - reference_value;
+                    weighted_delta_l2_sq += delta * delta;
+                    weighted_max_abs_delta = weighted_max_abs_delta.max(delta.abs());
+                }
+                let weighted_delta_l2 = weighted_delta_l2_sq.sqrt();
+                let weighted_delta_l2_relative_percent = if reference_weighted_l2 > 0.0 {
+                    weighted_delta_l2 / reference_weighted_l2 * 100.0
+                } else {
+                    0.0
+                };
+                Ok(serde_json::json!({
+                    "details": details,
+                    "weighted_aggregate": {
+                        "actual_gpu_rows_accumulated_on_cpu_l2": actual_weighted_l2,
+                        "same_weight_sequential_reference_accumulated_on_cpu_l2": reference_weighted_l2,
+                        "delta_l2": weighted_delta_l2,
+                        "delta_l2_relative_percent": weighted_delta_l2_relative_percent,
+                        "max_abs_delta": weighted_max_abs_delta,
+                        "actual_hash_fnv1a_f32": format!("0x{:016x}", fnv1a_f32_hash(&actual_weighted)),
+                        "reference_hash_fnv1a_f32": format!("0x{:016x}", fnv1a_f32_hash(&reference_weighted)),
+                    },
+                }))
+            })();
+
+            match diag_result {
+                Ok(comparison) => self.push_reference_stage_metadata(
+                    &format!(
+                        "{}_moe_w2_same_weight_cpu_reference_row{}",
+                        routed_stage_trace_prefix, row
+                    ),
+                    Some(layer_idx),
+                    0,
+                    trace_moe_last_pos,
+                    trace_moe_token_id,
+                    serde_json::json!({
+                        "available": true,
+                        "scope": "diagnostic-only final-token full-row W2 comparison of production GPU output against sequential FP32 CPU evaluation of the same dequantized quantized weights",
+                        "production_behavior_changed": false,
+                        "sync_after_w2_success": sync_after_w2,
+                        "row": row,
+                        "topk": topk,
+                        "expert_bits": bits,
+                        "group_size": self.config.group_size,
+                        "intermediate_size": inter,
+                        "output_width": expert_h,
+                        "comparison": comparison,
+                    }),
+                ),
+                Err(error) => self.push_reference_stage_metadata(
+                    &format!(
+                        "{}_moe_w2_same_weight_cpu_reference_row{}",
+                        routed_stage_trace_prefix, row
+                    ),
+                    Some(layer_idx),
+                    0,
+                    trace_moe_last_pos,
+                    trace_moe_token_id,
+                    serde_json::json!({
+                        "available": false,
+                        "scope": "diagnostic-only final-token full-row W2 same-weight CPU reference",
+                        "production_behavior_changed": false,
+                        "sync_after_w2_success": sync_after_w2,
+                        "row": row,
+                        "error": error,
+                    }),
+                ),
             }
         }
         if let Some((diag_config, diag_fetch)) = diag_moe_w2_lane_fns {
@@ -64168,6 +66740,9 @@ impl PrefillEngine {
                 }),
             );
         }
+        // BEGIN selected prefill row W2 output
+        crate::matched_prefill_row::capture_slots(self.matched_prefill_invocation.as_ref(),layer_idx, m, "w2-slots.bf16", fused_output_ptr, expert_h, topk, self.stream)?;
+        // END selected prefill row W2 output
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MLA_MOE_W2_OUTPUT_FULL,
             layer_idx,
@@ -64275,9 +66850,9 @@ impl PrefillEngine {
                     num_bits: bits,
                 };
                 let hidden_row_ptr = expert_input + ((compare_token * expert_h * 2) as u64);
-                self.marlin_gemm(hidden_row_ptr, &orig_w13, ref_c1, 1)?;
+                self.expert_marlin_gemm(hidden_row_ptr, &orig_w13, ref_c1, 1)?;
                 if gated {
-                    self.launch_gated_activation(
+                    self.expert_gated_activation(
                         ref_act_out,
                         ref_c1,
                         activation,
@@ -64297,7 +66872,7 @@ impl PrefillEngine {
                     num_bits: bits,
                 };
                 let w2_in = if gated { ref_act_out } else { ref_c1 };
-                self.marlin_gemm(w2_in, &orig_w2, ref_c2, 1)?;
+                self.expert_marlin_gemm(w2_in, &orig_w2, ref_c2, 1)?;
                 self.stream_sync()?;
 
                 let fused_slot_ptr =
@@ -64620,7 +67195,9 @@ impl PrefillEngine {
                 layer_idx, total_sorted, m_topk, m, topk
             ));
         }
-        if use_driver_scatter {
+        if let Some(bank)=&self.ordered_kda_projection {
+            unsafe{bank.moe_combine.as_ref().ok_or("common MoE reduction program not admitted")?.enqueue_reduce(fused_output_ptr,topk_weights_ptr,moe_accum,0,expert_h,topk,m,scale_factor,scatter_stream)?;}
+        } else if use_driver_scatter {
             unsafe {
                 cuda_sys::lib().cuMemsetD32Async(moe_accum, 0, m * expert_h, scatter_stream);
             }
@@ -64792,6 +67369,9 @@ impl PrefillEngine {
                 }),
             );
         }
+        // BEGIN selected prefill row routed accumulator
+        crate::matched_prefill_row::capture_accumulator(self.matched_prefill_invocation.as_ref(),layer_idx, m, moe_accum, expert_h, scatter_stream)?;
+        // END selected prefill row routed accumulator
         self.record_prefill_device_trace_f32_slice(
             PDT_LAYER_MOE_ROUTED_ACCUM_PRE_SHARED_LAST,
             layer_idx,
@@ -66127,7 +68707,7 @@ impl PrefillEngine {
                 let gate_out = *self.scratch.d_gate_out.device_ptr();
                 let alpha: f32 = 1.0;
                 let beta: f32 = 0.0;
-                unsafe {
+                if let Some(bank)=&self.ordered_kda_projection { unsafe { bank.enqueue_router(sg_ptr,hidden,gate_out,lw_ref.shared_gate_rows,lw_ref.shared_gate_cols,m,add_stream)?; } } else { unsafe {
                     use cudarc::cublas::result as cublas_result;
                     use cudarc::cublas::sys as cublas_sys;
                     let gate_handle = if shared_add_on_shared_stream {
@@ -66164,7 +68744,7 @@ impl PrefillEngine {
                         cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
                     )
                     .map_err(|e| format!("shared gate GEMM: {:?}", e))?;
-                }
+                } }
                 if diag_moe
                     && std::env::var("KRASIS_PREFILL_DIAG_MOE_DETAIL").is_ok()
                     && Self::diag_layer_enabled(layer_idx)
@@ -66181,7 +68761,7 @@ impl PrefillEngine {
                 let mut as2 = gate_out;
                 let mut as3 = m as i32;
                 let mut as4 = h as i32;
-                unsafe {
+                if let Some(bank)=&self.ordered_kda_projection { unsafe { bank.moe_combine.as_ref().ok_or("common gated shared program not admitted")?.enqueue_combine(moe_accum,s1_buf,gate_out,0,moe_accum,h,m,1.0,add_stream)?; } } else { unsafe {
                     launch(
                         self.kernels.moe_add_shared_gated,
                         (m as u32, 1, 1),
@@ -66196,7 +68776,7 @@ impl PrefillEngine {
                             &mut as4 as *mut _ as *mut std::ffi::c_void,
                         ],
                     )?;
-                }
+                } }
             } else {
                 // No gate, add directly
                 let ast = std::cmp::max(32, ((std::cmp::min(1024, h) + 31) / 32) * 32) as u32;
@@ -66204,7 +68784,7 @@ impl PrefillEngine {
                 let mut as1 = s1_buf;
                 let mut as2 = m as i32;
                 let mut as3 = h as i32;
-                unsafe {
+                if let Some(bank)=&self.ordered_kda_projection { unsafe { bank.moe_combine.as_ref().ok_or("common shared program not admitted")?.enqueue_combine(moe_accum,s1_buf,0,0,moe_accum,h,m,1.0,add_stream)?; } } else { unsafe {
                     launch(
                         self.kernels.moe_add_shared,
                         (m as u32, 1, 1),
@@ -66218,7 +68798,7 @@ impl PrefillEngine {
                             &mut as3 as *mut _ as *mut std::ffi::c_void,
                         ],
                     )?;
-                }
+                } }
             }
             if !latent_moe && shared_add_on_shared_stream {
                 unsafe {
@@ -67774,7 +70354,7 @@ impl PrefillEngine {
         let gate_ptr = lw.moe_gate_ptr;
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
-        unsafe {
+        if let Some(bank)=&self.ordered_kda_projection {unsafe{bank.enqueue_router(gate_ptr,hidden,gate_out,n_experts,h,m,self.stream)?;}} else {unsafe {
             use cudarc::cublas::result as cublas_result;
             use cudarc::cublas::sys as cublas_sys;
 
@@ -67803,7 +70383,7 @@ impl PrefillEngine {
                 cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
             )
             .map_err(|e| format!("cublas gate GEMM: {:?}", e))?;
-        }
+        }}
 
         // 2. Top-K routing (GPU-only)
         let topk_ids_ptr = *self.scratch.d_topk_ids.device_ptr();
@@ -71163,7 +73743,7 @@ impl PrefillEngine {
                 }
 
                 if gated {
-                    self.launch_gated_activation(
+                    self.expert_gated_activation(
                         s2_buf,
                         s1_buf,
                         activation,
@@ -71400,7 +73980,7 @@ impl PrefillEngine {
                     );
                 }
 
-                self.marlin_gemm(hidden, sw1, s1_buf, m)?;
+                self.expert_marlin_gemm(hidden, sw1, s1_buf, m)?;
 
                 if gated {
                     if diag && diag_moe_detail && Self::diag_layer_enabled(layer_idx) {
@@ -71411,7 +73991,7 @@ impl PrefillEngine {
                         );
                     }
 
-                    self.launch_gated_activation(
+                    self.expert_gated_activation(
                         s2_buf,
                         s1_buf,
                         activation,
@@ -71429,7 +74009,7 @@ impl PrefillEngine {
                         );
                     }
 
-                    self.marlin_gemm(s2_buf, sw2, s1_buf, m)?;
+                    self.expert_marlin_gemm(s2_buf, sw2, s1_buf, m)?;
                 } else {
                     let act_t =
                         std::cmp::max(32, ((std::cmp::min(1024, shared_inter) + 31) / 32) * 32);
@@ -71450,7 +74030,7 @@ impl PrefillEngine {
                             ],
                         )?;
                     }
-                    self.marlin_gemm(s1_buf, sw2, s2_buf, m)?;
+                    self.expert_marlin_gemm(s1_buf, sw2, s2_buf, m)?;
                     self.memcpy_d2d(s1_buf, s2_buf, (m * h * 2) as u64)?;
                 }
             }
@@ -72223,6 +74803,11 @@ impl PrefillEngine {
     /// Launch shared expert computation on copy_stream (async overlap with routed experts).
     /// Result is written to d_scratch1.
     fn launch_shared_expert_async(&self, layer_idx: usize, m: usize) -> Result<(), String> {
+        if self.ordered_kda_projection.is_some() {
+            // Same actual shared stream, fork/join events and distinct shared scratch;
+            // common Marlin admission is enforced by marlin_gemm_on_stream.
+            return self.launch_shared_expert_on_shared_stream(layer_idx,m);
+        }
         // Use shared_stream + d_shared_fp32_scratch + d_shared_workspace
         // to avoid data races with the main stream's routed expert dispatch
         // which uses d_fp32_scratch + d_workspace + copy_stream.
@@ -72252,6 +74837,7 @@ impl PrefillEngine {
         let sw1 = lw.shared_w1.as_ref().ok_or("missing shared w1")?;
         let sw2 = lw.shared_w2.as_ref().ok_or("missing shared w2")?;
         let shared_inter = sw1.n / (if gated { 2 } else { 1 });
+        self.capture_matched_shared_input(layer_idx, m, hidden, sw1, sw2, self.shared_stream)?;
 
         let st = if sw1.num_bits == 4 {
             &ScalarType::U4B8
@@ -72313,6 +74899,8 @@ impl PrefillEngine {
             );
         }
 
+        self.capture_matched_shared_row(layer_idx, m, "w1.bf16", s1_buf, sw1.n, self.shared_stream)?;
+
         // Activation on shared_stream
         if gated {
             self.launch_gated_activation_on_stream(
@@ -72325,6 +74913,7 @@ impl PrefillEngine {
                 deepseek_v4_activation,
                 self.shared_stream,
             )?;
+            self.capture_matched_shared_row(layer_idx, m, "activation.bf16", s2_buf, shared_inter, self.shared_stream)?;
             // Zero workspace + C_tmp before w2 GEMM
             unsafe {
                 cuda_sys::lib().cuMemsetD32Async(shared_ws, 0, shared_ws_len, self.shared_stream);
@@ -72364,6 +74953,7 @@ impl PrefillEngine {
                     false,
                 );
             }
+            self.capture_matched_shared_row(layer_idx, m, "w2.bf16", s1_buf, sw2.n, self.shared_stream)?;
         } else {
             let act_t = std::cmp::max(32, ((std::cmp::min(1024, shared_inter) + 31) / 32) * 32);
             let mut ac0 = s1_buf;
@@ -72435,6 +75025,42 @@ impl PrefillEngine {
         Ok(())
     }
 
+    fn capture_matched_shared_input(
+        &self, layer: usize, m: usize, hidden: u64, w1: &MarlinWeight,
+        w2: &MarlinWeight, stream: cuda_sys::CUstream,
+    ) -> Result<(), String> {
+        let Some(target) = self.matched_prefill_target("shared_expert", layer, m,None)? else { return Ok(()) };
+        if !self.layer_weights[layer].moe_gated {
+            return Err("matched shared probe requires gated activation".into());
+        }
+        target.row("input.bf16", hidden, w1.k, stream)?;
+        for (name, weight) in [("w1", w1), ("w2", w2)] {
+            let packed_bytes = weight.k.checked_mul(weight.n).and_then(|n| n.checked_mul(weight.num_bits as usize)).map(|n| n / 8).ok_or("shared probe packed overflow")?;
+            let scale_bytes = weight.num_groups.checked_mul(weight.n).and_then(|n| n.checked_mul(2)).ok_or("shared probe scale overflow")?;
+            target.device(&format!("{name}-packed.bin"), weight.packed, packed_bytes, stream)?;
+            target.device(&format!("{name}-scales.bf16"), weight.scales, scale_bytes, stream)?;
+            target.write(&format!("{name}-descriptor.json"), serde_json::to_string_pretty(&serde_json::json!({
+                "n":weight.n,"k":weight.k,"bits":weight.num_bits,"groups":weight.num_groups,
+                "group_size":weight.group_size,"packed_ptr":weight.packed,"scales_ptr":weight.scales,
+                "layer":layer,"row":target.row,"height":m,"activation":self.layer_weights[layer].moe_activation,
+                "swiglu_limit":self.layer_weights[layer].shared_swiglu_limit,
+                "deepseek_v4_activation":self.layer_weights[layer].moe_deepseek_v4_activation,
+                "device_diagnostic_allocation_bytes":0
+            })).map_err(|e|e.to_string())?.as_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn capture_matched_shared_row(
+        &self, layer: usize, m: usize, name: &str, ptr: u64,
+        width: usize, stream: cuda_sys::CUstream,
+    ) -> Result<(), String> {
+        if let Some(target) = self.matched_prefill_target("shared_expert", layer, m,None)? {
+            target.row(name, ptr, width, stream)?;
+        }
+        Ok(())
+    }
+
     fn run_shared_expert_sync_on_main_stream(
         &self,
         layer_idx: usize,
@@ -72485,7 +75111,7 @@ impl PrefillEngine {
                 );
             }
             if gated {
-                self.launch_gated_activation(
+                self.expert_gated_activation(
                     s2_buf,
                     s1_buf,
                     activation,
@@ -72583,6 +75209,7 @@ impl PrefillEngine {
         let sw1 = lw.shared_w1.as_ref().ok_or("missing shared w1")?;
         let sw2 = lw.shared_w2.as_ref().ok_or("missing shared w2")?;
         let shared_inter = sw1.n / (if gated { 2 } else { 1 });
+        self.capture_matched_shared_input(layer_idx, m, hidden, sw1, sw2, self.stream)?;
         if trace_shared_stages {
             self.push_reference_stage_metadata(
                 "layer1_shared_expert_sync_descriptor_marlin",
@@ -72608,7 +75235,8 @@ impl PrefillEngine {
             );
         }
 
-        self.marlin_gemm(hidden, sw1, s1_buf, m)?;
+        self.expert_marlin_gemm(hidden, sw1, s1_buf, m)?;
+        self.capture_matched_shared_row(layer_idx, m, "w1.bf16", s1_buf, sw1.n, self.stream)?;
         if trace_shared_stages {
             self.push_reference_stage_snapshot(
                 "layer1_shared_w1_out_last",
@@ -72622,7 +75250,7 @@ impl PrefillEngine {
             );
         }
         if gated {
-            self.launch_gated_activation(
+            self.expert_gated_activation(
                 s2_buf,
                 s1_buf,
                 activation,
@@ -72643,7 +75271,9 @@ impl PrefillEngine {
                     shared_inter,
                 );
             }
-            self.marlin_gemm(s2_buf, sw2, s1_buf, m)?;
+            self.capture_matched_shared_row(layer_idx, m, "activation.bf16", s2_buf, shared_inter, self.stream)?;
+            self.expert_marlin_gemm(s2_buf, sw2, s1_buf, m)?;
+            self.capture_matched_shared_row(layer_idx, m, "w2.bf16", s1_buf, sw2.n, self.stream)?;
             if trace_shared_stages {
                 self.push_reference_stage_snapshot(
                     "layer1_shared_w2_out_last",
@@ -72687,7 +75317,7 @@ impl PrefillEngine {
                     shared_inter,
                 );
             }
-            self.marlin_gemm(s1_buf, sw2, s2_buf, m)?;
+            self.expert_marlin_gemm(s1_buf, sw2, s2_buf, m)?;
             if trace_shared_stages {
                 self.push_reference_stage_snapshot(
                     "layer1_shared_w2_out_last",
@@ -73460,7 +76090,7 @@ impl PrefillEngine {
             // Gate GEMM: [total_m, hidden] @ [hidden, n_experts] -> [total_m, n_experts] FP32
             let alpha: f32 = 1.0;
             let beta: f32 = 0.0;
-            unsafe {
+            if let Some(bank)=&self.ordered_kda_projection {unsafe{bank.enqueue_router(gate_ptr,hidden,gate_out,n_experts,h,total_m,self.stream)?;}} else {unsafe {
                 use cudarc::cublas::result as cublas_result;
                 use cudarc::cublas::sys as cublas_sys;
                 cublas_result::set_stream(
@@ -73490,7 +76120,7 @@ impl PrefillEngine {
                     cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
                 )
                 .map_err(|e| format!("prescan gate GEMM layer {}: {:?}", layer_idx, e))?;
-            }
+            }}
 
             // Top-K routing
             {
@@ -74180,6 +76810,7 @@ impl PrefillEngine {
         let sw1 = lw.shared_w1.as_ref().ok_or("missing shared w1")?;
         let sw2 = lw.shared_w2.as_ref().ok_or("missing shared w2")?;
         let shared_inter = sw1.n / (if gated { 2 } else { 1 });
+        self.capture_matched_shared_input(layer_idx, m, hidden, sw1, sw2, self.shared_stream)?;
 
         // Use shared_stream + shared workspace to avoid conflicts
         let shared_scratch = if use_main_scratch {
@@ -74201,7 +76832,7 @@ impl PrefillEngine {
                 .device_ptr()
         };
 
-        self.marlin_gemm_on_stream(
+        self.expert_marlin_gemm_on_stream(
             hidden,
             sw1,
             s1_buf,
@@ -74211,9 +76842,11 @@ impl PrefillEngine {
             shared_ws,
         )?;
 
+        self.capture_matched_shared_row(layer_idx, m, "w1.bf16", s1_buf, sw1.n, self.shared_stream)?;
+
         // Activation
         if gated {
-            self.launch_gated_activation_on_stream(
+            self.expert_gated_activation_on_stream(
                 s2_buf,
                 s1_buf,
                 activation,
@@ -74223,7 +76856,8 @@ impl PrefillEngine {
                 deepseek_v4_activation,
                 self.shared_stream,
             )?;
-            self.marlin_gemm_on_stream(
+            self.capture_matched_shared_row(layer_idx, m, "activation.bf16", s2_buf, shared_inter, self.shared_stream)?;
+            self.expert_marlin_gemm_on_stream(
                 s2_buf,
                 sw2,
                 s1_buf,
@@ -74232,6 +76866,7 @@ impl PrefillEngine {
                 shared_scratch,
                 shared_ws,
             )?;
+            self.capture_matched_shared_row(layer_idx, m, "w2.bf16", s1_buf, sw2.n, self.shared_stream)?;
         } else {
             let act_t = std::cmp::max(32, ((std::cmp::min(1024, shared_inter) + 31) / 32) * 32);
             let mut ac0 = s1_buf;
@@ -74251,7 +76886,7 @@ impl PrefillEngine {
                     ],
                 )?;
             }
-            self.marlin_gemm_on_stream(
+            self.expert_marlin_gemm_on_stream(
                 s1_buf,
                 sw2,
                 s2_buf,
@@ -75029,6 +77664,7 @@ impl PrefillEngine {
         let h = cfg.hidden_size;
         let v = cfg.vocab_size;
 
+        let first_logits_observer = crate::matched_prefill_logits::begin(self.matched_prefill_invocation.as_ref(), temperature, v, h, m, self.scratch.max_tokens, self.scratch.d_hidden.len(), self.scratch.d_logits.len(), *self.scratch.d_hidden.device_ptr())?;
         let last_tok = *self.scratch.d_hidden.device_ptr() + ((m - 1) * h * 2) as u64;
         let debug_reference_trace = self.reference_debug_trace_enabled;
         let margin_projection_target = self.first_token_margin_projection_target()?;
@@ -75102,6 +77738,8 @@ impl PrefillEngine {
         } else {
             return Err("No LM head (neither Marlin nor BF16)".to_string());
         }
+        if let Some(selected)=&self.selected_kda {selected.enqueue_serving_guard(*self.scratch.d_logits.device_ptr(),self.scratch.d_logits.len()*4,self.stream)?;}
+
         // Download logits
         self.h_logits.resize(v, 0.0);
         let h_logits_host_ptr = self.h_logits.as_ptr() as usize;
@@ -75119,7 +77757,10 @@ impl PrefillEngine {
             }
         }
         self.stream_sync()?;
+        if let Some(observer) = &first_logits_observer { observer.raw(&self.h_logits, last_tok, self.stream, self.final_logit_softcap, lm_head_kind)?; }
+        if self.selected_kda.is_some() && self.h_logits.first().is_some_and(|v|v.is_nan()) {return Err("selected prefill recurrence rejected invalid state/operands before sampling".into());}
         apply_logit_softcap_in_place(&mut self.h_logits, self.final_logit_softcap);
+        if let Some(observer) = &first_logits_observer { observer.softcap(&self.h_logits)?; }
 
         let logits_before_suppression = if debug_reference_trace {
             Some(self.h_logits.clone())
@@ -75134,6 +77775,7 @@ impl PrefillEngine {
             }
         }
 
+        if let Some(observer) = &first_logits_observer { observer.policy(&self.h_logits, suppress_tokens)?; }
         // Sample
         let first_token = if temperature < 1e-6 {
             // Greedy
@@ -75364,6 +78006,7 @@ impl PrefillEngine {
             }));
         }
 
+        if let Some(observer) = &first_logits_observer { observer.selected(&self.h_logits, first_token)?; }
         Ok(first_token)
     }
 }
@@ -76269,6 +78912,11 @@ impl PrefillKernels {
 /// Used by both `prepare_for_prefill` and `hcs_evict_for_prefill` to ensure consistency.
 pub const PREFILL_SAFETY_MARGIN_MB: usize = 600;
 const PREFILL_PTR_TABLE_REUSE_SLOTS: usize = 2;
+const PREFILL_CANCELLED_ERROR_PREFIX: &str = "prefill cancelled: peer disconnected";
+
+pub(crate) fn is_prefill_cancelled_error(error: &str) -> bool {
+    error.starts_with(PREFILL_CANCELLED_ERROR_PREFIX)
+}
 
 fn clean_runtime_chunk_tokens(prompt_tokens: usize, max_chunk_tokens: usize) -> usize {
     let max_chunk = max_chunk_tokens.max(128);
@@ -76600,17 +79248,12 @@ fn prefill_cross_chunk_kv_staging_floats(
     config: &PrefillModelConfig,
     prompt_tokens: usize,
 ) -> usize {
-    if prompt_tokens == 0 || config.num_kv_heads == 0 || config.head_dim == 0 {
-        return 0;
-    }
-    // Cross-chunk GQA fallback stages K and V as BF16 in d_fp32_scratch:
-    // required bytes = prompt_tokens * (num_kv_heads * head_dim) * 2 tensors * 2 bytes.
-    // d_fp32_scratch is counted in f32 elements, so the required f32 element floor is
-    // prompt_tokens * (num_kv_heads * head_dim).
-    let kv_dim = config
-        .max_gqa_kv_dim
-        .max(config.num_kv_heads * config.head_dim);
-    prompt_tokens * kv_dim
+    // Genuine cross-chunk GQA stages two BF16 histories in an F32 arena:
+    // tokens * KV width * 2 tensors * 2 bytes / sizeof(f32).
+    // Native MLA, recurrent attention and native DeepSeek-V4 have separate
+    // execution/storage contracts; their projection widths remain covered by
+    // the unchanged chunk-local scratch calculation.
+    prompt_tokens * config.full_history_gqa_kv_dim
 }
 
 fn deepseek_v4_selected_per_token(config: &PrefillModelConfig, prompt_tokens: usize) -> usize {
@@ -77574,7 +80217,7 @@ pub fn allocate_scratch_for_prompt(
         d_hidden: alloc_u16(max_tokens * h, "hidden")?,
         d_residual: alloc_u16(max_tokens * h, "residual")?,
         d_scratch1: alloc_u16(max_inter, "scratch1")?,
-        d_scratch2: alloc_u16(max_inter, "scratch2")?,
+        d_scratch2: Arc::new(alloc_u16(max_inter, "scratch2")?),
         d_hqq_bf16_weight: if config.hqq_prefill_materialize_bf16 && max_tokens > 0 {
             let elems = hqq_prefill_materialize_weight_elems(config);
             Some(alloc_u16(elems, "hqq_bf16_weight")?)
@@ -77677,27 +80320,27 @@ pub fn allocate_scratch_for_prompt(
                 .max(config.la_num_v_heads * config.la_v_head_dim);
             alloc_u16(max_tokens * attn_dim, "attn_out")?
         },
-        d_q: alloc_u16(
+        d_q: Arc::new(alloc_u16(
             max_tokens
                 * config
                     .max_gqa_q_dim
                     .max(config.num_q_heads * config.head_dim),
             "q",
-        )?,
-        d_k: alloc_u16(
+        )?),
+        d_k: Arc::new(alloc_u16(
             max_tokens
                 * config
                     .max_gqa_kv_dim
                     .max(config.num_kv_heads * config.head_dim),
             "k",
-        )?,
-        d_v: alloc_u16(
+        )?),
+        d_v: Arc::new(alloc_u16(
             max_tokens
                 * config
                     .max_gqa_kv_dim
                     .max(config.num_kv_heads * config.head_dim),
             "v",
-        )?,
+        )?),
         d_logits: alloc_f32(config.vocab_size, "logits")?,
         d_mamba2_conv_state: if has_mamba2 {
             Some(alloc_f32(
@@ -77893,7 +80536,7 @@ pub fn allocate_scratch_for_prompt(
             None
         },
         d_la_b: if has_la {
-            Some(alloc_u16(la_max_len * config.la_num_v_heads, "la_b")?)
+            Some(Arc::new(alloc_u16(la_max_len * config.la_num_v_heads, "la_b")?))
         } else {
             None
         },
@@ -78650,8 +81293,12 @@ mod chunk_plan_tests {
         build_balanced_prefill_chunk_plan, build_balanced_prefill_chunk_plan_at_boundary,
         build_image_aware_prefill_chunk_plan, build_prefill_chunk_plan,
         build_prefill_chunk_plan_at_boundary, deepseek_v4_native_prefix_rows_to_restore,
+        dsa_mla_gathered_gemm_workspace_row_layout,
+        dsa_mla_grouped_exact_workspace_row_layout, dsa_mla_wvc_workspace_row_layout,
+        dsa_prefill_workspace_deficit_bytes,
         glm5_hc_temp_state_elements_from_geometry, kimi_delta_state_elements_from_geometry,
-        marlin_moe_uses_sparse_block_filter,
+        is_prefill_cancelled_error, marlin_moe_uses_sparse_block_filter,
+        fused_moe_fp32_reduce_floats, fused_moe_fp32_reduce_floats_for_precisions,
         portable_predicted_w1_requires_exact_resize, prefill_chunk_guard_prompt_tokens,
         project_prefill_runtime_reserve_bytes, shared_moe_inter_scratch_elements,
         select_prefill_pinning_experts, stage_exact_export_launch_scalars, stage_exact_export_range,
@@ -78659,9 +81306,75 @@ mod chunk_plan_tests {
     };
 
     #[test]
+    fn prefill_cancellation_error_contract_is_narrow() {
+        assert!(is_prefill_cancelled_error(
+            "prefill cancelled: peer disconnected phase=chunk_complete chunk=2 completed_tokens=4096"
+        ));
+        assert!(!is_prefill_cancelled_error(
+            "cold staging allocation failed after chunk 2"
+        ));
+        assert!(!is_prefill_cancelled_error(
+            "prefill cancelled for an unrelated reason"
+        ));
+    }
+
+    #[test]
+    fn dsa_workspace_deficit_uses_complete_measured_requirement() {
+        assert_eq!(
+            dsa_prefill_workspace_deficit_bytes(1_000, 400, 300, 200, 100).unwrap(),
+            0
+        );
+        assert_eq!(
+            dsa_prefill_workspace_deficit_bytes(999, 400, 300, 200, 100).unwrap(),
+            1
+        );
+        assert_eq!(
+            dsa_prefill_workspace_deficit_bytes(600, 400, 300, 200, 100).unwrap(),
+            400
+        );
+        assert!(dsa_prefill_workspace_deficit_bytes(0, usize::MAX, 1, 0, 0).is_err());
+    }
+
+    #[test]
+    fn dsa_mla_transient_workspace_rows_include_every_buffer_and_alignment() {
+        assert_eq!(
+            dsa_mla_gathered_gemm_workspace_row_layout(2, 3, 4, 1).unwrap(),
+            (148, 765),
+        );
+        assert_eq!(
+            dsa_mla_grouped_exact_workspace_row_layout(2, 3).unwrap(),
+            (56, 510),
+        );
+        assert_eq!(dsa_mla_wvc_workspace_row_layout(2, 4, 3).unwrap(), (28, 255));
+        assert!(dsa_mla_gathered_gemm_workspace_row_layout(usize::MAX, 2, 1, 0).is_err());
+    }
+
+    #[test]
     fn mixed_marlin_prefill_enables_negative_sentinel_filtering_only_for_heterogeneous_layers() {
         assert!(marlin_moe_uses_sparse_block_filter(true));
         assert!(!marlin_moe_uses_sparse_block_filter(false));
+    }
+
+    #[test]
+    fn prefill_precision_scratch_covers_wider_int4_tiles_than_int8() {
+        let int4 = fused_moe_fp32_reduce_floats(64, 4096, 2048, 4, 128, 1, 99 * 1024);
+        let int8 = fused_moe_fp32_reduce_floats(64, 4096, 2048, 8, 128, 1, 99 * 1024);
+        assert!(int4 > int8, "precision changes the legal N tile at this shared-memory limit");
+        assert_eq!(fused_moe_fp32_reduce_floats_for_precisions(
+            64, 4096, 2048, &[4, 8], 128, 1, 99 * 1024), int4);
+        for shared_mem in [48 * 1024, 99 * 1024, 163 * 1024] {
+            for (n, k, group_size, sms) in [(4096, 2048, 128, 1), (768, 1024, 32, 7), (1024, 768, 64, 3)] {
+                let mixed = fused_moe_fp32_reduce_floats_for_precisions(
+                    64, n, k, &[4, 8], group_size, sms, shared_mem);
+                for bits in [4, 8] {
+                    let homogeneous = fused_moe_fp32_reduce_floats(
+                        64, n, k, bits, group_size, sms, shared_mem);
+                    assert!(mixed >= homogeneous);
+                    assert_eq!(fused_moe_fp32_reduce_floats_for_precisions(
+                        64, n, k, &[bits as u8], group_size, sms, shared_mem), homogeneous);
+                }
+            }
+        }
     }
 
     #[test]
@@ -79875,6 +82588,8 @@ mod kernel_tests {
                 ))),
                 "decode_kernels",
                 &[
+                    "dsa_kpool_expand_indices",
+                    "dsa_kpool_expand_indices_g",
                     "mla_kv_cache_write_k4_g",
                     "mla_kv_cache_write_k4",
                     "mla_attention_k4_g",
@@ -80610,6 +83325,113 @@ mod kernel_tests {
         }
     }
 
+    // BEGIN bounded kpool decode causal-prefix regression
+    // Bounded CUDA parity probe for pooled causal indices.
+    // Records pre-fix kernel failure; does not alter production arithmetic.
+    #[cfg(has_decode_kernels)]
+    #[test]
+    fn test_kpool_decode_consumed_prefix_matches_causal_reference() {
+        let ctx = GpuTestCtx::new();
+        let direct = ctx.get_decode_kernel("dsa_kpool_expand_indices");
+        let graphable = ctx.get_decode_kernel("dsa_kpool_expand_indices_g");
+        let mut observations = Vec::new();
+        for pool in [2usize, 4, 8] {
+            for capacity in [1usize, 2, 5] {
+                let width = capacity * pool + pool - 1;
+                let mut contexts = vec![0, 1, pool - 1, pool, pool + 1, width - 1, width, width + 1];
+                contexts.sort_unstable();
+                contexts.dedup();
+                for context in contexts {
+                    let complete = context / pool;
+                    let selected = capacity.min(complete);
+                    let mut pools = vec![i32::MAX; capacity];
+                    for (i, p) in pools[..selected].iter_mut().enumerate() {
+                        *p = (complete - 1 - i) as i32;
+                    }
+                    let mut expected = vec![-1i32; width];
+                    for i in 0..selected {
+                        for offset in 0..pool {
+                            expected[i * pool + offset] = pools[i] * pool as i32 + offset as i32;
+                        }
+                    }
+                    for offset in 0..context % pool {
+                        expected[selected * pool + offset] = (complete * pool + offset) as i32;
+                    }
+                    let d_pools = ctx.dev.htod_copy(pools).unwrap();
+                    let d_context = ctx.dev.htod_copy(vec![context as i32]).unwrap();
+                    for (label, kernel, pointer_context) in
+                        [("direct", direct, false), ("graphable", graphable, true)]
+                    {
+                        let d_raw = ctx.alloc_i32(width);
+                        let mut a0 = *d_pools.device_ptr() as u64;
+                        let mut a1 = *d_raw.device_ptr() as u64;
+                        let mut a2 = capacity as i32;
+                        let mut a3 = width as i32;
+                        let mut a4 = context as i32;
+                        let mut a4ptr = *d_context.device_ptr() as u64;
+                        let mut a5 = pool as i32;
+                        unsafe {
+                            launch(
+                                kernel,
+                                (width.div_ceil(128) as u32, 1, 1),
+                                (128, 1, 1),
+                                0,
+                                ctx.stream(),
+                                &mut [
+                                    &mut a0 as *mut _ as *mut _,
+                                    &mut a1 as *mut _ as *mut _,
+                                    &mut a2 as *mut _ as *mut _,
+                                    &mut a3 as *mut _ as *mut _,
+                                    if pointer_context {
+                                        &mut a4ptr as *mut _ as *mut _
+                                    } else {
+                                        &mut a4 as *mut _ as *mut _
+                                    },
+                                    &mut a5 as *mut _ as *mut _,
+                                ],
+                            )
+                            .unwrap();
+                        }
+                        self::cuda_sync();
+                        let actual = ctx.dev.dtoh_sync_copy(&d_raw).unwrap();
+                        let consumed = context.min(width);
+                        observations.push(serde_json::json!({
+                            "kernel":label,"context":context,"pool":pool,"capacity":capacity,
+                            "graph_consumed_count":consumed,"actual":actual,"expected":expected,
+                            "consumed_matches":actual[..consumed]==expected[..consumed],
+                            "complete_layout_matches":actual==expected,
+                        }));
+                    }
+                }
+            }
+        }
+        if let Some(output) = std::env::var_os("KRASIS_KPOOL_PROBE_OUTPUT") {
+            let path = std::path::PathBuf::from(output);
+            assert!(path.is_absolute());
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .unwrap();
+            file.write_all(serde_json::to_vec_pretty(&observations).unwrap().as_slice())
+                .unwrap();
+            file.sync_all().unwrap();
+        }
+        let failures = observations
+            .iter()
+            .filter(|v| v["consumed_matches"] != true || v["complete_layout_matches"] != true)
+            .collect::<Vec<_>>();
+        assert!(
+            failures.is_empty(),
+            "{} pooled-tail layout cases failed: {:?}",
+            failures.len(),
+            failures
+        );
+    }
+
+    // END bounded kpool decode causal-prefix regression
+
     #[test]
     fn test_glm53_kpool_prefill_matches_cpu_reference() {
         let ctx = GpuTestCtx::new();
@@ -81050,6 +83872,8 @@ mod kernel_tests {
         }
         output
     }
+
+    include!("matched_kda_test.rs");
 
     fn load_test_fla(nv: usize) -> FlaKernels {
         // FLA loading resolves the packaged sidecar path through PyO3. Kernel
@@ -84454,6 +87278,25 @@ mod kernel_tests {
     }
 
     #[test]
+    fn test_dsa_mla_gathered_trace_preserves_production_output() {
+        assert!(!dsa_mla_scalar_trace_shadow_enabled(
+            true, true, true, false,
+        ));
+        assert!(!dsa_mla_scalar_trace_shadow_enabled(
+            true, true, false, true,
+        ));
+        assert!(dsa_mla_scalar_trace_shadow_enabled(
+            false, true, true, false,
+        ));
+        assert!(dsa_mla_scalar_trace_shadow_enabled(
+            false, true, false, true,
+        ));
+        assert!(!dsa_mla_scalar_trace_shadow_enabled(
+            false, false, true, true,
+        ));
+    }
+
+    #[test]
     fn test_dsa_mla_gathered_compute_mode_parser_is_strict() {
         assert_eq!(
             parse_dsa_mla_gathered_compute_mode(None).unwrap(),
@@ -84714,6 +87557,7 @@ mod kernel_tests {
     fn test_dsa_prefill_causal_selection_matches_cpu() {
         let ctx = GpuTestCtx::new();
         let kernels = DsaPrefillSelectionKernels {
+            score_tensorcomp: None,
             rope_query_bf16: ctx.get_kernel("dsa_prefill_rope_query_bf16_kernel"),
             fused_scores: ctx.get_kernel("dsa_prefill_fused_scores_kernel"),
             accumulate_gemm_scores: ctx.get_kernel("dsa_prefill_accumulate_gemm_scores_kernel"),
@@ -84843,7 +87687,8 @@ mod kernel_tests {
             },
             None,
             &mut selection_timing,
-        )
+        None,
+)
         .expect("DSA prefill causal selection dispatcher");
         assert_eq!(launched_plan, topk_plan);
         self::cuda_sync();
@@ -84994,7 +87839,8 @@ mod kernel_tests {
             },
             None,
             &mut direct_selection_timing,
-        )
+        None,
+)
         .expect("DSA direct one-run dispatcher");
         assert_eq!(direct_launched_plan, direct_plan);
         self::cuda_sync();
@@ -85010,6 +87856,7 @@ mod kernel_tests {
     fn test_deepseek_v4_prefill_radix_linear_topk_matches_bitonic_bits() {
         let ctx = GpuTestCtx::new();
         let kernels = DsaPrefillSelectionKernels {
+            score_tensorcomp: None,
             rope_query_bf16: ctx.get_kernel("dsa_prefill_rope_query_bf16_kernel"),
             fused_scores: ctx.get_kernel("dsa_prefill_fused_scores_kernel"),
             accumulate_gemm_scores: ctx.get_kernel("dsa_prefill_accumulate_gemm_scores_kernel"),
@@ -85105,7 +87952,8 @@ mod kernel_tests {
                 },
                 None,
                 &mut timing,
-            )
+            None,
+)
             .expect("production-shape top-k launch");
             assert_eq!(launched, plan);
             self::cuda_sync();
@@ -85148,6 +87996,7 @@ mod kernel_tests {
     fn test_deepseek_v4_prefill_index_score_gemm_matches_cpu_bound() {
         let ctx = GpuTestCtx::new();
         let kernels = DsaPrefillSelectionKernels {
+            score_tensorcomp: None,
             rope_query_bf16: ctx.get_kernel("dsa_prefill_rope_query_bf16_kernel"),
             fused_scores: ctx.get_kernel("dsa_prefill_fused_scores_kernel"),
             accumulate_gemm_scores: ctx.get_kernel("dsa_prefill_accumulate_gemm_scores_kernel"),
@@ -85329,7 +88178,8 @@ mod kernel_tests {
                     },
                     None,
                     &mut timing,
-                )
+                None,
+)
                 .expect("DeepSeek-V4 index-score GEMM dispatcher");
                 assert_eq!(launched, topk_plan);
                 self::cuda_sync();
@@ -92537,6 +95387,11 @@ mod kernel_tests {
     #[cfg(has_decode_kernels)]
     #[test]
     fn test_glm53_kda_chunk_chain_matches_recurrent_oracle_across_partial_chunk() {
+        glm53_kda_chunk_fixture(73);
+    }
+
+    #[cfg(has_decode_kernels)]
+    fn glm53_kda_chunk_fixture(tokens: usize) -> (Vec<u8>, Vec<u8>) {
         let ctx = GpuTestCtx::new();
         // GLM-5.3 registers 64 KDA heads.  Exercise the same FLA sidecar
         // specialization as the production runtime rather than relying on the
@@ -92545,7 +95400,6 @@ mod kernel_tests {
         let fla = load_test_fla(64);
         let prepare = ctx.get_decode_kernel("kimi_delta_chunk_prepare_bf16");
         let recurrent = ctx.get_decode_kernel("kimi_delta_recurrent_scan_tiled_bf16");
-        let tokens = 73usize;
         let heads = 64usize;
         let dim = 128usize;
         let block_tokens = FLA_PREFILL_BLOCK_TOKENS;
@@ -93000,6 +95854,50 @@ mod kernel_tests {
             5e-2,
             "glm53_kda_first_decode_state",
         );
+        (oracle_output, chunk_output)
+    }
+
+    #[cfg(has_decode_kernels)]
+    #[test]
+    fn test_glm53_kda_appended_prefix_discriminator() {
+        // Numeric kernel fixtures, never calibration or benchmark prompts.
+        // Preserve the existing oracle checks and their measurement points.
+        for (base_tokens, extended_tokens) in [(63, 65), (73, 94), (10_500, 10_521)] {
+            let (serial_base, chunk_base) = glm53_kda_chunk_fixture(base_tokens);
+            let (serial_extended, chunk_extended) = glm53_kda_chunk_fixture(extended_tokens);
+            assert!(serial_extended.len() > serial_base.len());
+            assert_eq!(serial_base, serial_extended[..serial_base.len()],
+                "serial recurrent oracle changed its causal prefix");
+            let mut differing_values = 0usize;
+            let mut first_difference = None;
+            let mut max_abs = 0.0f64;
+            let mut error_squared = 0.0f64;
+            let mut reference_squared = 0.0f64;
+            for (index, (a, b)) in chunk_base.chunks_exact(2)
+                .zip(chunk_extended[..chunk_base.len()].chunks_exact(2)).enumerate() {
+                let a_bits = u16::from_le_bytes(a.try_into().unwrap());
+                let b_bits = u16::from_le_bytes(b.try_into().unwrap());
+                let a = half::bf16::from_bits(a_bits).to_f32() as f64;
+                let b = half::bf16::from_bits(b_bits).to_f32() as f64;
+                assert!(a.is_finite() && b.is_finite());
+                if a_bits != b_bits {
+                    differing_values += 1;
+                    first_difference.get_or_insert(index);
+                }
+                max_abs = max_abs.max((a-b).abs());
+                error_squared += (a-b).powi(2);
+                reference_squared += a.powi(2);
+            }
+            assert!(reference_squared > 0.0);
+            eprintln!("{}", serde_json::json!({
+                "diagnostic":"kda_appended_prefix", "campaign_exact_gate_waived":false,
+                "base_tokens":base_tokens,"extended_tokens":extended_tokens,
+                "serial_oracle_prefix_bit_exact":true,"values_compared":chunk_base.len()/2,
+                "parallel_prefix_bit_exact":differing_values==0,
+                "differing_values":differing_values,"first_difference_flat_index":first_difference,
+                "max_abs":max_abs,"relative_l2":(error_squared/reference_squared).sqrt()
+            }));
+        }
     }
 
     #[cfg(has_decode_kernels)]
@@ -93687,4 +96585,16 @@ fn find_marlin_so() -> Option<String> {
 
     log::warn!("libkrasis_marlin.so not found — Marlin GEMM will be unavailable");
     None
+}
+
+impl PrefillEngine {
+    pub(crate) fn retained_kda_prefill_source(&self,layer:usize,rows:usize,reserve:usize)->Result<crate::kda_prefix_owner::RetainedPrefillKdaSource,String>{
+        let desc=self.layer_weights.get(layer).and_then(|x|x.kimi_delta.as_ref()).ok_or("actual prefill KDA layer geometry")?;
+        if self.stream!=self.prefill_stream_owner.handle(){return Err("actual prefill stream owner mismatch".into());}
+        let beta=self.scratch.d_la_b.as_ref().ok_or("actual prefill beta absent")?.clone();
+        let raw=[self.scratch.d_q.clone(),self.scratch.d_k.clone(),self.scratch.d_v.clone(),self.scratch.d_scratch2.clone(),beta];
+        let addresses=raw.iter().map(|x|*x.device_ptr()).collect::<Vec<_>>();
+        let source=crate::kda_prefix_owner::RetainedPrefillKdaSource::from_model_storage(self.prefill_stream_owner.clone(),raw,rows,desc.num_heads,desc.head_dim,reserve)?;
+        if source.addresses()!=addresses{return Err("actual prefill source pointers differ".into());}Ok(source)
+    }
 }

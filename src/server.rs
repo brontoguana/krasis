@@ -195,6 +195,24 @@ impl SsePeerDisconnectMonitor {
             let _ = handle.join();
         }
     }
+
+    fn stop_and_join_without_stream_shutdown(mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for SsePeerDisconnectMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        // The probe has a bounded read timeout, so an early-return path can
+        // join without mutating the request stream that later decode may use.
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 fn abort_if_cuda_context_poisoned(context: &str, err: &str) {
@@ -240,6 +258,9 @@ extern "C" fn shutdown_signal_handler(_sig: libc::c_int) {
 
 /// Server state shared across request handling.
 struct ServerState {
+    // BEGIN explicit teacher-forced endpoint capability
+    diagnostic_endpoints_enabled: bool,
+    // END explicit teacher-forced endpoint capability
     py_model: Py<PyAny>,
     model_name: String,
     tokenizer: Arc<tokenizers::Tokenizer>,
@@ -639,6 +660,7 @@ fn commit_pending_boundary_snapshot(
             state_blobs: pending.capture.state_blobs,
         };
         snapshot.validate()?;
+        let matched_logical_tokens = snapshot.consumed_token_ids.len();
         let actual_bytes = snapshot.memory_cost_bytes();
         let snapshot_id = state
             .session_cache
@@ -646,6 +668,7 @@ fn commit_pending_boundary_snapshot(
             .as_mut()
             .ok_or_else(|| "RAM session store is unavailable".to_string())?
             .commit(reservation, snapshot)?;
+        capture_matched_ram_snapshot(state, snapshot_id, matched_logical_tokens)?;
         state
             .session_cache
             .restore_samples
@@ -745,6 +768,89 @@ fn restore_snapshot_to_gpu(
         )?;
     }
     Ok(total_ms)
+}
+
+fn capture_matched_sequence_state(
+    state: &ServerState,
+    engine: &crate::gpu_prefill::PrefillEngine,
+    request_id: &str,
+    phase: &str,
+    logical_tokens: usize,
+    sequence_start: usize,
+    snapshot_id: Option<crate::session_cache::SnapshotId>,
+) -> Result<(), String> {
+    let Some(target) = crate::matched_probe::target("sequence_state", 0, logical_tokens)? else {
+        return Ok(());
+    };
+    let target = target.child(&format!("request-{request_id}-{phase}"))?;
+    target.write("request.json",serde_json::to_vec_pretty(&serde_json::json!({
+        "request_id":request_id,"phase":phase,"logical_tokens":logical_tokens,"sequence_start":sequence_start,
+        "snapshot_id":snapshot_id,"device_diagnostic_allocation_bytes":0
+    })).map_err(|e|e.to_string())?.as_slice())?;
+    for address in
+        std::iter::once(state.gpu_store_addr).chain(state.aux_gpu_store_addrs.iter().copied())
+    {
+        let store = unsafe { &*(address as *const GpuDecodeStore) };
+        store.capture_matched_sequence_state_rust(
+            logical_tokens,
+            target
+                .directory
+                .join(format!("device-{}", store.device_ordinal())),
+        )?;
+    }
+    engine.capture_matched_stage_state_rust(logical_tokens, target.directory.join("prefill-stage"))
+}
+
+fn capture_matched_ready_state(
+    state: &ServerState,
+    engine: &crate::gpu_prefill::PrefillEngine,
+    request_id: &str,
+    logical_tokens: usize,
+    sequence_start: usize,
+    snapshot_id: Option<crate::session_cache::SnapshotId>,
+) -> Result<(), String> {
+    let Some(target) = crate::matched_probe::target("sequence_state", 0, logical_tokens)? else {
+        return Ok(());
+    };
+    capture_matched_sequence_state(
+        state,
+        engine,
+        request_id,
+        "prefill-runtime-ready",
+        logical_tokens,
+        sequence_start,
+        snapshot_id,
+    )?;
+    let bytes: Vec<u8> = engine
+        .h_logits
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    target
+        .child(&format!("request-{request_id}-prefill-runtime-ready"))?
+        .write("first-logits.f32.bin", &bytes)
+}
+
+fn capture_matched_ram_snapshot(
+    state: &mut ServerState,
+    id: crate::session_cache::SnapshotId,
+    logical_tokens: usize,
+) -> Result<(), String> {
+    let Some(target) = crate::matched_probe::target("snapshot", 0, logical_tokens)? else {
+        return Ok(());
+    };
+    let snapshot = state
+        .session_cache
+        .ram_store
+        .as_mut()
+        .ok_or("missing matched-probe RAM store")?
+        .get(id)?
+        .ok_or("missing committed matched-probe snapshot")?;
+    let name = format!(
+        "snapshot-{}",
+        serde_json::to_string(&id).map_err(|e| e.to_string())?
+    );
+    target.child(&name)?.snapshot(id, snapshot.as_ref())
 }
 
 fn snapshot_current_sequence_to_ram(
@@ -882,6 +988,7 @@ fn snapshot_current_sequence_to_ram(
             snapshot.as_ref(),
         )?
     };
+    capture_matched_ram_snapshot(state, id, consumed_token_ids.len())?;
     state
         .session_cache
         .restore_samples
@@ -1179,6 +1286,7 @@ fn drain_vram_pressure_for_state(
 enum ModelRequest {
     Chat { stream: TcpStream, body: String },
     SessionCacheStats { stream: TcpStream },
+    SessionCacheTestPressure { stream: TcpStream, arm: bool },
     PrefillLogits { stream: TcpStream, body: String },
     TeacherForcedDecodeLogits { stream: TcpStream, body: String },
     ReferenceTest { stream: TcpStream, body: String },
@@ -1303,13 +1411,39 @@ impl Drop for SessionRequestLease {
     }
 }
 
+fn require_model_sequence_ready(state: &ServerState) -> Result<(), String> {
+    for address in
+        std::iter::once(state.gpu_store_addr).chain(state.aux_gpu_store_addrs.iter().copied())
+    {
+        if address != 0 {
+            unsafe { &*(address as *const GpuDecodeStore) }.require_sequence_state_ready_rust()?;
+        }
+    }
+    Ok(())
+}
+
 fn handle_model_request(request: ModelRequest, state: &mut ServerState) {
+    if matches!(
+        &request,
+        ModelRequest::Chat { .. }
+            | ModelRequest::PrefillLogits { .. }
+            | ModelRequest::TeacherForcedDecodeLogits { .. }
+            | ModelRequest::ReferenceTest { .. }
+    ) {
+        if let Err(error) = require_model_sequence_ready(state) {
+            reject_model_request(request, &error);
+            return;
+        }
+    }
     match request {
         ModelRequest::Chat { mut stream, body } => {
             handle_chat_completion(&mut stream, &body, state)
         }
         ModelRequest::SessionCacheStats { mut stream } => {
             handle_session_cache_stats(&mut stream, state)
+        }
+        ModelRequest::SessionCacheTestPressure { mut stream, arm } => {
+            handle_session_cache_test_pressure(&mut stream, state, arm)
         }
         ModelRequest::PrefillLogits { mut stream, body } => {
             handle_prefill_logits(&mut stream, &body, state)
@@ -1330,10 +1464,19 @@ fn handle_model_request(request: ModelRequest, state: &mut ServerState) {
     crate::vram_monitor::report_event("model_request_handler_returned");
 }
 
+fn reject_model_sequence(stream: &mut TcpStream, message: &str) {
+    let _ = send_json(
+        stream,
+        500,
+        &serde_json::json!({"error": message}).to_string(),
+    );
+}
+
 fn reject_model_request(request: ModelRequest, message: &str) {
     let mut stream = match request {
         ModelRequest::Chat { stream, .. }
         | ModelRequest::SessionCacheStats { stream }
+        | ModelRequest::SessionCacheTestPressure { stream, .. }
         | ModelRequest::PrefillLogits { stream, .. }
         | ModelRequest::TeacherForcedDecodeLogits { stream, .. }
         | ModelRequest::ReferenceTest { stream, .. }
@@ -1630,6 +1773,28 @@ fn handle_front_connection(
             }
         }
 
+        ("POST", "/v1/internal/session-cache/pressure-arm")
+        | ("POST", "/v1/internal/session-cache/pressure-clear") => {
+            if test_endpoints {
+                let arm = request.path.ends_with("pressure-arm");
+                if let Err(error) = scheduler.enqueue(ModelRequest::SessionCacheTestPressure {
+                    stream: tcp_stream,
+                    arm,
+                }) {
+                    log::error!(
+                        "Model worker is not available for session-cache test pressure: {}",
+                        error
+                    );
+                }
+            } else {
+                let _ = send_json(
+                    &mut tcp_stream,
+                    404,
+                    r#"{"error":"Test endpoints not enabled. Start server with --test-endpoints"}"#,
+                );
+            }
+        }
+
         ("POST", path) if is_chat_completions_endpoint(path) => {
             if let Err(error) = scheduler.enqueue(ModelRequest::Chat {
                 stream: tcp_stream,
@@ -1867,6 +2032,52 @@ fn handle_session_cache_stats(stream: &mut TcpStream, state: &ServerState) {
     let _ = send_json(stream, 200, &body.to_string());
 }
 
+fn handle_session_cache_test_pressure(stream: &mut TcpStream, state: &mut ServerState, arm: bool) {
+    if !state.session_cache.enabled {
+        let _ = send_json(stream, 409, r#"{"error":"Session cache is disabled"}"#);
+        return;
+    }
+    let Some(store) = state.session_cache.ram_store.as_mut() else {
+        let _ = send_json(
+            stream,
+            409,
+            r#"{"error":"Session RAM store is unavailable"}"#,
+        );
+        return;
+    };
+    if arm {
+        match store.arm_test_pressure_at_resident_bytes() {
+            Ok(cap_bytes) => {
+                let stats = store.stats();
+                let body = serde_json::json!({
+                    "status": "armed",
+                    "cap_bytes": cap_bytes,
+                    "resident_bytes": stats.resident_bytes,
+                    "resident_snapshots": stats.resident_snapshots,
+                    "evictions_before": stats.evictions,
+                })
+                .to_string();
+                let _ = send_json(stream, 200, &body);
+            }
+            Err(error) => {
+                let body = serde_json::json!({"error": error}).to_string();
+                let _ = send_json(stream, 409, &body);
+            }
+        }
+    } else {
+        store.clear_test_pressure();
+        let stats = store.stats();
+        let body = serde_json::json!({
+            "status": "cleared",
+            "resident_bytes": stats.resident_bytes,
+            "resident_snapshots": stats.resident_snapshots,
+            "evictions": stats.evictions,
+        })
+        .to_string();
+        let _ = send_json(stream, 200, &body);
+    }
+}
+
 fn handle_sequence_state_inventory(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
     let request: serde_json::Value = match serde_json::from_str(body) {
         Ok(value) => value,
@@ -1953,10 +2164,171 @@ fn handle_sequence_state_transfer_measurement(
         }
     };
 
+    if let Some(action) = request
+        .get("copy_error_action")
+        .and_then(serde_json::Value::as_str)
+    {
+        #[cfg(feature = "copy-lifecycle-test")]
+        let result = (|| -> Result<serde_json::Value, String> {
+            if !matches!(action, "poison" | "recover") {
+                return Err("invalid copy error action".into());
+            }
+            invalidate_active_sequence(state, "explicit_installed_copy_error_control");
+            let mut devices = Vec::new();
+            for address in std::iter::once(state.gpu_store_addr)
+                .chain(state.aux_gpu_store_addrs.iter().copied())
+            {
+                if address != 0 {
+                    let store = unsafe { &mut *(address as *mut GpuDecodeStore) };
+                    devices.push(store.installed_copy_error_recovery_rust(action)?);
+                }
+            }
+            if devices.is_empty() {
+                return Err("no real store for error control".into());
+            }
+            Ok(serde_json::json!({"action":action,"devices":devices}))
+        })();
+        #[cfg(not(feature = "copy-lifecycle-test"))]
+        let result: Result<serde_json::Value, String> =
+            Err("copy lifecycle diagnostic feature was not compiled".into());
+        match result {
+            Ok(value) => {
+                let _ = send_json(stream, 200, &value.to_string());
+            }
+            Err(error) => {
+                let _ = send_json(stream, 500, &serde_json::json!({"error":error}).to_string());
+            }
+        }
+        return;
+    }
+    if request
+        .get("external_copy_lifecycle")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        #[cfg(feature = "copy-lifecycle-test")]
+        let result = (|| -> Result<serde_json::Value, String> {
+            let id = state
+                .session_cache
+                .active
+                .as_ref()
+                .ok_or("no real active snapshot available")?
+                .snapshot_id;
+            let snapshot = state
+                .session_cache
+                .ram_store
+                .as_mut()
+                .ok_or("RAM store unavailable")?
+                .get(id)?
+                .ok_or("active snapshot unavailable")?;
+            invalidate_active_sequence(state, "explicit_installed_copy_control");
+            let mut guard = state
+                .rust_prefill
+                .lock()
+                .map_err(|_| "prefill owner guard poisoned")?;
+            let engine = guard.as_mut().ok_or("prefill owner unavailable")?;
+            engine.installed_external_copy_lifecycle_rust(state.gpu_store_addr, &snapshot)
+        })();
+        #[cfg(not(feature = "copy-lifecycle-test"))]
+        let result: Result<serde_json::Value, String> =
+            Err("copy lifecycle diagnostic feature was not compiled".into());
+        match result {
+            Ok(value) => {
+                let _ = send_json(stream, 200, &value.to_string());
+            }
+            Err(error) => {
+                let _ = send_json(stream, 500, &serde_json::json!({"error":error}).to_string());
+            }
+        }
+        return;
+    }
+    #[cfg(feature = "copy-lifecycle-test")]
+    let genuine_copy_parent = if request
+        .get("copy_lifecycle")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        let result =
+            (|| -> Result<std::sync::Arc<crate::session_cache::SessionSnapshot>, String> {
+                let active = state
+                    .session_cache
+                    .active
+                    .as_ref()
+                    .ok_or("copy control requires actual active saved history")?;
+                let ram = state
+                    .session_cache
+                    .ram_store
+                    .as_mut()
+                    .ok_or("copy control RAM store unavailable")?;
+                let current = ram
+                    .get(active.snapshot_id)?
+                    .ok_or("copy control current snapshot missing")?;
+                current.validate()?;
+                let parent_id = match ram
+                    .longest_proper_prefix(&current.consumed_token_ids, &current.compatibility)?
+                {
+                    crate::session_cache::PrefixLookupResult::Hit { snapshot_id, .. } => {
+                        snapshot_id
+                    }
+                    _ => {
+                        return Err("copy control has no genuine saved proper-prefix parent".into())
+                    }
+                };
+                let parent = ram
+                    .get(parent_id)?
+                    .ok_or("copy control saved parent disappeared")?;
+                parent.validate()?;
+                if parent.consumed_token_ids.len() >= current.consumed_token_ids.len()
+                    || !current
+                        .consumed_token_ids
+                        .starts_with(&parent.consumed_token_ids)
+                {
+                    return Err("copy control parent history is not a proper prefix".into());
+                }
+                Ok(parent)
+            })();
+        match result {
+            Ok(parent) => Some(parent),
+            Err(error) => {
+                let _ = send_json(stream, 500, &serde_json::json!({"error":error}).to_string());
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    if request
+        .get("copy_lifecycle")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        invalidate_active_sequence(state, "explicit_installed_copy_control");
+    }
     let mut devices = Vec::with_capacity(1 + state.aux_gpu_store_addrs.len());
     if state.gpu_store_addr != 0 {
         let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-        match store.sequence_state_transfer_measurement_value(logical_tokens, iterations) {
+        match {
+            if request
+                .get("copy_lifecycle")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                #[cfg(feature = "copy-lifecycle-test")]
+                {
+                    store.installed_copy_lifecycle_rust(
+                        genuine_copy_parent
+                            .as_deref()
+                            .expect("parent admitted before invalidation"),
+                    )
+                }
+                #[cfg(not(feature = "copy-lifecycle-test"))]
+                {
+                    Err("copy lifecycle diagnostic feature was not compiled".to_string())
+                }
+            } else {
+                store.sequence_state_transfer_measurement_value(logical_tokens, iterations)
+            }
+        } {
             Ok(value) => devices.push(value),
             Err(error) => {
                 let response = serde_json::json!({"error": error});
@@ -1970,7 +2342,28 @@ fn handle_sequence_state_transfer_measurement(
             continue;
         }
         let store = unsafe { &mut *(address as *mut GpuDecodeStore) };
-        match store.sequence_state_transfer_measurement_value(logical_tokens, iterations) {
+        match {
+            if request
+                .get("copy_lifecycle")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                #[cfg(feature = "copy-lifecycle-test")]
+                {
+                    store.installed_copy_lifecycle_rust(
+                        genuine_copy_parent
+                            .as_deref()
+                            .expect("parent admitted before invalidation"),
+                    )
+                }
+                #[cfg(not(feature = "copy-lifecycle-test"))]
+                {
+                    Err("copy lifecycle diagnostic feature was not compiled".to_string())
+                }
+            } else {
+                store.sequence_state_transfer_measurement_value(logical_tokens, iterations)
+            }
+        } {
             Ok(value) => devices.push(value),
             Err(error) => {
                 let response = serde_json::json!({"error": error});
@@ -3053,6 +3446,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         .get("debug_first_token_boundary")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let mut chat_first_token_logprobs: Vec<(u32, f32)> = Vec::new();
     let request_prefix_cache = match req.get("prefix_cache") {
         Some(value) => match value.as_bool() {
             Some(enabled) => enabled,
@@ -3183,7 +3577,74 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     } else {
         None
     };
-    let estimated_tokens = if has_images {
+    // BEGIN explicit teacher-forced request admission
+    let teacher_label = match req.get("debug_matched_teacher_forcing") {
+        None => None,
+        Some(value) => match value.as_str() {
+            Some(label) if !label.is_empty() => Some(label),
+            _ => {
+                let _ = send_json(
+                    stream,
+                    400,
+                    r#"{"error":"debug_matched_teacher_forcing requires an admitted label"}"#,
+                );
+                return;
+            }
+        },
+    };
+    if teacher_label.is_some()
+        && (!state.diagnostic_endpoints_enabled
+            || !debug_first_token_boundary
+            || is_stream
+            || has_images
+            || has_tools
+            || enable_thinking
+            || !state.aux_gpu_store_addrs.is_empty()
+            || temperature != 0.0)
+    {
+        let _ = send_json(
+            stream,
+            400,
+            r#"{"error":"teacher forcing requires explicit test endpoints, debug IDs, greedy text-only non-streaming single-store execution with thinking off"}"#,
+        );
+        return;
+    }
+    let raw_teacher_tokens = match req.get("debug_matched_raw_input_token_ids") {
+        None => None,
+        Some(value) => {
+            let Some(label) = teacher_label else {
+                let _ = send_json(
+                    stream,
+                    400,
+                    r#"{"error":"raw input requires an explicit admitted teacher diagnostic"}"#,
+                );
+                return;
+            };
+            let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+            let admitted = store.diagnostic_vocab_size_rust().and_then(|vocab| {
+                crate::matched_teacher::admit_raw_request(
+                    label,
+                    value,
+                    max_tokens,
+                    vocab,
+                    state.max_context_tokens,
+                )
+            });
+            match admitted {
+                Ok(ids) => Some(ids),
+                Err(error) => {
+                    let _ = send_json(stream, 400, &serde_json::json!({"error":error}).to_string());
+                    return;
+                }
+            }
+        }
+    };
+    let mut raw_teacher_first_logits: Option<Vec<f32>> = None;
+    // END explicit teacher-forced request admission
+
+    let estimated_tokens = if let Some(ids) = &raw_teacher_tokens {
+        ids.len()
+    } else if has_images {
         log::info!(
             "Soft HCS: image request pre-evicting for configured context window {} (rendered_len={})",
             state.max_context_tokens,
@@ -3289,6 +3750,29 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     crate::vram_monitor::report_event("prefill_start");
     crate::vram_monitor::reset_request_lows();
     let t_prefill_gil = Instant::now();
+    let (mut prefill_peer_monitor, prefill_cancel_signal) = if is_stream {
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let monitor =
+            match SsePeerDisconnectMonitor::start(stream, Arc::clone(&disconnected), &request_id) {
+                Ok(monitor) => monitor,
+                Err(error) => {
+                    log::error!(
+                        "Request {} failed to start prefill peer monitor: {}",
+                        request_id,
+                        error,
+                    );
+                    let _ = send_json(
+                        stream,
+                        500,
+                        &format!(r#"{{"error":"start prefill peer monitor: {}"}}"#, error),
+                    );
+                    return;
+                }
+            };
+        (Some(monitor), Some(disconnected))
+    } else {
+        (None, None)
+    };
 
     let mut prompt_hcs_snapshot: Option<(Vec<u64>, usize, usize, usize)> = None;
     let mut chat_debug_input_token_ids: Option<Vec<u32>> = None;
@@ -3335,7 +3819,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         // ── Rust prefill: text requests stay token-id only; image requests
         // build BF16 inputs_embeds once before the Rust prefill run.
         let mut multimodal_inputs: Option<MultimodalPrefillInputs> = None;
-        let token_ids: Vec<u32> = if has_images {
+        let token_ids: Vec<u32> = if let Some(ids) = &raw_teacher_tokens {
+            ids.clone()
+        } else if has_images {
             let built = Python::with_gil(|py| -> Result<MultimodalPrefillInputs, String> {
                 let obj = state
                     .py_model
@@ -3491,7 +3977,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 !store.speculative_decode_enabled_rust()
             };
         if cache_request_eligible {
-            if let Some(stable_rendered) = stable_rendered.as_ref() {
+            if raw_teacher_tokens.is_some() {
+                cache_stable_boundary_tokens = Some(token_ids.clone());
+            } else if let Some(stable_rendered) = stable_rendered.as_ref() {
                 match state.tokenizer.encode(stable_rendered.as_str(), false) {
                     Ok(encoding) => {
                         let stable_ids = encoding.get_ids();
@@ -3699,7 +4187,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                                     cache_ram_restore = Some((bytes, measured_ms));
                                     cache_miss_reason = None;
                                     log::info!(
-                                            "Request {} prefix cache RAM hit: reused={} suffix={} restored_tokens={} rewound={} bytes={} restore_ms={:.3}",
+                                            "Request {} prefix cache RAM hit: reused={} suffix={} restored_tokens={} rewound={} bytes={} restore_ms={:.3} snapshot={:?}",
                                             request_id,
                                             matched_tokens,
                                             token_ids.len().saturating_sub(matched_tokens),
@@ -3707,6 +4195,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                                             rewound,
                                             bytes,
                                             measured_ms,
+                                            snapshot_id,
                                         );
                                 }
                             }
@@ -3899,6 +4388,11 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             // GPU state is mutated below. It is republished only after decode
             // and response delivery succeed.
             state.session_cache.active = None;
+        }
+        if let Err(error) = require_model_sequence_ready(state) {
+            invalidate_active_sequence(state, "interrupted_restore");
+            reject_model_sequence(stream, &error);
+            return;
         }
         let snapshot_boundary = cache_stable_boundary_tokens
             .as_ref()
@@ -4325,37 +4819,66 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 engine.clear_external_prefill_inputs();
             }
 
-            let attempt_result = match match (cache_sequence_start, capture_boundary) {
-                (sequence_start, Some(boundary)) if sequence_start > 0 => engine
-                    .run_prefill_continuation_capturing_boundary(
-                        &token_ids[sequence_start..],
-                        sequence_start,
+            engine.set_prefill_cancel_signal(prefill_cancel_signal.clone());
+            if cache_sequence_start > 0 {
+                if let Err(error) = capture_matched_sequence_state(
+                    state,
+                    engine,
+                    &request_id,
+                    "before-suffix",
+                    cache_sequence_start,
+                    cache_sequence_start,
+                    cache_restore_snapshot_id.or(cache_base_snapshot_id),
+                ) {
+                    break Err(error);
+                }
+            }
+            let attempt_result = match engine.with_matched_prefill_request(&request_id, |engine| {
+                match (cache_sequence_start, capture_boundary) {
+                    (sequence_start, Some(boundary)) if sequence_start > 0 => engine
+                        .run_prefill_continuation_capturing_boundary(
+                            &token_ids[sequence_start..],
+                            sequence_start,
+                            boundary,
+                            cache_boundary_incremental_base.as_deref(),
+                            temperature,
+                            &suppress_tokens,
+                        ),
+                    (0, Some(boundary)) => engine.run_prefill_capturing_boundary(
+                        &token_ids,
                         boundary,
                         cache_boundary_incremental_base.as_deref(),
                         temperature,
                         &suppress_tokens,
                     ),
-                (0, Some(boundary)) => engine.run_prefill_capturing_boundary(
-                    &token_ids,
-                    boundary,
-                    cache_boundary_incremental_base.as_deref(),
-                    temperature,
-                    &suppress_tokens,
-                ),
-                (sequence_start, None) if sequence_start > 0 => engine
-                    .run_prefill_continuation(
-                        &token_ids[sequence_start..],
-                        sequence_start,
-                        temperature,
-                        &suppress_tokens,
-                    )
-                    .map(|result| (result, None)),
-                (_, None) => engine
-                    .run_prefill(&token_ids, temperature, &suppress_tokens)
-                    .map(|result| (result, None)),
-                (_, Some(_)) => unreachable!(),
-            } {
+                    (sequence_start, None) if sequence_start > 0 => engine
+                        .run_prefill_continuation(
+                            &token_ids[sequence_start..],
+                            sequence_start,
+                            temperature,
+                            &suppress_tokens,
+                        )
+                        .map(|result| (result, None)),
+                    (_, None) => engine
+                        .run_prefill(&token_ids, temperature, &suppress_tokens)
+                        .map(|result| (result, None)),
+                    (_, Some(_)) => unreachable!(),
+                }
+            }) {
                 Ok((r, capture)) => {
+                    if cache_sequence_start > 0 {
+                        if let Err(error) = capture_matched_sequence_state(
+                            state,
+                            engine,
+                            &request_id,
+                            "after-suffix",
+                            r.prompt_len,
+                            cache_sequence_start,
+                            cache_restore_snapshot_id.or(cache_base_snapshot_id),
+                        ) {
+                            break Err(error);
+                        }
+                    }
                     let terminal_capture_planned = capture.is_none()
                         && cache_boundary_reservation.is_some()
                         && cache_stable_boundary_tokens
@@ -4397,10 +4920,14 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 }
                 Err(e) => Err(e),
             };
+            engine.set_prefill_cancel_signal(None);
 
             match attempt_result {
                 Ok(result) => break Ok(result),
                 Err(e) => {
+                    if crate::gpu_prefill::is_prefill_cancelled_error(&e) {
+                        break Err(e);
+                    }
                     if cache_sequence_start > 0 {
                         break Err(format!(
                             "continuation prefill failed after mutating live sequence state; retry requires the committed boundary snapshot: {}",
@@ -4549,7 +5076,17 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                         }
                     }
                 }
+                if raw_teacher_tokens.is_some() {
+                    raw_teacher_first_logits = Some(engine.h_logits.clone());
+                }
                 let debug_payload = if debug_first_token_boundary {
+                    if !is_stream && logprobs_top_n > 0 {
+                        chat_first_token_logprobs = crate::decode::extract_top_logprobs(
+                            &engine.h_logits,
+                            engine.h_logits.len(),
+                            logprobs_top_n,
+                        );
+                    }
                     let debug_ids = chat_debug_input_token_ids.clone().unwrap_or_default();
                     let selected_token_text = state
                         .tokenizer
@@ -4558,7 +5095,8 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     Some(serde_json::json!({
                         "schema": "krasis_chat_first_token_boundary_debug_v1",
                         "route": "/v1/chat/completions",
-                        "rendered_prompt": rendered.as_str(),
+                        "rendered_prompt": if raw_teacher_tokens.is_some() {serde_json::Value::Null} else {serde_json::json!(rendered.as_str())},
+                        "input_source": if raw_teacher_tokens.is_some() {"explicit_checksum_bound_raw_tokens"} else {"rendered_chat_template"},
                         "rendered_len": rendered.len(),
                         "enable_thinking": enable_thinking,
                         "has_tools": has_tools,
@@ -4579,25 +5117,36 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 };
                 // Set KV cache position on decode store so decode knows where to continue
                 let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-                if let Err(e) = restore_store_after_rust_prefill(store, r.prompt_len) {
-                    log::error!("Failed to restore decode runtime after prefill: {}", e);
-                }
-                store.set_rope_position_delta(
-                    multimodal_inputs
-                        .as_ref()
-                        .map(|mm| mm.rope_delta)
-                        .unwrap_or(0),
-                );
-                Ok((
-                    r.first_token as usize,
-                    r.prompt_len,
-                    stop_ids,
-                    kv_overflow,
-                    debug_payload,
-                ))
+                restore_store_after_rust_prefill(store, r.prompt_len)
+                    .and_then(|()| {
+                        store.set_rope_position_delta(
+                            multimodal_inputs
+                                .as_ref()
+                                .map(|mm| mm.rope_delta)
+                                .unwrap_or(0),
+                        );
+                        capture_matched_ready_state(
+                            state,
+                            engine,
+                            &request_id,
+                            r.prompt_len,
+                            cache_sequence_start,
+                            cache_restore_snapshot_id.or(cache_base_snapshot_id),
+                        )
+                    })
+                    .map(|()| {
+                        (
+                            r.first_token as usize,
+                            r.prompt_len,
+                            stop_ids,
+                            kv_overflow,
+                            debug_payload,
+                        )
+                    })
             }
             Err(e) => {
                 engine.clear_external_prefill_inputs();
+                engine.discard_active_stage_state();
                 if has_images {
                     Python::with_gil(|py| {
                         let _ = state
@@ -4606,6 +5155,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     });
                 }
                 let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+                store.discard_active_sequence_checkpoint_rust();
                 store.set_rope_position_delta(0);
                 let _ = store.prepare_runtime_for_decode_rust();
                 Err(e)
@@ -4615,6 +5165,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     // Boundary capture is complete. Release the old snapshot lease before
     // decode/post-generation admission so normal LRU policy can reclaim it.
     drop(cache_boundary_incremental_base.take());
+    if let Some(monitor) = prefill_peer_monitor.take() {
+        monitor.stop_and_join_without_stream_shutdown();
+    }
 
     if !cache_request_eligible {
         rollback_pending_boundary_snapshot(
@@ -4627,38 +5180,47 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     let prefill_gil_ms = t_prefill_gil.elapsed().as_secs_f64() * 1000.0;
     crate::vram_monitor::report_event("prefill_end");
 
-    let (first_token, prompt_len, stop_ids, kv_overflow, chat_debug_payload) = match prefill_result
-    {
-        Ok(v) => v,
-        Err(e) => {
-            rollback_pending_boundary_snapshot(
-                state,
-                &mut pending_boundary_snapshot,
-                &mut cache_boundary_reservation,
-            );
-            let err_str = e.to_string();
-            log::error!("Prefill failed: {}", err_str);
-            abort_if_cuda_context_poisoned("chat prefill", &err_str);
-            // Return 413 with structured error for KV cache exhaustion
-            let (status, body) = if err_str.contains("KV cache exhausted") {
-                (
-                    413,
-                    format!(
-                        r#"{{"error":{{"message":"Context length exceeds KV cache capacity ({} tokens max). Reduce context or start a new conversation.","type":"invalid_request_error","code":"context_length_exceeded","max_context_tokens":{}}}}}"#,
-                        state.max_context_tokens, state.max_context_tokens
-                    ),
-                )
-            } else if has_images {
-                if let Some(body) = image_vram_error_body(&err_str) {
-                    (507, body)
-                } else if err_str.to_ascii_lowercase().contains("out of memory") {
+    let (mut first_token, prompt_len, stop_ids, kv_overflow, mut chat_debug_payload) =
+        match prefill_result {
+            Ok(v) => v,
+            Err(e) => {
+                rollback_pending_boundary_snapshot(
+                    state,
+                    &mut pending_boundary_snapshot,
+                    &mut cache_boundary_reservation,
+                );
+                let err_str = e.to_string();
+                log::error!("Prefill failed: {}", err_str);
+                abort_if_cuda_context_poisoned("chat prefill", &err_str);
+                // Return 413 with structured error for KV cache exhaustion
+                let (status, body) = if err_str.contains("KV cache exhausted") {
                     (
-                        507,
+                        413,
                         format!(
-                            r#"{{"error":{{"message":"VRAM is too constrained for this image request. Multimodal prefill failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
-                            json_escape(&err_str)
+                            r#"{{"error":{{"message":"Context length exceeds KV cache capacity ({} tokens max). Reduce context or start a new conversation.","type":"invalid_request_error","code":"context_length_exceeded","max_context_tokens":{}}}}}"#,
+                            state.max_context_tokens, state.max_context_tokens
                         ),
                     )
+                } else if has_images {
+                    if let Some(body) = image_vram_error_body(&err_str) {
+                        (507, body)
+                    } else if err_str.to_ascii_lowercase().contains("out of memory") {
+                        (
+                            507,
+                            format!(
+                                r#"{{"error":{{"message":"VRAM is too constrained for this image request. Multimodal prefill failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
+                                json_escape(&err_str)
+                            ),
+                        )
+                    } else {
+                        (
+                            500,
+                            format!(
+                                r#"{{"error":{{"message":"Prefill failed: {}","type":"server_error"}}}}"#,
+                                err_str
+                            ),
+                        )
+                    }
                 } else {
                     (
                         500,
@@ -4667,24 +5229,73 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                             err_str
                         ),
                     )
+                };
+                let _ = send_json(stream, status, &body);
+                // Cleanup on error
+                Python::with_gil(|py| {
+                    let _ = state.py_model.call_method0(py, "server_cleanup");
+                });
+                return;
+            }
+        };
+    // BEGIN explicit teacher-forced current-state arming
+    if let Some(label) = teacher_label {
+        let result = crate::matched_teacher::Session::prepare(
+            label,
+            &request_token_ids,
+            cache_sequence_start,
+            max_tokens,
+        )
+        .and_then(|mut session| {
+            if raw_teacher_tokens.is_some() {
+                session.raw_first(
+                    raw_teacher_first_logits
+                        .as_deref()
+                        .ok_or("actual raw teacher first logits were not retained")?,
+                )?;
+            }
+            let metadata = session.metadata();
+            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+            store
+                .arm_matched_teacher_once(session, first_token, &stop_ids)
+                .map(|forced| (forced, metadata))
+        });
+        match result {
+            Ok((forced, metadata)) => {
+                if let Some(debug) = chat_debug_payload
+                    .as_mut()
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    debug.insert("teacher_forcing".into(), metadata);
+                    debug.insert(
+                        "ordinary_greedy_prefill_first_id".into(),
+                        serde_json::json!(first_token),
+                    );
+                    debug.insert(
+                        "actually_emitted_prefill_first_id".into(),
+                        serde_json::json!(forced),
+                    );
                 }
-            } else {
-                (
-                    500,
-                    format!(
-                        r#"{{"error":{{"message":"Prefill failed: {}","type":"server_error"}}}}"#,
-                        err_str
-                    ),
-                )
-            };
-            let _ = send_json(stream, status, &body);
-            // Cleanup on error
-            Python::with_gil(|py| {
-                let _ = state.py_model.call_method0(py, "server_cleanup");
-            });
-            return;
+                first_token = forced;
+            }
+            Err(error) => {
+                rollback_pending_boundary_snapshot(
+                    state,
+                    &mut pending_boundary_snapshot,
+                    &mut cache_boundary_reservation,
+                );
+                invalidate_active_sequence(state, "teacher_forcing_admission_failure");
+                let _ = send_json(
+                    stream,
+                    400,
+                    &serde_json::json!({"error":error,"attribution_prohibited":true}).to_string(),
+                );
+                return;
+            }
         }
-    };
+    }
+    // END explicit teacher-forced current-state arming
+
     if cache_request_eligible && cache_sequence_start == 0 && prefill_gil_ms > 0.0 {
         state
             .session_cache
@@ -5038,6 +5649,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         enable_thinking,
         logprobs_top_n,
         chat_debug_payload,
+        chat_first_token_logprobs,
     );
     crate::vram_monitor::report_event("decode_end");
 
@@ -5528,6 +6140,10 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
     ) {
         Ok(p) => p,
         Err(e) => {
+            // Preserve the first failure before cleanup can replace it with
+            // a secondary error from an already-poisoned CUDA context.
+            log::error!("prefill_logits: diagnostic prefill failed: {}", e);
+            abort_if_cuda_context_poisoned("prefill_logits prefill", &e);
             // Release scratch even on error
             let _ = engine.release_scratch();
             drop(engine_guard);
@@ -5919,6 +6535,34 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         .get("max_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(200) as usize;
+    let matched_replay = match req.get("debug_matched_replay") {
+        Some(serde_json::Value::String(label)) => {
+            if !state.aux_gpu_store_addrs.is_empty() {
+                let _ = send_json(
+                    stream,
+                    400,
+                    r#"{"error":"matched replay currently requires a single decode store"}"#,
+                );
+                return;
+            }
+            match crate::matched_replay::validate_request(label, &input_token_ids, max_tokens) {
+                Ok(first) => Some((label.clone(), first)),
+                Err(error) => {
+                    let _ = send_json(stream, 400, &serde_json::json!({"error":error}).to_string());
+                    return;
+                }
+            }
+        }
+        Some(_) => {
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"debug_matched_replay must be an admitted label"}"#,
+            );
+            return;
+        }
+        None => None,
+    };
     let top_logprobs = req
         .get("top_logprobs")
         .and_then(|v| v.as_u64())
@@ -6601,9 +7245,54 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     let prefill_result = loop {
         engine.set_prefill_runtime_chunk_cap(retry_cap);
 
+        // Allocate diagnostic-only device state before scratch/HCS planning so
+        // runtime VRAM measurement includes its real footprint. Allocating it
+        // after prepare_for_prefill can invalidate the measured safety floor
+        // on the first traced request.
+        if let Err(e) = engine.set_prefill_device_trace_enabled(
+            debug_prefill_device_trace,
+            debug_prefill_device_trace_mla_only,
+            debug_prefill_device_trace_layer,
+            debug_prefill_device_trace_all_layers,
+            debug_prefill_device_trace_full_pre_out_proj,
+            debug_prefill_device_trace_dims.clone(),
+            debug_prefill_device_trace_rows.clone(),
+            debug_prefill_device_trace_experts.clone(),
+            debug_prefill_device_trace_local_scan_token,
+        ) {
+            engine.clear_prefill_hcs_guard_store_addr();
+            engine.set_read_only_checkpoint_request_enabled(false);
+            engine.set_first_token_margin_projection_request_enabled(false);
+            engine.set_reference_debug_trace_enabled(false);
+            engine.set_optional_pinning_budget_mb(None);
+            engine.clear_prefill_runtime_chunk_cap();
+            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+            let _ = store.prepare_runtime_for_decode_rust();
+            let _ = send_json(
+                stream,
+                500,
+                &format!(r#"{{"error":"Prefill device trace setup failed: {}"}}"#, e),
+            );
+            return;
+        }
+
         // Dynamically allocate scratch for this prompt.
         if let Err(e) = engine.prepare_for_prefill(input_token_ids.len()) {
+            let _ = engine.set_prefill_device_trace_enabled(
+                false,
+                false,
+                debug_prefill_device_trace_layer,
+                false,
+                false,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
             engine.clear_prefill_hcs_guard_store_addr();
+            engine.set_read_only_checkpoint_request_enabled(false);
+            engine.set_first_token_margin_projection_request_enabled(false);
+            engine.set_reference_debug_trace_enabled(false);
             engine.set_optional_pinning_budget_mb(None);
             engine.clear_prefill_runtime_chunk_cap();
             let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
@@ -6625,34 +7314,6 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         engine.set_optional_pinning_budget_mb(pinning_budget_mb);
         scratch_tokens_after_prepare = engine.scratch.max_tokens;
         prefill_chunk_size_after_prepare = engine.config.prefill_chunk_size;
-
-        if let Err(e) = engine.set_prefill_device_trace_enabled(
-            debug_prefill_device_trace,
-            debug_prefill_device_trace_mla_only,
-            debug_prefill_device_trace_layer,
-            debug_prefill_device_trace_all_layers,
-            debug_prefill_device_trace_full_pre_out_proj,
-            debug_prefill_device_trace_dims.clone(),
-            debug_prefill_device_trace_rows.clone(),
-            debug_prefill_device_trace_experts.clone(),
-            debug_prefill_device_trace_local_scan_token,
-        ) {
-            engine.clear_prefill_hcs_guard_store_addr();
-            engine.set_read_only_checkpoint_request_enabled(false);
-            engine.set_first_token_margin_projection_request_enabled(false);
-            engine.set_reference_debug_trace_enabled(false);
-            engine.set_optional_pinning_budget_mb(None);
-            engine.clear_prefill_runtime_chunk_cap();
-            let _ = engine.release_scratch();
-            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-            let _ = store.prepare_runtime_for_decode_rust();
-            let _ = send_json(
-                stream,
-                500,
-                &format!(r#"{{"error":"Prefill device trace setup failed: {}"}}"#, e),
-            );
-            return;
-        }
         if debug_mamba2_state_lifecycle_trace {
             let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
             debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
@@ -6854,12 +7515,26 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     // Set KV position and swap to simple INT4 for decode
     {
         let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-        if let Err(e) = restore_store_after_rust_prefill(store, prompt_len) {
-            log::error!("reference_test: Failed to restore decode runtime: {}", e);
+        if let Err(error) = restore_store_after_rust_prefill(store, prompt_len) {
+            let _ = send_json(
+                stream,
+                500,
+                &serde_json::json!({"error":error,"attribution_prohibited":true}).to_string(),
+            );
+            Python::with_gil(|py| {
+                let _ = state.py_model.call_method0(py, "server_cleanup");
+            });
+            return;
         }
         store.set_rope_position_delta(0);
     }
 
+    if let Err(error) =
+        capture_matched_ready_state(state, engine, "reference-prefix", prompt_len, 0, None)
+    {
+        let _ = send_json(stream, 500, &serde_json::json!({"error":error}).to_string());
+        return;
+    }
     let prefill_ms = t_start.elapsed().as_secs_f64() * 1000.0;
 
     // ── Reload soft HCS after prefill ──
@@ -6939,6 +7614,12 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     let mut all_text = String::new();
     let mut finish_reason = "length".to_string();
 
+    // A replay forces the first common input; fresh-prefill probabilities remain
+    // labelled as fresh-prefill evidence and are not probabilities of restored state.
+    let first_token = matched_replay
+        .as_ref()
+        .map(|(_, first)| *first)
+        .unwrap_or(first_token);
     // First token
     let first_text = tokenizer
         .decode(&[first_token as u32], true)
@@ -6990,9 +7671,24 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
             &[],
             0.0, // no presence penalty
             top_logprobs,
-            Some("reference_test".to_string()),
+            Some(
+                matched_replay
+                    .as_ref()
+                    .map(|(label, _)| format!("matched_replay_{label}"))
+                    .unwrap_or_else(|| "reference_test".to_string()),
+            ),
             on_token,
         );
+    }
+    if matched_replay.is_some() {
+        if let Some(error) = store.last_stream_failure_rust() {
+            let _ = send_json(
+                stream,
+                500,
+                &serde_json::json!({"error":error,"attribution_prohibited":true}).to_string(),
+            );
+            return;
+        }
     }
     if debug_mamba2_state_lifecycle_trace {
         debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
@@ -7085,40 +7781,22 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     );
     let safety_margin_mb = store.hcs_safety_margin_mb();
 
-    // ── Format response ──
-    let mut per_token_json = Vec::new();
-    for (tid, logprobs) in &output_tokens {
-        let mut tk_json = Vec::new();
-        for &(lp_tid, lp_val) in logprobs {
-            tk_json.push(format!(
-                r#"{{"token_id":{},"log_prob":{:.6}}}"#,
-                lp_tid, lp_val
-            ));
-        }
-        // Get log_prob for the selected token (first in top-k if available)
-        let selected_lp = logprobs
-            .iter()
-            .find(|&&(t, _)| t == *tid as u32)
-            .map(|&(_, lp)| lp)
-            .unwrap_or(0.0);
-        per_token_json.push(format!(
-            r#"{{"token_id":{},"log_prob":{:.6},"top_k":[{}]}}"#,
-            tid,
-            selected_lp,
-            tk_json.join(",")
-        ));
-    }
-
-    // Escape text for JSON
+    // Preserve source-F32 observations; missing values remain explicit.
+    let (per_token_json, first_topk_json) =
+        match crate::reference_numbers::reference_rows(&output_tokens, &first_token_top_k) {
+            Ok(rows) => rows,
+            Err(error) => {
+                log::error!("reference_test numerical capture failed: {}", error);
+                let _ = send_json(
+                    stream,
+                    500,
+                    &serde_json::json!({"error":error,"type":"reference_logprob_capture_error"})
+                        .to_string(),
+                );
+                return;
+            }
+        };
     let text_escaped = serde_json::to_string(&all_text).unwrap_or_else(|_| "\"\"".to_string());
-
-    let mut first_topk_json = Vec::new();
-    for &(lp_tid, lp_val) in &first_token_top_k {
-        first_topk_json.push(format!(
-            r#"{{"token_id":{},"log_prob":{:.6}}}"#,
-            lp_tid, lp_val
-        ));
-    }
 
     let reference_prompt_debug = if debug_prompt_trace {
         Some(serde_json::json!({
@@ -7212,6 +7890,18 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     };
 
     let mut debug_json_suffix = String::new();
+    if let Some((label, _)) = matched_replay.as_ref() {
+        debug_json_suffix.push_str(&format!(
+            r#","debug_matched_replay":{}"#,
+            serde_json::json!({
+                "label":label,"diagnostic_only":true,"qualifies_candidate":false,
+                "first_output_token_source":"forced admitted common input",
+                "first_token_distribution_source":"fresh prefill before captured-state transplant",
+                "decode_input_source":"explicit common inputs, then ordinary greedy token",
+                "actual_greedy_choices":"separately retained in checksum-bound replay artifacts",
+            })
+        ));
+    }
     if let Some(prompt_debug) = reference_prompt_debug.as_ref() {
         debug_json_suffix.push_str(&format!(r#","debug_prompt_trace":{}"#, prompt_debug));
     }
@@ -7409,8 +8099,23 @@ fn handle_gpu_decode(
     enable_thinking: bool,
     logprobs_top_n: usize,
     chat_debug_payload: Option<serde_json::Value>,
+    first_token_logprobs: Vec<(u32, f32)>,
 ) -> DecodeTransactionOutcome {
     let mut chat_debug_payload = chat_debug_payload;
+    if !is_stream
+        && chat_debug_payload.is_some()
+        && logprobs_top_n > 0
+        && first_token_logprobs.is_empty()
+    {
+        let reason = "requested first-token log probabilities were not captured";
+        log::error!("{}", reason);
+        let _ = send_json(
+            stream,
+            500,
+            &serde_json::json!({"error":reason,"type":"chat_logprob_capture_error"}).to_string(),
+        );
+        return DecodeTransactionOutcome::failed(reason);
+    }
     // Resolve thinking end token early — used by both streaming and non-streaming paths
     let think_end_id = if enable_thinking {
         state.thinking_end_token
@@ -7899,7 +8604,7 @@ fn handle_gpu_decode(
         let mut finish = "length".to_string();
         let mut debug_output_tokens: Vec<(usize, Vec<(u32, f32)>)> = Vec::new();
         if chat_debug_payload.is_some() {
-            debug_output_tokens.push((first_token, Vec::new()));
+            debug_output_tokens.push((first_token, first_token_logprobs));
         }
 
         // Thinking budget for non-streaming
@@ -8016,36 +8721,40 @@ fn handle_gpu_decode(
 
         if let Some(serde_json::Value::Object(debug)) = chat_debug_payload.as_mut() {
             let token_ids: Vec<usize> = debug_output_tokens.iter().map(|(tid, _)| *tid).collect();
-            let per_token: Vec<serde_json::Value> = debug_output_tokens
+            let per_token: Result<Vec<serde_json::Value>, String> = debug_output_tokens
                 .iter()
                 .enumerate()
                 .map(|(step, (token_id, logprobs))| {
+                    let captured = crate::reference_numbers::capture(*token_id, logprobs)?;
                     let token_text = tokenizer
                         .decode(&[*token_id as u32], true)
                         .unwrap_or_default();
-                    let top_k: Vec<serde_json::Value> = logprobs
-                        .iter()
-                        .map(|&(tid, lp)| {
-                            serde_json::json!({
-                                "token_id": tid,
-                                "log_prob": lp as f64,
-                            })
-                        })
-                        .collect();
-                    let selected_log_prob = logprobs
-                        .iter()
-                        .find(|&&(tid, _)| tid == *token_id as u32)
-                        .map(|&(_, lp)| lp as f64);
-                    serde_json::json!({
-                        "step": step,
-                        "source": if step == 0 { "prefill_first_token" } else { "decode" },
-                        "token_id": token_id,
-                        "token_text": token_text,
-                        "selected_log_prob": selected_log_prob,
-                        "top_k": top_k,
-                    })
+                    Ok(serde_json::json!({
+                        "step":step,
+                        "source":if step==0 {"prefill_first_token"} else {"decode"},
+                        "token_id":token_id,
+                        "token_text":token_text,
+                        "selected_log_prob":captured.selected,
+                        "selected_log_prob_bits":captured.selected_bits,
+                        "log_prob_dtype":"f32",
+                        "warning":captured.warning,
+                        "top_k":captured.top_k,
+                    }))
                 })
                 .collect();
+            let per_token = match per_token {
+                Ok(rows) => rows,
+                Err(error) => {
+                    log::error!("Chat numerical capture failed: {}", error);
+                    let _ = send_json(
+                        stream,
+                        500,
+                        &serde_json::json!({"error":error,"type":"chat_logprob_capture_error"})
+                            .to_string(),
+                    );
+                    return DecodeTransactionOutcome::failed(error);
+                }
+            };
             debug.insert(
                 "completion_token_ids".to_string(),
                 serde_json::json!(token_ids),
@@ -8508,6 +9217,9 @@ impl RustServer {
             let tokenizer = Arc::new(tokenizer);
             let chat_template = Arc::new(chat_template);
             let state = ServerState {
+                // BEGIN explicit teacher-forced endpoint initialization
+                diagnostic_endpoints_enabled: test_endpoints,
+                // END explicit teacher-forced endpoint initialization
                 py_model,
                 model_name,
                 tokenizer: Arc::clone(&tokenizer),
@@ -8888,9 +9600,8 @@ impl RustServer {
         prefill_stop_ids_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         let t_phase = Instant::now();
-        if let Err(e) = restore_store_after_rust_prefill(store, prompt_len) {
-            log::error!("Failed to restore decode runtime after prefill: {}", e);
-        }
+        restore_store_after_rust_prefill(store, prompt_len)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         store.set_rope_position_delta(0);
         prefill_restore_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
@@ -9667,6 +10378,35 @@ mod tests {
         }
         assert!(disconnected.load(Ordering::Acquire));
         monitor.stop_and_join(&server);
+    }
+
+    #[test]
+    fn prefill_peer_monitor_handoff_preserves_decode_disconnect_detection() {
+        let (server, client) = tcp_pair();
+        let prefill_disconnected = Arc::new(AtomicBool::new(false));
+        let prefill_monitor = SsePeerDisconnectMonitor::start(
+            &server,
+            Arc::clone(&prefill_disconnected),
+            "prefill-handoff-test",
+        )
+        .unwrap();
+        prefill_monitor.stop_and_join_without_stream_shutdown();
+        assert!(!prefill_disconnected.load(Ordering::Acquire));
+
+        let decode_disconnected = Arc::new(AtomicBool::new(false));
+        let decode_monitor = SsePeerDisconnectMonitor::start(
+            &server,
+            Arc::clone(&decode_disconnected),
+            "decode-handoff-test",
+        )
+        .unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !decode_disconnected.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(decode_disconnected.load(Ordering::Acquire));
+        decode_monitor.stop_and_join(&server);
     }
 
     #[test]

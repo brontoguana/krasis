@@ -1,0 +1,7 @@
+[package]
+name = "reference-numbers-probe"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }

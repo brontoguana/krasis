@@ -1,0 +1,2 @@
+./dev benchmark /home/main/Documents/Claude/krasis-internal/reset-diagnostics/evidence/20261003/glm-reserve-r1/runtime-r4/treatments/mixed-tail-plus-10/runtime.conf
+Optional instrumentation/trace/--vram-report disabled; normal runtime safety monitoring, startup calibration and 600 MiB margin retained. Precision comparison, not a QCN speed regression run.

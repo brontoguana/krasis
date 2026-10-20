@@ -754,6 +754,116 @@ def _dspark_budget_components(
     }
 
 
+def validate_scales_only_contract(manifest: Dict[str, Any]) -> None:
+    """Validate the explicit source-copy experiment before allocating a budget."""
+    import copy
+    import hashlib
+    provenance = manifest.get("scales_only")
+    if not isinstance(provenance, dict):
+        raise ValueError("experimental scales-only manifest lacks provenance")
+    source = provenance.get("source_reserve")
+    if (not isinstance(source, dict) or source.get("schema_version") != 3
+            or source.get("scales_only") is not None
+            or source.get("format") != "Krasis routed mixed Marlin INT4/INT8"
+            or source.get("budget", {}).get("requested_basis_points") != 0):
+        raise ValueError("scales-only source must be the minimum-reserve v3 treatment")
+    validate_mixed_coverage_contract(source)
+    def valid_hash(value):
+        return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    original = provenance.get("original_amax", {})
+    compact = manifest.get("compact_cache", {})
+    hashes = [provenance.get(k) for k in ("protocol_sha256", "coverage_sha256", "source_reserve_sha256")]
+    hashes += [original.get(k) for k in ("sha256", "header_sha256")]
+    hashes += [compact.get(k) for k in ("sha256", "header_sha256", "payload_sha256", "region_map_sha256")]
+    if (provenance.get("method") != "copy_searched_int4_replace_coverage_reserve_with_original_amax_v1"
+            or not all(map(valid_hash, hashes))
+            or hashlib.sha256(json.dumps(source, separators=(",", ":")).encode()).hexdigest()
+                != provenance["source_reserve_sha256"]
+            or original.get("bits") != 4 or original.get("expert_int4_calibration_mode") != "amax"
+            or type(original.get("bytes")) is not int
+            or original["bytes"] < 64 + source["budget"]["baseline_int4_routed_bytes"]):
+        raise ValueError("scales-only source identity mismatch")
+    expected = copy.deepcopy(source)
+    replacements = []
+    policy = source["calibration"]["coverage_policy"]
+    for i, region in enumerate(expected["regions"]):
+        coverage = region["coverage"]
+        required = coverage["route_count"] < policy["minimum_routes_per_expert"] or 0 in coverage["corpus_route_counts"]
+        if region["bits"] != (8 if required else 4):
+            raise ValueError("scales-only source contains non-reserve promotion")
+        if required:
+            replacements.append(i)
+            region["bits"] = 4
+            coverage["selection_reason"] = "experimental_original_amax_int4"
+    expected.update(format="Krasis experimental scales-only Marlin INT4", schema_version=4,
+                    compact_cache=compact, scales_only=provenance)
+    for key in ("maximum_added_bytes", "achieved_added_bytes", "achieved_percent_millionths"):
+        expected["budget"][key] = 0
+    if (manifest != expected or provenance.get("replacement_indices") != replacements
+            or compact.get("bytes") != 128 + source["budget"]["baseline_int4_routed_bytes"]
+            or len(provenance.get("records", [])) != len(expected["regions"])):
+        raise ValueError("scales-only projection/replacement/budget mismatch")
+    source_offset = output_offset = 128
+    for i, (region, record) in enumerate(zip(source["regions"], provenance["records"])):
+        rare = i in replacements
+        if (record.get("index") != i or record.get("source") != ("original_amax" if rare else "source_reserve")
+                or record.get("source_offset") != (64 + i * region["int4_bytes"] if rare else source_offset)
+                or record.get("output_offset") != output_offset or record.get("bytes") != region["int4_bytes"]
+                or not valid_hash(record.get("sha256"))):
+            raise ValueError("scales-only record provenance mismatch")
+        source_offset += region["int4_bytes"] if region["bits"] == 4 else region["int8_bytes"]
+        output_offset += region["int4_bytes"]
+
+
+def validate_mixed_coverage_contract(manifest: Dict[str, Any]) -> int:
+    """Validate explicit startup coverage policy and return required INT8 bytes."""
+    if manifest.get("schema_version") == 4:
+        validate_scales_only_contract(manifest)
+        return 0
+    if manifest.get("scales_only") is not None:
+        raise ValueError("experimental provenance is forbidden in reserve/legacy manifests")
+    if manifest.get("schema_version") != 3:
+        return 0
+    calibration = manifest.get("calibration", {})
+    policy = calibration.get("coverage_policy", {})
+    minimum = policy.get("minimum_routes_per_expert")
+    corpora = policy.get("required_corpora")
+    if (policy.get("method") != "underobserved_int8_v1" or type(minimum) is not int or minimum < 1
+            or type(corpora) is not int or corpora < 1
+            or corpora != len(calibration.get("corpus_sha256", []))):
+        raise ValueError("mixed coverage policy is invalid")
+    required_bytes = 0
+    ranks = []
+    for region in manifest.get("regions", []):
+        coverage = region.get("coverage", {})
+        counts = coverage.get("corpus_route_counts")
+        if (not isinstance(counts, list) or len(counts) != corpora
+                or any(type(count) is not int or count < 0 for count in counts)
+                or type(coverage.get("route_count")) is not int
+                or sum(counts) != coverage["route_count"]):
+            raise ValueError("mixed per-corpus coverage counts mismatch")
+        required = sum(counts) < minimum or 0 in counts
+        reason = "coverage_required_int8" if required else (
+            "measured_promotion" if region.get("bits") == 8 else "measured_int4")
+        if coverage.get("selection_reason") != reason:
+            raise ValueError("mixed coverage selection reason mismatch")
+        if required:
+            if region.get("bits") != 8 or any(key in region for key in ("quality_gain_units", "quality_rank")):
+                raise ValueError("coverage-required expert must be INT8 without invented quality scores")
+            delta = region.get("int8_bytes", 0) - region.get("int4_bytes", 0)
+            if delta <= 0:
+                raise ValueError("mixed coverage reserve has invalid byte geometry")
+            required_bytes += delta
+        else:
+            gain, rank = region.get("quality_gain_units"), region.get("quality_rank")
+            if type(gain) is not int or gain < 0 or type(rank) is not int or rank < 0:
+                raise ValueError("measured expert lacks valid quality scores")
+            ranks.append(rank)
+    if sorted(ranks) != list(range(len(ranks))):
+        raise ValueError("mixed measured ranks must be complete and unique")
+    return required_bytes
+
+
 def estimate_int4_runtime_ram_bytes(
     model_path: str,
     attention_quant: str,
@@ -1535,8 +1645,11 @@ def compute_launcher_budget(
             mixed_manifest = json.load(handle)
         regions = mixed_manifest.get("regions")
         if (
-            mixed_manifest.get("format") != "Krasis routed mixed Marlin INT4/INT8"
-            or mixed_manifest.get("schema_version") != 1
+            (mixed_manifest.get("format"), mixed_manifest.get("schema_version")) not in (
+                ("Krasis routed mixed Marlin INT4/INT8", 1),
+                ("Krasis routed mixed Marlin INT4/INT8", 2),
+                ("Krasis routed mixed Marlin INT4/INT8", 3),
+                ("Krasis experimental scales-only Marlin INT4", 4))
             or mixed_manifest.get("default_bits") != 4
             or mixed_manifest.get("experts_gated")
             is not (model_cfg.mlp_hidden_act != "relu2")
@@ -1613,10 +1726,15 @@ def compute_launcher_budget(
         requested_basis_points = int(mixed_budget.get("requested_basis_points", -1))
         maximum_added_bytes = (
             mixed_baseline_bytes * requested_basis_points // 10_000
-            if requested_basis_points in (500, 1000, 1500, 2000)
+            if requested_basis_points in (0, 500, 1000, 1500, 2000, 10_000)
             else -1
         )
         achieved_added_bytes = mixed_selected_bytes - mixed_baseline_bytes
+        required_int8_bytes = validate_mixed_coverage_contract(mixed_manifest)
+        if mixed_manifest.get("schema_version") == 3 and requested_basis_points == 0:
+            maximum_added_bytes = required_int8_bytes
+        if required_int8_bytes > maximum_added_bytes:
+            raise ValueError("coverage-required INT8 reserve exceeds requested byte budget")
         achieved_percent_millionths = (
             achieved_added_bytes * 100_000_000 // mixed_baseline_bytes
         )

@@ -18,7 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const VRAM_HARD_EXIT_FLOOR_MB: u64 = 125;
-pub const CUDA_CONTEXT_POISONED_EXIT_CODE: i32 = 138;
+pub use crate::cuda_failure_code::CUDA_CONTEXT_POISONED_EXIT_CODE;
 const PRESSURE_DEVICE_SLOTS: usize = u64::BITS as usize;
 
 #[derive(Clone, Copy, Debug)]
@@ -97,6 +97,23 @@ pub fn fatal_cuda_context_error(context: &str, err: &str) -> ! {
         context,
         err,
     );
+    // Fatal exits bypass normal shutdown. Persist samples already collected,
+    // without calling CUDA or waiting on a lock held by a failed thread.
+    match REPORT.try_lock() {
+        Ok(report) => {
+            if let Some(state) = report.as_ref() {
+                if let Some(run_dir) = std::env::var_os("KRASIS_RUN_DIR") {
+                    let path = std::path::Path::new(&run_dir).join("vram_report.csv");
+                    if let Err(error) = report_write_state(state, &path) {
+                        log::error!("Failed to preserve fatal CUDA VRAM report: {}", error);
+                    }
+                } else {
+                    log::error!("Cannot preserve fatal CUDA VRAM report: KRASIS_RUN_DIR is absent");
+                }
+            }
+        }
+        Err(error) => log::error!("Cannot preserve fatal CUDA VRAM report lock: {}", error),
+    }
     #[cfg(unix)]
     unsafe {
         libc::_exit(CUDA_CONTEXT_POISONED_EXIT_CODE);
@@ -719,7 +736,10 @@ pub fn report_write(path: &str) -> std::io::Result<()> {
     let Some(ref state) = *report else {
         return Ok(());
     };
+    report_write_state(state, std::path::Path::new(path))
+}
 
+fn report_write_state(state: &VramReportState, path: &std::path::Path) -> std::io::Result<()> {
     use std::io::Write;
     let mut f = std::fs::File::create(path)?;
 
@@ -739,7 +759,7 @@ pub fn report_write(path: &str) -> std::io::Result<()> {
         writeln!(f)?;
     }
 
-    Ok(())
+    f.sync_all()
 }
 
 /// Get summary of key events as list of (event, timestamp_ms, [gpu_free_mb, ...]).
@@ -793,15 +813,233 @@ pub struct VramMonitor {
 impl VramMonitor {
     #[new]
     #[pyo3(signature = (device_indices, poll_interval_ms=50, safety_margin_mb=600))]
-    fn new(
-        device_indices: Vec<i32>,
-        poll_interval_ms: u64,
-        safety_margin_mb: u64,
-    ) -> PyResult<Self> {
+    fn new(device_indices: Vec<i32>, poll_interval_ms: u64, safety_margin_mb: u64) -> PyResult<Self> {
+        Self::new_native(device_indices, poll_interval_ms, safety_margin_mb)
+            .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+
+    /// Start the background monitoring thread.
+    fn start(&mut self) -> PyResult<()> {
+        self.start_native().map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+
+    /// Stop the background monitoring thread.
+    fn stop(&mut self) {
+        PRECISION_WINDOWS_ENABLED.store(false, Ordering::Release);
+        self.running.store(false, Ordering::Release);
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
+    }
+
+    /// Get the minimum free VRAM observed on a device (in MB).
+    fn min_free_mb(&self, device_index: i32) -> u64 {
+        for dev in self.devices.iter() {
+            if dev.device_id == device_index {
+                let bytes = dev.min_free_bytes.load(Ordering::Relaxed);
+                if bytes == u64::MAX {
+                    return 0;
+                }
+                return bytes / (1024 * 1024);
+            }
+        }
+        0
+    }
+
+    /// Get the total VRAM on a device (in MB).
+    fn total_mb(&self, device_index: i32) -> u64 {
+        for dev in self.devices.iter() {
+            if dev.device_id == device_index {
+                return dev.total_bytes.load(Ordering::Relaxed) / (1024 * 1024);
+            }
+        }
+        0
+    }
+
+    /// Get the peak VRAM used on a device (in MB) = total - min_free.
+    fn peak_used_mb(&self, device_index: i32) -> u64 {
+        for dev in self.devices.iter() {
+            if dev.device_id == device_index {
+                let total = dev.total_bytes.load(Ordering::Relaxed);
+                let min_free = dev.min_free_bytes.load(Ordering::Relaxed);
+                if min_free == u64::MAX || min_free > total {
+                    return 0;
+                }
+                return (total - min_free) / (1024 * 1024);
+            }
+        }
+        0
+    }
+
+    /// Reset min-free tracking for a single device (used by 4-point VRAM calibration).
+    fn reset(&self, device_index: i32) {
+        for dev in self.devices.iter() {
+            if dev.device_id == device_index {
+                dev.min_free_bytes.store(u64::MAX, Ordering::Relaxed);
+                return;
+            }
+        }
+    }
+
+    /// Reset min-free tracking on all devices (e.g. after warmup, before runtime).
+    fn reset_min_free(&self) {
+        for dev in self.devices.iter() {
+            dev.min_free_bytes.store(u64::MAX, Ordering::Relaxed);
+        }
+    }
+
+    /// Get current free VRAM on a device (in MB) — live reading, not tracked min.
+    fn current_free_mb(&self, device_index: i32) -> u64 {
+        let Some((set_device, mem_get_info)) = load_cuda_fns() else {
+            return 0;
+        };
+        match query_free_bytes(set_device, mem_get_info, device_index) {
+            Some(free) => (free as u64) / (1024 * 1024),
+            None => 0,
+        }
+    }
+
+    /// Enable runtime warnings when free VRAM drops below safety margin.
+    /// Resets min-free tracking so the next poll immediately captures current state
+    /// and warns if already below the margin (e.g. right after HCS allocation).
+    fn enable_warnings(&self) {
+        // Reset min_free so the very next poll sets a fresh baseline.
+        // If post-HCS free is already below safety margin, the first poll
+        // will detect it as a "new low" and fire the warning immediately.
+        for dev in self.devices.iter() {
+            dev.min_free_bytes.store(u64::MAX, Ordering::Relaxed);
+        }
+        self.warn_enabled.store(true, Ordering::Release);
+    }
+
+    /// Disable runtime warnings.
+    fn disable_warnings(&self) {
+        self.warn_enabled.store(false, Ordering::Release);
+    }
+
+    /// Update safety margin (in MB).
+    fn set_safety_margin_mb(&self, margin_mb: u64) {
+        self.safety_margin_bytes
+            .store(margin_mb * 1024 * 1024, Ordering::Relaxed);
+    }
+
+    /// Change the polling cadence and return the previous value. Startup
+    /// calibration uses a high-resolution cadence, then restores the normal
+    /// runtime cadence before serving requests or collecting speed evidence.
+    fn set_poll_interval_ms(&self, poll_interval_ms: u64) -> PyResult<u64> {
         if !(1..=1000).contains(&poll_interval_ms) {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "VRAM monitor poll interval must be between 1 and 1000 milliseconds",
             ));
+        }
+        Ok(self
+            .poll_interval_ms
+            .swap(poll_interval_ms, Ordering::AcqRel))
+    }
+
+    /// Enable exact scratch-release allocation windows for startup calibration only.
+    fn enable_precision_windows(&self) -> PyResult<()> {
+        self.enable_precision_windows_native().map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+
+    /// Disable startup-only exact allocation windows before normal serving.
+    fn disable_precision_windows(&self) -> PyResult<()> {
+        if PRECISION_IN_FLIGHT.load(Ordering::Acquire) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "cannot disable VRAM precision windows while one is active",
+            ));
+        }
+        PRECISION_WINDOWS_ENABLED.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    // ── VRAM Report methods ──
+
+    /// Enable VRAM reporting. Periodic samples (~200ms) and named events
+    /// are recorded to an in-memory buffer. Call write_report() to flush to CSV.
+    fn enable_report(&self) {
+        let device_ids: Vec<i32> = self.devices.iter().map(|d| d.device_id).collect();
+        report_enable(device_ids);
+    }
+
+    /// Log a named event with current VRAM snapshot. No-op if report not enabled.
+    fn report_event(&self, event: &str) {
+        crate::vram_monitor::report_event(event);
+    }
+
+    /// Write VRAM report CSV to file. Contains periodic samples and events.
+    fn write_report(&self, path: &str) -> PyResult<()> {
+        report_write(path).map_err(|e| {
+            pyo3::exceptions::PyIOError::new_err(format!("Failed to write VRAM report: {}", e))
+        })
+    }
+
+    /// Get summary: list of (event_name, timestamp_ms, [gpu_free_mb, ...]) for all events.
+    fn report_summary(&self) -> Vec<(String, u64, Vec<u64>)> {
+        crate::vram_monitor::report_summary()
+    }
+}
+
+impl Drop for VramMonitor {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_cuda_uuid;
+
+    #[test]
+    fn fatal_cuda_exit_preserves_previously_recorded_report() {
+        const CHILD_DIR: &str = "KRASIS_FATAL_REPORT_TEST_DIR";
+        if let Some(dir) = std::env::var_os(CHILD_DIR) {
+            *super::REPORT.lock().unwrap() = Some(super::VramReportState {
+                start_time: std::time::Instant::now(),
+                device_ids: vec![0, 3],
+                entries: vec![super::ReportEntry {
+                    timestamp_ms: 17,
+                    event: "recorded_before_fault".into(),
+                    gpu_free_mb: vec![700, 601],
+                }],
+            });
+            assert_eq!(std::env::var_os("KRASIS_RUN_DIR"), Some(dir));
+            super::fatal_cuda_context_error("test fixture", "CUDA_ERROR_ILLEGAL_ADDRESS");
+        }
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("krasis-fatal-report-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "vram_monitor::tests::fatal_cuda_exit_preserves_previously_recorded_report", "--nocapture"])
+            .env(CHILD_DIR, &dir).env("KRASIS_RUN_DIR", &dir).output().unwrap();
+        assert_eq!(child.status.code(), Some(super::CUDA_CONTEXT_POISONED_EXIT_CODE), "{}", String::from_utf8_lossy(&child.stderr));
+        assert_eq!(std::fs::read_to_string(dir.join("vram_report.csv")).unwrap(),
+            "timestamp_ms,event,gpu0_free_mb,gpu3_free_mb\n17,recorded_before_fault,700,601\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cuda_uuid_matches_nvidia_canonical_format() {
+        let bytes = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x10, 0x32, 0x54, 0x76, 0x98, 0xba,
+            0xdc, 0xfe,
+        ];
+        assert_eq!(
+            format_cuda_uuid(&bytes),
+            "GPU-01234567-89ab-cdef-1032-547698badcfe"
+        );
+    }
+}
+
+// The native fixtures use the same sampler and precision-window admission as startup.
+impl VramMonitor {
+    fn new_native(
+        device_indices: Vec<i32>,
+        poll_interval_ms: u64,
+        safety_margin_mb: u64,
+    ) -> Result<Self, String> {
+        if !(1..=1000).contains(&poll_interval_ms) {
+            return Err("VRAM monitor poll interval must be between 1 and 1000 milliseconds".into());
         }
         let devices: Vec<DeviceState> = device_indices
             .into_iter()
@@ -823,16 +1061,14 @@ impl VramMonitor {
     }
 
     /// Start the background monitoring thread.
-    fn start(&mut self) -> PyResult<()> {
+    fn start_native(&mut self) -> Result<(), String> {
         if self.running.load(Ordering::Acquire) {
             return Ok(());
         }
 
         // Verify CUDA is available before spawning thread
         let _ = load_cuda_fns().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(
-                "VRAM monitor: failed to load CUDA runtime (libcudart.so not loaded)",
-            )
+            "VRAM monitor: failed to load CUDA runtime (libcudart.so not loaded)".to_string()
         })?;
 
         PRECISION_WINDOWS_ENABLED.store(false, Ordering::Release);
@@ -1061,200 +1297,43 @@ impl VramMonitor {
                 log::info!("VRAM monitor stopped");
             })
             .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to spawn VRAM monitor thread: {}",
-                    e
-                ))
+                format!("Failed to spawn VRAM monitor thread: {}", e)
             })?;
 
         self.thread_handle = Some(handle);
         Ok(())
     }
 
-    /// Stop the background monitoring thread.
-    fn stop(&mut self) {
-        PRECISION_WINDOWS_ENABLED.store(false, Ordering::Release);
-        self.running.store(false, Ordering::Release);
-        if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
-        }
-    }
-
-    /// Get the minimum free VRAM observed on a device (in MB).
-    fn min_free_mb(&self, device_index: i32) -> u64 {
-        for dev in self.devices.iter() {
-            if dev.device_id == device_index {
-                let bytes = dev.min_free_bytes.load(Ordering::Relaxed);
-                if bytes == u64::MAX {
-                    return 0;
-                }
-                return bytes / (1024 * 1024);
-            }
-        }
-        0
-    }
-
-    /// Get the total VRAM on a device (in MB).
-    fn total_mb(&self, device_index: i32) -> u64 {
-        for dev in self.devices.iter() {
-            if dev.device_id == device_index {
-                return dev.total_bytes.load(Ordering::Relaxed) / (1024 * 1024);
-            }
-        }
-        0
-    }
-
-    /// Get the peak VRAM used on a device (in MB) = total - min_free.
-    fn peak_used_mb(&self, device_index: i32) -> u64 {
-        for dev in self.devices.iter() {
-            if dev.device_id == device_index {
-                let total = dev.total_bytes.load(Ordering::Relaxed);
-                let min_free = dev.min_free_bytes.load(Ordering::Relaxed);
-                if min_free == u64::MAX || min_free > total {
-                    return 0;
-                }
-                return (total - min_free) / (1024 * 1024);
-            }
-        }
-        0
-    }
-
-    /// Reset min-free tracking for a single device (used by 4-point VRAM calibration).
-    fn reset(&self, device_index: i32) {
-        for dev in self.devices.iter() {
-            if dev.device_id == device_index {
-                dev.min_free_bytes.store(u64::MAX, Ordering::Relaxed);
-                return;
-            }
-        }
-    }
-
-    /// Reset min-free tracking on all devices (e.g. after warmup, before runtime).
-    fn reset_min_free(&self) {
-        for dev in self.devices.iter() {
-            dev.min_free_bytes.store(u64::MAX, Ordering::Relaxed);
-        }
-    }
-
-    /// Get current free VRAM on a device (in MB) — live reading, not tracked min.
-    fn current_free_mb(&self, device_index: i32) -> u64 {
-        let Some((set_device, mem_get_info)) = load_cuda_fns() else {
-            return 0;
-        };
-        match query_free_bytes(set_device, mem_get_info, device_index) {
-            Some(free) => (free as u64) / (1024 * 1024),
-            None => 0,
-        }
-    }
-
-    /// Enable runtime warnings when free VRAM drops below safety margin.
-    /// Resets min-free tracking so the next poll immediately captures current state
-    /// and warns if already below the margin (e.g. right after HCS allocation).
-    fn enable_warnings(&self) {
-        // Reset min_free so the very next poll sets a fresh baseline.
-        // If post-HCS free is already below safety margin, the first poll
-        // will detect it as a "new low" and fire the warning immediately.
-        for dev in self.devices.iter() {
-            dev.min_free_bytes.store(u64::MAX, Ordering::Relaxed);
-        }
-        self.warn_enabled.store(true, Ordering::Release);
-    }
-
-    /// Disable runtime warnings.
-    fn disable_warnings(&self) {
-        self.warn_enabled.store(false, Ordering::Release);
-    }
-
-    /// Update safety margin (in MB).
-    fn set_safety_margin_mb(&self, margin_mb: u64) {
-        self.safety_margin_bytes
-            .store(margin_mb * 1024 * 1024, Ordering::Relaxed);
-    }
-
-    /// Change the polling cadence and return the previous value. Startup
-    /// calibration uses a high-resolution cadence, then restores the normal
-    /// runtime cadence before serving requests or collecting speed evidence.
-    fn set_poll_interval_ms(&self, poll_interval_ms: u64) -> PyResult<u64> {
-        if !(1..=1000).contains(&poll_interval_ms) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "VRAM monitor poll interval must be between 1 and 1000 milliseconds",
-            ));
-        }
-        Ok(self
-            .poll_interval_ms
-            .swap(poll_interval_ms, Ordering::AcqRel))
-    }
-
     /// Enable exact scratch-release allocation windows for startup calibration only.
-    fn enable_precision_windows(&self) -> PyResult<()> {
+    fn enable_precision_windows_native(&self) -> Result<(), String> {
         if !self.running.load(Ordering::Acquire)
             || !PRECISION_MONITOR_ACTIVE.load(Ordering::Acquire)
         {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "VRAM precision monitor is not active",
-            ));
+            return Err("VRAM precision monitor is not active".into());
         }
         PRECISION_WINDOWS_ENABLED.store(true, Ordering::Release);
         Ok(())
     }
 
-    /// Disable startup-only exact allocation windows before normal serving.
-    fn disable_precision_windows(&self) -> PyResult<()> {
-        if PRECISION_IN_FLIGHT.load(Ordering::Acquire) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "cannot disable VRAM precision windows while one is active",
-            ));
-        }
-        PRECISION_WINDOWS_ENABLED.store(false, Ordering::Release);
-        Ok(())
-    }
-
-    // ── VRAM Report methods ──
-
-    /// Enable VRAM reporting. Periodic samples (~200ms) and named events
-    /// are recorded to an in-memory buffer. Call write_report() to flush to CSV.
-    fn enable_report(&self) {
-        let device_ids: Vec<i32> = self.devices.iter().map(|d| d.device_id).collect();
-        report_enable(device_ids);
-    }
-
-    /// Log a named event with current VRAM snapshot. No-op if report not enabled.
-    fn report_event(&self, event: &str) {
-        crate::vram_monitor::report_event(event);
-    }
-
-    /// Write VRAM report CSV to file. Contains periodic samples and events.
-    fn write_report(&self, path: &str) -> PyResult<()> {
-        report_write(path).map_err(|e| {
-            pyo3::exceptions::PyIOError::new_err(format!("Failed to write VRAM report: {}", e))
-        })
-    }
-
-    /// Get summary: list of (event_name, timestamp_ms, [gpu_free_mb, ...]) for all events.
-    fn report_summary(&self) -> Vec<(String, u64, Vec<u64>)> {
-        crate::vram_monitor::report_summary()
-    }
-}
-
-impl Drop for VramMonitor {
-    fn drop(&mut self) {
-        self.stop();
-    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::format_cuda_uuid;
+pub(crate) fn native_optional_monitor_active() -> bool {
+    PRECISION_MONITOR_ACTIVE.load(Ordering::Acquire)
+        || PRECISION_WINDOWS_ENABLED.load(Ordering::Acquire)
+}
 
-    #[test]
-    fn cuda_uuid_matches_nvidia_canonical_format() {
-        let bytes = [
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x10, 0x32, 0x54, 0x76, 0x98, 0xba,
-            0xdc, 0xfe,
-        ];
-        assert_eq!(
-            format_cuda_uuid(&bytes),
-            "GPU-01234567-89ab-cdef-1032-547698badcfe"
-        );
+#[cfg(test)]
+pub(crate) fn native_calibration_monitor(device_indices: Vec<i32>, safety_margin_mb: u64) -> Result<VramMonitor, String> {
+    let mut monitor = VramMonitor::new_native(device_indices, 50, safety_margin_mb)?;
+    monitor.start_native()?;
+    let deadline = Instant::now() + PRECISION_HANDSHAKE_TIMEOUT;
+    while !PRECISION_MONITOR_ACTIVE.load(Ordering::Acquire) {
+        if Instant::now() >= deadline {
+            return Err("native calibration monitor startup handshake timed out".into());
+        }
+        thread::yield_now();
     }
+    monitor.enable_precision_windows_native()?;
+    Ok(monitor)
 }

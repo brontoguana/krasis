@@ -58,6 +58,12 @@ pub enum SequenceStateGrowth {
         capacity_rows: usize,
         row_bytes: usize,
     },
+    /// A row becomes live only after its complete source group is available.
+    CompletedTokenRows {
+        logical_tokens_per_row: usize,
+        capacity_rows: usize,
+        row_bytes: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +96,45 @@ impl SequenceStateAllocation {
                     .min(capacity_rows);
                 rows.saturating_mul(row_bytes).min(self.storage_bytes)
             }
+            SequenceStateGrowth::CompletedTokenRows {
+                logical_tokens_per_row,
+                capacity_rows,
+                row_bytes,
+            } => (logical_tokens / logical_tokens_per_row)
+                .min(capacity_rows)
+                .saturating_mul(row_bytes)
+                .min(self.storage_bytes),
         }
+    }
+
+    pub(crate) fn stable_prefix_bytes(&self, logical_tokens: usize) -> usize {
+        match self.growth {
+            SequenceStateGrowth::Fixed => 0,
+            SequenceStateGrowth::TokenRows {
+                logical_tokens_per_row,
+                capacity_rows,
+                row_bytes,
+            }
+            | SequenceStateGrowth::CompletedTokenRows {
+                logical_tokens_per_row,
+                capacity_rows,
+                row_bytes,
+            } => (logical_tokens / logical_tokens_per_row)
+                .min(capacity_rows)
+                .saturating_mul(row_bytes),
+        }
+    }
+
+    pub(crate) fn snapshot_shape(&self, used_bytes: usize) -> Vec<usize> {
+        let mut shape = self.shape.clone();
+        match self.growth {
+            SequenceStateGrowth::Fixed => {}
+            SequenceStateGrowth::TokenRows { row_bytes, .. }
+            | SequenceStateGrowth::CompletedTokenRows { row_bytes, .. } => {
+                shape[0] = used_bytes / row_bytes
+            }
+        }
+        shape
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
@@ -132,6 +176,11 @@ impl SequenceStateAllocation {
         match self.growth {
             SequenceStateGrowth::Fixed => {}
             SequenceStateGrowth::TokenRows {
+                logical_tokens_per_row,
+                capacity_rows,
+                row_bytes,
+            }
+            | SequenceStateGrowth::CompletedTokenRows {
                 logical_tokens_per_row,
                 capacity_rows,
                 row_bytes,
@@ -189,6 +238,40 @@ pub struct SequenceStateInventoryItem<'a> {
 }
 
 impl SequenceStateRegistry {
+    pub(crate) fn with_validated_inventory(
+        &self,
+        additions: &[SequenceStateAllocation],
+        required: &[SequenceStateAllocation],
+    ) -> Result<Self, String> {
+        let mut candidate = Self::default();
+        // Registries may come from Deserialize; never assume the old inventory
+        // is valid merely because allocations are private to this module.
+        for allocation in self.allocations.iter().chain(additions) {
+            candidate.register(allocation.clone())?;
+        }
+        let mut names = HashSet::new();
+        for expected in required {
+            expected.validate()?;
+            if !names.insert(expected.name.as_str()) {
+                return Err(format!(
+                    "duplicate required sequence-state name {:?}",
+                    expected.name
+                ));
+            }
+            if !candidate
+                .allocations
+                .iter()
+                .any(|actual| actual == expected)
+            {
+                return Err(format!(
+                    "required sequence-state descriptor missing or changed: {:?}",
+                    expected.name
+                ));
+            }
+        }
+        Ok(candidate)
+    }
+
     pub fn register(&mut self, allocation: SequenceStateAllocation) -> Result<(), String> {
         allocation.validate()?;
         if self
@@ -611,13 +694,70 @@ pub(crate) fn snapshot_blob_can_restore(
         SequenceStateGrowth::Fixed => {
             blob.shape == allocation.shape && blob.bytes.len() == required_bytes
         }
-        SequenceStateGrowth::TokenRows { row_bytes, .. } => {
+        SequenceStateGrowth::TokenRows { row_bytes, .. }
+        | SequenceStateGrowth::CompletedTokenRows { row_bytes, .. } => {
             blob.shape.get(1..) == allocation.shape.get(1..)
                 && required_bytes % row_bytes == 0
                 && blob.bytes.len() % row_bytes == 0
                 && blob.bytes.len() >= required_bytes
         }
     }
+}
+
+/// Match the ordered previous inventory, admitting a newly live allocation
+/// only when its computed previous live extent was exactly zero.
+pub(crate) fn incremental_snapshot_bases<'a>(
+    allocations: &[(SequenceStateAllocation, usize)],
+    previous_logical_tokens: usize,
+    previous_blobs: &[&'a SequenceStateBlob],
+) -> Result<Vec<Option<&'a SequenceStateBlob>>, String> {
+    let mut previous = previous_blobs.iter().copied().peekable();
+    let mut bases = Vec::with_capacity(allocations.len());
+    for (allocation, _) in allocations {
+        let required = allocation.used_bytes(previous_logical_tokens);
+        if required == 0
+            && previous.peek().is_some_and(|blob| {
+                blob.allocation_name == allocation.name
+                    && blob.device_ordinal == allocation.device_ordinal
+            })
+        {
+            return Err(format!(
+                "incremental snapshot contains non-live allocation {}",
+                allocation.name
+            ));
+        }
+        let base = match previous.peek() {
+            Some(blob)
+                if blob.allocation_name == allocation.name
+                    && blob.device_ordinal == allocation.device_ordinal =>
+            {
+                previous.next()
+            }
+            _ if required == 0 => None,
+            _ => {
+                return Err(format!(
+                    "incremental snapshot is missing live allocation {}",
+                    allocation.name
+                ))
+            }
+        };
+        if let Some(blob) = base {
+            blob.validate()?;
+            if !snapshot_blob_can_restore(allocation, required, blob) {
+                return Err(format!(
+                    "incremental snapshot previous layout/extent does not match {}",
+                    allocation.name
+                ));
+            }
+        }
+        bases.push(base);
+    }
+    if previous.next().is_some() {
+        return Err(
+            "incremental snapshot has duplicate, unknown or reordered previous allocations".into(),
+        );
+    }
+    Ok(bases)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1371,6 +1511,9 @@ pub struct RamSessionStore {
     evictions: u64,
     last_availability: MemoryAvailability,
     last_budget_bytes: usize,
+    /// Test-endpoint-only cap used to exercise live LRU admission against the
+    /// store's own measured resident bytes. Production never sets this.
+    test_budget_cap_bytes: Option<usize>,
 }
 
 impl RamSessionStore {
@@ -1421,6 +1564,7 @@ impl RamSessionStore {
             evictions: 0,
             last_availability: availability,
             last_budget_bytes: initial_budget_bytes,
+            test_budget_cap_bytes: None,
         })
     }
 
@@ -1432,10 +1576,31 @@ impl RamSessionStore {
             .effective_available_bytes
             .saturating_add(resident_bytes);
         let live_budget = fraction_bytes(controlled_baseline, self.budget_fraction)?;
-        let budget = self.initial_budget_bytes.min(live_budget);
+        let mut budget = self.initial_budget_bytes.min(live_budget);
+        if let Some(test_cap) = self.test_budget_cap_bytes {
+            budget = budget.min(test_cap);
+        }
         self.last_availability = availability;
         self.last_budget_bytes = budget;
         Ok(budget)
+    }
+
+    /// Arm a bounded live-pressure phase for the internal test endpoint. The
+    /// cap is derived from bytes the store owns now, so the next independent
+    /// admission must prove real LRU eviction without a host/model constant.
+    pub(crate) fn arm_test_pressure_at_resident_bytes(&mut self) -> Result<usize, String> {
+        self.recompute_resident_bytes();
+        if self.resident_bytes == 0 || self.entries.is_empty() {
+            return Err(
+                "session cache test pressure requires at least one resident snapshot".to_string(),
+            );
+        }
+        self.test_budget_cap_bytes = Some(self.resident_bytes);
+        Ok(self.resident_bytes)
+    }
+
+    pub(crate) fn clear_test_pressure(&mut self) {
+        self.test_budget_cap_bytes = None;
     }
 
     fn ensure_transaction_staging_available(&self, additional_bytes: usize) -> Result<(), String> {
@@ -1977,6 +2142,108 @@ mod tests {
     }
 
     #[test]
+    fn completed_rows_exclude_partial_groups_and_preserve_capacity() {
+        for pool in [1, 2, 3, 5, 7] {
+            let mut allocation = rows("pooled", 0x1000);
+            allocation.growth = SequenceStateGrowth::CompletedTokenRows {
+                logical_tokens_per_row: pool,
+                capacity_rows: 16,
+                row_bytes: 256,
+            };
+            allocation.validate().unwrap();
+            assert_eq!(allocation.used_bytes(pool - 1), 0);
+            assert_eq!(allocation.used_bytes(pool), 256);
+            assert_eq!(allocation.used_bytes(2 * pool - 1), 256);
+            assert_eq!(
+                allocation.snapshot_shape(allocation.used_bytes(2 * pool)),
+                vec![2, 256]
+            );
+            assert_eq!(allocation.stable_prefix_bytes(2 * pool - 1), 256);
+            assert_eq!(allocation.used_bytes(usize::MAX), allocation.storage_bytes);
+            let mut invalid = allocation.clone();
+            invalid.growth = SequenceStateGrowth::CompletedTokenRows {
+                logical_tokens_per_row: 0,
+                capacity_rows: 16,
+                row_bytes: 256,
+            };
+            assert!(invalid.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn completed_row_growth_changes_compatibility_layout() {
+        let mut before = SequenceStateRegistry::default();
+        let mut allocation = rows("pooled", 0x1000);
+        allocation.growth = SequenceStateGrowth::TokenRows {
+            logical_tokens_per_row: 4,
+            capacity_rows: 16,
+            row_bytes: 256,
+        };
+        before.register(allocation.clone()).unwrap();
+        allocation.growth = SequenceStateGrowth::CompletedTokenRows {
+            logical_tokens_per_row: 4,
+            capacity_rows: 16,
+            row_bytes: 256,
+        };
+        let mut after = SequenceStateRegistry::default();
+        after.register(allocation).unwrap();
+        assert_ne!(
+            before.compatibility_layout_value(),
+            after.compatibility_layout_value()
+        );
+        assert_eq!(
+            after.compatibility_layout_value()[0]["growth"]["mode"],
+            "completed_token_rows"
+        );
+        assert_eq!(after.snapshot_blob_memory_cost_estimate(3).unwrap(), 0);
+        assert!(after.snapshot_blob_memory_cost_estimate(4).unwrap() > 256);
+    }
+
+    #[test]
+    fn incremental_snapshot_admits_only_newly_live_completed_rows() {
+        let raw = rows("raw", 0x1000);
+        let mut pooled = rows("pooled", 0x2000);
+        pooled.growth = SequenceStateGrowth::CompletedTokenRows {
+            logical_tokens_per_row: 3,
+            capacity_rows: 16,
+            row_bytes: 256,
+        };
+        let blob = |a: &SequenceStateAllocation, tokens| SequenceStateBlob {
+            allocation_name: a.name.clone(),
+            kind: a.kind.clone(),
+            layer_idx: a.layer_idx,
+            device_ordinal: a.device_ordinal,
+            dtype: a.dtype.clone(),
+            element_size: a.element_size,
+            shape: a.snapshot_shape(a.used_bytes(tokens)),
+            strides_bytes: a.strides_bytes.clone(),
+            bytes: vec![0; a.used_bytes(tokens)],
+        };
+        let raw2 = blob(&raw, 2);
+        let allocations = vec![
+            (raw.clone(), raw.used_bytes(5)),
+            (pooled.clone(), pooled.used_bytes(5)),
+        ];
+        let previous = [&raw2];
+        let bases = incremental_snapshot_bases(&allocations, 2, &previous).unwrap();
+        assert!(bases[0].is_some() && bases[1].is_none());
+        assert_eq!(pooled.stable_prefix_bytes(2), 0);
+        assert!(incremental_snapshot_bases(&allocations, 3, &previous).is_err());
+        assert!(incremental_snapshot_bases(&allocations, 2, &[&raw2, &raw2]).is_err());
+        let pooled3 = blob(&pooled, 3);
+        assert!(incremental_snapshot_bases(&allocations, 2, &[&raw2, &pooled3]).is_err());
+        let raw3 = blob(&raw, 3);
+        assert!(incremental_snapshot_bases(&allocations, 3, &[&pooled3, &raw3]).is_err());
+        let valid = [&raw3, &pooled3];
+        assert!(incremental_snapshot_bases(&allocations, 3, &valid).is_ok());
+        assert!(snapshot_blob_can_restore(&pooled, 256, &pooled3));
+        assert!(!snapshot_blob_can_restore(&pooled, 512, &pooled3));
+        let mut wrong = blob(&pooled, 3);
+        wrong.kind = "wrong".into();
+        assert!(incremental_snapshot_bases(&allocations, 3, &[&raw3, &wrong]).is_err());
+    }
+
+    #[test]
     fn token_row_snapshot_can_restore_only_an_exact_available_prefix() {
         let allocation = rows("layer3.k", 0x1000);
         let blob = SequenceStateBlob {
@@ -2213,6 +2480,29 @@ mod tests {
         assert!(store.get(second).unwrap().is_none());
         assert!(store.get(first).unwrap().is_some());
         assert!(store.get(third).unwrap().is_some());
+        assert_eq!(store.stats().evictions, 1);
+    }
+
+    #[test]
+    fn measured_test_pressure_cap_forces_live_lru_without_a_fixed_budget() {
+        let sample = snapshot(1, 8192);
+        let cost = sample.memory_cost_bytes();
+        let probe = Arc::new(TestMemoryProbe::new((cost * 10) as u64));
+        let mut store = RamSessionStore::new(1.0, probe).unwrap();
+        let first = commit_snapshot(&mut store, sample);
+        let second = commit_snapshot(&mut store, snapshot(3, 8192));
+        let measured_cap = store.arm_test_pressure_at_resident_bytes().unwrap();
+        assert_eq!(measured_cap, store.stats().resident_bytes);
+
+        let third = commit_snapshot(&mut store, snapshot(5, 8192));
+        assert!(store.get(first).unwrap().is_none());
+        assert!(store.get(second).unwrap().is_some());
+        assert!(store.get(third).unwrap().is_some());
+        assert_eq!(store.stats().evictions, 1);
+
+        store.clear_test_pressure();
+        let fourth = commit_snapshot(&mut store, snapshot(7, 8192));
+        assert!(store.get(fourth).unwrap().is_some());
         assert_eq!(store.stats().evictions, 1);
     }
 

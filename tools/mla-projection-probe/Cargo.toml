@@ -1,0 +1,13 @@
+[package]
+name = "mla-projection-probe"
+version = "0.1.0"
+edition = "2021"
+[features]
+shared-kda-test = []
+[dependencies]
+cudarc = { path = "../../vendor/cudarc", features = ["driver", "cublas", "f16", "cuda-12060"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+[profile.release]
+opt-level = 3

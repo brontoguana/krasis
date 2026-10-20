@@ -331,9 +331,7 @@ fn canonical_ungraphed_quantized_moe_supported(
 
 /// `Some(bits)` means a manifest layer can use one homogeneous Marlin launch;
 /// `None` means it requires disjoint INT4 and INT8 launches.
-fn manifest_layer_uniform_bits(
-    mut bits: impl Iterator<Item = u8>,
-) -> Result<Option<u8>, String> {
+fn manifest_layer_uniform_bits(mut bits: impl Iterator<Item = u8>) -> Result<Option<u8>, String> {
     let first = bits
         .next()
         .ok_or_else(|| "manifest routed expert table is empty".to_string())?;
@@ -352,6 +350,14 @@ fn manifest_layer_uniform_bits(
         uniform &= bits == first;
     }
     Ok(uniform.then_some(first))
+}
+
+fn max_prefill_expert_bits<I, J>(default_bits: u8, layers: I) -> u8
+where
+    I: IntoIterator<Item = J>,
+    J: IntoIterator<Item = u8>,
+{
+    layers.into_iter().flatten().fold(default_bits, u8::max)
 }
 
 fn uniform_aligned_expert_bytes(
@@ -526,10 +532,7 @@ fn select_stable_timing_candidate(
         .filter_map(|&(_, elapsed_ms)| {
             (elapsed_ms.is_finite() && elapsed_ms >= 0.0).then_some(elapsed_ms)
         })
-        .min_by(|left, right| {
-            left.partial_cmp(right)
-                .unwrap_or(std::cmp::Ordering::Equal)
-    })?;
+        .min_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))?;
     let stable_limit_ms = fastest_ms * (1.0 + margin_pct / 100.0);
     if let Some(&(geometry, elapsed_ms)) = results.iter().find(|&&(geometry, elapsed_ms)| {
         geometry == established_geometry
@@ -557,9 +560,9 @@ fn select_stable_timing_candidate(
 #[cfg(test)]
 mod kernel_tests {
     use super::{
-        has_registered_sparse_prefill_topk, mla_sparse_attention_shared_floats,
-        parse_mla_sparse_attention_threads, parse_nonnegative_finite_f64,
-        select_stable_timing_candidate, uniform_aligned_expert_bytes,
+        has_registered_sparse_prefill_topk, max_prefill_expert_bits,
+        mla_sparse_attention_shared_floats, parse_mla_sparse_attention_threads,
+        parse_nonnegative_finite_f64, select_stable_timing_candidate, uniform_aligned_expert_bytes,
     };
 
     #[test]
@@ -605,10 +608,7 @@ mod kernel_tests {
             select_stable_timing_candidate(&[(2, 0.5)], f64::NAN, 2),
             None
         );
-        assert_eq!(
-            select_stable_timing_candidate(&[(2, 0.5)], -1.0, 2),
-            None
-        );
+        assert_eq!(select_stable_timing_candidate(&[(2, 0.5)], -1.0, 2), None);
     }
 
     #[test]
@@ -617,11 +617,31 @@ mod kernel_tests {
             uniform_aligned_expert_bytes([1_001, 1_001, 1_001].into_iter(), 512).unwrap(),
             1_024
         );
-        assert!(uniform_aligned_expert_bytes([1_001, 2_001].into_iter(), 512)
-            .unwrap_err()
-            .contains("heterogeneous"));
+        assert!(
+            uniform_aligned_expert_bytes([1_001, 2_001].into_iter(), 512)
+                .unwrap_err()
+                .contains("heterogeneous")
+        );
         assert!(uniform_aligned_expert_bytes(std::iter::empty(), 512).is_err());
         assert!(uniform_aligned_expert_bytes([1].into_iter(), 500).is_err());
+    }
+
+    #[test]
+    fn prefill_precision_capacity_includes_experts_after_first_moe_layer() {
+        let layers = [vec![4, 4], vec![], vec![4, 8], vec![4, 4]];
+        assert_eq!(
+            max_prefill_expert_bits(4, layers.iter().map(|v| v.iter().copied())),
+            8
+        );
+        // Each store sizes only its own registered layers; precision on a
+        // different store cannot force larger local allocations.
+        assert_eq!(
+            max_prefill_expert_bits(4, layers[..2].iter().map(|v| v.iter().copied())),
+            4
+        );
+        assert_eq!(max_prefill_expert_bits(8, [vec![8], vec![8]]), 8);
+        assert_eq!(max_prefill_expert_bits(16, [vec![16]]), 16);
+        assert_eq!(max_prefill_expert_bits(4, std::iter::empty::<Vec<u8>>()), 4);
     }
 
     #[test]
@@ -868,7 +888,9 @@ fn select_exact_hcs_slots(
     let mut used = 0usize;
     for &(layer, expert) in ranking {
         if !seen.insert((layer, expert)) {
-            return Err(format!("exact HCS ranking contains duplicate L{layer}E{expert}"));
+            return Err(format!(
+                "exact HCS ranking contains duplicate L{layer}E{expert}"
+            ));
         }
         let index = layer
             .checked_mul(experts_per_layer)
@@ -2995,7 +3017,11 @@ impl PromptHcsShadowStats {
         // Preserve the blend priority independently within each exact capacity
         // class so a prompt reload can never place an INT8 payload into an
         // INT4-sized slot or silently waste an INT8 slot on a smaller record.
-        if hcs.soft_slot_sizes.windows(2).any(|pair| pair[0] != pair[1]) {
+        if hcs
+            .soft_slot_sizes
+            .windows(2)
+            .any(|pair| pair[0] != pair[1])
+        {
             let mut priority = ranking.clone();
             let mut seen: std::collections::HashSet<(usize, usize)> =
                 priority.iter().copied().collect();
@@ -3468,7 +3494,8 @@ fn apply_prompt_hcs_reload_blend(
     let target_slots = if target_chunks == 0 {
         0
     } else {
-        hcs.soft_chunk_slot_range(target_chunks.min(hcs.soft_total_chunks) - 1).1
+        hcs.soft_chunk_slot_range(target_chunks.min(hcs.soft_total_chunks) - 1)
+            .1
     }
     .min(plan.ranking.len());
     if target_slots <= loaded_slots {
@@ -3476,6 +3503,15 @@ fn apply_prompt_hcs_reload_blend(
     }
 
     let mut changed_slots = 0usize;
+    for slot in loaded_slots..target_slots {
+        if hcs.soft_ranking.get(slot).copied() != Some(plan.ranking[slot]) {
+            changed_slots += 1;
+        }
+    }
+    if changed_slots == 0 {
+        return 0;
+    }
+
     let mut repacked_slots = 0usize;
     for slot in loaded_slots..target_slots {
         let desired = plan.ranking[slot];
@@ -3483,7 +3519,6 @@ fn apply_prompt_hcs_reload_blend(
         if current == Some(desired) {
             continue;
         }
-        changed_slots += 1;
         if !use_host_mirror {
             repacked_slots += 1;
         } else if pack_soft_host_slot(hcs, moe_layers, slot, desired.0, desired.1) {
@@ -5574,7 +5609,10 @@ impl HcsState {
         let index = layer
             .checked_mul(self.num_experts_per_layer)?
             .checked_add(expert)?;
-        self.expert_slot_sizes.get(index).copied().filter(|&size| size > 0)
+        self.expert_slot_sizes
+            .get(index)
+            .copied()
+            .filter(|&size| size > 0)
     }
 
     /// Drop loaded soft chunks down to target_chunks, freeing VRAM and clearing cache entries.
@@ -6431,11 +6469,9 @@ impl HcsState {
             .saturating_add(promo.w2p_bytes)
             .saturating_add(promo.w2s_bytes);
         let required_capacity = needed.saturating_add(511) & !511usize;
-        let Some(slot) = self.dynamic_victim_slot(
-            promo.layer_idx,
-            promo.expert_idx,
-            required_capacity,
-        ) else {
+        let Some(slot) =
+            self.dynamic_victim_slot(promo.layer_idx, promo.expert_idx, required_capacity)
+        else {
             self.dynamic_no_slot += 1;
             let debug_no_slot_classes = env_truthy("KRASIS_DEBUG_HCS_NO_SLOT_CLASSES");
             if self.debug_hcs_transition_trace_active || debug_no_slot_classes {
@@ -10090,31 +10126,92 @@ pub(crate) mod dsa_registration_tests {
     use cudarc::driver::{DevicePtr, LaunchAsync, LaunchConfig};
 
     use super::{
-        claimed_peer_route_slots, create_decode_timing_event, dependency_preserving_route_schedule,
+        canonical_ungraphed_quantized_moe_supported, claimed_peer_route_slots,
+        create_decode_timing_event, dependency_preserving_route_schedule,
         dsa_expanded_topk_capacity, dsa_score_context_capacity, dspark_expected_emitted_tokens,
         dspark_residency_scan_required, dspark_target_cache_restore_slots,
         dspark_target_cache_rows, dspark_verification_batch_plan, dynamic_peer_shard,
-        graph_w13_path, layer_split_sequence_state_contract, marlin_dispatch_for_bits,
-        measured_peer_route_admission, occupancy_active_blocks_per_multiprocessor,
-        peer_selector_check_message, plan_dsa_topk, route_prep_rmsnorm_threads,
-        canonical_ungraphed_quantized_moe_supported, manifest_layer_uniform_bits,
-        select_exact_hcs_slots, split_expert_launch_enabled, validate_dsa_indexer_registration,
+        graph_reuse_linear_state_ptrs, graph_w13_path, layer_split_sequence_state_contract,
+        manifest_layer_uniform_bits, marlin_dispatch_for_bits, measured_peer_route_admission,
+        occupancy_active_blocks_per_multiprocessor, peer_selector_check_message, plan_dsa_topk,
+        route_prep_rmsnorm_threads, select_exact_hcs_slots, shared_expert_path,
+        split_expert_launch_enabled, validate_dsa_indexer_registration,
         validate_dsa_owner_weight_contract, validate_dsa_runtime_registration,
         validate_dspark_residency_contract, validate_stream_probe_outcome, CudaEvent, CudaStream,
         DsaGraphScoreBackend, DsaIndexerOwnerResource, DsaIndexerOwnerWeightIds,
         DsparkResidencyMode, DsparkTargetCacheRowMapping, DsparkVerificationPolicy, ExpertDataPtr,
         GpuAttnConfig, GpuDecodeStore, GpuWeight, GraphW13Path, HqqStageAsyncCopyMode,
-        PeerDemandEntry, PeerDynamicTier, PeerRoutedExpert, PendingPeerDispatch,
-        RouteLocalityGlobalLruState, DSA_TOPK_RADIX_THREADS, MODULE_NAME,
+        KimiDeltaAttentionRegistration, PeerDemandEntry, PeerDynamicTier, PeerRoutedExpert,
+        PendingPeerDispatch, RouteLocalityGlobalLruState, SharedExpertPath, DSA_TOPK_RADIX_THREADS,
+        MODULE_NAME,
     };
 
     static DSA_CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn graph_reuse_pointer_contract_covers_kda_and_linear_attention() {
+        let kda = GpuAttnConfig::KimiDeltaAttention(KimiDeltaAttentionRegistration {
+            q_proj: 0,
+            k_proj: 0,
+            v_proj: 0,
+            o_proj: 0,
+            f_a_proj: 0,
+            f_b_proj: 0,
+            b_proj: 0,
+            g_a_proj: 0,
+            g_b_proj: 0,
+            conv_weight_ptr: 0,
+            a_log_ptr: 0,
+            dt_bias_ptr: 0,
+            norm_weight_ptr: 0,
+            conv_state_ptr: 0x1234,
+            recur_state_ptr: 0x5678,
+            num_heads: 0,
+            head_dim: 0,
+            kernel_dim: 0,
+            gate_lower_bound: 0.0,
+        });
+        assert_eq!(graph_reuse_linear_state_ptrs(&kda), Some((0x1234, 0x5678)));
+
+        let linear = GpuAttnConfig::LinearAttention {
+            in_proj_qkvz: 0,
+            in_proj_ba: 0,
+            out_proj: 0,
+            conv_weight_ptr: 0,
+            a_log_ptr: 0,
+            dt_bias_ptr: 0,
+            norm_weight_ptr: 0,
+            nk: 0,
+            nv: 0,
+            dk: 0,
+            dv: 0,
+            hr: 0,
+            kernel_dim: 0,
+            conv_dim: 0,
+            scale: 0.0,
+            conv_state_ptr: 0x9abc,
+            recur_state_ptr: 0xdef0,
+        };
+        assert_eq!(
+            graph_reuse_linear_state_ptrs(&linear),
+            Some((0x9abc, 0xdef0))
+        );
+    }
+
+    #[test]
     fn mixed_manifest_layer_dispatch_distinguishes_uniform_and_heterogeneous_bits() {
-        assert_eq!(manifest_layer_uniform_bits([4, 4, 4].into_iter()).unwrap(), Some(4));
-        assert_eq!(manifest_layer_uniform_bits([8, 8].into_iter()).unwrap(), Some(8));
-        assert_eq!(manifest_layer_uniform_bits([4, 8, 4].into_iter()).unwrap(), None);
+        assert_eq!(
+            manifest_layer_uniform_bits([4, 4, 4].into_iter()).unwrap(),
+            Some(4)
+        );
+        assert_eq!(
+            manifest_layer_uniform_bits([8, 8].into_iter()).unwrap(),
+            Some(8)
+        );
+        assert_eq!(
+            manifest_layer_uniform_bits([4, 8, 4].into_iter()).unwrap(),
+            None
+        );
         assert!(manifest_layer_uniform_bits([4, 6].into_iter())
             .unwrap_err()
             .contains("unsupported INT6"));
@@ -10127,14 +10224,9 @@ pub(crate) mod dsa_registration_tests {
     fn mixed_hcs_selection_uses_exact_capacities_and_runtime_layer_stride() {
         let sizes = vec![100, 200, 0, 0, 0, 0, 0, 0, 120, 0, 0, 180];
         let ranking = vec![(2, 3), (0, 1), (2, 0), (0, 0)];
-        let selected = select_exact_hcs_slots(
-            &ranking,
-            &sizes,
-            4,
-            &std::collections::HashSet::new(),
-            400,
-        )
-        .unwrap();
+        let selected =
+            select_exact_hcs_slots(&ranking, &sizes, 4, &std::collections::HashSet::new(), 400)
+                .unwrap();
         assert_eq!(selected, vec![(2, 3, 180), (0, 1, 200)]);
 
         let occupied = std::collections::HashSet::from([(2, 3)]);
@@ -10387,7 +10479,9 @@ pub(crate) mod dsa_registration_tests {
         assert!(!canonical_ungraphed_quantized_moe_supported(4, 1, true, 0));
         assert!(!canonical_ungraphed_quantized_moe_supported(4, 2, true, 0));
         assert!(!canonical_ungraphed_quantized_moe_supported(4, 0, false, 0));
-        assert!(!canonical_ungraphed_quantized_moe_supported(4, 0, true, 4096));
+        assert!(!canonical_ungraphed_quantized_moe_supported(
+            4, 0, true, 4096
+        ));
     }
 
     #[test]
@@ -10427,6 +10521,13 @@ pub(crate) mod dsa_registration_tests {
         assert_eq!(graph_w13_path(4, true), GraphW13Path::DirectBf16);
         assert_eq!(graph_w13_path(4, false), GraphW13Path::Marlin);
         assert_eq!(graph_w13_path(8, false), GraphW13Path::Marlin);
+    }
+
+    #[test]
+    fn bf16_shared_expert_never_falls_through_to_marlin() {
+        assert_eq!(shared_expert_path(16), SharedExpertPath::DirectBf16);
+        assert_eq!(shared_expert_path(4), SharedExpertPath::Marlin);
+        assert_eq!(shared_expert_path(8), SharedExpertPath::Marlin);
     }
 
     #[test]
@@ -10668,6 +10769,205 @@ pub(crate) mod dsa_registration_tests {
             .unwrap_err()
             .contains("INT4 or INT8"));
     }
+
+    // BEGIN completed-pool snapshot CUDA regression
+    #[test]
+    fn completed_pool_snapshot_transition_dma_matches_full_and_restores() {
+        use crate::session_cache::{
+            SequenceStateAllocation, SequenceStateBlob, SequenceStateGrowth,
+        };
+        let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
+        let mut store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal(), false).expect("CUDA store");
+        let device = store.device.clone();
+        // Fixture geometries exercise different completion/capacity boundaries;
+        // they do not set model, memory or launch policy.
+        for pool in [2usize, 4, 7] {
+            let row_bytes = pool + 3;
+            let pooled_rows = 3;
+            let raw_rows = pool * (pooled_rows + 1);
+            let sizes = [
+                row_bytes * 2,
+                raw_rows * row_bytes,
+                pooled_rows * row_bytes,
+                (pooled_rows + 1) * row_bytes,
+            ];
+            let buffers: Vec<_> = sizes
+                .iter()
+                .map(|n| device.htod_copy(vec![0xa5u8; *n]).unwrap())
+                .collect();
+            let owners: Vec<&dyn crate::sequence_external_owner::CudaRegion> = buffers
+                .iter()
+                .map(|b| b as &dyn crate::sequence_external_owner::CudaRegion)
+                .collect();
+            let allocations: Vec<_> = buffers
+                .iter()
+                .enumerate()
+                .map(|(i, buf)| {
+                    let growth = match i {
+                        0 => SequenceStateGrowth::Fixed,
+                        1 => SequenceStateGrowth::TokenRows {
+                            logical_tokens_per_row: 1,
+                            capacity_rows: raw_rows,
+                            row_bytes,
+                        },
+                        2 => SequenceStateGrowth::CompletedTokenRows {
+                            logical_tokens_per_row: pool,
+                            capacity_rows: pooled_rows,
+                            row_bytes,
+                        },
+                        _ => SequenceStateGrowth::TokenRows {
+                            logical_tokens_per_row: pool,
+                            capacity_rows: pooled_rows + 1,
+                            row_bytes,
+                        },
+                    };
+                    SequenceStateAllocation {
+                        name: format!("fixture-{i}"),
+                        kind: format!("fixture-kind-{i}"),
+                        layer_idx: Some(i),
+                        device_ordinal: device.ordinal(),
+                        ptr: *buf.device_ptr(),
+                        storage_bytes: sizes[i],
+                        dtype: "uint8".into(),
+                        element_size: 1,
+                        shape: vec![sizes[i] / row_bytes, row_bytes],
+                        strides_bytes: vec![row_bytes, 1],
+                        growth,
+                    }
+                })
+                .collect();
+            // Stable appended rows use row/column identity; fixed state changes
+            // on each transition. Unwritten pooled storage has a distinct poison.
+            let source = |i: usize, tokens: usize| -> Vec<u8> {
+                (0..sizes[i])
+                    .map(|offset| {
+                        if i == 2 && offset / row_bytes >= (tokens / pool).min(pooled_rows) {
+                            return 0xa5;
+                        }
+                        ((offset * 17
+                            + i * 31
+                            + match i {
+                                0 => tokens * 7,
+                                3 => tokens.saturating_sub(offset / row_bytes * pool).min(pool) * 7,
+                                _ => 0,
+                            })
+                            % 251) as u8
+                    })
+                    .collect()
+            };
+            let upload = |values: &[Vec<u8>]| {
+                for (buf, bytes) in buffers.iter().zip(values) {
+                    assert_eq!(
+                        unsafe {
+                            cuda_sys::lib().cuMemcpyHtoD_v2(
+                                *buf.device_ptr(),
+                                bytes.as_ptr().cast(),
+                                bytes.len(),
+                            )
+                        },
+                        cuda_sys::CUresult::CUDA_SUCCESS
+                    );
+                }
+            };
+            let points = [
+                pool - 1,
+                pool,
+                pool + 1,
+                2 * pool - 1,
+                2 * pool,
+                3 * pool + 1,
+                raw_rows + pool,
+            ];
+            let mut previous: Vec<SequenceStateBlob> = Vec::new();
+            let mut previous_tokens = 0;
+            for (step, &tokens) in points.iter().enumerate() {
+                let values: Vec<_> = (0..sizes.len()).map(|i| source(i, tokens)).collect();
+                upload(&values);
+                let (full, _) = store
+                    .snapshot_external_sequence_state_rust(&allocations, tokens, &owners)
+                    .unwrap();
+                // Expected payload comes from the actual uploaded buffer and
+                // independent completion arithmetic, including first-row absence.
+                let counts = [
+                    sizes[0],
+                    tokens.min(raw_rows) * row_bytes,
+                    (tokens / pool).min(pooled_rows) * row_bytes,
+                    tokens.div_ceil(pool).min(pooled_rows + 1) * row_bytes,
+                ];
+                let expected: Vec<_> = counts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| **n > 0)
+                    .map(|(i, n)| (i, &values[i][..*n]))
+                    .collect();
+                assert_eq!(full.len(), expected.len());
+                for (blob, (i, bytes)) in full.iter().zip(expected) {
+                    assert_eq!(blob.allocation_name, allocations[i].name);
+                    assert_eq!(blob.bytes, bytes);
+                }
+                if step > 0 {
+                    let refs: Vec<_> = previous.iter().collect();
+                    let (incremental, _) = store
+                        .snapshot_external_sequence_state_incremental_rust(
+                            &allocations,
+                            previous_tokens,
+                            tokens,
+                            &refs,
+                            &owners,
+                        )
+                        .unwrap();
+                    assert_eq!(incremental.len(), full.len());
+                    for (a, b) in incremental.iter().zip(&full) {
+                        assert_eq!(a.allocation_name, b.allocation_name);
+                        assert_eq!(a.shape, b.shape);
+                        assert_eq!(a.bytes, b.bytes);
+                    }
+                    // Rejection must happen before transfer/restore mutates GPU state.
+                    let incomplete: Vec<_> = refs.iter().copied().skip(1).collect();
+                    assert!(store
+                        .snapshot_external_sequence_state_incremental_rust(
+                            &allocations,
+                            previous_tokens,
+                            tokens,
+                            &incomplete,
+                            &owners,
+                        )
+                        .is_err());
+                    let poison: Vec<_> = sizes.iter().map(|n| vec![0xee; *n]).collect();
+                    upload(&poison);
+                    assert!(store
+                        .restore_external_sequence_state_rust(
+                            &allocations,
+                            tokens,
+                            &incomplete,
+                            &owners
+                        )
+                        .is_err());
+                    for (buf, bytes) in buffers.iter().zip(&poison) {
+                        assert_eq!(device.dtoh_sync_copy(buf).unwrap(), *bytes);
+                    }
+                    let refs: Vec<_> = incremental.iter().collect();
+                    store
+                        .restore_external_sequence_state_rust(&allocations, tokens, &refs, &owners)
+                        .unwrap();
+                    for (i, buf) in buffers.iter().enumerate() {
+                        let actual = device.dtoh_sync_copy(buf).unwrap();
+                        assert_eq!(&actual[..counts[i]], &values[i][..counts[i]]);
+                        assert!(
+                            actual[counts[i]..].iter().all(|v| *v == 0xee),
+                            "restore wrote inactive rows"
+                        );
+                    }
+                    previous = incremental;
+                } else {
+                    previous = full;
+                }
+                previous_tokens = tokens;
+            }
+        }
+    }
+    // END completed-pool snapshot CUDA regression
 
     fn dsa_cuda_test_gpu_ordinal() -> usize {
         if let Ok(raw) = std::env::var("KRASIS_TEST_GPU_ORDINAL") {
@@ -15313,6 +15613,48 @@ struct HqqTensorExecDescriptor {
     decode_sidecars: Vec<HqqPrefillSidecarRegistration>,
 }
 
+fn ordered_decode_layout(
+    desc: &HqqTensorExecDescriptor,
+) -> Result<crate::ordered_projection::Layout, String> {
+    let qualified_stage_layout = matches!(
+        (
+            desc.runtime_stage.as_str(),
+            desc.runtime_kind.as_str(),
+            desc.layout.as_str()
+        ),
+        (
+            "prefill",
+            "prefill_row_major_v1",
+            "row_major_axis1_grouped_uint6_packed"
+        ) | (
+            "decode",
+            "decode_row_aligned_v1",
+            "row_aligned_grouped_uint6_decode_v1"
+        )
+    );
+    if desc.axis != 1
+        || !qualified_stage_layout
+        || desc.packed_dtype != "uint8"
+        || desc.scales_dtype != "float32"
+        || desc.zeros_dtype != "float32"
+        || !desc.kernel_ready
+        || !desc.decode_sidecars.is_empty()
+    {
+        return Err("ordered projection requires plain loaded row-major HQQ6/F32 coefficients; corrections/layout unsupported".into());
+    }
+    Ok(crate::ordered_projection::Layout {
+        packed: desc.packed_ptr,
+        scales: desc.scales_ptr,
+        zeros: desc.zeros_ptr,
+        rows: desc.rows,
+        cols: desc.cols,
+        group: desc.group_size,
+        packed_stride: desc.packed_row_stride_bytes,
+        scales_stride: desc.scales_row_stride_bytes,
+        zeros_stride: desc.zeros_row_stride_bytes,
+    })
+}
+
 /// Packed HQQ payload plus FP32 scales and zeros read by decode. Timing-only
 /// accounting uses the execution descriptor so padded/runtime layouts are
 /// represented by their real packed payload rather than a nominal bit rate.
@@ -16966,6 +17308,34 @@ fn register_hqq_attention_layer_common(
     Ok(())
 }
 
+/// Full-history staging belongs only to ordinary GQA execution descriptors.
+/// Native DeepSeek-V4 dispatches before its placeholder attention metadata;
+/// native MLA and recurrent layers do not stage expanded GQA histories.
+fn prefill_full_history_gqa_kv_dim<'a>(
+    layers: impl IntoIterator<Item = (&'a GpuAttnConfig, bool)>,
+) -> Result<usize, String> {
+    layers
+        .into_iter()
+        .try_fold(0usize, |largest, (attn, native_v4)| {
+            if native_v4 {
+                return Ok(largest);
+            }
+            match attn {
+                GpuAttnConfig::GQA {
+                    num_kv_heads,
+                    head_dim,
+                    ..
+                } => {
+                    let width = num_kv_heads
+                        .checked_mul(*head_dim)
+                        .ok_or_else(|| "GQA full-history staging width overflow".to_string())?;
+                    Ok(largest.max(width))
+                }
+                _ => Ok(largest),
+            }
+        })
+}
+
 #[allow(dead_code)]
 enum GpuAttnConfig {
     /// GLM-5.3 Kimi Delta Attention. All learned projections are registered
@@ -17057,6 +17427,21 @@ enum GpuAttnConfig {
         conv_state_ptr: u64, // [conv_dim, conv_kernel] FP32 on GPU (per-sequence)
         ssm_state_ptr: u64, // [num_heads, head_dim, state_size] FP32 on GPU (per-sequence)
     },
+}
+
+/// Return persistent recurrent-state pointers for graph-reusable linear
+/// attention families. Capture and reuse verification must recognize the same
+/// variants: GLM-5.3 uses KDA while earlier hybrid models use LinearAttention.
+fn graph_reuse_linear_state_ptrs(attn: &GpuAttnConfig) -> Option<(u64, u64)> {
+    match attn {
+        GpuAttnConfig::KimiDeltaAttention(kda) => Some((kda.conv_state_ptr, kda.recur_state_ptr)),
+        GpuAttnConfig::LinearAttention {
+            conv_state_ptr,
+            recur_state_ptr,
+            ..
+        } => Some((*conv_state_ptr, *recur_state_ptr)),
+        _ => None,
+    }
 }
 
 #[allow(dead_code)]
@@ -18139,6 +18524,9 @@ impl CachedKernels {
 // ── Main GPU decode graph ──────────────────────────────────────────────
 
 struct GpuDecodeGraph {
+    ordered_expert_projection: Option<Arc<crate::ordered_projection::OrderedProjection>>,
+    d_common_moe_accum: Option<cudarc::driver::CudaSlice<f32>>,
+    matched_routes: Option<crate::matched_routes::Experiment>,
     hidden_size: usize,
     #[allow(dead_code)]
     num_layers: usize,
@@ -18216,7 +18604,7 @@ struct GpuDecodeGraph {
     // GPU scratch buffers
     d_hidden: cudarc::driver::CudaSlice<u16>,
     d_residual: cudarc::driver::CudaSlice<u16>,
-    d_scratch: cudarc::driver::CudaSlice<u16>,
+    d_scratch: Arc<cudarc::driver::CudaSlice<u16>>,
     d_logits: cudarc::driver::CudaSlice<f32>,
     // FP32 scratch for intermediate computations (routing, attention)
     d_fp32_scratch: cudarc::driver::CudaSlice<f32>,
@@ -18332,11 +18720,11 @@ struct GpuDecodeGraph {
     gqa_head_dim: usize,
 
     // Linear attention scratch (FP32)
-    d_la_qkvz: cudarc::driver::CudaSlice<f32>,
-    d_la_ba: cudarc::driver::CudaSlice<f32>,
-    d_la_conv_out: cudarc::driver::CudaSlice<f32>,
+    d_la_qkvz: Arc<cudarc::driver::CudaSlice<f32>>,
+    d_la_ba: Arc<cudarc::driver::CudaSlice<f32>>,
+    d_la_conv_out: Arc<cudarc::driver::CudaSlice<f32>>,
     d_la_recur_out: cudarc::driver::CudaSlice<f32>,
-    d_la_gated_out: cudarc::driver::CudaSlice<f32>,
+    d_la_gated_out: Arc<cudarc::driver::CudaSlice<f32>>,
 
     // Mamba2 SSM scratch (FP32)
     d_mamba2_conv_out: Option<cudarc::driver::CudaSlice<f32>>, // [conv_dim] FP32
@@ -18699,6 +19087,7 @@ struct GpuDecodeGraph {
     graph_la_clock_enabled: bool,
     graph_la_active: Vec<bool>,
     graph_kda_active: Vec<bool>,
+    selected_kda_arithmetic: bool,
     d_graph_la_clocks: Option<cudarc::driver::CudaSlice<u64>>,
     h_graph_la_clocks: Vec<u64>,
     graph_final_clock_enabled: bool,
@@ -19032,9 +19421,17 @@ struct GpuDecodeGraph {
     // ── Marlin w13 ksplit autotune. Measured at
     //    graph-capture time on the real loaded expert shape; overrides the
     //    occupancy formula per (k, n, batch_z, is_int8). ──
+    matched_shared_w13_ksplits: Option<std::collections::HashMap<(usize, usize, bool), usize>>,
+    matched_graph_stages: Vec<MatchedGraphStageBuffer>,
+    matched_graph_stages_initialized: bool,
+    matched_eager_kda_enabled: bool,
+    matched_eager_shared_enabled: bool,
+    matched_router_capture_enabled: bool,
+    matched_moe_input_capture_enabled: bool,
     ksplit_autotune: std::collections::HashMap<(usize, usize, usize, bool), usize>,
     /// Runtime-measured shared-W2 K-split selection by exact tensor shape/format.
     shared_w2_ksplit_autotune: std::collections::HashMap<(usize, usize, bool), usize>,
+    ksplit_autotune_complete: bool,
     /// Runtime-measured INT4 routed-expert tile geometry. Both outcomes are
     /// stored so a completed measurement can never be confused with a missing
     /// one. Keys contain every launch dimension that affects the comparison.
@@ -19100,6 +19497,13 @@ fn select_w13_ksplits_batched(
 /// decode. Keeping the format and batch geometry here prevents either path
 /// from silently selecting different arithmetic for the same loaded tensor.
 fn select_shared_w13_ksplits(graph: &GpuDecodeGraph, w13_n: usize) -> usize {
+    if let Some(ks) = graph
+        .matched_shared_w13_ksplits
+        .as_ref()
+        .and_then(|map| map.get(&(graph.hidden_size, w13_n, graph.shared_expert_bits == 8)))
+    {
+        return *ks;
+    }
     select_w13_ksplits_for_weights(
         graph,
         graph.hidden_size,
@@ -19181,6 +19585,20 @@ enum GraphW13Path {
     TileQ,
     DirectBf16,
     Marlin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SharedExpertPath {
+    DirectBf16,
+    Marlin,
+}
+
+fn shared_expert_path(bits: u8) -> SharedExpertPath {
+    if bits == 16 {
+        SharedExpertPath::DirectBf16
+    } else {
+        SharedExpertPath::Marlin
+    }
 }
 
 /// Select exactly one routed W13 implementation during graph replay.
@@ -19423,6 +19841,470 @@ struct SequenceStatePinnedBuffer {
     bytes: usize,
 }
 
+// Bounded observation only: CUDA graph D2H nodes retain the actual arithmetic.
+#[derive(Clone, Copy)]
+enum IndexObservationFrame {
+    Graph(usize),
+    Eager(usize),
+}
+
+struct MatchedGraphStageBuffer {
+    dtype: &'static str,
+    layer: usize,
+    operation: String,
+    buffer: SequenceStatePinnedBuffer,
+    segment: std::sync::atomic::AtomicUsize,
+    eager_identity: std::sync::Mutex<Option<(String, usize)>>,
+    mla_geometry: Option<serde_json::Value>,
+    index_geometry: Option<serde_json::Value>,
+    index_graph_math_mode: std::sync::atomic::AtomicUsize,
+    index_eager_math_mode: std::sync::atomic::AtomicUsize,
+}
+impl MatchedGraphStageBuffer {
+    fn build(graph: &GpuDecodeGraph, common_mla_enabled: bool) -> Result<Vec<Self>, String> {
+        let specs = crate::matched_probe::graph_stage_specs()?;
+        let mut buffers = Vec::with_capacity(specs.len());
+        for (layer, operation) in specs {
+            let mut mla_geometry = None;
+            let mut index_geometry = None;
+            let config = graph
+                .layers
+                .get(layer)
+                .ok_or("graph stage layer is not loaded")?;
+            if layer < graph.decode_layer_start || layer >= graph.decode_layer_end {
+                continue;
+            }
+            let (elements, dtype) = if operation.starts_with("decode_graph_shared_w13_") {
+                let moe = graph
+                    .moe_layers
+                    .get(layer)
+                    .and_then(|x| x.as_ref())
+                    .ok_or("shared graph stage requires a loaded MoE layer")?;
+                let shared = moe
+                    .shared
+                    .as_ref()
+                    .ok_or("shared graph stage requires loaded shared weights")?;
+                if shared.bits != graph.shared_expert_bits {
+                    return Err("shared graph record precision mismatch".into());
+                }
+                crate::matched_probe::shared_w13_graph_stage_layout(
+                    &operation,
+                    graph.hidden_size,
+                    graph.shared_expert_intermediate_size,
+                    moe.gated_experts,
+                    shared.bits as usize,
+                    graph.group_size,
+                )?
+            } else if let Some(stage) = operation.strip_prefix("decode_graph_index_") {
+                let reg = config
+                    .dsa_indexer
+                    .as_ref()
+                    .ok_or("index observation requires registered owner")?;
+                if reg.owner_layer_idx != layer {
+                    return Err("index observation requires actual owner layer".into());
+                }
+                let resource = graph
+                    .dsa_indexer_owners
+                    .iter()
+                    .find(|r| r.owner_layer_idx == layer)
+                    .ok_or("index observed owner absent")?;
+                let wq = graph
+                    .weights
+                    .get(resource.weight_ids.wq_b)
+                    .ok_or("index query weight absent")?;
+                if !common_mla_enabled
+                    || wq.dtype != 0
+                    || wq.rows
+                        != reg
+                            .index_n_heads
+                            .checked_mul(reg.index_head_dim)
+                            .ok_or("index query rows overflow")?
+                    || wq.cols != reg.q_lora_rank
+                {
+                    return Err("index query observation requires actual common normalized latent and registered BF16 matrix".into());
+                }
+                let capacity = if reg.index_kpool_compress {
+                    resource.max_context_tokens.div_ceil(reg.index_kpool)
+                } else {
+                    resource.max_context_tokens
+                };
+                index_geometry = Some(
+                    serde_json::json!({"heads":reg.index_n_heads,"head_dim":reg.index_head_dim,"capacity":capacity,"raw_capacity":resource.max_context_tokens,"pool":if reg.index_kpool_compress{reg.index_kpool}else{1},"query_rank":reg.q_lora_rank,"query_rows":wq.rows,"query_cols":wq.cols,"weight_dtype":wq.dtype,"hidden":graph.hidden_size,"rope":reg.qk_rope_head_dim,"score_mode":"LiveFused","capture":"actual owner before top-k; compare only causal prefix"}),
+                );
+                let n = match stage {
+                    "query_input" | "query_input_f32" => Some(reg.q_lora_rank),
+                    "query_weights" => wq.rows.checked_mul(wq.cols),
+                    "query_raw" => reg.index_n_heads.checked_mul(reg.index_head_dim),
+                    "hidden" => Some(graph.hidden_size),
+                    "query" => reg.index_n_heads.checked_mul(reg.index_head_dim),
+                    "head_weights" => Some(reg.index_n_heads),
+                    "keys" => capacity.checked_mul(reg.index_head_dim),
+                    "scores" => Some(capacity),
+                    "position" | "sequence" => Some(1),
+                    _ => None,
+                }
+                .ok_or("invalid index observation extent")?;
+                let dtype = match stage {
+                    "position" | "sequence" => "int32",
+                    "scores" | "query_input_f32" => "float32",
+                    _ => "bfloat16",
+                };
+                let bytes = n
+                    .checked_mul(if dtype == "bfloat16" { 2 } else { 4 })
+                    .ok_or("index observation bytes overflow")?;
+                let maximum = crate::matched_probe::capture_maximum_bytes(&operation, layer, None)?;
+                if bytes > maximum {
+                    return Err(format!(
+                        "{operation} actual bytes {bytes} exceed declared maximum_bytes {maximum}"
+                    ));
+                }
+                (n, dtype)
+            } else if let Some(stage) = operation.strip_prefix("decode_graph_mla_") {
+                if !common_mla_enabled {
+                    return Err(
+                        "MLA stage observation requires the installed common MLA path".into(),
+                    );
+                }
+                let GpuAttnConfig::MLA {
+                    num_heads,
+                    ckv_cache_dim,
+                    qk_rope_dim,
+                    v_head_dim,
+                    ..
+                } = &config.attn
+                else {
+                    return Err("MLA observation requires an actual loaded MLA layer".into());
+                };
+                let selected =
+                    GpuDecodeStore::resolve_dsa_selected_indices_for_layer(graph, layer)?;
+                mla_geometry = Some(
+                    serde_json::json!({"heads":num_heads,"ccd":ckv_cache_dim,"rope":qk_rope_dim,"values":v_head_dim,"slots":selected.topk_capacity,"codec":graph.kv_format}),
+                );
+                let value = crate::matched_mla_stage::graph_layout(
+                    stage,
+                    *num_heads,
+                    *ckv_cache_dim,
+                    *qk_rope_dim,
+                    *v_head_dim,
+                    selected.topk_capacity,
+                )?;
+                let size = match value.1 {
+                    "float32" | "int32" => 4,
+                    "bfloat16" => 2,
+                    _ => return Err("invalid MLA observed dtype".into()),
+                };
+                if value
+                    .0
+                    .checked_mul(size)
+                    .ok_or("MLA graph bytes overflow")?
+                    > crate::matched_probe::capture_maximum_bytes(&operation, layer, None)?
+                {
+                    return Err(format!(
+                        "{operation} actual bytes {} exceed declared maximum_bytes {}",
+                        value.0 * size,
+                        crate::matched_probe::capture_maximum_bytes(&operation, layer, None)?
+                    ));
+                }
+                value
+            } else if operation.starts_with("decode_graph_kda_") {
+                let GpuAttnConfig::KimiDeltaAttention(kda) = &config.attn else {
+                    return Err("KDA graph stage requires a registered KDA layer".into());
+                };
+                crate::matched_probe::validate_kda_state_observation(
+                    &operation,
+                    graph.selected_kda_arithmetic,
+                )?;
+                crate::matched_probe::kda_graph_stage_layout(
+                    &operation,
+                    kda.num_heads,
+                    kda.head_dim,
+                    kda.kernel_dim,
+                )?
+            } else {
+                let _ = config
+                    .glm5_hyper_connection
+                    .as_ref()
+                    .ok_or("graph stage requires a loaded GLM mHC layer")?;
+                (
+                    if operation.contains("hc_") {
+                        graph
+                            .hidden_size
+                            .checked_mul(
+                                config
+                                    .glm5_hyper_connection
+                                    .as_ref()
+                                    .ok_or("HC graph stage requires a loaded mHC layer")?
+                                    .mult,
+                            )
+                            .ok_or("graph stage state extent overflow")?
+                    } else if matches!(
+                        operation.as_str(),
+                        "decode_graph_dense_gate" | "decode_graph_dense_up"
+                    ) {
+                        let GpuMlpConfig::Dense {
+                            gate_proj, up_proj, ..
+                        } = &config.mlp
+                        else {
+                            return Err("dense graph stage requires a loaded dense FFN".into());
+                        };
+                        let wid = if operation == "decode_graph_dense_gate" {
+                            *gate_proj
+                        } else {
+                            *up_proj
+                        };
+                        graph
+                            .weights
+                            .get(wid)
+                            .ok_or("graph stage weight is not loaded")?
+                            .rows
+                    } else {
+                        graph.hidden_size
+                    },
+                    "bfloat16",
+                )
+            };
+            buffers.push(Self {
+                dtype,
+                layer,
+                operation,
+                mla_geometry,
+                index_geometry,
+                index_graph_math_mode: std::sync::atomic::AtomicUsize::new(usize::MAX),
+                index_eager_math_mode: std::sync::atomic::AtomicUsize::new(usize::MAX),
+                buffer: SequenceStatePinnedBuffer::new(
+                    elements
+                        .checked_mul(match dtype {
+                            "float32" | "int32" => 4,
+                            "bfloat16" => 2,
+                            _ => return Err("unknown diagnostic stage dtype".into()),
+                        })
+                        .ok_or("graph stage byte overflow")?,
+                )?,
+                segment: std::sync::atomic::AtomicUsize::new(usize::MAX),
+                eager_identity: std::sync::Mutex::new(None),
+            });
+        }
+        Ok(buffers)
+    }
+    fn record(
+        graph: &GpuDecodeGraph,
+        layer: usize,
+        operation: &str,
+        ptr: u64,
+        bytes: usize,
+        segment: usize,
+        stream: cuda_sys::CUstream,
+    ) -> Result<(), String> {
+        let Some(stage) = graph
+            .matched_graph_stages
+            .iter()
+            .find(|s| s.layer == layer && s.operation == operation)
+        else {
+            return Ok(());
+        };
+        if ptr == 0 || bytes != stage.buffer.bytes {
+            return Err("graph stage actual pointer/extent does not match admitted shape".into());
+        }
+        let prior = stage
+            .segment
+            .swap(segment, std::sync::atomic::Ordering::Relaxed);
+        if prior != usize::MAX && prior != segment {
+            return Err("graph stage segment identity changed across capture".into());
+        }
+        let rc = unsafe {
+            cuda_sys::lib().cuMemcpyDtoHAsync_v2(stage.buffer.ptr.cast(), ptr, bytes, stream)
+        };
+        if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "record graph stage {operation} layer{layer}: {rc:?}"
+            ));
+        }
+        Ok(())
+    }
+    fn record_eager(
+        graph: &GpuDecodeGraph,
+        layer: usize,
+        operation: &str,
+        ptr: u64,
+        bytes: usize,
+        height: usize,
+        stream: cuda_sys::CUstream,
+    ) -> Result<(), String> {
+        let Some(stage) = graph
+            .matched_graph_stages
+            .iter()
+            .find(|s| s.layer == layer && s.operation == operation)
+        else {
+            return Ok(());
+        };
+        if crate::matched_probe::target_for_request(
+            operation,
+            layer,
+            height,
+            Some(&graph.trace_request_label),
+        )?
+        .is_none()
+        {
+            return Ok(());
+        }
+        if ptr == 0 || bytes != stage.buffer.bytes {
+            return Err("eager stage pointer/extent differs from admitted layout".into());
+        }
+        let rc = unsafe {
+            cuda_sys::lib().cuMemcpyDtoHAsync_v2(stage.buffer.ptr.cast(), ptr, bytes, stream)
+        };
+        if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("eager stage {operation} read: {rc:?}"));
+        }
+        *stage
+            .eager_identity
+            .lock()
+            .map_err(|_| "eager frame identity poisoned")? =
+            Some((graph.trace_request_label.clone(), height));
+        Ok(())
+    }
+    fn flush(
+        graph: &GpuDecodeGraph,
+        height: usize,
+        stream: cuda_sys::CUstream,
+        device: usize,
+        actual_graph_replay: bool,
+    ) -> Result<(), String> {
+        let mut selected = Vec::new();
+        for stage in &graph.matched_graph_stages {
+            if let Some(target) = crate::matched_probe::target_for_request(
+                &stage.operation,
+                stage.layer,
+                height,
+                Some(&graph.trace_request_label),
+            )? {
+                if actual_graph_replay
+                    && stage.segment.load(std::sync::atomic::Ordering::Relaxed) == usize::MAX
+                {
+                    return Err(
+                        "admitted graph stage was not captured; stale data prohibited".into(),
+                    );
+                }
+                selected.push((stage, target));
+            }
+        }
+        if selected.is_empty() {
+            return Ok(());
+        }
+        let _ = stream;
+        if actual_graph_replay && !graph.per_layer_graphs_valid {
+            return Err("graph-stage diagnostic requires the actual captured replay path".into());
+        }
+        let rc = unsafe { cuda_sys::lib().cuCtxSynchronize() };
+        if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("graph stage replay completion: {rc:?}"));
+        }
+        for (stage, target) in selected {
+            let target = target
+                .child(&graph.trace_request_label)?
+                .child(&format!("device-{device}"))?;
+            if !actual_graph_replay
+                && stage
+                    .eager_identity
+                    .lock()
+                    .map_err(|_| "eager frame identity poisoned")?
+                    .as_ref()
+                    != Some(&(graph.trace_request_label.clone(), height))
+            {
+                target.write("UNAVAILABLE.json",serde_json::to_vec_pretty(&serde_json::json!({"operation":stage.operation,"layer":stage.layer,"logical_tokens":height,"request_label":graph.trace_request_label,"available":false,"actual_execution_path":"eager","reason":"This eager operation has no recorded current-frame producer","stale_data_written":false})).map_err(|e|e.to_string())?.as_slice())?;
+                continue;
+            }
+            let raw = unsafe { std::slice::from_raw_parts(stage.buffer.ptr, stage.buffer.bytes) };
+            target.write(
+                match stage.dtype {
+                    "float32" => "tensor.f32.bin",
+                    "int32" => "tensor.i32.bin",
+                    "bfloat16" => "tensor.bf16.bin",
+                    _ => return Err("unknown diagnostic payload dtype".into()),
+                },
+                raw,
+            )?;
+
+            if stage.operation == "decode_graph_shared_w13_input" {
+                let moe = graph
+                    .moe_layers
+                    .get(stage.layer)
+                    .and_then(|x| x.as_ref())
+                    .ok_or("captured shared layer not loaded")?;
+                let shared = moe
+                    .shared
+                    .as_ref()
+                    .ok_or("captured shared record not loaded")?;
+                let resident = graph
+                    .shared_expert_vram
+                    .get(stage.layer)
+                    .and_then(|x| x.as_ref())
+                    .ok_or("captured graph shared weight is not resident")?;
+                let k = graph.hidden_size;
+                let n = graph
+                    .shared_expert_intermediate_size
+                    .checked_mul(if moe.gated_experts { 2 } else { 1 })
+                    .ok_or("shared output geometry overflow")?;
+                let (_, _) = crate::matched_probe::shared_w13_graph_stage_layout(
+                    &stage.operation,
+                    k,
+                    graph.shared_expert_intermediate_size,
+                    moe.gated_experts,
+                    shared.bits as usize,
+                    graph.group_size,
+                )?;
+                let packed_bytes = k
+                    .checked_mul(n)
+                    .and_then(|x| x.checked_mul(shared.bits as usize))
+                    .ok_or("shared packed extent overflow")?
+                    / 8;
+                let scales_bytes = (k / graph.group_size)
+                    .checked_mul(n)
+                    .and_then(|x| x.checked_mul(2))
+                    .ok_or("shared scales extent overflow")?;
+                if packed_bytes != shared.w13_packed_bytes
+                    || scales_bytes != shared.w13_scales_bytes
+                {
+                    return Err(
+                        "actual shared record extents disagree with loaded dimensions".into(),
+                    );
+                }
+                target.device(
+                    "w1-packed.bin",
+                    resident.w13_packed_ptr(),
+                    packed_bytes,
+                    stream,
+                )?;
+                target.device(
+                    "w1-scales.bf16",
+                    resident.w13_scales_ptr(),
+                    scales_bytes,
+                    stream,
+                )?;
+                target.write("w1-descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({"n":n,"k":k,"bits":shared.bits,"groups":k/graph.group_size,"group_size":graph.group_size,"layer":stage.layer,"height":height,"row":0,"selected_ksplits":select_shared_w13_ksplits(graph,n),"input_dtype":"bfloat16","output_dtype":"bfloat16","packed_source":"actual resident GPU tensor","device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?.as_slice())?;
+            }
+            let kda_semantics = match &graph.layers[stage.layer].attn {
+                GpuAttnConfig::KimiDeltaAttention(kda) => Some(
+                    serde_json::json!({"heads":kda.num_heads,"dim":kda.head_dim,"kernel_dim":kda.kernel_dim,"gate_lower_bound":kda.gate_lower_bound,"q_scale":(kda.head_dim as f32).sqrt().recip(),"qk_norm_eps":1.0e-6f32,"output_norm_eps":graph.eps,"kernel":if graph.selected_kda_arithmetic {"current_prepared_f32_fixed16"}else{"kimi_delta_recurrent_scan_bf16"},"tokens":1,"state_dtype":"float32","operand_dtype":"bfloat16"}),
+                ),
+                _ => None,
+            };
+            let index_math_mode = match (if actual_graph_replay {
+                &stage.index_graph_math_mode
+            } else {
+                &stage.index_eager_math_mode
+            })
+            .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                usize::MAX => None,
+                v => Some(v),
+            };
+            target.write("boundary.json", serde_json::to_vec_pretty(&serde_json::json!({"operation":stage.operation,"mla_geometry":stage.mla_geometry,"index_geometry":stage.index_geometry,"index_cublas_math_mode":index_math_mode,"index_query_projection":if graph.selected_kda_arithmetic{"bf16_projection_tensorcomp"}else{"native cuBLAS BF16"},"kda_semantics":kda_semantics,"layer":stage.layer,"logical_tokens":height,"request_label":graph.trace_request_label,"device_ordinal":device,"actual_bytes":stage.buffer.bytes,"dtype":stage.dtype,"source":if actual_graph_replay {"actual captured CUDA graph operation boundary via pinned D2H node"}else{"actual eager operation boundary via stream-ordered pinned D2H with current-frame identity"},"actual_execution_path":if actual_graph_replay {"graph_replay"}else{"eager"},"graph_segment":if actual_graph_replay {Some(stage.segment.load(std::sync::atomic::Ordering::Relaxed))}else{None},"per_layer_graphs_valid":graph.per_layer_graphs_valid,"device_diagnostic_allocation_bytes":0,"forcing":crate::matched_projection_transfer::forcing_label().is_some(),"teacher_label":crate::matched_projection_transfer::forcing_label(),"arithmetic_changed":graph.selected_kda_arithmetic})).map_err(|e|e.to_string())?.as_slice())?;
+        }
+        Ok(())
+    }
+}
+
 struct SequenceStateDmaSlot {
     buffer: SequenceStatePinnedBuffer,
     event: cuda_sys::CUevent,
@@ -19463,6 +20345,8 @@ impl SequenceStateDmaSlot {
     }
 
     fn record(&self, stream: cuda_sys::CUstream) -> Result<(), String> {
+        #[cfg(feature = "copy-lifecycle-test")]
+        crate::copy_fault::after_enqueue(stream)?;
         let result = unsafe { cuda_sys::lib().cuEventRecord(self.event, stream) };
         if result != cuda_sys::CUresult::CUDA_SUCCESS {
             return Err(format!(
@@ -23439,13 +24323,13 @@ struct ExpertHostRegistration {
 unsafe impl Send for ExpertHostRegistration {}
 unsafe impl Sync for ExpertHostRegistration {}
 
-fn expert_host_registration_totals(
-    registrations: &[ExpertHostRegistration],
-) -> (usize, usize) {
-    registrations.iter().filter(|entry| !entry.ptr.is_null()).fold(
-        (0usize, 0usize),
-        |(count, bytes), entry| (count + 1, bytes.saturating_add(entry.bytes)),
-    )
+fn expert_host_registration_totals(registrations: &[ExpertHostRegistration]) -> (usize, usize) {
+    registrations
+        .iter()
+        .filter(|entry| !entry.ptr.is_null())
+        .fold((0usize, 0usize), |(count, bytes), entry| {
+            (count + 1, bytes.saturating_add(entry.bytes))
+        })
 }
 
 #[cfg(test)]
@@ -23472,6 +24356,51 @@ mod expert_host_registration_tests {
             expert_host_registration_totals(&registrations),
             (2, 38_141_952)
         );
+    }
+}
+
+/// Real per-device one-token scratch, sized from loaded MLA/IndexShare geometry.
+struct CommonMlaDecodeScratch {
+    gathered: CudaSlice<f32>,
+    query_projected: CudaSlice<f32>,
+    scores: CudaSlice<f32>,
+    weights: CudaSlice<f32>,
+}
+impl CommonMlaDecodeScratch {
+    fn allocate(
+        device: &Arc<CudaDevice>,
+        geometries: &[crate::stable_mla_path::Geometry],
+    ) -> Result<Self, String> {
+        let mut sizes = [0usize; 4];
+        for geometry in geometries {
+            let e = geometry.work_elements(1)?;
+            for (i, size) in [e[0], e[1].max(e[5]), e[2], e[3]].into_iter().enumerate() {
+                sizes[i] = sizes[i].max(size);
+            }
+        }
+        if sizes.iter().any(|n| *n == 0) {
+            return Err("common MLA decode scratch requires actual loaded geometry".into());
+        }
+        let allocate = |n| {
+            device
+                .alloc_zeros::<f32>(n)
+                .map_err(|e| format!("alloc actual common MLA decode scratch: {e}"))
+        };
+        let result = Self {
+            gathered: allocate(sizes[0])?,
+            query_projected: allocate(sizes[1])?,
+            scores: allocate(sizes[2])?,
+            weights: allocate(sizes[3])?,
+        };
+        let bytes = sizes
+            .iter()
+            .try_fold(0usize, |n, v| {
+                n.checked_add(*v).ok_or("common MLA decode extent overflow")
+            })?
+            .checked_mul(4)
+            .ok_or("common MLA decode bytes overflow")?;
+        log::info!("Common MLA actual resident decode scratch: {} bytes", bytes);
+        Ok(result)
     }
 }
 
@@ -23542,6 +24471,10 @@ pub struct GpuDecodeStore {
     /// Calibration consumes this so a failed decode cannot become a false
     /// zero-VRAM measurement.
     last_stream_failure: Option<String>,
+    // BEGIN explicit teacher-forced store state
+    matched_teacher_once: Option<crate::matched_teacher::Session>,
+    matched_hqq_rounding: Option<crate::matched_hqq_rounding::Experiment>,
+    // END explicit teacher-forced store state
     last_soft_evict_experts: usize,
     last_soft_evict_freed_mb: f64,
     last_soft_reload_queued: usize,
@@ -23633,11 +24566,20 @@ pub struct GpuDecodeStore {
     /// device split. Populated once from real tensor metadata during setup;
     /// request-time cache paths consume it entirely in Rust.
     sequence_state_registry: crate::session_cache::SequenceStateRegistry,
+    selected_kda: Option<Arc<crate::kda_prefix_owner::KdaEngineRequestStorage>>,
+    pub(crate) ordered_kda_projection: Option<Arc<crate::ordered_projection::OrderedProjection>>,
+    pub(crate) ordered_mla_f32: Option<Arc<crate::mla_f32::MlaF32Ops>>,
+    common_mla_owners: std::collections::BTreeMap<usize, Arc<crate::stable_mla_owned::Layer>>,
+    common_mla_ops: Option<Arc<crate::stable_mla_ops::Ops>>,
+    common_mla_decode: Option<CommonMlaDecodeScratch>,
+    common_mla: Option<Arc<std::sync::Mutex<crate::stable_mla_runtime::Bank>>>,
+    ordered_mla_bf16_scratch: Option<CudaSlice<u16>>,
     /// Double-buffered allocation-sized pinned DMA windows. Canonical
     /// snapshots remain in pageable RAM; both slots are allocated lazily from
     /// the largest live allocation and reused across sessions so CPU staging
     /// can overlap the next device transfer.
     sequence_state_staging: Vec<SequenceStateDmaSlot>,
+    sequence_restore_validity: crate::sequence_restore_validity::RestoreValidity,
     /// Exact active-conversation boundary retained in VRAM. This is separate
     /// from pageable RAM snapshots and exists solely for the no-host-transfer
     /// continuation path.
@@ -23660,6 +24602,11 @@ pub struct GpuDecodeStore {
 }
 
 impl GpuDecodeStore {
+    #[cfg(test)]
+    pub(crate) fn diagnostic_session_dma_store_rust(ordinal: usize) -> Result<Self, String> {
+        Self::new(ordinal, false).map_err(|e| e.to_string())
+    }
+
     /// Release every ordinary expert page lock owned by this CUDA context.
     ///
     /// This is deliberately Rust-internal: callers must first stop all request
@@ -23675,12 +24622,12 @@ impl GpuDecodeStore {
         if registered_count == 0 {
             return Ok((0, 0));
         }
-        self.device
-            .bind_to_thread()
-            .map_err(|error| format!("bind CUDA context before expert host unregister: {error:?}"))?;
-        self.device
-            .synchronize()
-            .map_err(|error| format!("synchronize CUDA before expert host unregister: {error:?}"))?;
+        self.device.bind_to_thread().map_err(|error| {
+            format!("bind CUDA context before expert host unregister: {error:?}")
+        })?;
+        self.device.synchronize().map_err(|error| {
+            format!("synchronize CUDA before expert host unregister: {error:?}")
+        })?;
 
         let started = std::time::Instant::now();
         let mut released_count = 0usize;
@@ -23728,6 +24675,50 @@ impl GpuDecodeStore {
     /// Native decode status consumed by the transactional session-cache path.
     /// A cache transaction must never publish state after an engine failure,
     /// and speculative decoding currently has different rollback semantics.
+    // BEGIN explicit teacher-forced store arming
+    pub(crate) fn diagnostic_vocab_size_rust(&self) -> Result<usize, String> {
+        if self.matched_hqq_rounding.is_none()
+            || self.cuda_graphs_disabled()
+            || self.draft.is_some()
+            || self.dspark.is_some()
+        {
+            return Err("raw teacher requires verified context-owned HQQ dispatch, ordinary graphs and no speculative decode".into());
+        }
+        let n = self
+            .graph
+            .as_ref()
+            .ok_or("raw teacher requires initialized decode graph")?
+            .vocab_size;
+        if n == 0 {
+            return Err("raw teacher requires a loaded vocabulary".into());
+        }
+        Ok(n)
+    }
+    pub(crate) fn arm_matched_teacher_once(
+        &mut self,
+        session: crate::matched_teacher::Session,
+        first: usize,
+        stops: &[usize],
+    ) -> Result<usize, String> {
+        if self.matched_teacher_once.is_some()
+            || self.cuda_graphs_disabled()
+            || self.draft.is_some()
+            || self.dspark.is_some()
+            || std::env::var_os("KRASIS_MATCHED_REPLAY_CONFIG").is_some()
+        {
+            return Err("teacher forcing requires an unarmed ordinary graph-enabled non-speculative decode store".into());
+        }
+        let vocab = self
+            .graph
+            .as_ref()
+            .ok_or("teacher forcing requires an initialized decode graph")?
+            .vocab_size;
+        let forced = session.admit_decode(vocab, stops, first)?;
+        self.matched_teacher_once = Some(session);
+        Ok(forced)
+    }
+    // END explicit teacher-forced store arming
+
     pub fn last_stream_failure_rust(&self) -> Option<&str> {
         self.last_stream_failure.as_deref()
     }
@@ -23777,6 +24768,7 @@ impl GpuDecodeStore {
         &mut self,
         logical_tokens: usize,
     ) -> Result<(usize, f64), String> {
+        self.require_sequence_state_ready_rust()?;
         self.device
             .bind_to_thread()
             .map_err(|error| format!("bind CUDA context for active checkpoint: {error}"))?;
@@ -23814,37 +24806,63 @@ impl GpuDecodeStore {
             )
         };
         let base = storage.as_ref().map(|buffer| *buffer.device_ptr());
+        // alloc_zeros enqueues allocation/initialization on cudarc's stream.
+        // This nonblocking copy stream does not implicitly wait for that work.
+        let ready = ScopedCudaEvent::new("active checkpoint destination ready")?;
+        let recorded = unsafe { cuda_sys::lib().cuEventRecord(ready.0, *self.device.cu_stream()) };
+        if recorded != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "record active checkpoint destination readiness: {recorded:?}"
+            ));
+        }
         let started = std::time::Instant::now();
-        let mut allocations = Vec::with_capacity(fixed.len());
-        let mut offset = 0usize;
-        for allocation in fixed {
-            let destination = base
-                .ok_or_else(|| "active checkpoint storage is missing".to_string())?
-                .checked_add(offset as u64)
-                .ok_or_else(|| "active checkpoint destination overflows".to_string())?;
-            let result = unsafe {
-                cuda_sys::lib().cuMemcpyDtoDAsync_v2(
-                    destination,
-                    allocation.ptr,
-                    allocation.storage_bytes,
-                    self.copy_stream.0,
-                )
-            };
-            if result != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(format!(
-                    "active checkpoint D2D capture for {} failed: {result:?}",
-                    allocation.name
-                ));
-            }
-            allocations.push((allocation.clone(), offset, allocation.storage_bytes));
-            offset = offset
-                .checked_add(allocation.storage_bytes)
-                .ok_or_else(|| "active checkpoint offset overflow".to_string())?;
-        }
-        let sync = unsafe { cuda_sys::lib().cuStreamSynchronize(self.copy_stream.0) };
-        if sync != cuda_sys::CUresult::CUDA_SUCCESS {
-            return Err(format!("synchronize active checkpoint capture: {sync:?}"));
-        }
+        // The local destination owner must survive every callback exit.
+        let retained = (&*self, &storage, &ready);
+        let allocations = unsafe {
+            crate::sequence_copy_completion::with_copy_completion(
+                &self.device,
+                self.copy_stream.0,
+                &retained,
+                |_| {
+                    let wait = cuda_sys::lib().cuStreamWaitEvent(self.copy_stream.0, ready.0, 0);
+                    if wait != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "wait for active checkpoint destination readiness: {wait:?}"
+                        ));
+                    }
+                    let mut allocations = Vec::with_capacity(fixed.len());
+                    let mut offset = 0usize;
+                    for allocation in fixed {
+                        let destination = base
+                            .ok_or_else(|| "active checkpoint storage is missing".to_string())?
+                            .checked_add(offset as u64)
+                            .ok_or_else(|| "active checkpoint destination overflows".to_string())?;
+                        let result = unsafe {
+                            cuda_sys::lib().cuMemcpyDtoDAsync_v2(
+                                destination,
+                                allocation.ptr,
+                                allocation.storage_bytes,
+                                self.copy_stream.0,
+                            )
+                        };
+                        if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!(
+                                "active checkpoint D2D capture for {} failed: {result:?}",
+                                allocation.name
+                            ));
+                        }
+                        #[cfg(feature = "copy-lifecycle-test")]
+                        crate::copy_fault::after_enqueue(self.copy_stream.0)?;
+                        allocations.push((allocation.clone(), offset, allocation.storage_bytes));
+                        offset = offset
+                            .checked_add(allocation.storage_bytes)
+                            .ok_or_else(|| "active checkpoint offset overflow".to_string())?;
+                    }
+
+                    Ok(allocations)
+                },
+            )
+        }?;
         self.active_sequence_device_checkpoint = Some(ActiveSequenceDeviceCheckpoint {
             logical_tokens,
             rope_position_delta: position.rope_position_delta,
@@ -23877,6 +24895,10 @@ impl GpuDecodeStore {
         &mut self,
         logical_tokens: usize,
     ) -> Result<f64, String> {
+        self.require_sequence_state_ready_rust()?;
+        self.graph
+            .as_ref()
+            .ok_or_else(|| "GPU decode graph is not configured".to_string())?;
         self.device
             .bind_to_thread()
             .map_err(|error| format!("bind CUDA context for active restore: {error}"))?;
@@ -23891,32 +24913,49 @@ impl GpuDecodeStore {
             ));
         }
         let started = std::time::Instant::now();
-        if let Some(storage) = checkpoint.storage.as_ref() {
-            let base = *storage.device_ptr();
-            for (allocation, offset, bytes) in &checkpoint.allocations {
-                let source = base
-                    .checked_add(*offset as u64)
-                    .ok_or_else(|| "active checkpoint source overflows".to_string())?;
-                let result = unsafe {
-                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(
-                        allocation.ptr,
-                        source,
-                        *bytes,
-                        self.copy_stream.0,
-                    )
-                };
-                if result != cuda_sys::CUresult::CUDA_SUCCESS {
-                    return Err(format!(
-                        "active checkpoint D2D restore for {} failed: {result:?}",
-                        allocation.name
-                    ));
-                }
-            }
-            let sync = unsafe { cuda_sys::lib().cuStreamSynchronize(self.copy_stream.0) };
-            if sync != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(format!("synchronize active checkpoint restore: {sync:?}"));
-            }
-        }
+        let live: Vec<_> = checkpoint
+            .allocations
+            .iter()
+            .map(|(a, _, bytes)| (a.clone(), *bytes))
+            .collect();
+        let mut mutation = self.sequence_restore_validity.begin(&live)?;
+        unsafe {
+            crate::sequence_copy_completion::with_copy_completion(
+                &self.device,
+                self.copy_stream.0,
+                &*self,
+                |_| {
+                    if let Some(storage) = checkpoint.storage.as_ref() {
+                        let base = *storage.device_ptr();
+                        for (allocation, offset, bytes) in &checkpoint.allocations {
+                            let source = base
+                                .checked_add(*offset as u64)
+                                .ok_or_else(|| "active checkpoint source overflows".to_string())?;
+                            let result = unsafe {
+                                cuda_sys::lib().cuMemcpyDtoDAsync_v2(
+                                    allocation.ptr,
+                                    source,
+                                    *bytes,
+                                    self.copy_stream.0,
+                                )
+                            };
+                            if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(format!(
+                                    "active checkpoint D2D restore for {} failed: {result:?}",
+                                    allocation.name
+                                ));
+                            }
+                            mutation.note_enqueue();
+                            #[cfg(feature = "copy-lifecycle-test")]
+                            crate::copy_fault::after_enqueue(self.copy_stream.0)?;
+                        }
+                    }
+
+                    Ok(())
+                },
+            )
+        }?;
+        mutation.complete()?;
         {
             let graph = self
                 .graph
@@ -23933,6 +24972,377 @@ impl GpuDecodeStore {
 
     pub fn discard_active_sequence_checkpoint_rust(&mut self) {
         self.active_sequence_device_checkpoint = None;
+    }
+
+    pub fn capture_matched_sequence_state_rust(
+        &self,
+        logical_tokens: usize,
+        directory: std::path::PathBuf,
+    ) -> Result<(), String> {
+        self.device.bind_to_thread().map_err(|e| e.to_string())?;
+        let target = crate::matched_probe::Target { row: 0, directory };
+        target.allocations(self.sequence_state_registry.allocations(), logical_tokens)?;
+        target.write(
+            "inventory.json",
+            serde_json::to_vec_pretty(&self.sequence_state_inventory_value(logical_tokens))
+                .map_err(|e| e.to_string())?
+                .as_slice(),
+        )
+    }
+
+    pub fn capture_matched_decode_boundary_rust(
+        &self,
+        logical_tokens: usize,
+        label: &str,
+        step: usize,
+        input_token: Option<usize>,
+        actual_graph_replay: bool,
+    ) -> Result<(), String> {
+        if !crate::matched_probe::enabled()? {
+            return Ok(());
+        }
+        if let Some(target) = crate::matched_probe::target("decode_boundary", 0, logical_tokens)? {
+            let phase = format!("after-input-{step}");
+            let target = target
+                .child(label)?
+                .child(&phase)?
+                .child(&format!("device-{}", self.device_ordinal()))?;
+            self.capture_matched_sequence_state_rust(
+                logical_tokens,
+                target.directory.join("persistent"),
+            )?;
+            let graph = self
+                .graph
+                .as_ref()
+                .ok_or("matched decode boundary missing graph")?;
+            MatchedGraphStageBuffer::flush(
+                graph,
+                logical_tokens,
+                *self.device.cu_stream(),
+                self.device.ordinal(),
+                actual_graph_replay,
+            )?;
+            let logits: Vec<u8> = graph
+                .h_logits
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            target.write("logits.f32.bin", &logits)?;
+            target.device(
+                "final-hidden.bf16.bin",
+                *graph.d_hidden.device_ptr(),
+                graph
+                    .d_hidden
+                    .len()
+                    .checked_mul(2)
+                    .ok_or("hidden capture overflow")?,
+                std::ptr::null_mut(),
+            )?;
+            target.write("boundary.json", serde_json::to_vec_pretty(&serde_json::json!({
+            "logical_tokens": logical_tokens, "phase": phase, "input_token": input_token, "actual_execution_path":if actual_graph_replay {"graph_replay"}else{"eager"},
+            "vocab_size": graph.h_logits.len(), "logits_dtype": "f32_le",
+            "logits_source": "decode_host_logits_before_sampling_modifications",
+            "forcing": crate::matched_projection_transfer::forcing_label().is_some(),
+            "teacher_label": crate::matched_projection_transfer::forcing_label(),
+            "device_diagnostic_allocation_bytes": 0,
+        })).map_err(|e| e.to_string())?.as_slice())?;
+        } else if let Some(graph) = self.graph.as_ref() {
+            if !graph.matched_graph_stages.is_empty() {
+                MatchedGraphStageBuffer::flush(
+                    graph,
+                    logical_tokens,
+                    *self.device.cu_stream(),
+                    self.device.ordinal(),
+                    actual_graph_replay,
+                )?;
+            }
+        }
+        if let Some(decision) = crate::matched_probe::target_for_request(
+            "decode_current_decision",
+            0,
+            logical_tokens,
+            Some(label),
+        )? {
+            let decision = decision
+                .child(label)?
+                .child(&format!("after-input-{step}"))?
+                .child(&format!("device-{}", self.device_ordinal()))?;
+            let graph = self
+                .graph
+                .as_ref()
+                .ok_or("selected decision capture missing actual graph")?;
+            let logits: Vec<u8> = graph
+                .h_logits
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            decision.write("logits.f32.bin", &logits)?;
+            decision.device(
+                "final-hidden.bf16.bin",
+                *graph.d_hidden.device_ptr(),
+                graph
+                    .d_hidden
+                    .len()
+                    .checked_mul(2)
+                    .ok_or("selected decision hidden extent overflow")?,
+                *self.device.cu_stream(),
+            )?;
+            decision.write("decision.json",serde_json::to_vec_pretty(&serde_json::json!({"logical_tokens":logical_tokens,"step":step,"input_token":input_token,"actual_execution_path":if actual_graph_replay{"graph_replay"}else{"eager"},"vocab_size":graph.h_logits.len(),"logits_dtype":"f32_le","logits_source":"actual decode host logits before sampling modifications","forcing":crate::matched_projection_transfer::forcing_label().is_some(),"persistent_state_snapshot_requested":false,"device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?.as_slice())?;
+        }
+        Ok(())
+    }
+
+    fn capture_matched_moe_tensor(
+        graph: &GpuDecodeGraph,
+        layer: usize,
+        position: usize,
+        operation: &str,
+        stream: cuda_sys::CUstream,
+        device_ordinal: usize,
+    ) -> Result<(), String> {
+        let logical_tokens = position
+            .checked_add(1)
+            .ok_or("matched MoE token position overflow")?;
+        let Some(target) = crate::matched_probe::target_for_request(
+            operation,
+            layer,
+            logical_tokens,
+            Some(&graph.trace_request_label),
+        )?
+        else {
+            return Ok(());
+        };
+        let moe = graph
+            .moe_layers
+            .get(layer)
+            .and_then(Option::as_ref)
+            .ok_or("matched MoE capture missing layer")?;
+        if moe.moe_input_size != 0
+            || graph.moe_input_override_ptr != 0
+            || graph.moe_router_override_ptr != 0
+        {
+            return Err(
+                "matched MoE capture requires the direct hidden-space expert input contract".into(),
+            );
+        }
+        let target = target
+            .child(&graph.trace_request_label)?
+            .child(&format!("device-{device_ordinal}"))?;
+        let input = operation == "decode_moe_input";
+        let ptr = if input {
+            *graph.d_hidden.device_ptr()
+        } else {
+            *graph.d_moe_out.device_ptr()
+        };
+        target.device(
+            "tensor.bf16.bin",
+            ptr,
+            graph
+                .hidden_size
+                .checked_mul(2)
+                .ok_or("matched MoE capture width overflow")?,
+            stream,
+        )?;
+        if input {
+            // Match the actual router output destinations, including mapped pinned memory.
+            let (ids_ptr, weights_ptr) = match (&graph.pinned_topk_ids, &graph.pinned_topk_weights)
+            {
+                (Some(ids), Some(weights)) => (ids.device_ptr, weights.device_ptr),
+                (None, None) => (
+                    *graph.d_topk_indices.device_ptr(),
+                    *graph.d_topk_weights.device_ptr(),
+                ),
+                _ => return Err("matched route capture requires paired routing buffers".into()),
+            };
+            let route_bytes = moe
+                .topk
+                .checked_mul(4)
+                .ok_or("matched route bytes overflow")?;
+            target.device("route-ids.i32.bin", ids_ptr, route_bytes, stream)?;
+            target.device("route-weights.f32.bin", weights_ptr, route_bytes, stream)?;
+            let ids = std::fs::read(target.directory.join("route-ids.i32.bin"))
+                .map_err(|e| e.to_string())?;
+            let weights = std::fs::read(target.directory.join("route-weights.f32.bin"))
+                .map_err(|e| e.to_string())?;
+            let mut selected = std::collections::HashSet::new();
+            for (id, weight) in ids.chunks_exact(4).zip(weights.chunks_exact(4)) {
+                let id = i32::from_le_bytes(id.try_into().map_err(|_| "invalid route ID bytes")?);
+                let weight = f32::from_le_bytes(
+                    weight
+                        .try_into()
+                        .map_err(|_| "invalid route weight bytes")?,
+                );
+                if id < 0
+                    || id as usize >= moe.num_experts
+                    || !selected.insert(id)
+                    || !weight.is_finite()
+                    || weight < 0.0
+                {
+                    return Err("invalid captured routing; layer attribution prohibited".into());
+                }
+            }
+        }
+        target.write("boundary.json",serde_json::to_vec_pretty(&serde_json::json!({
+            "layer":layer,"absolute_input_position":position,"logical_tokens":logical_tokens,
+            "operation":operation,"width":graph.hidden_size,"topk":moe.topk,
+            "stage":if input {"normalized FFN input and actual device routing, before routed expert execution"} else {"retained expert output buffer; captured segment may already have committed it; not whole-layer state"},
+            "validation_step":graph.validation_decode_steps,"request_label":graph.trace_request_label,
+            "route_buffer_source":if graph.pinned_topk_ids.is_some() {"mapped pinned router outputs"} else {"device router outputs"},
+            "forcing":crate::matched_projection_transfer::forcing_label().is_some(),"teacher_label":crate::matched_projection_transfer::forcing_label(),
+            "device_diagnostic_allocation_bytes":0,"diagnostic_only":true,
+        })).map_err(|e|e.to_string())?.as_slice())
+    }
+
+    fn capture_matched_router_operands(
+        graph: &GpuDecodeGraph,
+        layer: usize,
+        position: usize,
+        stream: cuda_sys::CUstream,
+        device_ordinal: usize,
+        route_phase: &str,
+    ) -> Result<(), String> {
+        let logical_tokens = position
+            .checked_add(1)
+            .ok_or("router logical position overflow")?;
+        let Some(target) = crate::matched_probe::target_for_request(
+            "decode_router_operands",
+            layer,
+            logical_tokens,
+            Some(&graph.trace_request_label),
+        )?
+        else {
+            return Ok(());
+        };
+        if target.row != 0 {
+            return Err("router operand capture requires row zero".into());
+        }
+        let moe = graph
+            .moe_layers
+            .get(layer)
+            .and_then(Option::as_ref)
+            .ok_or("router capture lacks actual MoE layer")?;
+        let layer_data = graph
+            .layers
+            .get(layer)
+            .ok_or("router capture lacks actual layer descriptor")?;
+        if moe.scoring_func > 1
+            || moe.moe_input_size != 0
+            || graph.moe_input_override_ptr != 0
+            || graph.moe_router_override_ptr != 0
+            || moe.vl_bias_ptr != 0
+            || moe.hash_table_ptr != 0
+            || layer_data.router_per_expert_scale_ptr != 0
+        {
+            return Err("router observation rejects unreviewed latent/hash/image/scoring/override/per-expert-scale contract".into());
+        }
+        let w = graph
+            .weights
+            .get(moe.gate_wid)
+            .ok_or("router gate weight missing")?;
+        let (ids_ptr, weights_ptr) = match (&graph.pinned_topk_ids, &graph.pinned_topk_weights) {
+            (Some(ids), Some(weights)) => {
+                let bytes = moe
+                    .topk
+                    .checked_mul(4)
+                    .ok_or("router output extent overflow")?;
+                if ids.size < bytes || weights.size < bytes {
+                    return Err("router outputs exceed pinned allocations".into());
+                }
+                (ids.device_ptr, weights.device_ptr)
+            }
+            (None, None) => (
+                *graph.d_topk_indices.device_ptr(),
+                *graph.d_topk_weights.device_ptr(),
+            ),
+            _ => return Err("router observation requires paired output allocations".into()),
+        };
+        if graph.pinned_topk_ids.is_none()
+            && (graph.d_topk_indices.len() < moe.topk || graph.d_topk_weights.len() < moe.topk)
+        {
+            return Err("router outputs exceed device allocations".into());
+        }
+        let scratch_offset = graph
+            .hidden_size
+            .checked_mul(4)
+            .ok_or("router logits offset overflow")?;
+        let logits_ptr = (*graph.d_fp32_scratch.device_ptr())
+            .checked_add(
+                u64::try_from(scratch_offset).map_err(|_| "router pointer offset overflow")?,
+            )
+            .ok_or("router logits pointer overflow")?;
+        let layout = crate::matched_router_capture::RouterCaptureLayout {
+            hidden: graph.hidden_size,
+            experts: moe.num_experts,
+            topk: moe.topk,
+            gate_rows: w.rows,
+            gate_cols: w.cols,
+            gate_dtype: w.dtype,
+            scratch_elements: graph.d_fp32_scratch.len(),
+            hidden_elements: graph.d_hidden.len(),
+            hidden_ptr: *graph.d_hidden.device_ptr(),
+            gate_ptr: w.ptr,
+            logits_ptr,
+            ids_ptr,
+            weights_ptr,
+            bias_ptr: moe.gate_bias_ptr,
+            correction_ptr: moe.e_score_corr_ptr,
+        };
+        let spans = layout.checked_spans()?;
+        let parallel = graph.parallel_topk_enabled_for_moe(moe);
+        let selection = graph.parallel_topk_selection_enabled_for_moe(moe);
+        let kernel = match (moe.scoring_func, parallel, selection) {
+            (1, true, _) => "sigmoid_topk_parallel_scores",
+            (1, false, _) => "sigmoid_topk",
+            (0, _, true) => "softmax_topk_parallel_selection",
+            (0, true, false) => "softmax_topk_parallel_scores",
+            (0, false, false) => "softmax_topk",
+            _ => return Err("unreviewed router kernel selection".into()),
+        };
+        // These admitted kernels read const logits; checked nonalias ranges make
+        // this after-topk read the actual unchanged GEMM output, before experts.
+        let target = target
+            .child(&graph.trace_request_label)?
+            .child(&format!("device-{device_ordinal}"))?;
+        for s in &spans {
+            target.device(s.name, s.ptr, s.bytes, stream)?;
+        }
+        let ids =
+            std::fs::read(target.directory.join("route-ids.i32")).map_err(|e| e.to_string())?;
+        let weights =
+            std::fs::read(target.directory.join("route-weights.f32")).map_err(|e| e.to_string())?;
+        let mut selected = std::collections::HashSet::new();
+        for (i, z) in ids.chunks_exact(4).zip(weights.chunks_exact(4)) {
+            let i = i32::from_le_bytes(i.try_into().map_err(|_| "router ID byte extent")?);
+            let z = f32::from_le_bytes(z.try_into().map_err(|_| "router weight byte extent")?);
+            if i < 0
+                || i as usize >= moe.num_experts
+                || !selected.insert(i)
+                || !z.is_finite()
+                || z < 0.0
+            {
+                return Err("invalid actual router output".into());
+            }
+        }
+        for s in &spans {
+            if s.name.ends_with(".f32") {
+                let z = std::fs::read(target.directory.join(s.name)).map_err(|e| e.to_string())?;
+                if z.chunks_exact(4)
+                    .any(|x| !f32::from_le_bytes(x.try_into().expect("exact4 chunks")).is_finite())
+                {
+                    return Err(format!("nonfinite actual router tensor {}", s.name));
+                }
+            }
+        }
+        target.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({
+            "operation":"decode_router_operands","layer":layer,"device_ordinal":device_ordinal,"absolute_input_position":position,"logical_tokens":logical_tokens,"request_label":graph.trace_request_label,
+            "forcing":crate::matched_projection_transfer::forcing_label().is_some(),"teacher_label":crate::matched_projection_transfer::forcing_label(),"validation_step":graph.validation_decode_steps,
+            "hidden_size":graph.hidden_size,"num_experts":moe.num_experts,"topk":moe.topk,"gate_weight_id":moe.gate_wid,"gate_shape":[w.rows,w.cols],"gate_dtype":"bfloat16","gate_layout":"resident row-major, cuBLAS transpose",
+            "gate_operation":"cublasGemmEx BF16 x BF16 to F32, COMPUTE_32F, DEFAULT, alpha1 beta0","topk_kernel":kernel,"scoring_func":moe.scoring_func,"norm_topk_prob":moe.norm_topk_prob,"routed_scaling_factor":moe.routed_scaling_factor,
+            "bias_present":moe.gate_bias_ptr!=0,"correction_present":moe.e_score_corr_ptr!=0,"bias_correction_consumed_by_sigmoid":moe.scoring_func==1,
+            "sigmoid_post_normalization":moe.scoring_func==1&&moe.norm_topk_prob,"route_buffer_source":if graph.pinned_topk_ids.is_some(){"paired mapped pinned"}else{"paired device"},
+            "gate_logits_stage":"actual const gate logits after reviewed topk/normalization; before routed expert execution","route_phase":route_phase,"expert_consumed_routes_qualified":false,
+            "spans":spans.iter().map(|s|serde_json::json!({"name":s.name,"ptr":s.ptr,"bytes":s.bytes})).collect::<Vec<_>>(),"all_capture_spans_disjoint":true,"device_diagnostic_allocation_bytes":0,"diagnostic_only":true,
+        })).map_err(|e|e.to_string())?.as_slice())
     }
 
     pub fn sequence_state_inventory_value(&self, logical_tokens: usize) -> serde_json::Value {
@@ -23974,6 +25384,11 @@ impl GpuDecodeStore {
             "rope_position_delta".to_string(),
             serde_json::json!(graph.rope_position_delta),
         );
+        object.insert("graph_path".into(),serde_json::json!({
+            "per_layer_graphs_valid":graph.per_layer_graphs_valid,
+            "per_layer_steps":graph.validation_per_layer_steps,"ungraphed_steps":graph.validation_ungraphed_steps,
+            "timing_enabled":graph.timing_enabled,"gpu_route_sync":graph.gpu_route_sync
+        }));
         object.insert(
             "rope_absolute_position".to_string(),
             serde_json::json!(rope_absolute_position),
@@ -24179,6 +25594,10 @@ impl GpuDecodeStore {
         }))
     }
 
+    pub(crate) fn require_sequence_state_ready_rust(&self) -> Result<(), String> {
+        self.sequence_restore_validity.require_ready()
+    }
+
     fn ensure_sequence_state_staging(&mut self, required_bytes: usize) -> Result<(), String> {
         if required_bytes == 0 {
             return Err("sequence-state DMA requires a positive staging size".to_string());
@@ -24214,7 +25633,12 @@ impl GpuDecodeStore {
                 (used_bytes > 0).then(|| (allocation.clone(), used_bytes))
             })
             .collect();
-        self.snapshot_sequence_allocations_rust(allocations)
+        let result = self.snapshot_sequence_allocations_rust(allocations, None)?;
+        if let Some(selected) = &self.selected_kda {
+            selected
+                .validate_serving_snapshot(logical_tokens, &result.0.iter().collect::<Vec<_>>())?;
+        }
+        Ok(result)
     }
 
     /// Snapshot temporary sequence allocations which are not part of the
@@ -24224,7 +25648,9 @@ impl GpuDecodeStore {
         &mut self,
         allocations: &[crate::session_cache::SequenceStateAllocation],
         logical_tokens: usize,
+        owners: &[&dyn crate::sequence_external_owner::CudaRegion],
     ) -> Result<(Vec<crate::session_cache::SequenceStateBlob>, f64), String> {
+        crate::sequence_external_owner::validate(&self.device, allocations, owners)?;
         let allocations: Vec<_> = allocations
             .iter()
             .map(|allocation| {
@@ -24236,13 +25662,15 @@ impl GpuDecodeStore {
             .into_iter()
             .filter(|(_, used_bytes)| *used_bytes > 0)
             .collect();
-        self.snapshot_sequence_allocations_rust(allocations)
+        self.snapshot_sequence_allocations_rust(allocations, Some(owners))
     }
 
     fn snapshot_sequence_allocations_rust(
         &mut self,
         allocations: Vec<(crate::session_cache::SequenceStateAllocation, usize)>,
+        owners: Option<&[&dyn crate::sequence_external_owner::CudaRegion]>,
     ) -> Result<(Vec<crate::session_cache::SequenceStateBlob>, f64), String> {
+        self.require_sequence_state_ready_rust()?;
         self.device
             .bind_to_thread()
             .map_err(|error| format!("bind CUDA context for session snapshot: {error}"))?;
@@ -24258,70 +25686,83 @@ impl GpuDecodeStore {
             return Err(format!("synchronize before session snapshot: {sync:?}"));
         }
         let started = std::time::Instant::now();
-        let mut blobs = Vec::with_capacity(allocations.len());
-        for (allocation, used_bytes) in &allocations {
-            let mut shape = allocation.shape.clone();
-            if let crate::session_cache::SequenceStateGrowth::TokenRows { row_bytes, .. } =
-                allocation.growth
-            {
-                shape[0] = used_bytes / row_bytes;
-            }
-            blobs.push(crate::session_cache::SequenceStateBlob {
-                allocation_name: allocation.name.clone(),
-                kind: allocation.kind.clone(),
-                layer_idx: allocation.layer_idx,
-                device_ordinal: allocation.device_ordinal,
-                dtype: allocation.dtype.clone(),
-                element_size: allocation.element_size,
-                shape,
-                strides_bytes: allocation.strides_bytes.clone(),
-                bytes: vec![0u8; *used_bytes],
-            });
-        }
-        let mut inflight: [Option<usize>; 2] = [None, None];
-        for (index, (allocation, used_bytes)) in allocations.iter().enumerate() {
-            let slot_index = index % self.sequence_state_staging.len();
-            let slot = &self.sequence_state_staging[slot_index];
-            if let Some(previous_index) = inflight[slot_index].take() {
-                slot.synchronize()?;
-                let previous_bytes = blobs[previous_index].bytes.len();
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        slot.buffer.ptr,
-                        blobs[previous_index].bytes.as_mut_ptr(),
-                        previous_bytes,
-                    );
-                }
-            }
-            let result = unsafe {
-                cuda_sys::lib().cuMemcpyDtoHAsync_v2(
-                    slot.buffer.ptr.cast(),
-                    allocation.ptr,
-                    *used_bytes,
-                    stream,
-                )
-            };
-            if result != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(format!(
-                    "snapshot D2H enqueue for {}: {result:?}",
-                    allocation.name
-                ));
-            }
-            slot.record(stream)?;
-            inflight[slot_index] = Some(index);
-        }
-        for (slot_index, pending) in inflight.into_iter().enumerate() {
-            if let Some(index) = pending {
-                let slot = &self.sequence_state_staging[slot_index];
-                slot.synchronize()?;
-                let byte_count = blobs[index].bytes.len();
-                let destination = blobs[index].bytes.as_mut_ptr();
-                unsafe {
-                    std::ptr::copy_nonoverlapping(slot.buffer.ptr, destination, byte_count);
-                }
-            }
-        }
-        Ok((blobs, started.elapsed().as_secs_f64() * 1000.0))
+        // Retain this Store (stream, pinned slots and ordinary graph owners)
+        // through completion on success/error/unwind. External owners stay held
+        // by their calling phase; raw allocation descriptors are not ownership.
+        let retained = (&*self, owners);
+        let copied = unsafe {
+            crate::sequence_copy_completion::with_copy_completion(
+                &self.device,
+                stream,
+                &retained,
+                |_| {
+                    let mut blobs = Vec::with_capacity(allocations.len());
+                    for (allocation, used_bytes) in &allocations {
+                        let shape = allocation.snapshot_shape(*used_bytes);
+                        blobs.push(crate::session_cache::SequenceStateBlob {
+                            allocation_name: allocation.name.clone(),
+                            kind: allocation.kind.clone(),
+                            layer_idx: allocation.layer_idx,
+                            device_ordinal: allocation.device_ordinal,
+                            dtype: allocation.dtype.clone(),
+                            element_size: allocation.element_size,
+                            shape,
+                            strides_bytes: allocation.strides_bytes.clone(),
+                            bytes: vec![0u8; *used_bytes],
+                        });
+                    }
+                    let mut inflight: [Option<usize>; 2] = [None, None];
+                    for (index, (allocation, used_bytes)) in allocations.iter().enumerate() {
+                        let slot_index = index % self.sequence_state_staging.len();
+                        let slot = &self.sequence_state_staging[slot_index];
+                        if let Some(previous_index) = inflight[slot_index].take() {
+                            slot.synchronize()?;
+                            let previous_bytes = blobs[previous_index].bytes.len();
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    slot.buffer.ptr,
+                                    blobs[previous_index].bytes.as_mut_ptr(),
+                                    previous_bytes,
+                                );
+                            }
+                        }
+                        let result = unsafe {
+                            cuda_sys::lib().cuMemcpyDtoHAsync_v2(
+                                slot.buffer.ptr.cast(),
+                                allocation.ptr,
+                                *used_bytes,
+                                stream,
+                            )
+                        };
+                        if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!(
+                                "snapshot D2H enqueue for {}: {result:?}",
+                                allocation.name
+                            ));
+                        }
+                        slot.record(stream)?;
+                        inflight[slot_index] = Some(index);
+                    }
+                    for (slot_index, pending) in inflight.into_iter().enumerate() {
+                        if let Some(index) = pending {
+                            let slot = &self.sequence_state_staging[slot_index];
+                            slot.synchronize()?;
+                            let byte_count = blobs[index].bytes.len();
+                            let destination = blobs[index].bytes.as_mut_ptr();
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    slot.buffer.ptr,
+                                    destination,
+                                    byte_count,
+                                );
+                            }
+                        }
+                    }
+                    Ok(blobs)
+                },
+            )
+        }?;
+        Ok((copied, started.elapsed().as_secs_f64() * 1000.0))
     }
 
     /// Build a new pageable snapshot while transferring only newly appended
@@ -24352,6 +25793,7 @@ impl GpuDecodeStore {
             previous_logical_tokens,
             logical_tokens,
             previous_blobs,
+            None,
         )
     }
 
@@ -24364,7 +25806,9 @@ impl GpuDecodeStore {
         previous_logical_tokens: usize,
         logical_tokens: usize,
         previous_blobs: &[&crate::session_cache::SequenceStateBlob],
+        owners: &[&dyn crate::sequence_external_owner::CudaRegion],
     ) -> Result<(Vec<crate::session_cache::SequenceStateBlob>, f64), String> {
+        crate::sequence_external_owner::validate(&self.device, allocations, owners)?;
         if logical_tokens < previous_logical_tokens {
             return Err(format!(
                 "incremental external snapshot cannot rewind from {} to {} tokens",
@@ -24386,6 +25830,7 @@ impl GpuDecodeStore {
             previous_logical_tokens,
             logical_tokens,
             previous_blobs,
+            Some(owners),
         )
     }
 
@@ -24395,26 +25840,18 @@ impl GpuDecodeStore {
         previous_logical_tokens: usize,
         logical_tokens: usize,
         previous_blobs: &[&crate::session_cache::SequenceStateBlob],
+        owners: Option<&[&dyn crate::sequence_external_owner::CudaRegion]>,
     ) -> Result<(Vec<crate::session_cache::SequenceStateBlob>, f64), String> {
-        if previous_blobs.len() != allocations.len() {
-            return Err(format!(
-                "incremental snapshot has {} previous blobs but runtime requires {}",
-                previous_blobs.len(),
-                allocations.len()
-            ));
-        }
+        self.require_sequence_state_ready_rust()?;
+        let previous_bases = crate::session_cache::incremental_snapshot_bases(
+            &allocations,
+            previous_logical_tokens,
+            previous_blobs,
+        )?;
         let transfer_bytes_max = allocations
             .iter()
-            .map(|(allocation, used_bytes)| match allocation.growth {
-                crate::session_cache::SequenceStateGrowth::Fixed => *used_bytes,
-                crate::session_cache::SequenceStateGrowth::TokenRows {
-                    logical_tokens_per_row,
-                    row_bytes,
-                    ..
-                } => {
-                    let stable_rows = previous_logical_tokens / logical_tokens_per_row;
-                    used_bytes.saturating_sub(stable_rows.saturating_mul(row_bytes))
-                }
+            .map(|(allocation, used_bytes)| {
+                used_bytes.saturating_sub(allocation.stable_prefix_bytes(previous_logical_tokens))
             })
             .max()
             .ok_or_else(|| "sequence-state registry has no live allocations".to_string())?;
@@ -24430,122 +25867,121 @@ impl GpuDecodeStore {
         }
         let stream = self.copy_stream.0;
         let started = std::time::Instant::now();
-        let mut blobs = Vec::with_capacity(allocations.len());
-        let mut transfers = Vec::with_capacity(allocations.len());
-        for ((allocation, used_bytes), &previous) in allocations.iter().zip(previous_blobs) {
-            previous.validate()?;
-            if previous.allocation_name != allocation.name
-                || previous.device_ordinal != allocation.device_ordinal
-            {
-                return Err(format!(
-                    "incremental snapshot previous allocation {:?} does not match {:?}",
-                    previous.allocation_name, allocation.name
-                ));
-            }
-            let copy_start = match allocation.growth {
-                crate::session_cache::SequenceStateGrowth::Fixed => 0,
-                crate::session_cache::SequenceStateGrowth::TokenRows {
-                    logical_tokens_per_row,
-                    row_bytes,
-                    capacity_rows,
-                } => (previous_logical_tokens / logical_tokens_per_row)
-                    .min(capacity_rows)
-                    .saturating_mul(row_bytes),
-            };
-            if copy_start > previous.bytes.len() || copy_start > *used_bytes {
-                return Err(format!(
-                    "incremental snapshot stable prefix {} exceeds previous/current bytes {}/{} for {}",
-                    copy_start,
-                    previous.bytes.len(),
-                    used_bytes,
-                    allocation.name
-                ));
-            }
-            let mut bytes = vec![0u8; *used_bytes];
-            bytes[..copy_start].copy_from_slice(&previous.bytes[..copy_start]);
-            let transfer_bytes = used_bytes.saturating_sub(copy_start);
-            let source_ptr = allocation
-                .ptr
-                .checked_add(copy_start as u64)
-                .ok_or_else(|| format!("{} incremental pointer overflow", allocation.name))?;
-            let mut shape = allocation.shape.clone();
-            if let crate::session_cache::SequenceStateGrowth::TokenRows { row_bytes, .. } =
-                allocation.growth
-            {
-                shape[0] = used_bytes / row_bytes;
-            }
-            blobs.push(crate::session_cache::SequenceStateBlob {
-                allocation_name: allocation.name.clone(),
-                kind: allocation.kind.clone(),
-                layer_idx: allocation.layer_idx,
-                device_ordinal: allocation.device_ordinal,
-                dtype: allocation.dtype.clone(),
-                element_size: allocation.element_size,
-                shape,
-                strides_bytes: allocation.strides_bytes.clone(),
-                bytes,
-            });
-            transfers.push((source_ptr, copy_start, transfer_bytes));
-        }
-        let mut inflight: [Option<(usize, usize, usize)>; 2] = [None, None];
-        for (index, &(source_ptr, copy_start, transfer_bytes)) in transfers.iter().enumerate() {
-            if transfer_bytes == 0 {
-                continue;
-            }
-            let slot_index = index % self.sequence_state_staging.len();
-            let slot = &self.sequence_state_staging[slot_index];
-            if let Some((previous_index, previous_start, previous_bytes)) =
-                inflight[slot_index].take()
-            {
-                slot.synchronize()?;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        slot.buffer.ptr,
-                        blobs[previous_index].bytes[previous_start..].as_mut_ptr(),
-                        previous_bytes,
-                    );
-                }
-            }
-            let result = unsafe {
-                cuda_sys::lib().cuMemcpyDtoHAsync_v2(
-                    slot.buffer.ptr.cast(),
-                    source_ptr,
-                    transfer_bytes,
-                    stream,
-                )
-            };
-            if result != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(format!(
-                    "incremental snapshot D2H enqueue for {}: {result:?}",
-                    allocations[index].0.name
-                ));
-            }
-            slot.record(stream)?;
-            inflight[slot_index] = Some((index, copy_start, transfer_bytes));
-        }
-        for (slot_index, pending) in inflight.into_iter().enumerate() {
-            if let Some((index, copy_start, transfer_bytes)) = pending {
-                let slot = &self.sequence_state_staging[slot_index];
-                slot.synchronize()?;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        slot.buffer.ptr,
-                        blobs[index].bytes[copy_start..].as_mut_ptr(),
-                        transfer_bytes,
-                    );
-                }
-            }
-        }
-        let transferred_bytes = transfers.iter().try_fold(0usize, |total, (_, _, bytes)| {
-            total
-                .checked_add(*bytes)
-                .ok_or_else(|| "incremental transfer byte count overflow".to_string())
-        })?;
-        let snapshot_bytes = blobs.iter().try_fold(0usize, |total, blob| {
-            total
-                .checked_add(blob.bytes.len())
-                .ok_or_else(|| "incremental snapshot byte count overflow".to_string())
-        })?;
+        // Retain this Store (stream, pinned slots and ordinary graph owners)
+        // through completion on success/error/unwind. External owners stay held
+        // by their calling phase; raw allocation descriptors are not ownership.
+        let retained = (&*self, owners);
+        let copied = unsafe {
+            crate::sequence_copy_completion::with_copy_completion(
+                &self.device,
+                stream,
+                &retained,
+                |_| {
+                    let mut blobs = Vec::with_capacity(allocations.len());
+                    let mut transfers = Vec::with_capacity(allocations.len());
+                    for ((allocation, used_bytes), previous) in
+                        allocations.iter().zip(previous_bases)
+                    {
+                        let copy_start = allocation.stable_prefix_bytes(previous_logical_tokens);
+                        if copy_start > *used_bytes || previous.is_none() && copy_start != 0 {
+                            return Err(format!(
+                                "{} incremental stable prefix exceeds available live state",
+                                allocation.name
+                            ));
+                        }
+                        let mut bytes = vec![0u8; *used_bytes];
+                        if let Some(previous) = previous {
+                            bytes[..copy_start].copy_from_slice(&previous.bytes[..copy_start]);
+                        }
+                        let transfer_bytes = used_bytes.saturating_sub(copy_start);
+                        let source_ptr =
+                            allocation
+                                .ptr
+                                .checked_add(copy_start as u64)
+                                .ok_or_else(|| {
+                                    format!("{} incremental pointer overflow", allocation.name)
+                                })?;
+                        let shape = allocation.snapshot_shape(*used_bytes);
+                        blobs.push(crate::session_cache::SequenceStateBlob {
+                            allocation_name: allocation.name.clone(),
+                            kind: allocation.kind.clone(),
+                            layer_idx: allocation.layer_idx,
+                            device_ordinal: allocation.device_ordinal,
+                            dtype: allocation.dtype.clone(),
+                            element_size: allocation.element_size,
+                            shape,
+                            strides_bytes: allocation.strides_bytes.clone(),
+                            bytes,
+                        });
+                        transfers.push((source_ptr, copy_start, transfer_bytes));
+                    }
+                    let mut inflight: [Option<(usize, usize, usize)>; 2] = [None, None];
+                    for (index, &(source_ptr, copy_start, transfer_bytes)) in
+                        transfers.iter().enumerate()
+                    {
+                        if transfer_bytes == 0 {
+                            continue;
+                        }
+                        let slot_index = index % self.sequence_state_staging.len();
+                        let slot = &self.sequence_state_staging[slot_index];
+                        if let Some((previous_index, previous_start, previous_bytes)) =
+                            inflight[slot_index].take()
+                        {
+                            slot.synchronize()?;
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    slot.buffer.ptr,
+                                    blobs[previous_index].bytes[previous_start..].as_mut_ptr(),
+                                    previous_bytes,
+                                );
+                            }
+                        }
+                        let result = unsafe {
+                            cuda_sys::lib().cuMemcpyDtoHAsync_v2(
+                                slot.buffer.ptr.cast(),
+                                source_ptr,
+                                transfer_bytes,
+                                stream,
+                            )
+                        };
+                        if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!(
+                                "incremental snapshot D2H enqueue for {}: {result:?}",
+                                allocations[index].0.name
+                            ));
+                        }
+                        slot.record(stream)?;
+                        inflight[slot_index] = Some((index, copy_start, transfer_bytes));
+                    }
+                    for (slot_index, pending) in inflight.into_iter().enumerate() {
+                        if let Some((index, copy_start, transfer_bytes)) = pending {
+                            let slot = &self.sequence_state_staging[slot_index];
+                            slot.synchronize()?;
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    slot.buffer.ptr,
+                                    blobs[index].bytes[copy_start..].as_mut_ptr(),
+                                    transfer_bytes,
+                                );
+                            }
+                        }
+                    }
+                    let transferred_bytes =
+                        transfers.iter().try_fold(0usize, |total, (_, _, bytes)| {
+                            total.checked_add(*bytes).ok_or_else(|| {
+                                "incremental transfer byte count overflow".to_string()
+                            })
+                        })?;
+                    let snapshot_bytes = blobs.iter().try_fold(0usize, |total, blob| {
+                        total
+                            .checked_add(blob.bytes.len())
+                            .ok_or_else(|| "incremental snapshot byte count overflow".to_string())
+                    })?;
+                    Ok((blobs, snapshot_bytes, transferred_bytes))
+                },
+            )
+        }?;
+        let (blobs, snapshot_bytes, transferred_bytes) = copied;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         log::info!(
             "Incremental sequence snapshot: previous_tokens={} tokens={} allocations={} snapshot_bytes={} d2h_bytes={} pageable_prefix_bytes={} save_ms={:.3}",
@@ -24569,6 +26005,9 @@ impl GpuDecodeStore {
         blobs: &[&crate::session_cache::SequenceStateBlob],
         rope_position_delta: i32,
     ) -> Result<f64, String> {
+        self.graph
+            .as_ref()
+            .ok_or_else(|| "GPU decode graph is not configured".to_string())?;
         let allocations: Vec<_> = self
             .sequence_state_registry
             .allocations()
@@ -24578,7 +26017,10 @@ impl GpuDecodeStore {
                 (used_bytes > 0).then(|| (allocation.clone(), used_bytes))
             })
             .collect();
-        let elapsed = self.restore_sequence_allocations_rust(allocations, blobs)?;
+        if let Some(selected) = &self.selected_kda {
+            selected.validate_serving_snapshot(logical_tokens, blobs)?;
+        }
+        let elapsed = self.restore_sequence_allocations_rust(allocations, blobs, None)?;
         {
             let graph = self
                 .graph
@@ -24600,7 +26042,9 @@ impl GpuDecodeStore {
         allocations: &[crate::session_cache::SequenceStateAllocation],
         logical_tokens: usize,
         blobs: &[&crate::session_cache::SequenceStateBlob],
+        owners: &[&dyn crate::sequence_external_owner::CudaRegion],
     ) -> Result<f64, String> {
+        crate::sequence_external_owner::validate(&self.device, allocations, owners)?;
         let allocations: Vec<_> = allocations
             .iter()
             .map(|allocation| {
@@ -24612,13 +26056,14 @@ impl GpuDecodeStore {
             .into_iter()
             .filter(|(_, used_bytes)| *used_bytes > 0)
             .collect();
-        self.restore_sequence_allocations_rust(allocations, blobs)
+        self.restore_sequence_allocations_rust(allocations, blobs, Some(owners))
     }
 
     fn restore_sequence_allocations_rust(
         &mut self,
         allocations: Vec<(crate::session_cache::SequenceStateAllocation, usize)>,
         blobs: &[&crate::session_cache::SequenceStateBlob],
+        owners: Option<&[&dyn crate::sequence_external_owner::CudaRegion]>,
     ) -> Result<f64, String> {
         if blobs.len() != allocations.len() {
             return Err(format!(
@@ -24647,39 +26092,62 @@ impl GpuDecodeStore {
             .map_err(|error| format!("bind CUDA context for session restore: {error}"))?;
         let stream = self.copy_stream.0;
         let started = std::time::Instant::now();
-        let mut inflight = [false, false];
-        for (index, ((allocation, used_bytes), &blob)) in allocations.iter().zip(blobs).enumerate()
-        {
-            let slot_index = index % self.sequence_state_staging.len();
-            let slot = &self.sequence_state_staging[slot_index];
-            if inflight[slot_index] {
-                slot.synchronize()?;
-            }
-            unsafe {
-                std::ptr::copy_nonoverlapping(blob.bytes.as_ptr(), slot.buffer.ptr, *used_bytes);
-            }
-            let result = unsafe {
-                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                    allocation.ptr,
-                    slot.buffer.ptr.cast(),
-                    *used_bytes,
-                    stream,
-                )
-            };
-            if result != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(format!(
-                    "restore H2D enqueue for {}: {result:?}",
-                    allocation.name
-                ));
-            }
-            slot.record(stream)?;
-            inflight[slot_index] = true;
-        }
-        for (slot_index, active) in inflight.into_iter().enumerate() {
-            if active {
-                self.sequence_state_staging[slot_index].synchronize()?;
-            }
-        }
+        let mut mutation = self.sequence_restore_validity.begin(&allocations)?;
+        // Retain this Store (stream, pinned slots and ordinary graph owners)
+        // through completion on success/error/unwind. External owners stay held
+        // by their calling phase; raw allocation descriptors are not ownership.
+        let retained = (&*self, owners);
+        let copied = unsafe {
+            crate::sequence_copy_completion::with_copy_completion(
+                &self.device,
+                stream,
+                &retained,
+                |_| {
+                    let mut inflight = [false, false];
+                    for (index, ((allocation, used_bytes), &blob)) in
+                        allocations.iter().zip(blobs).enumerate()
+                    {
+                        let slot_index = index % self.sequence_state_staging.len();
+                        let slot = &self.sequence_state_staging[slot_index];
+                        if inflight[slot_index] {
+                            slot.synchronize()?;
+                        }
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                blob.bytes.as_ptr(),
+                                slot.buffer.ptr,
+                                *used_bytes,
+                            );
+                        }
+                        let result = unsafe {
+                            cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                allocation.ptr,
+                                slot.buffer.ptr.cast(),
+                                *used_bytes,
+                                stream,
+                            )
+                        };
+                        if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!(
+                                "restore H2D enqueue for {}: {result:?}",
+                                allocation.name
+                            ));
+                        }
+                        mutation.note_enqueue();
+                        slot.record(stream)?;
+                        inflight[slot_index] = true;
+                    }
+                    for (slot_index, active) in inflight.into_iter().enumerate() {
+                        if active {
+                            self.sequence_state_staging[slot_index].synchronize()?;
+                        }
+                    }
+                    Ok(())
+                },
+            )
+        }?;
+        let _ = copied;
+        mutation.complete()?;
         Ok(started.elapsed().as_secs_f64() * 1000.0)
     }
 
@@ -24804,10 +26272,15 @@ impl GpuDecodeStore {
                             }))
                         })
                     });
-                serde_json::json!({
+                let mut material=serde_json::json!({
                     "layer_idx": layer_idx,
                     "hqq": hqq,
-                })
+                });
+                if let Some(bank)=&self.ordered_kda_projection {
+                    material["ordered_kda_projection"]=serde_json::json!(&bank.identity);
+                    if let Some(mla)=&self.ordered_mla_f32{material["ordered_mla_f32"]=serde_json::json!({"producer":"ordered_hqq6_f32_native_norm_cache_absorb_v1","primitives":mla.identity});}
+                }
+                material
             })
             .collect();
         Ok(crate::session_cache::DeviceCompatibilityMaterial {
@@ -24833,7 +26306,12 @@ impl GpuDecodeStore {
             kv_format: kv_format.to_string(),
             kv_key_bits,
             kv_value_bits,
-            state_layout: self.sequence_state_registry.compatibility_layout_value(),
+            state_layout: match &self.common_mla {
+                Some(bank) => {
+                    serde_json::json!({"allocation_layout":self.sequence_state_registry.compatibility_layout_value(),"arithmetic_contract":bank.lock().map_err(|_|"common MLA bank poisoned")?.compatibility()?})
+                }
+                None => self.sequence_state_registry.compatibility_layout_value(),
+            },
         })
     }
 
@@ -26588,6 +28066,32 @@ impl GpuDecodeStore {
         let cols = desc.cols;
         let blocks = ((rows + 7) / 8) as u32;
         let smem = (cols as u32) * 2;
+        if let Some(experiment) = self
+            .matched_hqq_rounding
+            .as_ref()
+            .filter(|e| e.is_rounded())
+        {
+            return experiment.launch(
+                "hqq6_decode_gemv_f32",
+                [
+                    desc.rows,
+                    desc.cols,
+                    desc.group_size,
+                    desc.packed_row_stride_bytes,
+                    desc.scales_row_stride_bytes,
+                    desc.zeros_row_stride_bytes,
+                ],
+                [
+                    desc.packed_ptr,
+                    desc.scales_ptr,
+                    desc.zeros_ptr,
+                    input_ptr,
+                    output_ptr,
+                ],
+                256,
+                *self.device.cu_stream(),
+            );
+        }
         let kernel = self
             .device
             .get_func(MODULE_NAME, "hqq6_decode_gemv_f32")
@@ -26694,6 +28198,63 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    fn launch_mla_hqq_gemv_f32(
+        &self,
+        label: &str,
+        desc: &HqqTensorExecDescriptor,
+        input: u64,
+        output: u64,
+    ) -> Result<(), String> {
+        if self.ordered_mla_f32.is_some() {
+            let bank = self
+                .ordered_kda_projection
+                .as_ref()
+                .ok_or("selected MLA projection bank absent")?;
+            let scratch = self
+                .ordered_mla_bf16_scratch
+                .as_ref()
+                .ok_or("selected MLA BF16 co-output owner absent")?;
+            if scratch.len() < desc.rows {
+                return Err("selected MLA co-output capacity below actual loaded rows".into());
+            }
+            unsafe {
+                bank.enqueue_f32(
+                    &ordered_decode_layout(desc)?,
+                    input,
+                    *scratch.device_ptr(),
+                    output,
+                    1,
+                    *self.device.cu_stream(),
+                )
+            }
+        } else {
+            self.launch_hqq_decode_gemv_f32(label, desc, input, output)
+        }
+    }
+    fn launch_mla_hqq_gemv_bf16(
+        &self,
+        label: &str,
+        desc: &HqqTensorExecDescriptor,
+        input: u64,
+        output: u64,
+    ) -> Result<(), String> {
+        if self.ordered_mla_f32.is_some() {
+            unsafe {
+                self.ordered_kda_projection
+                    .as_ref()
+                    .ok_or("selected MLA projection bank absent")?
+                    .enqueue(
+                        &ordered_decode_layout(desc)?,
+                        input,
+                        output,
+                        1,
+                        *self.device.cu_stream(),
+                    )
+            }
+        } else {
+            self.launch_hqq_decode_gemv_bf16(label, desc, input, output)
+        }
+    }
     fn launch_hqq_decode_gemv_f32(
         &self,
         tensor_name: &str,
@@ -26778,6 +28339,32 @@ impl GpuDecodeStore {
         let cols = desc.cols;
         let blocks = ((rows + 7) / 8) as u32;
         let smem = (cols as u32) * 2;
+        if let Some(experiment) = self
+            .matched_hqq_rounding
+            .as_ref()
+            .filter(|e| e.is_rounded())
+        {
+            return experiment.launch(
+                "hqq6_decode_gemv_bf16",
+                [
+                    desc.rows,
+                    desc.cols,
+                    desc.group_size,
+                    desc.packed_row_stride_bytes,
+                    desc.scales_row_stride_bytes,
+                    desc.zeros_row_stride_bytes,
+                ],
+                [
+                    desc.packed_ptr,
+                    desc.scales_ptr,
+                    desc.zeros_ptr,
+                    input_ptr,
+                    output_ptr,
+                ],
+                256,
+                *self.device.cu_stream(),
+            );
+        }
         let kernel = self
             .device
             .get_func(MODULE_NAME, "hqq6_decode_gemv_bf16")
@@ -26848,6 +28435,32 @@ impl GpuDecodeStore {
             .ok_or_else(|| format!("HQQ6 quartet thread count overflow for {tensor_name}"))?;
         let blocks = rows.div_ceil(warps_per_block) as u32;
         let smem = (cols as u32) * 2;
+        if let Some(experiment) = self
+            .matched_hqq_rounding
+            .as_ref()
+            .filter(|e| e.is_rounded())
+        {
+            return experiment.launch(
+                "hqq6_decode_gemv_bf16_vec4",
+                [
+                    desc.rows,
+                    desc.cols,
+                    desc.group_size,
+                    desc.packed_row_stride_bytes,
+                    desc.scales_row_stride_bytes,
+                    desc.zeros_row_stride_bytes,
+                ],
+                [
+                    desc.packed_ptr,
+                    desc.scales_ptr,
+                    desc.zeros_ptr,
+                    input_ptr,
+                    output_ptr,
+                ],
+                threads as u32,
+                *self.device.cu_stream(),
+            );
+        }
         let kernel = self
             .device
             .get_func(MODULE_NAME, "hqq6_decode_gemv_bf16_vec4")
@@ -26993,6 +28606,35 @@ impl GpuDecodeStore {
             .checked_mul(32)
             .ok_or_else(|| format!("HQQ stream thread count overflow for {tensor_name}"))?;
         let blocks = desc.rows.div_ceil(warps_per_block);
+        if let Some(experiment) = self
+            .matched_hqq_rounding
+            .as_ref()
+            .filter(|e| e.is_rounded())
+        {
+            if nbits != 6 {
+                return Err("HQQ rounding experiment supports only HQQ6 descriptors".into());
+            }
+            return experiment.launch(
+                kernel_name,
+                [
+                    desc.rows,
+                    desc.cols,
+                    desc.group_size,
+                    desc.packed_row_stride_bytes,
+                    desc.scales_row_stride_bytes,
+                    desc.zeros_row_stride_bytes,
+                ],
+                [
+                    desc.packed_ptr,
+                    desc.scales_ptr,
+                    desc.zeros_ptr,
+                    input_ptr,
+                    output_ptr,
+                ],
+                u32::try_from(threads).map_err(|_| "HQQ thread overflow")?,
+                stream,
+            );
+        }
         let kernel = self
             .device
             .get_func(MODULE_NAME, kernel_name)
@@ -27404,8 +29046,7 @@ impl GpuDecodeStore {
                 results.push((candidate, samples[sample_blocks / 2]));
             }
 
-            let margin_pct =
-                nonnegative_finite_env("KRASIS_HQQ4_WARP_AUTOTUNE_MARGIN_PCT", 5.0)?;
+            let margin_pct = nonnegative_finite_env("KRASIS_HQQ4_WARP_AUTOTUNE_MARGIN_PCT", 5.0)?;
             let Some((best_warps, best_ms, fastest_ms)) =
                 select_stable_timing_candidate(&results, margin_pct, established_warps)
             else {
@@ -27460,7 +29101,25 @@ impl GpuDecodeStore {
                                   tune_geometry: bool|
              -> Result<(), String> {
                 if hqq_nbits_from_desc(desc)? != 6 {
+                    if self.matched_hqq_rounding.is_some() {
+                        return Err(
+                            "HQQ rounding experiment does not support mixed HQQ bit widths".into(),
+                        );
+                    }
                     return Ok(());
+                }
+                if let Some(experiment) = &self.matched_hqq_rounding {
+                    experiment.validate_storage(
+                        [
+                            desc.rows,
+                            desc.cols,
+                            desc.group_size,
+                            desc.packed_row_stride_bytes,
+                            desc.scales_row_stride_bytes,
+                            desc.zeros_row_stride_bytes,
+                        ],
+                        [desc.packed_ptr, desc.scales_ptr, desc.zeros_ptr],
+                    )?;
                 }
                 let key = (
                     desc.rows,
@@ -27605,6 +29264,69 @@ impl GpuDecodeStore {
                 }
             }
         }
+        if let Some(experiment) = &self.matched_hqq_rounding {
+            let graph = self
+                .graph
+                .as_ref()
+                .ok_or("HQQ experiment requires configured graph")?;
+            if graph.glm5_hc_mean_mult.is_none()
+                || self.draft.is_some()
+                || self.dspark.is_some()
+                || self.cuda_graphs_disabled()
+            {
+                return Err("HQQ rounding experiment requires GLM HQQ6, ordinary graphs and no speculative decode".into());
+            }
+            experiment.validate_inventory(
+                &tensors
+                    .iter()
+                    .map(|(_, d, _, _)| {
+                        [
+                            d.rows,
+                            d.cols,
+                            d.group_size,
+                            d.packed_row_stride_bytes,
+                            d.scales_row_stride_bytes,
+                            d.zeros_row_stride_bytes,
+                        ]
+                    })
+                    .collect::<Vec<_>>(),
+            )?;
+            for (name, desc, _, _) in &tensors {
+                validate_hqq_tensor_desc_for_layout(
+                    name,
+                    desc,
+                    6,
+                    hqq_expected_layout(6, "decode")?,
+                    true,
+                )?;
+                experiment.validate_descriptor(
+                    [
+                        desc.rows,
+                        desc.cols,
+                        desc.group_size,
+                        desc.packed_row_stride_bytes,
+                        desc.scales_row_stride_bytes,
+                        desc.zeros_row_stride_bytes,
+                    ],
+                    [desc.packed_ptr, desc.scales_ptr, desc.zeros_ptr],
+                )?;
+            }
+        }
+        // BEGIN bounded measured HQQ dispatch admission
+        let dispatch_controls = crate::matched_probe::HqqDispatchControls::load(
+            &self.device,
+            self.matched_hqq_rounding.as_ref(),
+        )?;
+        let mut applied_dispatch_shapes = Vec::new();
+        if let Some(control) = &dispatch_controls {
+            control.require_shapes(
+                &tensors
+                    .iter()
+                    .map(|(_, d, _, _)| (d.rows, d.cols, d.group_size))
+                    .collect::<Vec<_>>(),
+            )?;
+        }
+        // END bounded measured HQQ dispatch admission
         if tensors.is_empty() {
             self.hqq6_decode_dispatch_autotuned = true;
             return Ok(());
@@ -27854,6 +29576,32 @@ impl GpuDecodeStore {
                     margin_pct,
                 );
             }
+            // BEGIN bounded measured HQQ dispatch intervention
+            if let Some(control) = &dispatch_controls {
+                let shape = (desc.rows, desc.cols, desc.group_size);
+                let request =
+                    match control.measured_selection(shape, scalar_ms, &results, *force_vec4) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            destroy_events(ev_start, ev_stop);
+                            return Err(error);
+                        }
+                    };
+                if let Some(requested) = request {
+                    let original = self.hqq6_decode_vec4_warps_per_block.get(&key).copied();
+                    match requested {
+                        Some(warps) => {
+                            self.hqq6_decode_vec4_warps_per_block.insert(key, warps);
+                        }
+                        None => {
+                            self.hqq6_decode_vec4_warps_per_block.remove(&key);
+                        }
+                    }
+                    eprintln!("[matched-hqq-dispatch] tensor={} shape={}x{} group={} descriptor={:?} measured={:?} scalar={:.6}ms original={:?} diagnostic={:?}; all autotune measurements retained",tensor_name,desc.rows,desc.cols,desc.group_size,key,results,scalar_ms,original,requested);
+                    applied_dispatch_shapes.push(shape);
+                }
+            }
+            // END bounded measured HQQ dispatch intervention
             let _ = &mut output;
         }
         destroy_events(ev_start, ev_stop);
@@ -27866,6 +29614,11 @@ impl GpuDecodeStore {
                 ));
             }
         }
+        // BEGIN bounded measured HQQ dispatch completion
+        if let Some(control) = &dispatch_controls {
+            control.require_shapes(&applied_dispatch_shapes)?;
+        }
+        // END bounded measured HQQ dispatch completion
         self.hqq6_decode_dispatch_autotuned = true;
         Ok(())
     }
@@ -28567,13 +30320,24 @@ impl GpuDecodeStore {
     #[new]
     #[pyo3(signature = (device_ordinal=0, deepseek_v4_hqq6_native_int4=false))]
     fn new(device_ordinal: usize, deepseek_v4_hqq6_native_int4: bool) -> PyResult<Self> {
-        let device = CudaDevice::new(device_ordinal).map_err(|e| {
+        let selected_stream = crate::kda_prefix_owner::shared_kda_requested()
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        // Construct the real owned, capturable serving stream before buffers,
+        // kernels and state families bind to it. No temporary pointer rewrite.
+        let device = (if selected_stream {
+            CudaDevice::new_with_stream(device_ordinal)
+        } else {
+            CudaDevice::new(device_ordinal)
+        })
+        .map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "Failed to create CUDA device {}: {:?}",
                 device_ordinal, e
             ))
         })?;
 
+        let matched_hqq_rounding = crate::matched_hqq_rounding::Experiment::load(device.clone())
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
         let blas = CudaBlas::new(device.clone()).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "Failed to create cuBLAS handle: {:?}",
@@ -28894,6 +30658,10 @@ impl GpuDecodeStore {
             spec_jaccard_threshold: 0.15,
             last_min_free_vram_mb: 0,
             last_stream_failure: None,
+            // BEGIN explicit teacher-forced store initialization
+            matched_teacher_once: None,
+            matched_hqq_rounding,
+            // END explicit teacher-forced store initialization
             last_soft_evict_experts: 0,
             last_soft_evict_freed_mb: 0.0,
             last_soft_reload_queued: 0,
@@ -28941,7 +30709,16 @@ impl GpuDecodeStore {
             debug_decode_early_detail_dims_once: Vec::new(),
             debug_hcs_transition_trace_once: false,
             sequence_state_registry: crate::session_cache::SequenceStateRegistry::default(),
+            selected_kda: None,
+            ordered_kda_projection: None,
+            ordered_mla_f32: None,
+            common_mla_owners: Default::default(),
+            common_mla_ops: None,
+            common_mla_decode: None,
+            common_mla: None,
+            ordered_mla_bf16_scratch: None,
             sequence_state_staging: Vec::new(),
+            sequence_restore_validity: Default::default(),
             active_sequence_device_checkpoint: None,
             expert_only_peer_store: false,
             expert_host_registrations: Vec::new(),
@@ -28949,6 +30726,84 @@ impl GpuDecodeStore {
             peer_service_pending: false,
             peer_dynamic_tier: None,
         })
+    }
+
+    /// Setup-only: retain and validate the actual tensor owners. No Python
+    /// object is inspected during model execution. Cache capacity is admitted
+    /// later, after set_native_mla_kv_cache finalizes its real contract.
+    #[pyo3(signature=(layer_idx,wvc,ckv,kpe=None))]
+    fn register_mla_allocation_owners(
+        &mut self,
+        py: Python<'_>,
+        layer_idx: usize,
+        wvc: &Bound<'_, PyAny>,
+        ckv: &Bound<'_, PyAny>,
+        kpe: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        use pyo3::exceptions::PyValueError;
+        if !crate::kda_prefix_owner::shared_kda_requested().map_err(PyValueError::new_err)? {
+            return Ok(());
+        }
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("MLA graph not configured"))?;
+        if layer_idx < graph.decode_layer_start || layer_idx >= graph.decode_layer_end {
+            return Ok(());
+        }
+        let loaded = graph
+            .layers
+            .get(layer_idx)
+            .ok_or_else(|| PyValueError::new_err("MLA owner layer outside loaded model"))?;
+        let GpuAttnConfig::MLA {
+            num_heads,
+            ckv_cache_dim,
+            qk_rope_dim,
+            v_head_dim,
+            w_vc_ptr,
+            ckv_cache_ptr,
+            kpe_cache_ptr,
+            ..
+        } = &loaded.attn
+        else {
+            return Err(PyValueError::new_err(
+                "actual owner registration requires MLA",
+            ));
+        };
+        if self.common_mla_owners.contains_key(&layer_idx) {
+            return Err(PyValueError::new_err(
+                "actual MLA owners already registered",
+            ));
+        }
+        let ops = match &self.common_mla_ops {
+            Some(ops) => ops.clone(),
+            None => crate::stable_mla_ops::load_serving(self.device.clone())
+                .map_err(PyValueError::new_err)?,
+        };
+        let dimensions = crate::stable_mla_owned::Dimensions {
+            heads: *num_heads,
+            ccd: *ckv_cache_dim,
+            rope: *qk_rope_dim,
+            values: *v_head_dim,
+        };
+        let owner = crate::stable_mla_owned::Layer::admit(
+            py,
+            self.device.clone(),
+            &ops,
+            dimensions,
+            [*w_vc_ptr, *ckv_cache_ptr, *kpe_cache_ptr],
+            wvc,
+            ckv,
+            kpe,
+        )?;
+        log::info!(
+            "Common MLA layer {} actual resident F32 WVC: {} bytes",
+            layer_idx,
+            owner.resident_bytes().map_err(PyValueError::new_err)?
+        );
+        self.common_mla_ops = Some(ops);
+        self.common_mla_owners.insert(layer_idx, owner);
+        Ok(())
     }
 
     /// Register exact metadata for one per-sequence CUDA allocation.
@@ -29048,6 +30903,13 @@ impl GpuDecodeStore {
                 capacity_rows,
                 row_bytes,
             },
+            "completed_token_rows" => {
+                crate::session_cache::SequenceStateGrowth::CompletedTokenRows {
+                    logical_tokens_per_row,
+                    capacity_rows,
+                    row_bytes,
+                }
+            }
             other => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "{}: unsupported sequence-state growth mode {:?}",
@@ -29556,9 +31418,7 @@ impl GpuDecodeStore {
                 match engine.run_prefill(&token_ids, temperature, &[]) {
                     Ok(r) => {
                         if env_truthy("KRASIS_VRAM_LEDGER") {
-                            crate::vram_monitor::set_lifecycle_event(
-                                "prefill_bridge_run_complete",
-                            );
+                            crate::vram_monitor::set_lifecycle_event("prefill_bridge_run_complete");
                         }
                         if let Err(e) = engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
                             engine.clear_prefill_hcs_guard_store_addr();
@@ -29676,9 +31536,7 @@ impl GpuDecodeStore {
                 None => Ok(()),
             };
             if env_truthy("KRASIS_VRAM_LEDGER") {
-                crate::vram_monitor::set_lifecycle_event(
-                    "prefill_bridge_scratch_release_complete",
-                );
+                crate::vram_monitor::set_lifecycle_event("prefill_bridge_scratch_release_complete");
             }
             engine.clear_prefill_hcs_guard_store_addr();
             engine.set_prefill_pinning_disabled(false);
@@ -30063,7 +31921,13 @@ impl GpuDecodeStore {
             .alloc_zeros::<f32>(la_buf_size)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
 
+        let matched_routes =
+            crate::matched_routes::Experiment::load(self.device.clone(), num_layers)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
         self.graph = Some(Box::new(GpuDecodeGraph {
+            ordered_expert_projection: None,
+            d_common_moe_accum: None,
+            matched_routes,
             hidden_size,
             num_layers,
             decode_layer_start: 0,
@@ -30105,7 +31969,7 @@ impl GpuDecodeStore {
             peer_experts: Vec::new(),
             d_hidden,
             d_residual,
-            d_scratch,
+            d_scratch: Arc::new(d_scratch),
             d_logits,
             d_fp32_scratch,
             d_expert_buf: [d_expert_buf_0, d_expert_buf_1],
@@ -30176,11 +32040,11 @@ impl GpuDecodeStore {
             .unwrap_or(false),
             gqa_num_q_heads: 0,
             gqa_head_dim: 0,
-            d_la_qkvz,
-            d_la_ba,
-            d_la_conv_out,
+            d_la_qkvz: Arc::new(d_la_qkvz),
+            d_la_ba: Arc::new(d_la_ba),
+            d_la_conv_out: Arc::new(d_la_conv_out),
             d_la_recur_out,
-            d_la_gated_out,
+            d_la_gated_out: Arc::new(d_la_gated_out),
             d_mamba2_conv_out: None,
             mamba2_conv_out_size: 0,
             d_mamba2_bf16_graph_input: None,
@@ -30475,6 +32339,7 @@ impl GpuDecodeStore {
             graph_la_clock_enabled: false,
             graph_la_active: Vec::new(),
             graph_kda_active: Vec::new(),
+            selected_kda_arithmetic: false,
             d_graph_la_clocks: None,
             h_graph_la_clocks: Vec::new(),
             graph_final_clock_enabled: false,
@@ -30654,8 +32519,20 @@ impl GpuDecodeStore {
             d_wts_hot: None,
             h_wts_full: Vec::new(),
             h_wts_hot: Vec::new(),
+            matched_shared_w13_ksplits: None,
+            matched_graph_stages: Vec::new(),
+            matched_graph_stages_initialized: false,
+            matched_eager_kda_enabled: crate::matched_probe::eager_kda_capture_enabled()
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
+            matched_eager_shared_enabled: crate::matched_probe::eager_shared_capture_enabled()
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
+            matched_router_capture_enabled: crate::matched_probe::router_capture_enabled()
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
+            matched_moe_input_capture_enabled: crate::matched_probe::moe_input_capture_enabled()
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
             ksplit_autotune: std::collections::HashMap::new(),
             shared_w2_ksplit_autotune: std::collections::HashMap::new(),
+            ksplit_autotune_complete: false,
             int4_w13_n32_autotune: std::collections::HashMap::new(),
             int4_w2_n32_autotune: std::collections::HashMap::new(),
             int4_n32_autotune_complete: false,
@@ -34792,7 +36669,11 @@ impl GpuDecodeStore {
 
         // Validate the complete ranking and select whole experts by their
         // exact loaded capacity before deciding whether the soft tier is empty.
-        let occupied = hcs.cache.keys().copied().collect::<std::collections::HashSet<_>>();
+        let occupied = hcs
+            .cache
+            .keys()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
         let mut soft_plan = select_exact_hcs_slots(
             &ranking,
             &hcs.expert_slot_sizes,
@@ -34828,12 +36709,14 @@ impl GpuDecodeStore {
             ));
         }
 
-        let mut soft_alloc_bytes = soft_plan.iter().try_fold(0usize, |total, item| {
-            total
-                .checked_add(item.2)
-                .ok_or_else(|| "soft HCS packed byte overflow".to_string())
-        })
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let mut soft_alloc_bytes = soft_plan
+            .iter()
+            .try_fold(0usize, |total, item| {
+                total
+                    .checked_add(item.2)
+                    .ok_or_else(|| "soft HCS packed byte overflow".to_string())
+            })
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
         // Query actual VRAM and cap allocation to what's really available.
         // The Python-side budget was measured before reaching this point;
@@ -34929,8 +36812,7 @@ impl GpuDecodeStore {
             .map(|cal| cal.required_idle_free_mb(cal.short_tokens) as usize)
             .unwrap_or(safety_margin_mb);
         let max_chunk_bytes = soft_chunk_bytes.iter().copied().max().unwrap_or(0);
-        let startup_reload_guard_mb =
-            (max_chunk_bytes + (1024 * 1024) - 1) / (1024 * 1024);
+        let startup_reload_guard_mb = (max_chunk_bytes + (1024 * 1024) - 1) / (1024 * 1024);
         let startup_idle_floor_mb =
             startup_base_idle_floor_mb.saturating_add(startup_reload_guard_mb);
         log::info!(
@@ -37735,7 +39617,7 @@ impl GpuDecodeStore {
                         registration.index_head_dim * std::mem::size_of::<u16>(),
                         std::mem::size_of::<u16>(),
                     ],
-                    growth: crate::session_cache::SequenceStateGrowth::TokenRows {
+                    growth: crate::session_cache::SequenceStateGrowth::CompletedTokenRows {
                         logical_tokens_per_row: registration.index_kpool,
                         capacity_rows: pool_rows,
                         row_bytes: registration.index_head_dim * std::mem::size_of::<u16>(),
@@ -44405,6 +46287,22 @@ impl GpuDecodeStore {
                 label
             ));
         }
+        if let Some(bank) = &self.ordered_kda_projection {
+            return unsafe {
+                bank.norm
+                    .as_ref()
+                    .ok_or("common RMSNorm not admitted")?
+                    .enqueue(
+                        output_ptr,
+                        input_ptr,
+                        weight_ptr,
+                        width,
+                        1,
+                        graph.eps,
+                        *self.device.cu_stream(),
+                    )
+            };
+        }
         let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
         let threads = u32::try_from(width.min(1024).next_power_of_two().max(32))
             .map_err(|_| format!("{} RMSNorm threads exceed u32", label))?;
@@ -44577,6 +46475,37 @@ impl GpuDecodeStore {
         path_clock_base: Option<usize>,
         label: &str,
     ) -> Result<(), String> {
+        self.launch_deepseek_v4_hc_prepare_observed_for_graph(
+            graph,
+            state_ptr,
+            hidden_out_ptr,
+            function_wid,
+            base_ptr,
+            scale_ptr,
+            mult,
+            sinkhorn_iters,
+            hc_eps,
+            path_clock_base,
+            label,
+            None,
+        )
+    }
+
+    fn launch_deepseek_v4_hc_prepare_observed_for_graph(
+        &self,
+        graph: &GpuDecodeGraph,
+        state_ptr: u64,
+        hidden_out_ptr: u64,
+        function_wid: usize,
+        base_ptr: u64,
+        scale_ptr: u64,
+        mult: usize,
+        sinkhorn_iters: usize,
+        hc_eps: f32,
+        path_clock_base: Option<usize>,
+        label: &str,
+        observed: Option<&crate::matched_probe::Target>,
+    ) -> Result<(), String> {
         use cudarc::driver::LaunchConfig;
         let workspace = graph
             .deepseek_v4_decode_workspace
@@ -44605,6 +46534,23 @@ impl GpuDecodeStore {
             || workspace.max_hc_mix_width < mix_width
         {
             return Err(format!("{} HC prepare contract mismatch", label));
+        }
+        if let Some(target) = observed {
+            target.hc_prepare_operands(
+                0,
+                1,
+                graph.hidden_size,
+                mult,
+                state_ptr,
+                function.ptr,
+                base_ptr,
+                scale_ptr,
+                *self.device.cu_stream(),
+                "scalar_postscale",
+                graph.eps,
+                hc_eps,
+                sinkhorn_iters,
+            )?;
         }
         let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
         let reduction_threads = u32::try_from(flat.min(1024).next_power_of_two().max(32))
@@ -44643,27 +46589,58 @@ impl GpuDecodeStore {
                 )
                 .map_err(|error| format!("{} HC inverse RMS: {:?}", label, error))?;
             mark_hc(1, "deepseek-v4-hc-inv-rms-end")?;
-            kernels
-                .deepseek_v4_hc_project
-                .clone()
-                .launch(
-                    LaunchConfig {
-                        grid_dim: (mix_width as u32, 1, 1),
-                        block_dim: (reduction_threads, 1, 1),
-                        shared_mem_bytes: reduction_threads * 4,
-                    },
-                    (
-                        *workspace.d_hc_mixes.device_ptr(),
-                        state_ptr,
-                        function.ptr,
-                        *workspace.d_hc_inv_rms.device_ptr(),
-                        graph.hidden_size as i32,
-                        mult as i32,
-                        mix_width as i32,
-                    ),
-                )
-                .map_err(|error| format!("{} HC projection: {:?}", label, error))?;
+            if let Some(target) = observed {
+                target.device(
+                    "inverse-rms.f32",
+                    *workspace.d_hc_inv_rms.device_ptr(),
+                    4,
+                    *self.device.cu_stream(),
+                )?;
+            }
+            if let Some(bank) = &self.ordered_kda_projection {
+                bank.enqueue_hc(
+                    state_ptr,
+                    *workspace.d_hc_inv_rms.device_ptr(),
+                    function.ptr,
+                    *workspace.d_hc_mixes.device_ptr(),
+                    mix_width,
+                    flat,
+                    1,
+                    *self.device.cu_stream(),
+                )?;
+            } else {
+                kernels
+                    .deepseek_v4_hc_project
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (mix_width as u32, 1, 1),
+                            block_dim: (reduction_threads, 1, 1),
+                            shared_mem_bytes: reduction_threads * 4,
+                        },
+                        (
+                            *workspace.d_hc_mixes.device_ptr(),
+                            state_ptr,
+                            function.ptr,
+                            *workspace.d_hc_inv_rms.device_ptr(),
+                            graph.hidden_size as i32,
+                            mult as i32,
+                            mix_width as i32,
+                        ),
+                    )
+                    .map_err(|error| format!("{} HC projection: {:?}", label, error))?;
+            }
             mark_hc(2, "deepseek-v4-hc-projection-end")?;
+            if let Some(target) = observed {
+                target.device(
+                    "mixes.f32",
+                    *workspace.d_hc_mixes.device_ptr(),
+                    mix_width
+                        .checked_mul(4)
+                        .ok_or("HC observed mix extent overflow")?,
+                    *self.device.cu_stream(),
+                )?;
+            }
             kernels
                 .deepseek_v4_hc_prepare
                 .clone()
@@ -44687,6 +46664,30 @@ impl GpuDecodeStore {
                 )
                 .map_err(|error| format!("{} HC mix preparation: {:?}", label, error))?;
             mark_hc(3, "deepseek-v4-hc-sinkhorn-end")?;
+            if let Some(target) = observed {
+                target.device(
+                    "pre.f32",
+                    *workspace.d_hc_pre.device_ptr(),
+                    mult.checked_mul(4)
+                        .ok_or("HC observed pre extent overflow")?,
+                    *self.device.cu_stream(),
+                )?;
+                target.device(
+                    "post.f32",
+                    *workspace.d_hc_post.device_ptr(),
+                    mult.checked_mul(4)
+                        .ok_or("HC observed post extent overflow")?,
+                    *self.device.cu_stream(),
+                )?;
+                target.device(
+                    "comb.f32",
+                    *workspace.d_hc_comb.device_ptr(),
+                    mult.checked_mul(mult)
+                        .and_then(|n| n.checked_mul(4))
+                        .ok_or("HC observed comb extent overflow")?,
+                    *self.device.cu_stream(),
+                )?;
+            }
             let reduce_kernel = if self.deepseek_v4_hc_tiled {
                 &kernels.deepseek_v4_hc_reduce_tiled
             } else {
@@ -45254,7 +47255,10 @@ impl GpuDecodeStore {
             )
         };
         if join_record != cuda_sys::CUresult::CUDA_SUCCESS {
-            return Err(format!("{} parallel WKV join record: {:?}", label, join_record));
+            return Err(format!(
+                "{} parallel WKV join record: {:?}",
+                label, join_record
+            ));
         }
         let join_wait = unsafe {
             cuda_sys::lib().cuStreamWaitEvent(
@@ -46692,44 +48696,43 @@ impl GpuDecodeStore {
         }
         mark_prefix(5, "deepseek-v4-hc-input-norm-end")?;
         if diagnostic_active && graph.validation_decode_steps == 0 {
-            let native_plane_hashes =
-                |prefix: &str,
-                 cache: &DeepseekV4NativeCacheRegistration,
-                 rows: usize|
-                 -> serde_json::Value {
-                    let rows = rows.min(cache.rows);
-                    let code_stride = if cache.code_bits == 8 {
-                        cache.quant_cols
-                    } else {
-                        cache.width.div_ceil(2)
-                    };
-                    let scale_stride = cache.quant_cols.div_ceil(cache.block_size);
-                    let tail_stride = if cache.code_bits == 8 {
-                        cache.width.saturating_sub(cache.quant_cols)
-                    } else {
-                        0
-                    };
-                    serde_json::json!({
-                        "rows": rows,
-                        "codes": debug_hash_device_region_json(
-                            &format!("{}_codes", prefix),
-                            cache.codes_ptr,
-                            rows.saturating_mul(code_stride),
-                        ),
-                        "scale_exponents": debug_hash_device_region_json(
-                            &format!("{}_scale_exponents", prefix),
-                            cache.scale_exponents_ptr,
-                            rows.saturating_mul(scale_stride),
-                        ),
-                        "tail": debug_hash_device_region_json(
-                            &format!("{}_tail", prefix),
-                            cache.tail_ptr,
-                            rows
-                                .saturating_mul(tail_stride)
-                                .saturating_mul(std::mem::size_of::<u16>()),
-                        ),
-                    })
+            let native_plane_hashes = |prefix: &str,
+                                       cache: &DeepseekV4NativeCacheRegistration,
+                                       rows: usize|
+             -> serde_json::Value {
+                let rows = rows.min(cache.rows);
+                let code_stride = if cache.code_bits == 8 {
+                    cache.quant_cols
+                } else {
+                    cache.width.div_ceil(2)
                 };
+                let scale_stride = cache.quant_cols.div_ceil(cache.block_size);
+                let tail_stride = if cache.code_bits == 8 {
+                    cache.width.saturating_sub(cache.quant_cols)
+                } else {
+                    0
+                };
+                serde_json::json!({
+                    "rows": rows,
+                    "codes": debug_hash_device_region_json(
+                        &format!("{}_codes", prefix),
+                        cache.codes_ptr,
+                        rows.saturating_mul(code_stride),
+                    ),
+                    "scale_exponents": debug_hash_device_region_json(
+                        &format!("{}_scale_exponents", prefix),
+                        cache.scale_exponents_ptr,
+                        rows.saturating_mul(scale_stride),
+                    ),
+                    "tail": debug_hash_device_region_json(
+                        &format!("{}_tail", prefix),
+                        cache.tail_ptr,
+                        rows
+                            .saturating_mul(tail_stride)
+                            .saturating_mul(std::mem::size_of::<u16>()),
+                    ),
+                })
+            };
             let raw_rows = graph.kv_current_pos.min(v4.sliding_window);
             let compressed_rows = if v4.compress_ratio == 0 {
                 0
@@ -46845,7 +48848,11 @@ impl GpuDecodeStore {
                 v4.indexer
                     .as_ref()
                     .map(|indexer| indexer.index_topk)
-                    .or_else(|| v4.compressor.as_ref().map(|compressor| compressor.cache_rows))
+                    .or_else(|| {
+                        v4.compressor
+                            .as_ref()
+                            .map(|compressor| compressor.cache_rows)
+                    })
                     .unwrap_or(0),
             );
             diagnostic_entries.push(serde_json::json!({
@@ -47071,7 +49078,11 @@ impl GpuDecodeStore {
             )?;
         }
 
-        self.gemv_bf16_internal(wq_b, q_lora_ptr, *workspace.d_projected_query.device_ptr())?;
+        self.dsa_owner_query_bf16_internal(
+            wq_b,
+            q_lora_ptr,
+            *workspace.d_projected_query.device_ptr(),
+        )?;
         self.gemv_bf16_internal(wk, hidden_ptr, *workspace.d_raw_key.device_ptr())?;
         self.gemv_bf16_internal(
             weights_proj,
@@ -47276,6 +49287,355 @@ impl GpuDecodeStore {
         )
     }
 
+    fn record_indexer_stages(
+        &self,
+        graph: &GpuDecodeGraph,
+        layer: usize,
+        position: u64,
+        sequence: u64,
+        input: u64,
+        frame: IndexObservationFrame,
+    ) -> Result<(), String> {
+        if !graph
+            .matched_graph_stages
+            .iter()
+            .any(|s| s.layer == layer && s.operation.starts_with("decode_graph_index_"))
+        {
+            return Ok(());
+        }
+        let reg = graph
+            .layers
+            .get(layer)
+            .and_then(|l| l.dsa_indexer.as_ref())
+            .ok_or("index observed registration absent")?;
+        let owner = graph
+            .dsa_indexer_owners
+            .iter()
+            .find(|r| r.owner_layer_idx == layer)
+            .ok_or("index observed owner absent")?;
+        if reg.owner_layer_idx != layer {
+            return Err("index observation cannot borrow another owner".into());
+        }
+        let work = graph
+            .dsa_indexer_workspace
+            .as_ref()
+            .ok_or("index observed workspace absent")?;
+        let mut math_mode = 0u32;
+        let math_status = unsafe {
+            cublas_sys::lib().cublasGetMathMode(
+                *self.blas.handle(),
+                (&mut math_mode as *mut u32).cast::<cublas_sys::cublasMath_t>(),
+            )
+        };
+        if math_status != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+            return Err(format!(
+                "query projection math-mode observation: {math_status:?}"
+            ));
+        }
+        let keys = if reg.index_kpool_compress {
+            *owner
+                .d_pool_key_cache
+                .as_ref()
+                .ok_or("index pooled keys absent")?
+                .device_ptr()
+        } else {
+            *owner.d_key_cache.device_ptr()
+        };
+        for (name, ptr) in [
+            ("query_input", input),
+            ("query_input_f32", *graph.d_gqa_q.device_ptr()),
+            (
+                "query_weights",
+                graph
+                    .weights
+                    .get(owner.weight_ids.wq_b)
+                    .ok_or("index query matrix absent")?
+                    .ptr,
+            ),
+            ("query_raw", *work.d_projected_query.device_ptr()),
+            ("hidden", *graph.d_hidden.device_ptr()),
+            ("query", *work.d_query_rope.device_ptr()),
+            ("head_weights", *work.d_head_weights.device_ptr()),
+            ("keys", keys),
+            ("scores", *work.d_scores.device_ptr()),
+            ("position", position),
+            ("sequence", sequence),
+        ] {
+            let operation = format!("decode_graph_index_{name}");
+            if let Some(stage) = graph
+                .matched_graph_stages
+                .iter()
+                .find(|s| s.layer == layer && s.operation == operation)
+            {
+                match frame {
+                    IndexObservationFrame::Graph(_) => &stage.index_graph_math_mode,
+                    IndexObservationFrame::Eager(_) => &stage.index_eager_math_mode,
+                }
+                .store(math_mode as usize, std::sync::atomic::Ordering::Relaxed);
+                match frame {
+                    IndexObservationFrame::Graph(segment) => MatchedGraphStageBuffer::record(
+                        graph,
+                        layer,
+                        &operation,
+                        ptr,
+                        stage.buffer.bytes,
+                        segment,
+                        *self.device.cu_stream(),
+                    )?,
+                    IndexObservationFrame::Eager(height) => MatchedGraphStageBuffer::record_eager(
+                        graph,
+                        layer,
+                        &operation,
+                        ptr,
+                        stage.buffer.bytes,
+                        height,
+                        *self.device.cu_stream(),
+                    )?,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn observe_mla_indexer(
+        &self,
+        target: &crate::matched_probe::Target,
+        graph: &GpuDecodeGraph,
+        layer: usize,
+        position: usize,
+        d_position: u64,
+        d_sequence: u64,
+    ) -> Result<(), String> {
+        let registration = graph
+            .layers
+            .get(layer)
+            .and_then(|l| l.dsa_indexer.as_ref())
+            .ok_or("observed MLA index registration absent")?;
+        let resource = graph
+            .dsa_indexer_owners
+            .iter()
+            .find(|r| r.owner_layer_idx == layer)
+            .ok_or("observed MLA index owner absent")?;
+        let workspace = graph
+            .dsa_indexer_workspace
+            .as_ref()
+            .ok_or("observed MLA index workspace absent")?;
+        if registration.owner_layer_idx != layer {
+            return Err("index observation requires actual owner".into());
+        }
+        let prefix = position
+            .checked_add(1)
+            .ok_or("observed index position overflow")?;
+        if prefix > resource.max_context_tokens {
+            return Err("observed index prefix exceeds actual cache".into());
+        }
+        let width = registration
+            .index_n_heads
+            .checked_mul(registration.index_head_dim)
+            .ok_or("observed index query width overflow")?;
+        let stream = *self.device.cu_stream();
+        crate::mla_probe::block(
+            target,
+            "indexer-raw-query.bf16",
+            *workspace.d_projected_query.device_ptr(),
+            width,
+            2,
+            stream,
+        )?;
+        crate::mla_probe::block(
+            target,
+            "indexer-rope-query.bf16",
+            *workspace.d_query_rope.device_ptr(),
+            width,
+            2,
+            stream,
+        )?;
+        crate::mla_probe::block(
+            target,
+            "indexer-head-weights.bf16",
+            *workspace.d_head_weights.device_ptr(),
+            registration.index_n_heads,
+            2,
+            stream,
+        )?;
+        crate::mla_probe::block(
+            target,
+            "indexer-raw-key.bf16",
+            *workspace.d_raw_key.device_ptr(),
+            registration.index_head_dim,
+            2,
+            stream,
+        )?;
+        crate::mla_probe::block(
+            target,
+            "indexer-key-prefix.bf16",
+            *resource.d_key_cache.device_ptr(),
+            prefix
+                .checked_mul(registration.index_head_dim)
+                .ok_or("observed index key prefix overflow")?,
+            2,
+            stream,
+        )?;
+        let score_prefix = if registration.index_kpool_compress {
+            crate::mla_probe::causal_score_count(prefix, registration.index_kpool)?
+        } else {
+            prefix
+        };
+        crate::mla_probe::logical_block(
+            target,
+            "indexer-scores.f32",
+            *workspace.d_scores.device_ptr(),
+            score_prefix,
+            4,
+            stream,
+        )?;
+        if registration.index_kpool_compress {
+            let pool = resource
+                .d_pool_key_cache
+                .as_ref()
+                .ok_or("observed pooled index key cache absent")?;
+            let gates = resource
+                .d_gate_cache
+                .as_ref()
+                .ok_or("observed pooled index gate cache absent")?;
+            crate::mla_probe::logical_block(
+                target,
+                "indexer-pool-key-prefix.bf16",
+                *pool.device_ptr(),
+                score_prefix
+                    .checked_mul(registration.index_head_dim)
+                    .ok_or("observed pooled key extent overflow")?,
+                2,
+                stream,
+            )?;
+            crate::mla_probe::block(
+                target,
+                "indexer-gate-prefix.bf16",
+                *gates.device_ptr(),
+                prefix
+                    .checked_mul(registration.index_head_dim)
+                    .ok_or("observed gate prefix overflow")?,
+                2,
+                stream,
+            )?;
+            crate::mla_probe::block(
+                target,
+                "indexer-raw-gate.bf16",
+                *workspace.d_raw_gate.device_ptr(),
+                registration.index_head_dim,
+                2,
+                stream,
+            )?;
+            crate::mla_probe::block(
+                target,
+                "indexer-pool-count.i32",
+                *workspace.d_pool_count.device_ptr(),
+                1,
+                4,
+                stream,
+            )?;
+            for (name, id) in [
+                (
+                    "pool-ape",
+                    resource
+                        .weight_ids
+                        .kpool_ape
+                        .ok_or("observed index APE weight absent")?,
+                ),
+                (
+                    "weight-kpool_gate",
+                    resource
+                        .weight_ids
+                        .kpool_gate
+                        .ok_or("observed index gate matrix absent")?,
+                ),
+            ] {
+                let w = &graph.weights[id];
+                if w.dtype != 0 {
+                    return Err(format!(
+                        "observed index {name} actual dtype{} is not BF16",
+                        w.dtype
+                    ));
+                }
+                crate::mla_probe::block(
+                    target,
+                    &format!("indexer-{name}.bf16"),
+                    w.ptr,
+                    w.rows
+                        .checked_mul(w.cols)
+                        .ok_or("observed pooled parameter extent overflow")?,
+                    2,
+                    stream,
+                )?;
+            }
+        }
+        crate::mla_probe::block(target, "indexer-position.i32", d_position, 1, 4, stream)?;
+        crate::mla_probe::block(target, "indexer-sequence.i32", d_sequence, 1, 4, stream)?;
+        let weights = &graph.weights;
+        let mut shapes = serde_json::Map::new();
+        for (name, id) in [
+            ("wq_b", resource.weight_ids.wq_b),
+            ("wk", resource.weight_ids.wk),
+            ("weights_proj", resource.weight_ids.weights_proj),
+            ("norm-weight", resource.weight_ids.k_norm_weight),
+            ("norm-bias", resource.weight_ids.k_norm_bias),
+        ] {
+            let w = &weights[id];
+            if w.dtype != 0 {
+                return Err(format!(
+                    "actual observed index weight {name} has dtype{}, not BF16",
+                    w.dtype
+                ));
+            }
+            let file = match name {
+                "norm-weight" => "indexer-norm-weight.bf16".to_string(),
+                "norm-bias" => "indexer-norm-bias.bf16".to_string(),
+                _ => format!("indexer-weight-{name}.bf16"),
+            };
+            crate::mla_probe::block(
+                target,
+                &file,
+                w.ptr,
+                w.rows
+                    .checked_mul(w.cols)
+                    .ok_or("observed index weight extent overflow")?,
+                2,
+                stream,
+            )?;
+            shapes.insert(name.into(), serde_json::json!([w.rows, w.cols]));
+        }
+        if registration.qk_rope_head_dim > 0 {
+            let cos = graph
+                .d_rope_cos
+                .as_ref()
+                .ok_or("observed index cos absent")?;
+            let sin = graph
+                .d_rope_sin
+                .as_ref()
+                .ok_or("observed index sin absent")?;
+            crate::mla_probe::row(
+                target,
+                "indexer-rope-cos.f32",
+                *cos.device_ptr(),
+                position,
+                registration.qk_rope_head_dim / 2,
+                4,
+                stream,
+            )?;
+            crate::mla_probe::row(
+                target,
+                "indexer-rope-sin.f32",
+                *sin.device_ptr(),
+                position,
+                registration.qk_rope_head_dim / 2,
+                4,
+                stream,
+            )?;
+        }
+        target.write("indexer-operands.json",serde_json::to_vec_pretty(&serde_json::json!({"path":"actual_eager_owner_before_topk","layer":layer,"absolute_row":position,"prefix":prefix,"score_prefix":score_prefix,"pooled":registration.index_kpool_compress,"pool_ratio":registration.index_kpool,"always_select_tail":registration.index_kpool_always_select_tail,"raw_output_topk":resource.topk_capacity,"scoring_key_file":if registration.index_kpool_compress{"indexer-pool-key-prefix.bf16"}else{"indexer-key-prefix.bf16"},"heads":registration.index_n_heads,"head_dim":registration.index_head_dim,"rope_dim":registration.qk_rope_head_dim,"layer_norm_eps":DSA_INDEXER_LAYER_NORM_EPS,"projection_shapes":shapes,"score_mode":"LiveFused","scores_scope":"actual live causal prefix before top-k, not allocated-capacity padding","device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?.as_slice())?;
+        Ok(())
+    }
+
     fn execute_dsa_owner_scores_graphable_for_graph(
         &self,
         graph: &GpuDecodeGraph,
@@ -47411,7 +49771,11 @@ impl GpuDecodeStore {
             )?;
         }
 
-        self.gemv_bf16_internal(wq_b, q_lora_ptr, *workspace.d_projected_query.device_ptr())?;
+        self.dsa_owner_query_bf16_internal(
+            wq_b,
+            q_lora_ptr,
+            *workspace.d_projected_query.device_ptr(),
+        )?;
         self.gemv_bf16_internal(wk, hidden_ptr, *workspace.d_raw_key.device_ptr())?;
         self.gemv_bf16_internal(
             weights_proj,
@@ -48051,6 +50415,198 @@ impl GpuDecodeStore {
             d_indices_ptr,
             topk_capacity,
         })
+    }
+
+    fn launch_common_mla_for_layer(
+        &self,
+        graph: &GpuDecodeGraph,
+        layer_idx: usize,
+        capturing: bool,
+        graph_segment: Option<usize>,
+        actual_eager_height: Option<usize>,
+    ) -> Result<(), String> {
+        use crate::{
+            stable_mla_gemm::{Element, Span},
+            stable_mla_ops::{Codec, Gather},
+            stable_mla_path::{Geometry, Inputs, Work},
+        };
+        let shared = self.common_mla.as_ref().ok_or("common MLA bank absent")?;
+        let mut bank = shared.lock().map_err(|_| "common MLA bank poisoned")?;
+        let layer = bank.layer(layer_idx)?;
+        let d = layer.dimensions;
+        let selected = Self::resolve_dsa_selected_indices_for_layer(graph, layer_idx)?;
+        let selected_owner = match (
+            graph
+                .dsa_indexer_owners
+                .iter()
+                .find(|r| r.owner_layer_idx == selected.owner_layer_idx),
+            graph
+                .dsa_indexshare_replicas
+                .iter()
+                .find(|r| r.owner_layer_idx == selected.owner_layer_idx),
+        ) {
+            (Some(r), None) => &r.d_topk_indices,
+            (None, Some(r)) => &r.d_topk_indices,
+            _ => return Err("common MLA requires one actual selected-index owner".into()),
+        };
+        if *selected_owner.device_ptr() != selected.d_indices_ptr {
+            return Err("common MLA selected pointer differs from retained allocation".into());
+        }
+        let g = Geometry {
+            heads: d.heads,
+            ccd: d.ccd,
+            rope: d.rope,
+            values: d.values,
+            slots: selected.topk_capacity,
+            codec: match graph.kv_format {
+                7 => Codec::K6,
+                9 => Codec::K4,
+                _ => return Err("common MLA requires actual K4/K6 cache".into()),
+            },
+        };
+        let e = g.work_elements(1)?;
+        let scratch = self
+            .common_mla_decode
+            .as_ref()
+            .ok_or("common MLA actual decode scratch absent")?;
+        let positions = graph
+            .d_graph_pos
+            .as_ref()
+            .ok_or("common MLA real device position absent")?;
+        let scale = match graph.layers.get(layer_idx).map(|l| &l.attn) {
+            Some(GpuAttnConfig::MLA { sm_scale, .. }) => *sm_scale,
+            _ => return Err("common MLA layer descriptor absent".into()),
+        };
+        let stream = *self.device.cu_stream();
+        let input = Inputs {
+            q_abs: Span::f32(&graph.d_mla_q_absorbed, 0, d.heads * d.ccd)?,
+            q_rope: if d.rope == 0 {
+                None
+            } else {
+                Some(Span::f32(&graph.d_gqa_v, 0, d.heads * d.rope)?)
+            },
+            ckv: layer.compressed_view()?,
+            kpe: layer.positional_view()?,
+            selected: Span::i32(selected_owner, 0, g.slots)?,
+            positions: Span::i32(positions, 0, 1)?,
+            wvc: layer.weight_view()?,
+        };
+        let query = Span::f32(&scratch.query_projected, 0, e[1].max(e[5]))?;
+        let projected = Span::f32(&scratch.query_projected, 0, e[5])?;
+        let work = Work {
+            gathered: Span::f32(&scratch.gathered, 0, e[0])?,
+            query,
+            scores: Span::f32(&scratch.scores, 0, e[2])?,
+            weights: Span::f32(&scratch.weights, 0, e[3])?,
+            attention: Span::f32(&graph.d_mla_attn_out, 0, e[4])?,
+            projected,
+            output: Span::bf16(graph.d_scratch.as_ref(), 0, e[6])?,
+        };
+        let workspace = unsafe {
+            Span::region(
+                &graph.d_fp32_scratch,
+                0,
+                bank.workspace_capacity,
+                Element::Bytes,
+            )?
+        };
+        let gather = Gather {
+            row_start: 0,
+            rows: 1,
+            heads: d.heads,
+            ccd: d.ccd,
+            rope: d.rope,
+            slots: g.slots,
+            context: graph.kv_max_seq,
+            q_abs_row_stride: d.heads * d.ccd,
+            q_abs_head_stride: d.ccd,
+            q_rope_row_stride: d.heads * d.rope,
+            q_rope_head_stride: d.rope,
+            codec: g.codec,
+        };
+        if capturing != graph_segment.is_some() || capturing == actual_eager_height.is_some() {
+            return Err(
+                "MLA diagnostic execution frame differs from actual capture/eager mode".into(),
+            );
+        }
+        unsafe {
+            if !capturing {
+                bank.prepare(
+                    layer_idx,
+                    g,
+                    gather,
+                    &input,
+                    &work,
+                    Some(&workspace),
+                    scale,
+                    stream,
+                )?;
+            }
+            if graph
+                .matched_graph_stages
+                .iter()
+                .any(|s| s.layer == layer_idx && s.operation.starts_with("decode_graph_mla_"))
+            {
+                let observer =
+                    |stage: &str, span: &Span<'_>, layout: crate::matched_mla_stage::Layout| {
+                        let operation = format!("decode_graph_mla_{stage}");
+                        let (dtype, size) = crate::matched_mla_stage::dtype(span.element())?;
+                        let ranges = layout.ranges(0, size)?;
+                        if ranges.len() != 1 {
+                            return Err(
+                                "actual singleton MLA observed source is not contiguous".into()
+                            );
+                        }
+                        if let Some(record) = graph
+                            .matched_graph_stages
+                            .iter()
+                            .find(|s| s.layer == layer_idx && s.operation == operation)
+                        {
+                            if record.dtype != dtype {
+                                return Err(
+                                    "MLA observed source dtype differs from admitted record".into(),
+                                );
+                            }
+                        }
+                        let part = span.subview(ranges[0].0, ranges[0].1)?;
+                        if let Some(segment) = graph_segment {
+                            MatchedGraphStageBuffer::record(
+                                graph,
+                                layer_idx,
+                                &operation,
+                                part.pointer(),
+                                ranges[0].1,
+                                segment,
+                                stream,
+                            )?;
+                        }
+                        if let Some(height) = actual_eager_height {
+                            MatchedGraphStageBuffer::record_eager(
+                                graph,
+                                layer_idx,
+                                &operation,
+                                part.pointer(),
+                                ranges[0].1,
+                                height,
+                                stream,
+                            )?;
+                        }
+                        Ok(())
+                    };
+                bank.enqueue_observed(
+                    g,
+                    gather,
+                    &input,
+                    &work,
+                    Some(&workspace),
+                    scale,
+                    stream,
+                    Some(&observer),
+                )
+            } else {
+                bank.enqueue(g, gather, &input, &work, Some(&workspace), scale, stream)
+            }
+        }
     }
 
     fn launch_mla_sparse_attention_graphable_for_layer(
@@ -49698,12 +52254,30 @@ impl GpuDecodeStore {
     /// The returned engine can run prefill without any Python/GIL involvement.
     #[allow(dead_code)]
     pub fn create_prefill_engine(
-        &self,
+        &mut self,
         max_tokens: usize,
     ) -> Result<crate::gpu_prefill::PrefillEngine, String> {
         use crate::gpu_prefill::*;
 
+        if crate::kda_prefix_owner::shared_kda_requested()? {
+            // Loaded Torch parameter producers ran before this cold setup.
+            // Explicitly finish them before a nonblocking Rust stream reads
+            // their tensors; this is startup only, never a token hot-path wait.
+            self.device.bind_to_thread().map_err(|e| e.to_string())?;
+            let rc = unsafe { cuda_sys::lib().cuCtxSynchronize() };
+            if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("selected loaded parameter readiness: {rc:?}"));
+            }
+        }
         let graph = self.graph.as_ref().ok_or("GpuDecodeStore not configured")?;
+        if self.matched_hqq_rounding.is_some()
+            && (graph.glm5_hc_mean_mult.is_none()
+                || self.draft.is_some()
+                || self.dspark.is_some()
+                || self.cuda_graphs_disabled())
+        {
+            return Err("HQQ reconstruction experiment requires GLM HQQ6, ordinary graphs and no draft model".into());
+        }
         let target_layers = graph.layers.get(..graph.num_layers).ok_or_else(|| {
             format!(
                 "target layer count {} exceeds registered layer count {}",
@@ -49756,17 +52330,9 @@ impl GpuDecodeStore {
         let kernels = PrefillKernels::load(self.device.clone())?;
 
         // Create streams
-        let prefill_stream = unsafe {
-            let mut stream: cuda_sys::CUstream = std::ptr::null_mut();
-            let err = cuda_sys::lib().cuStreamCreate(
-                &mut stream,
-                cuda_sys::CUstream_flags::CU_STREAM_NON_BLOCKING as u32,
-            );
-            if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(format!("Create prefill stream: {:?}", err));
-            }
-            stream
-        };
+        let prefill_stream_owner =
+            crate::gpu_prefill::PrefillComputeStream::create(self.device.clone())?;
+        let prefill_stream = prefill_stream_owner.handle();
         let copy_stream = unsafe {
             let mut stream: cuda_sys::CUstream = std::ptr::null_mut();
             let err = cuda_sys::lib().cuStreamCreate(
@@ -50063,12 +52629,17 @@ impl GpuDecodeStore {
         let mut routed_sf = 1.0f32;
         let mut moe_gated = true;
         let mut moe_activation = 0u8;
-        let mut max_expert_bits = graph.expert_bits;
+        // Capacity must cover every registered expert on this store, not just
+        // the first layer used below to obtain routing metadata.
+        let max_expert_bits = max_prefill_expert_bits(
+            graph.expert_bits,
+            target_moe_layers
+                .iter()
+                .filter_map(|layer| layer.as_ref())
+                .map(|layer| layer.experts.iter().map(|expert| expert.bits)),
+        );
         for ml in target_moe_layers {
             if let Some(m) = ml {
-                for expert in &m.experts {
-                    max_expert_bits = max_expert_bits.max(expert.bits);
-                }
                 n_routed = m.num_experts;
                 n_topk = m.topk;
                 scoring_func = m.scoring_func;
@@ -50082,6 +52653,11 @@ impl GpuDecodeStore {
 
         let has_linear_attention = layer_types.iter().any(|&t| t == 3);
 
+        let full_history_gqa_kv_dim = prefill_full_history_gqa_kv_dim(
+            target_layers
+                .iter()
+                .map(|layer| (&layer.attn, layer.deepseek_v4.is_some())),
+        )?;
         let mut config = PrefillModelConfig {
             hidden_size: graph.hidden_size,
             intermediate_size: graph
@@ -50096,6 +52672,7 @@ impl GpuDecodeStore {
             head_dim,
             max_gqa_q_dim: max_gqa_q_dim.max(num_q_heads.saturating_mul(head_dim)),
             max_gqa_kv_dim: max_gqa_kv_dim.max(num_kv_heads.saturating_mul(head_dim)),
+            full_history_gqa_kv_dim,
             vocab_size: graph.vocab_size,
             rms_norm_eps: graph.eps,
             max_seq_len: max_tokens,
@@ -51975,7 +54552,23 @@ impl GpuDecodeStore {
         } else {
             graph.kv_max_seq_by_layer.clone()
         };
+        // BEGIN bounded model KDA diagnostic startup
+        let matched_kda_geometries: Vec<_> = layer_weights
+            .iter()
+            .filter_map(|w| w.kimi_delta.as_ref())
+            .map(|d| (d.num_heads, d.head_dim, d.gate_lower_bound))
+            .collect();
+        let matched_kda_intra = crate::matched_kda_model::ModelKdaDiagnostic::load(
+            self.device.clone(),
+            &matched_kda_geometries,
+        )?;
+        // END bounded model KDA diagnostic startup
         let mut engine = PrefillEngine {
+            selected_kda: None,
+            ordered_kda_projection: None,
+            ordered_mla_f32: None,
+            common_mla: None,
+
             device: self.device.clone(),
             kernels,
             trace: None,
@@ -52061,6 +54654,7 @@ impl GpuDecodeStore {
             retain_prefill_kv_for_active: false,
             active_stage_prefix_tokens: None,
             stream: prefill_stream,
+            prefill_stream_owner,
             copy_stream,
             cublas_handle,
             shared_cublas_handle,
@@ -52202,8 +54796,11 @@ impl GpuDecodeStore {
             last_cold_staging_failure: None,
             prefill_runtime_chunk_cap: None,
             active_prefill_prompt_tokens: 0,
+            matched_prefill_invocation: None,
+            matched_prefill_request_label: None,
             active_prefill_chunk_idx: 0,
             active_prefill_chunk_start: 0,
+            prefill_cancel_signal: None,
             dsa_prefill_workspace: None,
             dsa_mla_gather_autotune: std::cell::RefCell::new(std::collections::HashMap::new()),
             prefill_prescan_accuracy_enabled: false,
@@ -52343,6 +54940,9 @@ impl GpuDecodeStore {
             t_moe_scatter: std::cell::Cell::new(0.0),
             t_moe_shared: std::cell::Cell::new(0.0),
             fla: crate::gpu_prefill::load_fla(has_linear_attention, la_nv)?,
+            // BEGIN bounded model KDA diagnostic ownership
+            matched_kda_intra,
+            // END bounded model KDA diagnostic ownership
             d_fla_g_cumsum: None,
             d_fla_a: None,
             d_fla_ai: None,
@@ -52375,6 +54975,390 @@ impl GpuDecodeStore {
             prompt_hcs_prompt_tokens: 0,
         };
         engine.initialize_tileq_capture_from_env()?;
+        if crate::kda_prefix_owner::shared_kda_requested()? {
+            if self.selected_kda.is_some() {
+                return Err("selected KDA engine already constructed".into());
+            }
+            let reserve = engine
+                .safety_margin_mb
+                .checked_mul(1024 * 1024)
+                .ok_or("selected KDA safety bytes overflow")?;
+            let projection = crate::ordered_projection::load_serving(self.device.clone())?;
+            // Cold admission before any selected graph/calibration: validate all
+            // loaded projection formats; unsupported precision/corrections error.
+            for (layer, loaded) in graph.layers.iter().take(graph.num_layers).enumerate() {
+                if !matches!(loaded.attn, GpuAttnConfig::KimiDeltaAttention(_)) {
+                    continue;
+                }
+                let Some(HqqExecutionDescriptor::KimiDeltaAttention(hqq)) = &loaded.hqq_exec else {
+                    return Err(format!(
+                        "ordered KDA layer {layer} requires loaded HQQ6 descriptors"
+                    ));
+                };
+                if !loaded.hqq_prefill_sidecars.is_empty() {
+                    return Err(format!(
+                        "ordered KDA layer {layer} sidecar corrections are not qualified"
+                    ));
+                }
+                for (label, weight) in [
+                    ("q_proj", &hqq.q_proj),
+                    ("k_proj", &hqq.k_proj),
+                    ("v_proj", &hqq.v_proj),
+                    ("o_proj", &hqq.o_proj),
+                    ("f_a_proj", &hqq.f_a_proj),
+                    ("f_b_proj", &hqq.f_b_proj),
+                    ("b_proj", &hqq.b_proj),
+                    ("g_a_proj", &hqq.g_a_proj),
+                    ("g_b_proj", &hqq.g_b_proj),
+                ] {
+                    ordered_decode_layout(weight)
+                        .and_then(|layout| layout.validate())
+                        .map_err(|error| {
+                            format!(
+                                "ordered layer {layer} {label} admission: {error}; actual={}",
+                                hqq_tensor_exec_json(weight, label)
+                            )
+                        })?;
+                }
+                let pre = engine.layer_weights[layer]
+                    .kimi_delta
+                    .as_ref()
+                    .ok_or("ordered prefill KDA descriptor absent")?;
+                for weight in [
+                    &pre.q_proj,
+                    &pre.k_proj,
+                    &pre.v_proj,
+                    &pre.o_proj,
+                    &pre.f_a_proj,
+                    &pre.f_b_proj,
+                    &pre.b_proj,
+                    &pre.g_a_proj,
+                    &pre.g_b_proj,
+                ] {
+                    engine.ordered_kda_layout(weight)?.validate()?;
+                }
+            }
+
+            // Actual loaded Marlin expert formats are admitted before calibration
+            // and graph capture. BF16 validation/other precision retain their
+            // own existing execution family rather than pretending to be Marlin.
+            if matches!(graph.expert_bits, 4 | 8) {
+                if !graph.peer_experts.is_empty() || !graph.cpu_tail_workers.is_empty() {
+                    return Err("selected common Marlin experiment has not qualified peer or CPU-tail execution".into());
+                }
+                for (layer, moe) in graph
+                    .moe_layers
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, m)| m.as_ref().map(|m| (i, m)))
+                {
+                    let h = if moe.moe_input_size > 0 {
+                        moe.moe_input_size
+                    } else {
+                        graph.hidden_size
+                    };
+                    let gate = graph
+                        .weights
+                        .get(moe.gate_wid)
+                        .ok_or("common router gate registration missing")?;
+                    if gate.dtype != 0
+                        || gate.rows != moe.num_experts
+                        || gate.cols != graph.hidden_size
+                    {
+                        return Err(format!(
+                            "common router actual BF16 gate geometry mismatch at layer {layer}"
+                        ));
+                    }
+                    if let Some(id) = moe.shared_gate_wid {
+                        let gate = graph
+                            .weights
+                            .get(id)
+                            .ok_or("common shared gate registration missing")?;
+                        if gate.dtype != 0 || gate.rows != 1 || gate.cols != graph.hidden_size {
+                            return Err(format!("common shared gate requires one actual BF16 scalar projection at layer {layer}"));
+                        }
+                    }
+                    let n = graph
+                        .moe_intermediate_size
+                        .checked_mul(if moe.gated_experts { 2 } else { 1 })
+                        .ok_or("common expert W13 extent overflow")?;
+                    if !canonical_ungraphed_quantized_moe_supported(
+                        graph.expert_bits,
+                        moe.activation_type,
+                        moe.gated_experts,
+                        moe.moe_input_size,
+                    ) {
+                        return Err(format!("selected common Marlin experiment requires its qualified canonical gated-SiLU/nonlatent expert capability at layer {layer}"));
+                    }
+                    if let Some(shared) = &moe.shared {
+                        if !matches!(shared.bits, 4 | 8) {
+                            return Err(format!("selected common Marlin experiment requires qualified shared Marlin precision at layer {layer}"));
+                        }
+                        let inter = graph.shared_expert_intermediate_size;
+                        for (label, rows, cols, packed, scales) in [
+                            (
+                                "sharedW13",
+                                inter.checked_mul(2).ok_or("shared W13 extent overflow")?,
+                                graph.hidden_size,
+                                shared.w13_packed_bytes,
+                                shared.w13_scales_bytes,
+                            ),
+                            (
+                                "sharedW2",
+                                graph.hidden_size,
+                                inter,
+                                shared.w2_packed_bytes,
+                                shared.w2_scales_bytes,
+                            ),
+                        ] {
+                            let (pb, sb) = crate::common_marlin::Geometry {
+                                rows,
+                                cols,
+                                group: graph.group_size.min(cols),
+                                bits: shared.bits as usize,
+                            }
+                            .extents()?;
+                            if packed < pb || scales < sb {
+                                return Err(format!(
+                                    "selected {label} actual allocation too small at layer {layer}"
+                                ));
+                            }
+                        }
+                    }
+                    if moe.activation_type > 2 || (!moe.gated_experts && moe.activation_type != 1) {
+                        return Err(format!("common expert layer {layer} activation/gating combination is not admitted"));
+                    }
+                    for (eid, w) in moe.experts.iter().enumerate() {
+                        for (label, rows, cols, packed, scales) in [
+                            ("W13", n, h, w.w13_packed_bytes, w.w13_scales_bytes),
+                            (
+                                "W2",
+                                h,
+                                graph.moe_intermediate_size,
+                                w.w2_packed_bytes,
+                                w.w2_scales_bytes,
+                            ),
+                        ] {
+                            let (pb, sb) = crate::common_marlin::Geometry {
+                                rows,
+                                cols,
+                                group: graph.group_size.min(cols),
+                                bits: w.bits as usize,
+                            }
+                            .extents()
+                            .map_err(|e| format!("common expert {layer}/{eid}/{label}: {e}"))?;
+                            if packed < pb || scales < sb {
+                                return Err(format!("common expert {layer}/{eid}/{label}: actual source allocation too small"));
+                            }
+                        }
+                    }
+                }
+            }
+            let mut mla_rows = 0usize;
+            for (layer, loaded) in graph.layers.iter().take(graph.num_layers).enumerate() {
+                let GpuAttnConfig::MLA { q_lora_rank, .. } = &loaded.attn else {
+                    continue;
+                };
+                if *q_lora_rank == 0 || loaded.dsa_indexer.is_none() {
+                    return Err(format!("selected common MLA layer {layer} requires loaded sparse DSA/LoRA capability"));
+                }
+                if !loaded.hqq_prefill_sidecars.is_empty() {
+                    return Err(format!(
+                        "selected MLA layer {layer} exception sidecars are not qualified"
+                    ));
+                }
+                let Some(HqqExecutionDescriptor::Mla(hqq)) = &loaded.hqq_exec else {
+                    return Err(format!(
+                        "selected MLA layer {layer} requires actual HQQ6 descriptors"
+                    ));
+                };
+                let qa = hqq.q_a_proj.as_ref().ok_or("selected MLA Q-A absent")?;
+                let qb = hqq.q_b_proj.as_ref().ok_or("selected MLA Q-B absent")?;
+                for (label, weight) in [
+                    ("q_a", qa),
+                    ("q_b", qb),
+                    ("kv_a", &hqq.kv_a_proj_with_mqa),
+                    ("o", &hqq.o_proj),
+                ] {
+                    ordered_decode_layout(weight)?
+                        .validate()
+                        .map_err(|e| format!("selected MLA layer {layer} {label}: {e}"))?;
+                    mla_rows = mla_rows.max(weight.rows);
+                }
+                let pre = engine.layer_weights[layer]
+                    .mla_prefill
+                    .as_ref()
+                    .ok_or("selected prefill MLA descriptor absent")?;
+                for weight in [
+                    pre.q_a_proj.as_ref().ok_or("selected prefill qA absent")?,
+                    pre.q_b_proj.as_ref().ok_or("selected prefill qB absent")?,
+                    &pre.kv_a_proj_with_mqa,
+                    &pre.o_proj,
+                ] {
+                    engine.ordered_kda_layout(weight)?.validate()?;
+                }
+            }
+            if mla_rows > 0 {
+                let ops = crate::mla_f32::load_serving(self.device.clone())?;
+                self.ordered_mla_bf16_scratch = Some(
+                    self.device
+                        .alloc_zeros::<u16>(mla_rows)
+                        .map_err(|e| format!("alloc actual MLA BF16 co-output: {e}"))?,
+                );
+                self.ordered_mla_f32 = Some(ops.clone());
+                engine.ordered_mla_f32 = Some(ops);
+                let mut actual_geometries = Vec::new();
+                for (layer, loaded) in graph.layers.iter().take(graph.num_layers).enumerate() {
+                    let GpuAttnConfig::MLA {
+                        num_heads,
+                        ckv_cache_dim,
+                        qk_rope_dim,
+                        v_head_dim,
+                        ..
+                    } = &loaded.attn
+                    else {
+                        continue;
+                    };
+                    let selected = Self::resolve_dsa_selected_indices_for_layer(graph, layer)?;
+                    actual_geometries.push(crate::stable_mla_path::Geometry {
+                        heads: *num_heads,
+                        ccd: *ckv_cache_dim,
+                        rope: *qk_rope_dim,
+                        values: *v_head_dim,
+                        slots: selected.topk_capacity,
+                        codec: match graph.kv_format {
+                            7 => crate::stable_mla_ops::Codec::K6,
+                            9 => crate::stable_mla_ops::Codec::K4,
+                            _ => return Err("common MLA requires finalized K4/K6 cache".into()),
+                        },
+                    });
+                }
+                self.common_mla_decode = Some(CommonMlaDecodeScratch::allocate(
+                    &self.device,
+                    &actual_geometries,
+                )?);
+                let common_ops = self
+                    .common_mla_ops
+                    .as_ref()
+                    .ok_or("real MLA owners were not registered by model setup")?
+                    .clone();
+                // Reuse existing, disjoint attention-time scratch. Capacity is
+                // the minimum of actual decode storage and one prefill row.
+                let workspace_elements = graph.d_fp32_scratch.len().min(graph.hidden_size);
+                let workspace_bytes = workspace_elements
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or("common MLA workspace extent overflow")?;
+                let bank = crate::stable_mla_runtime::Bank::new(
+                    self.device.clone(),
+                    common_ops,
+                    self.common_mla_owners.clone(),
+                    workspace_bytes,
+                    graph.kv_max_seq,
+                    graph.kv_format,
+                )?;
+                log::info!("Common MLA actual resident mirror total: {} bytes; existing workspace capacity {} bytes",bank.resident_bytes()?,workspace_bytes);
+                let bank = Arc::new(std::sync::Mutex::new(bank));
+                self.common_mla = Some(bank.clone());
+                engine.common_mla = Some(bank);
+            }
+            let bank = crate::kda_prefix_owner::serving_kernel_bank(self.device.clone())?;
+            let mut descriptors = Vec::new();
+            let mut replaced = Vec::new();
+            for (layer, desc) in graph.layers.iter().take(graph.num_layers).enumerate() {
+                if let GpuAttnConfig::KimiDeltaAttention(kda) = &desc.attn {
+                    if kda.head_dim > 128 {
+                        return Err(
+                            "selected KDA kernel head dimension exceeds validated ABI".into()
+                        );
+                    }
+                    descriptors.push(crate::kda_prefix_owner::KdaColdLayer {
+                        layer,
+                        decode: graph.retained_kda_decode_source(
+                            self.device.clone(),
+                            kda,
+                            reserve,
+                        )?,
+                        heads: kda.num_heads,
+                        dim: kda.head_dim,
+                        lower: kda.gate_lower_bound,
+                        scale: (kda.head_dim as f32).sqrt().recip(),
+                        epsilon: 1.0e-6,
+                        a_log_ptr: kda.a_log_ptr,
+                        bias_ptr: kda.dt_bias_ptr,
+                    });
+                    replaced.push((layer, kda.recur_state_ptr));
+                }
+            }
+            if descriptors.is_empty() {
+                return Err("shared KDA was requested for a model with no KDA layers".into());
+            }
+            // Sixteen is the arithmetic block width, not a hardware budget or
+            // maximum prompt length. All prompt rows remain GPU processed.
+            let lifetime = unsafe {
+                crate::kda_prefix_owner::KdaPrefillStorageLifetime::from_decode_storage(
+                    descriptors,
+                    engine.prefill_stream_owner.clone(),
+                    16,
+                    reserve,
+                    &bank,
+                )?
+            };
+            let layers = replaced.iter().map(|&(layer, _)| layer).collect();
+            let mut selected = crate::kda_prefix_owner::KdaEngineRequestStorage::new(
+                lifetime, layers, reserve, true, None,
+            )?;
+            crate::kda_prefix_owner::KdaEngineRequestStorage::enable_serving_guard(&mut selected)?;
+            crate::kda_prefix_owner::KdaEngineRequestStorage::enable_serving_execution(
+                &mut selected,
+            )?;
+            selected.admit_serving_logits(
+                *graph.d_logits.device_ptr(),
+                graph.d_logits.len() * 4,
+                *self.device.cu_stream(),
+            )?;
+            let additions = selected.selected_registry()?;
+            let mut preserved = crate::session_cache::SequenceStateRegistry::default();
+            for allocation in self.sequence_state_registry.allocations() {
+                if !replaced.iter().any(|&(layer, old)| {
+                    allocation.layer_idx == Some(layer) && allocation.ptr == old
+                }) {
+                    preserved.register(allocation.clone())?;
+                }
+            }
+            let registry = preserved
+                .with_validated_inventory(additions.allocations(), additions.allocations())?;
+            let graph = self
+                .graph
+                .as_mut()
+                .ok_or("selected KDA graph disappeared")?;
+            graph.selected_kda_arithmetic = true;
+            if matches!(graph.expert_bits, 4 | 8) {
+                graph.d_common_moe_accum = Some(
+                    self.device
+                        .alloc_zeros::<f32>(graph.hidden_size)
+                        .map_err(|e| format!("common routed accumulator allocation:{e}"))?,
+                );
+                log::info!("Common MoE actual resident routed accumulator: {} F32 elements ({} bytes), included before runtime calibration",graph.hidden_size,graph.hidden_size.checked_mul(std::mem::size_of::<f32>()).ok_or("common accumulator bytes overflow")?);
+                graph.ordered_expert_projection = Some(projection.clone());
+            }
+            for (layer, _) in replaced {
+                let latest = selected.selected_latest_pointer(layer)?;
+                let GpuAttnConfig::KimiDeltaAttention(kda) = &mut graph.layers[layer].attn else {
+                    return Err("selected KDA layer changed".into());
+                };
+                kda.recur_state_ptr = latest;
+                engine.layer_weights[layer]
+                    .kimi_delta
+                    .as_mut()
+                    .ok_or("selected prefill layer absent")?
+                    .recur_state_ptr = latest;
+            }
+            self.sequence_state_registry = registry;
+            engine.ordered_kda_projection = Some(projection.clone());
+            self.ordered_kda_projection = Some(projection);
+            engine.selected_kda = Some(selected.clone());
+            self.selected_kda = Some(selected);
+        }
         Ok(engine)
     }
 
@@ -53849,19 +56833,15 @@ impl GpuDecodeStore {
                 );
                 return false;
             }
-            match &graph.layers[li].attn {
-                GpuAttnConfig::LinearAttention {
-                    conv_state_ptr,
-                    recur_state_ptr,
-                    ..
-                } => {
-                    if *conv_state_ptr != captured_conv || *recur_state_ptr != captured_recur {
+            match graph_reuse_linear_state_ptrs(&graph.layers[li].attn) {
+                Some((conv_state_ptr, recur_state_ptr)) => {
+                    if conv_state_ptr != captured_conv || recur_state_ptr != captured_recur {
                         trace_emit_global_mark(
                             trace_cfg.as_ref(),
                             "graph",
                             &format!(
                                 "phase=pointer_verify kind=la result=changed layer={} conv_prev=0x{:x} conv_now=0x{:x} recur_prev=0x{:x} recur_now=0x{:x}",
-                                li, captured_conv, *conv_state_ptr, captured_recur, *recur_state_ptr
+                                li, captured_conv, conv_state_ptr, captured_recur, recur_state_ptr
                             ),
                         );
                         return false;
@@ -54097,6 +57077,8 @@ impl GpuDecodeStore {
     /// the measurement runs on whatever model/GPU is actually loaded.
     fn autotune_w13_ksplits(&self, graph: &mut GpuDecodeGraph) -> Result<(), String> {
         use cudarc::driver::LaunchConfig;
+        let diagnostic_controls = crate::matched_probe::MarlinSharedDispatchControls::load()?;
+        let mut diagnostic_measured = Vec::new();
         let k = graph
             .kernels
             .as_ref()
@@ -54144,6 +57126,7 @@ impl GpuDecodeStore {
             }
         }
         if shapes.is_empty() {
+            graph.ksplit_autotune_complete = true;
             eprintln!("[ksplit-autotune] no batched MoE shapes found; skipping");
             return Ok(());
         }
@@ -54378,8 +57361,7 @@ impl GpuDecodeStore {
                 results.push((ks, samples[blocks / 2]));
             }
 
-            let margin_pct =
-                nonnegative_finite_env("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0)?;
+            let margin_pct = nonnegative_finite_env("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0)?;
             let Some((best_ks, best_ms, _fastest_ms)) =
                 select_stable_timing_candidate(&results, margin_pct, formula)
             else {
@@ -54599,8 +57581,84 @@ impl GpuDecodeStore {
                 results.push((ks, samples[blocks / 2]));
             }
 
-            let margin_pct =
-                nonnegative_finite_env("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0)?;
+            if diagnostic_controls.is_some() {
+                // The actual runtime split1 path is raw v1, whereas the
+                // ordinary candidate table times v2+reduce even for split1.
+                // Observe v1 as well before admitting this explicit experiment.
+                let launch_v1 = |reps: usize| -> Result<(), String> {
+                    for _ in 0..reps {
+                        self.launch_marlin_gemv_raw(
+                            packed_ptr,
+                            scales_ptr,
+                            shared_input_ptr,
+                            shared_output_ptr,
+                            inv_wp,
+                            inv_sp,
+                            shared_k,
+                            shared_n,
+                            gs,
+                            shared_is_int8,
+                        )
+                        .map_err(|e| format!("diagnostic shared W13 actual v1: {e}"))?;
+                    }
+                    Ok(())
+                };
+                let measured_v1 = (|| -> Result<f64, String> {
+                    launch_v1(3)?;
+                    let mut samples = Vec::with_capacity(5);
+                    for _ in 0..5 {
+                        let rc = unsafe { cuda_sys::lib().cuEventRecord(ev_start, cu_stream) };
+                        if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!("diagnostic shared W13 start: {rc:?}"));
+                        }
+                        launch_v1(20)?;
+                        let rc = unsafe { cuda_sys::lib().cuEventRecord(ev_stop, cu_stream) };
+                        if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!("diagnostic shared W13 stop: {rc:?}"));
+                        }
+                        let rc = unsafe { cuda_sys::lib().cuEventSynchronize(ev_stop) };
+                        if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!("diagnostic shared W13 sync: {rc:?}"));
+                        }
+                        let mut elapsed = 0f32;
+                        let rc = unsafe {
+                            cuda_sys::lib().cuEventElapsedTime(&mut elapsed, ev_start, ev_stop)
+                        };
+                        if rc != cuda_sys::CUresult::CUDA_SUCCESS
+                            || !elapsed.is_finite()
+                            || elapsed <= 0.
+                        {
+                            return Err(format!("diagnostic shared W13 elapsed: {rc:?}"));
+                        }
+                        samples.push(elapsed as f64 / 20.);
+                    }
+                    samples.sort_by(f64::total_cmp);
+                    Ok(samples[2])
+                })();
+                let v1_ms = match measured_v1 {
+                    Ok(ms) => ms,
+                    Err(error) => {
+                        destroy_events(ev_start, ev_stop);
+                        return Err(error);
+                    }
+                };
+                eprintln!("[matched-shared-w13] actual v1 shape k={} n={} group={} bits={} median={:.6}ms (ordinary split1 candidate is v2+reduce)", shared_k, shared_n, gs, if shared_is_int8 {8} else {4}, v1_ms);
+                let mut actual_results = results
+                    .iter()
+                    .copied()
+                    .filter(|(ks, _)| *ks != 1)
+                    .collect::<Vec<_>>();
+                actual_results.push((1, v1_ms));
+                diagnostic_measured.push((
+                    shared_k,
+                    shared_n,
+                    gs,
+                    if shared_is_int8 { 8 } else { 4 },
+                    actual_results,
+                ));
+            }
+
+            let margin_pct = nonnegative_finite_env("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0)?;
             let Some((best_ks, best_ms, _fastest_ms)) =
                 select_stable_timing_candidate(&results, margin_pct, formula)
             else {
@@ -54855,8 +57913,7 @@ impl GpuDecodeStore {
                     };
                     results.push((ks, elapsed));
                 }
-                let margin_pct =
-                    nonnegative_finite_env("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0)?;
+                let margin_pct = nonnegative_finite_env("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0)?;
                 let Some((best_ks, best_ms, fastest_ms)) =
                     select_stable_timing_candidate(&results, margin_pct, 2)
                 else {
@@ -54883,6 +57940,14 @@ impl GpuDecodeStore {
                 }
             }
         }
+        if let Some(controls) = diagnostic_controls {
+            let admitted = controls.admit(&diagnostic_measured)?;
+            eprintln!(
+                "[matched-shared-w13] admitted loaded/runtime-measured selections: {:?}",
+                admitted
+            );
+            graph.matched_shared_w13_ksplits = Some(admitted);
+        }
         eprintln!(
             "[ksplit-autotune] complete: {} W13 override(s), {} shared-W2 override(s) installed",
             graph.ksplit_autotune.len(),
@@ -54895,6 +57960,7 @@ impl GpuDecodeStore {
                 return Err(format!("ksplit autotune final sync: {:?}", err));
             }
         }
+        graph.ksplit_autotune_complete = true;
         Ok(())
     }
 
@@ -55353,9 +58419,16 @@ impl GpuDecodeStore {
             .iter()
             .take(graph.num_layers)
             .any(|moe| moe.as_ref().is_some_and(|moe| !moe.experts.is_empty()));
+        if crate::matched_probe::MarlinSharedDispatchControls::load()?.is_some()
+            && (!has_routed_moe || !graph.deepseek_v4_decode_policy.marlin_autotune)
+        {
+            return Err(
+                "shared Marlin diagnostic requires complete live Marlin calibration".into(),
+            );
+        }
         if has_routed_moe
             && graph.deepseek_v4_decode_policy.marlin_autotune
-            && graph.ksplit_autotune.is_empty()
+            && !graph.ksplit_autotune_complete
         {
             self.autotune_w13_ksplits(graph)
                 .map_err(|error| format!("ksplit autotune failed: {error}"))?;
@@ -55677,6 +58750,47 @@ impl GpuDecodeStore {
         do_final: bool,
         gqa_cache_offset: usize,
     ) -> Result<(), String> {
+        let selected = self.selected_kda.clone();
+        if let Some(selected) = selected {
+            selected.with_serving_execution(*self.device.cu_stream(), || {
+                self.capture_per_layer_graphs_inner(
+                    decode_start_position,
+                    layer_range,
+                    do_embedding,
+                    do_final,
+                    gqa_cache_offset,
+                )
+            })
+        } else {
+            self.capture_per_layer_graphs_inner(
+                decode_start_position,
+                layer_range,
+                do_embedding,
+                do_final,
+                gqa_cache_offset,
+            )
+        }
+    }
+    fn capture_per_layer_graphs_inner(
+        &mut self,
+        decode_start_position: usize,
+        layer_range: Option<(usize, usize)>,
+        do_embedding: bool,
+        do_final: bool,
+        gqa_cache_offset: usize,
+    ) -> Result<(), String> {
+        if let Some(graph) = self.graph.as_ref() {
+            if let Some(experiment) = graph.matched_routes.as_ref() {
+                for layer in experiment.target_layers() {
+                    let moe = graph
+                        .moe_layers
+                        .get(layer)
+                        .and_then(Option::as_ref)
+                        .ok_or("route diagnostic target is not a loaded routed layer")?;
+                    experiment.validate_layer(layer, moe.num_experts, moe.topk)?;
+                }
+            }
+        }
         let trace_cfg = self.active_trace_owned();
         if env_truthy("KRASIS_HQQ4_WARP_AUTOTUNE") && self.hqq4_decode_warps_per_block.is_empty() {
             self.autotune_hqq4_la_warps()?;
@@ -55688,6 +58802,19 @@ impl GpuDecodeStore {
             .graph
             .take()
             .ok_or_else(|| "Call configure first".to_string())?;
+
+        if !graph.matched_graph_stages_initialized {
+            match MatchedGraphStageBuffer::build(&graph, self.common_mla.is_some()) {
+                Ok(buffers) => {
+                    graph.matched_graph_stages = buffers;
+                    graph.matched_graph_stages_initialized = true;
+                }
+                Err(error) => {
+                    self.graph = Some(graph);
+                    return Err(error);
+                }
+            }
+        }
 
         if let Some(reason) = Self::cuda_graph_unsupported_reason_for_graph(&graph, layer_range) {
             self.graph = Some(graph);
@@ -56332,16 +59459,21 @@ impl GpuDecodeStore {
             ),
         );
 
-        // Create capture stream
-        let mut capture_stream: cuda_sys::CUstream = std::ptr::null_mut();
-        unsafe {
-            let err = cuda_sys::lib().cuStreamCreate(
-                &mut capture_stream,
-                cuda_sys::CUstream_flags::CU_STREAM_NON_BLOCKING as u32,
-            );
-            if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                self.graph = Some(graph);
-                return Err(format!("cuStreamCreate for capture: {:?}", err));
+        // Selected state and raw sources retain this actual serving stream.
+        // Record on that same stream; no temporary stream can silently redirect
+        // its recurrence kernels outside the captured graph.
+        let capture_stream_owned = self.selected_kda.is_none();
+        let mut capture_stream: cuda_sys::CUstream = *self.device.cu_stream();
+        if capture_stream_owned {
+            unsafe {
+                let err = cuda_sys::lib().cuStreamCreate(
+                    &mut capture_stream,
+                    cuda_sys::CUstream_flags::CU_STREAM_NON_BLOCKING as u32,
+                );
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    self.graph = Some(graph);
+                    return Err(format!("cuStreamCreate for capture: {err:?}"));
+                }
             }
         }
 
@@ -56355,7 +59487,9 @@ impl GpuDecodeStore {
             let stream_ref = self.device.cu_stream();
             stream_ptr = stream_ref as *const cuda_sys::CUstream as *mut cuda_sys::CUstream;
             orig_stream = *stream_ptr;
-            *stream_ptr = capture_stream;
+            if capture_stream_owned {
+                *stream_ptr = capture_stream;
+            }
 
             // Switch cuBLAS handle to capture stream so GEMM/GEMV ops are recorded in the graph
             cublas_result::set_stream(
@@ -56585,10 +59719,14 @@ impl GpuDecodeStore {
 
         // Restore original stream, cuBLAS handle, and destroy capture stream
         unsafe {
-            *stream_ptr = orig_stream;
+            if capture_stream_owned {
+                *stream_ptr = orig_stream;
+            }
             cublas_result::set_stream(*self.blas.handle(), orig_stream as cublas_sys::cudaStream_t)
                 .map_err(|e| format!("cublasSetStream restore: {:?}", e))?;
-            cuda_sys::lib().cuStreamDestroy_v2(capture_stream);
+            if capture_stream_owned {
+                cuda_sys::lib().cuStreamDestroy_v2(capture_stream);
+            }
         }
 
         if let Some(e) = capture_err {
@@ -56913,7 +60051,11 @@ impl GpuDecodeStore {
         let mixed_segment_clock_base = graph_idx * 5;
         // Homogeneous sub-stage clocks do not describe the two-dispatch mixed
         // stack. The enclosing mixed-segment clock remains the truthful total.
+        // The detailed clock schema describes Marlin shared-expert stages.
+        // BF16 validation uses a direct GEMV path, so keep only the enclosing
+        // graph timing rather than publishing mislabeled Marlin sub-stages.
         let moe_route_clock_active = !graph.mixed_expert_precision
+            && graph.shared_expert_bits != 16
             && graph.graph_moe_route_clock_enabled
             && expert_layer.is_some()
             && routing_range.is_some()
@@ -57082,39 +60224,7 @@ impl GpuDecodeStore {
                         topk,
                         "captured manifest routed stack",
                     )?;
-                } else {
-                let direct_w13_bf16 =
-                    graph.direct_w13_bf16_enabled_for_moe(moe, expert_bits, w13_ksplits_batched);
-                let graph_w13_path = graph_w13_path(expert_bits, direct_w13_bf16);
-                if graph_w13_path == GraphW13Path::DirectBf16 {
-                    if is_int8 || expert_bits != 4 {
-                        return Err(format!(
-                            "KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=1 requires INT4 experts at layer {}; expert_bits={}",
-                            layer_idx, expert_bits
-                        ));
-                    }
-                    if w13_ksplits_batched != 1 {
-                        return Err(format!(
-                            "KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=1 requires w13_ksplits_batched=1 at layer {}; got {}",
-                            layer_idx, w13_ksplits_batched
-                        ));
-                    }
-                }
-                // Batched w13 GEMV v2
-                let w13_n32 = graph_w13_path == GraphW13Path::Marlin
-                    && !is_int8
-                    && select_int4_w13_n32(
-                        graph,
-                        expert_hs,
-                        w13_n,
-                        topk.max(1),
-                        w13_ksplits_batched,
-                    )?;
-                let w13_tile_width = if w13_n32 { 32 } else { 16 };
-                let w13_threads = if w13_n32 { 512 } else { 256 };
-                let w13_n_tiles = w13_n.div_ceil(w13_tile_width);
-                let w13_smem = (expert_hs * 2 + 1024 * 4 + 64 * 4 + 16 * w13_tile_width * 4) as u32;
-                if graph_w13_path == GraphW13Path::TileQ {
+                } else if graph.ordered_expert_projection.is_some() {
                     Self::launch_batched_expert_stack(
                         graph,
                         layer_idx,
@@ -57122,312 +60232,361 @@ impl GpuDecodeStore {
                         Some(d_wts),
                         Some(topk),
                         None,
-                        "graph TileQ",
+                        "captured common routed stack",
                     )?;
-                } else if graph_w13_path == GraphW13Path::DirectBf16 {
-                    unsafe {
-                        k.marlin_gemv_int4_v2_batched_bf16_out
-                            .clone()
-                            .launch(
-                                LaunchConfig {
-                                    grid_dim: (w13_n_tiles as u32, 1, topk as u32),
-                                    block_dim: (256, 1, 1),
-                                    shared_mem_bytes: w13_smem,
-                                },
-                                (
-                                    d_w13p,
-                                    d_w13s,
-                                    expert_input_ptr,
-                                    *graph.d_batch_gate_ups.device_ptr(),
-                                    inv_wp,
-                                    inv_sp,
-                                    expert_hs as i32,
-                                    w13_n as i32,
-                                    gs as i32,
-                                    d_wts,
-                                ),
-                            )
-                            .map_err(|e| {
-                                format!("direct batched w13 bf16[{}]: {:?}", layer_idx, e)
-                            })?;
-                    }
                 } else {
-                    let w13_kernel = if is_int8 {
-                        k.marlin_gemv_int8_v2_batched.clone()
-                    } else if w13_n32 {
-                        k.marlin_gemv_int4_v2_batched_n32.clone()
-                    } else {
-                        k.marlin_gemv_int4_v2_batched.clone()
-                    };
-                    unsafe {
-                        w13_kernel
-                            .launch(
-                                LaunchConfig {
-                                    grid_dim: (
-                                        w13_n_tiles as u32,
-                                        w13_ksplits_batched as u32,
-                                        topk as u32,
+                    let direct_w13_bf16 = graph.direct_w13_bf16_enabled_for_moe(
+                        moe,
+                        expert_bits,
+                        w13_ksplits_batched,
+                    );
+                    let graph_w13_path = graph_w13_path(expert_bits, direct_w13_bf16);
+                    if graph_w13_path == GraphW13Path::DirectBf16 {
+                        if is_int8 || expert_bits != 4 {
+                            return Err(format!(
+                            "KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=1 requires INT4 experts at layer {}; expert_bits={}",
+                            layer_idx, expert_bits
+                        ));
+                        }
+                        if w13_ksplits_batched != 1 {
+                            return Err(format!(
+                            "KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=1 requires w13_ksplits_batched=1 at layer {}; got {}",
+                            layer_idx, w13_ksplits_batched
+                        ));
+                        }
+                    }
+                    // Batched w13 GEMV v2
+                    let w13_n32 = graph_w13_path == GraphW13Path::Marlin
+                        && !is_int8
+                        && select_int4_w13_n32(
+                            graph,
+                            expert_hs,
+                            w13_n,
+                            topk.max(1),
+                            w13_ksplits_batched,
+                        )?;
+                    let w13_tile_width = if w13_n32 { 32 } else { 16 };
+                    let w13_threads = if w13_n32 { 512 } else { 256 };
+                    let w13_n_tiles = w13_n.div_ceil(w13_tile_width);
+                    let w13_smem =
+                        (expert_hs * 2 + 1024 * 4 + 64 * 4 + 16 * w13_tile_width * 4) as u32;
+                    if graph_w13_path == GraphW13Path::TileQ {
+                        Self::launch_batched_expert_stack(
+                            graph,
+                            layer_idx,
+                            Some(expert_input_ptr),
+                            Some(d_wts),
+                            Some(topk),
+                            None,
+                            "graph TileQ",
+                        )?;
+                    } else if graph_w13_path == GraphW13Path::DirectBf16 {
+                        unsafe {
+                            k.marlin_gemv_int4_v2_batched_bf16_out
+                                .clone()
+                                .launch(
+                                    LaunchConfig {
+                                        grid_dim: (w13_n_tiles as u32, 1, topk as u32),
+                                        block_dim: (256, 1, 1),
+                                        shared_mem_bytes: w13_smem,
+                                    },
+                                    (
+                                        d_w13p,
+                                        d_w13s,
+                                        expert_input_ptr,
+                                        *graph.d_batch_gate_ups.device_ptr(),
+                                        inv_wp,
+                                        inv_sp,
+                                        expert_hs as i32,
+                                        w13_n as i32,
+                                        gs as i32,
+                                        d_wts,
                                     ),
-                                    block_dim: (w13_threads as u32, 1, 1),
-                                    shared_mem_bytes: w13_smem,
-                                },
-                                (
-                                    d_w13p,
-                                    d_w13s,
-                                    expert_input_ptr,
-                                    *graph.d_batch_partials.device_ptr(),
-                                    inv_wp,
-                                    inv_sp,
-                                    expert_hs as i32,
-                                    w13_n as i32,
-                                    gs as i32,
-                                    w13_ksplits_batched as i32,
-                                    d_wts,
-                                ),
-                            )
-                            .map_err(|e| format!("batched w13 v2[{}]: {:?}", layer_idx, e))?;
+                                )
+                                .map_err(|e| {
+                                    format!("direct batched w13 bf16[{}]: {:?}", layer_idx, e)
+                                })?;
+                        }
+                    } else {
+                        let w13_kernel = if is_int8 {
+                            k.marlin_gemv_int8_v2_batched.clone()
+                        } else if w13_n32 {
+                            k.marlin_gemv_int4_v2_batched_n32.clone()
+                        } else {
+                            k.marlin_gemv_int4_v2_batched.clone()
+                        };
+                        unsafe {
+                            w13_kernel
+                                .launch(
+                                    LaunchConfig {
+                                        grid_dim: (
+                                            w13_n_tiles as u32,
+                                            w13_ksplits_batched as u32,
+                                            topk as u32,
+                                        ),
+                                        block_dim: (w13_threads as u32, 1, 1),
+                                        shared_mem_bytes: w13_smem,
+                                    },
+                                    (
+                                        d_w13p,
+                                        d_w13s,
+                                        expert_input_ptr,
+                                        *graph.d_batch_partials.device_ptr(),
+                                        inv_wp,
+                                        inv_sp,
+                                        expert_hs as i32,
+                                        w13_n as i32,
+                                        gs as i32,
+                                        w13_ksplits_batched as i32,
+                                        d_wts,
+                                    ),
+                                )
+                                .map_err(|e| format!("batched w13 v2[{}]: {:?}", layer_idx, e))?;
+                        }
                     }
-                }
-                if moe_route_clock_active {
-                    let clocks = graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
-                        format!("MoE/route clock buffer missing for graph {}", graph_idx)
-                    })?;
-                    launch_graph_clock_marker(
-                        &k,
-                        clocks,
-                        moe_route_clock_base + 1,
-                        "moe-route-w13-end",
-                    )?;
-                }
-
-                // Batched reduce. Keep the same reduction kernel even when
-                // k_splits == 1 so the default graph path stays grouped for
-                // small-K expert shapes instead of falling back or failing capture.
-                if graph_w13_path == GraphW13Path::Marlin {
-                    unsafe {
-                        k.reduce_ksplits_bf16_batched
-                            .clone()
-                            .launch(
-                                LaunchConfig {
-                                    grid_dim: (((w13_n + 255) / 256) as u32, 1, topk as u32),
-                                    block_dim: (256, 1, 1),
-                                    shared_mem_bytes: 0,
-                                },
-                                (
-                                    *graph.d_batch_gate_ups.device_ptr(),
-                                    *graph.d_batch_partials.device_ptr(),
-                                    w13_n as i32,
-                                    w13_ksplits_batched as i32,
-                                    d_wts,
-                                ),
-                            )
-                            .map_err(|e| format!("batched reduce[{}]: {:?}", layer_idx, e))?;
+                    if moe_route_clock_active {
+                        let clocks = graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
+                            format!("MoE/route clock buffer missing for graph {}", graph_idx)
+                        })?;
+                        launch_graph_clock_marker(
+                            &k,
+                            clocks,
+                            moe_route_clock_base + 1,
+                            "moe-route-w13-end",
+                        )?;
                     }
-                }
-                if moe_route_clock_active {
-                    let clocks = graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
-                        format!("MoE/route clock buffer missing for graph {}", graph_idx)
-                    })?;
-                    launch_graph_clock_marker(
-                        &k,
-                        clocks,
-                        moe_route_clock_base + 2,
-                        "moe-route-w13-reduce-end",
-                    )?;
-                }
 
-                // Batched activation + w2
-                // Select kernel based on activation type: 0=silu_gated, 1=relu2
-                let w2_n16_tiles = (expert_hs + 15) / 16;
-                let w2_n32 = gated
-                    && !is_relu2
-                    && !is_int8
-                    && expert_bits == 4
-                    && select_int4_w2_n32(
-                        graph,
-                        intermediate,
-                        expert_hs,
-                        topk.max(1),
-                        moe.swiglu_limit,
-                        moe.deepseek_v4_activation,
-                    )?;
-                let w2_tile_width = if w2_n32 { 32 } else { 16 };
-                let w2_threads = if w2_n32 { 512 } else { 256 };
-                let w2_n_tiles = expert_hs.div_ceil(w2_tile_width);
-                // relu2 input is [K] (up_proj only), silu is [2*K] (gate+up)
-                let w2_input_k = if is_relu2 { intermediate } else { intermediate };
-                let relu2_w2_coalesced =
-                    graph.relu2_w2_coalesced_enabled_for_moe(moe, expert_bits, w2_n16_tiles);
-                if relu2_w2_coalesced {
-                    if !is_relu2 {
-                        return Err(format!(
+                    // Batched reduce. Keep the same reduction kernel even when
+                    // k_splits == 1 so the default graph path stays grouped for
+                    // small-K expert shapes instead of falling back or failing capture.
+                    if graph_w13_path == GraphW13Path::Marlin {
+                        unsafe {
+                            k.reduce_ksplits_bf16_batched
+                                .clone()
+                                .launch(
+                                    LaunchConfig {
+                                        grid_dim: (((w13_n + 255) / 256) as u32, 1, topk as u32),
+                                        block_dim: (256, 1, 1),
+                                        shared_mem_bytes: 0,
+                                    },
+                                    (
+                                        *graph.d_batch_gate_ups.device_ptr(),
+                                        *graph.d_batch_partials.device_ptr(),
+                                        w13_n as i32,
+                                        w13_ksplits_batched as i32,
+                                        d_wts,
+                                    ),
+                                )
+                                .map_err(|e| format!("batched reduce[{}]: {:?}", layer_idx, e))?;
+                        }
+                    }
+                    if moe_route_clock_active {
+                        let clocks = graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
+                            format!("MoE/route clock buffer missing for graph {}", graph_idx)
+                        })?;
+                        launch_graph_clock_marker(
+                            &k,
+                            clocks,
+                            moe_route_clock_base + 2,
+                            "moe-route-w13-reduce-end",
+                        )?;
+                    }
+
+                    // Batched activation + w2
+                    // Select kernel based on activation type: 0=silu_gated, 1=relu2
+                    let w2_n16_tiles = (expert_hs + 15) / 16;
+                    let w2_n32 = gated
+                        && !is_relu2
+                        && !is_int8
+                        && expert_bits == 4
+                        && select_int4_w2_n32(
+                            graph,
+                            intermediate,
+                            expert_hs,
+                            topk.max(1),
+                            moe.swiglu_limit,
+                            moe.deepseek_v4_activation,
+                        )?;
+                    let w2_tile_width = if w2_n32 { 32 } else { 16 };
+                    let w2_threads = if w2_n32 { 512 } else { 256 };
+                    let w2_n_tiles = expert_hs.div_ceil(w2_tile_width);
+                    // relu2 input is [K] (up_proj only), silu is [2*K] (gate+up)
+                    let w2_input_k = if is_relu2 { intermediate } else { intermediate };
+                    let relu2_w2_coalesced =
+                        graph.relu2_w2_coalesced_enabled_for_moe(moe, expert_bits, w2_n16_tiles);
+                    if relu2_w2_coalesced {
+                        if !is_relu2 {
+                            return Err(format!(
                             "KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED=1 requires ReLU2 routed experts at layer {}",
                             layer_idx
                         ));
-                    }
-                    if is_int8 || expert_bits != 4 {
-                        return Err(format!(
+                        }
+                        if is_int8 || expert_bits != 4 {
+                            return Err(format!(
                             "KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED=1 requires INT4 experts at layer {}; expert_bits={}",
                             layer_idx, expert_bits
                         ));
-                    }
-                }
-                let w2_smem_base = (w2_input_k * 2 + 1024 * 4 + 64 * 4) as u32;
-                let w2_smem_coalesced = (w2_input_k * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32;
-                let w2_smem_n32 = (w2_input_k * 2 + 1024 * 4 + 64 * 4 + 16 * 32 * 4) as u32;
-                let w2_smem = if relu2_w2_coalesced {
-                    w2_smem_coalesced
-                } else if w2_n32 {
-                    w2_smem_n32
-                } else {
-                    w2_smem_base
-                };
-                let moe_w2_clock_active = graph.graph_moe_w2_clock_enabled
-                    && moe_route_clock_active
-                    && gated
-                    && !is_relu2
-                    && !is_int8
-                    && !w2_n32
-                    && topk.saturating_mul(w2_n_tiles) <= graph.graph_moe_w2_clock_blocks;
-                if is_tileq {
-                    // Native TileQ stack includes activation and W2.
-                } else if moe_w2_clock_active {
-                    if let Some(active) = graph.graph_moe_w2_active.get_mut(graph_idx) {
-                        *active = true;
-                    }
-                    let clocks = graph.d_graph_moe_w2_clocks.as_ref().ok_or_else(|| {
-                        format!("MoE W2 clock buffer missing for graph {}", graph_idx)
-                    })?;
-                    let clock_base = (graph_idx
-                        * graph.graph_moe_w2_clock_blocks
-                        * graph.graph_moe_w2_clock_slots_per_block)
-                        as i32;
-                    unsafe {
-                        let mut a0 = d_w2p;
-                        let mut a1 = d_w2s;
-                        let mut a2 = *graph.d_batch_gate_ups.device_ptr();
-                        let mut a3 = *graph.d_batch_expert_outs.device_ptr();
-                        let mut a4 = inv_wp;
-                        let mut a5 = inv_sp;
-                        let mut a6 = intermediate as i32;
-                        let mut a7 = expert_hs as i32;
-                        let mut a8 = gs as i32;
-                        let mut a9 = moe.swiglu_limit;
-                        let mut a10 = if moe.deepseek_v4_activation {
-                            2i32
-                        } else {
-                            0i32
-                        };
-                        let mut a11 = d_wts;
-                        let mut a12 = *clocks.device_ptr();
-                        let mut a13 = clock_base;
-                        let mut a14 = graph.graph_moe_w2_clock_blocks as i32;
-                        let mut a15 = graph.graph_moe_w2_clock_slots_per_block as i32;
-                        let mut params: Vec<*mut std::ffi::c_void> = vec![
-                            &mut a0 as *mut _ as *mut std::ffi::c_void,
-                            &mut a1 as *mut _ as *mut std::ffi::c_void,
-                            &mut a2 as *mut _ as *mut std::ffi::c_void,
-                            &mut a3 as *mut _ as *mut std::ffi::c_void,
-                            &mut a4 as *mut _ as *mut std::ffi::c_void,
-                            &mut a5 as *mut _ as *mut std::ffi::c_void,
-                            &mut a6 as *mut _ as *mut std::ffi::c_void,
-                            &mut a7 as *mut _ as *mut std::ffi::c_void,
-                            &mut a8 as *mut _ as *mut std::ffi::c_void,
-                            &mut a9 as *mut _ as *mut std::ffi::c_void,
-                            &mut a10 as *mut _ as *mut std::ffi::c_void,
-                            &mut a11 as *mut _ as *mut std::ffi::c_void,
-                            &mut a12 as *mut _ as *mut std::ffi::c_void,
-                            &mut a13 as *mut _ as *mut std::ffi::c_void,
-                            &mut a14 as *mut _ as *mut std::ffi::c_void,
-                            &mut a15 as *mut _ as *mut std::ffi::c_void,
-                        ];
-                        k.fused_silu_w2_batched_timed
-                            .clone()
-                            .launch(
-                                LaunchConfig {
-                                    grid_dim: (w2_n_tiles as u32, 1, topk as u32),
-                                    block_dim: (256, 1, 1),
-                                    shared_mem_bytes: w2_smem,
-                                },
-                                &mut params,
-                            )
-                            .map_err(|e| {
-                                format!("batched silu_w2_timed[{}]: {:?}", layer_idx, e,)
-                            })?;
-                    }
-                } else {
-                    if is_relu2 {
-                        let (w2_kernel, w2_grid_tiles) = if is_int8 {
-                            (k.relu2_w2_int8_batched.clone(), w2_n_tiles)
-                        } else if relu2_w2_coalesced {
-                            (k.relu2_w2_batched_coalesced.clone(), w2_n_tiles)
-                        } else {
-                            (k.relu2_w2_batched.clone(), w2_n_tiles)
-                        };
-                        unsafe {
-                            w2_kernel
-                                .launch(
-                                    LaunchConfig {
-                                        grid_dim: (w2_grid_tiles as u32, 1, topk as u32),
-                                        block_dim: (256, 1, 1),
-                                        shared_mem_bytes: w2_smem,
-                                    },
-                                    (
-                                        d_w2p,
-                                        d_w2s,
-                                        *graph.d_batch_gate_ups.device_ptr(),
-                                        *graph.d_batch_expert_outs.device_ptr(),
-                                        inv_wp,
-                                        inv_sp,
-                                        intermediate as i32,
-                                        expert_hs as i32,
-                                        gs as i32,
-                                        d_wts,
-                                    ),
-                                )
-                                .map_err(
-                                    |e| format!("batched relu2_w2[{}]: {:?}", layer_idx, e,),
-                                )?;
                         }
+                    }
+                    let w2_smem_base = (w2_input_k * 2 + 1024 * 4 + 64 * 4) as u32;
+                    let w2_smem_coalesced =
+                        (w2_input_k * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32;
+                    let w2_smem_n32 = (w2_input_k * 2 + 1024 * 4 + 64 * 4 + 16 * 32 * 4) as u32;
+                    let w2_smem = if relu2_w2_coalesced {
+                        w2_smem_coalesced
+                    } else if w2_n32 {
+                        w2_smem_n32
                     } else {
-                        let w2_kernel = if is_int8 {
-                            k.fused_silu_w2_int8_batched.clone()
-                        } else if w2_n32 {
-                            k.fused_silu_w2_batched_n32.clone()
-                        } else {
-                            k.fused_silu_w2_batched.clone()
-                        };
+                        w2_smem_base
+                    };
+                    let moe_w2_clock_active = graph.graph_moe_w2_clock_enabled
+                        && moe_route_clock_active
+                        && gated
+                        && !is_relu2
+                        && !is_int8
+                        && !w2_n32
+                        && topk.saturating_mul(w2_n_tiles) <= graph.graph_moe_w2_clock_blocks;
+                    if is_tileq {
+                        // Native TileQ stack includes activation and W2.
+                    } else if moe_w2_clock_active {
+                        if let Some(active) = graph.graph_moe_w2_active.get_mut(graph_idx) {
+                            *active = true;
+                        }
+                        let clocks = graph.d_graph_moe_w2_clocks.as_ref().ok_or_else(|| {
+                            format!("MoE W2 clock buffer missing for graph {}", graph_idx)
+                        })?;
+                        let clock_base = (graph_idx
+                            * graph.graph_moe_w2_clock_blocks
+                            * graph.graph_moe_w2_clock_slots_per_block)
+                            as i32;
                         unsafe {
-                            w2_kernel
+                            let mut a0 = d_w2p;
+                            let mut a1 = d_w2s;
+                            let mut a2 = *graph.d_batch_gate_ups.device_ptr();
+                            let mut a3 = *graph.d_batch_expert_outs.device_ptr();
+                            let mut a4 = inv_wp;
+                            let mut a5 = inv_sp;
+                            let mut a6 = intermediate as i32;
+                            let mut a7 = expert_hs as i32;
+                            let mut a8 = gs as i32;
+                            let mut a9 = moe.swiglu_limit;
+                            let mut a10 = if moe.deepseek_v4_activation {
+                                2i32
+                            } else {
+                                0i32
+                            };
+                            let mut a11 = d_wts;
+                            let mut a12 = *clocks.device_ptr();
+                            let mut a13 = clock_base;
+                            let mut a14 = graph.graph_moe_w2_clock_blocks as i32;
+                            let mut a15 = graph.graph_moe_w2_clock_slots_per_block as i32;
+                            let mut params: Vec<*mut std::ffi::c_void> = vec![
+                                &mut a0 as *mut _ as *mut std::ffi::c_void,
+                                &mut a1 as *mut _ as *mut std::ffi::c_void,
+                                &mut a2 as *mut _ as *mut std::ffi::c_void,
+                                &mut a3 as *mut _ as *mut std::ffi::c_void,
+                                &mut a4 as *mut _ as *mut std::ffi::c_void,
+                                &mut a5 as *mut _ as *mut std::ffi::c_void,
+                                &mut a6 as *mut _ as *mut std::ffi::c_void,
+                                &mut a7 as *mut _ as *mut std::ffi::c_void,
+                                &mut a8 as *mut _ as *mut std::ffi::c_void,
+                                &mut a9 as *mut _ as *mut std::ffi::c_void,
+                                &mut a10 as *mut _ as *mut std::ffi::c_void,
+                                &mut a11 as *mut _ as *mut std::ffi::c_void,
+                                &mut a12 as *mut _ as *mut std::ffi::c_void,
+                                &mut a13 as *mut _ as *mut std::ffi::c_void,
+                                &mut a14 as *mut _ as *mut std::ffi::c_void,
+                                &mut a15 as *mut _ as *mut std::ffi::c_void,
+                            ];
+                            k.fused_silu_w2_batched_timed
+                                .clone()
                                 .launch(
                                     LaunchConfig {
                                         grid_dim: (w2_n_tiles as u32, 1, topk as u32),
-                                        block_dim: (w2_threads as u32, 1, 1),
+                                        block_dim: (256, 1, 1),
                                         shared_mem_bytes: w2_smem,
                                     },
-                                    (
-                                        d_w2p,
-                                        d_w2s,
-                                        *graph.d_batch_gate_ups.device_ptr(),
-                                        *graph.d_batch_expert_outs.device_ptr(),
-                                        inv_wp,
-                                        inv_sp,
-                                        intermediate as i32,
-                                        expert_hs as i32,
-                                        gs as i32,
-                                        moe.swiglu_limit,
-                                        if moe.deepseek_v4_activation {
-                                            2i32
-                                        } else {
-                                            0i32
-                                        },
-                                        d_wts,
-                                    ),
+                                    &mut params,
                                 )
-                                .map_err(|e| format!("batched silu_w2[{}]: {:?}", layer_idx, e,))?;
+                                .map_err(|e| {
+                                    format!("batched silu_w2_timed[{}]: {:?}", layer_idx, e,)
+                                })?;
+                        }
+                    } else {
+                        if is_relu2 {
+                            let (w2_kernel, w2_grid_tiles) = if is_int8 {
+                                (k.relu2_w2_int8_batched.clone(), w2_n_tiles)
+                            } else if relu2_w2_coalesced {
+                                (k.relu2_w2_batched_coalesced.clone(), w2_n_tiles)
+                            } else {
+                                (k.relu2_w2_batched.clone(), w2_n_tiles)
+                            };
+                            unsafe {
+                                w2_kernel
+                                    .launch(
+                                        LaunchConfig {
+                                            grid_dim: (w2_grid_tiles as u32, 1, topk as u32),
+                                            block_dim: (256, 1, 1),
+                                            shared_mem_bytes: w2_smem,
+                                        },
+                                        (
+                                            d_w2p,
+                                            d_w2s,
+                                            *graph.d_batch_gate_ups.device_ptr(),
+                                            *graph.d_batch_expert_outs.device_ptr(),
+                                            inv_wp,
+                                            inv_sp,
+                                            intermediate as i32,
+                                            expert_hs as i32,
+                                            gs as i32,
+                                            d_wts,
+                                        ),
+                                    )
+                                    .map_err(|e| {
+                                        format!("batched relu2_w2[{}]: {:?}", layer_idx, e,)
+                                    })?;
+                            }
+                        } else {
+                            let w2_kernel = if is_int8 {
+                                k.fused_silu_w2_int8_batched.clone()
+                            } else if w2_n32 {
+                                k.fused_silu_w2_batched_n32.clone()
+                            } else {
+                                k.fused_silu_w2_batched.clone()
+                            };
+                            unsafe {
+                                w2_kernel
+                                    .launch(
+                                        LaunchConfig {
+                                            grid_dim: (w2_n_tiles as u32, 1, topk as u32),
+                                            block_dim: (w2_threads as u32, 1, 1),
+                                            shared_mem_bytes: w2_smem,
+                                        },
+                                        (
+                                            d_w2p,
+                                            d_w2s,
+                                            *graph.d_batch_gate_ups.device_ptr(),
+                                            *graph.d_batch_expert_outs.device_ptr(),
+                                            inv_wp,
+                                            inv_sp,
+                                            intermediate as i32,
+                                            expert_hs as i32,
+                                            gs as i32,
+                                            moe.swiglu_limit,
+                                            if moe.deepseek_v4_activation {
+                                                2i32
+                                            } else {
+                                                0i32
+                                            },
+                                            d_wts,
+                                        ),
+                                    )
+                                    .map_err(|e| {
+                                        format!("batched silu_w2[{}]: {:?}", layer_idx, e,)
+                                    })?;
+                            }
                         }
                     }
-                }
                 }
                 if moe_route_clock_active {
                     let clocks = graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
@@ -57462,27 +60621,50 @@ impl GpuDecodeStore {
                 } else {
                     d_wts
                 };
-                unsafe {
-                    k.multi_expert_weighted_add_bf16
-                        .clone()
-                        .launch(
-                            LaunchConfig {
-                                grid_dim: (((expert_hs + 255) / 256) as u32, 1, 1),
-                                block_dim: (256, 1, 1),
-                                shared_mem_bytes: 0,
-                            },
-                            (
-                                *graph.d_moe_out.device_ptr(),
+                if let Some(bank) = &graph.ordered_expert_projection {
+                    unsafe {
+                        bank.moe_combine
+                            .as_ref()
+                            .ok_or("common routed reduction absent")?
+                            .enqueue_reduce(
                                 *graph.d_batch_expert_outs.device_ptr(),
                                 d_wts_final,
-                                expert_hs as i32,
-                                topk as i32,
-                                1i32,
-                            ),
-                        )
-                        .map_err(|e| {
-                            format!("multi_expert_weighted_add[{}]: {:?}", layer_idx, e)
-                        })?;
+                                *graph
+                                    .d_common_moe_accum
+                                    .as_ref()
+                                    .ok_or("common routed owner absent")?
+                                    .device_ptr(),
+                                *graph.d_moe_out.device_ptr(),
+                                expert_hs,
+                                topk,
+                                1,
+                                rsf,
+                                cu_stream,
+                            )?;
+                    }
+                } else {
+                    unsafe {
+                        k.multi_expert_weighted_add_bf16
+                            .clone()
+                            .launch(
+                                LaunchConfig {
+                                    grid_dim: (((expert_hs + 255) / 256) as u32, 1, 1),
+                                    block_dim: (256, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                (
+                                    *graph.d_moe_out.device_ptr(),
+                                    *graph.d_batch_expert_outs.device_ptr(),
+                                    d_wts_final,
+                                    expert_hs as i32,
+                                    topk as i32,
+                                    1i32,
+                                ),
+                            )
+                            .map_err(|e| {
+                                format!("multi_expert_weighted_add[{}]: {:?}", layer_idx, e)
+                            })?;
+                    }
                 }
                 if !graph.peer_experts.is_empty() {
                     if expert_hs != graph.hidden_size
@@ -57574,7 +60756,11 @@ impl GpuDecodeStore {
                 }
 
                 // Apply routed_scaling_factor to the routed branch before adding shared expert output.
-                if !has_latent && shared_expert_will_run && rsf != 1.0 {
+                if !has_latent
+                    && shared_expert_will_run
+                    && rsf != 1.0
+                    && graph.ordered_expert_projection.is_none()
+                {
                     let threads = 256u32;
                     let blocks = ((expert_hs as u32) + threads - 1) / threads;
                     unsafe {
@@ -57601,12 +60787,19 @@ impl GpuDecodeStore {
 
                 // Shared expert (if any)
                 if let Some(shared_vram) = shared_vram_opt {
-                    let (shared_inv_wp, shared_is_int8) = marlin_dispatch_for_bits(
-                        graph.shared_expert_bits,
-                        *graph.d_inv_weight_perm.device_ptr(),
-                        *graph.d_inv_weight_perm_int8.device_ptr(),
-                    )
-                    .map_err(|e| format!("shared expert layer {}: {}", layer_idx, e))?;
+                    let shared_path = shared_expert_path(graph.shared_expert_bits);
+                    let shared_marlin_dispatch = if shared_path == SharedExpertPath::Marlin {
+                        Some(
+                            marlin_dispatch_for_bits(
+                                graph.shared_expert_bits,
+                                *graph.d_inv_weight_perm.device_ptr(),
+                                *graph.d_inv_weight_perm_int8.device_ptr(),
+                            )
+                            .map_err(|e| format!("shared expert layer {}: {}", layer_idx, e))?,
+                        )
+                    } else {
+                        None
+                    };
                     let shared_input_ptr = if has_latent {
                         *graph.d_expert_out.device_ptr()
                     } else {
@@ -57621,6 +60814,15 @@ impl GpuDecodeStore {
                     let sw13s = shared_vram.w13_scales_ptr();
                     let sw2p = shared_vram.w2_packed_ptr();
                     let sw2s = shared_vram.w2_scales_ptr();
+                    MatchedGraphStageBuffer::record(
+                        graph,
+                        layer_idx,
+                        "decode_graph_shared_w13_input",
+                        shared_input_ptr,
+                        hs.checked_mul(2).ok_or("shared input extent overflow")?,
+                        graph_idx,
+                        cu_stream,
+                    )?;
 
                     // Shared gate (if applicable)
                     if let Some(ref moe_data) = graph.moe_layers[layer_idx] {
@@ -57628,29 +60830,51 @@ impl GpuDecodeStore {
                             let sg_w = &graph.weights[sg_wid];
                             let alpha: f32 = 1.0;
                             let beta: f32 = 0.0;
-                            unsafe {
-                                cublas_result::gemm_ex(
-                                    *self.blas.handle(),
-                                    cublas_sys::cublasOperation_t::CUBLAS_OP_T,
-                                    cublas_sys::cublasOperation_t::CUBLAS_OP_N,
-                                    sg_w.rows as i32,
-                                    1,
-                                    sg_w.cols as i32,
-                                    &alpha as *const f32 as *const std::ffi::c_void,
-                                    sg_w.ptr as *const std::ffi::c_void,
-                                    cublas_sys::cudaDataType::CUDA_R_16BF,
-                                    sg_w.cols as i32,
-                                    shared_input_ptr as *const std::ffi::c_void,
-                                    cublas_sys::cudaDataType::CUDA_R_16BF,
-                                    hs as i32,
-                                    &beta as *const f32 as *const std::ffi::c_void,
-                                    *graph.d_fp32_scratch.device_ptr() as *mut std::ffi::c_void,
-                                    cublas_sys::cudaDataType::CUDA_R_32F,
-                                    sg_w.rows as i32,
-                                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                                    cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
-                                )
-                                .map_err(|e| format!("shared gate GEMV[{}]: {:?}", layer_idx, e))?;
+                            if let Some(bank) = &graph.ordered_expert_projection {
+                                unsafe {
+                                    if sg_w.dtype != 0 {
+                                        return Err(
+                                            "common shared gate requires actual BF16 weights"
+                                                .into(),
+                                        );
+                                    }
+                                    bank.enqueue_router(
+                                        sg_w.ptr,
+                                        shared_input_ptr,
+                                        *graph.d_fp32_scratch.device_ptr(),
+                                        sg_w.rows,
+                                        sg_w.cols,
+                                        1,
+                                        cu_stream,
+                                    )?;
+                                }
+                            } else {
+                                unsafe {
+                                    cublas_result::gemm_ex(
+                                        *self.blas.handle(),
+                                        cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                                        cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                                        sg_w.rows as i32,
+                                        1,
+                                        sg_w.cols as i32,
+                                        &alpha as *const f32 as *const std::ffi::c_void,
+                                        sg_w.ptr as *const std::ffi::c_void,
+                                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                                        sg_w.cols as i32,
+                                        shared_input_ptr as *const std::ffi::c_void,
+                                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                                        hs as i32,
+                                        &beta as *const f32 as *const std::ffi::c_void,
+                                        *graph.d_fp32_scratch.device_ptr() as *mut std::ffi::c_void,
+                                        cublas_sys::cudaDataType::CUDA_R_32F,
+                                        sg_w.rows as i32,
+                                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                                        cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                                    )
+                                    .map_err(|e| {
+                                        format!("shared gate GEMV[{}]: {:?}", layer_idx, e)
+                                    })?;
+                                }
                             }
                         }
                     }
@@ -57666,98 +60890,6 @@ impl GpuDecodeStore {
                         )?;
                     }
 
-                    // w13 GEMV for shared expert
-                    if use_v2_w13 {
-                        self.launch_marlin_gemv_v2(
-                            sw13p,
-                            sw13s,
-                            shared_input_ptr,
-                            partial_ptr,
-                            shared_inv_wp,
-                            inv_sp,
-                            hs,
-                            shared_w13_n,
-                            gs,
-                            w13_ksplits,
-                            &k,
-                            shared_is_int8,
-                        )
-                        .map_err(|e| format!("shared w13 v2: {:?}", e))?;
-                        if moe_route_clock_active {
-                            let clocks =
-                                graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
-                                    format!(
-                                        "MoE/route clock buffer missing for graph {}",
-                                        graph_idx
-                                    )
-                                })?;
-                            launch_graph_clock_marker(
-                                &k,
-                                clocks,
-                                moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_W13_END,
-                                "moe-route-post-shared-w13-end",
-                            )?;
-                        }
-                        self.launch_reduce_ksplits_bf16(
-                            *graph.d_expert_gate_up.device_ptr(),
-                            partial_ptr,
-                            shared_w13_n,
-                            w13_ksplits,
-                            &k,
-                        )
-                        .map_err(|e| format!("shared reduce: {:?}", e))?;
-                        if moe_route_clock_active {
-                            let clocks =
-                                graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
-                                    format!(
-                                        "MoE/route clock buffer missing for graph {}",
-                                        graph_idx
-                                    )
-                                })?;
-                            launch_graph_clock_marker(
-                                &k,
-                                clocks,
-                                moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_REDUCE_END,
-                                "moe-route-post-shared-reduce-end",
-                            )?;
-                        }
-                    } else {
-                        self.launch_marlin_gemv_raw(
-                            sw13p,
-                            sw13s,
-                            shared_input_ptr,
-                            *graph.d_expert_gate_up.device_ptr(),
-                            shared_inv_wp,
-                            inv_sp,
-                            hs,
-                            shared_w13_n,
-                            gs,
-                            shared_is_int8,
-                        )
-                        .map_err(|e| format!("shared w13 raw: {:?}", e))?;
-                        if moe_route_clock_active {
-                            let clocks =
-                                graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
-                                    format!(
-                                        "MoE/route clock buffer missing for graph {}",
-                                        graph_idx
-                                    )
-                                })?;
-                            launch_graph_clock_marker(
-                                &k,
-                                clocks,
-                                moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_W13_END,
-                                "moe-route-post-shared-w13-end",
-                            )?;
-                            launch_graph_clock_marker(
-                                &k,
-                                clocks,
-                                moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_REDUCE_END,
-                                "moe-route-post-shared-reduce-end",
-                            )?;
-                        }
-                    }
-
                     let shared_gate_ptr = if graph.moe_layers[layer_idx]
                         .as_ref()
                         .and_then(|m| m.shared_gate_wid)
@@ -57768,58 +60900,255 @@ impl GpuDecodeStore {
                         0
                     };
 
-                    if let Some(w2_ksplits) = select_shared_w2_ksplits(
-                        graph,
-                        shared_intermediate,
-                        hs,
-                        shared_is_int8,
-                    ) {
-                        self.launch_fused_silu_accum_v2(
+                    if shared_path == SharedExpertPath::DirectBf16 {
+                        let activation_mode = if is_relu2 {
+                            1
+                        } else if moe.deepseek_v4_activation {
+                            2
+                        } else {
+                            0
+                        };
+                        self.launch_bf16_expert_accum(
+                            sw13p,
                             sw2p,
-                            sw2s,
+                            shared_input_ptr,
+                            shared_accum_ptr,
                             *graph.d_expert_gate_up.device_ptr(),
-                            partial_ptr,
-                            shared_inv_wp,
-                            inv_sp,
+                            *graph.d_expert_scratch.device_ptr(),
+                            *graph.d_expert_out.device_ptr(),
+                            hs,
+                            shared_w13_n,
                             shared_intermediate,
                             hs,
-                            gs,
-                            w2_ksplits,
-                            moe.shared_swiglu_limit,
-                            if moe.deepseek_v4_activation { 2 } else { 0 },
-                            &k,
-                            shared_is_int8,
-                        )
-                        .map_err(|e| format!("shared silu_accum v2: {:?}", e))?;
-                        self.launch_reduce_ksplits_sigmoid_accum(
-                            shared_accum_ptr,
-                            partial_ptr,
-                            hs,
-                            w2_ksplits,
                             1.0,
                             shared_gate_ptr,
+                            activation_mode,
+                            gated,
                             &k,
                         )
-                        .map_err(|e| format!("shared W2 reduce: {:?}", e))?;
+                        .map_err(|e| format!("shared BF16 expert layer {}: {}", layer_idx, e))?;
                     } else {
-                        self.launch_fused_silu_accum(
-                            sw2p,
-                            sw2s,
+                        let (shared_inv_wp, shared_is_int8) = shared_marlin_dispatch.unwrap();
+
+                        // w13 GEMV for shared expert
+                        if let Some(bank) = &graph.ordered_expert_projection {
+                            unsafe {
+                                bank.marlin
+                                    .as_ref()
+                                    .ok_or("common shared W13 program absent")?
+                                    .enqueue(
+                                        crate::common_marlin::Geometry {
+                                            rows: shared_w13_n,
+                                            cols: hs,
+                                            group: gs.min(hs),
+                                            bits: graph.shared_expert_bits as usize,
+                                        },
+                                        sw13p,
+                                        sw13s,
+                                        shared_input_ptr,
+                                        *graph.d_expert_gate_up.device_ptr(),
+                                        0,
+                                        1,
+                                        cu_stream,
+                                    )?;
+                            }
+                            if moe_route_clock_active {
+                                let clocks = graph
+                                    .d_graph_moe_route_clocks
+                                    .as_ref()
+                                    .ok_or("common shared clock owner absent")?;
+                                launch_graph_clock_marker(
+                                    &k,
+                                    clocks,
+                                    moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_W13_END,
+                                    "common-shared-w13-end",
+                                )?;
+                                launch_graph_clock_marker(
+                                    &k,
+                                    clocks,
+                                    moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_REDUCE_END,
+                                    "common-shared-w13-single-kernel-no-separate-reduction-end",
+                                )?;
+                            }
+                        } else if use_v2_w13 {
+                            self.launch_marlin_gemv_v2(
+                                sw13p,
+                                sw13s,
+                                shared_input_ptr,
+                                partial_ptr,
+                                shared_inv_wp,
+                                inv_sp,
+                                hs,
+                                shared_w13_n,
+                                gs,
+                                w13_ksplits,
+                                &k,
+                                shared_is_int8,
+                            )
+                            .map_err(|e| format!("shared w13 v2: {:?}", e))?;
+                            if moe_route_clock_active {
+                                let clocks =
+                                    graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
+                                        format!(
+                                            "MoE/route clock buffer missing for graph {}",
+                                            graph_idx
+                                        )
+                                    })?;
+                                launch_graph_clock_marker(
+                                    &k,
+                                    clocks,
+                                    moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_W13_END,
+                                    "moe-route-post-shared-w13-end",
+                                )?;
+                            }
+                            self.launch_reduce_ksplits_bf16(
+                                *graph.d_expert_gate_up.device_ptr(),
+                                partial_ptr,
+                                shared_w13_n,
+                                w13_ksplits,
+                                &k,
+                            )
+                            .map_err(|e| format!("shared reduce: {:?}", e))?;
+                            if moe_route_clock_active {
+                                let clocks =
+                                    graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
+                                        format!(
+                                            "MoE/route clock buffer missing for graph {}",
+                                            graph_idx
+                                        )
+                                    })?;
+                                launch_graph_clock_marker(
+                                    &k,
+                                    clocks,
+                                    moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_REDUCE_END,
+                                    "moe-route-post-shared-reduce-end",
+                                )?;
+                            }
+                        } else {
+                            self.launch_marlin_gemv_raw(
+                                sw13p,
+                                sw13s,
+                                shared_input_ptr,
+                                *graph.d_expert_gate_up.device_ptr(),
+                                shared_inv_wp,
+                                inv_sp,
+                                hs,
+                                shared_w13_n,
+                                gs,
+                                shared_is_int8,
+                            )
+                            .map_err(|e| format!("shared w13 raw: {:?}", e))?;
+                            if moe_route_clock_active {
+                                let clocks =
+                                    graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
+                                        format!(
+                                            "MoE/route clock buffer missing for graph {}",
+                                            graph_idx
+                                        )
+                                    })?;
+                                launch_graph_clock_marker(
+                                    &k,
+                                    clocks,
+                                    moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_W13_END,
+                                    "moe-route-post-shared-w13-end",
+                                )?;
+                                launch_graph_clock_marker(
+                                    &k,
+                                    clocks,
+                                    moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_REDUCE_END,
+                                    "moe-route-post-shared-reduce-end",
+                                )?;
+                            }
+                        }
+
+                        MatchedGraphStageBuffer::record(
+                            graph,
+                            layer_idx,
+                            "decode_graph_shared_w13_output",
                             *graph.d_expert_gate_up.device_ptr(),
-                            shared_accum_ptr,
-                            shared_inv_wp,
-                            inv_sp,
-                            shared_intermediate,
-                            hs,
-                            gs,
-                            1.0,
-                            shared_gate_ptr,
-                            moe.shared_swiglu_limit,
-                            if moe.deepseek_v4_activation { 2 } else { 0 },
-                            &k,
-                            shared_is_int8,
-                        )
-                        .map_err(|e| format!("shared silu_accum: {:?}", e))?;
+                            shared_w13_n
+                                .checked_mul(2)
+                                .ok_or("shared output extent overflow")?,
+                            graph_idx,
+                            cu_stream,
+                        )?;
+                        if let Some(bank) = &graph.ordered_expert_projection {
+                            unsafe {
+                                bank.enqueue_shared_finish(
+                                    crate::common_marlin::Geometry {
+                                        rows: hs,
+                                        cols: shared_intermediate,
+                                        group: gs.min(shared_intermediate),
+                                        bits: graph.shared_expert_bits as usize,
+                                    },
+                                    sw2p,
+                                    sw2s,
+                                    *graph.d_expert_gate_up.device_ptr(),
+                                    *graph.d_expert_out.device_ptr(),
+                                    *graph
+                                        .d_common_moe_accum
+                                        .as_ref()
+                                        .ok_or("common routed owner absent")?
+                                        .device_ptr(),
+                                    shared_accum_ptr,
+                                    shared_gate_ptr,
+                                    1.0,
+                                    moe.activation_type,
+                                    moe.shared_swiglu_limit,
+                                    moe.deepseek_v4_activation,
+                                    cu_stream,
+                                )?;
+                            }
+                        } else if let Some(w2_ksplits) =
+                            select_shared_w2_ksplits(graph, shared_intermediate, hs, shared_is_int8)
+                        {
+                            self.launch_fused_silu_accum_v2(
+                                sw2p,
+                                sw2s,
+                                *graph.d_expert_gate_up.device_ptr(),
+                                partial_ptr,
+                                shared_inv_wp,
+                                inv_sp,
+                                shared_intermediate,
+                                hs,
+                                gs,
+                                w2_ksplits,
+                                moe.shared_swiglu_limit,
+                                if moe.deepseek_v4_activation { 2 } else { 0 },
+                                &k,
+                                shared_is_int8,
+                            )
+                            .map_err(|e| format!("shared silu_accum v2: {:?}", e))?;
+                            self.launch_reduce_ksplits_sigmoid_accum(
+                                shared_accum_ptr,
+                                partial_ptr,
+                                hs,
+                                w2_ksplits,
+                                1.0,
+                                shared_gate_ptr,
+                                &k,
+                            )
+                            .map_err(|e| format!("shared W2 reduce: {:?}", e))?;
+                        } else {
+                            self.launch_fused_silu_accum(
+                                sw2p,
+                                sw2s,
+                                *graph.d_expert_gate_up.device_ptr(),
+                                shared_accum_ptr,
+                                shared_inv_wp,
+                                inv_sp,
+                                shared_intermediate,
+                                hs,
+                                gs,
+                                1.0,
+                                shared_gate_ptr,
+                                moe.shared_swiglu_limit,
+                                if moe.deepseek_v4_activation { 2 } else { 0 },
+                                &k,
+                                shared_is_int8,
+                            )
+                            .map_err(|e| format!("shared silu_accum: {:?}", e))?;
+                        }
                     }
                     if moe_route_clock_active {
                         let clocks = graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
@@ -57835,7 +61164,11 @@ impl GpuDecodeStore {
                 }
 
                 // Scale by routed_scaling_factor when there is no shared branch.
-                if !has_latent && !shared_expert_will_run && rsf != 1.0 {
+                if !has_latent
+                    && !shared_expert_will_run
+                    && rsf != 1.0
+                    && graph.ordered_expert_projection.is_none()
+                {
                     let threads = 256u32;
                     let blocks = ((expert_hs as u32) + threads - 1) / threads;
                     unsafe {
@@ -57890,6 +61223,15 @@ impl GpuDecodeStore {
                     )?;
                     self.capture_dspark_decode_target_state(graph, layer_idx, d_pos_ptr)?;
                 } else if let Some(hc) = glm5_hc_expert_layer.as_ref() {
+                    MatchedGraphStageBuffer::record(
+                        graph,
+                        layer_idx,
+                        "decode_graph_ffn_output",
+                        *graph.d_moe_out.device_ptr(),
+                        hs.checked_mul(2).ok_or("graph FFN extent overflow")?,
+                        graph_idx,
+                        cu_stream,
+                    )?;
                     let workspace = graph
                         .deepseek_v4_decode_workspace
                         .as_ref()
@@ -57901,6 +61243,17 @@ impl GpuDecodeStore {
                         *workspace.d_hc_next.device_ptr(),
                         hc.mult,
                         &format!("GLM-5.3 layer {} FFN", layer_idx),
+                    )?;
+                    MatchedGraphStageBuffer::record(
+                        graph,
+                        layer_idx,
+                        "decode_graph_hc_post_ffn",
+                        *workspace.d_hc_state.device_ptr(),
+                        hs.checked_mul(hc.mult)
+                            .and_then(|x| x.checked_mul(2))
+                            .ok_or("graph HC extent overflow")?,
+                        graph_idx,
+                        cu_stream,
                     )?;
                 } else if gemma4_expert_layer {
                     let layer = &graph.layers[layer_idx];
@@ -58257,6 +61610,17 @@ impl GpuDecodeStore {
                                 .deepseek_v4_decode_workspace
                                 .as_ref()
                                 .ok_or("GLM-5.3 mHC workspace is not finalized")?;
+                            MatchedGraphStageBuffer::record(
+                                graph,
+                                layer_idx,
+                                "decode_graph_hc_entry",
+                                *workspace.d_hc_state.device_ptr(),
+                                hs.checked_mul(hc.mult)
+                                    .and_then(|x| x.checked_mul(2))
+                                    .ok_or("graph HC extent overflow")?,
+                                graph_idx,
+                                cu_stream,
+                            )?;
                             self.launch_deepseek_v4_hc_prepare_for_graph(
                                 graph,
                                 *workspace.d_hc_state.device_ptr(),
@@ -58270,6 +61634,15 @@ impl GpuDecodeStore {
                                 None,
                                 &format!("GLM-5.3 layer {} attention", layer_idx),
                             )?;
+                            MatchedGraphStageBuffer::record(
+                                graph,
+                                layer_idx,
+                                "decode_graph_attn_prepared",
+                                *graph.d_hidden.device_ptr(),
+                                hs * 2,
+                                graph_idx,
+                                cu_stream,
+                            )?;
                             self.launch_deepseek_v4_rmsnorm_for_graph(
                                 graph,
                                 *graph.d_hidden.device_ptr(),
@@ -58277,6 +61650,15 @@ impl GpuDecodeStore {
                                 layer.input_norm_ptr,
                                 graph.hidden_size,
                                 &format!("GLM-5.3 layer {} input", layer_idx),
+                            )?;
+                            MatchedGraphStageBuffer::record(
+                                graph,
+                                layer_idx,
+                                "decode_graph_attn_norm",
+                                *graph.d_hidden.device_ptr(),
+                                hs * 2,
+                                graph_idx,
+                                cu_stream,
                             )?;
                         } else if is_gemma4 {
                             unsafe {
@@ -58391,12 +61773,16 @@ impl GpuDecodeStore {
                             };
                             self.run_kimi_delta_attention(
                                 graph,
+                                layer_idx,
                                 kda,
                                 hqq_kda,
                                 *graph.d_hidden.device_ptr(),
                                 *graph.d_hidden.device_ptr(),
                                 false,
                                 kda_graph_clock,
+                                None,
+                                Some((layer_idx, graph_idx)),
+                                None,
                                 None,
                             )?;
                         }
@@ -60824,7 +64210,7 @@ impl GpuDecodeStore {
                                     let qb = hqq_exec.q_b_proj.as_ref().ok_or_else(|| {
                                         format!("HQQ MLA layer {} has no q_b_proj", layer_idx)
                                     })?;
-                                    self.launch_hqq_decode_gemv_f32(
+                                    self.launch_mla_hqq_gemv_f32(
                                         "q_a_proj",
                                         qa,
                                         *graph.d_hidden.device_ptr(),
@@ -60872,6 +64258,14 @@ impl GpuDecodeStore {
                                             *graph.d_scratch.device_ptr(),
                                             DsaGraphScoreBackend::LiveFused,
                                         )?;
+                                        self.record_indexer_stages(
+                                            graph,
+                                            layer_idx,
+                                            d_pos_ptr,
+                                            d_seq_len_ptr,
+                                            *graph.d_scratch.device_ptr(),
+                                            IndexObservationFrame::Graph(graph_idx),
+                                        )?;
                                     }
                                     mla_path_clock!(
                                         GRAPH_MLA_DSA_SCORE_END,
@@ -60888,7 +64282,7 @@ impl GpuDecodeStore {
                                         GRAPH_MLA_DSA_TOPK_END,
                                         "mla-path-dsa-topk-end"
                                     );
-                                    self.launch_hqq_decode_gemv_f32(
+                                    self.launch_mla_hqq_gemv_f32(
                                         "q_b_proj",
                                         qb,
                                         *graph.d_scratch.device_ptr(),
@@ -60899,7 +64293,7 @@ impl GpuDecodeStore {
                                     let q = hqq_exec.q_proj.as_ref().ok_or_else(|| {
                                         format!("HQQ MLA layer {} has no q_proj", layer_idx)
                                     })?;
-                                    self.launch_hqq_decode_gemv_f32(
+                                    self.launch_mla_hqq_gemv_f32(
                                         "q_proj",
                                         q,
                                         *graph.d_hidden.device_ptr(),
@@ -60965,6 +64359,14 @@ impl GpuDecodeStore {
                                         *graph.d_scratch.device_ptr(),
                                         DsaGraphScoreBackend::LiveFused,
                                     )?;
+                                    self.record_indexer_stages(
+                                        graph,
+                                        layer_idx,
+                                        d_pos_ptr,
+                                        d_seq_len_ptr,
+                                        *graph.d_scratch.device_ptr(),
+                                        IndexObservationFrame::Graph(graph_idx),
+                                    )?;
                                 }
                                 mla_path_clock!(GRAPH_MLA_DSA_SCORE_END, "mla-path-dsa-score-end");
                                 if dsa_owner_active {
@@ -60995,7 +64397,7 @@ impl GpuDecodeStore {
 
                             // ── MLA Step 2: KV projection + norm ──
                             if let Some(hqq_exec) = hqq_mla_exec.as_ref() {
-                                self.launch_hqq_decode_gemv_f32(
+                                self.launch_mla_hqq_gemv_f32(
                                     "kv_a_proj_with_mqa",
                                     &hqq_exec.kv_a_proj_with_mqa,
                                     *graph.d_hidden.device_ptr(),
@@ -61235,8 +64637,22 @@ impl GpuDecodeStore {
                             }
                             mla_path_clock!(GRAPH_MLA_CACHE_WRITE_END, "mla-path-cache-write-end");
 
+                            // The common path also produces the final BF16 WVC result.
+                            let common_projected = if self.common_mla.is_some() {
+                                self.launch_common_mla_for_layer(
+                                    graph,
+                                    layer_idx,
+                                    true,
+                                    Some(graph_idx),
+                                    None,
+                                )?;
+                                true
+                            } else {
+                                false
+                            };
                             // ── MLA Step 8: Attention (graphable: reads seq_len from GPU buffer) ──
-                            if layer.dsa_indexer.is_some() {
+                            if common_projected {
+                            } else if layer.dsa_indexer.is_some() {
                                 self.launch_mla_sparse_attention_graphable_for_layer(
                                     graph,
                                     layer_idx,
@@ -61290,7 +64706,7 @@ impl GpuDecodeStore {
                             mla_path_clock!(GRAPH_MLA_SPARSE_ATTN_END, "mla-path-sparse-attn-end");
 
                             // ── MLA Step 9: Apply w_vc ──
-                            {
+                            if !common_projected {
                                 let threads = 256u32;
                                 unsafe {
                                     k.mla_apply_wvc
@@ -61319,7 +64735,7 @@ impl GpuDecodeStore {
 
                             // ── MLA Step 10: O projection ──
                             if let Some(hqq_exec) = hqq_mla_exec.as_ref() {
-                                self.launch_hqq_decode_gemv_bf16(
+                                self.launch_mla_hqq_gemv_bf16(
                                     "o_proj",
                                     &hqq_exec.o_proj,
                                     *graph.d_scratch.device_ptr(),
@@ -61790,6 +65206,15 @@ impl GpuDecodeStore {
                             .deepseek_v4_decode_workspace
                             .as_ref()
                             .ok_or("GLM-5.3 mHC workspace is not finalized")?;
+                        MatchedGraphStageBuffer::record(
+                            graph,
+                            layer_idx,
+                            "decode_graph_attn_output",
+                            *graph.d_hidden.device_ptr(),
+                            hs * 2,
+                            graph_idx,
+                            cu_stream,
+                        )?;
                         self.launch_deepseek_v4_hc_post_for_graph(
                             graph,
                             *workspace.d_hc_next.device_ptr(),
@@ -61798,6 +65223,18 @@ impl GpuDecodeStore {
                             hc.mult,
                             &format!("GLM-5.3 layer {} attention", layer_idx),
                         )?;
+                        MatchedGraphStageBuffer::record(
+                            graph,
+                            layer_idx,
+                            "decode_graph_hc_post_attn",
+                            *workspace.d_hc_next.device_ptr(),
+                            hs.checked_mul(hc.mult)
+                                .and_then(|x| x.checked_mul(2))
+                                .ok_or("graph HC extent overflow")?,
+                            graph_idx,
+                            cu_stream,
+                        )?;
+
                         self.launch_deepseek_v4_hc_prepare_for_graph(
                             graph,
                             *workspace.d_hc_next.device_ptr(),
@@ -61811,6 +65248,16 @@ impl GpuDecodeStore {
                             None,
                             &format!("GLM-5.3 layer {} FFN", layer_idx),
                         )?;
+                        MatchedGraphStageBuffer::record(
+                            graph,
+                            layer_idx,
+                            "decode_graph_ffn_prepared",
+                            *graph.d_hidden.device_ptr(),
+                            hs * 2,
+                            graph_idx,
+                            cu_stream,
+                        )?;
+
                         self.launch_deepseek_v4_rmsnorm_for_graph(
                             graph,
                             *graph.d_hidden.device_ptr(),
@@ -61818,6 +65265,15 @@ impl GpuDecodeStore {
                             layer.post_attn_norm_ptr,
                             graph.hidden_size,
                             &format!("GLM-5.3 layer {} post-attention", layer_idx),
+                        )?;
+                        MatchedGraphStageBuffer::record(
+                            graph,
+                            layer_idx,
+                            "decode_graph_ffn_norm",
+                            *graph.d_hidden.device_ptr(),
+                            hs * 2,
+                            graph_idx,
+                            cu_stream,
                         )?;
                     } else if layer.post_attn_norm_size > 0 {
                         if route_prep_clock_active {
@@ -62249,16 +65705,40 @@ impl GpuDecodeStore {
                             let dw = &graph.weights[*down_proj];
                             let inter = gw.rows;
 
-                            self.gemv_bf16_internal(
+                            self.dense_projection_bf16_internal(
                                 gw,
                                 *graph.d_hidden.device_ptr(),
                                 *graph.d_expert_gate_up.device_ptr(),
                             )?;
+                            MatchedGraphStageBuffer::record(
+                                graph,
+                                layer_idx,
+                                "decode_graph_dense_gate",
+                                *graph.d_expert_gate_up.device_ptr(),
+                                inter.checked_mul(2).ok_or("dense graph extent overflow")?,
+                                graph_idx,
+                                cu_stream,
+                            )?;
+
                             let up_out_ptr = unsafe {
                                 (*graph.d_expert_gate_up.device_ptr() as *const u16).add(inter)
                                     as u64
                             };
-                            self.gemv_bf16_internal(uw, *graph.d_hidden.device_ptr(), up_out_ptr)?;
+                            self.dense_projection_bf16_internal(
+                                uw,
+                                *graph.d_hidden.device_ptr(),
+                                up_out_ptr,
+                            )?;
+                            MatchedGraphStageBuffer::record(
+                                graph,
+                                layer_idx,
+                                "decode_graph_dense_up",
+                                up_out_ptr,
+                                inter.checked_mul(2).ok_or("dense graph extent overflow")?,
+                                graph_idx,
+                                cu_stream,
+                            )?;
+
                             self.launch_dense_swiglu_for_layer(
                                 graph,
                                 layer_idx,
@@ -62266,11 +65746,30 @@ impl GpuDecodeStore {
                                 *graph.d_expert_gate_up.device_ptr(),
                                 inter,
                             )?;
-                            self.gemv_bf16_internal(
+                            self.dense_projection_bf16_internal(
                                 dw,
                                 *graph.d_expert_scratch.device_ptr(),
                                 *graph.d_hidden.device_ptr(),
                             )?;
+                            MatchedGraphStageBuffer::record(
+                                graph,
+                                layer_idx,
+                                "decode_graph_dense_output",
+                                *graph.d_hidden.device_ptr(),
+                                hs * 2,
+                                graph_idx,
+                                cu_stream,
+                            )?;
+                            MatchedGraphStageBuffer::record(
+                                graph,
+                                layer_idx,
+                                "decode_graph_ffn_output",
+                                *graph.d_hidden.device_ptr(),
+                                hs.checked_mul(2).ok_or("graph FFN extent overflow")?,
+                                graph_idx,
+                                cu_stream,
+                            )?;
+
                             if let Some(hc) = glm5_hc.as_ref() {
                                 let workspace = graph
                                     .deepseek_v4_decode_workspace
@@ -62283,6 +65782,17 @@ impl GpuDecodeStore {
                                     *workspace.d_hc_next.device_ptr(),
                                     hc.mult,
                                     &format!("GLM-5.3 layer {} FFN", layer_idx),
+                                )?;
+                                MatchedGraphStageBuffer::record(
+                                    graph,
+                                    layer_idx,
+                                    "decode_graph_hc_post_ffn",
+                                    *workspace.d_hc_state.device_ptr(),
+                                    hs.checked_mul(hc.mult)
+                                        .and_then(|x| x.checked_mul(2))
+                                        .ok_or("graph HC extent overflow")?,
+                                    graph_idx,
+                                    cu_stream,
                                 )?;
                             }
                         }
@@ -62318,29 +65828,48 @@ impl GpuDecodeStore {
                         let w = &graph.weights[gate_wid];
                         let alpha: f32 = 1.0;
                         let beta: f32 = 0.0;
-                        unsafe {
-                            cublas_result::gemm_ex(
-                                *self.blas.handle(),
-                                cublas_sys::cublasOperation_t::CUBLAS_OP_T,
-                                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
-                                w.rows as i32,
-                                1,
-                                w.cols as i32,
-                                &alpha as *const f32 as *const std::ffi::c_void,
-                                w.ptr as *const std::ffi::c_void,
-                                cublas_sys::cudaDataType::CUDA_R_16BF,
-                                w.cols as i32,
-                                *graph.d_hidden.device_ptr() as *const std::ffi::c_void,
-                                cublas_sys::cudaDataType::CUDA_R_16BF,
-                                hs as i32,
-                                &beta as *const f32 as *const std::ffi::c_void,
-                                logits_ptr as *mut std::ffi::c_void,
-                                cublas_sys::cudaDataType::CUDA_R_32F,
-                                w.rows as i32,
-                                cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                                cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
-                            )
-                            .map_err(|e| format!("gate GEMV[{}]: {:?}", layer_idx, e))?;
+                        if let Some(bank) = &graph.ordered_expert_projection {
+                            unsafe {
+                                if w.dtype != 0 {
+                                    return Err(
+                                        "common router requires actual BF16 gate weights".into()
+                                    );
+                                }
+                                bank.enqueue_router(
+                                    w.ptr,
+                                    *graph.d_hidden.device_ptr(),
+                                    logits_ptr,
+                                    w.rows,
+                                    w.cols,
+                                    1,
+                                    cu_stream,
+                                )?;
+                            }
+                        } else {
+                            unsafe {
+                                cublas_result::gemm_ex(
+                                    *self.blas.handle(),
+                                    cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                                    cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                                    w.rows as i32,
+                                    1,
+                                    w.cols as i32,
+                                    &alpha as *const f32 as *const std::ffi::c_void,
+                                    w.ptr as *const std::ffi::c_void,
+                                    cublas_sys::cudaDataType::CUDA_R_16BF,
+                                    w.cols as i32,
+                                    *graph.d_hidden.device_ptr() as *const std::ffi::c_void,
+                                    cublas_sys::cudaDataType::CUDA_R_16BF,
+                                    hs as i32,
+                                    &beta as *const f32 as *const std::ffi::c_void,
+                                    logits_ptr as *mut std::ffi::c_void,
+                                    cublas_sys::cudaDataType::CUDA_R_32F,
+                                    w.rows as i32,
+                                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                                    cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                                )
+                                .map_err(|e| format!("gate GEMV[{}]: {:?}", layer_idx, e))?;
+                            }
                         }
                     }
                     if moe_route_clock_active {
@@ -62605,6 +66134,38 @@ impl GpuDecodeStore {
                         )?;
                     }
 
+                    // Explicit diagnostics replace normalized routes before every route consumer.
+                    if let Some(experiment) = graph.matched_routes.as_ref() {
+                        if graph.gpu_route_sync
+                            || !graph.split_expert_launch
+                            || graph.mapped_reads_active
+                            || graph.gpu_route_sync_hot_nosync
+                            || !graph.peer_experts.is_empty()
+                            || !graph.cpu_tail_workers.is_empty()
+                            || graph.adaptive_cold_drop.enabled()
+                            || graph.hcs_cold_swap.enabled
+                            || graph.synthetic_repack.is_some()
+                            || graph.expert_compression.is_some()
+                            || graph.apfl.as_ref().is_some_and(|a| a.enabled)
+                            || graph.decode_layer_start != 0
+                            || graph.decode_layer_end != graph.num_layers
+                            || graph.glm5_hc_mean_mult.is_none()
+                        {
+                            return Err("route diagnostic requires the admitted native host-classified split graph contract".into());
+                        }
+                        experiment.validate_layer(layer_idx, ne, topk)?;
+                        let position = graph
+                            .d_graph_pos
+                            .as_ref()
+                            .ok_or("route graph position missing")?;
+                        experiment.capture_node(
+                            layer_idx,
+                            topk_ids_dptr,
+                            topk_wts_dptr,
+                            *position.device_ptr(),
+                        )?;
+                    }
+
                     // GPU-side expert classification: check HCS table and prepare batch upload
                     if graph.gpu_route_sync {
                         if let Some(ref hcs) = graph.hcs {
@@ -62807,35 +66368,14 @@ impl GpuDecodeStore {
                 launch_graph_clock_marker(&k, clocks, final_clock_base + 1, "final-norm-end")?;
             }
 
-            // LM head GEMV
+            // Use the same dtype/arithmetic dispatch as ordinary eager decode.
             {
                 let w = &graph.weights[graph.lm_head_wid];
-                let alpha: f32 = 1.0;
-                let beta: f32 = 0.0;
-                unsafe {
-                    cublas_result::gemm_ex(
-                        *self.blas.handle(),
-                        cublas_sys::cublasOperation_t::CUBLAS_OP_T,
-                        cublas_sys::cublasOperation_t::CUBLAS_OP_N,
-                        w.rows as i32,
-                        1,
-                        w.cols as i32,
-                        &alpha as *const f32 as *const std::ffi::c_void,
-                        w.ptr as *const std::ffi::c_void,
-                        cublas_sys::cudaDataType::CUDA_R_16BF,
-                        w.cols as i32,
-                        *graph.d_hidden.device_ptr() as *const std::ffi::c_void,
-                        cublas_sys::cudaDataType::CUDA_R_16BF,
-                        hs as i32,
-                        &beta as *const f32 as *const std::ffi::c_void,
-                        *graph.d_logits.device_ptr() as *mut std::ffi::c_void,
-                        cublas_sys::cudaDataType::CUDA_R_32F,
-                        w.rows as i32,
-                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                        cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
-                    )
-                    .map_err(|e| format!("lm_head GEMV: {:?}", e))?;
-                }
+                self.gemv_bf16_to_f32_internal(
+                    w,
+                    *graph.d_hidden.device_ptr(),
+                    *graph.d_logits.device_ptr(),
+                )?;
             }
             if final_clock_active {
                 let clocks = graph
@@ -62871,6 +66411,13 @@ impl GpuDecodeStore {
                     .as_ref()
                     .ok_or_else(|| format!("final clock buffer missing for graph {}", graph_idx))?;
                 launch_graph_clock_marker(&k, clocks, final_clock_base + 3, "final-softcap-end")?;
+            }
+            if let Some(selected) = &self.selected_kda {
+                selected.enqueue_serving_guard(
+                    *graph.d_logits.device_ptr(),
+                    graph.d_logits.len() * 4,
+                    *self.device.cu_stream(),
+                )?;
             }
         }
         Ok(())
@@ -63439,8 +66986,8 @@ impl GpuDecodeStore {
             format!("{label}: mixed routed-expert precision table is unavailable")
         })?;
         let int4_weights = *graph.d_mixed_weights.device_ptr();
-        let int8_weights = int4_weights
-            + (graph.max_experts_per_tok * std::mem::size_of::<f32>()) as u64;
+        let int8_weights =
+            int4_weights + (graph.max_experts_per_tok * std::mem::size_of::<f32>()) as u64;
         let kernels = graph
             .kernels
             .as_ref()
@@ -63561,7 +67108,9 @@ impl GpuDecodeStore {
         let gs = graph.group_size;
         let expert_bits = expert_bits_override.unwrap_or(graph.expert_bits);
         if !matches!(expert_bits, 3 | 4 | 8) {
-            return Err(format!("{label}: unsupported routed expert INT{expert_bits}"));
+            return Err(format!(
+                "{label}: unsupported routed expert INT{expert_bits}"
+            ));
         }
         let is_int8 = expert_bits == 8;
         let inv_wp = if is_int8 {
@@ -63603,13 +67152,8 @@ impl GpuDecodeStore {
         } else {
             intermediate
         };
-        let w13_ksplits_batched = select_w13_ksplits_for_weights(
-            graph,
-            expert_hs,
-            w13_n,
-            topk.max(1),
-            is_int8,
-        );
+        let w13_ksplits_batched =
+            select_w13_ksplits_for_weights(graph, expert_hs, w13_n, topk.max(1), is_int8);
         let direct_w13_bf16 =
             graph.direct_w13_bf16_enabled_for_moe(moe, expert_bits, w13_ksplits_batched);
         if direct_w13_bf16 && (is_int8 || expert_bits != 4 || w13_ksplits_batched != 1) {
@@ -63637,6 +67181,66 @@ impl GpuDecodeStore {
                 .device_ptr()
         };
 
+        if let Some(bank) = &graph.ordered_expert_projection {
+            let program = bank
+                .marlin
+                .as_ref()
+                .ok_or("common expert program not admitted")?;
+            let gate = *graph.d_batch_gate_ups.device_ptr();
+            let output = *graph.d_batch_expert_outs.device_ptr();
+            let w13 = crate::common_marlin::Geometry {
+                rows: w13_n,
+                cols: expert_hs,
+                group: gs.min(expert_hs),
+                bits: expert_bits as usize,
+            };
+            let w2 = crate::common_marlin::Geometry {
+                rows: expert_hs,
+                cols: intermediate,
+                group: gs.min(intermediate),
+                bits: expert_bits as usize,
+            };
+            unsafe {
+                program.enqueue_slots(
+                    w13,
+                    d_w13p,
+                    d_w13s,
+                    expert_input_ptr,
+                    gate,
+                    d_wts_hot,
+                    0,
+                    w13_n,
+                    topk,
+                    program.stream(),
+                )?;
+                program.enqueue_activation(
+                    gate,
+                    gate,
+                    d_wts_hot,
+                    intermediate,
+                    moe.activation_type,
+                    moe.swiglu_limit,
+                    moe.deepseek_v4_activation,
+                    w13_n,
+                    w13_n,
+                    topk,
+                    program.stream(),
+                )?;
+                program.enqueue_slots(
+                    w2,
+                    d_w2p,
+                    d_w2s,
+                    gate,
+                    output,
+                    d_wts_hot,
+                    w13_n,
+                    expert_hs,
+                    topk,
+                    program.stream(),
+                )?;
+            }
+            return Ok(());
+        }
         if expert_bits == 3 {
             let factors = moe
                 .tileq
@@ -65117,7 +68721,130 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    fn capture_route_consumers(
+        graph: &GpuDecodeGraph,
+        layer: usize,
+        position: usize,
+        phase: &str,
+        stream: cuda_sys::CUstream,
+    ) -> Result<(), String> {
+        let Some(experiment) = graph
+            .matched_routes
+            .as_ref()
+            .filter(|e| e.selected(layer, position))
+        else {
+            return Ok(());
+        };
+        let moe = graph
+            .moe_layers
+            .get(layer)
+            .and_then(Option::as_ref)
+            .ok_or("route consumer MoE missing")?;
+        if graph.gpu_route_sync || !graph.split_expert_launch {
+            return Err("route consumer execution contract changed".into());
+        }
+        let topk = moe.topk;
+        let expected: Vec<[u64; 4]> = (0..topk)
+            .map(|slot| {
+                [
+                    graph.h_batch_w13_packed_ptrs[slot],
+                    graph.h_batch_w13_scales_ptrs[slot],
+                    graph.h_batch_w2_packed_ptrs[slot],
+                    graph.h_batch_w2_scales_ptrs[slot],
+                ]
+            })
+            .collect();
+        // Validate every resident slot against the live cache's actual pointer decision.
+        for slot in 0..topk {
+            if graph.h_batch_hot_flags[slot] != 0 {
+                let eid = usize::try_from(graph.h_batch_expert_ids[slot])
+                    .map_err(|_| "negative consumer ID")?;
+                let actual = graph
+                    .hcs
+                    .as_ref()
+                    .and_then(|h| h.get_fast(layer, eid))
+                    .ok_or("resident route absent from HCS")?;
+                if [actual.0, actual.1, actual.2, actual.3] != expected[slot] {
+                    return Err("resident consumer pointer identity changed".into());
+                }
+            } else {
+                let offsets = [
+                    graph.expert_buf_w13p_offset,
+                    graph.expert_buf_w13s_offset,
+                    graph.expert_buf_w2p_offset,
+                    graph.expert_buf_w2s_offset,
+                ];
+                if !graph.d_graph_expert_bufs.iter().any(|buffer| {
+                    offsets.iter().enumerate().all(|(kind, offset)| {
+                        (*buffer.device_ptr()).checked_add(*offset as u64)
+                            == Some(expected[slot][kind])
+                    })
+                }) {
+                    return Err("cold consumer does not own an admitted upload buffer".into());
+                }
+            }
+        }
+        let sources: Vec<[(usize, usize); 4]> = moe
+            .experts
+            .iter()
+            .map(|e| {
+                [
+                    (e.w13_packed_ptr, e.w13_packed_bytes),
+                    (e.w13_scales_ptr, e.w13_scales_bytes),
+                    (e.w2_packed_ptr, e.w2_packed_bytes),
+                    (e.w2_scales_ptr, e.w2_scales_bytes),
+                ]
+            })
+            .collect();
+        let (ids, weights) = match (&graph.pinned_topk_ids, &graph.pinned_topk_weights) {
+            (Some(ids), Some(weights)) => (ids.device_ptr, weights.device_ptr),
+            (None, None) => (
+                *graph.d_topk_indices.device_ptr(),
+                *graph.d_topk_weights.device_ptr(),
+            ),
+            _ => return Err("unpaired route consumer destinations".into()),
+        };
+        experiment.legacy_consumers(
+            layer,
+            position,
+            phase,
+            stream,
+            ids,
+            weights,
+            *graph.d_batch_upload.device_ptr(),
+            graph.max_experts_per_tok,
+            *graph
+                .d_wts_hot
+                .as_ref()
+                .ok_or("split hot weights missing")?
+                .device_ptr(),
+            *graph
+                .d_wts_full
+                .as_ref()
+                .ok_or("split full weights missing")?
+                .device_ptr(),
+            &graph.h_batch_hot_flags[..topk],
+            &expected,
+            &sources,
+        )
+    }
+
     fn replay_per_layer_graphs(
+        &mut self,
+        token_id: usize,
+        position: usize,
+        do_final: bool,
+    ) -> Result<(), String> {
+        let selected = self.selected_kda.clone();
+        if let Some(selected) = selected {
+            selected.with_serving_execution(*self.device.cu_stream(), || {
+                self.replay_per_layer_graphs_inner(token_id, position, do_final)
+            })
+        } else {
+            self.replay_per_layer_graphs_inner(token_id, position, do_final)
+        }
+    }
+    fn replay_per_layer_graphs_inner(
         &mut self,
         token_id: usize,
         position: usize,
@@ -65127,10 +68854,23 @@ impl GpuDecodeStore {
             .graph
             .as_mut()
             .ok_or_else(|| "No graph configured".to_string())?;
+        if let Some(experiment) = graph.matched_routes.as_mut() {
+            experiment.arm(&graph.trace_request_label)?;
+        }
         if !graph.per_layer_graphs_valid || graph.per_layer_graphs.is_empty() {
             return Err("Per-layer graphs not captured".to_string());
         }
         let decode_step_counter = graph.decode_step_counter;
+        let mut scalar_audit = ReplayScalarAudit::begin(
+            &graph.trace_request_label,
+            position,
+            token_id,
+            decode_step_counter,
+            "graph_replay",
+        )?;
+        if let (Some(audit), Some(selected)) = (&scalar_audit, &self.selected_kda) {
+            audit.capture_incoming(selected, 0)?;
+        }
         graph.decode_step_counter += 1;
         trace_emit_mark(
             graph.decode_trace.as_ref(),
@@ -65170,36 +68910,58 @@ impl GpuDecodeStore {
             let seq_len_i32 = (position + 1) as i32;
             unsafe {
                 if let Some(ref buf) = graph.d_graph_token_id {
-                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    let upload_result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                         *buf.device_ptr(),
                         &token_id_i32 as *const i32 as *const std::ffi::c_void,
                         4,
                         replay_stream,
                     );
+                    if let Some(audit) = scalar_audit.as_mut() {
+                        audit.record("token_id", *buf.device_ptr(), token_id_i32, upload_result);
+                    }
                 }
                 if let Some(ref buf) = graph.d_graph_pos {
-                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    let upload_result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                         *buf.device_ptr(),
                         &pos_i32 as *const i32 as *const std::ffi::c_void,
                         4,
                         replay_stream,
                     );
+                    if let Some(audit) = scalar_audit.as_mut() {
+                        audit.record("position", *buf.device_ptr(), pos_i32, upload_result);
+                    }
                 }
                 if let Some(ref buf) = graph.d_graph_rope_pos {
-                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    let upload_result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                         *buf.device_ptr(),
                         &rope_pos_i32 as *const i32 as *const std::ffi::c_void,
                         4,
                         replay_stream,
                     );
+                    if let Some(audit) = scalar_audit.as_mut() {
+                        audit.record(
+                            "rope_position",
+                            *buf.device_ptr(),
+                            rope_pos_i32,
+                            upload_result,
+                        );
+                    }
                 }
                 if let Some(ref buf) = graph.d_graph_seq_len {
-                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    let upload_result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                         *buf.device_ptr(),
                         &seq_len_i32 as *const i32 as *const std::ffi::c_void,
                         4,
                         replay_stream,
                     );
+                    if let Some(audit) = scalar_audit.as_mut() {
+                        audit.record(
+                            "sequence_length",
+                            *buf.device_ptr(),
+                            seq_len_i32,
+                            upload_result,
+                        );
+                    }
                 }
             }
             for layer_idx in 0..graph.d_graph_seq_len_by_layer.len() {
@@ -65207,12 +68969,20 @@ impl GpuDecodeStore {
                     .kv_attention_len_for_layer(layer_idx, position)
                     .min(i32::MAX as usize) as i32;
                 unsafe {
-                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    let upload_result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                         *graph.d_graph_seq_len_by_layer[layer_idx].device_ptr(),
                         &layer_seq_len_i32 as *const i32 as *const std::ffi::c_void,
                         4,
                         replay_stream,
                     );
+                    if let Some(audit) = scalar_audit.as_mut() {
+                        audit.record(
+                            &format!("layer{layer_idx}.sequence_length"),
+                            *graph.d_graph_seq_len_by_layer[layer_idx].device_ptr(),
+                            layer_seq_len_i32,
+                            upload_result,
+                        );
+                    }
                 }
             }
         }
@@ -65554,6 +69324,14 @@ impl GpuDecodeStore {
                     None
                 };
                 if !graph.graph_final_softcap_gpu_enabled {
+                    if self.selected_kda.is_some()
+                        && graph.h_logits.first().is_some_and(|v| v.is_nan())
+                    {
+                        return Err(
+                            "selected recurrence rejected invalid state/operands before sampling"
+                                .into(),
+                        );
+                    }
                     apply_logit_softcap_in_place(&mut graph.h_logits, graph.final_logit_softcap);
                 }
                 if let Some(t) = t_softcap_start {
@@ -67156,21 +70934,23 @@ impl GpuDecodeStore {
                         && graph.debug_decode_hcs_equiv_layer == Some(moe_layer_idx)
                         && graph.validation_decode_steps < graph.debug_decode_early_max_steps
                     {
-                        graph.debug_decode_hcs_equiv_entries.push(serde_json::json!({
-                            "phase": "graph_replay_expert_slot_order",
-                            "decode_step_zero_indexed": graph.validation_decode_steps,
-                            "layer": moe_layer_idx,
-                            "canonical_route_order": true,
-                            "router_topk_ids": graph.h_topk_ids[..topk].to_vec(),
-                            "router_topk_weights": graph.h_topk_weights[..topk].to_vec(),
-                            "batch_expert_ids": graph.h_batch_expert_ids[..topk].to_vec(),
-                            "batch_weights": graph.h_batch_weights[..topk].to_vec(),
-                            "batch_hot_flags": graph.h_batch_hot_flags[..topk].to_vec(),
-                            "hot_count": hot_batch_count,
-                            "demand_cold_count": cold_experts.len(),
-                            "adaptive_cold_drop_count": adaptive_cold_drop_count,
-                            "peer_served_count": peer_served_count,
-                        }));
+                        graph
+                            .debug_decode_hcs_equiv_entries
+                            .push(serde_json::json!({
+                                "phase": "graph_replay_expert_slot_order",
+                                "decode_step_zero_indexed": graph.validation_decode_steps,
+                                "layer": moe_layer_idx,
+                                "canonical_route_order": true,
+                                "router_topk_ids": graph.h_topk_ids[..topk].to_vec(),
+                                "router_topk_weights": graph.h_topk_weights[..topk].to_vec(),
+                                "batch_expert_ids": graph.h_batch_expert_ids[..topk].to_vec(),
+                                "batch_weights": graph.h_batch_weights[..topk].to_vec(),
+                                "batch_hot_flags": graph.h_batch_hot_flags[..topk].to_vec(),
+                                "hot_count": hot_batch_count,
+                                "demand_cold_count": cold_experts.len(),
+                                "adaptive_cold_drop_count": adaptive_cold_drop_count,
+                                "peer_served_count": peer_served_count,
+                            }));
                     }
                     let ptr_stride = max_ept * 8;
                     let fill_count = topk.min(max_ept);
@@ -67231,11 +71011,7 @@ impl GpuDecodeStore {
                             // without changing their reduction order.
                             for i in 0..fill_count {
                                 if graph.h_batch_hot_flags[i] != 0 {
-                                    std::ptr::write_bytes(
-                                        h.add(ptr_stride * 4 + i * 4),
-                                        0,
-                                        4,
-                                    );
+                                    std::ptr::write_bytes(h.add(ptr_stride * 4 + i * 4), 0, 4);
                                 }
                             }
                             for pending in &cpu_tail_pending {
@@ -67328,6 +71104,13 @@ impl GpuDecodeStore {
             // is backed by finished DMA and the replay stream (including the
             // split hot pre-launch below) never blocks on the prefetch stream.
 
+            if let Some(layer) = graph_idx
+                .checked_sub(1)
+                .and_then(|i| moe_indices.get(i))
+                .copied()
+            {
+                Self::capture_route_consumers(graph, layer, position, "pre_hot", replay_stream)?;
+            }
             // Split launch: compute hot/staged experts on the replay stream now,
             // before the cold-DMA wait, so hot compute overlaps demand DMA.
             if split_launch && graph_idx > 0 && hot_batch_count > 0 {
@@ -67716,6 +71499,13 @@ impl GpuDecodeStore {
                 }
             }
 
+            if let Some(layer) = graph_idx
+                .checked_sub(1)
+                .and_then(|i| moe_indices.get(i))
+                .copied()
+            {
+                Self::capture_route_consumers(graph, layer, position, "pre_cold", replay_stream)?;
+            }
             // ── Pre-graph: clear mapped cold buffer ready flag for GPU classify kernel ──
             if gpu_rs && graph_idx < num_graphs - 1 {
                 // The graph about to be replayed contains a classify kernel at the end.
@@ -67745,6 +71535,71 @@ impl GpuDecodeStore {
             }
             if let Some(t) = t_launch_start {
                 graph.t_graph_launch += t.elapsed().as_secs_f64();
+            }
+            if do_final {
+                if let Some(&layer) = moe_indices.get(graph_idx) {
+                    Self::capture_matched_moe_tensor(
+                        graph,
+                        layer,
+                        position,
+                        "decode_moe_input",
+                        replay_stream,
+                        self.device.ordinal(),
+                    )?;
+                    if graph.matched_router_capture_enabled {
+                        Self::capture_matched_router_operands(
+                            graph,
+                            layer,
+                            position,
+                            replay_stream,
+                            self.device.ordinal(),
+                            "graph routing segment before host cold processing",
+                        )?;
+                    }
+                }
+                if let Some(layer) = graph_idx
+                    .checked_sub(1)
+                    .and_then(|i| moe_indices.get(i))
+                    .copied()
+                {
+                    Self::capture_matched_moe_tensor(
+                        graph,
+                        layer,
+                        position,
+                        "decode_moe_output",
+                        replay_stream,
+                        self.device.ordinal(),
+                    )?;
+                    if let Some(experiment) = graph.matched_routes.as_ref() {
+                        if let Some(directory) = experiment.evidence_directory(layer, position)? {
+                            let target = crate::matched_probe::Target {
+                                row: 0,
+                                directory: directory.join("executed"),
+                            };
+                            let moe = graph.moe_layers[layer]
+                                .as_ref()
+                                .ok_or("executed route layer missing")?;
+                            let bytes = moe
+                                .topk
+                                .checked_mul(graph.hidden_size)
+                                .and_then(|v| v.checked_mul(2))
+                                .ok_or("executed route output overflow")?;
+                            target.device(
+                                "expert-slot-outputs.bf16",
+                                *graph.d_batch_expert_outs.device_ptr(),
+                                bytes,
+                                replay_stream,
+                            )?;
+                            target.device(
+                                "routed-output.bf16",
+                                *graph.d_moe_out.device_ptr(),
+                                graph.hidden_size * 2,
+                                replay_stream,
+                            )?;
+                            target.write("descriptor.json", serde_json::to_vec_pretty(&serde_json::json!({"layer":layer,"position":position,"topk":moe.topk,"hidden_size":graph.hidden_size,"intermediate_size":graph.moe_intermediate_size,"group_size":graph.group_size,"expert_bits":graph.expert_bits,"stage":"actual expert buffers after native hot/cold graph execution"})).map_err(|e|e.to_string())?.as_slice())?;
+                        }
+                    }
+                }
             }
             // Root-cause diagnostics only: make the otherwise opaque captured
             // segment observable at the same layer boundary as the canonical
@@ -67807,15 +71662,13 @@ impl GpuDecodeStore {
                     };
                     let gate_base = *graph.d_batch_gate_ups.device_ptr();
                     let output_base = *graph.d_batch_expert_outs.device_ptr();
-                    let ptr_stride = graph.max_experts_per_tok
-                        * std::mem::size_of::<u64>();
-                    let ordinary_weights_ptr = *graph.d_batch_upload.device_ptr()
-                        + (ptr_stride * 4) as u64;
+                    let ptr_stride = graph.max_experts_per_tok * std::mem::size_of::<u64>();
+                    let ordinary_weights_ptr =
+                        *graph.d_batch_upload.device_ptr() + (ptr_stride * 4) as u64;
                     let final_weights_ptr = if graph.split_expert_launch {
                         if graph.gpu_route_sync {
                             ordinary_weights_ptr
-                                + (graph.max_experts_per_tok
-                                    * std::mem::size_of::<f32>()) as u64
+                                + (graph.max_experts_per_tok * std::mem::size_of::<f32>()) as u64
                         } else {
                             *graph
                                 .d_wts_full
@@ -67876,9 +71729,8 @@ impl GpuDecodeStore {
                                 )
                             })?;
                     }
-                    let diagnostic_sync = unsafe {
-                        cuda_sys::lib().cuStreamSynchronize(replay_stream)
-                    };
+                    let diagnostic_sync =
+                        unsafe { cuda_sys::lib().cuStreamSynchronize(replay_stream) };
                     if diagnostic_sync != cuda_sys::CUresult::CUDA_SUCCESS {
                         return Err(format!(
                             "DeepSeek-V4 graph-boundary diagnostic reduction sync layer {}: {:?}",
@@ -67915,9 +71767,8 @@ impl GpuDecodeStore {
                                     )
                                 })?;
                         }
-                        let scale_sync = unsafe {
-                            cuda_sys::lib().cuStreamSynchronize(replay_stream)
-                        };
+                        let scale_sync =
+                            unsafe { cuda_sys::lib().cuStreamSynchronize(replay_stream) };
                         if scale_sync != cuda_sys::CUresult::CUDA_SUCCESS {
                             return Err(format!(
                                 "DeepSeek-V4 graph-boundary diagnostic routed scale sync layer {}: {:?}",
@@ -67932,26 +71783,28 @@ impl GpuDecodeStore {
                     } else {
                         routed_reduction.clone()
                     };
-                    graph.debug_decode_hcs_equiv_entries.push(serde_json::json!({
-                        "phase": "graph_replay_expert_slot_outputs",
-                        "decode_step_zero_indexed": graph.validation_decode_steps,
-                        "layer": layer_idx,
-                        "graph_idx": graph_idx,
-                        "ordinary_device_weights": debug_decode_f32_summary_json(
-                            &format!("graph_layer{}_ordinary_device_weights", layer_idx),
-                            ordinary_weights_ptr,
-                            topk,
-                        ),
-                        "final_device_weights": debug_decode_f32_summary_json(
-                            &format!("graph_layer{}_final_device_weights", layer_idx),
-                            final_weights_ptr,
-                            topk,
-                        ),
-                        "routed_reduction": routed_reduction,
-                        "routed_scaling_factor": routed_scaling_factor,
-                        "routed_scaled": routed_scaled,
-                        "slot_summaries": slot_summaries,
-                    }));
+                    graph
+                        .debug_decode_hcs_equiv_entries
+                        .push(serde_json::json!({
+                            "phase": "graph_replay_expert_slot_outputs",
+                            "decode_step_zero_indexed": graph.validation_decode_steps,
+                            "layer": layer_idx,
+                            "graph_idx": graph_idx,
+                            "ordinary_device_weights": debug_decode_f32_summary_json(
+                                &format!("graph_layer{}_ordinary_device_weights", layer_idx),
+                                ordinary_weights_ptr,
+                                topk,
+                            ),
+                            "final_device_weights": debug_decode_f32_summary_json(
+                                &format!("graph_layer{}_final_device_weights", layer_idx),
+                                final_weights_ptr,
+                                topk,
+                            ),
+                            "routed_reduction": routed_reduction,
+                            "routed_scaling_factor": routed_scaling_factor,
+                            "routed_scaled": routed_scaled,
+                            "slot_summaries": slot_summaries,
+                        }));
                 }
                 graph.debug_decode_early_entries.push(serde_json::json!({
                     "phase": "deepseek_v4_graph_segment_complete",
@@ -68228,6 +72081,13 @@ impl GpuDecodeStore {
                 None
             };
             if !graph.graph_final_softcap_gpu_enabled {
+                if self.selected_kda.is_some() && graph.h_logits.first().is_some_and(|v| v.is_nan())
+                {
+                    return Err(
+                        "selected recurrence rejected invalid state/operands before sampling"
+                            .into(),
+                    );
+                }
                 apply_logit_softcap_in_place(&mut graph.h_logits, graph.final_logit_softcap);
             }
             if let Some(t) = t_softcap_start {
@@ -68235,6 +72095,9 @@ impl GpuDecodeStore {
             }
         }
 
+        if let Some(audit) = scalar_audit {
+            audit.complete()?;
+        }
         Ok(())
     }
 
@@ -69338,9 +73201,7 @@ impl GpuDecodeStore {
                 None,
                 None,
             )?;
-            graph
-                .debug_decode_early_entries
-                .extend(diagnostic_entries);
+            graph.debug_decode_early_entries.extend(diagnostic_entries);
             if let Some(start) = stage_start {
                 self.device
                     .synchronize()
@@ -69358,6 +73219,14 @@ impl GpuDecodeStore {
             };
             self.moe_forward_with_graph(graph, layer_idx)
                 .map_err(|error| format!("DeepSeek-V4 MoE layer {}: {}", layer_idx, error))?;
+            Self::capture_matched_moe_tensor(
+                graph,
+                layer_idx,
+                position,
+                "decode_moe_output",
+                *self.device.cu_stream(),
+                self.device.ordinal(),
+            )?;
             let (state_ptr, next_ptr, hc_mult) = {
                 let workspace = graph
                     .deepseek_v4_decode_workspace
@@ -69482,6 +73351,11 @@ impl GpuDecodeStore {
                 return Err(format!("DeepSeek-V4 logits D2H: {:?}", result));
             }
         }
+        if self.selected_kda.is_some() && graph.h_logits.first().is_some_and(|v| v.is_nan()) {
+            return Err(
+                "selected recurrence rejected invalid state/operands before sampling".into(),
+            );
+        }
         apply_logit_softcap_in_place(&mut graph.h_logits, graph.final_logit_softcap);
         if timing {
             let total_seconds = step_start.elapsed().as_secs_f64();
@@ -69500,6 +73374,7 @@ impl GpuDecodeStore {
     /// All computation on GPU via CUDA kernels. Zero Python, zero GIL.
     /// The MoE forward uses the fast Marlin GEMV path with HCS.
     pub fn gpu_decode_step(&mut self, token_id: usize, position: usize) -> Result<(), String> {
+        self.require_sequence_state_ready_rust()?;
         if !self.kernels_loaded {
             return Err("Decode kernels not loaded".to_string());
         }
@@ -69509,7 +73384,14 @@ impl GpuDecodeStore {
             .take()
             .ok_or_else(|| "Call configure first".to_string())?;
 
-        let result = self.gpu_decode_step_with_graph(&mut graph, token_id, position);
+        let selected = self.selected_kda.clone();
+        let result = if let Some(selected) = selected {
+            selected.with_serving_execution(*self.device.cu_stream(), || {
+                self.gpu_decode_step_with_graph(&mut graph, token_id, position)
+            })
+        } else {
+            self.gpu_decode_step_with_graph(&mut graph, token_id, position)
+        };
 
         self.graph = Some(graph);
         result
@@ -69524,6 +73406,22 @@ impl GpuDecodeStore {
         use cudarc::driver::LaunchConfig;
         use std::time::Instant;
 
+        if !graph.matched_graph_stages_initialized {
+            graph.matched_graph_stages =
+                MatchedGraphStageBuffer::build(graph, self.common_mla.is_some())?;
+            graph.matched_graph_stages_initialized = true;
+        }
+        let incoming_audit = ReplayScalarAudit::begin(
+            &graph.trace_request_label,
+            position,
+            token_id,
+            usize::try_from(graph.validation_decode_steps)
+                .map_err(|_| "observer step does not fit usize")?,
+            "eager",
+        )?;
+        if let (Some(audit), Some(selected)) = (&incoming_audit, &self.selected_kda) {
+            audit.capture_incoming(selected, 0)?;
+        }
         let hs = graph.hidden_size;
         let eps = graph.eps;
         let timing = graph.timing_enabled;
@@ -69853,6 +73751,19 @@ impl GpuDecodeStore {
                     .as_ref()
                     .map(|workspace| *workspace.d_hc_state.device_ptr())
                     .ok_or("GLM-5.3 mHC workspace is not finalized")?;
+                MatchedGraphStageBuffer::record_eager(
+                    graph,
+                    layer_idx,
+                    "decode_graph_hc_entry",
+                    state_ptr,
+                    hs.checked_mul(hc.mult)
+                        .and_then(|x| x.checked_mul(2))
+                        .ok_or("eager HC extent overflow")?,
+                    position
+                        .checked_add(1)
+                        .ok_or("eager stage height overflow")?,
+                    *self.device.cu_stream(),
+                )?;
                 if debug_glm5_boundary_trace {
                     graph.debug_decode_early_entries.push(serde_json::json!({
                         "phase": "glm5_hc_input_state",
@@ -69868,7 +73779,21 @@ impl GpuDecodeStore {
                         ),
                     }));
                 }
-                self.launch_deepseek_v4_hc_prepare_for_graph(
+                let hc_producer_capture = crate::matched_probe::target_for_request(
+                    "decode_eager_hc_prepare",
+                    layer_idx,
+                    position
+                        .checked_add(1)
+                        .ok_or("HC eager producer height overflow")?,
+                    Some(&graph.trace_request_label),
+                )?
+                .map(|target| {
+                    target
+                        .child(&graph.trace_request_label)?
+                        .child(&format!("device-{}", self.device.ordinal()))
+                })
+                .transpose()?;
+                self.launch_deepseek_v4_hc_prepare_observed_for_graph(
                     graph,
                     state_ptr,
                     *graph.d_hidden.device_ptr(),
@@ -69880,6 +73805,18 @@ impl GpuDecodeStore {
                     hc.eps,
                     None,
                     &format!("GLM-5.3 layer {} attention", layer_idx),
+                    hc_producer_capture.as_ref(),
+                )?;
+                MatchedGraphStageBuffer::record_eager(
+                    graph,
+                    layer_idx,
+                    "decode_graph_attn_prepared",
+                    *graph.d_hidden.device_ptr(),
+                    hs.checked_mul(2).ok_or("eager hidden extent overflow")?,
+                    position
+                        .checked_add(1)
+                        .ok_or("eager stage height overflow")?,
+                    *self.device.cu_stream(),
                 )?;
                 if debug_glm5_boundary_trace {
                     graph.debug_decode_early_entries.push(serde_json::json!({
@@ -69903,6 +73840,17 @@ impl GpuDecodeStore {
                     layer.input_norm_ptr,
                     hs,
                     &format!("GLM-5.3 layer {} input", layer_idx),
+                )?;
+                MatchedGraphStageBuffer::record_eager(
+                    graph,
+                    layer_idx,
+                    "decode_graph_attn_norm",
+                    *graph.d_hidden.device_ptr(),
+                    hs.checked_mul(2).ok_or("eager hidden extent overflow")?,
+                    position
+                        .checked_add(1)
+                        .ok_or("eager stage height overflow")?,
+                    *self.device.cu_stream(),
                 )?;
                 if debug_glm5_boundary_trace {
                     graph.debug_decode_early_entries.push(serde_json::json!({
@@ -69967,10 +73915,11 @@ impl GpuDecodeStore {
                 };
                 if is_gemma4 {
                     unsafe {
-                        let err = cuda_sys::lib().cuMemcpyDtoD_v2(
+                        let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(
                             *graph.d_residual.device_ptr(),
                             *graph.d_hidden.device_ptr(),
                             hs * 2,
+                            *self.device.cu_stream(),
                         );
                         if err != cuda_sys::CUresult::CUDA_SUCCESS {
                             return Err(format!(
@@ -70138,8 +74087,37 @@ impl GpuDecodeStore {
                     } else {
                         None
                     };
+                    let eager_probe = if graph.matched_eager_kda_enabled {
+                        crate::matched_probe::target_for_request(
+                            "decode_eager_kda",
+                            layer_idx,
+                            position.checked_add(1).ok_or("eager KDA height overflow")?,
+                            Some(&graph.trace_request_label),
+                        )?
+                        .map(|target| {
+                            target.child(&graph.trace_request_label).and_then(|target| {
+                                target.child(&format!("device-{}", self.device.ordinal()))
+                            })
+                        })
+                        .transpose()?
+                    } else {
+                        None
+                    };
+                    let _projection_frame = if eager_probe.is_some() {
+                        Some(crate::matched_projection_transfer::Frame::enter(
+                            layer_idx,
+                            position
+                                .checked_add(1)
+                                .ok_or("conditional height overflow")?,
+                            token_id,
+                            true,
+                        )?)
+                    } else {
+                        None
+                    };
                     self.run_kimi_delta_attention(
                         graph,
+                        layer_idx,
                         kda,
                         hqq_kda,
                         *graph.d_hidden.device_ptr(),
@@ -70147,7 +74125,17 @@ impl GpuDecodeStore {
                         timing,
                         None,
                         kda_debug_context,
+                        None,
+                        eager_probe.as_ref(),
+                        Some(
+                            position
+                                .checked_add(1)
+                                .ok_or("actual eager KDA frame height overflow")?,
+                        ),
                     )?;
+                    if let Some(target) = eager_probe {
+                        target.write("boundary.json",serde_json::to_vec_pretty(&serde_json::json!({"operation":"decode_eager_kda","layer":layer_idx,"logical_tokens":position+1,"consumed_token":token_id,"request_label":graph.trace_request_label,"device_ordinal":self.device.ordinal(),"heads":kda.num_heads,"dim":kda.head_dim,"kernel_dim":kda.kernel_dim,"gate_lower_bound":kda.gate_lower_bound,"q_scale":(kda.head_dim as f32).sqrt().recip(),"qk_norm_eps":1.0e-6f32,"output_norm_eps":graph.eps,"kernel":if graph.selected_kda_arithmetic {"current_prepared_f32_fixed16"}else{"kimi_delta_recurrent_scan_bf16"},"source":"actual eager operation boundaries, no graph buffer reuse","arithmetic_changed":graph.selected_kda_arithmetic,"device_diagnostic_allocation_bytes":0,"forcing":crate::matched_projection_transfer::forcing_label().is_some(),"teacher_label":crate::matched_projection_transfer::forcing_label(),"conditional_projection_control":crate::matched_projection_transfer::boundary_intervention()})).map_err(|e|e.to_string())?.as_slice())?;
+                    }
                     graph.debug_decode_early_entries.extend(kda_debug_entries);
                 }
                 GpuAttnConfig::LinearAttention {
@@ -70288,10 +74276,11 @@ impl GpuDecodeStore {
                     {
                         let z_size = nv_ * dv_;
                         unsafe {
-                            let err = cuda_sys::lib().cuMemcpyDtoD_v2(
+                            let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(
                                 *graph.d_la_gated_out.device_ptr(),
                                 *graph.d_la_recur_out.device_ptr(),
                                 z_size * 4,
+                                *self.device.cu_stream(),
                             );
                             if err != cuda_sys::CUresult::CUDA_SUCCESS {
                                 return Err(format!("D2D z save[{}]: {:?}", layer_idx, err));
@@ -70944,11 +74933,12 @@ impl GpuDecodeStore {
                                 let k_offset = hqq_exec.fused_q_rows;
                                 let v_offset = k_offset + hqq_exec.fused_k_rows;
                                 unsafe {
-                                    let err = cuda_sys::lib().cuMemcpyDtoD_v2(
+                                    let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(
                                         *graph.d_gqa_k.device_ptr(),
                                         (*graph.d_gqa_q.device_ptr() as *const f32).add(k_offset)
                                             as u64,
                                         hqq_exec.fused_k_rows * 4,
+                                        *self.device.cu_stream(),
                                     );
                                     if err != cuda_sys::CUresult::CUDA_SUCCESS {
                                         return Err(format!(
@@ -70956,11 +74946,12 @@ impl GpuDecodeStore {
                                             layer_idx, err
                                         ));
                                     }
-                                    let err = cuda_sys::lib().cuMemcpyDtoD_v2(
+                                    let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(
                                         *graph.d_gqa_v.device_ptr(),
                                         (*graph.d_gqa_q.device_ptr() as *const f32).add(v_offset)
                                             as u64,
                                         hqq_exec.fused_v_rows * 4,
+                                        *self.device.cu_stream(),
                                     );
                                     if err != cuda_sys::CUresult::CUDA_SUCCESS {
                                         return Err(format!(
@@ -71040,20 +75031,22 @@ impl GpuDecodeStore {
                             let k_offset = q_size;
                             let v_offset = k_offset + kv_stride;
                             unsafe {
-                                let err = cuda_sys::lib().cuMemcpyDtoD_v2(
+                                let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(
                                     *graph.d_gqa_k.device_ptr(),
                                     (*graph.d_gqa_q.device_ptr() as *const f32).add(k_offset)
                                         as u64,
                                     kv_stride * 4,
+                                    *self.device.cu_stream(),
                                 );
                                 if err != cuda_sys::CUresult::CUDA_SUCCESS {
                                     return Err(format!("D2D K split[{}]: {:?}", layer_idx, err));
                                 }
-                                let err = cuda_sys::lib().cuMemcpyDtoD_v2(
+                                let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(
                                     *graph.d_gqa_v.device_ptr(),
                                     (*graph.d_gqa_q.device_ptr() as *const f32).add(v_offset)
                                         as u64,
                                     kv_stride * 4,
+                                    *self.device.cu_stream(),
                                 );
                                 if err != cuda_sys::CUresult::CUDA_SUCCESS {
                                     return Err(format!("D2D V split[{}]: {:?}", layer_idx, err));
@@ -71149,10 +75142,11 @@ impl GpuDecodeStore {
                             if !qg_input_already_in_split_buffer {
                                 let gated_q_size = nh * hd * 2; // Q + gate interleaved
                                 unsafe {
-                                    let err = cuda_sys::lib().cuMemcpyDtoD_v2(
+                                    let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(
                                         *graph.d_gqa_out.device_ptr(),
                                         *graph.d_gqa_q.device_ptr(),
                                         gated_q_size * 4,
+                                        *self.device.cu_stream(),
                                     );
                                     if err != cuda_sys::CUresult::CUDA_SUCCESS {
                                         return Err(format!(
@@ -72449,6 +76443,101 @@ impl GpuDecodeStore {
                         None => None,
                     };
 
+                    let mla_probe = crate::matched_probe::target_for_request(
+                        "mla_decode_operands",
+                        layer_idx,
+                        position
+                            .checked_add(1)
+                            .ok_or("MLA observation height overflow")?,
+                        Some(&graph.trace_request_label),
+                    )?
+                    .map(|target| {
+                        target
+                            .child(&graph.trace_request_label)?
+                            .child(&format!("device-{}", self.device.ordinal()))
+                    })
+                    .transpose()?;
+                    if let Some(t) = &mla_probe {
+                        if t.row != 0 || *q_lora_rank == 0 || layer.dsa_indexer.is_none() {
+                            return Err(
+                                "MLA eager observation requires actual sparse HQQ LoRA frame"
+                                    .into(),
+                            );
+                        }
+                        let exec = hqq_mla_exec.as_ref().ok_or(
+                            "MLA eager observation requires actual HQQ6 execution descriptor",
+                        )?;
+                        let qa = exec.q_a_proj.as_ref().ok_or("observed q_a absent")?;
+                        let qb = exec.q_b_proj.as_ref().ok_or("observed q_b absent")?;
+                        for (name, w) in [
+                            ("q_a", qa),
+                            ("q_b", qb),
+                            ("kv_a", &exec.kv_a_proj_with_mqa),
+                            ("o", &exec.o_proj),
+                        ] {
+                            crate::mla_probe::weights(
+                                t,
+                                &format!("{name}-weights"),
+                                &ordered_decode_layout(w)?,
+                                hqq_tensor_exec_json(w, name),
+                                *self.device.cu_stream(),
+                            )?;
+                        }
+                        crate::mla_probe::row(
+                            t,
+                            "input.bf16",
+                            *graph.d_hidden.device_ptr(),
+                            0,
+                            hs,
+                            2,
+                            *self.device.cu_stream(),
+                        )?;
+                        crate::mla_probe::block(
+                            t,
+                            "input_norm.bf16",
+                            layer.input_norm_ptr,
+                            hs,
+                            2,
+                            *self.device.cu_stream(),
+                        )?;
+                        crate::mla_probe::block(
+                            t,
+                            "q_a_norm.f32",
+                            *q_a_norm_ptr,
+                            *q_lora_rank,
+                            4,
+                            *self.device.cu_stream(),
+                        )?;
+                        crate::mla_probe::block(
+                            t,
+                            "kv_a_norm.f32",
+                            *kv_a_norm_ptr,
+                            klr,
+                            4,
+                            *self.device.cu_stream(),
+                        )?;
+                        crate::mla_probe::block(
+                            t,
+                            "w_kc.bf16",
+                            *w_kc_ptr,
+                            nh.checked_mul(nope)
+                                .and_then(|v| v.checked_mul(ccd))
+                                .ok_or("MLA WKC observation overflow")?,
+                            2,
+                            *self.device.cu_stream(),
+                        )?;
+                        crate::mla_probe::block(
+                            t,
+                            "w_vc.bf16",
+                            *w_vc_ptr,
+                            nh.checked_mul(vhd)
+                                .and_then(|v| v.checked_mul(ccd))
+                                .ok_or("MLA WVC observation overflow")?,
+                            2,
+                            *self.device.cu_stream(),
+                        )?;
+                        t.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({"actual_execution_path":"eager","layer":layer_idx,"logical_tokens":position+1,"position":position,"row":0,"hidden":hs,"heads":nh,"kv_lora_rank":klr,"cache_dim":ccd,"nope":nope,"rope":rope,"value_dim":vhd,"q_lora_rank":*q_lora_rank,"eps":eps,"kv_format":graph.kv_format,"q_a_output_dtype":"float32","q_b_output_dtype":"float32","kv_a_output_dtype":"float32","q_a_norm_output_dtype":"bf16","norm_input_dtype":"float32","forcing":crate::matched_projection_transfer::forcing_label().is_some(),"device_diagnostic_allocation_bytes":0})).map_err(|e|e.to_string())?.as_slice())?;
+                    }
                     // ── MLA Step 1: Q projection ──
                     if let Some(hqq_exec) = hqq_mla_exec.as_ref() {
                         if *q_lora_rank > 0 {
@@ -72458,12 +76547,23 @@ impl GpuDecodeStore {
                             let qb = hqq_exec.q_b_proj.as_ref().ok_or_else(|| {
                                 format!("HQQ MLA layer {} has no q_b_proj", layer_idx)
                             })?;
-                            self.launch_hqq_decode_gemv_f32(
+                            self.launch_mla_hqq_gemv_f32(
                                 "q_a_proj",
                                 qa,
                                 *graph.d_hidden.device_ptr(),
                                 *graph.d_gqa_q.device_ptr(),
                             )?;
+                            if let Some(t) = &mla_probe {
+                                crate::mla_probe::row(
+                                    t,
+                                    "q_a-output.f32",
+                                    *graph.d_gqa_q.device_ptr(),
+                                    0,
+                                    *q_lora_rank,
+                                    4,
+                                    *self.device.cu_stream(),
+                                )?;
+                            }
 
                             {
                                 let threads = 256u32;
@@ -72496,6 +76596,28 @@ impl GpuDecodeStore {
                                 *graph.d_gqa_q.device_ptr(),
                                 *q_lora_rank,
                             )?;
+                            if let Some(t) = &mla_probe {
+                                crate::mla_probe::row(
+                                    t,
+                                    "q_norm.f32",
+                                    *graph.d_gqa_q.device_ptr(),
+                                    0,
+                                    *q_lora_rank,
+                                    4,
+                                    *self.device.cu_stream(),
+                                )?;
+                            }
+                            if let Some(t) = &mla_probe {
+                                crate::mla_probe::row(
+                                    t,
+                                    "q_norm.bf16",
+                                    *graph.d_scratch.device_ptr(),
+                                    0,
+                                    *q_lora_rank,
+                                    2,
+                                    *self.device.cu_stream(),
+                                )?;
+                            }
                             if let Some((d_position_ptr, d_seq_len_ptr)) = dsa_owner_scalars {
                                 // The DSA query projection consumes the same
                                 // normalized query-LoRA latent as MLA q_b.
@@ -72508,13 +76630,35 @@ impl GpuDecodeStore {
                                     *graph.d_scratch.device_ptr(),
                                     DsaGraphScoreBackend::LiveFused,
                                 )?;
+                                self.record_indexer_stages(
+                                    graph,
+                                    layer_idx,
+                                    d_position_ptr,
+                                    d_seq_len_ptr,
+                                    *graph.d_scratch.device_ptr(),
+                                    IndexObservationFrame::Eager(
+                                        position
+                                            .checked_add(1)
+                                            .ok_or("index eager height overflow")?,
+                                    ),
+                                )?;
+                                if let Some(target) = &mla_probe {
+                                    self.observe_mla_indexer(
+                                        target,
+                                        graph,
+                                        layer_idx,
+                                        position,
+                                        d_position_ptr,
+                                        d_seq_len_ptr,
+                                    )?;
+                                }
                                 self.execute_dsa_owner_topk_graphable_for_graph(
                                     graph,
                                     layer_idx,
                                     d_seq_len_ptr,
                                 )?;
                             }
-                            self.launch_hqq_decode_gemv_f32(
+                            self.launch_mla_hqq_gemv_f32(
                                 "q_b_proj",
                                 qb,
                                 *graph.d_scratch.device_ptr(),
@@ -72524,7 +76668,7 @@ impl GpuDecodeStore {
                             let q = hqq_exec.q_proj.as_ref().ok_or_else(|| {
                                 format!("HQQ MLA layer {} has no q_proj", layer_idx)
                             })?;
-                            self.launch_hqq_decode_gemv_f32(
+                            self.launch_mla_hqq_gemv_f32(
                                 "q_proj",
                                 q,
                                 *graph.d_hidden.device_ptr(),
@@ -72590,6 +76734,18 @@ impl GpuDecodeStore {
                                 *graph.d_scratch.device_ptr(),
                                 DsaGraphScoreBackend::LiveFused,
                             )?;
+                            self.record_indexer_stages(
+                                graph,
+                                layer_idx,
+                                d_position_ptr,
+                                d_seq_len_ptr,
+                                *graph.d_scratch.device_ptr(),
+                                IndexObservationFrame::Eager(
+                                    position
+                                        .checked_add(1)
+                                        .ok_or("index eager height overflow")?,
+                                ),
+                            )?;
                             self.execute_dsa_owner_topk_graphable_for_graph(
                                 graph,
                                 layer_idx,
@@ -72614,11 +76770,23 @@ impl GpuDecodeStore {
                     } else {
                         return Err(format!("MLA layer {} has no Q projection", layer_idx));
                     }
+                    if let Some(t) = &mla_probe {
+                        crate::mla_probe::row(
+                            t,
+                            "q_b-output.f32",
+                            *graph.d_gqa_q.device_ptr(),
+                            0,
+                            nh.checked_mul(q_head_dim)
+                                .ok_or("MLA qB observed extent overflow")?,
+                            4,
+                            *self.device.cu_stream(),
+                        )?;
+                    }
                     // d_gqa_q = [num_heads * (nope + rope)] FP32
 
                     // ── MLA Step 2: KV projection ──
                     if let Some(hqq_exec) = hqq_mla_exec.as_ref() {
-                        self.launch_hqq_decode_gemv_f32(
+                        self.launch_mla_hqq_gemv_f32(
                             "kv_a_proj_with_mqa",
                             &hqq_exec.kv_a_proj_with_mqa,
                             *graph.d_hidden.device_ptr(),
@@ -72633,6 +76801,18 @@ impl GpuDecodeStore {
                         )?;
                     }
 
+                    if let Some(t) = &mla_probe {
+                        crate::mla_probe::row(
+                            t,
+                            "kv_a-output.f32",
+                            *graph.d_mla_kv.device_ptr(),
+                            0,
+                            klr.checked_add(rope)
+                                .ok_or("MLA KVA observed extent overflow")?,
+                            4,
+                            *self.device.cu_stream(),
+                        )?;
+                    }
                     // RMSNorm on ckv portion only (first kv_lora_rank elements)
                     {
                         let threads = 256u32;
@@ -72659,6 +76839,18 @@ impl GpuDecodeStore {
                         }
                     }
 
+                    if let Some(t) = &mla_probe {
+                        crate::mla_probe::row(
+                            t,
+                            "kv_norm.f32",
+                            *graph.d_mla_kv.device_ptr(),
+                            0,
+                            klr.checked_add(rope)
+                                .ok_or("MLA KV norm observed extent overflow")?,
+                            4,
+                            *self.device.cu_stream(),
+                        )?;
+                    }
                     let ckv_ptr = *graph.d_mla_kv.device_ptr();
                     let k_pe_ptr =
                         unsafe { (*graph.d_mla_kv.device_ptr() as *const f32).add(klr) as u64 };
@@ -72777,6 +76969,32 @@ impl GpuDecodeStore {
                         }
                     }
 
+                    if let Some(t) = &mla_probe {
+                        crate::mla_probe::row(
+                            t,
+                            "query_nope.f32",
+                            *graph.d_gqa_k.device_ptr(),
+                            0,
+                            nh.checked_mul(nope)
+                                .ok_or("MLA q nope observed extent overflow")?,
+                            4,
+                            *self.device.cu_stream(),
+                        )?;
+                    }
+                    if rope > 0 {
+                        if let Some(t) = &mla_probe {
+                            crate::mla_probe::row(
+                                t,
+                                "query_rope.f32",
+                                *graph.d_gqa_v.device_ptr(),
+                                0,
+                                nh.checked_mul(rope)
+                                    .ok_or("MLA q rope observed extent overflow")?,
+                                4,
+                                *self.device.cu_stream(),
+                            )?;
+                        }
+                    }
                     // ── MLA Step 6: Absorb w_kc (q_nope @ w_kc → q_absorbed) ──
                     // w_kc is [H, nope, ccd] (padded to ≥512 for MLA decode)
                     {
@@ -72801,6 +77019,18 @@ impl GpuDecodeStore {
                                 )
                                 .map_err(|e| format!("mla_absorb_wkc[{}]: {:?}", layer_idx, e))?;
                         }
+                    }
+                    if let Some(t) = &mla_probe {
+                        crate::mla_probe::row(
+                            t,
+                            "q_absorbed.f32",
+                            *graph.d_mla_q_absorbed.device_ptr(),
+                            0,
+                            nh.checked_mul(ccd)
+                                .ok_or("MLA q absorbed observed extent overflow")?,
+                            4,
+                            *self.device.cu_stream(),
+                        )?;
                     }
                     // ── MLA Step 7: Write to the selected compact cache ──
                     // Cache has ccd logical entries; real data is klr and the
@@ -72846,9 +77076,83 @@ impl GpuDecodeStore {
                         }
                     }
 
+                    if let Some(t) = &mla_probe {
+                        let prefix = position
+                            .checked_add(1)
+                            .ok_or("MLA observed prefix overflow")?;
+                        if prefix > graph.kv_max_seq {
+                            return Err("MLA observed prefix exceeds actual cache capacity".into());
+                        }
+                        crate::mla_probe::cache(
+                            t,
+                            prefix,
+                            ccd,
+                            rope,
+                            graph.kv_format,
+                            *ckv_cache_ptr,
+                            *kpe_cache_ptr,
+                            *self.device.cu_stream(),
+                        )?;
+                        let selected =
+                            Self::resolve_dsa_selected_indices_for_layer(graph, layer_idx)?;
+                        let compressed = layer
+                            .dsa_indexer
+                            .as_ref()
+                            .is_some_and(|r| r.index_kpool_compress);
+                        let count = if compressed {
+                            selected.topk_capacity
+                        } else {
+                            prefix.min(selected.topk_capacity)
+                        };
+                        crate::mla_probe::row(
+                            t,
+                            "selected.i32",
+                            selected.d_indices_ptr,
+                            0,
+                            count,
+                            4,
+                            *self.device.cu_stream(),
+                        )?;
+                        if let Some((pos, seq)) = dsa_owner_scalars {
+                            crate::mla_probe::block(
+                                t,
+                                "position.i32",
+                                pos,
+                                1,
+                                4,
+                                *self.device.cu_stream(),
+                            )?;
+                            crate::mla_probe::block(
+                                t,
+                                "seq_len.i32",
+                                seq,
+                                1,
+                                4,
+                                *self.device.cu_stream(),
+                            )?;
+                        }
+                        t.write("selection.json",serde_json::to_vec_pretty(&serde_json::json!({"selected_per_row":count,"capacity":selected.topk_capacity,"owner_layer":selected.owner_layer_idx,"causal_position":position,"compressed":compressed,"threads":graph.mla_sparse_attention_threads,"invalid_slots":"preserve actual integer sentinels; capacity not asserted as valid count"})).map_err(|e|e.to_string())?.as_slice())?;
+                    }
                     // ── MLA Step 8: MLA attention ──
                     // Uses ccd (padded) for cache reads and q_absorbed dimensions.
-                    if layer.dsa_indexer.is_some() {
+                    let common_projected = if self.common_mla.is_some() {
+                        self.launch_common_mla_for_layer(
+                            graph,
+                            layer_idx,
+                            false,
+                            None,
+                            Some(
+                                position
+                                    .checked_add(1)
+                                    .ok_or("actual MLA eager height overflow")?,
+                            ),
+                        )?;
+                        true
+                    } else {
+                        false
+                    };
+                    if common_projected {
+                    } else if layer.dsa_indexer.is_some() {
                         self.launch_mla_sparse_attention_for_layer(graph, layer_idx, position + 1)?;
                     } else {
                         let attention_kernel = match graph.kv_format {
@@ -72895,9 +77199,21 @@ impl GpuDecodeStore {
                                 })?;
                         }
                     }
+                    if let Some(t) = &mla_probe {
+                        crate::mla_probe::row(
+                            t,
+                            "attention.f32",
+                            *graph.d_mla_attn_out.device_ptr(),
+                            0,
+                            nh.checked_mul(ccd)
+                                .ok_or("MLA attention observed extent overflow")?,
+                            4,
+                            *self.device.cu_stream(),
+                        )?;
+                    }
                     // ── MLA Step 9: Apply w_vc (attn_out @ w_vc → BF16) ──
                     // w_vc is [H, v_head, ccd] (padded)
-                    {
+                    if !common_projected {
                         let threads = 256u32;
                         unsafe {
                             k.mla_apply_wvc
@@ -72921,9 +77237,21 @@ impl GpuDecodeStore {
                         }
                     }
 
+                    if let Some(t) = &mla_probe {
+                        crate::mla_probe::row(
+                            t,
+                            "wvc_output.bf16",
+                            *graph.d_scratch.device_ptr(),
+                            0,
+                            nh.checked_mul(vhd)
+                                .ok_or("MLA WVC observed extent overflow")?,
+                            2,
+                            *self.device.cu_stream(),
+                        )?;
+                    }
                     // ── MLA Step 10: O projection ──
                     if let Some(hqq_exec) = hqq_mla_exec.as_ref() {
-                        self.launch_hqq_decode_gemv_bf16(
+                        self.launch_mla_hqq_gemv_bf16(
                             "o_proj",
                             &hqq_exec.o_proj,
                             *graph.d_scratch.device_ptr(),
@@ -72935,6 +77263,17 @@ impl GpuDecodeStore {
                             ow,
                             *graph.d_scratch.device_ptr(),
                             *graph.d_hidden.device_ptr(),
+                        )?;
+                    }
+                    if let Some(t) = &mla_probe {
+                        crate::mla_probe::row(
+                            t,
+                            "o-output.bf16",
+                            *graph.d_hidden.device_ptr(),
+                            0,
+                            hs,
+                            2,
+                            *self.device.cu_stream(),
                         )?;
                     }
                 }
@@ -73052,10 +77391,11 @@ impl GpuDecodeStore {
                                 )
                             })?;
                         let copy_err = unsafe {
-                            cuda_sys::lib().cuMemcpyDtoD_v2(
+                            cuda_sys::lib().cuMemcpyDtoDAsync_v2(
                                 *graph.d_scratch.device_ptr(),
                                 candidate_last_ptr,
                                 copy_bytes,
+                                *self.device.cu_stream(),
                             )
                         };
                         if copy_err != cuda_sys::CUresult::CUDA_SUCCESS {
@@ -73652,6 +77992,19 @@ impl GpuDecodeStore {
                 }
             }
 
+            if glm5_hc.is_some() {
+                MatchedGraphStageBuffer::record_eager(
+                    graph,
+                    layer_idx,
+                    "decode_graph_attn_output",
+                    *graph.d_hidden.device_ptr(),
+                    hs.checked_mul(2).ok_or("eager hidden extent overflow")?,
+                    position
+                        .checked_add(1)
+                        .ok_or("eager stage height overflow")?,
+                    *self.device.cu_stream(),
+                )?;
+            }
             // Timing: after attention
             if timing {
                 self.device
@@ -73700,6 +78053,37 @@ impl GpuDecodeStore {
                     .ok_or("GLM-5.3 mHC workspace is not finalized")?;
                 let state_ptr = *workspace.d_hc_state.device_ptr();
                 let next_ptr = *workspace.d_hc_next.device_ptr();
+                let hc_capture = crate::matched_probe::target_for_request(
+                    "decode_eager_hc_post",
+                    layer_idx,
+                    position.checked_add(1).ok_or("HC eager height overflow")?,
+                    Some(&graph.trace_request_label),
+                )?
+                .map(|target| {
+                    target
+                        .child(&graph.trace_request_label)?
+                        .child(&format!("device-{}", self.device.ordinal()))
+                })
+                .transpose()?;
+                if let Some(target) = &hc_capture {
+                    target.hc_post_operands(
+                        0,
+                        1,
+                        hs,
+                        hc.mult,
+                        *graph.d_hidden.device_ptr(),
+                        state_ptr,
+                        *workspace.d_hc_post.device_ptr(),
+                        *workspace.d_hc_comb.device_ptr(),
+                        next_ptr,
+                        *self.device.cu_stream(),
+                        if self.deepseek_v4_hc_tiled {
+                            "deepseek_v4_hc_post_tiled_kernel"
+                        } else {
+                            "deepseek_v4_hc_post_kernel"
+                        },
+                    )?;
+                }
                 self.launch_deepseek_v4_hc_post_for_graph(
                     graph,
                     next_ptr,
@@ -73707,6 +78091,29 @@ impl GpuDecodeStore {
                     state_ptr,
                     hc.mult,
                     &format!("GLM-5.3 layer {} attention", layer_idx),
+                )?;
+                if let Some(target) = &hc_capture {
+                    target.device(
+                        "output.bf16",
+                        next_ptr,
+                        hs.checked_mul(hc.mult)
+                            .and_then(|n| n.checked_mul(2))
+                            .ok_or("HC eager output extent overflow")?,
+                        *self.device.cu_stream(),
+                    )?;
+                }
+                MatchedGraphStageBuffer::record_eager(
+                    graph,
+                    layer_idx,
+                    "decode_graph_hc_post_attn",
+                    next_ptr,
+                    hs.checked_mul(hc.mult)
+                        .and_then(|x| x.checked_mul(2))
+                        .ok_or("eager HC extent overflow")?,
+                    position
+                        .checked_add(1)
+                        .ok_or("eager stage height overflow")?,
+                    *self.device.cu_stream(),
                 )?;
                 if debug_glm5_boundary_trace {
                     graph.debug_decode_early_entries.push(serde_json::json!({
@@ -73736,6 +78143,17 @@ impl GpuDecodeStore {
                     None,
                     &format!("GLM-5.3 layer {} FFN", layer_idx),
                 )?;
+                MatchedGraphStageBuffer::record_eager(
+                    graph,
+                    layer_idx,
+                    "decode_graph_ffn_prepared",
+                    *graph.d_hidden.device_ptr(),
+                    hs.checked_mul(2).ok_or("eager hidden extent overflow")?,
+                    position
+                        .checked_add(1)
+                        .ok_or("eager stage height overflow")?,
+                    *self.device.cu_stream(),
+                )?;
                 if debug_glm5_boundary_trace {
                     graph.debug_decode_early_entries.push(serde_json::json!({
                         "phase": "glm5_ffn_prepared_hidden",
@@ -73758,6 +78176,17 @@ impl GpuDecodeStore {
                     layer.post_attn_norm_ptr,
                     hs,
                     &format!("GLM-5.3 layer {} post-attention", layer_idx),
+                )?;
+                MatchedGraphStageBuffer::record_eager(
+                    graph,
+                    layer_idx,
+                    "decode_graph_ffn_norm",
+                    *graph.d_hidden.device_ptr(),
+                    hs.checked_mul(2).ok_or("eager hidden extent overflow")?,
+                    position
+                        .checked_add(1)
+                        .ok_or("eager stage height overflow")?,
+                    *self.device.cu_stream(),
                 )?;
                 if debug_glm5_boundary_trace {
                     graph.debug_decode_early_entries.push(serde_json::json!({
@@ -73927,10 +78356,11 @@ impl GpuDecodeStore {
                 let layer_scalar_ptr = layer.layer_scalar_ptr;
 
                 unsafe {
-                    let err = cuda_sys::lib().cuMemcpyDtoD_v2(
+                    let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(
                         *graph.d_residual.device_ptr(),
                         *graph.d_hidden.device_ptr(),
                         hs * 2,
+                        *self.device.cu_stream(),
                     );
                     if err != cuda_sys::CUresult::CUDA_SUCCESS {
                         return Err(format!(
@@ -74148,6 +78578,14 @@ impl GpuDecodeStore {
                 // MoE forward: gate reads d_hidden (always), experts read override ptr (if set)
                 self.moe_forward_with_graph(graph, layer_idx)
                     .map_err(|e| format!("moe_forward[{}]: {}", layer_idx, e))?;
+                Self::capture_matched_moe_tensor(
+                    graph,
+                    layer_idx,
+                    position,
+                    "decode_moe_output",
+                    *self.device.cu_stream(),
+                    self.device.ordinal(),
+                )?;
 
                 // Reset override for next layer
                 graph.moe_input_override_ptr = 0;
@@ -74168,10 +78606,11 @@ impl GpuDecodeStore {
                 if !has_latent {
                     let t_d2d = Instant::now();
                     unsafe {
-                        let err = cuda_sys::lib().cuMemcpyDtoD_v2(
+                        let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(
                             *graph.d_hidden.device_ptr(),
                             *graph.d_moe_out.device_ptr(),
                             hs * 2,
+                            *self.device.cu_stream(),
                         ); // BF16
                         if err != cuda_sys::CUresult::CUDA_SUCCESS {
                             return Err(format!("D2D moe_out->hidden[{}]: {:?}", layer_idx, err));
@@ -74253,8 +78692,68 @@ impl GpuDecodeStore {
                 let uw = &graph.weights[*up_proj];
                 let intermediate = gw.rows;
 
+                let dense_probe = crate::matched_probe::target_for_request(
+                    "dense_decode_operands",
+                    layer_idx,
+                    position
+                        .checked_add(1)
+                        .ok_or("dense diagnostic height overflow")?,
+                    Some(&graph.trace_request_label),
+                )?;
+                if let Some(t) = &dense_probe {
+                    if t.row != 0 {
+                        return Err("dense eager diagnostic requires row zero".into());
+                    }
+                    crate::dense_ffn_probe::row(
+                        t,
+                        "input.bf16",
+                        *graph.d_hidden.device_ptr(),
+                        0,
+                        hs,
+                        *self.device.cu_stream(),
+                    )?;
+                    for (name, w) in [
+                        ("gate", gw),
+                        ("up", uw),
+                        ("down", &graph.weights[*down_proj]),
+                    ] {
+                        match w.dtype {
+                            0 => crate::dense_ffn_probe::bf16(
+                                t,
+                                name,
+                                w.ptr,
+                                w.rows,
+                                w.cols,
+                                *self.device.cu_stream(),
+                            )?,
+                            4 | 5 => {
+                                if w.group_size == 0 {
+                                    return Err("dense diagnostic invalid loaded group".into());
+                                }
+                                crate::dense_ffn_probe::marlin(
+                                    t,
+                                    name,
+                                    w.ptr,
+                                    w.scales_ptr,
+                                    w.rows,
+                                    w.cols,
+                                    w.cols.div_ceil(w.group_size),
+                                    w.group_size,
+                                    if w.dtype == 4 { 8 } else { 4 },
+                                    *self.device.cu_stream(),
+                                )?;
+                            }
+                            _ => {
+                                return Err(
+                                    "dense diagnostic unsupported actual loaded dtype".into()
+                                )
+                            }
+                        }
+                    }
+                    t.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({"actual_execution_path":"eager","layer":layer_idx,"logical_tokens":position+1,"row":0,"hidden":hs,"intermediate":intermediate,"forcing":crate::matched_projection_transfer::forcing_label().is_some(),"device_diagnostic_allocation_bytes":0,"clamped":layer.dense_deepseek_clamp,"clamp_limit":layer.dense_swiglu_limit})).map_err(|e|e.to_string())?.as_slice())?;
+                }
                 // Gate GEMV: hidden → d_expert_gate_up[0..intermediate]
-                self.gemv_bf16_internal(
+                self.dense_projection_bf16_internal(
                     gw,
                     *graph.d_hidden.device_ptr(),
                     *graph.d_expert_gate_up.device_ptr(),
@@ -74263,7 +78762,25 @@ impl GpuDecodeStore {
                 let up_out_ptr = unsafe {
                     (*graph.d_expert_gate_up.device_ptr() as *const u16).add(intermediate) as u64
                 };
-                self.gemv_bf16_internal(uw, *graph.d_hidden.device_ptr(), up_out_ptr)?;
+                self.dense_projection_bf16_internal(uw, *graph.d_hidden.device_ptr(), up_out_ptr)?;
+                if let Some(t) = &dense_probe {
+                    crate::dense_ffn_probe::row(
+                        t,
+                        "gate.bf16",
+                        *graph.d_expert_gate_up.device_ptr(),
+                        0,
+                        intermediate,
+                        *self.device.cu_stream(),
+                    )?;
+                    crate::dense_ffn_probe::row(
+                        t,
+                        "up.bf16",
+                        up_out_ptr,
+                        0,
+                        intermediate,
+                        *self.device.cu_stream(),
+                    )?;
+                }
 
                 // Fused SiLU*mul
                 self.launch_dense_swiglu_for_layer(
@@ -74274,19 +78791,50 @@ impl GpuDecodeStore {
                     intermediate,
                 )?;
 
+                if let Some(t) = &dense_probe {
+                    crate::dense_ffn_probe::row(
+                        t,
+                        "activation.bf16",
+                        *graph.d_expert_scratch.device_ptr(),
+                        0,
+                        intermediate,
+                        *self.device.cu_stream(),
+                    )?;
+                }
                 // Down GEMV: d_expert_scratch → d_hidden
                 let dw = &graph.weights[*down_proj];
-                self.gemv_bf16_internal(
+                self.dense_projection_bf16_internal(
                     dw,
                     *graph.d_expert_scratch.device_ptr(),
                     *graph.d_hidden.device_ptr(),
                 )?;
+                if let Some(t) = &dense_probe {
+                    crate::dense_ffn_probe::row(
+                        t,
+                        "output.bf16",
+                        *graph.d_hidden.device_ptr(),
+                        0,
+                        hs,
+                        *self.device.cu_stream(),
+                    )?;
+                }
             }
             if let Some(hc) = glm5_hc.as_ref() {
                 let workspace = graph
                     .deepseek_v4_decode_workspace
                     .as_ref()
                     .ok_or("GLM-5.3 mHC workspace is not finalized")?;
+                MatchedGraphStageBuffer::record_eager(
+                    graph,
+                    layer_idx,
+                    "decode_graph_ffn_output",
+                    *graph.d_hidden.device_ptr(),
+                    hs.checked_mul(2).ok_or("eager hidden extent overflow")?,
+                    position
+                        .checked_add(1)
+                        .ok_or("eager stage height overflow")?,
+                    *self.device.cu_stream(),
+                )?;
                 if debug_glm5_boundary_trace {
                     graph.debug_decode_early_entries.push(serde_json::json!({
                         "phase": "glm5_ffn_sublayer",
@@ -74309,6 +78857,19 @@ impl GpuDecodeStore {
                     *workspace.d_hc_next.device_ptr(),
                     hc.mult,
                     &format!("GLM-5.3 layer {} FFN", layer_idx),
+                )?;
+                MatchedGraphStageBuffer::record_eager(
+                    graph,
+                    layer_idx,
+                    "decode_graph_hc_post_ffn",
+                    *workspace.d_hc_state.device_ptr(),
+                    hs.checked_mul(hc.mult)
+                        .and_then(|x| x.checked_mul(2))
+                        .ok_or("eager HC extent overflow")?,
+                    position
+                        .checked_add(1)
+                        .ok_or("eager stage height overflow")?,
+                    *self.device.cu_stream(),
                 )?;
                 if debug_glm5_boundary_trace {
                     graph.debug_decode_early_entries.push(serde_json::json!({
@@ -74664,6 +79225,13 @@ impl GpuDecodeStore {
             )?;
         }
 
+        if let Some(selected) = &self.selected_kda {
+            selected.enqueue_serving_guard(
+                *graph.d_logits.device_ptr(),
+                graph.d_logits.len() * 4,
+                *self.device.cu_stream(),
+            )?;
+        }
         // ── 5. Sync + D2H logits ──
         self.device
             .synchronize()
@@ -74695,6 +79263,14 @@ impl GpuDecodeStore {
             if err != cuda_sys::CUresult::CUDA_SUCCESS {
                 return Err(format!("D2H logits: {:?}", err));
             }
+        }
+        if let Some(audit) = incoming_audit {
+            audit.complete()?;
+        }
+        if self.selected_kda.is_some() && graph.h_logits.first().is_some_and(|v| v.is_nan()) {
+            return Err(
+                "selected recurrence rejected invalid state/operands before sampling".into(),
+            );
         }
         apply_logit_softcap_in_place(&mut graph.h_logits, graph.final_logit_softcap);
         if graph.debug_decode_early_trace_active
@@ -75835,7 +80411,14 @@ impl GpuDecodeStore {
         graph.segment_layer_end = layer_end;
         graph.segment_gqa_cache_offset = gqa_cache_offset;
 
-        let result = self.gpu_decode_step_with_graph(&mut graph, token_id, position);
+        let selected = self.selected_kda.clone();
+        let result = if let Some(selected) = selected {
+            selected.with_serving_execution(*self.device.cu_stream(), || {
+                self.gpu_decode_step_with_graph(&mut graph, token_id, position)
+            })
+        } else {
+            self.gpu_decode_step_with_graph(&mut graph, token_id, position)
+        };
 
         // Restore defaults
         graph.segment_skip_embedding = false;
@@ -75881,6 +80464,20 @@ impl GpuDecodeStore {
         use std::time::Instant;
 
         self.last_stream_failure = None;
+        if let Err(error) = self.require_sequence_state_ready_rust() {
+            self.last_stream_failure = Some(error);
+            return 0;
+        }
+        for &address in aux_store_addrs {
+            if address == 0 {
+                continue;
+            }
+            let store = unsafe { &*(address as *const GpuDecodeStore) };
+            if let Err(error) = store.require_sequence_state_ready_rust() {
+                self.last_stream_failure = Some(error);
+                return 0;
+            }
+        }
 
         let num_aux = aux_store_addrs.len();
         if num_aux == 0 || split_layers.len() != num_aux || gqa_cache_offsets.len() != num_aux {
@@ -76855,6 +81452,7 @@ impl GpuDecodeStore {
         tokens: &[usize],
         positions: &[usize],
     ) -> Result<usize, String> {
+        self.require_sequence_state_ready_rust()?;
         let batch_size = tokens.len();
         if batch_size == 0 {
             return Ok(0);
@@ -77767,7 +82365,8 @@ impl GpuDecodeStore {
                         let hidden_ptr = d_bh_ptr + (t * hs * 2) as u64;
                         let output_ptr = d_bao_ptr + (t * hs * 2) as u64;
                         self.run_kimi_delta_attention(
-                            graph, kda, hqq_kda, hidden_ptr, output_ptr, do_timing, None, None,
+                            graph, layer_idx, kda, hqq_kda, hidden_ptr, output_ptr, do_timing,
+                            None, None, None, None, None,
                         )?;
                     }
                 }
@@ -79341,12 +83940,16 @@ impl GpuDecodeStore {
                 for t in 0..batch_size {
                     let h_ptr = d_bh_ptr + (t * hs * 2) as u64;
 
-                    self.gemv_bf16_internal(gw, h_ptr, *graph.d_expert_gate_up.device_ptr())?;
+                    self.dense_projection_bf16_internal(
+                        gw,
+                        h_ptr,
+                        *graph.d_expert_gate_up.device_ptr(),
+                    )?;
                     let up_out_ptr = unsafe {
                         (*graph.d_expert_gate_up.device_ptr() as *const u16).add(intermediate)
                             as u64
                     };
-                    self.gemv_bf16_internal(uw, h_ptr, up_out_ptr)?;
+                    self.dense_projection_bf16_internal(uw, h_ptr, up_out_ptr)?;
 
                     self.launch_dense_swiglu_for_layer(
                         graph,
@@ -79356,7 +83959,11 @@ impl GpuDecodeStore {
                         intermediate,
                     )?;
 
-                    self.gemv_bf16_internal(dw, *graph.d_expert_scratch.device_ptr(), h_ptr)?;
+                    self.dense_projection_bf16_internal(
+                        dw,
+                        *graph.d_expert_scratch.device_ptr(),
+                        h_ptr,
+                    )?;
                 }
             }
 
@@ -80535,6 +85142,7 @@ impl GpuDecodeStore {
     fn run_kimi_delta_attention(
         &self,
         graph: &GpuDecodeGraph,
+        layer_idx: usize,
         kda: &KimiDeltaAttentionRegistration,
         hqq: Option<&HqqKimiDeltaExecutionDescriptor>,
         hidden_ptr: u64,
@@ -80542,7 +85150,13 @@ impl GpuDecodeStore {
         stage_timing: bool,
         graph_clock: Option<(&cudarc::driver::CudaSlice<u64>, usize)>,
         mut debug_trace: Option<(usize, u64, usize, usize, &mut Vec<serde_json::Value>)>,
+        graph_observation: Option<(usize, usize)>,
+        eager_probe: Option<&crate::matched_probe::Target>,
+        actual_eager_height: Option<usize>,
     ) -> Result<(), String> {
+        if graph_observation.is_some() && actual_eager_height.is_some() {
+            return Err("KDA diagnostic frame cannot be both graph and eager".into());
+        }
         let kernels = graph
             .kernels
             .as_ref()
@@ -80595,7 +85209,95 @@ impl GpuDecodeStore {
                         label, desc.rows, desc.cols, registered.rows, registered.cols
                     ));
                 }
-                return self.launch_hqq_decode_gemv_bf16(label, desc, input, output);
+                if let Some(target) = eager_probe.filter(|_| matches!(label, "q_proj" | "b_proj")) {
+                    if desc.scales_dtype != "float32" || desc.zeros_dtype != "float32" {
+                        return Err("eager HQQ weight observation requires actual F32 scale/zero descriptors".into());
+                    }
+                    target.device(
+                        &format!("{label}-input.bf16"),
+                        input,
+                        desc.cols
+                            .checked_mul(2)
+                            .ok_or("eager projection input overflow")?,
+                        *self.device.cu_stream(),
+                    )?;
+                    // tensor_bytes includes packed payload plus scale/zero storage
+                    // for slot-backed runtime descriptors; each pointer has its
+                    // own loaded row stride and must be read independently.
+                    let (packed_bytes, scales_bytes, zeros_bytes) =
+                        crate::matched_probe::hqq_projection_capture_extents(
+                            desc.rows,
+                            desc.packed_row_stride_bytes,
+                            desc.scales_row_stride_bytes,
+                            desc.zeros_row_stride_bytes,
+                        )?;
+                    target.device(
+                        &format!("{label}-packed.bin"),
+                        desc.packed_ptr,
+                        packed_bytes,
+                        *self.device.cu_stream(),
+                    )?;
+                    target.device(
+                        &format!("{label}-scales.f32"),
+                        desc.scales_ptr,
+                        scales_bytes,
+                        *self.device.cu_stream(),
+                    )?;
+                    target.device(
+                        &format!("{label}-zeros.f32"),
+                        desc.zeros_ptr,
+                        zeros_bytes,
+                        *self.device.cu_stream(),
+                    )?;
+                    target.write(&format!("{label}-descriptor.json"),serde_json::to_vec_pretty(&serde_json::json!({
+                        "projection":label,"rows":desc.rows,"cols":desc.cols,"group_size":desc.group_size,"axis":desc.axis,
+                        "layout":desc.layout,"packed_dtype":desc.packed_dtype,"scales_dtype":desc.scales_dtype,"zeros_dtype":desc.zeros_dtype,
+                        "original_dtype":desc.original_dtype,"tensor_bytes":desc.tensor_bytes,"packed_row_stride_bytes":desc.packed_row_stride_bytes,
+                        "actual_packed_capture_bytes":packed_bytes,"actual_scales_capture_bytes":scales_bytes,"actual_zeros_capture_bytes":zeros_bytes,
+                        "scales_row_stride_bytes":desc.scales_row_stride_bytes,"zeros_row_stride_bytes":desc.zeros_row_stride_bytes,
+                        "runtime_stage":desc.runtime_stage,"runtime_kind":desc.runtime_kind,"kernel_ready":desc.kernel_ready,
+                        "nbits":hqq_nbits_from_desc(desc)?,
+                        "hqq6_selected_vec4_warps":self.hqq6_decode_vec4_warps_per_block.get(&(desc.rows,desc.cols,desc.group_size,desc.packed_row_stride_bytes,desc.scales_row_stride_bytes,desc.zeros_row_stride_bytes)).copied(),
+                        "hqq4_measured_warps":self.hqq4_decode_warps_per_block.get(&(desc.rows,desc.cols,true)).copied(),
+                        "actual_input_ptr":input,"actual_output_ptr":output,"input_dtype":"bfloat16","output_dtype":"bfloat16",
+                        "device_diagnostic_allocation_bytes":0,"arithmetic_changed":false
+                    })).map_err(|e|e.to_string())?.as_slice())?;
+                }
+                if let Some(projection) = &self.ordered_kda_projection {
+                    unsafe {
+                        projection.enqueue(
+                            &ordered_decode_layout(desc)?,
+                            input,
+                            output,
+                            1,
+                            *self.device.cu_stream(),
+                        )?;
+                    }
+                } else {
+                    self.launch_hqq_decode_gemv_bf16(label, desc, input, output)?;
+                }
+                if let Some(target) = eager_probe.filter(|_| matches!(label, "q_proj" | "b_proj")) {
+                    target.device(
+                        &format!("{label}-output.bf16"),
+                        output,
+                        desc.rows
+                            .checked_mul(2)
+                            .ok_or("eager projection output overflow")?,
+                        *self.device.cu_stream(),
+                    )?;
+                    crate::matched_projection_transfer::apply(
+                        target,
+                        label,
+                        output,
+                        *self.device.cu_stream(),
+                    )?;
+                }
+                return Ok(());
+            }
+            if eager_probe.is_some() && matches!(label, "q_proj" | "b_proj") {
+                return Err(
+                    "eager Q/beta weight diagnostic requires loaded HQQ descriptors".into(),
+                );
             }
             if registered.dtype == 6 {
                 return Err(format!(
@@ -80617,6 +85319,85 @@ impl GpuDecodeStore {
         let gate_ptr = *graph.d_la_gated_out.device_ptr();
         let beta_ptr = *graph.d_scratch.device_ptr();
 
+        let observe =
+            |operation: &str, ptr: u64, elements: usize, width: usize| -> Result<(), String> {
+                if let Some((layer, segment)) = graph_observation {
+                    MatchedGraphStageBuffer::record(
+                        graph,
+                        layer,
+                        operation,
+                        ptr,
+                        elements
+                            .checked_mul(width)
+                            .ok_or("KDA graph stage byte overflow")?,
+                        segment,
+                        *self.device.cu_stream(),
+                    )?;
+                }
+                if let Some(height) = actual_eager_height {
+                    MatchedGraphStageBuffer::record_eager(
+                        graph,
+                        layer_idx,
+                        operation,
+                        ptr,
+                        elements
+                            .checked_mul(width)
+                            .ok_or("actual eager KDA stage extent overflow")?,
+                        height,
+                        *self.device.cu_stream(),
+                    )?;
+                }
+                if let Some(target) = eager_probe {
+                    let name = operation
+                        .strip_prefix("decode_graph_kda_")
+                        .ok_or("invalid eager KDA stage name")?;
+                    target.device(
+                        &format!("{name}.{}", if width == 4 { "f32" } else { "bf16" }),
+                        ptr,
+                        elements
+                            .checked_mul(width)
+                            .ok_or("eager KDA stage extent overflow")?,
+                        *self.device.cu_stream(),
+                    )?;
+                }
+                Ok(())
+            };
+        if let Some(target) = eager_probe {
+            target.device(
+                "normalized-input.bf16",
+                hidden_ptr,
+                graph
+                    .hidden_size
+                    .checked_mul(2)
+                    .ok_or("eager KDA input extent overflow")?,
+                *self.device.cu_stream(),
+            )?;
+        }
+        observe(
+            "decode_graph_kda_conv_incoming",
+            kda.conv_state_ptr,
+            qkv_dim
+                .checked_mul(kda.kernel_dim - 1)
+                .and_then(|n| n.checked_mul(3))
+                .ok_or("KDA convolution diagnostic extent overflow")?,
+            4,
+        )?;
+        observe(
+            "decode_graph_kda_recurrent_incoming",
+            kda.recur_state_ptr,
+            qkv_dim
+                .checked_mul(kda.head_dim)
+                .ok_or("KDA recurrent diagnostic extent overflow")?,
+            4,
+        )?;
+        observe("decode_graph_kda_a_log", kda.a_log_ptr, kda.num_heads, 4)?;
+        observe("decode_graph_kda_dt_bias", kda.dt_bias_ptr, qkv_dim, 4)?;
+        observe(
+            "decode_graph_kda_norm_weight",
+            kda.norm_weight_ptr,
+            kda.head_dim,
+            4,
+        )?;
         let mut record_debug_bf16 = |phase: &str, label: &str, ptr: u64, elems: usize| {
             if let Some((layer_idx, decode_step, position, token_id, entries)) =
                 debug_trace.as_mut()
@@ -80667,8 +85448,11 @@ impl GpuDecodeStore {
         project(kda.q_proj, "q_proj", hidden_ptr, q_ptr)?;
         project(kda.k_proj, "k_proj", hidden_ptr, k_ptr)?;
         project(kda.v_proj, "v_proj", hidden_ptr, v_ptr)?;
+        observe("decode_graph_kda_q_projected", q_ptr, qkv_dim, 2)?;
         record_debug_bf16("glm5_kda_q_proj", "glm5_kda_q_proj", q_ptr, qkv_dim);
+        observe("decode_graph_kda_k_projected", k_ptr, qkv_dim, 2)?;
         record_debug_bf16("glm5_kda_k_proj", "glm5_kda_k_proj", k_ptr, qkv_dim);
+        observe("decode_graph_kda_v_projected", v_ptr, qkv_dim, 2)?;
         record_debug_bf16("glm5_kda_v_proj", "glm5_kda_v_proj", v_ptr, qkv_dim);
         timing_finish(qkv_timing, &graph.t_kda_qkv_proj, "qkv_proj")?;
         mark(1, "kda-qkv-end")?;
@@ -80724,8 +85508,11 @@ impl GpuDecodeStore {
                     .map_err(|error| format!("KDA convolution bank {}: {:?}", bank, error))?;
             }
         }
+        observe("decode_graph_kda_q_conv", q_ptr, qkv_dim, 2)?;
         record_debug_bf16("glm5_kda_q_conv", "glm5_kda_q_conv", q_ptr, qkv_dim);
+        observe("decode_graph_kda_k_conv", k_ptr, qkv_dim, 2)?;
         record_debug_bf16("glm5_kda_k_conv", "glm5_kda_k_conv", k_ptr, qkv_dim);
+        observe("decode_graph_kda_v_conv", v_ptr, qkv_dim, 2)?;
         record_debug_bf16("glm5_kda_v_conv", "glm5_kda_v_conv", v_ptr, qkv_dim);
         timing_finish(conv_timing, &graph.t_kda_conv, "conv")?;
         mark(2, "kda-conv-end")?;
@@ -80750,6 +85537,8 @@ impl GpuDecodeStore {
         project(kda.f_a_proj, "f_a_proj", hidden_ptr, work_ptr)?;
         project(kda.f_b_proj, "f_b_proj", work_ptr, gate_ptr)?;
         project(kda.b_proj, "b_proj", hidden_ptr, beta_ptr)?;
+        observe("decode_graph_kda_forget", gate_ptr, qkv_dim, 2)?;
+        observe("decode_graph_kda_beta", beta_ptr, kda.num_heads, 2)?;
         record_debug_bf16(
             "glm5_kda_forget_gate",
             "glm5_kda_forget_gate",
@@ -80766,73 +85555,106 @@ impl GpuDecodeStore {
 
         let recurrent_timing = timing_start()?;
         let recur_threads = kda.head_dim.next_power_of_two().max(32);
-        if recur_threads > 1024 {
-            return Err(format!(
-                "KDA head dimension {} requires {} CUDA threads",
-                kda.head_dim, recur_threads
-            ));
+        if let Some(selected) = &self.selected_kda {
+            selected.enqueue_decode(
+                layer_idx,
+                [q_ptr, k_ptr, v_ptr, gate_ptr, beta_ptr],
+                work_ptr,
+            )?;
+            if crate::matched_probe::enabled()? {
+                selected.observe_actual_prepared(layer_idx, |addresses, heads, dim| {
+                    let width = heads
+                        .checked_mul(dim)
+                        .ok_or("selected prepared stage width")?;
+                    for (i, role) in ["q", "k", "v", "gate", "beta"].iter().enumerate() {
+                        observe(
+                            &format!("decode_graph_kda_selected_prepared_{role}"),
+                            addresses[i],
+                            if i == 4 { heads } else { width },
+                            4,
+                        )?;
+                    }
+                    Ok(())
+                })?;
+            }
+        } else {
+            if recur_threads > 1024 {
+                return Err(format!(
+                    "KDA head dimension {} requires {} CUDA threads",
+                    kda.head_dim, recur_threads
+                ));
+            }
+            let shared_floats = 3usize
+                .checked_mul(kda.head_dim)
+                .and_then(|value| value.checked_add(recur_threads))
+                .ok_or_else(|| "KDA recurrent shared-memory size overflow".to_string())?;
+            let shared_bytes = shared_floats
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "KDA recurrent shared-memory byte overflow".to_string())?;
+            let mut a0 = kda.recur_state_ptr;
+            let mut a1 = q_ptr;
+            let mut a2 = k_ptr;
+            let mut a3 = v_ptr;
+            let mut a4 = gate_ptr;
+            let mut a5 = beta_ptr;
+            let mut a6 = kda.a_log_ptr;
+            let mut a7 = kda.dt_bias_ptr;
+            let mut a8 = work_ptr;
+            let mut a9 = 1i32;
+            let mut a10 = i32::try_from(kda.num_heads)
+                .map_err(|_| "KDA head count exceeds i32".to_string())?;
+            let mut a11 = i32::try_from(kda.head_dim)
+                .map_err(|_| "KDA head dimension exceeds i32".to_string())?;
+            let mut a12 = kda.gate_lower_bound;
+            let mut a13 = (kda.head_dim as f32).sqrt().recip();
+            // The published KDA reference fixes L2 normalization epsilon at 1e-6.
+            // This is an operation semantic, not a model/GPU tuning value.
+            let mut a14 = 1.0e-6f32;
+            let mut params: [*mut std::ffi::c_void; 15] = [
+                &mut a0 as *mut _ as *mut _,
+                &mut a1 as *mut _ as *mut _,
+                &mut a2 as *mut _ as *mut _,
+                &mut a3 as *mut _ as *mut _,
+                &mut a4 as *mut _ as *mut _,
+                &mut a5 as *mut _ as *mut _,
+                &mut a6 as *mut _ as *mut _,
+                &mut a7 as *mut _ as *mut _,
+                &mut a8 as *mut _ as *mut _,
+                &mut a9 as *mut _ as *mut _,
+                &mut a10 as *mut _ as *mut _,
+                &mut a11 as *mut _ as *mut _,
+                &mut a12 as *mut _ as *mut _,
+                &mut a13 as *mut _ as *mut _,
+                &mut a14 as *mut _ as *mut _,
+            ];
+            let launch = unsafe {
+                cuda_sys::lib().cuLaunchKernel(
+                    extract_cu_function(&kernels.kimi_delta_recurrent_scan_bf16),
+                    kda.num_heads as u32,
+                    1,
+                    1,
+                    recur_threads as u32,
+                    1,
+                    1,
+                    shared_bytes as u32,
+                    *self.device.cu_stream(),
+                    params.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if launch != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("KDA recurrent scan launch failed: {:?}", launch));
+            }
         }
-        let shared_floats = 3usize
-            .checked_mul(kda.head_dim)
-            .and_then(|value| value.checked_add(recur_threads))
-            .ok_or_else(|| "KDA recurrent shared-memory size overflow".to_string())?;
-        let shared_bytes = shared_floats
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| "KDA recurrent shared-memory byte overflow".to_string())?;
-        let mut a0 = kda.recur_state_ptr;
-        let mut a1 = q_ptr;
-        let mut a2 = k_ptr;
-        let mut a3 = v_ptr;
-        let mut a4 = gate_ptr;
-        let mut a5 = beta_ptr;
-        let mut a6 = kda.a_log_ptr;
-        let mut a7 = kda.dt_bias_ptr;
-        let mut a8 = work_ptr;
-        let mut a9 = 1i32;
-        let mut a10 =
-            i32::try_from(kda.num_heads).map_err(|_| "KDA head count exceeds i32".to_string())?;
-        let mut a11 = i32::try_from(kda.head_dim)
-            .map_err(|_| "KDA head dimension exceeds i32".to_string())?;
-        let mut a12 = kda.gate_lower_bound;
-        let mut a13 = (kda.head_dim as f32).sqrt().recip();
-        // The published KDA reference fixes L2 normalization epsilon at 1e-6.
-        // This is an operation semantic, not a model/GPU tuning value.
-        let mut a14 = 1.0e-6f32;
-        let mut params: [*mut std::ffi::c_void; 15] = [
-            &mut a0 as *mut _ as *mut _,
-            &mut a1 as *mut _ as *mut _,
-            &mut a2 as *mut _ as *mut _,
-            &mut a3 as *mut _ as *mut _,
-            &mut a4 as *mut _ as *mut _,
-            &mut a5 as *mut _ as *mut _,
-            &mut a6 as *mut _ as *mut _,
-            &mut a7 as *mut _ as *mut _,
-            &mut a8 as *mut _ as *mut _,
-            &mut a9 as *mut _ as *mut _,
-            &mut a10 as *mut _ as *mut _,
-            &mut a11 as *mut _ as *mut _,
-            &mut a12 as *mut _ as *mut _,
-            &mut a13 as *mut _ as *mut _,
-            &mut a14 as *mut _ as *mut _,
-        ];
-        let launch = unsafe {
-            cuda_sys::lib().cuLaunchKernel(
-                extract_cu_function(&kernels.kimi_delta_recurrent_scan_bf16),
-                kda.num_heads as u32,
-                1,
-                1,
-                recur_threads as u32,
-                1,
-                1,
-                shared_bytes as u32,
-                *self.device.cu_stream(),
-                params.as_mut_ptr(),
-                std::ptr::null_mut(),
-            )
-        };
-        if launch != cuda_sys::CUresult::CUDA_SUCCESS {
-            return Err(format!("KDA recurrent scan launch failed: {:?}", launch));
-        }
+        observe("decode_graph_kda_recurrent_output", work_ptr, qkv_dim, 2)?;
+        observe(
+            "decode_graph_kda_recurrent_outgoing",
+            kda.recur_state_ptr,
+            qkv_dim
+                .checked_mul(kda.head_dim)
+                .ok_or("KDA recurrent diagnostic extent overflow")?,
+            4,
+        )?;
         record_debug_bf16(
             "glm5_kda_recurrent",
             "glm5_kda_recurrent",
@@ -80853,6 +85675,7 @@ impl GpuDecodeStore {
         }
         project(kda.g_a_proj, "g_a_proj", hidden_ptr, q_ptr)?;
         project(kda.g_b_proj, "g_b_proj", q_ptr, k_ptr)?;
+        observe("decode_graph_kda_output_gate", k_ptr, qkv_dim, 2)?;
         record_debug_bf16(
             "glm5_kda_output_gate",
             "glm5_kda_output_gate",
@@ -80889,6 +85712,7 @@ impl GpuDecodeStore {
                 )
                 .map_err(|error| format!("KDA gated RMSNorm: {:?}", error))?;
         }
+        observe("decode_graph_kda_rms_gate", v_ptr, qkv_dim, 2)?;
         record_debug_bf16("glm5_kda_rms_gate", "glm5_kda_rms_gate", v_ptr, qkv_dim);
         timing_finish(rms_gate_timing, &graph.t_kda_rms_gate, "rms_gate")?;
         mark(6, "kda-rms-gate-end")?;
@@ -80900,10 +85724,70 @@ impl GpuDecodeStore {
             output_ptr,
             graph.hidden_size,
         );
+        if let Some(target) = eager_probe {
+            target.device(
+                "o-projection.bf16",
+                output_ptr,
+                graph
+                    .hidden_size
+                    .checked_mul(2)
+                    .ok_or("eager KDA output extent overflow")?,
+                *self.device.cu_stream(),
+            )?;
+        }
         timing_finish(o_proj_timing, &graph.t_kda_o_proj, "o_proj")?;
         mark(7, "kda-o-proj-end")
     }
 
+    // Same fixed arithmetic and loaded bank as selected GPU prefill.
+    fn dsa_owner_query_bf16_internal(
+        &self,
+        w: &GpuWeight,
+        input: u64,
+        output: u64,
+    ) -> Result<(), String> {
+        if let Some(bank) = &self.ordered_kda_projection {
+            if w.dtype != 0 {
+                return Err("selected DSA query requires registered BF16 matrix".into());
+            }
+            return unsafe {
+                bank.enqueue_dense_bf16(
+                    w.ptr,
+                    input,
+                    output,
+                    w.rows,
+                    w.cols,
+                    1,
+                    *self.device.cu_stream(),
+                )
+            };
+        }
+        self.gemv_bf16_internal(w, input, output)
+    }
+
+    fn dense_projection_bf16_internal(
+        &self,
+        w: &GpuWeight,
+        input: u64,
+        output: u64,
+    ) -> Result<(), String> {
+        if w.dtype == 0 {
+            if let Some(bank) = &self.ordered_kda_projection {
+                return unsafe {
+                    bank.enqueue_dense_bf16(
+                        w.ptr,
+                        input,
+                        output,
+                        w.rows,
+                        w.cols,
+                        1,
+                        *self.device.cu_stream(),
+                    )
+                };
+            }
+        }
+        self.gemv_bf16_internal(w, input, output)
+    }
     /// BF16 GEMV: output_bf16[N] = weight[N,K] @ input_bf16[K]
     /// Supports BF16, Marlin INT8, Marlin INT4, and simple INT4 weights.
     fn gemv_bf16_internal(
@@ -81032,6 +85916,21 @@ impl GpuDecodeStore {
         input_ptr: u64,
         output_ptr: u64,
     ) -> Result<(), String> {
+        if w.dtype == 0 {
+            if let Some(bank) = &self.ordered_kda_projection {
+                return unsafe {
+                    bank.enqueue_router(
+                        w.ptr,
+                        input_ptr,
+                        output_ptr,
+                        w.rows,
+                        w.cols,
+                        1,
+                        *self.device.cu_stream(),
+                    )
+                };
+            }
+        }
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         if w.is_marlin_int8() {
@@ -83083,8 +87982,7 @@ impl GpuDecodeStore {
 
             // Build pending cache entries only after the entire immutable
             // chunk layout has been validated and its DMA was accepted.
-            for (slot, layer_idx, expert_idx, w13p_off, w13s_off, w2p_off, w2s_off) in
-                chunk_layout
+            for (slot, layer_idx, expert_idx, w13p_off, w13s_off, w2p_off, w2s_off) in chunk_layout
             {
                 let dst = chunk_base + hcs.soft_slot_offsets[slot] as u64;
 
@@ -83399,44 +88297,43 @@ impl GpuDecodeStore {
 
         for (layer_idx, layer) in graph.layers.iter().enumerate() {
             if let Some(v4) = layer.deepseek_v4.as_ref() {
-                let native_plane_hashes =
-                    |prefix: &str,
-                     cache: &DeepseekV4NativeCacheRegistration,
-                     rows: usize|
-                     -> serde_json::Value {
-                        let rows = rows.min(cache.rows);
-                        let code_stride = if cache.code_bits == 8 {
-                            cache.quant_cols
-                        } else {
-                            cache.width.div_ceil(2)
-                        };
-                        let scale_stride = cache.quant_cols.div_ceil(cache.block_size);
-                        let tail_stride = if cache.code_bits == 8 {
-                            cache.width.saturating_sub(cache.quant_cols)
-                        } else {
-                            0
-                        };
-                        serde_json::json!({
-                            "rows": rows,
-                            "codes": debug_hash_device_region_json(
-                                &format!("{}_codes", prefix),
-                                cache.codes_ptr,
-                                rows.saturating_mul(code_stride),
-                            ),
-                            "scale_exponents": debug_hash_device_region_json(
-                                &format!("{}_scale_exponents", prefix),
-                                cache.scale_exponents_ptr,
-                                rows.saturating_mul(scale_stride),
-                            ),
-                            "tail": debug_hash_device_region_json(
-                                &format!("{}_tail", prefix),
-                                cache.tail_ptr,
-                                rows
-                                    .saturating_mul(tail_stride)
-                                    .saturating_mul(std::mem::size_of::<u16>()),
-                            ),
-                        })
+                let native_plane_hashes = |prefix: &str,
+                                           cache: &DeepseekV4NativeCacheRegistration,
+                                           rows: usize|
+                 -> serde_json::Value {
+                    let rows = rows.min(cache.rows);
+                    let code_stride = if cache.code_bits == 8 {
+                        cache.quant_cols
+                    } else {
+                        cache.width.div_ceil(2)
                     };
+                    let scale_stride = cache.quant_cols.div_ceil(cache.block_size);
+                    let tail_stride = if cache.code_bits == 8 {
+                        cache.width.saturating_sub(cache.quant_cols)
+                    } else {
+                        0
+                    };
+                    serde_json::json!({
+                        "rows": rows,
+                        "codes": debug_hash_device_region_json(
+                            &format!("{}_codes", prefix),
+                            cache.codes_ptr,
+                            rows.saturating_mul(code_stride),
+                        ),
+                        "scale_exponents": debug_hash_device_region_json(
+                            &format!("{}_scale_exponents", prefix),
+                            cache.scale_exponents_ptr,
+                            rows.saturating_mul(scale_stride),
+                        ),
+                        "tail": debug_hash_device_region_json(
+                            &format!("{}_tail", prefix),
+                            cache.tail_ptr,
+                            rows
+                                .saturating_mul(tail_stride)
+                                .saturating_mul(std::mem::size_of::<u16>()),
+                        ),
+                    })
+                };
                 let raw_rows = carry_position.min(v4.sliding_window);
                 let compressed_rows = if v4.compress_ratio == 0 {
                     0
@@ -83880,6 +88777,35 @@ impl GpuDecodeStore {
         use std::time::Instant;
 
         self.last_stream_failure = None;
+        if let Err(error) = self.require_sequence_state_ready_rust() {
+            self.last_stream_failure = Some(error);
+            return 0;
+        }
+        // BEGIN explicit teacher-forced decode start
+        let mut teacher_forcing = self.matched_teacher_once.take();
+        if let Some(teacher) = teacher_forcing.as_ref() {
+            let result = teacher.validate_start(start_position, first_token, max_tokens);
+            if self.cuda_graphs_disabled()
+                || self.draft.is_some()
+                || self.dspark.is_some()
+                || result.is_err()
+            {
+                self.last_stream_failure = Some(result.err().unwrap_or_else(|| {
+                    "teacher forcing requires ordinary graph-enabled decode".into()
+                }));
+                return 0;
+            }
+        }
+        // END explicit teacher-forced decode start
+        let mut projection_scope = match crate::matched_projection_transfer::Scope::enter(
+            teacher_forcing.as_ref().map(|t| t.diagnostic_label()),
+        ) {
+            Ok(scope) => scope,
+            Err(error) => {
+                self.last_stream_failure = Some(error);
+                return 0;
+            }
+        };
         self.refresh_trace_config();
         let trace_config = self.active_trace_owned();
         let debug_decode_state_trace = self.debug_decode_state_trace_once;
@@ -84458,6 +89384,44 @@ impl GpuDecodeStore {
 
         // ── Speculative decode state ──
         let use_dspark = self.dspark.is_some();
+        let matched_replay = match crate::matched_replay::load(
+            &trace_request_label,
+            start_position,
+            first_token,
+            max_tokens,
+        ) {
+            Ok(Some((replay, blobs, rope_delta))) => {
+                if self.cuda_graphs_disabled() || self.draft.is_some() || self.dspark.is_some() {
+                    self.last_stream_failure = Some(
+                        "matched replay requires ordinary graph-enabled single-token decode".into(),
+                    );
+                    return 0;
+                }
+                let refs: Vec<_> = blobs.iter().collect();
+                if let Err(error) =
+                    self.restore_sequence_state_rust(start_position, &refs, rope_delta)
+                {
+                    self.last_stream_failure =
+                        Some(format!("matched replay restore failed: {error}"));
+                    return 0;
+                }
+                Some(replay)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                self.last_stream_failure = Some(error);
+                return 0;
+            }
+        };
+        // BEGIN explicit teacher-forced replay separation
+        if teacher_forcing.is_some() && matched_replay.is_some() {
+            self.last_stream_failure = Some(
+                "teacher-forced current-state generation cannot also restore matched replay state"
+                    .into(),
+            );
+            return 0;
+        }
+        // END explicit teacher-forced replay separation
         let use_speculative = self.draft.is_some();
         if (use_speculative || use_dspark)
             && self
@@ -85895,6 +90859,35 @@ impl GpuDecodeStore {
                         break;
                     }
                 }
+                if let Err(error) = self.capture_matched_decode_boundary_rust(
+                    pos + 1,
+                    &trace_request_label,
+                    step,
+                    Some(next_token),
+                    use_per_layer,
+                ) {
+                    self.last_stream_failure =
+                        Some(format!("matched decode boundary capture: {error}"));
+                    break;
+                }
+                // BEGIN explicit teacher-forced raw decision capture
+                if let Some(teacher) = teacher_forcing.as_ref() {
+                    if let Err(error) =
+                        teacher.raw_step(step, next_token, &self.graph.as_ref().unwrap().h_logits)
+                    {
+                        self.last_stream_failure = Some(error);
+                        break;
+                    }
+                }
+                // END explicit teacher-forced raw decision capture
+                if let Some(replay) = matched_replay.as_ref() {
+                    if let Err(error) =
+                        replay.step(step, next_token, &self.graph.as_ref().unwrap().h_logits)
+                    {
+                        self.last_stream_failure = Some(error);
+                        break;
+                    }
+                }
                 let logits = &mut self.graph.as_mut().unwrap().h_logits;
 
                 if let Some(trace_cfg) = trace_cfg.as_ref() {
@@ -86016,6 +91009,32 @@ impl GpuDecodeStore {
                         target_pred,
                     ),
                 );
+                let target_pred = if let Some(replay) = matched_replay.as_ref() {
+                    if let Err(error) = replay.selection(step, target_pred) {
+                        self.last_stream_failure = Some(error);
+                        break;
+                    }
+                    replay
+                        .forced_inputs
+                        .get(step + 1)
+                        .map(|id| *id as usize)
+                        .unwrap_or(target_pred)
+                } else {
+                    target_pred
+                };
+                // BEGIN explicit teacher-forced next input selection
+                let target_pred = if let Some(teacher) = teacher_forcing.as_mut() {
+                    match teacher.select(step, next_token, target_pred) {
+                        Ok(selected) => selected,
+                        Err(error) => {
+                            self.last_stream_failure = Some(error);
+                            break;
+                        }
+                    }
+                } else {
+                    target_pred
+                };
+                // END explicit teacher-forced next input selection
                 self.notify_token_generated(target_pred);
 
                 seen_tokens.insert(target_pred);
@@ -88759,6 +93778,13 @@ impl GpuDecodeStore {
             }
         }
 
+        if self.last_stream_failure.is_none() {
+            if let Some(scope) = projection_scope.as_mut() {
+                if let Err(error) = scope.finish() {
+                    self.last_stream_failure = Some(error);
+                }
+            }
+        }
         generated
     }
 }
@@ -90946,6 +95972,7 @@ impl GpuDecodeStore {
         use std::time::Instant;
 
         let device = &self.device;
+        let compute_stream = *device.cu_stream();
         let copy_stream = self.copy_stream.0;
         let prefetch_stream = self.prefetch_stream.0;
         let timing = graph.timing_enabled;
@@ -91105,12 +96132,17 @@ impl GpuDecodeStore {
         // experts go through the cold path (0 hot experts), the HCS batch's
         // init_zero never fires, corrupting output with accumulated stale data.
         unsafe {
-            cuda_sys::lib().cuMemsetD16Async(
+            let result = cuda_sys::lib().cuMemsetD16Async(
                 *graph.d_moe_out.device_ptr(),
                 0,
                 expert_hs,
-                std::ptr::null_mut(),
+                compute_stream,
             );
+            if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "MoE accumulator clear: {result:?}"
+                )));
+            }
         }
 
         // ── Step 1+2: Gate GEMV (BF16 gate × BF16 hidden → FP32 logits) ──
@@ -91119,36 +96151,56 @@ impl GpuDecodeStore {
             unsafe { (*graph.d_fp32_scratch.device_ptr() as *const f32).add(hs) as u64 };
         {
             let w = &graph.weights[gate_wid];
-            let alpha: f32 = 1.0;
-            let beta: f32 = 0.0;
-            unsafe {
-                cublas_result::gemm_ex(
-                    *self.blas.handle(),
-                    cublas_sys::cublasOperation_t::CUBLAS_OP_T,
-                    cublas_sys::cublasOperation_t::CUBLAS_OP_N,
-                    w.rows as i32,
-                    1,
-                    w.cols as i32,
-                    &alpha as *const f32 as *const std::ffi::c_void,
-                    w.ptr as *const std::ffi::c_void,
-                    cublas_sys::cudaDataType::CUDA_R_16BF,
-                    w.cols as i32,
-                    router_input_ptr as *const std::ffi::c_void,
-                    cublas_sys::cudaDataType::CUDA_R_16BF,
-                    hs as i32,
-                    &beta as *const f32 as *const std::ffi::c_void,
-                    logits_ptr as *mut std::ffi::c_void,
-                    cublas_sys::cudaDataType::CUDA_R_32F,
-                    w.rows as i32,
-                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                    cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
-                )
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "cuBLAS gate GEMV (bf16): {:?}",
-                        e
-                    ))
-                })?;
+            if let Some(bank) = &self.ordered_kda_projection {
+                if w.dtype != 0 {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "common router requires actual BF16 gate weights",
+                    ));
+                }
+                unsafe {
+                    bank.enqueue_router(
+                        w.ptr,
+                        router_input_ptr,
+                        logits_ptr,
+                        w.rows,
+                        w.cols,
+                        1,
+                        compute_stream,
+                    )
+                }
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            } else {
+                let alpha: f32 = 1.0;
+                let beta: f32 = 0.0;
+                unsafe {
+                    cublas_result::gemm_ex(
+                        *self.blas.handle(),
+                        cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                        cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                        w.rows as i32,
+                        1,
+                        w.cols as i32,
+                        &alpha as *const f32 as *const std::ffi::c_void,
+                        w.ptr as *const std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                        w.cols as i32,
+                        router_input_ptr as *const std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                        hs as i32,
+                        &beta as *const f32 as *const std::ffi::c_void,
+                        logits_ptr as *mut std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_32F,
+                        w.rows as i32,
+                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                        cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                    )
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "cuBLAS gate GEMV (bf16): {:?}",
+                            e
+                        ))
+                    })?;
+                }
             }
         }
         // ── Step 3: TopK routing ──
@@ -91404,13 +96456,13 @@ impl GpuDecodeStore {
             }
         }
 
-        // ── Step 4: Sync default stream only (not copy/prefetch streams) ──
+        // ── Step 4: Complete the actual route producer before host reads ──
         if timing {
             graph.t_moe_gate_gemv += (Instant::now() - t_gate_start).as_secs_f64();
         }
         let t_route_start = Instant::now();
         unsafe {
-            let err = cuda_sys::lib().cuStreamSynchronize(std::ptr::null_mut());
+            let err = cuda_sys::lib().cuStreamSynchronize(compute_stream);
             if err != cuda_sys::CUresult::CUDA_SUCCESS {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "route stream sync: {:?}",
@@ -91474,6 +96526,46 @@ impl GpuDecodeStore {
             graph.t_moe_d2h_topk += (Instant::now() - t_d2h_start).as_secs_f64();
         }
 
+        if graph.matched_moe_input_capture_enabled
+            || graph.trace_request_label.starts_with("matched_replay_")
+        {
+            let position = graph
+                .kv_current_pos
+                .checked_add(usize::try_from(graph.validation_decode_steps).map_err(|_| {
+                    pyo3::exceptions::PyRuntimeError::new_err("matched decode step overflow")
+                })?)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err("matched decode position overflow")
+                })?;
+            Self::capture_matched_moe_tensor(
+                graph,
+                layer_idx,
+                position,
+                "decode_moe_input",
+                *device.cu_stream(),
+                device.ordinal(),
+            )
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        }
+        if graph.matched_router_capture_enabled {
+            let position = graph
+                .kv_current_pos
+                .checked_add(usize::try_from(graph.validation_decode_steps).map_err(|_| {
+                    pyo3::exceptions::PyRuntimeError::new_err("router decode step overflow")
+                })?)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err("router decode position overflow")
+                })?;
+            Self::capture_matched_router_operands(
+                graph,
+                layer_idx,
+                position,
+                *device.cu_stream(),
+                device.ordinal(),
+                "eager native topk before HCS swaps",
+            )
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        }
         let ids: Vec<i32> = graph.h_topk_ids[..topk].to_vec();
         let wts: Vec<f32> = graph.h_topk_weights[..topk].to_vec();
         if trace_moe_detail_active {
@@ -91528,7 +96620,8 @@ impl GpuDecodeStore {
                 "layer": layer_idx,
                 "use_pinned_topk": use_pinned,
                 "current_stream_ptr": format!("0x{:x}", route_stream as usize),
-                "null_stream_sync_was_used_for_original_readback": true,
+                "null_stream_sync_was_used_for_original_readback": compute_stream.is_null(),
+                "original_route_producer_stream":format!("0x{:x}",compute_stream as usize),
                 "current_stream_sync_status": format!("{:?}", route_sync_err),
                 "current_stream_copy_error": route_copy_error,
                 "router_per_expert_scale_ptr": format!("0x{:x}", graph.layers.get(layer_idx)
@@ -91926,7 +97019,8 @@ impl GpuDecodeStore {
         let mut apfl_misses = 0u32;
         let mut hcs_hits = 0u32;
 
-        let default_stream: cuda_sys::CUstream = std::ptr::null_mut();
+        // Compute launches, route readback, descriptors and DMA fences use
+        // the same actual Store stream, including owned nonblocking streams.
 
         // Extract raw event pointers from pre-allocated CudaEvent wrappers
         let ev_dma: [cuda_sys::CUevent; 2];
@@ -92463,7 +97557,7 @@ impl GpuDecodeStore {
         }
 
         // ── Phase 2: Batched HCS expert compute (4 launches instead of 3*N) ──
-        // Runs on default_stream while pre-queued cold DMAs proceed on copy_stream.
+        // Runs on compute_stream while pre-queued cold DMAs proceed on copy_stream.
         if canonical_ungraphed_batch {
             // The captured graph always evaluates every router slot with the same
             // batched W13/W2 stack and performs one canonical final reduction.
@@ -92471,20 +97565,20 @@ impl GpuDecodeStore {
             // stack but demand-cold experts with sequential fused accumulation,
             // making arithmetic depend on mutable HCS residency. Stage only the
             // cold slots, then run the exact graph arithmetic over all router slots.
-            let resident_records: Vec<(usize, u64, u64, u64, u64, f32, usize)> =
-                (0..hcs_batch_count)
-                    .map(|batch_slot| {
-                        (
-                            batch_topk_positions[batch_slot],
-                            graph.h_batch_w13_packed_ptrs[batch_slot],
-                            graph.h_batch_w13_scales_ptrs[batch_slot],
-                            graph.h_batch_w2_packed_ptrs[batch_slot],
-                            graph.h_batch_w2_scales_ptrs[batch_slot],
-                            graph.h_batch_weights[batch_slot],
-                            batch_expert_ids[batch_slot],
-                        )
-                    })
-                    .collect();
+            let resident_records: Vec<(usize, u64, u64, u64, u64, f32, usize)> = (0
+                ..hcs_batch_count)
+                .map(|batch_slot| {
+                    (
+                        batch_topk_positions[batch_slot],
+                        graph.h_batch_w13_packed_ptrs[batch_slot],
+                        graph.h_batch_w13_scales_ptrs[batch_slot],
+                        graph.h_batch_w2_packed_ptrs[batch_slot],
+                        graph.h_batch_w2_scales_ptrs[batch_slot],
+                        graph.h_batch_weights[batch_slot],
+                        batch_expert_ids[batch_slot],
+                    )
+                })
+                .collect();
 
             for slot in 0..topk {
                 let base = *graph.d_graph_expert_bufs[slot].device_ptr();
@@ -92505,16 +97599,16 @@ impl GpuDecodeStore {
             }
 
             if dma_count > 0 {
-                let record = unsafe { cuda_sys::lib().cuEventRecord(ev_compute[0], default_stream) };
+                let record =
+                    unsafe { cuda_sys::lib().cuEventRecord(ev_compute[0], compute_stream) };
                 if record != cuda_sys::CUresult::CUDA_SUCCESS {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                         "canonical cold staging compute event[{}]: {:?}",
                         layer_idx, record,
                     )));
                 }
-                let wait = unsafe {
-                    cuda_sys::lib().cuStreamWaitEvent(copy_stream, ev_compute[0], 0)
-                };
+                let wait =
+                    unsafe { cuda_sys::lib().cuStreamWaitEvent(copy_stream, ev_compute[0], 0) };
                 if wait != cuda_sys::CUresult::CUDA_SUCCESS {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                         "canonical cold staging stream wait[{}]: {:?}",
@@ -92531,10 +97625,8 @@ impl GpuDecodeStore {
                     || expert.w13_packed_bytes > graph.expert_buf_total_size
                     || expert.w13_scales_bytes
                         > graph.expert_buf_total_size.saturating_sub(w13s_off)
-                    || expert.w2_packed_bytes
-                        > graph.expert_buf_total_size.saturating_sub(w2p_off)
-                    || expert.w2_scales_bytes
-                        > graph.expert_buf_total_size.saturating_sub(w2s_off)
+                    || expert.w2_packed_bytes > graph.expert_buf_total_size.saturating_sub(w2p_off)
+                    || expert.w2_scales_bytes > graph.expert_buf_total_size.saturating_sub(w2s_off)
                 {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                         "canonical cold staging buffer too small at layer {} expert {}",
@@ -92559,7 +97651,12 @@ impl GpuDecodeStore {
                     Ok(())
                 };
                 if expert.contiguous_ptr != 0 {
-                    copy(base, expert.contiguous_ptr, expert.contiguous_bytes, "contiguous")?;
+                    copy(
+                        base,
+                        expert.contiguous_ptr,
+                        expert.contiguous_bytes,
+                        "contiguous",
+                    )?;
                     graph.dma_call_count += 1;
                 } else {
                     copy(
@@ -92605,9 +97702,8 @@ impl GpuDecodeStore {
                         layer_idx, record,
                     )));
                 }
-                let wait = unsafe {
-                    cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[0], 0)
-                };
+                let wait =
+                    unsafe { cuda_sys::lib().cuStreamWaitEvent(compute_stream, ev_dma[0], 0) };
                 if wait != cuda_sys::CUresult::CUDA_SUCCESS {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                         "canonical cold staging compute wait[{}]: {:?}",
@@ -92656,7 +97752,7 @@ impl GpuDecodeStore {
                     *graph.d_batch_upload.device_ptr(),
                     upload as *const std::ffi::c_void,
                     upload_bytes,
-                    default_stream,
+                    compute_stream,
                 );
                 if result != cuda_sys::CUresult::CUDA_SUCCESS {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -92667,8 +97763,8 @@ impl GpuDecodeStore {
             }
             let d_weights = *graph.d_batch_upload.device_ptr() + (ptr_stride * 4) as u64;
             if graph.mixed_expert_precision {
-                let d_ids = *graph.d_batch_upload.device_ptr()
-                    + (ptr_stride * 4 + max_ept * 4 * 3) as u64;
+                let d_ids =
+                    *graph.d_batch_upload.device_ptr() + (ptr_stride * 4 + max_ept * 4 * 3) as u64;
                 Self::launch_manifest_expert_stack(
                     graph,
                     layer_idx,
@@ -92691,26 +97787,58 @@ impl GpuDecodeStore {
                 )
                 .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
             }
-            unsafe {
-                k.multi_expert_weighted_add_bf16
-                    .clone()
-                    .launch(
-                        LaunchConfig::for_num_elems(expert_hs as u32),
-                        (
-                            *graph.d_moe_out.device_ptr(),
+            if let Some(bank) = &graph.ordered_expert_projection {
+                unsafe {
+                    bank.moe_combine
+                        .as_ref()
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(
+                                "common routed reduction absent",
+                            )
+                        })?
+                        .enqueue_reduce(
                             *graph.d_batch_expert_outs.device_ptr(),
                             d_weights,
-                            expert_hs as i32,
-                            topk as i32,
-                            1i32,
-                        ),
-                    )
-                    .map_err(|error| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "canonical ungraphed weighted reduction[{}]: {:?}",
-                            layer_idx, error,
-                        ))
-                    })?;
+                            *graph
+                                .d_common_moe_accum
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    pyo3::exceptions::PyRuntimeError::new_err(
+                                        "common routed owner absent",
+                                    )
+                                })?
+                                .device_ptr(),
+                            *graph.d_moe_out.device_ptr(),
+                            expert_hs,
+                            topk,
+                            1,
+                            rsf,
+                            compute_stream,
+                        )
+                        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                }
+            } else {
+                unsafe {
+                    k.multi_expert_weighted_add_bf16
+                        .clone()
+                        .launch(
+                            LaunchConfig::for_num_elems(expert_hs as u32),
+                            (
+                                *graph.d_moe_out.device_ptr(),
+                                *graph.d_batch_expert_outs.device_ptr(),
+                                d_weights,
+                                expert_hs as i32,
+                                topk as i32,
+                                1i32,
+                            ),
+                        )
+                        .map_err(|error| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "canonical ungraphed weighted reduction[{}]: {:?}",
+                                layer_idx, error,
+                            ))
+                        })?;
+                }
             }
 
             for &(slot, _) in dma_experts.iter().take(dma_count) {
@@ -92737,7 +97865,7 @@ impl GpuDecodeStore {
                             w2p_bytes: expert.w2_packed_bytes,
                             w2s_bytes: expert.w2_scales_bytes,
                         };
-                        hcs.dynamic_promote_from_device(&promotion, default_stream, timing)
+                        hcs.dynamic_promote_from_device(&promotion, compute_stream, timing)
                             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
                     }
                 }
@@ -92769,18 +97897,20 @@ impl GpuDecodeStore {
                         })
                     })
                     .collect::<Vec<_>>();
-                graph.debug_decode_hcs_equiv_entries.push(serde_json::json!({
-                    "phase": "canonical_ungraphed_mixed_batch",
-                    "decode_step_zero_indexed": graph.validation_decode_steps,
-                    "layer": layer_idx,
-                    "topk": topk,
-                    "resident_or_prefetched": hcs_batch_count,
-                    "staged_cold": dma_count,
-                    "expert_ids": graph.h_topk_ids[..topk].to_vec(),
-                    "weights": graph.h_batch_weights[..topk].to_vec(),
-                    "slot_summaries": slot_summaries,
-                    "arithmetic_contract": "graph_batched_stack_then_router_slot_reduction",
-                }));
+                graph
+                    .debug_decode_hcs_equiv_entries
+                    .push(serde_json::json!({
+                        "phase": "canonical_ungraphed_mixed_batch",
+                        "decode_step_zero_indexed": graph.validation_decode_steps,
+                        "layer": layer_idx,
+                        "topk": topk,
+                        "resident_or_prefetched": hcs_batch_count,
+                        "staged_cold": dma_count,
+                        "expert_ids": graph.h_topk_ids[..topk].to_vec(),
+                        "weights": graph.h_batch_weights[..topk].to_vec(),
+                        "slot_summaries": slot_summaries,
+                        "arithmetic_contract": "graph_batched_stack_then_router_slot_reduction",
+                    }));
             }
         } else if !is_bf16_expert && !is_tileq && hcs_batch_count >= 2 && act_type != 2 {
             let t_w13 = Instant::now();
@@ -92824,12 +97954,17 @@ impl GpuDecodeStore {
 
                 // Single H2D copy
                 let upload_bytes = ptr_stride * 4 + max_ept * 4 * 4;
-                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                let result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                     *graph.d_batch_upload.device_ptr(),
                     h as *const std::ffi::c_void,
                     upload_bytes,
-                    std::ptr::null_mut(),
+                    compute_stream,
                 );
+                if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "MoE HCS descriptor upload: {result:?}"
+                    )));
+                }
             }
 
             // Device pointers into the contiguous upload buffer
@@ -92910,7 +98045,7 @@ impl GpuDecodeStore {
 
             if timing {
                 unsafe {
-                    cuda_sys::lib().cuStreamSynchronize(std::ptr::null_mut());
+                    cuda_sys::lib().cuStreamSynchronize(compute_stream);
                 }
                 graph.t_expert_w13 += (Instant::now() - t_w13).as_secs_f64();
             }
@@ -93295,7 +98430,7 @@ impl GpuDecodeStore {
 
             if timing {
                 unsafe {
-                    cuda_sys::lib().cuStreamSynchronize(std::ptr::null_mut());
+                    cuda_sys::lib().cuStreamSynchronize(compute_stream);
                 }
                 graph.t_expert_silu_w2 += (Instant::now() - t_silu_w2).as_secs_f64();
             }
@@ -93446,7 +98581,7 @@ impl GpuDecodeStore {
                             source,
                             expert_out_ptr,
                             expert_hs,
-                            default_stream,
+                            compute_stream,
                         );
                         let (capture_summary, capture_error) = match capture {
                             Ok(captured) => {
@@ -93572,7 +98707,7 @@ impl GpuDecodeStore {
                         &mut graph.h_batch_upload,
                         d_upload,
                         upload_slots,
-                        default_stream,
+                        compute_stream,
                         &k,
                         is_int8,
                     )?;
@@ -93619,335 +98754,333 @@ impl GpuDecodeStore {
         // Experts 0..pre_dma_count already have DMAs in flight from before Phase 2.
         // Their ev_dma events may already be signaled, giving near-zero wait.
         if !canonical_ungraphed_batch {
-        for di in 0..dma_count {
-            let (i, _weight) = dma_experts[di];
-            let eid = graph.h_topk_ids[i] as usize;
-            let weight = graph.h_topk_weights[i];
-            let expert = &moe.experts[eid];
+            for di in 0..dma_count {
+                let (i, _weight) = dma_experts[di];
+                let eid = graph.h_topk_ids[i] as usize;
+                let weight = graph.h_topk_weights[i];
+                let expert = &moe.experts[eid];
 
-            if use_double_buf {
-                apfl_misses += 1;
-                graph.dma_cold_experts += 1;
-                if timing {
-                    let dma_bytes = expert.w13_packed_bytes
-                        + expert.w13_scales_bytes
-                        + expert.w2_packed_bytes
-                        + expert.w2_scales_bytes;
-                    graph.dma_bytes_total += dma_bytes as u64;
-                    graph.dma_call_count += if expert.contiguous_ptr != 0 { 1 } else { 4 };
-                }
-
-                let slot = (dma_expert_count % 2) as usize;
-
-                if di < pre_dma_count {
-                    // DMA already queued before Phase 2 — skip DMA, just wait + compute
-                } else {
-                    // Wait for this buffer's previous compute to finish (free the buffer)
-                    if dma_expert_count >= 2 {
-                        unsafe {
-                            cuda_sys::lib().cuStreamWaitEvent(copy_stream, ev_compute[slot], 0);
-                        }
+                if use_double_buf {
+                    apfl_misses += 1;
+                    graph.dma_cold_experts += 1;
+                    if timing {
+                        let dma_bytes = expert.w13_packed_bytes
+                            + expert.w13_scales_bytes
+                            + expert.w2_packed_bytes
+                            + expert.w2_scales_bytes;
+                        graph.dma_bytes_total += dma_bytes as u64;
+                        graph.dma_call_count += if expert.contiguous_ptr != 0 { 1 } else { 4 };
                     }
 
-                    unsafe {
-                        let base = buf_base[slot];
-                        if expert.contiguous_ptr != 0 {
-                            let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                base,
-                                expert.contiguous_ptr as *const std::ffi::c_void,
-                                expert.contiguous_bytes,
-                                copy_stream,
-                            );
-                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                    "DMA contiguous[{}]: {:?}",
-                                    eid, err
-                                )));
-                            }
-                        } else {
-                            let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                base + w13p_off as u64,
-                                expert.w13_packed_ptr as *const std::ffi::c_void,
-                                expert.w13_packed_bytes,
-                                copy_stream,
-                            );
-                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                    "DMA w13p[{}]: {:?}",
-                                    eid, err
-                                )));
-                            }
-                            let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                base + w13s_off as u64,
-                                expert.w13_scales_ptr as *const std::ffi::c_void,
-                                expert.w13_scales_bytes,
-                                copy_stream,
-                            );
-                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                    "DMA w13s[{}]: {:?}",
-                                    eid, err
-                                )));
-                            }
-                            let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                base + w2p_off as u64,
-                                expert.w2_packed_ptr as *const std::ffi::c_void,
-                                expert.w2_packed_bytes,
-                                copy_stream,
-                            );
-                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                    "DMA w2p[{}]: {:?}",
-                                    eid, err
-                                )));
-                            }
-                            let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                                base + w2s_off as u64,
-                                expert.w2_scales_ptr as *const std::ffi::c_void,
-                                expert.w2_scales_bytes,
-                                copy_stream,
-                            );
-                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                    "DMA w2s[{}]: {:?}",
-                                    eid, err
-                                )));
-                            }
-                        }
-                        cuda_sys::lib().cuEventRecord(ev_dma[slot], copy_stream);
-                    }
-                }
+                    let slot = (dma_expert_count % 2) as usize;
 
-                // Wait for THIS expert's DMA to complete before computing
-                // GPU-side only: default_stream waits for copy_stream's DMA event.
-                // No host sync here -- that would serialize DMA and compute, destroying overlap.
-                let t_dma_wait = Instant::now();
-                unsafe {
-                    cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[slot], 0);
-                }
-                if timing {
-                    // Sync to measure actual DMA wait (serializes for measurement only)
-                    unsafe {
-                        cuda_sys::lib().cuStreamSynchronize(default_stream);
-                    }
-                    graph.t_dma_expert_wait += (Instant::now() - t_dma_wait).as_secs_f64();
-                }
-
-                // Compute from buf[slot]
-                let t_dma_compute = Instant::now();
-                let base = buf_base[slot];
-                if is_tileq {
-                    let factors = moe.tileq.ok_or_else(|| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "TileQ factors missing for layer {layer_idx}"
-                        ))
-                    })?;
-                    self.launch_tileq_expert_compute(
-                        base + w13p_off as u64,
-                        base + w13s_off as u64,
-                        base + w2p_off as u64,
-                        base + w2s_off as u64,
-                        expert_input_ptr,
-                        *graph.d_expert_gate_up.device_ptr(),
-                        *graph.d_expert_scratch.device_ptr(),
-                        *graph.d_expert_out.device_ptr(),
-                        partial_ptr,
-                        eid,
-                        factors,
-                        gs,
-                        &k,
-                    )?;
-                    self.launch_weighted_add_bf16(
-                        *graph.d_moe_out.device_ptr(),
-                        *graph.d_expert_out.device_ptr(),
-                        expert_hs,
-                        weight,
-                        0,
-                        &k,
-                    )?;
-                } else if is_bf16_expert {
-                    let pending_slot = bf16_pending_adds.len();
-                    if pending_slot >= graph.max_experts_per_tok {
-                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "BF16 pending expert overflow: slot={} max={}",
-                            pending_slot, graph.max_experts_per_tok
-                        )));
-                    }
-                    let expert_out_ptr = *graph.d_batch_expert_outs.device_ptr()
-                        + (pending_slot * expert_hs * std::mem::size_of::<u16>()) as u64;
-                    self.launch_bf16_expert_compute(
-                        base + w13p_off as u64,
-                        base + w2p_off as u64,
-                        expert_input_ptr,
-                        *graph.d_expert_gate_up.device_ptr(),
-                        *graph.d_expert_scratch.device_ptr(),
-                        expert_out_ptr,
-                        expert_hs,
-                        w13_n,
-                        intermediate,
-                        expert_hs,
-                        act_type,
-                        gated,
-                        &k,
-                    )?;
-                    bf16_pending_adds.push(Bf16DecodePendingAdd {
-                        topk_pos: i,
-                        expert_id: eid,
-                        weight,
-                        source: "cold_dma",
-                        output_ptr: expert_out_ptr,
-                    });
-                } else {
-                    // w13 GEMV: expert_input -> gate_up (v2 K-split if beneficial)
-                    if use_v2_w13 {
-                        self.launch_marlin_gemv_v2(
-                            base + w13p_off as u64,
-                            base + w13s_off as u64,
-                            expert_input_ptr,
-                            partial_ptr,
-                            inv_wp,
-                            inv_sp,
-                            expert_hs,
-                            w13_n,
-                            gs,
-                            w13_ksplits,
-                            &k,
-                            is_int8,
-                        )?;
-                        self.launch_reduce_ksplits_bf16(
-                            *graph.d_expert_gate_up.device_ptr(),
-                            partial_ptr,
-                            w13_n,
-                            w13_ksplits,
-                            &k,
-                        )?;
+                    if di < pre_dma_count {
+                        // DMA already queued before Phase 2 — skip DMA, just wait + compute
                     } else {
-                        self.launch_marlin_gemv_raw(
-                            base + w13p_off as u64,
-                            base + w13s_off as u64,
-                            expert_input_ptr,
-                            *graph.d_expert_gate_up.device_ptr(),
-                            inv_wp,
-                            inv_sp,
-                            expert_hs,
-                            w13_n,
-                            gs,
-                            is_int8,
-                        )?;
+                        // Wait for this buffer's previous compute to finish (free the buffer)
+                        if dma_expert_count >= 2 {
+                            unsafe {
+                                cuda_sys::lib().cuStreamWaitEvent(copy_stream, ev_compute[slot], 0);
+                            }
+                        }
+
+                        unsafe {
+                            let base = buf_base[slot];
+                            if expert.contiguous_ptr != 0 {
+                                let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                    base,
+                                    expert.contiguous_ptr as *const std::ffi::c_void,
+                                    expert.contiguous_bytes,
+                                    copy_stream,
+                                );
+                                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                                        format!("DMA contiguous[{}]: {:?}", eid, err),
+                                    ));
+                                }
+                            } else {
+                                let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                    base + w13p_off as u64,
+                                    expert.w13_packed_ptr as *const std::ffi::c_void,
+                                    expert.w13_packed_bytes,
+                                    copy_stream,
+                                );
+                                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                                        format!("DMA w13p[{}]: {:?}", eid, err),
+                                    ));
+                                }
+                                let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                    base + w13s_off as u64,
+                                    expert.w13_scales_ptr as *const std::ffi::c_void,
+                                    expert.w13_scales_bytes,
+                                    copy_stream,
+                                );
+                                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                                        format!("DMA w13s[{}]: {:?}", eid, err),
+                                    ));
+                                }
+                                let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                    base + w2p_off as u64,
+                                    expert.w2_packed_ptr as *const std::ffi::c_void,
+                                    expert.w2_packed_bytes,
+                                    copy_stream,
+                                );
+                                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                                        format!("DMA w2p[{}]: {:?}", eid, err),
+                                    ));
+                                }
+                                let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                    base + w2s_off as u64,
+                                    expert.w2_scales_ptr as *const std::ffi::c_void,
+                                    expert.w2_scales_bytes,
+                                    copy_stream,
+                                );
+                                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                                        format!("DMA w2s[{}]: {:?}", eid, err),
+                                    ));
+                                }
+                            }
+                            cuda_sys::lib().cuEventRecord(ev_dma[slot], copy_stream);
+                        }
                     }
 
-                    #[cfg(feature = "gpu-debug")]
-                    if layer_idx == 0 && i == 0 {
-                        device.synchronize().map_err(|e| {
-                            pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e))
+                    // Wait for THIS expert's DMA to complete before computing
+                    // GPU-side only: compute_stream waits for copy_stream's DMA event.
+                    // No host sync here -- that would serialize DMA and compute, destroying overlap.
+                    let t_dma_wait = Instant::now();
+                    unsafe {
+                        cuda_sys::lib().cuStreamWaitEvent(compute_stream, ev_dma[slot], 0);
+                    }
+                    if timing {
+                        // Sync to measure actual DMA wait (serializes for measurement only)
+                        unsafe {
+                            cuda_sys::lib().cuStreamSynchronize(compute_stream);
+                        }
+                        graph.t_dma_expert_wait += (Instant::now() - t_dma_wait).as_secs_f64();
+                    }
+
+                    // Compute from buf[slot]
+                    let t_dma_compute = Instant::now();
+                    let base = buf_base[slot];
+                    if is_tileq {
+                        let factors = moe.tileq.ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "TileQ factors missing for layer {layer_idx}"
+                            ))
                         })?;
-                        let mut gu = vec![0u16; 4];
-                        unsafe {
-                            let _ = cuda_sys::lib().cuMemcpyDtoH_v2(
-                                gu.as_mut_ptr() as *mut std::ffi::c_void,
-                                *graph.d_expert_gate_up.device_ptr(),
-                                8,
-                            );
-                        }
-                        let vals: Vec<f32> = gu
-                            .iter()
-                            .map(|&b| f32::from_bits((b as u32) << 16))
-                            .collect();
-                        log::info!("DBG MoE L0 expert[{}] gate_up[0..4] = [{:.4}, {:.4}, {:.4}, {:.4}], w={:.4}",
-                        eid, vals[0], vals[1], vals[2], vals[3], weight);
-                    }
-
-                    if act_type == 1 {
-                        let d_upload = *graph.d_batch_upload.device_ptr();
-                        let upload_slots = graph.max_experts_per_tok;
-                        self.launch_relu2_w2_accum(
+                        self.launch_tileq_expert_compute(
+                            base + w13p_off as u64,
+                            base + w13s_off as u64,
                             base + w2p_off as u64,
                             base + w2s_off as u64,
+                            expert_input_ptr,
                             *graph.d_expert_gate_up.device_ptr(),
-                            *graph.d_moe_out.device_ptr(),
-                            *graph.d_expert_out.device_ptr(),
-                            inv_wp,
-                            inv_sp,
-                            intermediate,
-                            expert_hs,
-                            gs,
-                            weight,
-                            &mut graph.h_batch_upload,
-                            d_upload,
-                            upload_slots,
-                            default_stream,
-                            &k,
-                            is_int8,
-                        )?;
-                    } else if act_type == 2 {
-                        self.launch_gelu_tanh_w2_accum(
-                            base + w2p_off as u64,
-                            base + w2s_off as u64,
-                            *graph.d_expert_gate_up.device_ptr(),
-                            *graph.d_moe_out.device_ptr(),
-                            *graph.d_expert_out.device_ptr(),
                             *graph.d_expert_scratch.device_ptr(),
-                            inv_wp,
-                            inv_sp,
-                            intermediate,
-                            expert_hs,
-                            gs,
-                            weight,
-                            &k,
-                            is_int8,
-                        )?;
-                    } else {
-                        self.launch_fused_silu_accum(
-                            base + w2p_off as u64,
-                            base + w2s_off as u64,
-                            *graph.d_expert_gate_up.device_ptr(),
-                            *graph.d_moe_out.device_ptr(),
-                            inv_wp,
-                            inv_sp,
-                            intermediate,
-                            expert_hs,
-                            gs,
-                            weight,
-                            0u64,
-                            moe.swiglu_limit,
-                            if moe.deepseek_v4_activation { 2 } else { 0 },
-                            &k,
-                            is_int8,
-                        )?;
-                    }
-                }
-                if hcs_equiv_trace_active {
-                    let sync_err = unsafe { cuda_sys::lib().cuStreamSynchronize(default_stream) };
-                    let dma_query = unsafe { cuda_sys::lib().cuEventQuery(ev_dma[slot]) };
-                    let capture = if is_bf16_expert {
-                        debug_capture_decode_bf16_expert_output(
-                            i,
+                            *graph.d_expert_out.device_ptr(),
+                            partial_ptr,
                             eid,
-                            weight,
-                            "cold_dma",
-                            bf16_pending_adds
-                                .iter()
-                                .find(|pending| pending.topk_pos == i && pending.expert_id == eid)
-                                .map(|pending| pending.output_ptr)
-                                .unwrap_or(*graph.d_expert_out.device_ptr()),
+                            factors,
+                            gs,
+                            &k,
+                        )?;
+                        self.launch_weighted_add_bf16(
+                            *graph.d_moe_out.device_ptr(),
+                            *graph.d_expert_out.device_ptr(),
                             expert_hs,
-                            default_stream,
-                        )
-                    } else {
-                        Err("not_bf16_expert_path".to_string())
-                    };
-                    let (capture_summary, capture_error) = match capture {
-                        Ok(captured) => {
-                            let summary = debug_decode_bf16_raw_summary_json(
-                                &format!("layer{}_expert{}_cold_dma_w2_out", layer_idx, eid),
-                                &captured.output_bf16,
-                            );
-                            bf16_accum_order_outputs.push(captured);
-                            (Some(summary), None)
+                            weight,
+                            0,
+                            &k,
+                        )?;
+                    } else if is_bf16_expert {
+                        let pending_slot = bf16_pending_adds.len();
+                        if pending_slot >= graph.max_experts_per_tok {
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "BF16 pending expert overflow: slot={} max={}",
+                                pending_slot, graph.max_experts_per_tok
+                            )));
                         }
-                        Err(err) => (None, Some(err)),
-                    };
-                    graph.debug_decode_hcs_equiv_entries.push(serde_json::json!({
+                        let expert_out_ptr = *graph.d_batch_expert_outs.device_ptr()
+                            + (pending_slot * expert_hs * std::mem::size_of::<u16>()) as u64;
+                        self.launch_bf16_expert_compute(
+                            base + w13p_off as u64,
+                            base + w2p_off as u64,
+                            expert_input_ptr,
+                            *graph.d_expert_gate_up.device_ptr(),
+                            *graph.d_expert_scratch.device_ptr(),
+                            expert_out_ptr,
+                            expert_hs,
+                            w13_n,
+                            intermediate,
+                            expert_hs,
+                            act_type,
+                            gated,
+                            &k,
+                        )?;
+                        bf16_pending_adds.push(Bf16DecodePendingAdd {
+                            topk_pos: i,
+                            expert_id: eid,
+                            weight,
+                            source: "cold_dma",
+                            output_ptr: expert_out_ptr,
+                        });
+                    } else {
+                        // w13 GEMV: expert_input -> gate_up (v2 K-split if beneficial)
+                        if use_v2_w13 {
+                            self.launch_marlin_gemv_v2(
+                                base + w13p_off as u64,
+                                base + w13s_off as u64,
+                                expert_input_ptr,
+                                partial_ptr,
+                                inv_wp,
+                                inv_sp,
+                                expert_hs,
+                                w13_n,
+                                gs,
+                                w13_ksplits,
+                                &k,
+                                is_int8,
+                            )?;
+                            self.launch_reduce_ksplits_bf16(
+                                *graph.d_expert_gate_up.device_ptr(),
+                                partial_ptr,
+                                w13_n,
+                                w13_ksplits,
+                                &k,
+                            )?;
+                        } else {
+                            self.launch_marlin_gemv_raw(
+                                base + w13p_off as u64,
+                                base + w13s_off as u64,
+                                expert_input_ptr,
+                                *graph.d_expert_gate_up.device_ptr(),
+                                inv_wp,
+                                inv_sp,
+                                expert_hs,
+                                w13_n,
+                                gs,
+                                is_int8,
+                            )?;
+                        }
+
+                        #[cfg(feature = "gpu-debug")]
+                        if layer_idx == 0 && i == 0 {
+                            device.synchronize().map_err(|e| {
+                                pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e))
+                            })?;
+                            let mut gu = vec![0u16; 4];
+                            unsafe {
+                                let _ = cuda_sys::lib().cuMemcpyDtoH_v2(
+                                    gu.as_mut_ptr() as *mut std::ffi::c_void,
+                                    *graph.d_expert_gate_up.device_ptr(),
+                                    8,
+                                );
+                            }
+                            let vals: Vec<f32> = gu
+                                .iter()
+                                .map(|&b| f32::from_bits((b as u32) << 16))
+                                .collect();
+                            log::info!("DBG MoE L0 expert[{}] gate_up[0..4] = [{:.4}, {:.4}, {:.4}, {:.4}], w={:.4}",
+                        eid, vals[0], vals[1], vals[2], vals[3], weight);
+                        }
+
+                        if act_type == 1 {
+                            let d_upload = *graph.d_batch_upload.device_ptr();
+                            let upload_slots = graph.max_experts_per_tok;
+                            self.launch_relu2_w2_accum(
+                                base + w2p_off as u64,
+                                base + w2s_off as u64,
+                                *graph.d_expert_gate_up.device_ptr(),
+                                *graph.d_moe_out.device_ptr(),
+                                *graph.d_expert_out.device_ptr(),
+                                inv_wp,
+                                inv_sp,
+                                intermediate,
+                                expert_hs,
+                                gs,
+                                weight,
+                                &mut graph.h_batch_upload,
+                                d_upload,
+                                upload_slots,
+                                compute_stream,
+                                &k,
+                                is_int8,
+                            )?;
+                        } else if act_type == 2 {
+                            self.launch_gelu_tanh_w2_accum(
+                                base + w2p_off as u64,
+                                base + w2s_off as u64,
+                                *graph.d_expert_gate_up.device_ptr(),
+                                *graph.d_moe_out.device_ptr(),
+                                *graph.d_expert_out.device_ptr(),
+                                *graph.d_expert_scratch.device_ptr(),
+                                inv_wp,
+                                inv_sp,
+                                intermediate,
+                                expert_hs,
+                                gs,
+                                weight,
+                                &k,
+                                is_int8,
+                            )?;
+                        } else {
+                            self.launch_fused_silu_accum(
+                                base + w2p_off as u64,
+                                base + w2s_off as u64,
+                                *graph.d_expert_gate_up.device_ptr(),
+                                *graph.d_moe_out.device_ptr(),
+                                inv_wp,
+                                inv_sp,
+                                intermediate,
+                                expert_hs,
+                                gs,
+                                weight,
+                                0u64,
+                                moe.swiglu_limit,
+                                if moe.deepseek_v4_activation { 2 } else { 0 },
+                                &k,
+                                is_int8,
+                            )?;
+                        }
+                    }
+                    if hcs_equiv_trace_active {
+                        let sync_err =
+                            unsafe { cuda_sys::lib().cuStreamSynchronize(compute_stream) };
+                        let dma_query = unsafe { cuda_sys::lib().cuEventQuery(ev_dma[slot]) };
+                        let capture = if is_bf16_expert {
+                            debug_capture_decode_bf16_expert_output(
+                                i,
+                                eid,
+                                weight,
+                                "cold_dma",
+                                bf16_pending_adds
+                                    .iter()
+                                    .find(|pending| {
+                                        pending.topk_pos == i && pending.expert_id == eid
+                                    })
+                                    .map(|pending| pending.output_ptr)
+                                    .unwrap_or(*graph.d_expert_out.device_ptr()),
+                                expert_hs,
+                                compute_stream,
+                            )
+                        } else {
+                            Err("not_bf16_expert_path".to_string())
+                        };
+                        let (capture_summary, capture_error) = match capture {
+                            Ok(captured) => {
+                                let summary = debug_decode_bf16_raw_summary_json(
+                                    &format!("layer{}_expert{}_cold_dma_w2_out", layer_idx, eid),
+                                    &captured.output_bf16,
+                                );
+                                bf16_accum_order_outputs.push(captured);
+                                (Some(summary), None)
+                            }
+                            Err(err) => (None, Some(err)),
+                        };
+                        graph.debug_decode_hcs_equiv_entries.push(serde_json::json!({
                         "phase": "cold_expert_after_compute",
                         "decode_step_zero_indexed": graph.validation_decode_steps,
                         "layer": layer_idx,
@@ -93972,57 +99105,58 @@ impl GpuDecodeStore {
                             expert_hs,
                         ),
                     }));
-                }
-                if timing {
-                    unsafe {
-                        cuda_sys::lib().cuStreamSynchronize(default_stream);
                     }
-                    graph.t_dma_expert_compute += (Instant::now() - t_dma_compute).as_secs_f64();
-                }
+                    if timing {
+                        unsafe {
+                            cuda_sys::lib().cuStreamSynchronize(compute_stream);
+                        }
+                        graph.t_dma_expert_compute +=
+                            (Instant::now() - t_dma_compute).as_secs_f64();
+                    }
 
-                if let Some(ref mut hcs) = graph.hcs {
-                    if hcs.dynamic_enabled {
-                        let promo = DynamicHcsPromotion {
-                            source_path: "ungraphed_decode_cold_dma_pingpong",
-                            layer_idx,
-                            expert_idx: eid,
-                            src_base: base,
-                            src_w13p_off: w13p_off,
-                            src_w13s_off: w13s_off,
-                            src_w2p_off: w2p_off,
-                            src_w2s_off: w2s_off,
-                            w13p_host: expert.w13_packed_ptr,
-                            w13s_host: expert.w13_scales_ptr,
-                            w2p_host: expert.w2_packed_ptr,
-                            w2s_host: expert.w2_scales_ptr,
-                            w13p_bytes: expert.w13_packed_bytes,
-                            w13s_bytes: expert.w13_scales_bytes,
-                            w2p_bytes: expert.w2_packed_bytes,
-                            w2s_bytes: expert.w2_scales_bytes,
-                        };
-                        hcs.dynamic_promote_from_device(&promo, default_stream, timing)
-                            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+                    if let Some(ref mut hcs) = graph.hcs {
+                        if hcs.dynamic_enabled {
+                            let promo = DynamicHcsPromotion {
+                                source_path: "ungraphed_decode_cold_dma_pingpong",
+                                layer_idx,
+                                expert_idx: eid,
+                                src_base: base,
+                                src_w13p_off: w13p_off,
+                                src_w13s_off: w13s_off,
+                                src_w2p_off: w2p_off,
+                                src_w2s_off: w2s_off,
+                                w13p_host: expert.w13_packed_ptr,
+                                w13s_host: expert.w13_scales_ptr,
+                                w2p_host: expert.w2_packed_ptr,
+                                w2s_host: expert.w2_scales_ptr,
+                                w13p_bytes: expert.w13_packed_bytes,
+                                w13s_bytes: expert.w13_scales_bytes,
+                                w2p_bytes: expert.w2_packed_bytes,
+                                w2s_bytes: expert.w2_scales_bytes,
+                            };
+                            hcs.dynamic_promote_from_device(&promo, compute_stream, timing)
+                                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+                        }
                     }
-                }
 
-                #[cfg(feature = "gpu-debug")]
-                if layer_idx == 0 && i == 0 {
-                    device.synchronize().map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e))
-                    })?;
-                    let mut mo = vec![0u16; 4];
-                    unsafe {
-                        let _ = cuda_sys::lib().cuMemcpyDtoH_v2(
-                            mo.as_mut_ptr() as *mut std::ffi::c_void,
-                            *graph.d_moe_out.device_ptr(),
-                            8,
-                        );
-                    }
-                    let vals: Vec<f32> = mo
-                        .iter()
-                        .map(|&b| f32::from_bits((b as u32) << 16))
-                        .collect();
-                    log::info!(
+                    #[cfg(feature = "gpu-debug")]
+                    if layer_idx == 0 && i == 0 {
+                        device.synchronize().map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e))
+                        })?;
+                        let mut mo = vec![0u16; 4];
+                        unsafe {
+                            let _ = cuda_sys::lib().cuMemcpyDtoH_v2(
+                                mo.as_mut_ptr() as *mut std::ffi::c_void,
+                                *graph.d_moe_out.device_ptr(),
+                                8,
+                            );
+                        }
+                        let vals: Vec<f32> = mo
+                            .iter()
+                            .map(|&b| f32::from_bits((b as u32) << 16))
+                            .collect();
+                        log::info!(
                         "DBG MoE L0 moe_out[0..4] after expert[{}] = [{:.6}, {:.6}, {:.6}, {:.6}]",
                         eid,
                         vals[0],
@@ -94030,338 +99164,344 @@ impl GpuDecodeStore {
                         vals[2],
                         vals[3]
                     );
-                }
-
-                // Signal: compute done on this buffer (copy_stream can reuse it)
-                unsafe {
-                    cuda_sys::lib().cuEventRecord(ev_compute[slot], default_stream);
-                }
-
-                dma_expert_count += 1;
-            } else {
-                // ── Fallback: legacy single-buffer DMA (no ping-pong) ──
-                apfl_misses += 1;
-                graph.dma_cold_experts += 1;
-                if timing {
-                    let dma_bytes = expert.w13_packed_bytes
-                        + expert.w13_scales_bytes
-                        + expert.w2_packed_bytes
-                        + expert.w2_scales_bytes;
-                    graph.dma_bytes_total += dma_bytes as u64;
-                    graph.dma_call_count += 4;
-                }
-
-                unsafe {
-                    let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                        buf_w13_packed,
-                        expert.w13_packed_ptr as *const std::ffi::c_void,
-                        expert.w13_packed_bytes,
-                        copy_stream,
-                    );
-                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "DMA w13p[{}]: {:?}",
-                            eid, err
-                        )));
                     }
-                    let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                        buf_w13_scales,
-                        expert.w13_scales_ptr as *const std::ffi::c_void,
-                        expert.w13_scales_bytes,
-                        copy_stream,
-                    );
-                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "DMA w13s[{}]: {:?}",
-                            eid, err
-                        )));
-                    }
-                    let ev_dma_w13 = ev_dma[0];
-                    cuda_sys::lib().cuEventRecord(ev_dma_w13, copy_stream);
-                    cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma_w13, 0);
-                }
 
-                if is_tileq {
+                    // Signal: compute done on this buffer (copy_stream can reuse it)
                     unsafe {
-                        let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                            buf_w2_packed,
-                            expert.w2_packed_ptr as *const std::ffi::c_void,
-                            expert.w2_packed_bytes,
-                            copy_stream,
-                        );
-                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                "TileQ DMA w2p[{eid}]: {err:?}"
-                            )));
-                        }
-                        let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                            buf_w2_scales,
-                            expert.w2_scales_ptr as *const std::ffi::c_void,
-                            expert.w2_scales_bytes,
-                            copy_stream,
-                        );
-                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                "TileQ DMA w2s[{eid}]: {err:?}"
-                            )));
-                        }
-                        cuda_sys::lib().cuEventRecord(ev_dma[1], copy_stream);
-                        cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[1], 0);
+                        cuda_sys::lib().cuEventRecord(ev_compute[slot], compute_stream);
                     }
-                    let factors = moe.tileq.ok_or_else(|| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "TileQ factors missing for layer {layer_idx}"
-                        ))
-                    })?;
-                    self.launch_tileq_expert_compute(
-                        buf_w13_packed,
-                        buf_w13_scales,
-                        buf_w2_packed,
-                        buf_w2_scales,
-                        expert_input_ptr,
-                        *graph.d_expert_gate_up.device_ptr(),
-                        *graph.d_expert_scratch.device_ptr(),
-                        *graph.d_expert_out.device_ptr(),
-                        partial_ptr,
-                        eid,
-                        factors,
-                        gs,
-                        &k,
-                    )?;
-                    self.launch_weighted_add_bf16(
-                        *graph.d_moe_out.device_ptr(),
-                        *graph.d_expert_out.device_ptr(),
-                        expert_hs,
-                        weight,
-                        0,
-                        &k,
-                    )?;
-                    continue;
-                }
 
-                if is_bf16_expert {
-                    // DMA w2 before BF16 cuBLAS W2, then compute the full expert.
-                    unsafe {
-                        let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                            buf_w2_packed,
-                            expert.w2_packed_ptr as *const std::ffi::c_void,
-                            expert.w2_packed_bytes,
-                            copy_stream,
-                        );
-                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                "DMA w2p[{}]: {:?}",
-                                eid, err
-                            )));
-                        }
-                        let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                            buf_w2_scales,
-                            expert.w2_scales_ptr as *const std::ffi::c_void,
-                            expert.w2_scales_bytes,
-                            copy_stream,
-                        );
-                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                "DMA w2s[{}]: {:?}",
-                                eid, err
-                            )));
-                        }
-                        let ev_dma_w2 = ev_dma[1];
-                        cuda_sys::lib().cuEventRecord(ev_dma_w2, copy_stream);
-                        cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma_w2, 0);
-                    }
-                    let pending_slot = bf16_pending_adds.len();
-                    if pending_slot >= graph.max_experts_per_tok {
-                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "BF16 pending expert overflow: slot={} max={}",
-                            pending_slot, graph.max_experts_per_tok
-                        )));
-                    }
-                    let expert_out_ptr = *graph.d_batch_expert_outs.device_ptr()
-                        + (pending_slot * expert_hs * std::mem::size_of::<u16>()) as u64;
-                    self.launch_bf16_expert_compute(
-                        buf_w13_packed,
-                        buf_w2_packed,
-                        expert_input_ptr,
-                        *graph.d_expert_gate_up.device_ptr(),
-                        *graph.d_expert_scratch.device_ptr(),
-                        expert_out_ptr,
-                        expert_hs,
-                        w13_n,
-                        intermediate,
-                        expert_hs,
-                        act_type,
-                        gated,
-                        &k,
-                    )?;
-                    bf16_pending_adds.push(Bf16DecodePendingAdd {
-                        topk_pos: i,
-                        expert_id: eid,
-                        weight,
-                        source: "cold_dma_legacy_single_buffer",
-                        output_ptr: expert_out_ptr,
-                    });
+                    dma_expert_count += 1;
                 } else {
-                    // w13 GEMV: expert_input -> gate_up (v2 K-split if beneficial)
-                    if use_v2_w13 {
-                        self.launch_marlin_gemv_v2(
-                            buf_w13_packed,
-                            buf_w13_scales,
-                            expert_input_ptr,
-                            partial_ptr,
-                            inv_wp,
-                            inv_sp,
-                            expert_hs,
-                            w13_n,
-                            gs,
-                            w13_ksplits,
-                            &k,
-                            is_int8,
-                        )?;
-                        self.launch_reduce_ksplits_bf16(
-                            *graph.d_expert_gate_up.device_ptr(),
-                            partial_ptr,
-                            w13_n,
-                            w13_ksplits,
-                            &k,
-                        )?;
-                    } else {
-                        self.launch_marlin_gemv_raw(
-                            buf_w13_packed,
-                            buf_w13_scales,
-                            expert_input_ptr,
-                            *graph.d_expert_gate_up.device_ptr(),
-                            inv_wp,
-                            inv_sp,
-                            expert_hs,
-                            w13_n,
-                            gs,
-                            is_int8,
-                        )?;
+                    // ── Fallback: legacy single-buffer DMA (no ping-pong) ──
+                    apfl_misses += 1;
+                    graph.dma_cold_experts += 1;
+                    if timing {
+                        let dma_bytes = expert.w13_packed_bytes
+                            + expert.w13_scales_bytes
+                            + expert.w2_packed_bytes
+                            + expert.w2_scales_bytes;
+                        graph.dma_bytes_total += dma_bytes as u64;
+                        graph.dma_call_count += 4;
                     }
 
-                    // DMA w2 weights while w13 GEMV runs
                     unsafe {
                         let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                            buf_w2_packed,
-                            expert.w2_packed_ptr as *const std::ffi::c_void,
-                            expert.w2_packed_bytes,
+                            buf_w13_packed,
+                            expert.w13_packed_ptr as *const std::ffi::c_void,
+                            expert.w13_packed_bytes,
                             copy_stream,
                         );
                         if err != cuda_sys::CUresult::CUDA_SUCCESS {
                             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                "DMA w2p[{}]: {:?}",
+                                "DMA w13p[{}]: {:?}",
                                 eid, err
                             )));
                         }
                         let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                            buf_w2_scales,
-                            expert.w2_scales_ptr as *const std::ffi::c_void,
-                            expert.w2_scales_bytes,
+                            buf_w13_scales,
+                            expert.w13_scales_ptr as *const std::ffi::c_void,
+                            expert.w13_scales_bytes,
                             copy_stream,
                         );
                         if err != cuda_sys::CUresult::CUDA_SUCCESS {
                             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                "DMA w2s[{}]: {:?}",
+                                "DMA w13s[{}]: {:?}",
                                 eid, err
                             )));
                         }
-                        let ev_dma_w2 = ev_dma[1];
-                        cuda_sys::lib().cuEventRecord(ev_dma_w2, copy_stream);
-                        cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma_w2, 0);
+                        let ev_dma_w13 = ev_dma[0];
+                        cuda_sys::lib().cuEventRecord(ev_dma_w13, copy_stream);
+                        cuda_sys::lib().cuStreamWaitEvent(compute_stream, ev_dma_w13, 0);
                     }
 
-                    if act_type == 1 {
-                        let d_upload = *graph.d_batch_upload.device_ptr();
-                        let upload_slots = graph.max_experts_per_tok;
-                        self.launch_relu2_w2_accum(
-                            buf_w2_packed,
-                            buf_w2_scales,
-                            *graph.d_expert_gate_up.device_ptr(),
-                            *graph.d_moe_out.device_ptr(),
-                            *graph.d_expert_out.device_ptr(),
-                            inv_wp,
-                            inv_sp,
-                            intermediate,
-                            expert_hs,
-                            gs,
-                            weight,
-                            &mut graph.h_batch_upload,
-                            d_upload,
-                            upload_slots,
-                            default_stream,
-                            &k,
-                            is_int8,
-                        )?;
-                    } else if act_type == 2 {
-                        self.launch_gelu_tanh_w2_accum(
-                            buf_w2_packed,
-                            buf_w2_scales,
-                            *graph.d_expert_gate_up.device_ptr(),
-                            *graph.d_moe_out.device_ptr(),
-                            *graph.d_expert_out.device_ptr(),
-                            *graph.d_expert_scratch.device_ptr(),
-                            inv_wp,
-                            inv_sp,
-                            intermediate,
-                            expert_hs,
-                            gs,
-                            weight,
-                            &k,
-                            is_int8,
-                        )?;
-                    } else {
-                        self.launch_fused_silu_accum(
-                            buf_w2_packed,
-                            buf_w2_scales,
-                            *graph.d_expert_gate_up.device_ptr(),
-                            *graph.d_moe_out.device_ptr(),
-                            inv_wp,
-                            inv_sp,
-                            intermediate,
-                            expert_hs,
-                            gs,
-                            weight,
-                            0u64,
-                            moe.swiglu_limit,
-                            if moe.deepseek_v4_activation { 2 } else { 0 },
-                            &k,
-                            is_int8,
-                        )?;
-                    }
-                }
-                if hcs_equiv_trace_active {
-                    let sync_err = unsafe { cuda_sys::lib().cuStreamSynchronize(default_stream) };
-                    let dma_query = unsafe { cuda_sys::lib().cuEventQuery(ev_dma[1]) };
-                    let capture = if is_bf16_expert {
-                        debug_capture_decode_bf16_expert_output(
-                            i,
-                            eid,
-                            weight,
-                            "cold_dma_legacy_single_buffer",
-                            bf16_pending_adds
-                                .iter()
-                                .find(|pending| pending.topk_pos == i && pending.expert_id == eid)
-                                .map(|pending| pending.output_ptr)
-                                .unwrap_or(*graph.d_expert_out.device_ptr()),
-                            expert_hs,
-                            default_stream,
-                        )
-                    } else {
-                        Err("not_bf16_expert_path".to_string())
-                    };
-                    let (capture_summary, capture_error) = match capture {
-                        Ok(captured) => {
-                            let summary = debug_decode_bf16_raw_summary_json(
-                                &format!("layer{}_expert{}_cold_dma_legacy_w2_out", layer_idx, eid),
-                                &captured.output_bf16,
+                    if is_tileq {
+                        unsafe {
+                            let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                buf_w2_packed,
+                                expert.w2_packed_ptr as *const std::ffi::c_void,
+                                expert.w2_packed_bytes,
+                                copy_stream,
                             );
-                            bf16_accum_order_outputs.push(captured);
-                            (Some(summary), None)
+                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "TileQ DMA w2p[{eid}]: {err:?}"
+                                )));
+                            }
+                            let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                buf_w2_scales,
+                                expert.w2_scales_ptr as *const std::ffi::c_void,
+                                expert.w2_scales_bytes,
+                                copy_stream,
+                            );
+                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "TileQ DMA w2s[{eid}]: {err:?}"
+                                )));
+                            }
+                            cuda_sys::lib().cuEventRecord(ev_dma[1], copy_stream);
+                            cuda_sys::lib().cuStreamWaitEvent(compute_stream, ev_dma[1], 0);
                         }
-                        Err(err) => (None, Some(err)),
-                    };
-                    graph.debug_decode_hcs_equiv_entries.push(serde_json::json!({
+                        let factors = moe.tileq.ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "TileQ factors missing for layer {layer_idx}"
+                            ))
+                        })?;
+                        self.launch_tileq_expert_compute(
+                            buf_w13_packed,
+                            buf_w13_scales,
+                            buf_w2_packed,
+                            buf_w2_scales,
+                            expert_input_ptr,
+                            *graph.d_expert_gate_up.device_ptr(),
+                            *graph.d_expert_scratch.device_ptr(),
+                            *graph.d_expert_out.device_ptr(),
+                            partial_ptr,
+                            eid,
+                            factors,
+                            gs,
+                            &k,
+                        )?;
+                        self.launch_weighted_add_bf16(
+                            *graph.d_moe_out.device_ptr(),
+                            *graph.d_expert_out.device_ptr(),
+                            expert_hs,
+                            weight,
+                            0,
+                            &k,
+                        )?;
+                        continue;
+                    }
+
+                    if is_bf16_expert {
+                        // DMA w2 before BF16 cuBLAS W2, then compute the full expert.
+                        unsafe {
+                            let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                buf_w2_packed,
+                                expert.w2_packed_ptr as *const std::ffi::c_void,
+                                expert.w2_packed_bytes,
+                                copy_stream,
+                            );
+                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "DMA w2p[{}]: {:?}",
+                                    eid, err
+                                )));
+                            }
+                            let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                buf_w2_scales,
+                                expert.w2_scales_ptr as *const std::ffi::c_void,
+                                expert.w2_scales_bytes,
+                                copy_stream,
+                            );
+                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "DMA w2s[{}]: {:?}",
+                                    eid, err
+                                )));
+                            }
+                            let ev_dma_w2 = ev_dma[1];
+                            cuda_sys::lib().cuEventRecord(ev_dma_w2, copy_stream);
+                            cuda_sys::lib().cuStreamWaitEvent(compute_stream, ev_dma_w2, 0);
+                        }
+                        let pending_slot = bf16_pending_adds.len();
+                        if pending_slot >= graph.max_experts_per_tok {
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "BF16 pending expert overflow: slot={} max={}",
+                                pending_slot, graph.max_experts_per_tok
+                            )));
+                        }
+                        let expert_out_ptr = *graph.d_batch_expert_outs.device_ptr()
+                            + (pending_slot * expert_hs * std::mem::size_of::<u16>()) as u64;
+                        self.launch_bf16_expert_compute(
+                            buf_w13_packed,
+                            buf_w2_packed,
+                            expert_input_ptr,
+                            *graph.d_expert_gate_up.device_ptr(),
+                            *graph.d_expert_scratch.device_ptr(),
+                            expert_out_ptr,
+                            expert_hs,
+                            w13_n,
+                            intermediate,
+                            expert_hs,
+                            act_type,
+                            gated,
+                            &k,
+                        )?;
+                        bf16_pending_adds.push(Bf16DecodePendingAdd {
+                            topk_pos: i,
+                            expert_id: eid,
+                            weight,
+                            source: "cold_dma_legacy_single_buffer",
+                            output_ptr: expert_out_ptr,
+                        });
+                    } else {
+                        // w13 GEMV: expert_input -> gate_up (v2 K-split if beneficial)
+                        if use_v2_w13 {
+                            self.launch_marlin_gemv_v2(
+                                buf_w13_packed,
+                                buf_w13_scales,
+                                expert_input_ptr,
+                                partial_ptr,
+                                inv_wp,
+                                inv_sp,
+                                expert_hs,
+                                w13_n,
+                                gs,
+                                w13_ksplits,
+                                &k,
+                                is_int8,
+                            )?;
+                            self.launch_reduce_ksplits_bf16(
+                                *graph.d_expert_gate_up.device_ptr(),
+                                partial_ptr,
+                                w13_n,
+                                w13_ksplits,
+                                &k,
+                            )?;
+                        } else {
+                            self.launch_marlin_gemv_raw(
+                                buf_w13_packed,
+                                buf_w13_scales,
+                                expert_input_ptr,
+                                *graph.d_expert_gate_up.device_ptr(),
+                                inv_wp,
+                                inv_sp,
+                                expert_hs,
+                                w13_n,
+                                gs,
+                                is_int8,
+                            )?;
+                        }
+
+                        // DMA w2 weights while w13 GEMV runs
+                        unsafe {
+                            let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                buf_w2_packed,
+                                expert.w2_packed_ptr as *const std::ffi::c_void,
+                                expert.w2_packed_bytes,
+                                copy_stream,
+                            );
+                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "DMA w2p[{}]: {:?}",
+                                    eid, err
+                                )));
+                            }
+                            let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                                buf_w2_scales,
+                                expert.w2_scales_ptr as *const std::ffi::c_void,
+                                expert.w2_scales_bytes,
+                                copy_stream,
+                            );
+                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "DMA w2s[{}]: {:?}",
+                                    eid, err
+                                )));
+                            }
+                            let ev_dma_w2 = ev_dma[1];
+                            cuda_sys::lib().cuEventRecord(ev_dma_w2, copy_stream);
+                            cuda_sys::lib().cuStreamWaitEvent(compute_stream, ev_dma_w2, 0);
+                        }
+
+                        if act_type == 1 {
+                            let d_upload = *graph.d_batch_upload.device_ptr();
+                            let upload_slots = graph.max_experts_per_tok;
+                            self.launch_relu2_w2_accum(
+                                buf_w2_packed,
+                                buf_w2_scales,
+                                *graph.d_expert_gate_up.device_ptr(),
+                                *graph.d_moe_out.device_ptr(),
+                                *graph.d_expert_out.device_ptr(),
+                                inv_wp,
+                                inv_sp,
+                                intermediate,
+                                expert_hs,
+                                gs,
+                                weight,
+                                &mut graph.h_batch_upload,
+                                d_upload,
+                                upload_slots,
+                                compute_stream,
+                                &k,
+                                is_int8,
+                            )?;
+                        } else if act_type == 2 {
+                            self.launch_gelu_tanh_w2_accum(
+                                buf_w2_packed,
+                                buf_w2_scales,
+                                *graph.d_expert_gate_up.device_ptr(),
+                                *graph.d_moe_out.device_ptr(),
+                                *graph.d_expert_out.device_ptr(),
+                                *graph.d_expert_scratch.device_ptr(),
+                                inv_wp,
+                                inv_sp,
+                                intermediate,
+                                expert_hs,
+                                gs,
+                                weight,
+                                &k,
+                                is_int8,
+                            )?;
+                        } else {
+                            self.launch_fused_silu_accum(
+                                buf_w2_packed,
+                                buf_w2_scales,
+                                *graph.d_expert_gate_up.device_ptr(),
+                                *graph.d_moe_out.device_ptr(),
+                                inv_wp,
+                                inv_sp,
+                                intermediate,
+                                expert_hs,
+                                gs,
+                                weight,
+                                0u64,
+                                moe.swiglu_limit,
+                                if moe.deepseek_v4_activation { 2 } else { 0 },
+                                &k,
+                                is_int8,
+                            )?;
+                        }
+                    }
+                    if hcs_equiv_trace_active {
+                        let sync_err =
+                            unsafe { cuda_sys::lib().cuStreamSynchronize(compute_stream) };
+                        let dma_query = unsafe { cuda_sys::lib().cuEventQuery(ev_dma[1]) };
+                        let capture = if is_bf16_expert {
+                            debug_capture_decode_bf16_expert_output(
+                                i,
+                                eid,
+                                weight,
+                                "cold_dma_legacy_single_buffer",
+                                bf16_pending_adds
+                                    .iter()
+                                    .find(|pending| {
+                                        pending.topk_pos == i && pending.expert_id == eid
+                                    })
+                                    .map(|pending| pending.output_ptr)
+                                    .unwrap_or(*graph.d_expert_out.device_ptr()),
+                                expert_hs,
+                                compute_stream,
+                            )
+                        } else {
+                            Err("not_bf16_expert_path".to_string())
+                        };
+                        let (capture_summary, capture_error) = match capture {
+                            Ok(captured) => {
+                                let summary = debug_decode_bf16_raw_summary_json(
+                                    &format!(
+                                        "layer{}_expert{}_cold_dma_legacy_w2_out",
+                                        layer_idx, eid
+                                    ),
+                                    &captured.output_bf16,
+                                );
+                                bf16_accum_order_outputs.push(captured);
+                                (Some(summary), None)
+                            }
+                            Err(err) => (None, Some(err)),
+                        };
+                        graph.debug_decode_hcs_equiv_entries.push(serde_json::json!({
                         "phase": "cold_expert_after_compute",
                         "decode_step_zero_indexed": graph.validation_decode_steps,
                         "layer": layer_idx,
@@ -94385,9 +99525,9 @@ impl GpuDecodeStore {
                             expert_hs,
                         ),
                     }));
+                    }
                 }
             }
-        }
         }
 
         if is_bf16_expert && !bf16_pending_adds.is_empty() {
@@ -94544,7 +99684,7 @@ impl GpuDecodeStore {
         let t_shared_start = Instant::now();
 
         let shared_expert_present = moe.shared.is_some();
-        if shared_expert_present && rsf != 1.0 {
+        if shared_expert_present && rsf != 1.0 && graph.ordered_expert_projection.is_none() {
             unsafe {
                 k.scale_bf16
                     .clone()
@@ -94640,7 +99780,7 @@ impl GpuDecodeStore {
                         )));
                     }
                     cuda_sys::lib().cuEventRecord(ev_dma[0], copy_stream);
-                    cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[0], 0);
+                    cuda_sys::lib().cuStreamWaitEvent(compute_stream, ev_dma[0], 0);
                 }
                 (buf_w13_packed, buf_w13_scales, buf_w2_packed, buf_w2_scales)
             };
@@ -94652,6 +99792,106 @@ impl GpuDecodeStore {
                 graph.shared_expert_intermediate_size
             };
             let shared_is_bf16 = graph.shared_expert_bits == 16;
+            let eager_shared_target = if graph.matched_eager_shared_enabled {
+                let height = graph
+                    .kv_current_pos
+                    .checked_add(usize::try_from(graph.validation_decode_steps).map_err(|_| {
+                        pyo3::exceptions::PyRuntimeError::new_err("eager shared step overflow")
+                    })?)
+                    .and_then(|n| n.checked_add(1))
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err("eager shared height overflow")
+                    })?;
+                crate::matched_probe::target_for_request(
+                    "decode_eager_shared_w13",
+                    layer_idx,
+                    height,
+                    Some(&graph.trace_request_label),
+                )
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+                .map(|target| {
+                    target
+                        .child(&graph.trace_request_label)
+                        .and_then(|target| target.child(&format!("device-{}", device.ordinal())))
+                })
+                .transpose()
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+            } else {
+                None
+            };
+            if let Some(target) = &eager_shared_target {
+                if shared_is_bf16 {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "eager shared weight observation supports loaded Marlin INT4/INT8",
+                    ));
+                }
+                let shared = moe.shared.as_ref().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err("eager shared weights absent")
+                })?;
+                crate::matched_probe::shared_w13_graph_stage_layout(
+                    "decode_graph_shared_w13_input",
+                    hs,
+                    graph.shared_expert_intermediate_size,
+                    moe.gated_experts,
+                    shared.bits as usize,
+                    gs,
+                )
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                let packed_bytes = hs
+                    .checked_mul(shared_w13_n)
+                    .and_then(|n| n.checked_mul(shared.bits as usize))
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "eager shared packed extent overflow",
+                        )
+                    })?
+                    / 8;
+                let scales_bytes = (hs / gs)
+                    .checked_mul(shared_w13_n)
+                    .and_then(|n| n.checked_mul(2))
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "eager shared scales extent overflow",
+                        )
+                    })?;
+                if shared.bits != graph.shared_expert_bits
+                    || packed_bytes != shared.w13_packed_bytes
+                    || scales_bytes != shared.w13_scales_bytes
+                {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "eager actual shared weight extent/precision mismatch",
+                    ));
+                }
+                let capture = (|| -> Result<(), String> {
+                    target.device(
+                        "input.bf16",
+                        *graph.d_hidden.device_ptr(),
+                        hs.checked_mul(2)
+                            .ok_or("eager shared input extent overflow")?,
+                        compute_stream,
+                    )?;
+                    target.device(
+                        "routed-before-shared.bf16",
+                        *graph.d_moe_out.device_ptr(),
+                        expert_hs
+                            .checked_mul(2)
+                            .ok_or("eager routed extent overflow")?,
+                        compute_stream,
+                    )?;
+                    target.device("w1-packed.bin", w13p, packed_bytes, compute_stream)?;
+                    target.device("w1-scales.bf16", w13s, scales_bytes, compute_stream)?;
+                    let height = graph
+                        .kv_current_pos
+                        .checked_add(
+                            usize::try_from(graph.validation_decode_steps)
+                                .map_err(|_| "eager shared step overflow")?,
+                        )
+                        .and_then(|n| n.checked_add(1))
+                        .ok_or("eager shared height overflow")?;
+                    target.write("descriptor.json",serde_json::to_vec_pretty(&serde_json::json!({"layer":layer_idx,"height":height,"request_label":graph.trace_request_label,"device_ordinal":device.ordinal(),"n":shared_w13_n,"k":hs,"bits":shared.bits,"group_size":gs,"groups":hs/gs,"selected_ksplits":if graph.ordered_expert_projection.is_some(){None}else{Some(select_shared_w13_ksplits(graph,shared_w13_n))},"arithmetic_family":graph.ordered_expert_projection.as_ref().map(|b|&b.identity),"source":"actual eager shared W13 operands/use points","arithmetic_changed":false,"device_diagnostic_allocation_bytes":0,"forcing":crate::matched_projection_transfer::forcing_label().is_some(),"teacher_label":crate::matched_projection_transfer::forcing_label()})).map_err(|e|e.to_string())?.as_slice())
+                })();
+                capture.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            }
             let shared_marlin_dispatch = if shared_is_bf16 {
                 None
             } else {
@@ -94678,7 +99918,33 @@ impl GpuDecodeStore {
                 // first request numerically different whenever calibration
                 // selected K-split execution.
                 let shared_w13_ksplits = select_shared_w13_ksplits(graph, shared_w13_n);
-                if shared_w13_ksplits > 1 {
+                if let Some(bank) = &graph.ordered_expert_projection {
+                    unsafe {
+                        bank.marlin
+                            .as_ref()
+                            .ok_or_else(|| {
+                                pyo3::exceptions::PyRuntimeError::new_err(
+                                    "common shared W13 program absent",
+                                )
+                            })?
+                            .enqueue(
+                                crate::common_marlin::Geometry {
+                                    rows: shared_w13_n,
+                                    cols: hs,
+                                    group: gs.min(hs),
+                                    bits: graph.shared_expert_bits as usize,
+                                },
+                                w13p,
+                                w13s,
+                                *graph.d_hidden.device_ptr(),
+                                *graph.d_expert_gate_up.device_ptr(),
+                                0,
+                                1,
+                                compute_stream,
+                            )
+                    }
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                } else if shared_w13_ksplits > 1 {
                     self.launch_marlin_gemv_v2(
                         w13p,
                         w13s,
@@ -94716,6 +99982,21 @@ impl GpuDecodeStore {
                 }
             }
 
+            if let Some(target) = &eager_shared_target {
+                target
+                    .device(
+                        "w13-output.bf16",
+                        *graph.d_expert_gate_up.device_ptr(),
+                        shared_w13_n.checked_mul(2).ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(
+                                "eager shared output extent overflow",
+                            )
+                        })?,
+                        compute_stream,
+                    )
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            }
+
             // w2: DMA fallback path needs separate DMA for w2
             if se_vram.is_none() {
                 let shared = moe.shared.as_ref().unwrap();
@@ -94745,7 +100026,7 @@ impl GpuDecodeStore {
                         )));
                     }
                     cuda_sys::lib().cuEventRecord(ev_dma[1], copy_stream);
-                    cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[1], 0);
+                    cuda_sys::lib().cuStreamWaitEvent(compute_stream, ev_dma[1], 0);
                 }
             }
 
@@ -94827,7 +100108,39 @@ impl GpuDecodeStore {
                 // Fused: silu_mul + w2 GEMV + add to accumulator.
                 // When gate_weight_ptr != 0, kernel reads sigmoid(*gate_weight_ptr).
                 let (shared_inv_wp, shared_is_int8) = shared_marlin_dispatch.unwrap();
-                if let Some(w2_ksplits) = select_shared_w2_ksplits(
+                if let Some(bank) = &graph.ordered_expert_projection {
+                    unsafe {
+                        bank.enqueue_shared_finish(
+                            crate::common_marlin::Geometry {
+                                rows: hs,
+                                cols: graph.shared_expert_intermediate_size,
+                                group: gs.min(graph.shared_expert_intermediate_size),
+                                bits: graph.shared_expert_bits as usize,
+                            },
+                            w2p,
+                            w2s,
+                            *graph.d_expert_gate_up.device_ptr(),
+                            *graph.d_expert_out.device_ptr(),
+                            *graph
+                                .d_common_moe_accum
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    pyo3::exceptions::PyRuntimeError::new_err(
+                                        "common routed owner absent",
+                                    )
+                                })?
+                                .device_ptr(),
+                            *graph.d_moe_out.device_ptr(),
+                            gate_weight_ptr,
+                            shared_weight,
+                            moe.activation_type,
+                            moe.shared_swiglu_limit,
+                            moe.deepseek_v4_activation,
+                            compute_stream,
+                        )
+                    }
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                } else if let Some(w2_ksplits) = select_shared_w2_ksplits(
                     graph,
                     graph.shared_expert_intermediate_size,
                     hs,
@@ -94881,7 +100194,7 @@ impl GpuDecodeStore {
         }
 
         // ── Step 8: Scale by routed_scaling_factor when there is no shared branch ──
-        if !shared_expert_present && rsf != 1.0 {
+        if !shared_expert_present && rsf != 1.0 && graph.ordered_expert_projection.is_none() {
             unsafe {
                 k.scale_bf16
                     .clone()
@@ -95527,9 +100840,7 @@ impl GpuDecodeStore {
                         .zip(gpu_experts.iter())
                         .enumerate()
                     {
-                        if loaded.num_bits != loaded.w2_bits
-                            || !matches!(loaded.num_bits, 4 | 8)
-                        {
+                        if loaded.num_bits != loaded.w2_bits || !matches!(loaded.num_bits, 4 | 8) {
                             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                                 "routed Marlin expert L{}E{} requires matching INT4/INT8 W13/W2 precision, got {}/{}",
                                 abs_layer_idx, expert_idx, loaded.num_bits, loaded.w2_bits,
@@ -95570,7 +100881,9 @@ impl GpuDecodeStore {
                 })?;
                 let mut table = vec![0u8; graph.moe_layers.len() * n_experts];
                 for (layer_idx, layer) in graph.moe_layers.iter().enumerate() {
-                    let Some(layer) = layer.as_ref() else { continue };
+                    let Some(layer) = layer.as_ref() else {
+                        continue;
+                    };
                     if layer.experts.len() != n_experts {
                         return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                             "mixed precision layer {layer_idx} has {} experts, expected {n_experts}",
@@ -96871,12 +102184,14 @@ impl GpuDecodeStore {
             budget_bytes,
         )
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        let pool_alloc_bytes = selected.iter().try_fold(0usize, |total, item| {
-            total
-                .checked_add(item.2)
-                .ok_or_else(|| "HCS packed pool byte overflow".to_string())
-        })
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let pool_alloc_bytes = selected
+            .iter()
+            .try_fold(0usize, |total, item| {
+                total
+                    .checked_add(item.2)
+                    .ok_or_else(|| "HCS packed pool byte overflow".to_string())
+            })
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         // Preserve ranking selection, then place same-layer experts adjacently.
         selected.sort_unstable_by_key(|&(layer, expert, _)| (layer, expert));
         let num_slots = selected.len();
@@ -99239,6 +104554,23 @@ impl GpuDecodeStore {
 
 impl Drop for GpuDecodeStore {
     fn drop(&mut self) {
+        // Complete selected attention before any retained tensor, scratch or Lt
+        // program owner can be released, including error/unwind teardown.
+        if self.common_mla.is_some() {
+            if let Err(e) = self.device.bind_to_thread() {
+                crate::vram_monitor::fatal_cuda_context_error(
+                    "common MLA teardown context",
+                    &e.to_string(),
+                );
+            }
+            let rc = unsafe { cuda_sys::lib().cuStreamSynchronize(*self.device.cu_stream()) };
+            if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                crate::vram_monitor::fatal_cuda_context_error(
+                    "common MLA teardown completion",
+                    &format!("{rc:?}"),
+                );
+            }
+        }
         if let Err(error) = self.release_expert_host_registrations_rust() {
             log::error!("GpuDecodeStore drop could not release expert host registrations: {error}");
         }
@@ -99308,5 +104640,173 @@ impl Drop for GpuDecodeStore {
                 let _ = cublas_result::destroy_handle(self.spec_blas_handle.0);
             }
         }
+    }
+}
+
+#[cfg(feature = "copy-lifecycle-test")]
+include!("copy_lifecycle.rs");
+#[cfg(feature = "copy-lifecycle-test")]
+include!("copy_error_recovery.rs");
+
+include!("selected_store_interfaces.rs");
+
+impl GpuDecodeGraph {
+    fn retained_kda_decode_source(
+        &self,
+        device: Arc<CudaDevice>,
+        kda: &KimiDeltaAttentionRegistration,
+        reserve: usize,
+    ) -> Result<crate::kda_prefix_owner::RetainedDecodeKdaSource, String> {
+        let source = crate::kda_prefix_owner::RetainedDecodeKdaSource::from_model_storage(
+            device,
+            [
+                self.d_la_qkvz.clone(),
+                self.d_la_ba.clone(),
+                self.d_la_conv_out.clone(),
+                self.d_la_gated_out.clone(),
+            ],
+            self.d_scratch.clone(),
+            kda.num_heads,
+            kda.head_dim,
+            reserve,
+        )?;
+        if source.addresses()
+            != vec![
+                *self.d_la_qkvz.device_ptr(),
+                *self.d_la_ba.device_ptr(),
+                *self.d_la_conv_out.device_ptr(),
+                *self.d_la_gated_out.device_ptr(),
+                *self.d_scratch.device_ptr(),
+            ]
+        {
+            return Err("actual decode source pointer/layout mismatch".into());
+        }
+        Ok(source)
+    }
+}
+
+include!("replay_scalar_audit.rs");
+
+#[cfg(test)]
+mod prefill_history_geometry_tests {
+    use super::{prefill_full_history_gqa_kv_dim, GpuAttnConfig};
+
+    fn gqa(heads: usize, dim: usize) -> GpuAttnConfig {
+        GpuAttnConfig::GQA {
+            q_proj: 0,
+            k_proj: 0,
+            v_proj: 0,
+            o_proj: 0,
+            fused_qkv: None,
+            head_gate_proj: None,
+            num_heads: heads,
+            num_kv_heads: heads,
+            head_dim: dim,
+            rope_half_dim: 0,
+            rope_cos_ptr: 0,
+            rope_sin_ptr: 0,
+            sm_scale: 1.0,
+            q_norm_ptr: 0,
+            k_norm_ptr: 0,
+            gated: false,
+        }
+    }
+
+    fn mla() -> GpuAttnConfig {
+        GpuAttnConfig::MLA {
+            q_a_proj: None,
+            q_b_proj: None,
+            q_a_norm_ptr: 0,
+            q_proj: None,
+            kv_a_proj: 0,
+            kv_a_norm_ptr: 0,
+            w_kc_ptr: 0,
+            w_vc_ptr: 0,
+            o_proj: 0,
+            num_heads: 64,
+            kv_lora_rank: 512,
+            ckv_cache_dim: 512,
+            qk_nope_dim: 256,
+            qk_rope_dim: 0,
+            v_head_dim: 256,
+            q_lora_rank: 1536,
+            sm_scale: 1.0,
+            rope_interleave: false,
+            ckv_cache_ptr: 0,
+            kpe_cache_ptr: 0,
+        }
+    }
+
+    #[test]
+    fn native_mla_does_not_inherit_expanded_gqa_history() {
+        let layer = mla();
+        assert_eq!(
+            prefill_full_history_gqa_kv_dim([(&layer, false)]).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn genuine_gqa_history_covers_each_registered_shape_and_partition() {
+        let layers = [gqa(4, 128), gqa(8, 96), gqa(2, 256)];
+        assert_eq!(
+            prefill_full_history_gqa_kv_dim(layers.iter().map(|l| (l, false))).unwrap(),
+            768
+        );
+        assert_eq!(
+            prefill_full_history_gqa_kv_dim(layers[..1].iter().map(|l| (l, false))).unwrap(),
+            512
+        );
+        assert_eq!(
+            prefill_full_history_gqa_kv_dim(layers[1..].iter().map(|l| (l, false))).unwrap(),
+            768
+        );
+    }
+
+    #[test]
+    fn mixed_native_mla_and_gqa_preserve_real_gqa_history() {
+        let native = mla();
+        let ordinary = gqa(3, 80);
+        assert_eq!(
+            prefill_full_history_gqa_kv_dim([(&native, false), (&ordinary, false)]).unwrap(),
+            240
+        );
+        assert_eq!(
+            prefill_full_history_gqa_kv_dim([(&ordinary, false), (&native, false)]).unwrap(),
+            240
+        );
+    }
+
+    #[test]
+    fn native_v4_placeholder_does_not_override_actual_gqa() {
+        let native = gqa(32, 512);
+        let ordinary = gqa(2, 64);
+        assert_eq!(
+            prefill_full_history_gqa_kv_dim([(&native, true)]).unwrap(),
+            0
+        );
+        assert_eq!(
+            prefill_full_history_gqa_kv_dim([(&native, true), (&ordinary, false)]).unwrap(),
+            128
+        );
+    }
+
+    #[test]
+    fn attention_free_and_empty_partitions_have_no_gqa_history() {
+        let placeholder = gqa(0, 0);
+        assert_eq!(
+            prefill_full_history_gqa_kv_dim([(&placeholder, false)]).unwrap(),
+            0
+        );
+        assert_eq!(
+            prefill_full_history_gqa_kv_dim(std::iter::empty()).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn actual_gqa_history_width_overflow_is_an_error() {
+        let layer = gqa(usize::MAX, 2);
+        assert!(prefill_full_history_gqa_kv_dim([(&layer, false)]).is_err());
     }
 }

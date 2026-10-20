@@ -1,0 +1,8 @@
+{
+  "utc": "2026-10-16T15:44:56.655Z",
+  "passed": true,
+  "sourceFiles": 1194,
+  "coreSha256": "06613ea100e8c9c2264ec269055488ca8db52e29a99cf5e43b3317a2caecc352",
+  "configSha256": "3b8732f1a85b7def36ee8b1cab21c17ec9069a82aa2d5f822bd989d2c8bb4c56",
+  "scope": "Fixed speed source/config identity; no GLM throughput or QCN correctness claim."
+}

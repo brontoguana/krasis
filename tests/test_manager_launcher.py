@@ -108,6 +108,54 @@ class ManagerLauncherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "host cache"):
             launcher._validate_manager_preload_budget(host)
 
+    def test_manager_preload_budget_rejects_context_larger_than_kv_cache(self):
+        short_kv = SimpleNamespace(
+            budget_error=None,
+            _compute_budget=lambda: {
+                "over_budget": False,
+                "worst_rank": 0,
+                "ranks": [{
+                    "rank": 0,
+                    "total_mb": 8192.0,
+                    "kv_capacity_relevant": True,
+                    "kv_alloc_tokens": 200_000,
+                    "kv_required_mb": 1228.5,
+                }],
+                "gpu_vram_mb": 16384.0,
+                "kv_cache_mb": 1000,
+                "max_context_tokens": 262_144,
+                "ram_total_mb": 1024.0,
+                "total_ram_gb": 64.0,
+            },
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r"262,144-token context.*200,000 tokens.*at least 1,229 MB",
+        ):
+            launcher._validate_manager_preload_budget(short_kv)
+
+        sufficient_kv = SimpleNamespace(
+            budget_error=None,
+            _compute_budget=lambda: {
+                "over_budget": False,
+                "worst_rank": 0,
+                "ranks": [{
+                    "rank": 0,
+                    "total_mb": 8192.0,
+                    "kv_capacity_relevant": True,
+                    "kv_alloc_tokens": 262_144,
+                    "kv_required_mb": 1228.5,
+                }],
+                "gpu_vram_mb": 16384.0,
+                "kv_cache_mb": 1229,
+                "max_context_tokens": 262_144,
+                "ram_total_mb": 1024.0,
+                "total_ram_gb": 64.0,
+            },
+        )
+        accepted = launcher._validate_manager_preload_budget(sufficient_kv)
+        self.assertEqual(accepted["max_context_tokens"], 262_144)
+
 
 if __name__ == "__main__":
     if os.environ.get("KRASIS_DEV_SCRIPT") != "1":

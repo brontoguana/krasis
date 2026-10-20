@@ -5732,6 +5732,9 @@ class KrasisModel:
                 "ckv_cache_ptr": int(ckv_cache.data_ptr()),
                 "kpe_cache_ptr": int(kpe_cache.data_ptr()),
                 "q_a_norm_ptr": int(q_a_norm_ptr),
+                "_mla_wvc_owner": attn._hqq_w_vc,
+                "_mla_ckv_owner": ckv_cache,
+                "_mla_kpe_owner": kpe_cache if kpe_cache.numel() else None,
             }
             return metadata
 
@@ -6401,6 +6404,12 @@ class KrasisModel:
                     ckv_cache_ptr=int(layer_meta["ckv_cache_ptr"]),
                     kpe_cache_ptr=int(layer_meta["kpe_cache_ptr"]),
                     q_a_norm_ptr=int(layer_meta["q_a_norm_ptr"]),
+                )
+                store.register_mla_allocation_owners(
+                    int(common_args["layer_idx"]),
+                    layer_meta["_mla_wvc_owner"],
+                    layer_meta["_mla_ckv_owner"],
+                    layer_meta["_mla_kpe_owner"],
                 )
                 self._register_dsa_indexer_layer_on_store(
                     store,

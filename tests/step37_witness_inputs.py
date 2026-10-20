@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Build Step-3.7 llama-witness input-token sources with Krasis tokenization.
+"""Build production-rendered llama-witness inputs with Krasis tokenization.
 
-This is intentionally Step-specific because Step's HF chat template opens an
-initial <think> block but does not expose an enable_thinking variable. Krasis
-closes that block for enable_thinking=false; witness capture must consume the
-same input_token_ids rather than re-rendering the prompt independently.
+Some checkpoint templates open an initial ``<think>`` block but do not expose
+an ``enable_thinking`` variable. Krasis closes that block for
+``enable_thinking=false``; witness capture must consume the same input IDs as
+production rather than re-rendering the prompt independently.
 """
 
 from __future__ import annotations
@@ -57,7 +57,31 @@ def _load_prompt_source(path: Path) -> Dict[str, Any]:
     return data
 
 
-def _iter_prompt_turns(source: Dict[str, Any]) -> Iterable[Tuple[int, int, str]]:
+def _resolve_prompt(turn: Dict[str, Any], prompt_source: Path) -> str:
+    prompt = turn.get("prompt")
+    if isinstance(prompt, str):
+        return prompt
+    prompt_file = turn.get("prompt_file")
+    if not isinstance(prompt_file, str) or not prompt_file:
+        raise ValueError("prompt turn must contain prompt text or prompt_file")
+    path = (prompt_source.parent / prompt_file).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"prompt_file not found: {path}")
+    raw = path.read_bytes()
+    max_bytes = turn.get("prompt_max_bytes")
+    if max_bytes is not None:
+        if not isinstance(max_bytes, int) or max_bytes <= 0:
+            raise ValueError("prompt_max_bytes must be a positive integer")
+        raw = raw[:max_bytes]
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"prompt_file byte boundary is not valid UTF-8: {path}") from error
+
+
+def _iter_prompt_turns(
+    source: Dict[str, Any], prompt_source: Path
+) -> Iterable[Tuple[int, int, str]]:
     for ci, conv in enumerate(source.get("conversations", [])):
         turns = conv.get("turns") if isinstance(conv, dict) else None
         if not isinstance(turns, list):
@@ -65,14 +89,14 @@ def _iter_prompt_turns(source: Dict[str, Any]) -> Iterable[Tuple[int, int, str]]
         for ti, turn in enumerate(turns):
             if not isinstance(turn, dict):
                 continue
-            prompt = turn.get("prompt")
-            if isinstance(prompt, str):
-                yield ci, ti, prompt
+            yield ci, ti, _resolve_prompt(turn, prompt_source)
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build Step witness input-token source")
-    parser.add_argument("--model-dir", required=True, help="Step HF model directory")
+    parser = argparse.ArgumentParser(
+        description="Build production-rendered witness input-token source"
+    )
+    parser.add_argument("--model-dir", required=True, help="HF checkpoint directory")
     parser.add_argument("--prompt-source", required=True, help="fixed prompt-source JSON")
     parser.add_argument("--output", required=True, help="output input-token JSON")
     parser.add_argument("--profile", default="greedy_chat_thinking_off", help="reference profile id")
@@ -103,7 +127,7 @@ def main() -> None:
     cases: List[Dict[str, Any]] = []
     max_cases = int(args.max_cases or 0)
 
-    for ci, ti, prompt in _iter_prompt_turns(source):
+    for ci, ti, prompt in _iter_prompt_turns(source, prompt_source):
         if max_cases and len(cases) >= max_cases:
             break
         messages = [{"role": "user", "content": prompt}]
@@ -114,8 +138,27 @@ def main() -> None:
         )
         if not input_token_ids:
             raise ValueError(f"empty tokenization for conversation={ci} turn={ti}")
+        thinking_on_ids = tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )
         decoded = tokenizer.decode(input_token_ids, skip_special_tokens=False)
-        closed_initial_think = decoded.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+        thinking_on_decoded = tokenizer.decode(
+            thinking_on_ids, skip_special_tokens=False
+        )
+        has_thinking_marker = "<think>" in thinking_on_decoded
+        closed_initial_think = decoded.rstrip().endswith("</think>")
+        thinking_on_left_open = thinking_on_decoded.rstrip().endswith("<think>")
+        if has_thinking_marker and not (
+            closed_initial_think
+            and thinking_on_left_open
+            and input_token_ids != thinking_on_ids
+        ):
+            raise RuntimeError(
+                "could not prove production thinking-disabled rendering differs "
+                f"from thinking-enabled rendering for conversation={ci} turn={ti}"
+            )
         turn = {
             "source_conversation_index": ci,
             "source_turn_index": ti,
@@ -125,6 +168,9 @@ def main() -> None:
                 "add_generation_prompt": True,
                 "requested_enable_thinking": False,
                 "krasis_closed_initial_think_block": closed_initial_think,
+                "thinking_on_left_initial_block_open": thinking_on_left_open,
+                "thinking_variants_differ": input_token_ids != thinking_on_ids,
+                "thinking_on_input_sha256": _input_sha256(thinking_on_ids),
             },
             "input_token_ids": [int(t) for t in input_token_ids],
             "input_sha256": _input_sha256(input_token_ids),
@@ -156,7 +202,7 @@ def main() -> None:
         extra={
             "source_role": "input_token_source_only",
             "tokenizer_wrapper": "krasis.tokenizer.Tokenizer",
-            "step_no_thinking_policy": "close_initial_think_block",
+            "no_thinking_policy": "close_initial_think_block",
         },
     )
     contract["source_role"] = "input_token_source_only"
@@ -183,7 +229,7 @@ def main() -> None:
             "method": "krasis.Tokenizer.apply_chat_template",
             "add_generation_prompt": True,
             "requested_enable_thinking": False,
-            "step_no_thinking_policy": "close_initial_think_block",
+            "no_thinking_policy": "close_initial_think_block",
         },
         "contract": contract,
         "conversations": cases,
@@ -194,7 +240,7 @@ def main() -> None:
         json.dump(root, f, indent=2)
         f.write("\n")
 
-    print(f"Wrote {len(cases)} Step witness input cases to {output_path}")
+    print(f"Wrote {len(cases)} production-rendered witness input cases to {output_path}")
     print(f"Prompt source: {prompt_source}")
     print(f"Profile: {args.profile}")
 

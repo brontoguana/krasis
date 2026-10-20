@@ -115,20 +115,29 @@ def main() -> int:
             break
 
     # Force more committed conversations than the deliberately small live RAM
-    # budget can retain. The server derives every snapshot's real size.
+    # budget can retain. The internal test endpoint derives the cap from the
+    # store's live resident bytes; production never uses this cap.
     before_pressure = after_cancel
+    pressure_arm = _request(
+        f"{root}/internal/session-cache/pressure-arm", {}, args.timeout
+    )
     pressure_requests = 0
-    while pressure_requests < 8:
-        pressure_requests += 1
-        text = (MOBY if pressure_requests % 2 else WAR)
-        _request(
-            f"{root}/chat/completions",
-            payload(model, [{"role": "user", "content": text + f"\nUnique cache entry {pressure_requests}."}]),
-            args.timeout,
+    try:
+        while pressure_requests < 8:
+            pressure_requests += 1
+            text = (MOBY if pressure_requests % 2 else WAR)
+            _request(
+                f"{root}/chat/completions",
+                payload(model, [{"role": "user", "content": text + f"\nUnique cache entry {pressure_requests}."}]),
+                args.timeout,
+            )
+            current = _get(f"{root}/session-cache/stats", args.timeout)
+            if int(current["evictions"]) > int(before_pressure["evictions"]):
+                break
+    finally:
+        pressure_clear = _request(
+            f"{root}/internal/session-cache/pressure-clear", {}, args.timeout
         )
-        current = _get(f"{root}/session-cache/stats", args.timeout)
-        if int(current["evictions"]) > int(before_pressure["evictions"]):
-            break
     final = _get(f"{root}/session-cache/stats", args.timeout)
 
     failures = []
@@ -157,6 +166,14 @@ def main() -> int:
         failures.append("restore_failed increased")
     if int(final["evictions"]) <= int(before_pressure["evictions"]):
         failures.append("RAM pressure did not evict an LRU snapshot")
+    if pressure_arm.get("status") != "armed":
+        failures.append("session-cache pressure endpoint did not arm")
+    if int(pressure_arm.get("cap_bytes", -1)) != int(
+        pressure_arm.get("resident_bytes", -2)
+    ):
+        failures.append("session-cache pressure cap did not use measured resident bytes")
+    if pressure_clear.get("status") != "cleared":
+        failures.append("session-cache pressure endpoint did not clear")
 
     print(json.dumps({
         "model": model,
@@ -165,6 +182,8 @@ def main() -> int:
         "concurrent_ids": [_completion_ids(value) for value in concurrent],
         "cancel_reserved_bytes": after_cancel["resident"]["reserved_bytes"],
         "pressure_requests": pressure_requests,
+        "pressure_arm": pressure_arm,
+        "pressure_clear": pressure_clear,
         "active_hit_delta": int(final["hits"]["active_gpu"]) - int(initial["hits"]["active_gpu"]),
         "ram_hit_delta": int(final["hits"]["pageable_ram"]) - int(initial["hits"]["pageable_ram"]),
         "eviction_delta": int(final["evictions"]) - int(before_pressure["evictions"]),

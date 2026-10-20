@@ -1,6 +1,39 @@
 # Changelog
 
+- Synced the verified GLM-5.3-Flash conversation-loading runtime (`candidate-capacity163`) into `krasis`, including KDA/MLA ordered projection and state ownership, 1M-context GQA history scratch geometry, completed-pool snapshot accounting, exact F32 reference logprob capture, and post-prefill decode runtime restore error propagation in `src/server.rs`.
+- Fixed `ensure_marlin_dispatch_autotuned_for_graph` in `src/gpu_decode.rs` to track completion via an explicit `ksplit_autotune_complete` boolean instead of checking `graph.ksplit_autotune.is_empty()`, preventing `autotune_w13_ksplits` from re-running on every request when no ksplit override beats the 5% margin and avoiding mid-session dispatch flips. Also skipped redundant `hcs.soft_ranking` vector replacement and logging in `apply_prompt_hcs_reload` when `changed_slots == 0`.
+- ADQ test tooling now builds long-context retrieval and session-soak prompts through the checkpoint-native Krasis chat template instead of DeepSeek-specific control tokens, retains a hashed real-content corpus token stream for reproducible downstream construction, and exercises both DeepSeek V4 and GLM-5.3 framing in the built harness test command.
+- Fixed CUDA graph reuse verification for GLM-5.3 Kimi Delta Attention: recurrent-state pointer snapshots are now checked through the same KDA/linear-attention family contract used at capture, rather than incorrectly treating every KDA layer as a changed attention type and recapturing graphs on identical requests.
+
 ## Unreleased
+
+- GLM-5.3 long-context qualification remains pending: the accepted exact-131K
+  reference stage was followed by a host-hardware memory error during exact
+  262K. No model, numerical-fidelity, or VRAM-safety failure is inferred from
+  that interrupted reference run, and no 500K qualification claim is made.
+
+- Added request-scoped streaming peer cancellation to Rust GPU prefill. The
+  server monitors the peer before prefill, the generic prefill engine checks
+  the signal at runtime-derived chunk boundaries, and cancellation follows the
+  existing synchronized transactional cleanup without cold-staging retry.
+  Calibration, benchmarks, internal endpoints, non-streaming requests, and
+  model arithmetic are unchanged. Live and cross-model qualification is still
+  pending.
+
+- Fixed GLM-5.3 llama-witness input generation to use the same checkpoint-native
+  Krasis rendering as production. Thinking-disabled artifacts now prove that
+  the terminal initial think block is closed and differs from the retained
+  thinking-enabled rendering, preventing a raw-token oracle from silently
+  omitting the production `</think>` token.
+
+- Added a test-only GLM-5.3-Flash text ADQ-500K configuration under `tests/`.
+  It freezes the accepted single-RTX-PRO INT4/HQQ6/k6v6 runtime profile,
+  derives the 4,928 MiB KV allocation from checkpoint geometry, retains the
+  unchanged 600 MiB safety reserve, and leaves `testconfigs/` untouched.
+- Made the staged ADQ witness-input builder derive its exact raw-token framing
+  from the checkpoint's resolved chat template instead of DeepSeek-specific
+  special tokens, including nested text-model context limits. Added offline
+  exact-length and fail-closed framing tests.
 
 - Restructured kernel-handle initialization to avoid excessive Rust/LLVM
   compilation complexity, preserving kernel mappings, errors and cleanup.
@@ -707,6 +740,16 @@
   test-endpoint server, retains exact-prefix/top-k/log-probability metrics and
   runtime timing, and fails on an absent or unsafe measured VRAM low-water.
 
+- Fixed the native Windows installer redownloading the pinned 2.86 GB CUDA
+  PyTorch wheel on every setup run. An identical release now reuses the active
+  private runtime only after exact manifest/activation comparison and a full
+  isolated runtime probe. New Krasis releases retain their separate sealed
+  runtimes but reuse an installer-owned, SHA-256-addressed Torch wheel and
+  install it offline with `--no-index`; a changed pin gets a new artifact and
+  corrupt cache content fails visibly. The Windows lifecycle gate now covers a
+  clean install, exact same-release reuse, cached repair/new activation, and
+  uninstall. Local launcher/downloader/planner tests passed
+  `61/61 + 18/18 + 19/19`, and the native Windows launcher passed `4/4`.
 
 - Removed catalog qualification caps from the launcher context contract. Model
   metadata and the interactive maximum now always use each checkpoint's

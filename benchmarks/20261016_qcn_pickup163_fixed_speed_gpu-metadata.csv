@@ -1,0 +1,3 @@
+index, name, uuid, driver_version, memory.total [MiB]
+0, NVIDIA RTX A6000, GPU-f3ca4c02-673b-fed3-3207-223b3f6c81ab, 580.178.04, 49140 MiB
+1, NVIDIA RTX PRO 6000 Blackwell Workstation Edition, GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d, 580.178.04, 97887 MiB

@@ -1,12 +1,12 @@
 import unittest
 from pathlib import Path
 
-from tokenizers import Tokenizer
+from krasis.tokenizer import Tokenizer
+from tests.adq_session_soak_live import _chat_ids, _token_count
 
-from tests.adq_session_soak_live import _render
 
-
-TOKENIZER = "/home/main/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp/tokenizer.json"
+DEEPSEEK_MODEL = "/home/main/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp"
+GLM_MODEL = "/home/main/.krasis/models/GLM-5.3-Flash"
 
 
 class AdqSessionSoakTests(unittest.TestCase):
@@ -17,35 +17,37 @@ class AdqSessionSoakTests(unittest.TestCase):
         path_init = 'sys.path.insert(0, str(Path(__file__).resolve().parents[1]))'
         self.assertLess(source.index(path_init), source.index("from tests.adq_build_witness_inputs"))
 
-    def test_renderer_matches_bundled_deepseek_v4_contract(self) -> None:
-        rendered = _render([{"role": "user", "content": "hello"}])
-        self.assertEqual(
-            rendered,
-            "<｜begin▁of▁sentence｜><｜User｜>hello<｜Assistant｜></think>",
-        )
+    def test_checkpoint_native_chat_ids_cover_deepseek_and_glm(self) -> None:
+        messages = [{"role": "user", "content": "hello"}]
+        for model_dir in (DEEPSEEK_MODEL, GLM_MODEL):
+            with self.subTest(model_dir=model_dir):
+                tokenizer = Tokenizer(model_dir)
+                ids = _chat_ids(tokenizer, messages)
+                self.assertEqual(ids, tokenizer.apply_chat_template(
+                    messages, add_generation_prompt=True, enable_thinking=False
+                ))
+                self.assertGreater(len(ids), 0)
 
-    def test_multiturn_renderer_includes_closed_history(self) -> None:
-        rendered = _render(
+    def test_multiturn_uses_checkpoint_native_contract(self) -> None:
+        messages = (
             [
                 {"role": "user", "content": "first"},
                 {"role": "assistant", "content": "answer"},
                 {"role": "user", "content": "second"},
             ]
         )
-        self.assertEqual(
-            rendered,
-            "<｜begin▁of▁sentence｜><｜User｜>first"
-            "<｜Assistant｜></think>answer<｜end▁of▁sentence｜>"
-            "<｜User｜>second<｜Assistant｜></think>",
-        )
+        deepseek = _chat_ids(Tokenizer(DEEPSEEK_MODEL), messages)
+        glm = _chat_ids(Tokenizer(GLM_MODEL), messages)
+        self.assertNotEqual(deepseek, glm)
+        self.assertGreater(len(deepseek), 0)
+        self.assertGreater(len(glm), 0)
 
     def test_renderer_token_count_uses_real_checkpoint_tokenizer(self) -> None:
-        tokenizer = Tokenizer.from_file(TOKENIZER)
-        rendered = _render([{"role": "user", "content": "hello"}])
-        self.assertEqual(
-            len(tokenizer.encode(rendered, add_special_tokens=False).ids),
-            5,
-        )
+        for model_dir in (DEEPSEEK_MODEL, GLM_MODEL):
+            with self.subTest(model_dir=model_dir):
+                tokenizer = Tokenizer(model_dir)
+                messages = [{"role": "user", "content": "hello"}]
+                self.assertEqual(_token_count(tokenizer, messages), len(_chat_ids(tokenizer, messages)))
 
 if __name__ == "__main__":
     unittest.main()

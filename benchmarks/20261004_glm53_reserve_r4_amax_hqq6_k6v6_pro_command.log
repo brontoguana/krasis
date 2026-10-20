@@ -1,0 +1,2 @@
+./dev benchmark /home/main/Documents/Claude/krasis-internal/reset-diagnostics/evidence/20261003/glm-reserve-r1/runtime-r4/treatments/amax/runtime.conf --vram-report
+Profiling/trace/forced-sync flags and diagnostic 1ms sampler override removed; normal runtime calibration retained.

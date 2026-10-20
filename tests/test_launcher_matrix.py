@@ -23,11 +23,36 @@ from krasis import vram_budget as vram_budget_mod
 from krasis.launcher import Launcher, LauncherConfig
 
 with mock.patch.dict(os.environ, {"KRASIS_DEV_SCRIPT": "1"}):
-    from scripts.tileq_build import mixed_calibration_entry_hashes
+    from scripts.tileq_build import (
+        mixed_calibration_entry_hashes,
+        tileq_transaction_request_sha256,
+    )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NONEXISTENT_MODEL = "/tmp/nonexistent-krasis-launcher-matrix-model"
+
+
+class TileQCaptureResumeTests(unittest.TestCase):
+    def test_request_identity_matches_rust_transaction_contract(self) -> None:
+        self.assertEqual(
+            tileq_transaction_request_sha256(
+                "11" * 32,
+                [1, 2],
+                sequence_start=0,
+            ),
+            "b2a0b65212c293b7a88c30764a362de4ac49bf03f57b04e843afad87c2f676b7",
+        )
+
+    def test_request_identity_rejects_invalid_input(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "calibration SHA-256"):
+            tileq_transaction_request_sha256("invalid", [1], sequence_start=0)
+        with self.assertRaisesRegex(RuntimeError, "outside u32"):
+            tileq_transaction_request_sha256(
+                "11" * 32,
+                [0x1_0000_0000],
+                sequence_start=0,
+            )
 
 
 def _minimal_qwen3_config(model_type: str = "qwen3") -> dict[str, object]:
@@ -89,7 +114,8 @@ class _ExecIntercept(Exception):
         self.args = args
 
 
-def _capture_launch_config(cfg: LauncherConfig, *, benchmark: bool = True) -> tuple[Path, list[str]]:
+def _capture_launch_config(cfg: LauncherConfig, *, benchmark: bool = True,
+                          test_endpoints: bool = False) -> tuple[Path, list[str]]:
     args = argparse.Namespace()
     with _patched_launcher_env():
         launcher = Launcher(args)
@@ -107,7 +133,7 @@ def _capture_launch_config(cfg: LauncherConfig, *, benchmark: bool = True) -> tu
         os.execvp = fake_execvp
         try:
             with contextlib.redirect_stdout(io.StringIO()):
-                launcher.launch_server(benchmark=benchmark)
+                launcher.launch_server(benchmark=benchmark, test_endpoints=test_endpoints)
         except _ExecIntercept as exc:
             config_path = Path(exc.args[exc.args.index("--config") + 1])
             return config_path, exc.args
@@ -1359,6 +1385,81 @@ class LauncherMatrixTest(unittest.TestCase):
                 (baseline + achieved) / (1024 * 1024),
             )
 
+            manifest["schema_version"] = 3
+            manifest["calibration"] = {
+                "corpus_sha256": ["11" * 32],
+                "coverage_policy": {"method": "underobserved_int8_v1",
+                                    "minimum_routes_per_expert": 500, "required_corpora": 1},
+            }
+            for index, region in enumerate(regions):
+                required = index == 0
+                region["coverage"] = {
+                    "route_count": 1 if required else 500,
+                    "corpus_route_counts": [1 if required else 500],
+                    "selection_reason": "coverage_required_int8" if required else "measured_int4",
+                }
+                if not required:
+                    region["quality_gain_units"] = 1
+                    region["quality_rank"] = index - 1
+            manifest["budget"]["requested_basis_points"] = 0
+            manifest["budget"]["maximum_added_bytes"] = achieved
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            reserve_budget = vram_budget_mod.compute_launcher_budget(
+                str(model_dir), [2], attention_quant="bf16", kv_dtype="k4v4",
+                gpu_vram_mb=24_000, total_ram_gb=128, kv_cache_mb=200,
+                mixed_expert_manifest=str(manifest_path),
+            )
+            self.assertEqual(reserve_budget["hcs_cacheable_experts_mb"], budget["hcs_cacheable_experts_mb"])
+            # A source-copy ablation charges only INT4 bytes, without weakening
+            # the required-INT8 contract of the source v3 treatment.
+            import copy
+            ablation = copy.deepcopy(manifest)
+            ablation.update(format="Krasis experimental scales-only Marlin INT4", schema_version=4)
+            ablation["regions"][0]["bits"] = 4
+            ablation["regions"][0]["coverage"]["selection_reason"] = "experimental_original_amax_int4"
+            for key in ("maximum_added_bytes", "achieved_added_bytes", "achieved_percent_millionths"):
+                ablation["budget"][key] = 0
+            ablation["compact_cache"] = {"basename": "scales-only.krmx", "bytes": 128 + baseline,
+                **{key: "aa" * 32 for key in ("sha256", "header_sha256", "payload_sha256", "region_map_sha256")}}
+            records = []
+            source_offset = output_offset = 128
+            for index, region in enumerate(regions):
+                records.append({"index": index, "source": "original_amax" if index == 0 else "source_reserve",
+                    "source_offset": 64 if index == 0 else source_offset,
+                    "output_offset": output_offset, "bytes": int4_bytes, "sha256": "bb" * 32})
+                source_offset += int8_bytes if index == 0 else int4_bytes
+                output_offset += int4_bytes
+            ablation["scales_only"] = {
+                "method": "copy_searched_int4_replace_coverage_reserve_with_original_amax_v1",
+                "protocol_sha256": "cc" * 32, "coverage_sha256": "dd" * 32,
+                "source_reserve_sha256": hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode()).hexdigest(),
+                "source_reserve": copy.deepcopy(manifest),
+                "original_amax": {"bits": 4, "bytes": 64 + baseline, "expert_int4_calibration_mode": "amax",
+                                  "sha256": "ee" * 32, "header_sha256": "ff" * 32},
+                "replacement_indices": [0], "records": records,
+            }
+            manifest_path.write_text(json.dumps(ablation), encoding="utf-8")
+            ablation_budget = vram_budget_mod.compute_launcher_budget(
+                str(model_dir), [2], attention_quant="bf16", kv_dtype="k4v4",
+                gpu_vram_mb=24_000, total_ram_gb=128, kv_cache_mb=200,
+                mixed_expert_manifest=str(manifest_path),
+            )
+            self.assertEqual(ablation_budget["hcs_cacheable_experts_mb"], baseline / (1024 * 1024))
+            self.assertEqual(ablation_budget["mixed_expert_max_record_bytes"], int4_bytes)
+            for mutation in ("replacement", "source", "offset", "score", "schema"):
+                bad = copy.deepcopy(ablation)
+                if mutation == "replacement": bad["scales_only"]["replacement_indices"] = [1]
+                elif mutation == "source": bad["scales_only"]["source_reserve"]["regions"][0]["bits"] = 4
+                elif mutation == "offset": bad["scales_only"]["records"][0]["source_offset"] += 1
+                elif mutation == "score": bad["regions"][0]["quality_gain_units"] = 0
+                else: bad["schema_version"] = 3
+                with self.assertRaises(ValueError):
+                    vram_budget_mod.validate_mixed_coverage_contract(bad)
+            regions[0]["quality_gain_units"] = 0
+            with self.assertRaisesRegex(ValueError, "invented quality scores"):
+                vram_budget_mod.validate_mixed_coverage_contract(manifest)
+            del regions[0]["quality_gain_units"]
+
             regions[0]["int4_bytes"] += 1
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "invalid byte size"):
@@ -2043,9 +2144,28 @@ class LauncherMatrixTest(unittest.TestCase):
             "[System.IO.Compression.ZipFile]::ExtractToDirectory",
             install_source,
         )
+        self.assertIn("Test-KrasisRuntimeManifestIdentity", install_source)
+        self.assertIn("Get-KrasisReusableRuntime", install_source)
+        self.assertIn("Get-KrasisTorchArtifact", install_source)
+        self.assertIn('Join-Path $InstalledRoot "activation.json"', install_source)
+        self.assertIn('$ArtifactsRoot = Join-Path $RuntimeRoot "artifacts"', install_source)
+        self.assertIn("Using verified cached CUDA PyTorch wheel", install_source)
+        self.assertIn("This is a large one-time download", install_source)
+        self.assertIn("-m pip download", install_source)
+        self.assertIn('"$($Manifest.torch_url)" | Out-Host', install_source)
+        self.assertIn(
+            "Krasis private runtime already matches this installer",
+            install_source,
+        )
+        self.assertIn(
+            "Existing Krasis runtime cannot be reused and will be repaired",
+            install_source,
+        )
         self.assertNotIn("Copy-Item -Recurse -Force", install_source)
         self.assertIn("--no-deps", install_source)
-        self.assertIn('"$($StagedManifest.torch_url)"', install_source)
+        self.assertIn("--no-index", install_source)
+        self.assertIn('"$($Manifest.torch_url)"', install_source)
+        self.assertIn("$TorchArtifactPath", install_source)
         self.assertIn("(Join-Path $InstallRoot \"python\")", install_source)
         self.assertIn("(Join-Path $InstallRoot \"venv\")", install_source)
         self.assertNotIn("Get-Command py", install_source)
@@ -2124,7 +2244,10 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("-PythonRuntimeArchive python-runtime.zip", workflow_source)
         self.assertNotIn("-PythonInstaller python-installer.exe", workflow_source)
         self.assertIn('KRASIS_WINDOWS_TORCH_VERSION: "2.9.1+cu128"', workflow_source)
-        self.assertIn("Test clean install, isolation, legacy repair, and uninstall", workflow_source)
+        self.assertIn(
+            "Test clean install, runtime reuse, cached repair, isolation, legacy repair, and uninstall",
+            workflow_source,
+        )
         self.assertIn(
             "Compare payload digest under Windows PowerShell 5.1",
             workflow_source,
@@ -2137,6 +2260,20 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("Retained private-runtime entries:", workflow_source)
         self.assertIn("Processes executing from the retained runtime:", workflow_source)
         self.assertIn("PendingFileRenameOperations", workflow_source)
+        self.assertIn("same-release-installer-test.log", workflow_source)
+        self.assertIn("cached-torch-installer-test.log", workflow_source)
+        self.assertIn(
+            "Same-release installer unexpectedly invoked the PyTorch installation",
+            workflow_source,
+        )
+        self.assertIn(
+            "Same-release installer changed the active runtime",
+            workflow_source,
+        )
+        self.assertIn(
+            "Repair installer did not reuse the verified cached CUDA PyTorch wheel",
+            workflow_source,
+        )
         self.assertIn("generate-windows-fla-sources:", workflow_source)
         self.assertIn("needs: generate-windows-fla-sources", workflow_source)
         self.assertGreaterEqual(
@@ -2295,6 +2432,9 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.max_context_tokens = 32768
         cfg.kv_dtype = "k4v4"
         cfg.gpu_expert_bits = 8
+        cfg.mixed_expert_manifest = "~/mixed/final.json"
+        cfg.mixed_expert_build_plan = "~/mixed/final.plan.json"
+        cfg.mixed_expert_calibration = "~/mixed/calibration.kic"
         cfg.expert_group_size = 64
         cfg.gpu_expert_int4_calib = "search_rmse"
         cfg.cpu_expert_bits = 8
@@ -2353,6 +2493,9 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(values.get("CFG_MAX_CONTEXT_TOKENS"), "32768")
             self.assertEqual(values.get("CFG_KV_DTYPE"), "k4v4")
             self.assertEqual(values.get("CFG_GPU_EXPERT_BITS"), "8")
+            self.assertEqual(values.get("CFG_MIXED_EXPERT_MANIFEST"), "~/mixed/final.json")
+            self.assertEqual(values.get("CFG_MIXED_EXPERT_BUILD_PLAN"), "~/mixed/final.plan.json")
+            self.assertEqual(values.get("CFG_MIXED_EXPERT_CALIBRATION"), "~/mixed/calibration.kic")
             self.assertEqual(values.get("CFG_EXPERT_GROUP_SIZE"), "64")
             self.assertEqual(values.get("CFG_GPU_EXPERT_INT4_CALIB"), "search_rmse")
             self.assertEqual(values.get("CFG_CPU_EXPERT_BITS"), "8")
@@ -2412,6 +2555,9 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(loaded.max_context_tokens, 32768)
             self.assertEqual(loaded.kv_dtype, "k4v4")
             self.assertEqual(loaded.gpu_expert_bits, 8)
+            self.assertEqual(loaded.mixed_expert_manifest, os.path.expanduser("~/mixed/final.json"))
+            self.assertEqual(loaded.mixed_expert_build_plan, os.path.expanduser("~/mixed/final.plan.json"))
+            self.assertEqual(loaded.mixed_expert_calibration, os.path.expanduser("~/mixed/calibration.kic"))
             self.assertEqual(loaded.expert_group_size, 64)
             self.assertEqual(loaded.gpu_expert_int4_calib, "search_rmse")
             self.assertEqual(loaded.cpu_expert_bits, 8)
@@ -2489,6 +2635,47 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg = LauncherConfig()
         launcher_mod._apply_cli_overrides(cfg, args)
         self.assertFalse(cfg.prefix_cache)
+
+    def test_main_forwards_diagnostic_opt_in_in_both_launch_modes(self) -> None:
+        for interactive in (False, True):
+            for enabled in (False, True):
+                with self.subTest(interactive=interactive, enabled=enabled):
+                    argv = ["krasis"]
+                    if not interactive:
+                        argv.append("--non-interactive")
+                    if enabled:
+                        argv.append("--test-endpoints")
+                    fake = mock.MagicMock()
+                    fake.cfg = _base_config()
+                    fake.model_info = None
+                    fake.selected_gpus = []
+                    fake.run_interactive.return_value = True
+                    with mock.patch.object(sys, "argv", argv), \
+                         mock.patch.object(launcher_mod, "Launcher", return_value=fake), \
+                         mock.patch.object(launcher_mod, "_check_gpu_deps"), \
+                         mock.patch.object(launcher_mod, "_discard_pending_keys"), \
+                         mock.patch.object(launcher_mod, "_hide_cursor"), \
+                         mock.patch.object(launcher_mod, "_show_cursor"), \
+                         mock.patch.object(launcher_mod, "_launch_mode_screen", return_value="server"), \
+                         contextlib.redirect_stdout(io.StringIO()):
+                        launcher_mod.main()
+                    fake.launch_server.assert_called_once()
+                    self.assertEqual(fake.launch_server.call_args.kwargs["test_endpoints"], enabled)
+
+    def test_diagnostic_endpoints_require_explicit_cli_opt_in(self) -> None:
+        for flags, expected in (([], False), (["--test-endpoints"], True)):
+            with self.subTest(flags=flags):
+                with mock.patch.object(sys, "argv", ["krasis", *flags]):
+                    args = launcher_mod.parse_args()
+                self.assertEqual(args.test_endpoints, expected)
+                config_path, argv = _capture_launch_config(
+                    _base_config(), benchmark=False, test_endpoints=args.test_endpoints,
+                )
+                try:
+                    self.assertEqual(argv.count("--test-endpoints"), int(expected))
+                    self.assertNotIn("TEST_ENDPOINTS", config_path.read_text())
+                finally:
+                    config_path.unlink()
 
     def test_interactive_load_config_preserves_saved_kv_attention_safety_and_ssh(self) -> None:
         launcher = Launcher.__new__(Launcher)

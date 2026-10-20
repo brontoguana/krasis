@@ -473,17 +473,22 @@ impl ChatTemplateEngine {
 /// behavior remain exactly as declared by the checkpoint. Matching is on the
 /// template contract, never a model name.
 fn make_disabled_thinking_scaffold_history_stable(template: String) -> (String, bool) {
-    const HISTORY_CONDITION: &str = "{%- if loop.index0 > ns.last_query_index %}";
-    const STABLE_HISTORY_CONDITION: &str = "{%- if loop.index0 > ns.last_query_index or (enable_thinking is defined and enable_thinking is false and not reasoning_content) %}";
+    const HISTORY_CONDITIONS: [&str; 2] = [
+        "{%- if loop.index0 > ns.last_query_index %}",
+        "{%- if (preserve_thinking is defined and preserve_thinking is true) or (loop.index0 > ns.last_query_index) %}",
+    ];
     const DISABLED_SCAFFOLD: &str = "<think>\\n\\n</think>\\n\\n";
-    if template.contains(HISTORY_CONDITION) && template.contains(DISABLED_SCAFFOLD) {
-        (
-            template.replace(HISTORY_CONDITION, STABLE_HISTORY_CONDITION),
-            true,
-        )
-    } else {
-        (template, false)
+    if !template.contains(DISABLED_SCAFFOLD) {
+        return (template, false);
     }
+    for condition in HISTORY_CONDITIONS {
+        if template.contains(condition) {
+            let expression = condition.strip_suffix(" %}").unwrap();
+            let stable = format!("{expression} or (enable_thinking is defined and enable_thinking is false and not reasoning_content) %}}");
+            return (template.replace(condition, &stable), true);
+        }
+    }
+    (template, false)
 }
 
 fn detect_tool_call_format(template: &str) -> ToolCallFormat {
@@ -1341,6 +1346,54 @@ mod tests {
         ];
         for (template, expected) in cases {
             assert_eq!(detect_tool_call_format(template), expected, "{template}");
+        }
+    }
+    #[test]
+    fn empty_scaffold_supports_preserve_thinking_history_condition() {
+        let template = concat!(
+            "{%- set ns = namespace(last_query_index=messages|length - 1) %}",
+            "{%- for message in messages %}",
+            "{%- set content = message.content %}",
+            "{%- if message.role == 'user' %}",
+            "{{- '<|im_start|>user\\n' + content + '<|im_end|>\\n' }}",
+            "{%- else %}{%- set reasoning_content = message.get('reasoning_content', '')|trim %}",
+            "{%- if (preserve_thinking is defined and preserve_thinking is true) or (loop.index0 > ns.last_query_index) %}",
+            "{{- '<|im_start|>assistant\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}",
+            "{%- else %}{{- '<|im_start|>assistant\\n' + content }}{%- endif %}",
+            "{{- '<|im_end|>\\n' }}{%- endif %}{%- endfor %}",
+            "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\\n' }}",
+            "{%- if enable_thinking is false %}{{- '<think>\\n\\n</think>\\n\\n' }}",
+            "{%- else %}{{- '<think>\\n' }}{%- endif %}{%- endif %}"
+        );
+        let source = template.to_owned();
+        let path = write_tokenizer_config(&source);
+        let engine = ChatTemplateEngine::from_config(&path).unwrap();
+        assert!(engine.disabled_thinking_generation_prompt_is_history_stable());
+        let first = engine
+            .apply(r#"[{"role":"user","content":"first"}]"#, true, false)
+            .unwrap();
+        let next = engine.apply(r#"[{"role":"user","content":"first"},{"role":"assistant","content":"answer"},{"role":"user","content":"next"}]"#,true,false).unwrap();
+        assert!(next.starts_with(&(first + "answer<|im_end|>\n")));
+        // Non-empty old reasoning must retain the checkpoint's discard policy.
+        let old_reason = engine.apply(r#"[{"role":"user","content":"first"},{"role":"assistant","content":"answer","reasoning_content":"secret reasoning"},{"role":"user","content":"next"}]"#,true,false).unwrap();
+        assert!(!old_reason.contains("secret reasoning"));
+        assert!(old_reason.contains("assistant\nanswer<|im_end|>\n"));
+        // With thinking enabled, the adapter must not seed old empty scaffolds.
+        let thinking = engine.apply(r#"[{"role":"user","content":"first"},{"role":"assistant","content":"answer"},{"role":"user","content":"next"}]"#,true,true).unwrap();
+        assert!(thinking.contains("assistant\nanswer<|im_end|>\n"));
+        assert!(!thinking.contains("assistant\n<think>\n\n</think>\n\nanswer"));
+    }
+
+    #[test]
+    fn scaffold_adapter_requires_recognized_condition_and_disabled_scaffold() {
+        for template in [
+            "{%- if loop.index0 > ns.last_query_index %}plain{% endif %}",
+            "<think>\\n\\n</think>\\n\\n{% if arbitrary %}plain{% endif %}",
+        ] {
+            let (adapted, stable) =
+                super::make_disabled_thinking_scaffold_history_stable(template.to_owned());
+            assert_eq!(adapted, template);
+            assert!(!stable);
         }
     }
 }

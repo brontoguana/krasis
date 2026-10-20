@@ -9,6 +9,8 @@
 pub mod expert_hqq;
 pub mod marlin;
 pub mod mixed_precision;
+pub mod scales_ablation;
+mod mixed_builder;
 pub mod safetensors_io;
 pub mod tileq;
 
@@ -1696,8 +1698,9 @@ pub struct GpuCacheIdentity {
 pub struct MixedGpuCacheIdentity {
     pub manifest_path: PathBuf,
     pub manifest_sha256: String,
-    pub source_int4_path: PathBuf,
-    pub source_int8_path: PathBuf,
+    pub source_int4_path: Option<PathBuf>,
+    pub source_int8_path: Option<PathBuf>,
+    pub compact_cache_path: Option<PathBuf>,
 }
 
 /// Manages loaded expert weights for all MoE layers.
@@ -3076,6 +3079,77 @@ impl WeightStore {
             gpu_num_bits: 4,
         }
     }
+
+    /// Offline, crash-resilient materialization of a compact routed INT4/INT8
+    /// cache. This is setup work only; inference never calls this method.
+    #[staticmethod]
+    pub fn prepare_compact_mixed_cache(
+        model_dir: String,
+        plan_path: String,
+        calibration_path: String,
+        output_cache: String,
+        output_manifest: String,
+    ) -> PyResult<String> {
+        mixed_builder::build_compact_mixed_cache(
+            Path::new(&model_dir),
+            Path::new(&plan_path),
+            Path::new(&calibration_path),
+            Path::new(&output_cache),
+            Path::new(&output_manifest),
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+
+    /// Offline assembly copies unchanged, fully verified source records while
+    /// retaining the original builder's resume and publication checks.
+    #[staticmethod]
+    pub fn assemble_compact_mixed_cache(
+        model_dir: String, plan_path: String, calibration_path: String,
+        output_cache: String, output_manifest: String,
+        int4_manifest: String, int8_manifest: String,
+    ) -> PyResult<String> {
+        mixed_builder::assemble_compact_mixed_cache(Path::new(&model_dir), Path::new(&plan_path),
+            Path::new(&calibration_path), Path::new(&output_cache), Path::new(&output_manifest),
+            Path::new(&int4_manifest), Path::new(&int8_manifest))
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+
+    /// Exact quantization for offline sensitivity; inference never calls this.
+    #[staticmethod]
+    #[pyo3(signature = (source, moments, rows, cols, group_size, num_bits=4))]
+    pub fn calibrated_projection(
+        py: Python<'_>, source: &[u8], moments: &[u8], rows: usize, cols: usize, group_size: usize,
+        num_bits: u8,
+    ) -> PyResult<(Py<pyo3::types::PyBytes>, Vec<u8>)> {
+        let elements = rows.checked_mul(cols).ok_or_else(|| pyo3::exceptions::PyValueError::new_err("projection dimensions overflow"))?;
+        let source_bytes = elements.checked_mul(2).ok_or_else(|| pyo3::exceptions::PyValueError::new_err("projection byte size overflow"))?;
+        let moment_bytes = cols.checked_mul(4).ok_or_else(|| pyo3::exceptions::PyValueError::new_err("moment byte size overflow"))?;
+        if rows == 0 || cols == 0 || group_size == 0 || group_size % 8 != 0 || cols % group_size != 0 || cols % 8 != 0
+            || source.len() != source_bytes || !matches!(num_bits, 4 | 8)
+            || (num_bits == 4 && moments.len() != moment_bytes)
+            || (num_bits == 8 && !moments.is_empty() && moments.len() != moment_bytes) {
+            return Err(pyo3::exceptions::PyValueError::new_err("projection byte/geometry mismatch"));
+        }
+        let weights: Vec<u16> = source.chunks_exact(2).map(|v| u16::from_le_bytes([v[0],v[1]])).collect();
+        let moments: Vec<f32> = moments.chunks_exact(4).map(|v| f32::from_le_bytes(v.try_into().unwrap())).collect();
+        if weights.iter().any(|v| !bf16_to_f32(*v).is_finite()) || moments.iter().any(|v| !v.is_finite() || *v < 0.0) || (num_bits == 4 && moments.iter().all(|v| *v == 0.0)) {
+            return Err(pyo3::exceptions::PyValueError::new_err("projection weights/moments must be finite with measured positive mass"));
+        }
+        let (payload, factors) = py.allow_threads(|| {
+            let mut factors = Vec::new();
+            let values = if num_bits == 4 {
+                let quantized = quantize_int4_expert_calibrated_impl(&weights, rows, cols, group_size,
+                    ExpertInt4CalibMode::SearchRmse, 0, 0, "gate_proj", None, Some(&moments), Some(&mut factors));
+                marlin::dequantize_int4(&quantized)
+            } else {
+                marlin::dequantize_int8(&quantize_int8(&weights, rows, cols, group_size))
+            };
+            let payload: Vec<u8> = values.iter()
+                .flat_map(|value| f32_to_bf16(*value).to_le_bytes()).collect();
+            (payload, factors)
+        });
+        Ok((pyo3::types::PyBytes::new(py, &payload).unbind(), factors))
+    }
 }
 
 impl WeightStore {
@@ -3257,23 +3331,31 @@ impl WeightStore {
             }
             None => remaining,
         };
-        let expert_int4_calib_data =
-            ExpertInt4CalibData::from_env_for_mode(expert_int4_calib_mode)?;
-        if let Some(data) = expert_int4_calib_data.as_ref() {
-            data.validate_for_model(&config)?;
-            log::info!(
-                "Loaded expert INT4 calibration data from {} (hash={:016x}, entries={})",
-                data.source_path.display(),
-                data.source_hash,
-                data.entry_count(),
+        // Prepared mixed banks carry their quantized payload and calibration
+        // identity in the validated manifest. Raw calibration is required only
+        // by the homogeneous cache loader/builder, never to execute that bank.
+        let homogeneous_marlin_input = if mixed_expert_manifest.is_none() {
+            let expert_int4_calib_data =
+                ExpertInt4CalibData::from_env_for_mode(expert_int4_calib_mode)?;
+            if let Some(data) = expert_int4_calib_data.as_ref() {
+                data.validate_for_model(&config)?;
+                log::info!(
+                    "Loaded expert INT4 calibration data from {} (hash={:016x}, entries={})",
+                    data.source_path.display(),
+                    data.source_hash,
+                    data.entry_count(),
+                );
+            }
+            let config_hash = marlin_cache_config_hash(
+                &config_str,
+                gpu_num_bits,
+                expert_int4_calib_mode,
+                expert_int4_calib_data.as_ref().map(|d| d.source_hash),
             );
-        }
-        let config_hash = marlin_cache_config_hash(
-            &config_str,
-            gpu_num_bits,
-            expert_int4_calib_mode,
-            expert_int4_calib_data.as_ref().map(|d| d.source_hash),
-        );
+            Some((expert_int4_calib_data, config_hash))
+        } else {
+            None
+        };
         let shared_config_hash = marlin_cache_config_hash(
             &config_str,
             shared_gpu_num_bits,
@@ -3497,12 +3579,14 @@ impl WeightStore {
         let gpu_cache_path =
             cache_path_marlin(model_dir, cache_gs, gpu_num_bits, expert_int4_calib_mode);
         if !gpu_loaded && gpu_cache_path.exists() {
+            let (_, config_hash) = homogeneous_marlin_input.as_ref().ok_or_else(||
+                "homogeneous cache load requested without homogeneous calibration identity".to_string())?;
             match Self::load_marlin_cache(
                 &gpu_cache_path,
                 &config,
                 cache_gs,
                 total_moe_layers,
-                config_hash,
+                *config_hash,
                 expert_int4_calib_mode,
                 moe_start,
                 num_moe_layers,
@@ -3533,6 +3617,9 @@ impl WeightStore {
 
         // Build Marlin cache if not found or existing cache is invalid
         if !gpu_loaded {
+            let (expert_int4_calib_data, config_hash) = homogeneous_marlin_input.as_ref().ok_or_else(||
+                "homogeneous cache build requested without homogeneous calibration identity".to_string())?;
+            let config_hash = *config_hash;
             cleanup_marlin_cache_before_build(
                 model_dir,
                 &config,
@@ -3655,6 +3742,9 @@ impl WeightStore {
             log::info!("GPU-only mode: skipping CPU expert cache (saves RAM + load time)");
         } else {
             // Try loading existing CPU cache
+            let (_, config_hash) = homogeneous_marlin_input.as_ref().ok_or_else(||
+                "CPU cache requested without homogeneous calibration identity".to_string())?;
+            let config_hash = *config_hash;
             let cpu_path = cache_path_cpu(model_dir, cpu_num_bits, effective_gs);
             if cpu_path.exists() {
                 match Self::load_cpu_cache(
@@ -6186,8 +6276,8 @@ impl WeightStore {
     }
 
     /// Load an immutable mixed routed INT4/INT8 bank selected by a canonical
-    /// precision manifest. The manifest refers directly to complete validated
-    /// homogeneous source caches, avoiding another on-disk weight copy.
+    /// precision manifest. Version 2 maps one compact selected-record cache;
+    /// immutable version-1 manifests retain their two-source compatibility.
     fn load_mixed_marlin_cache(
         manifest_path: &Path,
         model_dir: &Path,
@@ -6222,25 +6312,6 @@ impl WeightStore {
             &external_manifest,
             &ranking_evidence_raw,
         )?;
-        let int4_path = manifest_dir.join(&external_manifest.source_int4.basename);
-        let int8_path = manifest_dir.join(&external_manifest.source_int8.basename);
-        let int4_file = std::fs::File::open(&int4_path).map_err(|error| {
-            format!(
-                "open mixed routed-expert INT4 source {}: {error}",
-                int4_path.display()
-            )
-        })?;
-        let int8_file = std::fs::File::open(&int8_path).map_err(|error| {
-            format!(
-                "open mixed routed-expert INT8 source {}: {error}",
-                int8_path.display()
-            )
-        })?;
-        let int4_mmap = unsafe { memmap2::MmapOptions::new().map(&int4_file) }
-            .map_err(|error| format!("map mixed routed-expert INT4 source: {error}"))?;
-        let int8_mmap = unsafe { memmap2::MmapOptions::new().map(&int8_file) }
-            .map_err(|error| format!("map mixed routed-expert INT8 source: {error}"))?;
-
         let checkpoint_sha256 =
             crate::checkpoint_identity::checkpoint_identity_sha256(model_dir)?;
         let cache_namespace = crate::checkpoint_identity::cache_namespace(model_dir)?;
@@ -6273,7 +6344,24 @@ impl WeightStore {
             &cache_namespace,
             &config_sha256,
         )?;
+        if external_manifest.schema_version == scales_ablation::SCHEMA_VERSION {
+            let provenance = external_manifest.scales_only.as_ref().ok_or("missing scales-only provenance")?;
+            let coverage_raw = std::fs::read(manifest_dir.join("source-coverage.json"))
+                .map_err(|e| format!("read experimental coverage: {e}"))?;
+            if mixed_precision::sha256_hex(&coverage_raw) != provenance.coverage_sha256 {
+                return Err("experimental coverage identity mismatch".into());
+            }
+            scales_ablation::validate_coverage(&provenance.source_reserve, &coverage_raw)?;
+        }
         let manifest = external_manifest;
+        let int4_path = manifest
+            .source_int4
+            .as_ref()
+            .map(|identity| manifest_dir.join(&identity.basename));
+        let int8_path = manifest
+            .source_int8
+            .as_ref()
+            .map(|identity| manifest_dir.join(&identity.basename));
 
         let validate_source = |path: &Path,
                                mmap: &[u8],
@@ -6322,8 +6410,123 @@ impl WeightStore {
             }
             Ok(())
         };
-        validate_source(&int4_path, &int4_mmap, &manifest.source_int4, 4)?;
-        validate_source(&int8_path, &int8_mmap, &manifest.source_int8, 8)?;
+        let mut int4_file = None;
+        let mut int8_file = None;
+        let mut int4_mmap = None;
+        let mut int8_mmap = None;
+        let mut compact_file = None;
+        let mut compact_mmap = None;
+        let mut compact_path = None;
+        let mut compact_offsets = None;
+        if let Some(identity) = manifest.compact_cache.as_ref() {
+            let path = manifest_dir.join(&identity.basename);
+            let file = std::fs::File::open(&path).map_err(|error| {
+                format!("open compact mixed routed-expert cache {}: {error}", path.display())
+            })?;
+            let mmap = unsafe { memmap2::MmapOptions::new().map(&file) }
+                .map_err(|error| format!("map compact mixed routed-expert cache: {error}"))?;
+            let expected_bytes = usize::try_from(identity.bytes)
+                .map_err(|_| "compact mixed cache size exceeds usize".to_string())?;
+            if mmap.len() != expected_bytes
+                || mmap.len() < mixed_precision::MIXED_COMPACT_CACHE_HEADER_BYTES
+                || &mmap[..4] != mixed_precision::MIXED_COMPACT_CACHE_MAGIC
+                || u32::from_le_bytes(mmap[4..8].try_into().unwrap())
+                    != mixed_precision::MIXED_COMPACT_CACHE_VERSION
+                || u64::from_le_bytes(mmap[8..16].try_into().unwrap()) as usize
+                    != mixed_precision::MIXED_COMPACT_CACHE_HEADER_BYTES
+            {
+                return Err("compact mixed routed-expert cache header/size mismatch".to_string());
+            }
+            let payload_bytes = u64::from_le_bytes(mmap[16..24].try_into().unwrap());
+            let payload_sha = mmap[24..56]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let region_sha = mmap[56..88]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let checkpoint_header = mmap[88..120]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let header_sha = format!(
+                "{:x}",
+                Sha256::digest(&mmap[..mixed_precision::MIXED_COMPACT_CACHE_HEADER_BYTES])
+            );
+            let expected_payload = mmap
+                .len()
+                .checked_sub(mixed_precision::MIXED_COMPACT_CACHE_HEADER_BYTES)
+                .ok_or_else(|| "compact mixed cache payload underflow".to_string())?;
+            if payload_bytes != expected_payload as u64
+                || payload_sha != identity.payload_sha256
+                || region_sha != identity.region_map_sha256
+                || region_sha != mixed_precision::region_map_sha256(&manifest.regions)?
+                || checkpoint_header != checkpoint_sha256
+                || header_sha != identity.header_sha256
+                || verified_marlin_source_sha256(&path, &mmap, &identity.sha256)?
+                    != identity.sha256
+            {
+                return Err("compact mixed routed-expert cache identity mismatch".to_string());
+            }
+            let mut offsets = Vec::with_capacity(manifest.regions.len());
+            let mut offset = 0usize;
+            for region in &manifest.regions {
+                offsets.push(offset);
+                let bytes = if region.bits == 4 {
+                    geometry.int4_expert_bytes
+                } else {
+                    geometry.int8_expert_bytes
+                };
+                offset = offset
+                    .checked_add(bytes)
+                    .ok_or_else(|| "compact mixed cache region offset overflow".to_string())?;
+            }
+            if offset != expected_payload {
+                return Err(format!(
+                    "compact mixed cache payload geometry mismatch: {offset} != {expected_payload}"
+                ));
+            }
+            compact_offsets = Some(offsets);
+            compact_path = Some(path);
+            compact_mmap = Some(mmap);
+            compact_file = Some(file);
+        } else {
+            let identity4 = manifest.source_int4.as_ref().ok_or_else(|| {
+                "legacy mixed manifest omits INT4 source identity".to_string()
+            })?;
+            let identity8 = manifest.source_int8.as_ref().ok_or_else(|| {
+                "legacy mixed manifest omits INT8 source identity".to_string()
+            })?;
+            let path4 = int4_path.as_ref().ok_or_else(|| {
+                "legacy mixed manifest omits INT4 source path".to_string()
+            })?;
+            let path8 = int8_path.as_ref().ok_or_else(|| {
+                "legacy mixed manifest omits INT8 source path".to_string()
+            })?;
+            let file4 = std::fs::File::open(path4).map_err(|error| {
+                format!(
+                    "open mixed routed-expert INT4 source {}: {error}",
+                    path4.display()
+                )
+            })?;
+            let file8 = std::fs::File::open(path8).map_err(|error| {
+                format!(
+                    "open mixed routed-expert INT8 source {}: {error}",
+                    path8.display()
+                )
+            })?;
+            let mmap4 = unsafe { memmap2::MmapOptions::new().map(&file4) }
+                .map_err(|error| format!("map mixed routed-expert INT4 source: {error}"))?;
+            let mmap8 = unsafe { memmap2::MmapOptions::new().map(&file8) }
+                .map_err(|error| format!("map mixed routed-expert INT8 source: {error}"))?;
+            validate_source(path4, &mmap4, identity4, 4)?;
+            validate_source(path8, &mmap8, identity8, 8)?;
+            int4_mmap = Some(mmap4);
+            int8_mmap = Some(mmap8);
+            int4_file = Some(file4);
+            int8_file = Some(file8);
+        }
         let partition_regions = mixed_precision::regions_for_moe_partition(
             &manifest,
             start_moe_layer,
@@ -6380,23 +6583,40 @@ impl WeightStore {
                 let global_row = row_start
                     .checked_add(expert_idx)
                     .ok_or_else(|| "mixed routed-expert source row overflow".to_string())?;
-                let source_start = CACHE_HEADER_SIZE
-                    .checked_add(
-                        global_row
-                            .checked_mul(source_bytes)
+                let (source, source_start): (&[u8], usize) = if let (Some(mmap), Some(offsets)) =
+                    (compact_mmap.as_ref(), compact_offsets.as_ref())
+                {
+                    let payload_offset = offsets
+                        .get(global_row)
+                        .copied()
+                        .ok_or_else(|| "compact mixed source row is absent".to_string())?;
+                    (
+                        mmap,
+                        mixed_precision::MIXED_COMPACT_CACHE_HEADER_BYTES
+                            .checked_add(payload_offset)
                             .ok_or_else(|| {
-                                "mixed routed-expert source offset overflow".to_string()
+                                "compact mixed routed-expert source offset overflow".to_string()
                             })?,
                     )
-                    .ok_or_else(|| "mixed routed-expert source offset overflow".to_string())?;
+                } else {
+                    let mmap = if region.bits == 4 {
+                        int4_mmap.as_ref()
+                    } else {
+                        int8_mmap.as_ref()
+                    }
+                    .ok_or_else(|| {
+                        format!("mixed routed-expert INT{} source mapping is absent", region.bits)
+                    })?;
+                    let offset = CACHE_HEADER_SIZE
+                        .checked_add(global_row.checked_mul(source_bytes).ok_or_else(|| {
+                            "mixed routed-expert source offset overflow".to_string()
+                        })?)
+                        .ok_or_else(|| "mixed routed-expert source offset overflow".to_string())?;
+                    (mmap, offset)
+                };
                 let source_end = source_start
                     .checked_add(source_bytes)
                     .ok_or_else(|| "mixed routed-expert source range overflow".to_string())?;
-                let source = if region.bits == 4 {
-                    &int4_mmap
-                } else {
-                    &int8_mmap
-                };
                 if source_end > source.len() {
                     return Err(format!(
                         "mixed routed-expert L{}E{} source range exceeds INT{} cache",
@@ -6485,17 +6705,22 @@ impl WeightStore {
 
         #[cfg(unix)]
         {
-            let _ = unsafe {
-                int4_mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed)
-            };
-            let _ = unsafe {
-                int8_mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed)
-            };
+            if let Some(mmap) = int4_mmap.as_ref() {
+                let _ = unsafe { mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
+            }
+            if let Some(mmap) = int8_mmap.as_ref() {
+                let _ = unsafe { mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
+            }
+            if let Some(mmap) = compact_mmap.as_ref() {
+                let _ = unsafe { mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
+            }
         }
         drop(int4_mmap);
         drop(int8_mmap);
         drop(int4_file);
         drop(int8_file);
+        drop(compact_mmap);
+        drop(compact_file);
         log::info!(
             "Loaded mixed routed-expert cache in {:.1}s: layers [{}..{}), {} experts/layer, requested={} bp achieved_bytes={}",
             load_start.elapsed().as_secs_f64(),
@@ -6505,6 +6730,7 @@ impl WeightStore {
             manifest.budget.requested_basis_points,
             manifest.budget.achieved_added_bytes,
         );
+        let has_compact_cache = manifest.compact_cache.is_some();
 
         Ok(WeightStore {
             moe_layer_start: start_moe_layer,
@@ -6520,8 +6746,9 @@ impl WeightStore {
             mixed_gpu_cache_identity: Some(MixedGpuCacheIdentity {
                 manifest_path: manifest_path.to_path_buf(),
                 manifest_sha256: mixed_precision::sha256_hex(&canonical_manifest_bytes),
-                source_int4_path: int4_path,
-                source_int8_path: int8_path,
+                source_int4_path: (!has_compact_cache).then_some(int4_path).flatten(),
+                source_int8_path: (!has_compact_cache).then_some(int8_path).flatten(),
+                compact_cache_path: compact_path,
             }),
             tileq_layer_backings: Vec::new(),
             tileq_cache: None,
@@ -10757,6 +10984,15 @@ fn quantize_int4_expert_calibrated(
     proj_name: &str,
     calib_data: Option<&ExpertInt4CalibData>,
 ) -> QuantizedInt4 {
+    quantize_int4_expert_calibrated_impl(weight_bf16, rows, cols, group_size, mode, layer_idx, expert_idx, proj_name, calib_data, None, None)
+}
+
+fn quantize_int4_expert_calibrated_impl(
+    weight_bf16: &[u16], rows: usize, cols: usize, group_size: usize,
+    mode: ExpertInt4CalibMode, layer_idx: usize, expert_idx: usize, proj_name: &str,
+    calib_data: Option<&ExpertInt4CalibData>, explicit_moments: Option<&[f32]>,
+    mut factor_audit: Option<&mut Vec<u8>>,
+) -> QuantizedInt4 {
     if mode == ExpertInt4CalibMode::Amax {
         return quantize_int4(weight_bf16, rows, cols, group_size);
     }
@@ -10785,12 +11021,15 @@ fn quantize_int4_expert_calibrated(
         }
     }
 
-    for g in 0..num_groups_per_row {
-        let activation_moments = calib_data.and_then(|data| {
-            data.activation_moments_for(layer_idx, expert_idx, proj_name)
-        });
-        if let Some(moments) = activation_moments {
-            assert_eq!(moments.len(), cols);
+    let activation_moments = explicit_moments.or_else(|| calib_data.and_then(|data| {
+        data.activation_moments_for(layer_idx, expert_idx, proj_name)
+    }));
+    // Groups own disjoint scale columns. Preserve the original serial f32
+    // accumulation within each group while distributing groups across the
+    // existing Rayon pool. No calibration samples or search points are removed.
+    let moment_factors = activation_moments.map(|moments| {
+        assert_eq!(moments.len(), cols);
+        (0..num_groups_per_row).into_par_iter().map(|g| {
             let col_start = g * group_size;
             let col_end = (col_start + group_size).min(cols);
             let mut best_factor = EXPERT_INT4_RMSE_SCALE_FACTORS[0];
@@ -10818,10 +11057,19 @@ fn quantize_int4_expert_calibrated(
                     best_factor = factor;
                 }
             }
+            best_factor
+        }).collect::<Vec<f32>>()
+    });
+    for g in 0..num_groups_per_row {
+        if let Some(factors) = moment_factors.as_ref() {
+            let best_factor = factors[g];
             for row in 0..rows {
                 let best_scale =
                     (base_scales[row * num_groups_per_row + g] * best_factor).max(f32::EPSILON);
                 scales[row * num_groups_per_row + g] = f32_to_bf16(best_scale);
+            }
+            if let Some(audit) = factor_audit.as_mut() {
+                audit.push(EXPERT_INT4_RMSE_SCALE_FACTORS.iter().position(|factor| *factor == best_factor).unwrap() as u8);
             }
             continue;
         }
@@ -11588,6 +11836,63 @@ fn load_stacked_layer_experts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_mixed_search_rmse_load_uses_manifest_without_raw_calibration() {
+        assert!(std::env::var_os("KRASIS_EXPERT_INT4_CALIB_SAMPLES").is_none());
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("krasis-mixed-load-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), r#"{
+            "hidden_size":128,"moe_intermediate_size":128,"num_experts":8,
+            "num_experts_per_tok":2,"num_hidden_layers":2,"decoder_sparse_step":1
+        }"#).unwrap();
+        let manifest = dir.join("mixed.json");
+        let load = |bits, gpu_only, path| WeightStore::load_from_hf_with_mixed(
+            &dir, 128, None, None, 4, bits, 8,
+            ExpertInt4CalibMode::SearchRmse, gpu_only, path);
+        let error = load(4, true, Some(manifest.as_path())).err().unwrap();
+        assert!(error.contains("read mixed routed-expert precision manifest"), "{error}");
+        std::fs::write(&manifest, b"{}").unwrap();
+        let error = load(4, true, Some(manifest.as_path())).err().unwrap();
+        assert!(!error.contains("KRASIS_EXPERT_INT4_CALIB_SAMPLES"), "{error}");
+        assert!(load(8, true, Some(manifest.as_path())).err().unwrap().contains("INT4 baseline"));
+        assert!(load(4, false, Some(manifest.as_path())).err().unwrap().contains("GPU-only"));
+        // Uniform scale-search still requires the original calibration input.
+        assert!(load(4, true, None).err().unwrap().contains("KRASIS_EXPERT_INT4_CALIB_SAMPLES"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn offline_projection_uses_identical_materializer_scales_and_codes() {
+        let weights: Vec<u16> = (0..64).map(|index| f32_to_bf16(if index % 8 == 0 { 7.0 } else { index as f32 / 100.0 })).collect();
+        let moments: Vec<f32> = (0..16).map(|index| if index % 8 == 0 { 0.01 } else { 1.0 }).collect();
+        let data = ExpertInt4CalibData {
+            source_path: PathBuf::from("fixture.kic"),
+            source_hash: 0,
+            storage: ExpertInt4CalibStorage::ActivationMoments {
+                manifest: ExpertInt4CalibMomentManifest {
+                    schema_version: 1, format: "Krasis expert INT4 activation moments".into(),
+                    objective: "router_weight_squared_diagonal_activation_second_moment_v1".into(),
+                    hidden_size: 16, intermediate_size: 16, routed_experts: 1, topk: 1,
+                    routed_layers: 1, calibration_sha256: "00".repeat(32),
+                    capture_corpora_sha256: vec![], capture_artifact_sha256: vec![],
+                    payload_bytes: 128, payload_sha256: "00".repeat(32), layers: vec![],
+                },
+                moments: [moments.clone(), moments.clone()].concat(),
+                layer_offsets: [(0, (0, 16))].into_iter().collect(),
+            },
+        };
+        let reference = quantize_int4_expert_calibrated(&weights, 4, 16, 8,
+            ExpertInt4CalibMode::SearchRmse, 0, 0, "gate_proj", Some(&data));
+        let mut factors = Vec::new();
+        let offline = quantize_int4_expert_calibrated_impl(&weights, 4, 16, 8,
+            ExpertInt4CalibMode::SearchRmse, 0, 0, "gate_proj", None, Some(&moments), Some(&mut factors));
+        assert_eq!(offline.packed, reference.packed);
+        assert_eq!(offline.scales, reference.scales);
+        assert_eq!(factors.len(), 2);
+        assert!(factors.iter().all(|value| (*value as usize) < EXPERT_INT4_RMSE_SCALE_FACTORS.len()));
+    }
     use std::collections::HashMap;
 
     #[test]

@@ -54,6 +54,7 @@ HEADER_BYTES = 64
 PAYLOAD_OFFSET = 4 * 1024 * 1024
 CAPTURE_MAGIC = b"KTC1"
 CAPTURE_VERSION = 2
+CAPTURE_REQUEST_VERSION = 1
 INT4_CALIB_MAGIC = b"KIC1"
 INT4_CALIB_VERSION = 1
 INT4_CALIB_PAYLOAD_OFFSET = 4 * 1024 * 1024
@@ -99,6 +100,50 @@ def sha256_file(path: Path, chunk_bytes: int = 64 * 1024 * 1024) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def tileq_transaction_request_sha256(
+    calibration_sha256: str,
+    token_ids: list[int],
+    *,
+    sequence_start: int,
+) -> str:
+    """Reproduce the Rust transactional-capture request identity exactly."""
+    if not re.fullmatch(r"[0-9a-f]{64}", calibration_sha256):
+        raise RuntimeError("transaction calibration SHA-256 is invalid")
+    if sequence_start < 0 or sequence_start > 0xFFFFFFFFFFFFFFFF:
+        raise RuntimeError("transaction sequence_start is outside u64")
+    digest = hashlib.sha256()
+    digest.update(b"Krasis KTC1 transactional request v1\0")
+    digest.update(calibration_sha256.encode("ascii"))
+    digest.update(struct.pack("<Q", sequence_start))
+    digest.update(struct.pack("<Q", len(token_ids)))
+    for token in token_ids:
+        if not isinstance(token, int) or token < 0 or token > 0xFFFFFFFF:
+            raise RuntimeError("transaction token ID is outside u32")
+        digest.update(struct.pack("<I", token))
+    return digest.hexdigest()
+
+
+def post_json(url: str, payload: dict, timeout: float) -> dict:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read()
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(f"request failed for {url}: {exc}") from exc
+    try:
+        result = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"response from {url} is not JSON: {exc}") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError(f"response from {url} is not a JSON object")
+    return result
 
 
 def stable_sha256_file(path: Path) -> tuple[str, os.stat_result]:
@@ -412,6 +457,135 @@ def capture_metadata(capture_dir: Path) -> dict:
     if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
         raise RuntimeError(f"capture metadata {capture_dir / 'capture.json'} has invalid corpus hash")
     return metadata
+
+
+def capture_layer_row_count(path: Path) -> tuple[int, tuple[int, int, int, int, int]]:
+    raw = np.memmap(path, mode="r", dtype=np.uint8)
+    if raw.size < 32:
+        raise RuntimeError(f"capture {path} is truncated")
+    magic, version, layer, input_size, intermediate, topk, experts, reserved = struct.unpack_from(
+        "<4s7I", raw, 0
+    )
+    if magic != CAPTURE_MAGIC or version != CAPTURE_VERSION or reserved != 0:
+        raise RuntimeError(f"capture {path} has invalid header")
+    offset = 32
+    rows_total = 0
+    while offset < raw.size:
+        if offset + 4 > raw.size:
+            raise RuntimeError(f"capture {path} has truncated chunk row count")
+        rows = struct.unpack_from("<I", raw, offset)[0]
+        offset += 4
+        if rows == 0:
+            raise RuntimeError(f"capture {path} contains an empty chunk")
+        payload = (
+            rows * input_size * 2
+            + rows * topk * 4
+            + rows * topk * 4
+            + rows * topk * intermediate * 2
+        )
+        offset += payload
+        if offset > raw.size:
+            raise RuntimeError(f"capture {path} has a truncated chunk payload")
+        rows_total += rows
+    if offset != raw.size or rows_total == 0:
+        raise RuntimeError(f"capture {path} has invalid terminal length or no rows")
+    return rows_total, (layer, input_size, intermediate, topk, experts)
+
+
+def capture_inventory(capture_dir: Path) -> tuple[dict[str, list[Path]], list[Path]]:
+    """Return only fully published KTC1 layers and their identity files."""
+    metadata = capture_metadata(capture_dir)
+    if metadata.get("transactional_request_shards") is not True:
+        layers = sorted(capture_dir.glob("layer_*.ktc"))
+        return ({path.name: [path] for path in layers}, [capture_dir / "capture.json", *layers])
+    if metadata.get("request_manifest_version") != CAPTURE_REQUEST_VERSION:
+        raise RuntimeError(f"capture {capture_dir} has an unsupported request manifest version")
+    requests_dir = capture_dir / "requests"
+    if not requests_dir.is_dir():
+        raise RuntimeError(f"transactional capture has no requests directory: {requests_dir}")
+    groups: dict[str, list[Path]] = {}
+    identity_files = [capture_dir / "capture.json"]
+    accepted_hashes: set[str] = set()
+    accepted_rows: dict[str, int] = {}
+    routed_names = {
+        f"layer_{int(layer['model_layer']):05}.ktc"
+        for layer in metadata.get("routed_layers", [])
+    }
+    if not routed_names:
+        raise RuntimeError(f"transactional capture has no routed layer inventory: {capture_dir}")
+    for request_dir in sorted(requests_dir.iterdir(), key=lambda path: path.name):
+        if request_dir.name.startswith(".request-") and request_dir.name.endswith(".tmp"):
+            print(f"[capture] rejecting incomplete transaction {request_dir}", file=sys.stderr)
+            continue
+        if not request_dir.is_dir() or not request_dir.name.startswith("request-"):
+            raise RuntimeError(f"unrecognized transactional capture artifact: {request_dir}")
+        manifest_path = request_dir / "request.json"
+        manifest_raw = manifest_path.read_bytes()
+        manifest = json.loads(manifest_raw)
+        required = {
+            "schema_version", "format", "calibration_sha256", "request_sha256",
+            "sequence_start", "prompt_tokens", "rows_per_layer", "layers",
+        }
+        if set(manifest) != required:
+            raise RuntimeError(f"request manifest has unknown/missing fields: {manifest_path}")
+        request_hash = manifest.get("request_sha256")
+        rows = manifest.get("rows_per_layer")
+        if (
+            manifest.get("schema_version") != CAPTURE_REQUEST_VERSION
+            or manifest.get("format") != "Krasis KTC1 transactional request"
+            or manifest.get("calibration_sha256", "").lower()
+            != metadata["calibration_sha256"].lower()
+            or not isinstance(request_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", request_hash)
+            or request_hash in accepted_hashes
+            or not isinstance(rows, int)
+            or rows <= 0
+        ):
+            raise RuntimeError(f"request manifest identity is invalid: {manifest_path}")
+        accepted_hashes.add(request_hash)
+        layer_rows = manifest.get("layers")
+        if not isinstance(layer_rows, list) or len(layer_rows) != len(routed_names):
+            raise RuntimeError(f"request manifest layer inventory is invalid: {manifest_path}")
+        expected_files = {"request.json"}
+        seen_layers: set[str] = set()
+        for layer in layer_rows:
+            required_layer = {
+                "model_layer", "file", "bytes", "sha256", "rows",
+                "expert_input_size", "intermediate_size", "topk", "expert_count",
+            }
+            if not isinstance(layer, dict) or set(layer) != required_layer:
+                raise RuntimeError(f"request layer manifest is invalid: {manifest_path}")
+            name = layer["file"]
+            path = request_dir / name
+            if (
+                name not in routed_names
+                or name in seen_layers
+                or layer["rows"] != rows
+                or path.stat().st_size != layer["bytes"]
+                or sha256_file(path) != layer["sha256"]
+            ):
+                raise RuntimeError(f"request layer identity mismatch: {path}")
+            actual_rows, geometry = capture_layer_row_count(path)
+            expected_geometry = (
+                layer["model_layer"], layer["expert_input_size"],
+                layer["intermediate_size"], layer["topk"], layer["expert_count"],
+            )
+            if actual_rows != rows or geometry != expected_geometry:
+                raise RuntimeError(f"request layer geometry/row mismatch: {path}")
+            seen_layers.add(name)
+            expected_files.add(name)
+            groups.setdefault(name, []).append(path)
+            accepted_rows[name] = accepted_rows.get(name, 0) + rows
+            identity_files.append(path)
+        actual_files = {path.name for path in request_dir.iterdir()}
+        if actual_files != expected_files:
+            raise RuntimeError(f"request directory contains unrecognized files: {request_dir}")
+        identity_files.append(manifest_path)
+    if groups and set(groups) != routed_names:
+        raise RuntimeError(f"transactional capture layer coverage is incomplete: {capture_dir}")
+    if len(set(accepted_rows.values())) > 1:
+        raise RuntimeError(f"transactional capture has nonuniform routed-layer rows: {accepted_rows}")
+    return groups, identity_files
 
 
 def bf16_bytes(tensor: torch.Tensor) -> bytes:
@@ -1321,23 +1495,91 @@ def publish_manifest(fd: int, manifest: dict) -> None:
 
 
 def command_inspect_capture(args: argparse.Namespace) -> None:
+    report_path = args.coverage_report
+    if (report_path is None) != (args.minimum_routes is None):
+        raise RuntimeError("provide both --coverage-report and --minimum-routes")
+    if args.minimum_routes is not None and args.minimum_routes < 1:
+        raise RuntimeError("--minimum-routes must be positive")
+    if report_path is not None and report_path.exists():
+        raise RuntimeError(f"refusing to overwrite coverage report: {report_path}")
     capture_dirs = [args.capture_dir.resolve(), *[path.resolve() for path in args.extra]]
+    if len(set(capture_dirs)) != len(capture_dirs):
+        raise RuntimeError("capture directories must be unique")
     metadata = [capture_metadata(capture_dir) for capture_dir in capture_dirs]
+    inventories = [capture_inventory(capture_dir)[0] for capture_dir in capture_dirs]
     print(json.dumps({"captures": metadata}, indent=2, sort_keys=True))
-    for path in sorted(capture_dirs[0].glob("layer_*.ktc")):
-        layer = combine_capture_layers(
-            [read_capture_layer(capture_dir / path.name) for capture_dir in capture_dirs]
-        )
+    layer_names = sorted(inventories[0])
+    if any(sorted(inventory) != layer_names for inventory in inventories[1:]):
+        raise RuntimeError("capture layer inventories differ")
+    coverage_layers = []
+    for layer_name in layer_names:
+        corpus_parts = [
+            [
+                read_capture_layer(path)
+                for path in inventory[layer_name]
+            ] for inventory in inventories
+        ]
+        layer = combine_capture_layers([part for parts in corpus_parts for part in parts])
         counts = torch.bincount(layer.topk_ids.reshape(-1), minlength=layer.expert_count)
         routed = counts[counts > 0]
         missing = torch.nonzero(counts == 0).flatten().tolist()
         print(
-            f"{path.name}: tokens={layer.expert_inputs.shape[0]} input={layer.expert_input_size} "
+            f"{layer_name}: tokens={layer.expert_inputs.shape[0]} input={layer.expert_input_size} "
             f"topk={layer.topk} intermediate={layer.intermediate_size} experts={layer.expert_count} "
             f"route_zero={len(missing)} route_missing={missing} "
             f"route_nonzero_min={int(routed.min()) if routed.numel() else 0} "
             f"route_max={int(counts.max())}"
         )
+        if report_path is not None:
+            per_corpus = [
+                sum((torch.bincount(part.topk_ids.reshape(-1), minlength=layer.expert_count)
+                     for part in parts), torch.zeros(layer.expert_count, dtype=torch.int64))
+                for parts in corpus_parts
+            ]
+            coverage_layers.append({
+                "model_layer": layer.model_layer,
+                "rows": int(layer.expert_inputs.shape[0]),
+                "route_counts": counts.tolist(),
+                "below_minimum_experts": torch.nonzero(
+                    counts < args.minimum_routes
+                ).flatten().tolist(),
+                "corpora": [{
+                    "capture_dir": str(path),
+                    "calibration_sha256": meta["calibration_sha256"],
+                    "route_counts": corpus_counts.tolist(),
+                    "unobserved_experts": torch.nonzero(
+                        corpus_counts == 0
+                    ).flatten().tolist(),
+                } for path, meta, corpus_counts in zip(capture_dirs, metadata, per_corpus)],
+            })
+        del layer, corpus_parts
+    if report_path is not None:
+        if not coverage_layers:
+            raise RuntimeError("cannot publish an empty coverage report")
+        report = {
+            "format": "Krasis measured routed-expert coverage",
+            "schema_version": 1,
+            "minimum_routes_per_expert": args.minimum_routes,
+            "layers": coverage_layers,
+            "aggregate_route_gate_pass": all(
+                not item["below_minimum_experts"] for item in coverage_layers
+            ),
+            "per_corpus_gate_pass": all(
+                not corpus["unobserved_experts"]
+                for item in coverage_layers for corpus in item["corpora"]
+            ),
+        }
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = report_path.with_name(f"{report_path.name}.{os.getpid()}.tmp")
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(report, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Publish only the complete report, without overwriting another writer.
+        os.link(temporary, report_path)
+        temporary.unlink()
+        print(f"coverage_report={report_path}", flush=True)
 
 
 def unique_tensor_name(weight_map: dict, suffix: str, *, required: bool) -> str | None:
@@ -1602,19 +1844,19 @@ def command_export_int4_calibration(args: argparse.Namespace) -> None:
     corpus_hashes = [item["calibration_sha256"].lower() for item in metadata]
     if len(set(corpus_hashes)) != len(corpus_hashes):
         raise RuntimeError("INT4 calibration captures must come from distinct corpus bindings")
-    layer_names = sorted(path.name for path in capture_dirs[0].glob("layer_*.ktc"))
+    inventories = [capture_inventory(path) for path in capture_dirs]
+    layer_names = sorted(inventories[0][0])
     if not layer_names:
         raise RuntimeError(f"capture {capture_dirs[0]} contains no KTC1 layer files")
-    for capture_dir in capture_dirs[1:]:
-        current = sorted(path.name for path in capture_dir.glob("layer_*.ktc"))
+    for capture_dir, (inventory, _) in zip(capture_dirs[1:], inventories[1:]):
+        current = sorted(inventory)
         if current != layer_names:
             raise RuntimeError(
                 f"capture layer inventory mismatch between {capture_dirs[0]} and {capture_dir}"
             )
 
     artifact_hashes = []
-    for capture_dir in capture_dirs:
-        files = [capture_dir / "capture.json", *sorted(capture_dir.glob("layer_*.ktc"))]
+    for _, files in inventories:
         artifact_hashes.append(combined_sha256(files))
 
     output = args.output.resolve()
@@ -1640,7 +1882,11 @@ def command_export_int4_calibration(args: argparse.Namespace) -> None:
         handle.truncate(INT4_CALIB_PAYLOAD_OFFSET)
         for sequence, layer_name in enumerate(layer_names):
             capture = combine_capture_layers(
-                [read_capture_layer(path / layer_name) for path in capture_dirs]
+                [
+                    read_capture_layer(path)
+                    for inventory, _ in inventories
+                    for path in inventory[layer_name]
+                ]
             )
             current_geometry = (
                 capture.expert_input_size,
@@ -2066,7 +2312,33 @@ def command_capture_corpus(args: argparse.Namespace) -> None:
     entries = manifest.get("entries")
     if not isinstance(entries, list) or not entries:
         raise RuntimeError("corpus manifest has no entries")
-    endpoint = args.base_url.rstrip("/") + "/v1/chat/completions"
+    base_url = args.base_url.rstrip("/")
+    endpoint = base_url + "/v1/chat/completions"
+    accepted_hashes: set[str] = set()
+    calibration_sha256: str | None = None
+    if args.resume_capture_dir is not None:
+        resume_dir = args.resume_capture_dir.resolve()
+        metadata = capture_metadata(resume_dir)
+        if metadata.get("transactional_request_shards") is not True:
+            raise RuntimeError(
+                "capture-corpus resume requires transactional request shards"
+            )
+        calibration_sha256 = str(metadata["calibration_sha256"]).lower()
+        if calibration_sha256 != actual_digest:
+            raise RuntimeError(
+                "resume capture corpus identity mismatch: "
+                f"capture={calibration_sha256} corpus={actual_digest}"
+            )
+        # This is deliberately expensive: capture_inventory re-hashes and
+        # structurally validates every published layer shard.  A request hash
+        # becomes resumable only after that complete fail-closed verification.
+        capture_inventory(resume_dir)
+        requests_dir = resume_dir / "requests"
+        for request_dir in sorted(requests_dir.iterdir(), key=lambda path: path.name):
+            if request_dir.name.startswith(".request-") and request_dir.name.endswith(".tmp"):
+                continue
+            request_manifest = load_json(request_dir / "request.json")
+            accepted_hashes.add(str(request_manifest["request_sha256"]).lower())
     for expected_index, entry in enumerate(entries):
         if entry.get("index") != expected_index:
             raise RuntimeError(
@@ -2082,15 +2354,63 @@ def command_capture_corpus(args: argparse.Namespace) -> None:
         if hashlib.sha256(prompt_bytes).hexdigest() != entry["slice_sha256"]:
             raise RuntimeError(f"corpus slice SHA-256 mismatch: {prompt_path}")
         prompt = prompt_bytes.decode("utf-8")
-        body = json.dumps(
-            {
-                "model": args.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 1,
-                "temperature": 0,
-                "stream": False,
-            }
-        ).encode("utf-8")
+        request_payload = {
+            "model": args.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1,
+            "temperature": 0,
+            "stream": False,
+        }
+        request_hash = None
+        if calibration_sha256 is not None:
+            rendered = post_json(
+                base_url + "/apply-template",
+                {
+                    "messages": request_payload["messages"],
+                    "add_generation_prompt": True,
+                },
+                args.timeout,
+            )
+            rendered_prompt = rendered.get("prompt")
+            if not isinstance(rendered_prompt, str):
+                raise RuntimeError(
+                    f"template response omits prompt for corpus entry {expected_index}"
+                )
+            tokenized = post_json(
+                base_url + "/tokenize",
+                {"content": rendered_prompt, "add_special": False},
+                args.timeout,
+            )
+            token_ids = tokenized.get("tokens")
+            if (
+                not isinstance(token_ids, list)
+                or not token_ids
+                or any(not isinstance(token, int) or token < 0 or token > 0xFFFFFFFF for token in token_ids)
+            ):
+                raise RuntimeError(
+                    f"tokenize response is invalid for corpus entry {expected_index}"
+                )
+            request_hash = tileq_transaction_request_sha256(
+                calibration_sha256,
+                token_ids,
+                sequence_start=0,
+            )
+            if request_hash in accepted_hashes:
+                print(
+                    json.dumps(
+                        {
+                            "index": expected_index,
+                            "file": entry["file"],
+                            "slice_sha256": entry["slice_sha256"],
+                            "request_sha256": request_hash,
+                            "status": "verified-resume-skip",
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                continue
+        body = json.dumps(request_payload).encode("utf-8")
         request = urllib.request.Request(
             endpoint,
             data=body,
@@ -2115,6 +2435,7 @@ def command_capture_corpus(args: argparse.Namespace) -> None:
                     "index": expected_index,
                     "file": entry["file"],
                     "slice_sha256": entry["slice_sha256"],
+                    "request_sha256": request_hash,
                     "usage": usage,
                     "response_id": result.get("id"),
                 },
@@ -2485,6 +2806,8 @@ def command_build(args: argparse.Namespace) -> None:
     ]
     calibration_metas = [capture_metadata(path) for path in calibration_dirs]
     heldout_metas = [capture_metadata(path) for path in heldout_dirs]
+    calibration_inventories = [capture_inventory(path)[0] for path in calibration_dirs]
+    heldout_inventories = [capture_inventory(path)[0] for path in heldout_dirs]
     calibration_hashes = [meta["calibration_sha256"].lower() for meta in calibration_metas]
     heldout_hashes = [meta["calibration_sha256"].lower() for meta in heldout_metas]
     if set(calibration_hashes) & set(heldout_hashes):
@@ -2597,10 +2920,18 @@ def command_build(args: argparse.Namespace) -> None:
         for sequence, model_layer in enumerate(selected_layers):
             layer_name = f"layer_{model_layer:05}.ktc"
             calibration = combine_capture_layers(
-                [read_capture_layer(path / layer_name) for path in calibration_dirs]
+                [
+                    read_capture_layer(path)
+                    for inventory in calibration_inventories
+                    for path in inventory[layer_name]
+                ]
             )
             heldout = combine_capture_layers(
-                [read_capture_layer(path / layer_name) for path in heldout_dirs]
+                [
+                    read_capture_layer(path)
+                    for inventory in heldout_inventories
+                    for path in inventory[layer_name]
+                ]
             )
             for capture, label in ((calibration, "calibration"), (heldout, "heldout")):
                 if (
@@ -2930,23 +3261,17 @@ def command_build_mixed_expert_manifests(args: argparse.Namespace) -> None:
             "provide exactly one --corpus-manifest for every calibration capture directory"
         )
     capture_metas = [capture_metadata(path) for path in capture_dirs]
+    capture_inventories = [capture_inventory(path) for path in capture_dirs]
     corpus_hashes = [meta["calibration_sha256"].lower() for meta in capture_metas]
     if len(set(corpus_hashes)) != len(corpus_hashes):
         raise RuntimeError(
             "mixed-expert calibration captures must use distinct corpus identities"
         )
-    capture_files = [
-        file
-        for path in capture_dirs
-        for file in [path / "capture.json", *sorted(path.glob("layer_*.ktc"))]
-    ]
+    capture_files = [file for _, files in capture_inventories for file in files]
     capture_stats = {
         file: (file.stat().st_size, file.stat().st_mtime_ns) for file in capture_files
     }
-    capture_hashes = [
-        combined_sha256([path / "capture.json", *sorted(path.glob("layer_*.ktc"))])
-        for path in capture_dirs
-    ]
+    capture_hashes = [combined_sha256(files) for _, files in capture_inventories]
     calibration_input_hashes: set[str] = set()
     corpus_manifest_hashes: list[str] = []
     for expected_corpus_hash, manifest_path in zip(corpus_hashes, corpus_manifests):
@@ -2991,11 +3316,11 @@ def command_build_mixed_expert_manifests(args: argparse.Namespace) -> None:
     source4_sha, source4_stat = stable_sha256_file(cache4_path)
     source8_sha, source8_stat = stable_sha256_file(cache8_path)
 
-    layer_names = sorted(path.name for path in capture_dirs[0].glob("layer_*.ktc"))
+    layer_names = sorted(capture_inventories[0][0])
     if len(layer_names) != int(header4["layers"]):
         raise RuntimeError("mixed-expert captures do not cover every routed layer")
-    for capture_dir in capture_dirs[1:]:
-        if sorted(path.name for path in capture_dir.glob("layer_*.ktc")) != layer_names:
+    for inventory, _ in capture_inventories[1:]:
+        if sorted(inventory) != layer_names:
             raise RuntimeError("mixed-expert capture layer inventories differ")
 
     config_path = model_dir / "config.json"
@@ -3006,7 +3331,7 @@ def command_build_mixed_expert_manifests(args: argparse.Namespace) -> None:
     if not isinstance(config, dict):
         raise RuntimeError("model text_config is not an object")
     experts_gated = str(config.get("mlp_hidden_act", "")).lower() != "relu2"
-    first_capture = read_capture_layer(capture_dirs[0] / layer_names[0])
+    first_capture = read_capture_layer(capture_inventories[0][0][layer_names[0]][0])
     routed_hidden = first_capture.expert_input_size
     intermediate = first_capture.intermediate_size
     experts = first_capture.expert_count
@@ -3068,7 +3393,11 @@ def command_build_mixed_expert_manifests(args: argparse.Namespace) -> None:
     started = time.monotonic()
     for moe_layer, layer_name in enumerate(layer_names):
         capture = combine_capture_layers(
-            [read_capture_layer(path / layer_name) for path in capture_dirs]
+            [
+                read_capture_layer(path)
+                for inventory, _ in capture_inventories
+                for path in inventory[layer_name]
+            ]
         )
         input_moments, down_moments, _route_counts = routed_activation_second_moments(
             capture, device
@@ -3601,6 +3930,8 @@ def parser() -> argparse.ArgumentParser:
     inspect = sub.add_parser("inspect-capture", help="validate and summarize KTC1 capture files")
     inspect.add_argument("capture_dir", type=Path)
     inspect.add_argument("--extra", action="append", default=[], type=Path)
+    inspect.add_argument("--coverage-report", type=Path)
+    inspect.add_argument("--minimum-routes", type=int)
     inspect.set_defaults(func=command_inspect_capture)
 
     inspect_rank = sub.add_parser(
@@ -3677,6 +4008,14 @@ def parser() -> argparse.ArgumentParser:
         help="Exact model identifier exposed by the calibration server",
     )
     capture.add_argument("--timeout", type=float, default=1800.0)
+    capture.add_argument(
+        "--resume-capture-dir",
+        type=Path,
+        help=(
+            "fully verify transactional request shards and skip only corpus "
+            "entries whose rendered token identity is already published"
+        ),
+    )
     capture.set_defaults(func=command_capture_corpus)
 
     capture_multimodal = sub.add_parser(

@@ -482,6 +482,18 @@ def compile_kernel(spec: dict, h_value: int | None, arch: int):
     with offline_compile_driver():
         mod_path, kernel_name = spec["import"]
         jit_fn = import_kernel(mod_path, kernel_name)
+        # BEGIN isolated diagnostic anchor source
+        original_jit_source = jit_fn.src
+        if spec.get("_diagnostic_intra") and spec["_diagnostic_anchor"] != "native":
+            from triton.runtime.jit import JITFunction
+            original = jit_fn
+            jit_fn = JITFunction(original.fn, version=original.version,
+                                 do_not_specialize=original.do_not_specialize,
+                                 do_not_specialize_on_alignment=original.do_not_specialize_on_alignment,
+                                 debug=original.debug, noinline=original.noinline)
+            jit_fn._unsafe_update_src(diagnostic_anchor_source(
+                original_jit_source, spec["_diagnostic_anchor"], spec["_diagnostic_gate_lower_bound"]))
+        # END isolated diagnostic anchor source
 
         # Build constexprs with H filled in
         constexprs = dict(spec["constexprs"])
@@ -506,7 +518,15 @@ def compile_kernel(spec: dict, h_value: int | None, arch: int):
             )
 
         src = ASTSource(**ast_kwargs)
-        compiled = triton.compile(src, target=target, options=spec["options"])
+        # BEGIN isolated diagnostic precision scope
+        if spec.get("_diagnostic_intra"):
+            from triton import knobs
+            with knobs.language.scope():
+                knobs.language.fp32_default = spec["options"]["default_dot_input_precision"]
+                compiled = triton.compile(src, target=target, options=spec["options"])
+        else:
+            compiled = triton.compile(src, target=target, options=spec["options"])
+        # END isolated diagnostic precision scope
 
     # Extract runtime args from TTIR
     args = extract_kernel_args_from_compiled(compiled)
@@ -518,7 +538,7 @@ def compile_kernel(spec: dict, h_value: int | None, arch: int):
     else:
         safe_name = base
 
-    return {
+    result = {
         "name": spec["name"],
         "safe_name": safe_name,
         "cubin": compiled.asm['cubin'],
@@ -530,6 +550,36 @@ def compile_kernel(spec: dict, h_value: int | None, arch: int):
         "args": args,
         "h_tag": h_value if spec["h_dependent"] else None,
     }
+    # BEGIN isolated diagnostic compilation metadata
+    if spec.get("_diagnostic_intra"):
+        result["diagnostic_ptx"] = compiled.asm["ptx"]
+        result["diagnostic_ttir"] = compiled.asm["ttir"]
+        requested = spec["options"]["default_dot_input_precision"]
+        actual = diagnostic_dot_precisions(result["diagnostic_ttir"], requested)
+        result["meta"]["requested_dot_input_precision"] = requested
+        result["meta"]["effective_dot_input_precisions"] = actual
+        result["meta"]["triton_version"] = triton.__version__
+        result["meta"]["jit_source_file"] = inspect.getsourcefile(jit_fn.fn)
+        result["meta"]["jit_source_sha256"] = hashlib.sha256(jit_fn.src.encode()).hexdigest()
+        result["meta"]["original_jit_source_sha256"] = hashlib.sha256(original_jit_source.encode()).hexdigest()
+        result["meta"]["rescaling_anchor"] = spec["_diagnostic_anchor"]
+        result["meta"]["configured_gate_lower_bound"] = spec["_diagnostic_gate_lower_bound"]
+        result["meta"]["compiled_constants"] = constexprs
+        result["meta"]["compiled_signature"] = spec["signature"]
+        entry = re.search(r"\.entry\s+" + re.escape(compiled.metadata.name) + r"\s*\((.*?)\)", compiled.asm["ptx"], re.S)
+        if entry is None:
+            raise RuntimeError("diagnostic PTX entry ABI missing")
+        driver_types = re.findall(r"\.param\s+\.(u64|f32|u32)\b", entry.group(1))
+        expected_types = [{"CUdeviceptr": "u64", "float": "f32", "int32_t": "u32"}[kind] for _, kind in args] + ["u64", "u64"]
+        if driver_types != expected_types:
+            raise RuntimeError("diagnostic emitted CUDA driver ABI differs from runtime arguments plus scratch pointers")
+        if compiled.metadata.global_scratch_size != 0 or compiled.metadata.profile_scratch_size != 0:
+            raise RuntimeError("diagnostic intra requires unsupported nonzero scratch allocation")
+        result["meta"]["driver_parameter_types"] = driver_types
+        result["meta"]["global_scratch_size"] = compiled.metadata.global_scratch_size
+        result["meta"]["profile_scratch_size"] = compiled.metadata.profile_scratch_size
+    return result
+    # END isolated diagnostic compilation metadata
 
 
 def generated_export_symbols(kernels: list[dict]) -> list[str]:
@@ -689,6 +739,88 @@ def generate_c_wrapper(
     print(f"  Generated {output_path} ({len(lines)} lines)")
 
 
+# BEGIN isolated diagnostic build admission
+def diagnostic_anchor_source(source, anchor="first", lower_bound=None):
+    """Copy-only causal rescaling experiment; the imported native JIT is intact."""
+    import math
+    if anchor not in ("first", "causal-center"):
+        raise ValueError("unsupported causal diagnostic anchor")
+    if anchor == "causal-center":
+        if lower_bound is None or not math.isfinite(lower_bound) or lower_bound >= 0:
+            raise ValueError("causal-center requires a finite negative configured gate bound")
+    elif lower_bound is not None:
+        raise ValueError("configured gate bound applies only to causal-center")
+    expressions = ["min(BC//2, T - i_ti - 1)", "min(BC // 2, T - i_ti - 1)"]
+    for expression in expressions:
+        if source.count(expression) != 1:
+            raise ValueError("unrecognized native KDA rescaling source")
+        source = source.replace(expression, "0")
+    if anchor == "causal-center":
+        expression = "    b_gm = (b_g - b_gn).to(tl.float32)"
+        if source.count(expression) != 1:
+            raise ValueError("unrecognized native KDA rescaling arithmetic")
+        # Diagnostic specialization of an explicitly supplied model parameter,
+        # never a measured hardware constant or a production model assumption.
+        shift = f"(0.5 * (BC - 1) * {lower_bound!r} * {math.log2(math.e)!r})"
+        source = source.replace(expression, f"    b_gn = b_gn + {shift}\n" + expression)
+    return source
+
+
+def diagnostic_dot_precisions(ttir, requested):
+    """Admit the emitted IR, never infer arithmetic from a requested label."""
+    dots = [line for line in ttir.splitlines() if re.search(r"\btt\.dot\b", line)]
+    precisions = []
+    for line in dots:
+        match = re.search(r"inputPrecision\s*=\s*(\w+)", line)
+        # TT_DotOp defines IEEE as its DefaultValuedAttr. Its custom
+        # assembly omits inputPrecision only for that enum value; this is
+        # the IR contract, not a substitute for missing measurement.
+        precisions.append(match.group(1) if match is not None else "ieee")
+    if not precisions or set(precisions) != {requested}:
+        raise RuntimeError(f"diagnostic precision mismatch: requested={requested}, emitted={precisions}")
+    return precisions
+
+
+def diagnostic_build_selection(args):
+    """Keep production builds whole; admit explicitly separate intra artifacts."""
+    import math
+    if not args.diagnostic_intra:
+        if args.diagnostic_heads is not None or args.diagnostic_dot_precision is not None or args.diagnostic_anchor != "native" or args.diagnostic_gate_lower_bound is not None:
+            raise ValueError("diagnostic heads/precision require --diagnostic-intra")
+        return KERNEL_SPECS, H_VALUES, "krasis_fla"
+    if not args.arch or any(arch not in TARGET_ARCHS for arch in args.arch):
+        raise ValueError("diagnostic builds require explicit supported architectures")
+    if not args.diagnostic_heads or any(head not in H_VALUES for head in args.diagnostic_heads):
+        raise ValueError("diagnostic builds require explicit supported head counts")
+    if len(set(args.arch)) != len(args.arch) or len(set(args.diagnostic_heads)) != len(args.diagnostic_heads):
+        raise ValueError("duplicate diagnostic architectures/head counts")
+    if args.diagnostic_dot_precision not in ("tf32", "tf32x3", "ieee"):
+        raise ValueError("diagnostic builds require an explicit dot precision")
+    output = Path(args.output_dir)
+    package = (REPO_ROOT / "python" / "krasis").resolve()
+    if not output.is_absolute() or output.exists() or output.resolve().is_relative_to(package):
+        raise ValueError("diagnostic output must be fresh, absolute and outside the package")
+    selected = [spec for spec in KERNEL_SPECS if spec["name"] == "chunk_kda_fwd_kernel_intra_sub_chunk"]
+    if len(selected) != 1:
+        raise ValueError("expected exactly one native KDA intra specification")
+    spec = dict(selected[0])
+    spec["options"] = dict(spec["options"], default_dot_input_precision=args.diagnostic_dot_precision)
+    spec["_diagnostic_intra"] = True
+    if args.diagnostic_anchor not in ("native", "first", "causal-center"):
+        raise ValueError("unsupported diagnostic rescaling anchor")
+    bound = args.diagnostic_gate_lower_bound
+    if args.diagnostic_anchor == "causal-center":
+        if bound is None or not math.isfinite(bound) or bound >= 0:
+            raise ValueError("causal-center requires a finite negative configured gate bound")
+    elif bound is not None:
+        raise ValueError("configured gate bound applies only to causal-center")
+    spec["_diagnostic_anchor"] = args.diagnostic_anchor
+    spec["_diagnostic_gate_lower_bound"] = bound
+    suffix = "" if args.diagnostic_anchor == "native" else "_" + args.diagnostic_anchor.replace("-", "_")
+    return [spec], list(args.diagnostic_heads), f"krasis_kda_intra_{args.diagnostic_dot_precision}{suffix}"
+# END isolated diagnostic build admission
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Cross-compile FLA Triton kernels for multiple GPU architectures")
@@ -706,7 +838,15 @@ def main():
             "portable CUDA wrapper sources for native NVCC/MSVC linking."
         ),
     )
+    # BEGIN isolated diagnostic compiler arguments
+    parser.add_argument("--diagnostic-intra", action="store_true")
+    parser.add_argument("--diagnostic-heads", type=int, nargs="+")
+    parser.add_argument("--diagnostic-dot-precision", choices=("tf32", "tf32x3", "ieee"))
+    parser.add_argument("--diagnostic-anchor", choices=("native", "first", "causal-center"), default="native")
+    parser.add_argument("--diagnostic-gate-lower-bound", type=float)
+    # END isolated diagnostic compiler arguments
     args = parser.parse_args()
+    kernel_specs, h_values, artifact_prefix = diagnostic_build_selection(args)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -743,10 +883,10 @@ def main():
     archs = filtered_archs
 
     print(f"Target architectures: {['sm_' + str(a) for a in archs]}")
-    print(f"H values: {H_VALUES}")
-    print(f"Kernels: {len(KERNEL_SPECS)}")
+    print(f"H values: {h_values}")
+    print(f"Kernels: {len(kernel_specs)}")
     total = sum(
-        len(H_VALUES) if s["h_dependent"] else 1 for s in KERNEL_SPECS
+        len(h_values) if s["h_dependent"] else 1 for s in kernel_specs
     ) * len(archs)
     print(f"Total compilations: {total}")
 
@@ -809,9 +949,9 @@ def main():
         cubin_dir.mkdir(exist_ok=True)
 
         kernels = []
-        for spec in KERNEL_SPECS:
+        for spec in kernel_specs:
             if spec["h_dependent"]:
-                h_variants = H_VALUES
+                h_variants = h_values
             else:
                 h_variants = [None]
 
@@ -831,6 +971,23 @@ def main():
                     cubin_path = cubin_dir / f"{k['safe_name']}.cubin"
                     with open(cubin_path, 'wb') as f:
                         f.write(k['cubin'])
+                    # BEGIN isolated diagnostic artifact evidence
+                    if args.diagnostic_intra:
+                        (cubin_dir / f"{k['safe_name']}.ptx").write_text(k["diagnostic_ptx"], encoding="utf-8")
+                        (cubin_dir / f"{k['safe_name']}.ttir").write_text(k["diagnostic_ttir"], encoding="utf-8")
+                        record = {
+                            "artifact_scope": "diagnostic-only-single-intra",
+                            "qualifies_candidate": False,
+                            "arch": arch, "heads": h_val,
+                            "requested_dot_precision": args.diagnostic_dot_precision,
+                            "effective_dot_precisions": k["meta"]["effective_dot_input_precisions"],
+                            "metadata": k["meta"], "arguments": k["args"],
+                            "cubin_sha256": hashlib.sha256(k["cubin"]).hexdigest(),
+                            "ptx_sha256": hashlib.sha256(k["diagnostic_ptx"].encode()).hexdigest(),
+                            "ttir_sha256": hashlib.sha256(k["diagnostic_ttir"].encode()).hexdigest(),
+                        }
+                        (cubin_dir / f"{k['safe_name']}.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                    # END isolated diagnostic artifact evidence
 
                     kernels.append(k)
                 except Exception as e:
@@ -847,14 +1004,14 @@ def main():
         )
 
         if args.target_platform == "windows":
-            source_name = f"krasis_fla_sm{arch}.cu"
+            source_name = f"{artifact_prefix}_sm{arch}.cu"
             source_path = output_dir / source_name
             shutil.copy2(c_path, source_path)
             print(f"  {source_name}: {source_path.stat().st_size} bytes")
             continue
 
         # Compile to .so
-        so_name = f"libkrasis_fla_sm{arch}.so"
+        so_name = f"lib{artifact_prefix}_sm{arch}.so"
         so_path = arch_dir / so_name
         ccbin = os.environ.get("KRASIS_NVCC_CCBIN", "/usr/bin/g++")
         compile_cmd = [
@@ -902,7 +1059,7 @@ def main():
         representative_kernels = kernels
         sources = {}
         for arch in archs:
-            source_path = output_dir / f"krasis_fla_sm{arch}.cu"
+            source_path = output_dir / f"{artifact_prefix}_sm{arch}.cu"
             if not source_path.is_file():
                 raise RuntimeError(f"missing generated Windows source: {source_path}")
             sources[str(arch)] = {
@@ -916,11 +1073,11 @@ def main():
             "target_platform": "windows",
             "sidecar_contract_fingerprint_sha256": sidecar_contract_fingerprint(),
             "architectures": archs,
-            "h_values": H_VALUES,
+            "h_values": h_values,
             "exports": generated_export_symbols(representative_kernels),
             "sources": sources,
         }
-        manifest_path = output_dir / "windows-fla-manifest.json"
+        manifest_path = output_dir / ("diagnostic-windows-fla-manifest.json" if args.diagnostic_intra else "windows-fla-manifest.json")
         manifest_path.write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -928,16 +1085,16 @@ def main():
         print(f"  {manifest_path.name}: {manifest_path.stat().st_size:,} bytes")
     else:
         for arch in archs:
-            so_path = output_dir / f"libkrasis_fla_sm{arch}.so"
+            so_path = output_dir / f"lib{artifact_prefix}_sm{arch}.so"
             if so_path.exists():
-                print(f"  libkrasis_fla_sm{arch}.so: {so_path.stat().st_size:,} bytes")
+                print(f"  lib{artifact_prefix}_sm{arch}.so: {so_path.stat().st_size:,} bytes")
 
     n_kernels = sum(
-        len(H_VALUES) if s["h_dependent"] else 1 for s in KERNEL_SPECS
+        len(h_values) if s["h_dependent"] else 1 for s in kernel_specs
     )
     print(f"\n  {n_kernels} kernel variants x {len(archs)} architectures = "
           f"{n_kernels * len(archs)} total cubins")
-    print(f"  H values: {H_VALUES}")
+    print(f"  H values: {h_values}")
     print(f"  K=128, V=128 (all known models)")
 
 

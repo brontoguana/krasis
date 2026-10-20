@@ -11,7 +11,12 @@ import os
 from pathlib import Path
 from typing import Any
 
-from tokenizers import Tokenizer
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from krasis.tokenizer import Tokenizer
+from tests.adq_build_witness_inputs import _fit_exact_chat_input
 
 
 TARGET_TOKENS = 500_000
@@ -61,48 +66,180 @@ def select_smallest_qualifying_turn(
     return min(turns, key=lambda turn: len(turn["input_token_ids"]))
 
 
-def _required_id(tokenizer: Tokenizer, token: str) -> int:
-    value = tokenizer.token_to_id(token)
-    if value is None:
-        raise RuntimeError(f"checkpoint tokenizer lacks required token {token!r}")
-    return value
+def _decode(tokenizer: Tokenizer, values: list[int]) -> str:
+    return tokenizer.tokenizer.decode(
+        values,
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
 
 
-def _framing(tokenizer: Tokenizer, query: str) -> tuple[list[int], list[int]]:
-    prefix = [
-        _required_id(tokenizer, "<｜begin▁of▁sentence｜>"),
-        _required_id(tokenizer, "<｜User｜>"),
-    ]
-    suffix = tokenizer.encode(query, add_special_tokens=False).ids
-    suffix.append(_required_id(tokenizer, "<｜Assistant｜>"))
-    suffix.extend(tokenizer.encode("</think>", add_special_tokens=False).ids)
-    return prefix, suffix
+def decode_exact_raw_prompt(tokenizer: Tokenizer, values: list[int]) -> str:
+    """Decode a frozen rendered prompt and reject any lossy round trip."""
+    prompt = _decode(tokenizer, values)
+    roundtrip = tokenizer.tokenizer.encode(prompt, add_special_tokens=False)
+    if roundtrip != values:
+        mismatch = next(
+            (
+                index
+                for index, (expected, actual) in enumerate(zip(values, roundtrip))
+                if expected != actual
+            ),
+            min(len(values), len(roundtrip)),
+        )
+        raise RuntimeError(
+            "decoded raw prompt does not reproduce its frozen token IDs: "
+            f"expected={len(values):,} actual={len(roundtrip):,} "
+            f"first_mismatch={mismatch:,}"
+        )
+    return prompt
 
 
-def build_case(
-    base_ids: list[int], tokenizer: Tokenizer, target_tokens: int = TARGET_TOKENS
-) -> tuple[list[int], list[dict[str, Any]]]:
-    query = (
+def _chat_ids(tokenizer: Tokenizer, content: str) -> list[int]:
+    return tokenizer.apply_chat_template(
+        [{"role": "user", "content": content}],
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+
+def _retrieval_query() -> str:
+    return (
         "\n\n===== END ADQ LONG-CONTEXT TEST =====\n"
         "Read the authoritative North, Centre, and South ADQ control records. "
         "Ignore each explicitly revoked older note. Reply with exactly one line "
         "in North|Centre|South order and no other text, using this placeholder "
         f"format: {QUERY_FORMAT}"
     )
-    prefix, suffix = _framing(tokenizer, query)
-    body_count = target_tokens - len(prefix) - len(suffix)
-    if len(base_ids) < target_tokens:
-        raise RuntimeError(f"base artifact has only {len(base_ids):,} tokens")
-    body = list(base_ids[len(prefix) : len(prefix) + body_count])
+
+
+def _provider_content(
+    corpus_ids: list[int], tokenizer: Tokenizer, content_count: int, alignment: str
+) -> str:
+    body = list(corpus_ids[:content_count])
+    for position_ratio, text in reversed(RECORDS):
+        record_ids = tokenizer.tokenizer.encode(text, add_special_tokens=False)
+        position = int(content_count * position_ratio)
+        end = position + len(record_ids)
+        if end > len(body):
+            raise RuntimeError(f"record at {position:,} falls outside provider body")
+        body[position:end] = record_ids
+    body_text = _decode(tokenizer, body)
+    return body_text + alignment + _retrieval_query()
+
+
+def build_provider_case(
+    corpus_ids: list[int], tokenizer: Tokenizer, target_tokens: int
+) -> tuple[list[int], str, list[dict[str, Any]]]:
+    """Build canonical raw text whose checkpoint tokenization is exactly the target."""
+
+    def candidate(content_count: int, alignment: str = "") -> tuple[list[int], str]:
+        content = _provider_content(corpus_ids, tokenizer, content_count, alignment)
+        values = _chat_ids(tokenizer, content)
+        return values, content
+
+    empty = _chat_ids(tokenizer, _retrieval_query())
+    if len(empty) >= target_tokens:
+        raise RuntimeError(
+            f"target {target_tokens:,} is not larger than its "
+            f"{len(empty):,}-token provider framing"
+        )
+
+    content_count = min(len(corpus_ids), max(1, target_tokens - len(empty)))
+    exact: tuple[list[int], str] | None = None
+    closest_below: tuple[int, int] | None = None
+    seen_content_counts: set[int] = set()
+    for attempt in range(24):
+        if content_count in seen_content_counts:
+            break
+        seen_content_counts.add(content_count)
+        values, content = candidate(content_count)
+        delta = target_tokens - len(values)
+        print(
+            "Provider prompt solve "
+            f"attempt={attempt + 1} content_tokens={content_count:,} "
+            f"rendered_tokens={len(values):,} delta={delta:+,}",
+            flush=True,
+        )
+        if delta == 0:
+            exact = (values, content)
+            break
+        if delta > 0 and (closest_below is None or delta < closest_below[0]):
+            closest_below = (delta, content_count)
+        next_count = min(len(corpus_ids), max(1, content_count + delta))
+        if next_count == content_count:
+            break
+        content_count = next_count
+
+    if exact is None and closest_below is not None:
+        gap, nearby_count = closest_below
+        for unit in (" x", " .", "\n", " ", "\t", "\u200b"):
+            repeats = max(1, gap)
+            seen_repeats: set[int] = set()
+            for attempt in range(8):
+                if repeats in seen_repeats:
+                    break
+                seen_repeats.add(repeats)
+                values, content = candidate(nearby_count, unit * repeats)
+                delta = target_tokens - len(values)
+                print(
+                    "Provider prompt alignment "
+                    f"unit={unit!r} attempt={attempt + 1} repeats={repeats:,} "
+                    f"rendered_tokens={len(values):,} delta={delta:+,}",
+                    flush=True,
+                )
+                if delta == 0:
+                    exact = (values, content)
+                    break
+                repeats = max(1, repeats + delta)
+            if exact is not None:
+                break
+    if exact is None:
+        raise RuntimeError(
+            f"could not construct canonical provider prompt at {target_tokens:,} tokens"
+        )
+
+    values, content = exact
+    raw_prompt = decode_exact_raw_prompt(tokenizer, values)
+    records: list[dict[str, Any]] = []
+    for position_ratio, text in RECORDS:
+        if raw_prompt.count(text) != 1:
+            raise RuntimeError("provider prompt does not contain one intact control record")
+        prefix = raw_prompt.split(text, 1)[0]
+        absolute_position = len(
+            tokenizer.tokenizer.encode(prefix, add_special_tokens=False)
+        )
+        records.append(
+            {
+                "requested_position_ratio": position_ratio,
+                "absolute_token_position": absolute_position,
+                "text": text,
+            }
+        )
+    if EXPECTED in raw_prompt:
+        raise RuntimeError("provider prompt leaked the expected answer")
+    return values, raw_prompt, records
+
+
+def build_case(
+    corpus_ids: list[int], tokenizer: Tokenizer, target_tokens: int = TARGET_TOKENS
+) -> tuple[list[int], list[dict[str, Any]]]:
+    query = _retrieval_query()
+    if len(corpus_ids) < target_tokens:
+        raise RuntimeError(f"real-content corpus has only {len(corpus_ids):,} tokens")
+
+    result, _alignment = _fit_exact_chat_input(
+        tokenizer, corpus_ids, target_tokens, query
+    )
+
     inserted: list[dict[str, Any]] = []
     for position_ratio, text in RECORDS:
         absolute_position = int(target_tokens * position_ratio)
-        record_ids = tokenizer.encode(text, add_special_tokens=False).ids
-        body_position = absolute_position - len(prefix)
-        end = body_position + len(record_ids)
-        if body_position < 0 or end > len(body):
+        record_ids = tokenizer.tokenizer.encode(text, add_special_tokens=False)
+        end = absolute_position + len(record_ids)
+        if absolute_position < 0 or end > len(result):
             raise RuntimeError(f"record at {absolute_position:,} falls outside body")
-        body[body_position:end] = record_ids
+        result[absolute_position:end] = record_ids
         inserted.append(
             {
                 "absolute_token_position": absolute_position,
@@ -110,7 +247,6 @@ def build_case(
                 "text": text,
             }
         )
-    result = prefix + body + suffix
     if len(result) != target_tokens:
         raise AssertionError(f"built {len(result):,} tokens, expected {target_tokens:,}")
     return result, inserted
@@ -146,11 +282,10 @@ def _vram_safe(timing: dict[str, Any]) -> bool:
 
 
 def _short_isolation_ids(tokenizer: Tokenizer) -> list[int]:
-    prefix, suffix = _framing(
+    return _chat_ids(
         tokenizer,
         "Reply with exactly ISOLATION_OK and do not repeat any earlier access code.",
     )
-    return prefix + suffix
 
 
 def build_witness_input_artifact(
@@ -199,6 +334,14 @@ def main() -> None:
     parser.add_argument("--target-tokens", type=int, default=TARGET_TOKENS)
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--witness-input-output", type=Path)
+    parser.add_argument(
+        "--raw-prompt-output",
+        type=Path,
+        help=(
+            "write the checkpoint-decoded rendered prompt after proving an exact "
+            "decode/encode token-ID round trip"
+        ),
+    )
     args = parser.parse_args()
 
     source = json.loads(args.input_source.read_text(encoding="utf-8"))
@@ -206,10 +349,20 @@ def main() -> None:
         source_turn = select_smallest_qualifying_turn(source, args.target_tokens)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    tokenizer = Tokenizer.from_file(str(args.model_dir / "tokenizer.json"))
-    input_ids, inserted = build_case(
-        [int(v) for v in source_turn["input_token_ids"]], tokenizer, args.target_tokens
-    )
+    tokenizer = Tokenizer(str(args.model_dir))
+    corpus_ids = [int(value) for value in source.get("corpus_token_ids", [])]
+    corpus_digest = _sha256_ids(corpus_ids)
+    if not corpus_ids or corpus_digest != source.get("corpus_token_sha256"):
+        raise SystemExit("staged input lacks an intact checkpoint-native corpus token stream")
+    raw_prompt = None
+    if args.raw_prompt_output is not None:
+        input_ids, raw_prompt, inserted = build_provider_case(
+            corpus_ids, tokenizer, args.target_tokens
+        )
+    else:
+        input_ids, inserted = build_case(
+            corpus_ids, tokenizer, args.target_tokens
+        )
     isolation_ids = _short_isolation_ids(tokenizer)
     report: dict[str, Any] = {
         "format": "krasis_adq_long_context_result",
@@ -225,8 +378,21 @@ def main() -> None:
         "isolation_input_sha256": _sha256_ids(isolation_ids),
         "execution": "build_only" if args.build_only else "pending",
     }
+    if raw_prompt is not None:
+        encoded_prompt = raw_prompt.encode("utf-8")
+        report["raw_prompt"] = {
+            "path": str(args.raw_prompt_output.resolve()),
+            "bytes": len(encoded_prompt),
+            "sha256": hashlib.sha256(encoded_prompt).hexdigest(),
+            "token_roundtrip_exact": True,
+            "case_kind": "canonical_raw_completion_prompt",
+        }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    if raw_prompt is not None:
+        args.raw_prompt_output.parent.mkdir(parents=True, exist_ok=True)
+        args.raw_prompt_output.write_text(raw_prompt, encoding="utf-8")
+        print(f"Wrote exact raw prompt {args.raw_prompt_output}", flush=True)
     if args.witness_input_output is not None:
         witness_input = build_witness_input_artifact(
             input_ids, isolation_ids, args.output
@@ -248,7 +414,7 @@ def main() -> None:
             "input_token_ids": input_ids,
             "max_tokens": 64,
             "top_logprobs": 10,
-            "stop_token_ids": [_required_id(tokenizer, "<｜end▁of▁sentence｜>")],
+            "stop_token_ids": [int(tokenizer.eos_token_id)],
         },
         args.timeout,
     )
@@ -267,7 +433,7 @@ def main() -> None:
             "input_token_ids": isolation_ids,
             "max_tokens": 16,
             "top_logprobs": 10,
-            "stop_token_ids": [_required_id(tokenizer, "<｜end▁of▁sentence｜>")],
+            "stop_token_ids": [int(tokenizer.eos_token_id)],
         },
         args.timeout,
     )

@@ -12,6 +12,8 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["cuda"]
 cuda = ["cudarc"]
+copy-lifecycle-test = []
+shared-kda-test = ["copy-lifecycle-test"]
 gpu-debug = []  # Enable GPU decode debug instrumentation (syncs, peeks, layer capture)
 
 [dependencies]
@@ -29,7 +31,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 rand = "0.8"
-cudarc = { version = "0.12", features = ["driver", "cublas", "f16", "cuda-12060"], optional = true }
+cudarc = { version = "0.12", features = ["driver", "cublas", "cublaslt", "f16", "cuda-12060"], optional = true }
 minijinja = { version = "2", features = ["loop_controls"] }
 sha2 = "0.10"
 
@@ -43,3 +45,6 @@ cc = "1"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+[patch.crates-io]
+cudarc = { path = "vendor/cudarc" }

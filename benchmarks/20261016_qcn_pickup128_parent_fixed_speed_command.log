@@ -1,0 +1,6 @@
+./dev speed-test
+Working directory: candidate-experts128 (retained parent of candidate136)
+No arguments; fixed config byte-identical to candidate136.
+All inherited KRASIS_* variables cleared; optional instrumentation/capture/forcing off.
+No --timing or --vram-report; complete calibration/default600 remains enabled.
+Purpose: matched parent control after one lower1K result; no causal conclusion from one pair.

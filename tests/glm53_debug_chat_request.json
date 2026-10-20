@@ -1,0 +1,17 @@
+{
+  "model": "GLM-5.3-Flash",
+  "messages": [
+    {
+      "role": "user",
+      "content": "What is the capital of France? Answer with only the city name."
+    }
+  ],
+  "max_tokens": 1,
+  "temperature": 0.0,
+  "top_p": 1.0,
+  "stream": false,
+  "logprobs": true,
+  "top_logprobs": 10,
+  "prefix_cache": false,
+  "debug_first_token_boundary": true
+}

@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from tokenizers import Tokenizer
+from krasis.tokenizer import Tokenizer
 
 from tests.adq_long_context_live import (
     EXPECTED,
@@ -10,6 +10,7 @@ from tests.adq_long_context_live import (
     _sha256_ids,
     _short_isolation_ids,
     build_case,
+    build_provider_case,
     build_witness_input_artifact,
     select_smallest_qualifying_turn,
 )
@@ -18,23 +19,31 @@ from tests.adq_long_context_live import (
 class AdqLongContextTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.tokenizer = Tokenizer.from_file(
-            "/home/main/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp/tokenizer.json"
+        cls.tokenizer = Tokenizer(
+            "/home/main/.krasis/models/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp"
         )
 
     def test_case_is_exact_and_places_each_distinct_record(self) -> None:
-        base = [100] * TARGET_TOKENS
-        ids, records = build_case(base, self.tokenizer)
-        self.assertEqual(len(ids), TARGET_TOKENS)
+        target = 8_192
+        base = self.tokenizer.tokenizer.encode(
+            "alpha beta gamma delta engineering evidence. " * 4_000,
+            add_special_tokens=False,
+        )
+        ids, records = build_case(base, self.tokenizer, target)
+        self.assertEqual(len(ids), target)
         self.assertEqual(len(records), 3)
         self.assertEqual(len({row["absolute_token_position"] for row in records}), 3)
-        decoded_tail = self.tokenizer.decode(ids[-200:])
+        decoded_tail = self.tokenizer.tokenizer.decode(ids[-200:])
         self.assertIn(QUERY_FORMAT, decoded_tail)
         self.assertNotIn(EXPECTED, decoded_tail)
 
     def test_shorter_diagnostic_scales_record_positions(self) -> None:
-        target = 131_072
-        ids, records = build_case([100] * TARGET_TOKENS, self.tokenizer, target)
+        target = 8_192
+        base = self.tokenizer.tokenizer.encode(
+            "one two three four five six seven eight. " * 4_000,
+            add_special_tokens=False,
+        )
+        ids, records = build_case(base, self.tokenizer, target)
         self.assertEqual(len(ids), target)
         self.assertEqual(
             [row["absolute_token_position"] for row in records],
@@ -68,6 +77,36 @@ class AdqLongContextTests(unittest.TestCase):
         self.assertEqual(turns[1]["input_token_ids"], isolation_ids)
         self.assertEqual(turns[1]["input_sha256"], _sha256_ids(isolation_ids))
         self.assertEqual(len(isolation_ids), 20)
+
+    def test_glm_uses_its_checkpoint_native_framing(self) -> None:
+        tokenizer = Tokenizer("/home/main/.krasis/models/GLM-5.3-Flash")
+        target = 4_096
+        base = tokenizer.tokenizer.encode(
+            "portable checkpoint native input framing. " * 3_000,
+            add_special_tokens=False,
+        )
+        ids, records = build_case(base, tokenizer, target)
+        self.assertEqual(len(ids), target)
+        self.assertEqual(len(records), 3)
+        rendered = tokenizer.tokenizer.decode(ids[:40], skip_special_tokens=False)
+        self.assertIn("<|system|>", rendered)
+        self.assertIn("<|user|>", rendered)
+
+    def test_glm_raw_prompt_decode_roundtrips_exactly(self) -> None:
+        tokenizer = Tokenizer("/home/main/.krasis/models/GLM-5.3-Flash")
+        target = 4_096
+        base = tokenizer.tokenizer.encode(
+            "portable provider reference content. " * 4_000,
+            add_special_tokens=False,
+        )
+        ids, prompt, records = build_provider_case(base, tokenizer, target)
+        self.assertEqual(len(ids), target)
+        self.assertEqual(len(records), 3)
+        self.assertNotIn(EXPECTED, prompt)
+        self.assertEqual(
+            tokenizer.tokenizer.encode(prompt, add_special_tokens=False),
+            ids,
+        )
 
 
 if __name__ == "__main__":

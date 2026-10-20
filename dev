@@ -45,6 +45,7 @@
 #   ./dev witness-inputs <model>    Build stored input_token_ids from fixed prompt-source JSON
 #   ./dev witness-model-check <model>  Check expected BF16 GGUF witness model readiness
 #   ./dev witness-build             Build the pinned llama-witness validator
+#   ./dev witness-fit <model>       Project llama-witness GPU memory placement
 #   ./dev witness-server <model>    Run the source-precision llama-witness OpenAI server
 #   ./dev witness-gguf-preflight <model>  Preflight BF16 GGUF witness conversion readiness
 #   ./dev witness-gguf-convert <model>  Convert local safetensors to BF16 GGUF after preflight
@@ -55,6 +56,13 @@
 #   ./dev hqq-gpu-search-probe       Prototype GPU HQQ candidate-search timing/quality
 #   ./dev expert-hqq-cache-generate <manifest.json>  Generate KRHQ cache from explicit manifest
 #   ./dev tileq-build <subcommand>  Plan/build/verify TileQ and mixed routed-expert artifacts
+#   ./dev capture-corpus-prepare ... Prepare exact-token-prefix calibration prompts
+#   ./dev capture-layer-compare <reference.ktc> <candidate.ktc>
+#                                    Measure logical capture differences offline
+#   ./dev capture-test              Test Rust corpus preparation and capture comparison
+#   ./dev heldout-nll ...           Score real-corpus next-token likelihood in Rust
+#   ./dev heldout-nll-test          Test strict Rust likelihood scoring/transport
+#   ./dev mixed-cache-prepare ...   Materialize a compact mixed INT4/INT8 cache
 #   ./dev expert-hqq-trace-compare <trace.json> <spec.json> <metrics.tsv>  Compare diagnostic HQQ trace export offline
 #   ./dev capture-box <subcommand>  ARCHIVED HF capture wrapper; requires explicit override
 #   ./dev capture-preflight         ARCHIVED HF capture host preflight; requires explicit override
@@ -922,6 +930,81 @@ PY
     build_timer_end "dev build total" "$build_start" 0
 }
 
+do_conditional_projection_build() {
+    [[ ( $# -eq 1 || ( $# -eq 2 && ( "$2" == --copy-lifecycle-test || "$2" == --shared-kda-test ) ) ) && "$1" = /* && -f "$1" ]] || err "Usage: ./dev conditional-projection-build <absolute frozen sidecar bank.json> [--copy-lifecycle-test|--shared-kda-test]"
+    local diagnostic_features=()
+    if [[ "${2:-}" == --copy-lifecycle-test ]]; then diagnostic_features=(--features copy-lifecycle-test); fi
+    if [[ "${2:-}" == --shared-kda-test ]]; then diagnostic_features=(--features shared-kda-test); fi
+    local admitted_bank="$1"
+    local build_start
+    build_start=$(build_timer_start)
+    info "Building Rust extension (repo-local maturin build --release)..."
+    export LD_LIBRARY_PATH
+    LD_LIBRARY_PATH="$(build_base_ld_library_path)"
+
+    # Explicit historical diagnostic bank, required and exact; never a fallback.
+    KRASIS_DEV_SCRIPT=1 "$PYTHON" "$SCRIPT_DIR/scripts/verify_retained_diagnostic_sidecars.py" "$admitted_bank" "$SCRIPT_DIR"
+
+    cd "$SCRIPT_DIR"
+    mkdir -p "$WHEEL_DIR"
+    rm -f "$WHEEL_DIR"/krasis-*.whl
+    local maturin_start
+    maturin_start=$(build_timer_start)
+    set +e
+    PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+        "$MATURIN" build --release --skip-auditwheel --out "$WHEEL_DIR" "${diagnostic_features[@]}" 2>&1
+    local maturin_status=$?
+    set -e
+    build_timer_end "dev maturin build" "$maturin_start" "$maturin_status"
+    [[ "$maturin_status" -eq 0 ]] || return "$maturin_status"
+    local wheel
+    wheel=$(ls -t "$WHEEL_DIR"/krasis-*.whl 2>/dev/null | head -1)
+    [[ -n "$wheel" ]] || err "Build succeeded but no wheel was produced in $WHEEL_DIR"
+    "$PYTHON" - "$wheel" "$SCRIPT_DIR/python/krasis" "$SCRIPT_DIR/python/krasis.libs" <<'PY'
+import pathlib
+import shutil
+import sys
+import zipfile
+
+wheel = pathlib.Path(sys.argv[1])
+target = pathlib.Path(sys.argv[2])
+lib_target = pathlib.Path(sys.argv[3])
+target.mkdir(parents=True, exist_ok=True)
+lib_target.mkdir(parents=True, exist_ok=True)
+for pattern in ("krasis*.so", "krasis*.pyd", "lib*.so", "*.dylib", "*.dll"):
+    for path in target.glob(pattern):
+        path.unlink()
+for pattern in ("*.so", "*.so.*", "*.dylib", "*.dll"):
+    for path in lib_target.glob(pattern):
+        path.unlink()
+with zipfile.ZipFile(wheel) as zf:
+    ext_members = [
+        name for name in zf.namelist()
+        if name.startswith("krasis/") and name.endswith((".so", ".pyd", ".dll", ".dylib"))
+    ]
+    lib_members = [
+        name for name in zf.namelist()
+        if name.startswith("krasis.libs/")
+    ]
+    if not ext_members:
+        raise SystemExit("No compiled artifacts found in wheel")
+    for member in ext_members:
+        dest = target / pathlib.Path(member).name
+        with zf.open(member) as src, open(dest, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        print(dest)
+    for member in lib_members:
+        dest = lib_target / pathlib.Path(member).name
+        with zf.open(member) as src, open(dest, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        print(dest)
+PY
+    KRASIS_DEV_SCRIPT=1 "$PYTHON" "$SCRIPT_DIR/scripts/verify_retained_diagnostic_sidecars.py" "$admitted_bank" "$SCRIPT_DIR"
+    ok "Build complete. Extension at: $SO_FILE"
+    verify_repo_imports
+    build_timer_end "dev build total" "$build_start" 0
+}
+
 do_run() {
     [[ $# -lt 1 ]] && err "Usage: ./dev run <config> [--benchmark] [--selected-gpus GPU[,GPU...]] [extra args...]"
     local conf
@@ -1643,12 +1726,41 @@ do_session_cache_operations() {
 }
 
 do_session_cache_benchmark() {
-    [[ $# -ne 1 ]] && err "Usage: ./dev session-cache-benchmark <port>"
+    [[ $# -lt 1 ]] && err "Usage: ./dev session-cache-benchmark <port> [--diagnostic <source-evidence>]"
     local port="$1"
+    shift
+    local evidence_run
+    evidence_run=$(create_run_dir "session-cache-benchmark")
+    # Capture the runtime files before compiling the client. The server may
+    # continue using an older mapped extension; diagnostic harnesses must also
+    # bind its startup identities and /proc maps to this evidence.
+    sha256sum "$SCRIPT_DIR/python/krasis/"krasis*.so \
+        "$SCRIPT_DIR/src/server.rs" "$SCRIPT_DIR/src/session_cache.rs" \
+        "$SCRIPT_DIR/src/gpu_prefill.rs" "$SCRIPT_DIR/src/gpu_decode.rs" \
+        > "$evidence_run/runtime-files.sha256"
+    (
+        cd "$SCRIPT_DIR"
+        KRASIS_CACHE_BENCH_EVIDENCE="$evidence_run/http" \
+        KRASIS_CACHE_BENCH_RUNTIME_IDENTITY="$evidence_run/runtime-files.sha256" \
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --quiet --bin session-cache-benchmark -- "$port" "$@"
+    )
+}
+
+do_session_cache_benchmark_test() {
     (
         cd "$SCRIPT_DIR"
         PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
-            cargo run --release --quiet --bin session-cache-benchmark -- "$port"
+            cargo test --release --bin session-cache-benchmark -- --nocapture
+    )
+}
+
+do_session_cache_benchmark_build() {
+    [[ $# == 0 ]] || err "Usage: ./dev session-cache-benchmark-build"
+    (
+        cd "$SCRIPT_DIR"
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo build --release --bin session-cache-benchmark
     )
 }
 
@@ -1860,6 +1972,52 @@ do_test_kernels() {
     fi
 }
 
+do_model_owner_test() {
+    [[ $# == 3 ]] || err "Usage: ./dev model-owner-test <actual-bf16-source> <new-report> <physical-uuid>"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/model_tensor_owner_test.py" "$@"
+}
+
+do_stable_mla_kernel_build() {
+    [[ $# == 1 ]] || err "Usage: ./dev stable-mla-kernel-build <fresh-output-dir>"
+    local compiler
+    compiler="${CUDA_HOME:-${CUDA_PATH:-/usr/local/cuda}}/bin/nvcc"
+    [[ -x "$compiler" ]] || err "CUDA nvcc is unavailable at the configured toolkit path: $compiler"
+    [[ ! -e "$1" ]] || err "Kernel output directory must be fresh: $1"
+    mkdir "$1"
+    sha256sum "$compiler" "$SCRIPT_DIR/src/cuda/stable_mla_ops.cu" > "$1/inputs.sha256"
+    "$compiler" --version > "$1/compiler.version"
+    "$compiler" -ptx -allow-unsupported-compiler -arch=sm_80 -O3 --use_fast_math -std=c++17 \
+        "$SCRIPT_DIR/src/cuda/stable_mla_ops.cu" -o "$1/operator.ptx"
+    sha256sum "$1/operator.ptx" > "$1/operator.sha256"
+}
+
+do_stable_mla_sanitize() {
+    [[ $# == 3 ]] || err "Usage: ./dev stable-mla-sanitize <attention|wvc|interleaved-wvc|ops> <plan.json> <fresh-output-dir>"
+    local kind="$1"; shift
+    local binary
+    case "$kind" in
+        attention) binary="stable-mla-probe" ;;
+        wvc) binary="stable-wvc-probe" ;;
+        interleaved-wvc) binary="stable-wvc-interleaved-probe" ;;
+        ops) binary="stable-ops-probe" ;;
+        path) binary="stable-path-probe" ;;
+        rope) binary="stable-rope-copy-probe" ;;
+        selector) binary="stable-selector-probe" ;;
+        *) err "Unsupported stable MLA sanitizer kind: $kind" ;;
+    esac
+    local sanitizer="/usr/local/cuda/bin/compute-sanitizer"
+    [[ -x "$sanitizer" ]] || err "CUDA Compute Sanitizer is unavailable: $sanitizer"
+    local target_dir="${CARGO_TARGET_DIR:-$SCRIPT_DIR/tools/mla-attention-probe/target}"
+    [[ "$target_dir" == /* ]] || target_dir="$SCRIPT_DIR/$target_dir"
+    local executable="$target_dir/release/$binary"
+    [[ -x "$executable" ]] || err "Build the explicit operator first: ./dev mla-attention-build"
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    KRASIS_DEV_SCRIPT=1 LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        "$sanitizer" --tool memcheck --leak-check full --error-exitcode 117 "$executable" "$@"
+}
+
 do_test_kernels_sanitize() {
     [[ $# -ne 1 ]] && err "Usage: ./dev test-kernels-sanitize <name>"
     local sanitizer="/usr/local/cuda/bin/compute-sanitizer"
@@ -1878,7 +2036,7 @@ do_test_kernels_sanitize() {
     [[ -n "$test_binary" && -x "$test_binary" ]] \
         || err "No built Krasis unit-test binary found; run ./dev test-kernels $1 first"
     local filter="gpu_prefill::kernel_tests::test_$1"
-    "$test_binary" --list | grep -Fqx "$filter: test" \
+    "$test_binary" --list | grep -Fx "$filter: test" > /dev/null \
         || err "Newest built unit-test binary does not contain $filter; rebuild it first"
     info "Running CUDA racecheck: $filter"
     "$sanitizer" --tool racecheck --racecheck-report all --print-level info \
@@ -1901,6 +2059,23 @@ do_rust_test() {
         RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
             PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
             cargo test --release --lib ${filter:+"$filter"} -- --nocapture
+    )
+}
+
+do_prefix_digest_library_tests() {
+    [[ $# -eq 1 && ( "$1" == compile || "$1" == gpu || "$1" == numbers ) ]] || err "internal library test mode must be compile, gpu or numbers"
+    local digest_pyver digest_pylibdir
+    local -a digest_args=(test --release --lib)
+    if [[ "$1" == compile ]]; then digest_args+=(--no-run); elif [[ "$1" == gpu ]]; then digest_args+=(prefix_digest_gpu -- --ignored --nocapture); else digest_args+=(reference_numbers::tests -- --nocapture); fi
+    digest_pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    digest_pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    (
+        cd "$SCRIPT_DIR"
+        PYO3_PYTHON="$PYTHON" \
+        LD_LIBRARY_PATH="$digest_pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RUSTFLAGS="${RUSTFLAGS:-} -L $digest_pylibdir -l python${digest_pyver}" \
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo "${digest_args[@]}"
     )
 }
 
@@ -2015,6 +2190,242 @@ do_tileq_build() {
     fi
     cd "$SCRIPT_DIR"
     KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/scripts/tileq_build.py" "$@"
+}
+
+run_capture_cargo() {
+    local pyver pylibdir
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    (
+        cd "$SCRIPT_DIR"
+        PYO3_PYTHON="$PYTHON" \
+        LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo "$@"
+    )
+}
+
+do_capture_corpus_prepare() {
+    run_capture_cargo run --release --quiet --bin capture-corpus-prepare -- "$@"
+}
+
+do_capture_layer_compare() {
+    [[ $# == 2 ]] || err "Usage: ./dev capture-layer-compare <reference.ktc> <candidate.ktc>"
+    run_capture_cargo run --release --quiet --bin capture-layer-compare -- "$@"
+}
+
+# BEGIN explicit raw recurrence reference commands
+do_raw_recurrence() {
+    [[ $# -eq 2 || ( $# -eq 1 && ( $1 == --help || $1 == --identity ) ) ]] || err "Usage: ./dev raw-recurrence <plan.json> <fresh-output-dir>"
+    KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin raw-recurrence -- "$@"
+}
+do_raw_recurrence_test() {
+    [[ $# -eq 0 ]] || err "Usage: ./dev raw-recurrence-test"
+    run_capture_cargo test --release --bin raw-recurrence -- --nocapture
+}
+# END explicit raw recurrence reference commands
+
+# BEGIN explicit Witness operator command
+do_witness_kda_operator() {
+    [[ $# -eq 2 ]] || err "Usage: ./dev witness-kda-operator <plan.json> <fresh-output-dir>"
+    KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin witness-kda-operator -- "$@"
+}
+
+do_witness_kda_operator_test() {
+    [[ $# -eq 0 ]] || err "Usage: ./dev witness-kda-operator-test"
+    KRASIS_DEV_SCRIPT=1 run_capture_cargo test --release --bin witness-kda-operator -- --nocapture
+}
+
+do_witness_kda_operator_build() {
+    [[ $# -eq 0 ]] || err "Usage: ./dev witness-kda-operator-build"
+    KRASIS_DEV_SCRIPT=1 run_capture_cargo build --release --bin witness-kda-operator
+}
+# END explicit Witness operator command
+
+# BEGIN selected prefill row test command
+do_prefill_row_probe_test() {
+    [[ $# -eq 0 ]] || err "Usage: ./dev prefill-row-probe-test"
+    KRASIS_DEV_SCRIPT=1 run_capture_cargo test --release --lib matched_prefill_row:: -- --nocapture
+    KRASIS_DEV_SCRIPT=1 run_capture_cargo test --release --lib matched_probe:: -- --nocapture
+    KRASIS_DEV_SCRIPT=1 run_capture_cargo test --release --lib mla_probe:: -- --nocapture
+}
+# END selected prefill row test command
+
+do_hqq_rounding_parity() {
+    [[ $# -eq 3 ]] || err "Usage: ./dev hqq-rounding-parity <experiment-plan.json> <parity-plan.json> <gpu-uuid>"
+    CUDA_VISIBLE_DEVICES="$3" KRASIS_HQQ_ROUNDING_COMMAND=1 \
+    KRASIS_MATCHED_HQQ_ROUNDING_CONFIG="$1" KRASIS_HQQ_ROUNDING_PARITY_PLAN="$2" \
+        run_capture_cargo test --release --lib context_owned_hqq_rounding_matches_same_order_reference -- --ignored --nocapture --test-threads=1
+}
+
+do_hqq_dispatch_run() {
+    [[ $# -ge 2 ]] || err "Usage: ./dev hqq-dispatch-run <native-plan.json> <config> [run flags]"
+    [[ -f "$1" ]] || err "HQQ native-control experiment requires an explicit plan file"
+    export KRASIS_MATCHED_HQQ_NATIVE_CONFIG="$1" KRASIS_HQQ_NATIVE_COMMAND=1
+    shift
+    do_run "$@"
+}
+
+do_hqq_rounding_run() {
+    [[ $# -ge 2 ]] || err "Usage: ./dev hqq-rounding-run <plan.json> <config> [run flags]"
+    [[ -f "$1" ]] || err "HQQ rounding experiment requires an explicit plan file"
+    export KRASIS_MATCHED_HQQ_ROUNDING_CONFIG="$1" KRASIS_HQQ_ROUNDING_COMMAND=1
+    shift
+    do_run "$@"
+}
+
+do_matched_arithmetic() {
+    KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin matched-arithmetic -- "$@"
+}
+
+do_matched_kda() {
+    [[ $# -eq 3 ]] || err "Usage: ./dev matched-kda <capture-dir> <fresh-output-dir> <gpu-uuid>"
+    (
+        local sidecar stem key count=0
+        for sidecar in "$SCRIPT_DIR/python/krasis"/libkrasis_fla_sm*.so; do
+            [[ -f $sidecar ]] || continue
+            stem=${sidecar##*/}
+            [[ $stem =~ ^libkrasis_fla_sm[0-9]+\.so$ ]] || continue
+            stem=${stem%.so}
+            key="KRASIS_${stem^^}_SO"
+            export "$key=$sidecar"
+            count=$((count+1))
+        done
+        [[ $count -gt 0 ]] || err "Built repository FLA sidecars are required for matched KDA evidence"
+        export KRASIS_SIDECAR_MANIFEST="$SCRIPT_DIR/python/krasis/sidecar_manifest.json"
+        [[ -f $KRASIS_SIDECAR_MANIFEST ]] || err "Repository sidecar manifest is missing"
+        KRASIS_DEV_SCRIPT=1 KRASIS_MATCHED_KDA_INPUT="$1" KRASIS_MATCHED_KDA_OUTPUT="$2" CUDA_VISIBLE_DEVICES="$3" \
+            run_capture_cargo test --release --lib test_matched_kda_prefix_from_identical_real_capture -- --ignored --nocapture --test-threads=1
+    )
+}
+
+do_matched_arithmetic_test() {
+    run_capture_cargo test --release --bin matched-arithmetic -- --nocapture
+}
+
+# BEGIN bounded native KDA anchor command
+do_matched_kda_anchor() {
+    [[ $# -eq 2 ]] || err "Usage: ./dev matched-kda-anchor <plan> <gpu-uuid>"
+    do_matched_kda_native_diagnostic "$1" "$2" KRASIS_MATCHED_KDA_ANCHOR_PLAN test_matched_kda_intra_anchor_from_real_window
+}
+do_matched_kda_chain() {
+    [[ $# -eq 2 ]] || err "Usage: ./dev matched-kda-chain <plan> <gpu-uuid>"
+    do_matched_kda_native_diagnostic "$1" "$2" KRASIS_MATCHED_KDA_CHAIN_PLAN test_matched_kda_anchor_chain_from_real_capture
+}
+do_matched_kda_precision() {
+    [[ $# -eq 2 ]] || err "Usage: ./dev matched-kda-precision <plan> <gpu-uuid>"
+    do_matched_kda_native_diagnostic "$1" "$2" KRASIS_MATCHED_KDA_PRECISION_PLAN test_matched_kda_precision_from_real_window
+}
+# BEGIN bounded context-owned KDA command
+do_matched_kda_module() {
+    [[ $# -eq 2 ]] || err "Usage: ./dev matched-kda-module <plan> <gpu-uuid>"
+    do_matched_kda_native_diagnostic "$1" "$2" KRASIS_MATCHED_KDA_MODULE_PLAN test_model_kda_context_owned_cubin_from_real_capture
+}
+# END bounded context-owned KDA command
+# BEGIN bounded causal-reference KDA command
+do_matched_kda_causal_chain() {
+    [[ $# -eq 2 ]] || err "Usage: ./dev matched-kda-causal-chain <plan> <gpu-uuid>"
+    do_matched_kda_native_diagnostic "$1" "$2" KRASIS_MATCHED_KDA_CAUSAL_CHAIN_PLAN test_matched_kda_causal_chain_from_real_capture
+}
+# END bounded causal-reference KDA command
+do_matched_kda_native_diagnostic() {
+    [[ $# -eq 4 ]] || err "Internal native KDA diagnostic requires plan, GPU, environment key and test"
+    (
+        local sidecar stem key count=0
+        for sidecar in "$SCRIPT_DIR/python/krasis"/libkrasis_fla_sm*.so; do
+            [[ -f $sidecar ]] || continue
+            stem=${sidecar##*/}
+            [[ $stem =~ ^libkrasis_fla_sm[0-9]+\.so$ ]] || continue
+            stem=${stem%.so}
+            key="KRASIS_${stem^^}_SO"
+            export "$key=$sidecar"
+            count=$((count+1))
+        done
+        [[ $count -gt 0 ]] || err "Built repository FLA sidecars are required for native KDA anchor evidence"
+        export KRASIS_SIDECAR_MANIFEST="$SCRIPT_DIR/python/krasis/sidecar_manifest.json"
+        [[ -f $KRASIS_SIDECAR_MANIFEST ]] || err "Repository sidecar manifest is missing"
+        export "$3=$1"
+        KRASIS_DEV_SCRIPT=1 CUDA_VISIBLE_DEVICES="$2" \
+            run_capture_cargo test --release --lib "$4" -- --ignored --nocapture --test-threads=1
+    )
+}
+# END bounded native KDA anchor command
+
+# BEGIN isolated KDA compiler commands
+do_build_kda_diagnostic() {
+    [[ $# -ge 4 ]] || err "Usage: ./dev build-kda-diagnostic <fresh-output> <tf32|tf32x3|ieee> <heads> <arch...>"
+    local output="$1" precision="$2" heads="$3"
+    shift 3
+    KRASIS_DEV_SCRIPT=1 KRASIS_FLA_REQUIRE_ALL_ARCHS=1 "$PYTHON" \
+        "$SCRIPT_DIR/src/cuda/fla/compile_kernels.py" --diagnostic-intra \
+        --output-dir "$output" --diagnostic-dot-precision "$precision" \
+        --diagnostic-heads "$heads" --arch "$@"
+}
+do_fla_diagnostic_test() {
+    [[ $# -eq 0 ]] || err "Usage: ./dev fla-diagnostic-test"
+    KRASIS_DEV_SCRIPT=1 "$PYTHON" -m unittest discover -s "$SCRIPT_DIR/tests" \
+        -p test_fla_diagnostic_build.py -v
+}
+# END isolated KDA compiler commands
+
+do_capture_test() {
+    [[ $# == 0 ]] || err "Usage: ./dev capture-test"
+    run_capture_cargo test --release --bin capture-corpus-prepare prefix_tests -- --nocapture
+    run_capture_cargo test --release --bin capture-layer-compare compare_tests -- --nocapture
+}
+
+do_heldout_decode() {
+    KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin heldout-decode -- "$@"
+}
+do_heldout_decode_test() {
+    run_capture_cargo test --release --bin heldout-decode -- --nocapture
+}
+do_heldout_nll() {
+    if [[ ( $# -ne 6 && $# -ne 8 ) || ${1:-} == --help || ${1:-} == -h ]]; then
+        echo "Usage: ./dev heldout-nll <model-dir> <corpus-dir> <server-address:port> <runtime.conf> <new-output-dir> <timeout-seconds> [--source-archive <directory>]"
+        [[ ${1:-} == --help || ${1:-} == -h ]] && return 0
+        return 2
+    fi
+    KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin heldout-nll -- "$@"
+}
+
+do_heldout_nll_test() {
+    [[ $# == 0 ]] || err "Usage: ./dev heldout-nll-test"
+    run_capture_cargo test --release --bin heldout-nll -- --nocapture
+}
+
+do_scales_only() {
+    [[ $# == 3 ]] || err "Usage: ./dev scales-only <assemble|verify> <plan.json> <output-dir>"
+    KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin scales-only -- "$@"
+}
+
+do_scales_only_test() {
+    [[ $# == 0 ]] || err "Usage: ./dev scales-only-test"
+    KRASIS_DEV_SCRIPT=1 run_capture_cargo test --release --bin scales-only -- --nocapture
+}
+
+do_dev_dispatch_test() {
+    [[ $# == 0 ]] || err "Usage: ./dev dev-dispatch-test"
+    KRASIS_DEV_SCRIPT=1 bash "$SCRIPT_DIR/tests/test_dev_dispatch.sh"
+}
+
+do_mixed_cache_prepare() {
+    if [[ $# -ne 5 && $# -ne 9 ]]; then
+        echo "Usage: ./dev mixed-cache-prepare <model-dir> <plan.json> <calibration.kic> <output.krmx> <output-manifest.json> [--reuse-int4-manifest PATH --reuse-int8-manifest PATH]"
+        return 2
+    fi
+    cd "$SCRIPT_DIR"
+    KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/scripts/mixed_cache_prepare.py" "$@"
+}
+
+do_mixed_cache_rank() {
+    if [[ $# -lt 3 ]]; then
+        echo "Usage: ./dev mixed-cache-rank <model-dir> <capture-dir> <output-dir> --corpus-manifest ... --excluded-input-manifest ... --calibration-artifact ... --group-size N [options]"
+        return 2
+    fi
+    cd "$SCRIPT_DIR"
+    KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/scripts/mixed_cache_rank.py" "$@"
 }
 
 do_expert_hqq_trace_compare() {
@@ -2702,23 +3113,162 @@ sum_file_sizes() {
 
 do_witness_build() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        echo "Usage: ./dev witness-build"
+        echo "Usage: ./dev witness-build [--gpu UUID]..."
         echo "  Configures and builds the pinned llama-witness validator without loading a model."
+        echo "  With --gpu, builds a distinct CUDA validator for the exact physical GPU architecture set."
         return 0
     fi
-    [[ $# -eq 0 ]] || err "witness-build takes no arguments"
+    local gpu_uuids=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --gpu)
+                [[ $# -ge 2 ]] || err "--gpu requires a physical CUDA UUID"
+                gpu_uuids+=("$2")
+                shift 2
+                ;;
+            *)
+                err "Unknown witness-build argument: $1"
+                ;;
+        esac
+    done
     [[ -d "$WITNESS_REPO" ]] || err "llama-witness repo not found: $WITNESS_REPO"
+
+    local build_dir="${WITNESS_BUILD_DIR:-$WITNESS_REPO/build}"
+    local cuda_visible=""
+    local cuda_arch=""
+    local cuda_compiler=""
+    local cmake_args=(-DGGML_CUDA=OFF)
+    if [[ "${#gpu_uuids[@]}" -gt 0 ]]; then
+        local gpu_inventory gpu_uuid gpu_compute_cap build_arch
+        local cuda_arches=()
+        local build_arches=()
+        declare -A seen_gpu_uuids=()
+        gpu_inventory=$(nvidia-smi --query-gpu=uuid,compute_cap --format=csv,noheader,nounits)
+        for gpu_uuid in "${gpu_uuids[@]}"; do
+            [[ "$gpu_uuid" == GPU-* ]] || err "--gpu requires a physical UUID beginning GPU-"
+            [[ -z "${seen_gpu_uuids[$gpu_uuid]:-}" ]] || err "duplicate --gpu UUID: $gpu_uuid"
+            seen_gpu_uuids[$gpu_uuid]=1
+            gpu_compute_cap=$(awk -F ', ' -v uuid="$gpu_uuid" '$1 == uuid { print $2 }' <<< "$gpu_inventory")
+            [[ "$gpu_compute_cap" =~ ^[0-9]+\.[0-9]+$ ]] || err "GPU UUID is not present or has no CUDA compute capability: $gpu_uuid"
+            cuda_arches+=("${gpu_compute_cap/./}-real")
+            build_arches+=("${gpu_compute_cap/./}")
+        done
+        cuda_visible=$(IFS=,; echo "${gpu_uuids[*]}")
+        cuda_arch=$(IFS=';'; echo "${cuda_arches[*]}")
+        build_arch=$(IFS=-; echo "${build_arches[*]}")
+        build_dir="${WITNESS_BUILD_DIR:-$WITNESS_REPO/build-cuda-$build_arch}"
+        cuda_compiler="${CUDACXX:-}"
+        if [[ -z "$cuda_compiler" ]]; then
+            cuda_compiler=$(command -v nvcc 2>/dev/null || true)
+        fi
+        if [[ -z "$cuda_compiler" ]]; then
+            cuda_compiler=$(find -L /usr/local /opt -maxdepth 4 -type f -name nvcc -perm -u+x -print 2>/dev/null \
+                | sort -V | tail -n 1)
+        fi
+        [[ -n "$cuda_compiler" && -x "$cuda_compiler" ]] || err "CUDA compiler nvcc was not discoverable"
+        cmake_args=(
+            -DGGML_CUDA=ON
+            -DCMAKE_CUDA_COMPILER="$cuda_compiler"
+            -DCMAKE_CUDA_ARCHITECTURES="$cuda_arch"
+        )
+    fi
 
     local run_dir
     run_dir=$(create_run_dir "witness-build")
     info "Building pinned llama-witness validator"
     info "Run dir: $run_dir"
+    info "Build dir: $build_dir"
     (
         cd "$WITNESS_REPO"
-        cmake -S . -B build
-        cmake --build build --target llama-witness-validate -j "${WITNESS_BUILD_JOBS:-$(nproc)}"
+        if [[ -n "$cuda_visible" ]]; then
+            export CUDA_VISIBLE_DEVICES="$cuda_visible"
+        fi
+        cmake -S . -B "$build_dir" "${cmake_args[@]}"
+        cmake --build "$build_dir" --target llama-witness-validate -j "${WITNESS_BUILD_JOBS:-$(nproc)}"
     ) 2>&1 | tee "$run_dir/witness_build.log"
     ok "llama-witness validator build complete"
+}
+
+do_witness_fit() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev witness-fit <model> --gpu UUID [--gpu UUID]... [llama-fit-params args...]"
+        echo "  Builds and runs pinned llama.cpp memory projection for an explicit physical GPU set."
+        echo "  Use --fit-print on with explicit context, batch, offload and K/Q/V settings for a non-loading projection."
+        return 0
+    fi
+    [[ $# -ge 1 ]] || err "Usage: ./dev witness-fit <model> --gpu UUID [--gpu UUID]... [llama-fit-params args...]"
+    local model="$1"
+    shift
+    local gpu_uuids=()
+    local fit_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --gpu)
+                [[ $# -ge 2 ]] || err "--gpu requires a physical CUDA UUID"
+                gpu_uuids+=("$2")
+                shift 2
+                ;;
+            *)
+                fit_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+    [[ "${#gpu_uuids[@]}" -gt 0 ]] || err "witness-fit requires at least one --gpu physical UUID"
+    [[ -d "$WITNESS_REPO" ]] || err "llama-witness repo not found: $WITNESS_REPO"
+
+    mapfile -t paths < <(witness_model_paths "$model")
+    local model_gguf="${paths[2]}"
+    [[ -f "$model_gguf" ]] || err "witness GGUF not found: $model_gguf"
+
+    local gpu_inventory gpu_uuid gpu_compute_cap
+    local cuda_arches=()
+    local build_arches=()
+    declare -A seen_gpu_uuids=()
+    gpu_inventory=$(nvidia-smi --query-gpu=uuid,compute_cap --format=csv,noheader,nounits)
+    for gpu_uuid in "${gpu_uuids[@]}"; do
+        [[ "$gpu_uuid" == GPU-* ]] || err "--gpu requires a physical UUID beginning GPU-"
+        [[ -z "${seen_gpu_uuids[$gpu_uuid]:-}" ]] || err "duplicate --gpu UUID: $gpu_uuid"
+        seen_gpu_uuids[$gpu_uuid]=1
+        gpu_compute_cap=$(awk -F ', ' -v uuid="$gpu_uuid" '$1 == uuid { print $2 }' <<< "$gpu_inventory")
+        [[ "$gpu_compute_cap" =~ ^[0-9]+\.[0-9]+$ ]] || err "GPU UUID is not present or has no CUDA compute capability: $gpu_uuid"
+        cuda_arches+=("${gpu_compute_cap/./}-real")
+        build_arches+=("${gpu_compute_cap/./}")
+    done
+
+    local cuda_visible cuda_arch build_arch build_dir fit_bin cuda_compiler
+    cuda_visible=$(IFS=,; echo "${gpu_uuids[*]}")
+    cuda_arch=$(IFS=';'; echo "${cuda_arches[*]}")
+    build_arch=$(IFS=-; echo "${build_arches[*]}")
+    build_dir="${WITNESS_BUILD_DIR:-$WITNESS_REPO/build-cuda-$build_arch}"
+    fit_bin="$build_dir/bin/llama-fit-params"
+    cuda_compiler="${CUDACXX:-}"
+    if [[ -z "$cuda_compiler" ]]; then
+        cuda_compiler=$(command -v nvcc 2>/dev/null || true)
+    fi
+    if [[ -z "$cuda_compiler" ]]; then
+        cuda_compiler=$(find -L /usr/local /opt -maxdepth 4 -type f -name nvcc -perm -u+x -print 2>/dev/null \
+            | sort -V | tail -n 1)
+    fi
+    [[ -n "$cuda_compiler" && -x "$cuda_compiler" ]] || err "CUDA compiler nvcc was not discoverable"
+
+    local run_dir
+    run_dir=$(create_run_dir "witness-fit")
+    info "Building pinned llama-witness memory projector"
+    info "Run dir: $run_dir"
+    info "Build dir: $build_dir"
+    info "GPU UUID order: ${gpu_uuids[*]}"
+    (
+        cd "$WITNESS_REPO"
+        export CUDA_VISIBLE_DEVICES="$cuda_visible"
+        cmake -S . -B "$build_dir" \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_COMPILER="$cuda_compiler" \
+            -DCMAKE_CUDA_ARCHITECTURES="$cuda_arch"
+        cmake --build "$build_dir" --target llama-fit-params -j "${WITNESS_BUILD_JOBS:-$(nproc)}"
+        [[ -x "$fit_bin" ]] || err "llama-witness memory projector was not built: $fit_bin"
+        "$fit_bin" --model "$model_gguf" "${fit_args[@]}"
+    ) 2>&1 | tee "$run_dir/witness_fit.log"
 }
 
 do_witness_server() {
@@ -3551,9 +4101,10 @@ Use --force only if overwriting that witness artifact is intentional."
 
 do_witness_capture() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH | --request-json PATH] [--profile ID] [--max-cases N] [validator args...]"
+        echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH | --request-json PATH] [--profile ID] [--max-cases N] [--ngl N] [--gpu UUID]... [validator args...]"
         echo "  Captures llama-witness JSON from stored input_token_ids only."
         echo "  --reference reads witness/reference input-token artifacts; --request-json reads one frozen raw-token request."
+        echo "  GPU offload requires physical --gpu UUIDs; CUDA architectures and a distinct build directory are derived from them."
         echo "  A direct local checkpoint directory is accepted with either explicit input source."
         echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53"
         return 0
@@ -3567,11 +4118,13 @@ do_witness_capture() {
     local reference_override=""
     local request_override=""
     local profile="$WITNESS_PROFILE_ID"
+    local ngl="${WITNESS_NGL:-0}"
+    local gpu_uuids=()
     local validator_args=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --help|-h)
-                echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]"
+                echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [--ngl N] [--gpu UUID]... [validator args...]"
                 echo "  Captures llama-witness JSON from stored input_token_ids only."
                 echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53"
                 return 0
@@ -3601,12 +4154,63 @@ do_witness_capture() {
                 validator_args+=(--max-cases "$2")
                 shift 2
                 ;;
+            --ngl|--n-gpu-layers)
+                [[ $# -ge 2 ]] || err "$1 requires a value"
+                ngl="$2"
+                shift 2
+                ;;
+            --gpu)
+                [[ $# -ge 2 ]] || err "--gpu requires a physical CUDA UUID"
+                gpu_uuids+=("$2")
+                shift 2
+                ;;
             *)
                 validator_args+=("$1")
                 shift
                 ;;
         esac
     done
+
+    [[ "$ngl" =~ ^[0-9]+$ ]] || err "--ngl must be a non-negative integer"
+
+    local cuda_visible=""
+    local cuda_arch=""
+    local build_arch=""
+    local cuda_compiler=""
+    local witness_build_dir=""
+    if (( ngl > 0 )); then
+        [[ "${#gpu_uuids[@]}" -gt 0 ]] || err "GPU witness capture requires at least one --gpu physical UUID"
+        local gpu_inventory gpu_uuid gpu_compute_cap
+        gpu_inventory=$(nvidia-smi --query-gpu=uuid,compute_cap --format=csv,noheader,nounits)
+        local cuda_arches=()
+        local build_arches=()
+        declare -A seen_gpu_uuids=()
+        for gpu_uuid in "${gpu_uuids[@]}"; do
+            [[ "$gpu_uuid" == GPU-* ]] || err "--gpu requires a physical UUID beginning GPU-"
+            [[ -z "${seen_gpu_uuids[$gpu_uuid]:-}" ]] || err "duplicate --gpu UUID: $gpu_uuid"
+            seen_gpu_uuids[$gpu_uuid]=1
+            gpu_compute_cap=$(awk -F ', ' -v uuid="$gpu_uuid" '$1 == uuid { print $2 }' <<< "$gpu_inventory")
+            [[ "$gpu_compute_cap" =~ ^[0-9]+\.[0-9]+$ ]] || err "GPU UUID is not present or has no CUDA compute capability: $gpu_uuid"
+            cuda_arches+=("${gpu_compute_cap/./}-real")
+            build_arches+=("${gpu_compute_cap/./}")
+            validator_args+=(--gpu-uuid "$gpu_uuid")
+        done
+        cuda_visible=$(IFS=,; echo "${gpu_uuids[*]}")
+        cuda_arch=$(IFS=';'; echo "${cuda_arches[*]}")
+        build_arch=$(IFS=-; echo "${build_arches[*]}")
+        witness_build_dir="${WITNESS_BUILD_DIR:-$WITNESS_REPO/build-cuda-$build_arch}"
+        cuda_compiler="${CUDACXX:-}"
+        if [[ -z "$cuda_compiler" ]]; then
+            cuda_compiler=$(command -v nvcc 2>/dev/null || true)
+        fi
+        if [[ -z "$cuda_compiler" ]]; then
+            cuda_compiler=$(find -L /usr/local /opt -maxdepth 4 -type f -name nvcc -perm -u+x -print 2>/dev/null \
+                | sort -V | tail -n 1)
+        fi
+        [[ -n "$cuda_compiler" && -x "$cuda_compiler" ]] || err "CUDA compiler nvcc was not discoverable"
+    elif [[ "${#gpu_uuids[@]}" -gt 0 ]]; then
+        err "--gpu requires --ngl greater than zero"
+    fi
 
     [[ -d "$WITNESS_REPO" ]] || err "llama-witness repo not found: $WITNESS_REPO"
     local script="$WITNESS_REPO/scripts/witness/validate_frozen_reference.sh"
@@ -3641,11 +4245,23 @@ do_witness_capture() {
     info "Output: $output"
     (
         cd "$WITNESS_REPO"
-        WITNESS_PROFILE_ID="$profile" \
-        WITNESS_INPUT_MODE="$witness_input_mode" \
-        WITNESS_MAX_NEW_TOKENS="${KRASIS_WITNESS_MAX_NEW_TOKENS:-1}" \
-        WITNESS_GENERATED_AT="${KRASIS_WITNESS_GENERATED_AT:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}" \
-            "$script" "$model_dir" "$reference_json" "$model_gguf" \
+        local witness_env=(
+            WITNESS_PROFILE_ID="$profile"
+            WITNESS_INPUT_MODE="$witness_input_mode"
+            WITNESS_MAX_NEW_TOKENS="${KRASIS_WITNESS_MAX_NEW_TOKENS:-1}"
+            WITNESS_GENERATED_AT="${KRASIS_WITNESS_GENERATED_AT:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
+            WITNESS_NGL="$ngl"
+        )
+        if (( ngl > 0 )); then
+            witness_env+=(
+                CUDA_VISIBLE_DEVICES="$cuda_visible"
+                CUDACXX="$cuda_compiler"
+                WITNESS_BUILD_DIR="$witness_build_dir"
+                WITNESS_CMAKE_CUDA=1
+                WITNESS_CUDA_ARCHITECTURES="$cuda_arch"
+            )
+        fi
+        env "${witness_env[@]}" "$script" "$model_dir" "$reference_json" "$model_gguf" \
             --json-output "$output" \
             --capture-only \
             "${validator_args[@]}"
@@ -3671,8 +4287,9 @@ do_adq_witness_inputs() {
 
 do_adq_witness_compare() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        echo "Usage: ./dev adq-witness-compare --reference PATH --output PATH [--targets CSV] [--port N]"
+        echo "Usage: ./dev adq-witness-compare --reference PATH --output PATH [--targets CSV] [--port N] [trace options]"
         echo "  Compares staged raw-token inputs against a running test-endpoint server."
+        echo "  Trace options include --debug-reference-trace and --debug-prefill-device-trace-all-layers."
         return 0
     fi
     local run_dir
@@ -3687,7 +4304,7 @@ do_adq_witness_compare() {
 
 do_adq_long_context() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        echo "Usage: ./dev adq-long-context --input-source PATH --model-dir PATH --output PATH [--target-tokens N] [--port N] [--build-only] [--witness-input-output PATH]"
+        echo "Usage: ./dev adq-long-context --input-source PATH --model-dir PATH --output PATH [--target-tokens N] [--port N] [--build-only] [--witness-input-output PATH] [--raw-prompt-output PATH]"
         echo "  Runs an objective exact-500K multi-region retrieval and request-isolation gate."
         return 0
     fi
@@ -3699,6 +4316,22 @@ do_adq_long_context() {
     KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-long-context" \
         run_repo_python "$SCRIPT_DIR/tests/adq_long_context_live.py" "$@" \
         2>&1 | tee "$run_dir/adq_long_context.log"
+}
+
+do_adq_provider_compare() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev adq-provider-compare --cases-dir PATH --provider-results PATH --output PATH --rows-dir PATH [--targets CSV] [--port N]"
+        echo "  Runs frozen provider-reference token cases through Krasis and classifies each provider row."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "adq-provider-compare")
+    info "Running exact-token Krasis/provider ADQ comparisons"
+    info "Run dir: $run_dir"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="adq-provider-compare" \
+        run_repo_python "$SCRIPT_DIR/tests/adq_provider_compare.py" "$@" \
+        2>&1 | tee "$run_dir/adq_provider_compare.log"
 }
 
 do_adq_session_soak() {
@@ -3872,7 +4505,14 @@ do_adq_harness_test() {
     fi
     [[ $# -eq 0 ]] || err "adq-harness-test takes no arguments"
     verify_repo_imports
-    KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_opencode_harness.py"
+    KRASIS_DEV_SCRIPT=1 run_repo_python -m unittest \
+        tests.test_opencode_harness \
+        tests.test_adq_build_witness_inputs \
+        tests.test_adq_compare_witness \
+        tests.test_adq_long_context \
+        tests.test_adq_provider_compare \
+        tests.test_adq_session_soak \
+        tests.test_production_witness_inputs
 }
 
 do_sse_disconnect_test() {
@@ -3889,6 +4529,22 @@ do_sse_disconnect_test() {
     KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="sse-disconnect-test" \
         run_repo_python "$SCRIPT_DIR/tests/test_sse_disconnect.py" "$@" \
         2>&1 | tee "$run_dir/sse_disconnect_test.log"
+}
+
+do_prefill_disconnect_test() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev prefill-disconnect-test --model-dir PATH --input-source PATH --output PATH [--port N]"
+        echo "  Proves an in-flight exact real-content prefill cancels before SSE output and the worker recovers."
+        return 0
+    fi
+    local run_dir
+    run_dir=$(create_run_dir "prefill-disconnect-test")
+    info "Running in-flight prefill disconnect and worker recovery contract"
+    info "Run dir: $run_dir"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="prefill-disconnect-test" \
+        run_repo_python "$SCRIPT_DIR/tests/test_prefill_disconnect.py" "$@" \
+        2>&1 | tee "$run_dir/prefill_disconnect_test.log"
 }
 
 do_adq_vision_assets() {
@@ -3911,7 +4567,7 @@ do_witness_inputs() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         echo "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
         echo "  Tokenizes fixed prompt-source JSON into a stored llama-witness input_token_ids artifact."
-        echo "  Qwen3.5 models require proven chat-template enable_thinking=false application."
+        echo "  Models with explicit thinking policy use production Krasis rendering and retain proof."
         echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53"
         return 0
     fi
@@ -3927,7 +4583,7 @@ do_witness_inputs() {
             --help|-h)
                 echo "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
                 echo "  Tokenizes fixed prompt-source JSON into a stored llama-witness input_token_ids artifact."
-                echo "  Qwen3.5 models require proven chat-template enable_thinking=false application."
+                echo "  Models with explicit thinking policy use production Krasis rendering and retain proof."
                 echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52, glm53"
                 return 0
                 ;;
@@ -3962,12 +4618,12 @@ do_witness_inputs() {
     local model_gguf="${paths[2]}"
     [[ -d "$model_dir" ]] || err "witness model dir not found: $model_dir"
     [[ -f "$prompt_source" ]] || err "prompt source not found: $prompt_source"
-    if is_step_witness_model "$model"; then
+    if is_step_witness_model "$model" || [[ "${model,,}" =~ ^(glm53|glm5\.3|glm-5\.3-flash)$ ]]; then
         local run_dir
         run_dir=$(create_run_dir "witness-inputs")
         mkdir -p "$(dirname "$output")"
 
-        info "Building Step llama-witness input-token source with Krasis tokenizer"
+        info "Building production-rendered llama-witness input-token source with Krasis tokenizer"
         info "Run dir: $run_dir"
         info "Output: $output"
         KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="witness-inputs" \
@@ -4485,6 +5141,7 @@ fi
 cmd="${1:-help}"
 shift || true
 
+dispatch_dev_command() {
 case "$cmd" in
     build)          do_build ;;
     build-fla-windows-sources) do_build_fla_windows_sources ;;
@@ -4513,8 +5170,13 @@ case "$cmd" in
     reference-test) do_reference_test "$@" ;;
     witness-inputs) do_witness_inputs "$@" ;;
     adq-witness-inputs) do_adq_witness_inputs "$@" ;;
+    reference-client-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/session-cache-benchmark.rs ;;
+    reference-numbers-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --config skip_children=true src/reference_numbers.rs src/server.rs src/lib.rs tools/reference-numbers-probe/src/lib.rs ;;
+    reference-numbers-library-test) do_prefix_digest_library_tests numbers ;;
+    reference-numbers-test) PATH="$HOME/.cargo/bin:$PATH" cargo test --release --manifest-path "$SCRIPT_DIR/tools/reference-numbers-probe/Cargo.toml" -- --nocapture ;;
     adq-witness-compare) do_adq_witness_compare "$@" ;;
     adq-long-context) do_adq_long_context "$@" ;;
+    adq-provider-compare) do_adq_provider_compare "$@" ;;
     adq-session-soak) do_adq_session_soak "$@" ;;
     adq-opencode) do_adq_opencode "$@" ;;
     adq-opencode-history) do_adq_opencode_history "$@" ;;
@@ -4525,9 +5187,11 @@ case "$cmd" in
     adq-ledger-witness-review) do_adq_ledger_witness_review "$@" ;;
     adq-harness-test) do_adq_harness_test "$@" ;;
     sse-disconnect-test) do_sse_disconnect_test "$@" ;;
+    prefill-disconnect-test) do_prefill_disconnect_test "$@" ;;
     adq-vision-assets) do_adq_vision_assets "$@" ;;
     witness-model-check) do_witness_model_check "$@" ;;
     witness-build) do_witness_build "$@" ;;
+    witness-fit) do_witness_fit "$@" ;;
     witness-server) do_witness_server "$@" ;;
     witness-gguf-preflight) do_witness_gguf_preflight "$@" ;;
     witness-gguf-convert) do_witness_gguf_convert "$@" ;;
@@ -4540,6 +5204,24 @@ case "$cmd" in
     hqq-gpu-search-probe) do_hqq_gpu_search_probe "$@" ;;
     expert-hqq-cache-generate) do_expert_hqq_cache_generate "$@" ;;
     tileq-build)    do_tileq_build "$@" ;;
+    capture-corpus-prepare) do_capture_corpus_prepare "$@" ;;
+    capture-layer-compare) do_capture_layer_compare "$@" ;;
+    heldout-decode) do_heldout_decode "$@" ;;
+    heldout-decode-build) run_capture_cargo build --release --bin heldout-decode ;;
+    witness-quality-test)
+        [[ -n ${WITNESS_BUILD_DIR:-} ]] || err "witness-quality-test requires an explicit WITNESS_BUILD_DIR"
+        [[ -x "$WITNESS_BUILD_DIR/bin/llama-witness-validate" ]] || err "Witness quality validator not found: $WITNESS_BUILD_DIR/bin/llama-witness-validate"
+        "$WITNESS_BUILD_DIR/bin/llama-witness-validate" --quality-contract-self-test
+        ;;
+    heldout-decode-test) do_heldout_decode_test "$@" ;;
+    heldout-nll)    do_heldout_nll "$@" ;;
+    heldout-nll-test) do_heldout_nll_test "$@" ;;
+    scales-only) do_scales_only "$@" ;;
+    scales-only-test) do_scales_only_test "$@" ;;
+    dev-dispatch-test) do_dev_dispatch_test "$@" ;;
+    capture-test)   do_capture_test "$@" ;;
+    mixed-cache-rank) do_mixed_cache_rank "$@" ;;
+    mixed-cache-prepare) do_mixed_cache_prepare "$@" ;;
     expert-hqq-trace-compare) do_expert_hqq_trace_compare "$@" ;;
     expert-hqq-row-attribution) do_expert_hqq_row_attribution "$@" ;;
     reference-inventory) do_reference_inventory "$@" ;;
@@ -4558,12 +5240,151 @@ case "$cmd" in
     session-cache-test) do_session_cache_test "$@" ;;
     session-cache-operations) do_session_cache_operations "$@" ;;
     session-cache-benchmark) do_session_cache_benchmark "$@" ;;
+    session-cache-benchmark-test) do_session_cache_benchmark_test "$@" ;;
+    copy-recovery-probe-build) run_capture_cargo build --release --bin copy-recovery-probe ;;
+    copy-recovery-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin copy-recovery-probe -- "$@" ;;
+    session-cache-benchmark-build) do_session_cache_benchmark_build "$@" ;;
+    raw-recurrence) do_raw_recurrence "$@" ;;
+    raw-recurrence-test) do_raw_recurrence_test "$@" ;;
+    witness-kda-operator) do_witness_kda_operator "$@" ;;
+    witness-kda-operator-test) do_witness_kda_operator_test "$@" ;;
+    witness-kda-operator-build) do_witness_kda_operator_build "$@" ;;
+    prefill-row-probe-test) do_prefill_row_probe_test "$@" ;;
+    hqq-rounding-parity) do_hqq_rounding_parity "$@" ;;
+    hqq-rounding-run) do_hqq_rounding_run "$@" ;;
+    hqq-dispatch-run) do_hqq_dispatch_run "$@" ;;
+    row-projection-tensor-trace) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-tensor-trace -- "$@" ;;
+    row-projection-tensor-trace-build) run_capture_cargo build --release --bin row-projection-tensor-trace ;;
+    row-projection-tensor-trace-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/row-projection-tensor-trace.rs ;;
+    row-projection-compensated-profile) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-compensated-profile -- "$@" ;;
+    row-projection-compensated-profile-build) run_capture_cargo build --release --bin row-projection-compensated-profile ;;
+    row-projection-compensated-profile-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/row-projection-compensated-profile.rs ;;
+    row-projection-resident-graph-storage-test) run_capture_cargo test --release --bin row-projection-resident-graph-probe -- artifact::tests --nocapture ;;
+    row-projection-phase-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-phase-probe -- "$@" ;;
+    ordered-sum-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin ordered-sum-probe -- "$@" ;;
+    ordered-sum-build) run_capture_cargo build --release --bin ordered-sum-probe ;;
+    sequence-copy-integration-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --config skip_children=true src/lib.rs src/gpu_decode.rs ;;
+    sequence-copy-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/sequence_copy_completion.rs src/bin/sequence-copy-completion-probe.rs ;;
+    sequence-copy-build) run_capture_cargo build --release --bin sequence-copy-completion-probe ;;
+    sequence-copy-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin sequence-copy-completion-probe -- "$@" ;;
+    diagnostic-evidence-compress) KRASIS_DEV_SCRIPT=1 node "$SCRIPT_DIR/scripts/diagnostic_evidence_compress.js" "$@" ;;
+    marlin-projection-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/marlin-projection-probe/Cargo.toml" -- "$@" ;;
+    hc-projection-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/hc-projection-probe/Cargo.toml" ;;
+    stable-mla-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-mla-probe -- "$@" ;;
+    stable-wvc-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-wvc-probe -- "$@" ;;
+    stable-mla-kernel-build) do_stable_mla_kernel_build "$@" ;;
+    stable-mla-sanitize) do_stable_mla_sanitize "$@" ;;
+    model-owner-test) do_model_owner_test "$@" ;;
+    stable-wvc-interleaved-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-wvc-interleaved-probe -- "$@" ;;
+    stable-ops-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-ops-probe ;;
+    stable-ops-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-ops-probe -- "$@" ;;
+    stable-rope-copy-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-rope-copy-probe ;;
+    stable-rope-copy-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-rope-copy-probe -- "$@" ;;
+    stable-selector-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-selector-probe ;;
+    stable-selector-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-selector-probe -- "$@" ;;
+    stable-path-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-path-probe ;;
+    stable-path-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-path-probe -- "$@" ;;
+    stable-path-test) KRASIS_DEV_SCRIPT=1 run_capture_cargo test --release --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-path-test -- --nocapture ;;
+    stable-ops-test) KRASIS_DEV_SCRIPT=1 run_capture_cargo test --release --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-ops-test -- --nocapture ;;
+    stable-mla-test) KRASIS_DEV_SCRIPT=1 run_capture_cargo test --release --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin stable-mla-test -- --nocapture ;;
+    mla-wvc-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin mla-wvc-probe -- "$@" ;;
+    mla-attention-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" ;;
+    mla-attention-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/mla-attention-probe/Cargo.toml" --bin mla-attention-probe -- "$@" ;;
+    mla-primitives-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/mla-primitives-probe/Cargo.toml" ;;
+    mla-primitives-test) run_capture_cargo test --release --manifest-path "$SCRIPT_DIR/tools/mla-primitives-probe/Cargo.toml" -- --nocapture ;;
+    mla-primitives-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/mla-primitives-probe/Cargo.toml" -- "$@" ;;
+    mla-projection-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/mla-projection-probe/Cargo.toml" ;;
+    mla-projection-test) run_capture_cargo test --release --manifest-path "$SCRIPT_DIR/tools/mla-projection-probe/Cargo.toml" -- --nocapture ;;
+    mla-projection-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/mla-projection-probe/Cargo.toml" -- "$@" ;;
+    mla-dot-reference-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/mla-dot-reference/Cargo.toml" ;;
+    mla-dot-reference-test) run_capture_cargo test --release --manifest-path "$SCRIPT_DIR/tools/mla-dot-reference/Cargo.toml" -- --nocapture ;;
+    mla-dot-reference) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/mla-dot-reference/Cargo.toml" -- "$@" ;;
+    bf16-dot-reference-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/bf16-dot-reference/Cargo.toml" ;;
+    dsa-query-fmt) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 "$SCRIPT_DIR/tools/dsa-query-probe/src/main.rs" "$SCRIPT_DIR/tools/dsa-query-probe/src/exact.rs" ;;
+    prefix-digest-check) do_prefix_digest_library_tests compile ;;
+    prefix-digest-fmt) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 "$SCRIPT_DIR/src/matched_probe_digest.rs" "$SCRIPT_DIR/src/kda_prefix_digest.rs" "$SCRIPT_DIR/src/prefix_digest_tests.rs" ;;
+    prefix-digest-gpu) KRASIS_DEV_SCRIPT=1 do_prefix_digest_library_tests gpu ;;
+    dsa-runtime-fmt) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 "$SCRIPT_DIR/src/dsa_score.rs" "$SCRIPT_DIR/tools/dsa-score-runtime-probe/src/main.rs" ;;
+    dsa-runtime-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/dsa-score-runtime-probe/Cargo.toml" ;;
+    dsa-runtime-test) KRASIS_DEV_SCRIPT=1 run_capture_cargo test --release --manifest-path "$SCRIPT_DIR/tools/dsa-score-runtime-probe/Cargo.toml" ;;
+    dsa-runtime-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/dsa-score-runtime-probe/Cargo.toml" -- "$@" ;;
+    dsa-query-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/dsa-query-probe/Cargo.toml" ;;
+    dsa-query-test) run_capture_cargo test --release --manifest-path "$SCRIPT_DIR/tools/dsa-query-probe/Cargo.toml" ;;
+    dsa-query-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/dsa-query-probe/Cargo.toml" -- "$@" ;;
+    bf16-tensor-comp-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/bf16-tensor-comp-probe/Cargo.toml" ;;
+    bf16-tensor-comp-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/bf16-tensor-comp-probe/Cargo.toml" -- "$@" ;;
+    bf16-tiled-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/bf16-tiled-probe/Cargo.toml" ;;
+    bf16-tiled-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/bf16-tiled-probe/Cargo.toml" -- "$@" ;;
+    bf16-chunk-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/bf16-chunk-probe/Cargo.toml" ;;
+    bf16-chunk-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/bf16-chunk-probe/Cargo.toml" -- "$@" ;;
+    bf16-projection-build) run_capture_cargo build --release --manifest-path "$SCRIPT_DIR/tools/bf16-projection-probe/Cargo.toml" ;;
+    bf16-projection-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/bf16-projection-probe/Cargo.toml" -- "$@" ;;
+    bf16-dot-reference) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/bf16-dot-reference/Cargo.toml" -- "$@" ;;
+    hc-projection-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --manifest-path "$SCRIPT_DIR/tools/hc-projection-probe/Cargo.toml" -- "$@" ;;
+    ordered-projection-format-build) run_capture_cargo build --release --features shared-kda-test --bin row-projection-probe --bin row-projection-ordered-graph-probe ;;
+    ordered-projection-format-native) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --features shared-kda-test --bin row-projection-probe -- "$@" ;;
+    ordered-projection-format-ordered) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --features shared-kda-test --bin row-projection-ordered-graph-probe -- "$@" ;;
+    row-projection-ordered-graph-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/row-projection-ordered-graph-probe.rs ;;
+    row-projection-ordered-graph-build) run_capture_cargo build --release --bin row-projection-ordered-graph-probe ;;
+    row-projection-ordered-graph-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-ordered-graph-probe -- "$@" ;;
+    ordered-sum-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/ordered-sum-probe.rs ;;
+    row-projection-phase-build) run_capture_cargo build --release --bin row-projection-phase-probe ;;
+    row-projection-phase-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/row-projection-phase-probe.rs ;;
+    row-projection-resident-graph-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-resident-graph-probe -- "$@" ;;
+    row-projection-resident-graph-build) run_capture_cargo build --release --bin row-projection-resident-graph-probe ;;
+    row-projection-resident-graph-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/row-projection-resident-graph-probe.rs src/bin/row_projection_resident_graph/artifact.rs ;;
+    row-projection-resident-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-resident-probe -- "$@" ;;
+    row-projection-resident-build) run_capture_cargo build --release --bin row-projection-resident-probe ;;
+    row-projection-resident-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/row-projection-resident-probe.rs ;;
+    row-projection-compensated-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-compensated-probe -- "$@" ;;
+    row-projection-compensated-build) run_capture_cargo build --release --bin row-projection-compensated-probe ;;
+    row-projection-compensated-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/row-projection-compensated-probe.rs ;;
+    row-projection-tensor-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-tensor-probe -- "$@" ;;
+    row-projection-tensor-build) run_capture_cargo build --release --bin row-projection-tensor-probe ;;
+    row-projection-tensor-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/row-projection-tensor-probe.rs ;;
+    row-projection-graph-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-graph-probe -- "$@" ;;
+    row-projection-graph-build) run_capture_cargo build --release --bin row-projection-graph-probe ;;
+    row-projection-graph-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/row-projection-graph-probe.rs src/bin/row_projection_graph/owner.rs ;;
+    row-projection-tile-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-tile-probe -- "$@" ;;
+    row-projection-tile-build) run_capture_cargo build --release --bin row-projection-tile-probe --bin row-projection-tile-profile ;;
+    row-projection-tile-profile) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-tile-profile -- "$@" ;;
+    row-projection-tile-test) run_capture_cargo test --release --bin row-projection-tile-probe -- tile_tests --nocapture ;;
+    row-projection-tile-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/row-projection-tile-probe.rs src/bin/row-projection-tile-profile.rs ;;
+    row-projection-profile) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-profile -- "$@" ;;
+    row-projection-profile-build) run_capture_cargo build --release --bin row-projection-profile ;;
+    row-projection-profile-test) run_capture_cargo test --release --bin row-projection-profile -- operator::profile_tests --nocapture ;;
+    row-projection-profile-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/row-projection-profile.rs ;;
+    row-projection-probe) KRASIS_DEV_SCRIPT=1 run_capture_cargo run --release --quiet --bin row-projection-probe -- "$@" ;;
+    row-projection-build) run_capture_cargo build --release --bin row-projection-probe ;;
+    row-projection-test) run_capture_cargo test --release --bin row-projection-probe -- --nocapture ;;
+    row-projection-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/bin/row-projection-probe.rs ;;
+    matched-arithmetic) do_matched_arithmetic "$@" ;;
+    matched-arithmetic-test) do_matched_arithmetic_test "$@" ;;
+    matched-kda) do_matched_kda "$@" ;;
+    matched-kda-anchor) do_matched_kda_anchor "$@" ;;
+    matched-kda-chain) do_matched_kda_chain "$@" ;;
+    matched-kda-precision) do_matched_kda_precision "$@" ;;
+    matched-kda-module) do_matched_kda_module "$@" ;;
+    matched-kda-causal-chain) do_matched_kda_causal_chain "$@" ;;
+    build-kda-diagnostic) do_build_kda_diagnostic "$@" ;;
+    fla-diagnostic-test) do_fla_diagnostic_test "$@" ;;
     peer-rtt)       do_peer_rtt "$@" ;;
     expert-compression-probe) do_expert_compression_probe "$@" ;;
     expert-compression-gpu) do_expert_compression_gpu "$@" ;;
     expert-compression-build) do_expert_compression_build "$@" ;;
     test-kernels)   do_test_kernels "$@" ;;
     test-kernels-sanitize) do_test_kernels_sanitize "$@" ;;
+    conditional-projection-bank-check) [[ $# -eq 1 && "$1" = /* && -f "$1" ]] || err "Usage: ./dev conditional-projection-bank-check <absolute frozen bank.json>"; export LD_LIBRARY_PATH="$(build_base_ld_library_path)"; KRASIS_DEV_SCRIPT=1 "$PYTHON" "$SCRIPT_DIR/scripts/verify_retained_diagnostic_sidecars.py" "$1" "$SCRIPT_DIR" ;;
+    conditional-projection-build) do_conditional_projection_build "$@" ;;
+    conditional-projection-test) do_rust_test matched_projection_transfer; do_rust_test matched_teacher ;;
+    conditional-projection-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/matched_projection_transfer.rs ;;
+    prefill-first-observer-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/matched_prefill_logits.rs ;;
+    prefill-first-observer-fmt) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/matched_prefill_logits.rs ;;
+    router-observer-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/matched_router_capture.rs ;;
+    router-observer-fmt) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/matched_router_capture.rs ;;
+    prefill-capture-format) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 src/matched_prefill_capture.rs ;;
+    prefill-capture-fmt) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/matched_prefill_capture.rs ;;
+    conditional-projection-fmt) PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/matched_projection_transfer.rs ;;
     rust-test)      do_rust_test "$@" ;;
     glm53-check)    do_glm53_check ;;
     cpu-tail-calibrate) do_cpu_tail_calibrate "$@" ;;
@@ -4612,7 +5433,29 @@ case "$cmd" in
         echo "  prefill-decode-compare <port>  Compare exact-token prefill and teacher-forced decode logits"
         echo "  session-cache-test <port>      Compare active/RAM cached continuations with full prefill"
         echo "  session-cache-operations <port> Test eviction, branches, cancellation and concurrency"
-        echo "  session-cache-benchmark <port> Benchmark interleaved agent conversations cache off/on"
+        echo "  session-cache-benchmark <port> Benchmark cache off/on with durable HTTP evidence"
+        echo "    --diagnostic <evidence-dir>  Replay retained inputs and compare cache distributions"
+        echo "  session-cache-benchmark-test   Test failed-turn evidence and first-divergence reporting"
+        echo "  matched-arithmetic <q|q-full|shared> <capture> <output> <gpu> <warps>  Same-weight arithmetic diagnostics"
+        echo "  hqq-dispatch-run <plan> <config> [flags]  Explicit native measured-dispatch experiment"
+        echo "  hqq-rounding-run <plan> <config> [flags]  Explicit reconstructed-weight rounding experiment"
+        echo "  hqq-rounding-parity <plan> <parity> <gpu>  Context-owned six-path parity and admission"
+        echo "  session-cache-benchmark-build  Build the Rust cache diagnostic client before freezing"
+        echo "  matched-arithmetic-test       Test diagnostic error metrics"
+        echo "  prefill-row-probe-test        Test selected-row admission and route integrity"
+        echo "  raw-recurrence <plan> <fresh-output>  Compare actual raw recurrence contracts"
+        echo "  raw-recurrence-test         Test raw recurrence identity and memory admission"
+        echo "  witness-kda-operator <plan> <fresh-output>  Explicit same-input Witness operator reference"
+        echo "  witness-kda-operator-test     Test independent reference/error handling"
+        echo "  witness-kda-operator-build    Build the independent reference tool before freezing"
+        echo "  matched-kda <capture> <output> <gpu-uuid>  Replay captured KDA inputs and compare prefixes"
+        echo "  matched-kda-anchor <plan> <gpu-uuid>  Bounded native KDA rescaling diagnostic"
+        echo "  matched-kda-chain <plan> <gpu-uuid>  Bounded KDA rescaling propagation diagnostic"
+        echo "  matched-kda-precision <plan> <gpu-uuid>  Isolated real-input intra precision comparison"
+        echo "  matched-kda-module <plan> <gpu-uuid>  Verify context-owned diagnostic intra launch"
+        echo "  matched-kda-causal-chain <plan> <gpu-uuid>  Bounded complete KDA causal-reference diagnostic"
+        echo "  build-kda-diagnostic <fresh-output> <precision> <heads> <arch...>  Isolated intra precision build"
+        echo "  fla-diagnostic-test          Verify isolated compiler admission and production build scope"
         echo "  peer-rtt <primary> <peer>      Measure pinned-host peer-GPU round-trip latency"
         echo "  expert-compression-probe ...  Measure real Marlin cache entropy and lossless ratio"
         echo "  expert-compression-gpu ...    Gate bit-exact GPU entropy decode on real experts"
@@ -4630,6 +5473,7 @@ case "$cmd" in
         echo "  adq-witness-inputs ...         Build staged exact-token ADQ inputs from frozen real content"
         echo "  adq-witness-compare ...        Compare staged inputs with an authoritative witness artifact"
         echo "  adq-long-context ...           Run exact-500K retrieval and request-isolation checks"
+        echo "  adq-provider-compare ...        Classify frozen provider cases against exact-token Krasis runs"
         echo "  adq-session-soak ...            Run exact-500K session equivalence, boundary, and recovery checks"
         echo "  adq-opencode <model-id> ...    Run deterministic complex-development tasks and hidden oracles"
         echo "  adq-opencode-history ...       Build exact-token real-content ADQ issue history"
@@ -4640,9 +5484,11 @@ case "$cmd" in
         echo "  adq-ledger-witness-review ...  Review source decisions along a failed trajectory"
         echo "  adq-harness-test               Run offline ADQ/OpenCode harness contracts"
         echo "  sse-disconnect-test ...        Test graceful SSE cancellation and worker recovery"
+        echo "  prefill-disconnect-test ...    Test in-flight prefill cancellation and worker recovery"
         echo "  adq-vision-assets ...          Build deterministic ADQ multimodal test cards"
         echo "  witness-model-check <model>    Check expected BF16 GGUF witness model readiness"
-        echo "  witness-build                  Build the pinned llama-witness validator"
+        echo "  witness-build [--gpu UUID]...  Build the pinned llama-witness validator"
+        echo "  witness-fit <model> ...         Project witness GPU memory placement"
         echo "  witness-server <model> ...     Run the source-precision llama-witness OpenAI server"
         echo "  witness-gguf-preflight <model> Preflight BF16 GGUF witness conversion readiness"
         echo "  witness-gguf-convert <model>   Convert local safetensors to BF16 GGUF after preflight"
@@ -4652,6 +5498,14 @@ case "$cmd" in
         echo "  hqq-self-calibrate <config>    Capture HQQ self-calibration evidence/candidates"
         echo "  expert-hqq-cache-generate <manifest.json> Generate KRHQ cache from explicit manifest"
         echo "  tileq-build <subcommand>       Plan/build/verify TileQ and mixed routed-expert artifacts"
+        echo "  mixed-cache-rank ...           Measure resumable routed-expert sensitivity and build plans"
+        echo "  mixed-cache-prepare ...        Materialize a resumable compact mixed INT4/INT8 cache"
+        echo "  heldout-decode <port> <inputs> <sha> <teacher-dir> <output>  Frozen decode/cache quality"
+        echo "  heldout-decode-test          Validate decode/cache quality transport and scoring"
+        echo "  heldout-nll ...                Score exact real-corpus next-token likelihood in Rust"
+        echo "  heldout-nll-test               Test strict Rust likelihood scoring and HTTP transport"
+        echo "  scales-only assemble|verify ... Exact source-bound experimental INT4 record assembly"
+        echo "  scales-only-test               Test experimental provenance and legacy compatibility"
         echo "  expert-hqq-trace-compare <trace.json> <spec.json> <metrics.tsv> Compare HQQ trace export offline"
         echo "  expert-hqq-row-attribution <response.json> <spec.json> <metrics.tsv> Attribute exact HQQ row capture"
         echo "  capture-box <subcommand>      ARCHIVED HF capture wrapper; requires explicit override"
@@ -4844,3 +5698,8 @@ case "$cmd" in
   Run ./dev help for usage."
         ;;
 esac
+    # Parse termination together with dispatch before a long command starts.
+    # Editing dev during a run must not make Bash read shifted source afterward.
+    exit "$?"
+}
+dispatch_dev_command "$@"

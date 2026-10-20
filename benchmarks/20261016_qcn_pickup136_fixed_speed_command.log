@@ -1,0 +1,7 @@
+./dev speed-test
+Working directory: candidate-experts136
+No arguments. Built fixed config: tests/qcn-k4v4-hqq4-int4-benchmark.conf.
+All inherited KRASIS_* variables cleared; CUDA_LAUNCH_BLOCKING, tracing, capture,
+forcing, optional timing, RUST_LOG and CUBLAS_WORKSPACE_CONFIG absent.
+No --timing or --vram-report. Complete calibration/default600 remains enabled.
+QCN standard configuration; not a GLM affected-operator throughput verdict.
