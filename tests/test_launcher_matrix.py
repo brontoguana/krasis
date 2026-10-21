@@ -568,6 +568,19 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(proven["validation_status"], "validated")
             self.assertIn(revision, proven["compatibility_basis"])
 
+    def test_catalog_directory_cannot_admit_an_unimplemented_architecture(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            model_dir = Path(root) / "GLM-5.3-Flash"
+            model_dir.mkdir()
+            (model_dir / "config.json").write_text(
+                json.dumps(_minimal_qwen3_config("deepseek_v41_text"))
+            )
+            (model_dir / "model.safetensors").write_bytes(b"")
+            info = launcher_mod._model_info_from_path(str(model_dir))
+            self.assertEqual(info["support_key"], "glm53-flash")
+            self.assertFalse(info["runnable"])
+            self.assertIn("deepseek_v41_text", info["compatibility_error"])
+
     def test_unvalidated_model_requires_explicit_attempt_confirmation(self) -> None:
         model = {
             "name": "local/DeepSeek-derivative",
@@ -713,7 +726,12 @@ class LauncherMatrixTest(unittest.TestCase):
             "gpu_vram_mb": 24_000,
             "total_ram_gb": 128,
         }
-        launcher.model_info = None
+        launcher.model_info = {
+            "arch": "glm5_next_text", "layers": 45, "experts": 256,
+            "dense_layers": 0, "max_context": 1_048_576,
+            "kv_dim": 1024, "num_kv_layers": 15,
+            "validation_status": "unvalidated",
+        }
         launcher.budget_error = None
         launcher.krasis_home = "/tmp/krasis-test-home"
         launcher.models_dir = "/tmp/krasis-test-models"
@@ -748,6 +766,7 @@ class LauncherMatrixTest(unittest.TestCase):
         summary = launcher_mod._ANSI_RE.sub("", summary_output.getvalue())
 
         self.assertIn("Attention:", interactive)
+        self.assertIn("~16K tokens, runtime max", interactive)
         self.assertIn("Attention:", summary)
         self.assertNotIn("Attention budget:", interactive)
         self.assertNotIn("Attention budget:", summary)

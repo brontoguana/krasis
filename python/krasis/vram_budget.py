@@ -111,7 +111,9 @@ def _normalized_launcher_config(model_path: str) -> tuple[Dict[str, Any], ModelC
         "num_hidden_layers": model_cfg.num_hidden_layers,
         "num_attention_heads": model_cfg.num_attention_heads,
         "num_key_value_heads": model_cfg.num_key_value_heads,
-        "head_dim": model_cfg.gqa_head_dim or model_cfg.attention_head_dim or model_cfg.head_dim,
+        "head_dim": (model_cfg.gqa_head_dim or model_cfg.attention_head_dim
+                     or model_cfg.head_dim
+                     or model_cfg.hidden_size // model_cfg.num_attention_heads),
         "n_routed_experts": model_cfg.n_routed_experts,
         "num_experts_per_tok": model_cfg.num_experts_per_tok,
         "n_shared_experts": model_cfg.n_shared_experts,
@@ -869,6 +871,8 @@ def estimate_int4_runtime_ram_bytes(
     attention_quant: str,
     hqq_group_size: int = HQQ_DEFAULT_GROUP_SIZE,
     hqq_auto_budget_pct: Optional[float] = None,
+    *,
+    dimensions_only: bool = False,
 ) -> tuple[int, str]:
     """Estimate persistent INT4 runtime RAM from checkpoint dimensions.
 
@@ -876,18 +880,25 @@ def estimate_int4_runtime_ram_bytes(
     the launcher's detailed budget. It intentionally excludes optional prefix
     cache and operating-system headroom, which are separately user-controlled.
     """
-    _cfg, model_cfg = _normalized_launcher_config(model_path)
+    cfg, model_cfg = _normalized_launcher_config(model_path)
     expert_bytes = estimate_int4_expert_cache_bytes(model_cfg, hqq_group_size)
     hqq_bytes = 0
     source = "normalized model dimensions"
     if attention_quant in HQQ_ATTENTION_QUANTS:
-        layer_bytes, hqq_source = _hqq_attention_layer_bytes_for_budget(
-            model_path,
-            HQQ_CACHE_PROFILE_BASELINE,
-            attention_quant,
-            hqq_group_size,
-            hqq_auto_budget_pct,
-        )
+        if dimensions_only:
+            # Catalogue snapshots contain config metadata, not checkpoint shards.
+            # Cache identity and artifact lookup require a complete checkpoint.
+            layer_bytes, hqq_source = _estimate_hqq_attention_layer_bytes(
+                cfg, attention_quant, hqq_group_size, hqq_auto_budget_pct,
+            )
+        else:
+            layer_bytes, hqq_source = _hqq_attention_layer_bytes_for_budget(
+                model_path,
+                HQQ_CACHE_PROFILE_BASELINE,
+                attention_quant,
+                hqq_group_size,
+                hqq_auto_budget_pct,
+            )
         hqq_bytes = sum(layer_bytes.values()) * 2
         source = f"expert cache + dual HQQ staging ({hqq_source})"
     return expert_bytes + hqq_bytes, source

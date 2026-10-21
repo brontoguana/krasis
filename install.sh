@@ -236,7 +236,13 @@ for i, pyver in enumerate(py_vers):
     cpver = f"cp{pyver}"
     for asset in data.get("assets", []):
         name = asset["name"]
-        if name.endswith(".whl") and cpver in name and arch in name:
+        parts = name.removesuffix(".whl").split("-")
+        if (name.endswith(".whl") and len(parts) >= 5
+                and parts[0] == "krasis" and parts[-3] == cpver
+                and parts[-2] == cpver
+                and any(platform.startswith(("manylinux", "linux_"))
+                        and platform.endswith("_" + arch)
+                        for platform in parts[-1].split("."))):
             print("WHEEL")
             print(tag)
             print(py_bins[i])
@@ -247,7 +253,9 @@ for i, pyver in enumerate(py_vers):
 
 # No wheel for any installed Python — try sdist (build from source)
 for asset in data.get("assets", []):
-    if asset["name"].endswith(".tar.gz"):
+    name = asset["name"]
+    if (name.startswith("krasis-") and name.endswith(".tar.gz")
+            and name[len("krasis-"):][:1].isdigit()):
         print("SDIST")
         print(tag)
         print(py_bins[0])
@@ -441,7 +449,7 @@ if command -v krasis &>/dev/null; then
     echo ""
     info "Next steps:"
     echo -e "  1. Restart your terminal (or run ${BOLD}source ~/.bashrc${NC})"
-    echo -e "  2. Run ${BOLD}krasis-setup${NC}   — installs CUDA toolkit, PyTorch, FlashInfer"
+    echo -e "  2. Run ${BOLD}krasis-setup${NC}   — checks CUDA tools and installs CUDA PyTorch"
     echo -e "  3. Run ${BOLD}krasis${NC}         — launch the interactive TUI"
     echo ""
 else
@@ -453,7 +461,7 @@ else
     echo ""
     info "Then:"
     echo -e "  1. Restart your terminal (or run the export above)"
-    echo -e "  2. Run ${BOLD}krasis-setup${NC}   — installs CUDA toolkit, PyTorch, FlashInfer"
+    echo -e "  2. Run ${BOLD}krasis-setup${NC}   — checks CUDA tools and installs CUDA PyTorch"
     echo -e "  3. Run ${BOLD}krasis${NC}         — launch the interactive TUI"
     echo ""
 fi

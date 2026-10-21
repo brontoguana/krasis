@@ -141,7 +141,7 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         local_dir_name="Qwen3-Coder-Next",
         revision="a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
         recommended_config="tests/qcn-k4v4-hqq4-int4-benchmark.conf",
-        notes="Current production coding model.",
+        notes="Legacy coding checkpoint; not a prerequisite for GLM qualification.",
         default_attention="hqq4",
         default_kv="k4v4",
         attention_modes=GENERIC_MIXED_HQQ_ATTENTION_MODES,
@@ -357,8 +357,9 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         revision="3f1971b7b5f7a528c9c4ef6212c8785298a8c24a",
         recommended_config="tests/glm53-flash-hqq6-k6v6-a6000.conf",
         notes=(
-            "Validated HQQ6/k6v6/INT4 profile through 50K context; the launcher "
-            "still exposes the checkpoint-declared context limit. GLM vision "
+            "HQQ6/k6v6/INT4 launcher profile. Scoped 500K text ADQ passed with "
+            "thinking enabled and a separately prepared scales-only expert cache; "
+            "ordinary INT4 defaults do not inherit that qualification. GLM vision "
             "uses the accuracy-qualified BF16 tower, and measured multi-GPU "
             "execution supports primary-plus-peer expert serving."
         ),
@@ -803,6 +804,7 @@ def _populate_supported_runtime_ram(
             os.path.dirname(config_path),
             spec.default_attention,
             hqq_auto_budget_pct=(10.0 if spec.default_attention.endswith("_auto") else None),
+            dimensions_only=True,
         )
     )
     return candidate

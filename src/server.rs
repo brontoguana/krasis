@@ -3444,7 +3444,7 @@ fn format_completion_with_debug(
     created: u64,
     debug: Option<&serde_json::Value>,
 ) -> String {
-    let mut response = format_completion(
+    let response = format_completion(
         request_id,
         model_name,
         text,
@@ -3453,8 +3453,15 @@ fn format_completion_with_debug(
         finish_reason,
         created,
     );
+    attach_completion_debug(response, debug)
+}
+
+/// Attach diagnostic exports after formatting, including structured tool replies.
+/// Requests without diagnostics retain exactly the original response bytes.
+fn attach_completion_debug(mut response: String, debug: Option<&serde_json::Value>) -> String {
     if let Some(debug_value) = debug {
-        response.pop();
+        let closing_brace = response.pop();
+        debug_assert_eq!(closing_brace, Some('}'));
         response.push_str(&format!(r#","krasis_debug":{}"#, debug_value));
         response.push('}');
     }
@@ -8981,6 +8988,7 @@ fn handle_gpu_decode(
                     total_tokens,
                     created,
                 );
+                let response = attach_completion_debug(response, chat_debug_payload.as_ref());
                 let delivered = send_json(stream, 200, &response);
                 log::info!(
                     "Request {}: {} tool call(s) (non-streaming)",
@@ -10316,16 +10324,17 @@ impl RustServer {
 mod tests {
     use super::{
         active_boundary_tokens_for_publication, active_plan_requires_device_checkpoint,
-        active_plan_requires_stage_restore, consumed_generation_boundary, context_window_fits,
-        format_completion, format_completion_with_debug, format_completion_with_tool_calls,
-        format_models_response, format_sse_timing, format_sse_token, format_sse_tool_call_args,
-        format_sse_tool_call_start, hide_synthetic_think_stop_text, internal_capture_boundary,
-        is_chat_completions_endpoint, is_models_endpoint, parse_tool_calls,
-        prepare_rendered_chat_input, push_tool_stream_text, session_cache_multi_gpu_pending,
-        session_cache_runtime_materialization_enabled, unique_decode_store_addresses,
-        validate_prefix_cache_ram_fraction, FairModelScheduler, ModelRequest, ParsedToolCall,
-        RequestOverhead, ServerInfo, SessionCacheMetrics, SessionCacheMissReason, SessionLockKey,
-        SessionLockTable, SsePeerDisconnectMonitor, StreamDetokenizer,
+        active_plan_requires_stage_restore, attach_completion_debug, consumed_generation_boundary,
+        context_window_fits, format_completion, format_completion_with_debug,
+        format_completion_with_tool_calls, format_models_response, format_sse_timing,
+        format_sse_token, format_sse_tool_call_args, format_sse_tool_call_start,
+        hide_synthetic_think_stop_text, internal_capture_boundary, is_chat_completions_endpoint,
+        is_models_endpoint, parse_tool_calls, prepare_rendered_chat_input, push_tool_stream_text,
+        session_cache_multi_gpu_pending, session_cache_runtime_materialization_enabled,
+        unique_decode_store_addresses, validate_prefix_cache_ram_fraction, FairModelScheduler,
+        ModelRequest, ParsedToolCall, RequestOverhead, ServerInfo, SessionCacheMetrics,
+        SessionCacheMissReason, SessionLockKey, SessionLockTable, SsePeerDisconnectMonitor,
+        StreamDetokenizer,
     };
     use crate::chat_template::{ChatTemplateEngine, ToolCallFormat};
     use std::fs;
@@ -11020,6 +11029,44 @@ mod tests {
         assert_eq!(
             json["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
             tool_calls[0].arguments_json
+        );
+    }
+
+    #[test]
+    fn nonstreaming_tool_debug_preserves_tokens_numbers_and_tool_payload() {
+        let calls = vec![ParsedToolCall {
+            id: "call-test".to_string(),
+            name: "read".to_string(),
+            arguments_json: r#"{"filePath":"src/ledger.js"}"#.to_string(),
+        }];
+        let response = format_completion_with_tool_calls(
+            "chatcmpl-test",
+            WINDOWS_MODEL_PATH,
+            "",
+            &calls,
+            5701,
+            16,
+            123,
+        );
+        assert_eq!(attach_completion_debug(response.clone(), None), response);
+        let probability = -0.12345679_f32;
+        let debug = serde_json::json!({
+            "input_token_ids": [1, 154842, 42],
+            "completion_token_ids": [154830, 99],
+            "completion_decode_trace": [{
+                "selected_log_prob": probability,
+                "selected_log_prob_bits": probability.to_bits(),
+            }],
+        });
+        let plain = parse_response(&response);
+        let with_debug = parse_response(&attach_completion_debug(response, Some(&debug)));
+        assert_eq!(with_debug["choices"], plain["choices"]);
+        assert_eq!(with_debug["usage"], plain["usage"]);
+        assert_eq!(with_debug["model"], WINDOWS_MODEL_PATH);
+        assert_eq!(with_debug["krasis_debug"], debug);
+        assert_eq!(
+            with_debug["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            calls[0].arguments_json
         );
     }
 

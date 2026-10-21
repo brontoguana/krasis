@@ -728,9 +728,7 @@ def _model_info_from_path(model_path: str, name: Optional[str] = None) -> Dict[s
                     * cfg.gqa_head_dim_for_layer(layer_idx)
                 )
     inventory_error = _checkpoint_inventory_error(model_path)
-    architecture_supported = bool(
-        support_spec or cfg.model_type in _STRUCTURALLY_SUPPORTED_MODEL_TYPES
-    )
+    architecture_supported = cfg.model_type in _STRUCTURALLY_SUPPORTED_MODEL_TYPES
     pinned_catalog_provenance = bool(
         not inventory_error
         and support_spec
@@ -1918,7 +1916,8 @@ def _launch_mode_screen() -> Optional[str]:
 # Text/number editing overlay
 # ═══════════════════════════════════════════════════════════════════════
 
-def _edit_value(label: str, current: str, is_number: bool = False, secret: bool = False) -> str:
+def _edit_value(label: str, current: str, is_number: bool = False, secret: bool = False,
+                *, cancel_value: Optional[str] = None) -> str:
     """Inline edit: shows current value, user types new one."""
     buf = ""
 
@@ -1944,7 +1943,7 @@ def _edit_value(label: str, current: str, is_number: bool = False, secret: bool 
                 return buf
             return current  # empty = keep current
         elif key == KEY_ESCAPE:
-            return current
+            return current if cancel_value is None else cancel_value
         elif key == KEY_BACKSPACE:
             buf = buf[:-1]
         elif len(key) == 1 and key.isprintable():
@@ -2734,23 +2733,11 @@ class Launcher:
             # KV cache: show token capacity and model's max context
             if opt.key == "kv_cache_mb" and self.model_info:
                 mi = self.model_info
-                kv_dim = mi.get("kv_dim", 0)
-                num_kv_layers = mi.get("num_kv_layers", 0)
                 max_ctx = mi.get("max_context", 0)
-                if self._is_deepseek_v4() and self.budget:
+                if self.budget:
                     rank = self.budget["ranks"][self.budget["worst_rank"]]
                     alloc_tokens = _allocated_kv_tokens(rank)
                     runtime_max = self.cfg.max_context_tokens or max_ctx
-                    suffix = (
-                        f"  {DIM}(~{_format_tokens(alloc_tokens)} tokens, "
-                        f"runtime max {_format_tokens(runtime_max)}, "
-                        f"model max {_format_tokens(max_ctx)}){NC}"
-                    )
-                elif kv_dim > 0 and num_kv_layers > 0:
-                    kv_bytes_per_token = kv_dim * num_kv_layers
-                    alloc_tokens = (self.cfg.kv_cache_mb * 1024 * 1024) // kv_bytes_per_token if kv_bytes_per_token > 0 else 0
-                    runtime_max = self.cfg.max_context_tokens or max_ctx
-                    alloc_tokens = min(alloc_tokens, runtime_max)
                     suffix = (
                         f"  {DIM}(~{_format_tokens(alloc_tokens)} tokens, "
                         f"runtime max {_format_tokens(runtime_max)}, "
@@ -2952,7 +2939,7 @@ class Launcher:
     def _save_config_screen(self) -> None:
         """Prompt for filename and save current config to CWD."""
         _show_cursor()
-        name = _edit_value("Config filename", "my-config.conf")
+        name = _edit_value("Config filename", "my-config.conf", cancel_value="")
         _hide_cursor()
         if not name:
             return

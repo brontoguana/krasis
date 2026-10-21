@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.21-rc.13 — 2026-10-21
+
+- Estimate catalogue RAM from normalized dimensions without accessing checkpoint shards or runtime cache identities. Preserve artifact-aware budgets for installed models.
+- Cancel Save on Esc without writing a profile; ordinary setting editors keep their prior value.
+- Include the verified GLM runtime, CUDA lifetime and stream fixes, installer selection fixes and diagnostic tool-response export. GLM scoped qualification does not apply to default INT4 profiles; DeepSeek V4.1 and dense Qwen3.5-27B are not implemented.
+
+
+## 2026-10-21 — Installer and TUI release review
+
+- Restrict Linux release selection to matching CPython Linux wheels and actual versioned Krasis source distributions; sidecar cache archives cannot be installed as source packages. Correct obsolete FlashInfer setup instructions.
+- Reject unsupported architectures even when a directory matches a catalogue model name. Show the budget planner’s allocated context capacity for every architecture instead of a format-independent estimate.
+- Describe GLM’s scoped scales-only/thinking qualification separately from ordinary INT4 launcher defaults; remove stale QCN production guidance. Add installer selection and launcher regressions.
+
+## 2026-10-20 — Preserve tool-response diagnostic exports
+
+- Return the already captured input token IDs, completion IDs and exact F32 numerical trace on diagnostic non-streaming tool-call responses. The structured-tool formatter previously discarded this payload, blocking cache/full comparisons of real agent requests. Ordinary responses retain their original bytes; model arithmetic and generation settings are unchanged. Add a wire regression test for token/probability preservation and unchanged tool arguments.
+
 ## 2026-10-20 — Non-rotary attention startup
 
 - Skip RoPE uploads when the attention layer has zero rotary dimensions, including primary, auxiliary and HQQ fallback registration. GLM-5.3 requires zero RoPE dimensions; the stream-ordered transfer correctly rejects empty tables, so passing empty fallback tensors prevented startup after the runtime sync. Positive-dimension RoPE uploads retain their checked transfer path.
