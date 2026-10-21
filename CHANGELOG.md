@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.21-rc.17 — 2026-10-22
+
+- Fix supported-catalogue detail selection using the candidate repository identity, without requiring checkpoint shards before download.
+- Preserve pasted text in terminal editors, retain cancellation boundaries, and make advanced configuration scroll to the selected setting on small terminals.
+- Make Esc/Ctrl-C download cancellation terminate promptly even with active Hugging Face transfer threads, retaining resumable partial files.
+- Add catalogue handoff, real PTY input, terminal viewport and stalled-download cancellation regressions. Clean rc.16 acceptance exposed these issues; Qwen3.5-27B remains outside implemented runtime support.
+
 ## 1.0.21-rc.16 — 2026-10-21
 
 - Fix first-run CUDA setup on minimal Linux installations without wget. Download NVIDIA’s keyring with Python’s standard library, reject failed/empty responses, and remove failed temporary downloads.

@@ -370,7 +370,7 @@ def _read_key() -> str:
     read_char = lambda: os.read(fd, 1).decode("latin1")
     old_settings = termios.tcgetattr(fd)
     try:
-        tty.setraw(fd)
+        tty.setraw(fd, termios.TCSANOW)
         ch = read_char()
 
         if ch == "\x1b":
@@ -402,7 +402,7 @@ def _read_key_timeout(timeout: float) -> Optional[str]:
     read_char = lambda: os.read(fd, 1).decode("latin1")
     old_settings = termios.tcgetattr(fd)
     try:
-        tty.setraw(fd)
+        tty.setraw(fd, termios.TCSANOW)
         readable, _writable, _error = select.select([fd], [], [], timeout)
         if not readable:
             return None
@@ -1885,6 +1885,7 @@ def _launch_mode_screen() -> Optional[str]:
         ("Benchmark Suite", "Run all model \u00d7 config combos from suite config", "suite"),
     ]
     cursor = 0
+    _discard_pending_keys()
 
     while True:
         _clear_screen()
@@ -1898,7 +1899,8 @@ def _launch_mode_screen() -> Optional[str]:
 
         lines.append(f"\n  {DIM}[\u2191\u2193] Select  [Enter] Confirm  [q] Quit{NC}")
 
-        sys.stdout.write("\n".join(lines) + "\n")
+        columns = shutil.get_terminal_size(fallback=(80, 24)).columns
+        sys.stdout.write("\n".join(_truncate_ansi(line, columns - 1) for line in lines) + "\n")
         sys.stdout.flush()
 
         key = _read_key()
@@ -1919,6 +1921,7 @@ def _launch_mode_screen() -> Optional[str]:
 def _edit_value(label: str, current: str, is_number: bool = False, secret: bool = False,
                 *, cancel_value: Optional[str] = None) -> str:
     """Inline edit: shows current value, user types new one."""
+    _discard_pending_keys()
     buf = ""
 
     while True:
@@ -2661,6 +2664,10 @@ class Launcher:
                               show_advanced: bool = False) -> str:
         """Render the full config screen as a string."""
         lines = []
+        terminal = shutil.get_terminal_size(fallback=(80, 24))
+        columns, rows = terminal.columns, terminal.lines
+        if columns < 40 or rows < 12:
+            return "Terminal too small. Resize to at least 40 columns x 12 rows.\n[q/Esc] Quit"
 
         # Header
         from krasis import __version__
@@ -2707,6 +2714,7 @@ class Launcher:
         section_label = "Configuration + Advanced" if show_advanced else "Configuration"
         lines.append(f"  {DIM}\u2500\u2500\u2500 {section_label} \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500{NC}")
 
+        options_start = len(lines)
         for i, opt in enumerate(visible_options):
             val = getattr(self.cfg, opt.key)
             if opt.key == "host":
@@ -2746,9 +2754,10 @@ class Launcher:
 
             # Build left part (prefix + label + value + annotation)
             label_part = f"{label_style}{opt.label:<20s}{NC}"
-            left = f"{prefix}{label_part}{display}{suffix}"
+            left = f"{prefix}{label_part}  {display}{suffix}"
             lines.append(left)
 
+        options_end = len(lines)
         lines.append("")
 
         # Budget display — VRAM and System RAM side by side
@@ -2879,7 +2888,46 @@ class Launcher:
             f"[A] Advanced:{NC}{advanced_state}{DIM}  [L] Load  [S] Save  [q] Quit{NC}"
         )
 
-        return "\n".join(lines)
+        if len(lines) > rows - 1:
+            # Keep the selected setting visible instead of scrolling the whole
+            # configuration off a normal 80x24 terminal. Full budgets remain
+            # available on taller terminals; short terminals pin a summary.
+            status = (self.model_info or {}).get("validation_status", "unvalidated")
+            compact_header = [
+                f"  {BOLD}Krasis v{__version__}{NC}",
+                f"  {status.title()} checkpoint: {model_name}",
+            ]
+            if self.selected_gpus:
+                compact_header.append(
+                    "  GPUs: " + ", ".join(f"[{g['index']}] {g['name']}" for g in self.selected_gpus)
+                )
+            summary = [f"  {DIM}Budget unavailable{NC}"]
+            if self.budget:
+                summary = [
+                    f"  VRAM: {total_used:,}/{int(gpu_vram):,} MB | RAM: {ram_tot_gb:.1f}/{sys_ram_gb:.0f} GB",
+                    f"  Attention: {attention_mb:,} MB | KV: {kv_alloc:,} MB ({kv_label})",
+                ]
+                if free_after_kv < 0:
+                    summary.append(f"  {RED}OVER BUDGET by {int(-free_after_kv):,} MB{NC}")
+            elif self.budget_error:
+                summary.append(f"  {self.budget_error.splitlines()[0]}")
+            footer = [
+                "  [↑↓] Select [←→] Change [Enter] Launch",
+                f"  [A] Advanced:{advanced_state} [L] Load [S] Save",
+                "  [q/Esc] Quit",
+            ]
+            if rows < 18:
+                compact_header = compact_header[:2]
+                summary = summary[:1] if not self.budget or free_after_kv >= 0 else [summary[-1]]
+            fixed_rows = len(compact_header) + len(summary) + len(footer) + 3
+            window = max(1, rows - 1 - fixed_rows)
+            first = max(0, min(cursor - window // 2, len(visible_options) - window))
+            last = min(len(visible_options), first + window)
+            heading = f"  {section_label} [{first + 1}-{last}/{len(visible_options)}]"
+            lines = compact_header + [heading] + lines[options_start + first:options_start + last]
+            lines += [""] + summary + [""] + footer
+        # Leave the final terminal column free to avoid automatic line wraps.
+        return "\n".join(_truncate_ansi(line, columns - 1) for line in lines)
 
     def _load_config_screen(self) -> bool:
         """Show a scrolling list of .conf files in CWD. Returns True if a config was loaded."""
@@ -3174,6 +3222,8 @@ class Launcher:
     def _hf_detail_screen(self, candidate: Any) -> bool:
         from krasis.hf_downloader import destination_for_supported_model, format_bytes
 
+        # Details require a fresh confirmation after the metadata request.
+        _discard_pending_keys()
         cursor = 0
         options = ["Download", "Back"]
         dest = destination_for_supported_model(self.models_dir, candidate)
@@ -3251,42 +3301,56 @@ class Launcher:
                 result["done"] = True
 
         thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
-        while not result["done"]:
-            done = count_selected_local_bytes(dest, selected)
-            elapsed = max(0.001, time.time() - start)
-            speed = done / elapsed
-            pct = min(1.0, done / total) if total > 0 else 0.0
-            bar_w = 34
-            filled = int(bar_w * pct)
-            bar = f"{GREEN}{'#' * filled}{NC}{DIM}{'-' * (bar_w - filled)}{NC}"
-            _clear_screen()
-            lines = [
-                f"  {BOLD}Downloading {candidate.repo_id}{NC}",
-                "",
-                f"  [{bar}] {pct * 100:5.1f}%" if total > 0 else "  Preparing download...",
-                f"  {format_bytes(done)} / {format_bytes(total)}  {DIM}{format_bytes(int(speed))}/s{NC}",
-                f"  Destination: {dest}",
-                "",
-                f"  {DIM}Downloads resume automatically if interrupted. Ctrl-C cancels the launcher process.{NC}",
-            ]
-            sys.stdout.write("\n".join(lines) + "\n")
+        def cancel_download():
+            _show_cursor()
+            sys.stdout.write("\nDownload cancelled. Partial files are retained for resume.\n")
             sys.stdout.flush()
-            _read_key_timeout(0.5)
+            # HF may own non-daemon transfer threads that block Python's
+            # atexit join. No model is loaded on this screen. Let the OS close
+            # transfer handles/locks while retaining resumable partials.
+            os._exit(130)
 
-        thread.join(timeout=0.1)
-        if result["error"]:
-            self._message_screen("Download failed", [f"{RED}{result['error']}{NC}"])
-            return False
-        issues = validate_local_model(dest)
-        if issues:
-            self._message_screen(
-                "Download completed with warnings",
-                [f"{YELLOW}{issue}{NC}" for issue in issues] + [f"Path: {dest}"],
-            )
-        else:
-            self._message_screen("Download complete", [f"{GREEN}Model saved to {dest}{NC}"])
-        return True
+        try:
+            thread.start()
+            while not result["done"]:
+                done = count_selected_local_bytes(dest, selected)
+                elapsed = max(0.001, time.time() - start)
+                speed = done / elapsed
+                pct = min(1.0, done / total) if total > 0 else 0.0
+                bar_w = 34
+                filled = int(bar_w * pct)
+                bar = f"{GREEN}{'#' * filled}{NC}{DIM}{'-' * (bar_w - filled)}{NC}"
+                _clear_screen()
+                lines = [
+                    f"  {BOLD}Downloading {candidate.repo_id}{NC}",
+                    "",
+                    f"  [{bar}] {pct * 100:5.1f}%" if total > 0 else "  Preparing download...",
+                    f"  {format_bytes(done)} / {format_bytes(total)}  {DIM}{format_bytes(int(speed))}/s{NC}",
+                    f"  Destination: {dest}",
+                    "",
+                    f"  {DIM}Downloads resume automatically if interrupted. Esc/Ctrl-C cancels the launcher process.{NC}",
+                ]
+                sys.stdout.write("\n".join(lines) + "\n")
+                sys.stdout.flush()
+                key = _read_key_timeout(0.5)
+                if key == KEY_ESCAPE:
+                    cancel_download()
+
+            thread.join(timeout=0.1)
+            if result["error"]:
+                self._message_screen("Download failed", [f"{RED}{result['error']}{NC}"])
+                return False
+            issues = validate_local_model(dest)
+            if issues:
+                self._message_screen(
+                    "Download completed with warnings",
+                    [f"{YELLOW}{issue}{NC}" for issue in issues] + [f"Path: {dest}"],
+                )
+            else:
+                self._message_screen("Download complete", [f"{GREEN}Model saved to {dest}{NC}"])
+            return True
+        except KeyboardInterrupt:
+            cancel_download()
 
     def _hf_downloader_screen(self) -> bool:
         from krasis.hf_downloader import (
@@ -3345,7 +3409,7 @@ class Launcher:
                         continue
                     self._message_screen("Hugging Face model", [f"Reading file metadata for {selected.repo_id}..."], wait=False)
                     try:
-                        details = get_supported_model_details(selected.key)
+                        details = get_supported_model_details(selected.repo_id)
                     except Exception as exc:
                         self._message_screen("Hugging Face model", [f"{RED}{exc}{NC}"])
                         continue
@@ -3510,12 +3574,17 @@ class Launcher:
                     return False
                 cursor = min(cursor, n_visible - 1)
 
+                terminal = shutil.get_terminal_size(fallback=(80, 24))
                 _clear_screen()
                 screen = self._render_config_screen(cursor, show_advanced=show_advanced)
                 sys.stdout.write(screen + "\n")
                 sys.stdout.flush()
 
                 key = _read_key()
+                if terminal.columns < 40 or terminal.lines < 12:
+                    if key in (KEY_QUIT, KEY_ESCAPE):
+                        return False
+                    continue
 
                 if key == KEY_UP:
                     cursor = (cursor - 1) % n_visible
