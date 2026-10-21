@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.21-rc.14 — 2026-10-21
+
+- Let installed TUI users choose a benchmark-suite TOML file instead of requiring a developer-checkout path. Cancel returns to launch modes; missing, invalid or unmatched suites show an actionable message without starting a benchmark.
+- Support benchmark-suite TOML parsing on Python 3.10 with the conditional tomli dependency. rc.13 remains an unpublished build candidate.
+- Authenticate sidecar-cache discovery with the existing job token so verified cache bundles on draft candidates can be reused without rebuilding unchanged kernels.
+
 ## 1.0.21-rc.13 — 2026-10-21
 
 - Estimate catalogue RAM from normalized dimensions without accessing checkpoint shards or runtime cache identities. Preserve artifact-aware budgets for installed models.

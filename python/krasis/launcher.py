@@ -2936,6 +2936,34 @@ class Launcher:
             elif key == KEY_ESCAPE or key == KEY_QUIT:
                 return False
 
+    def _select_launch_mode(self):
+        """Select a mode and, for a suite, an editable local TOML file."""
+        while True:
+            mode = _launch_mode_screen()
+            if mode != "suite":
+                return mode, None
+            default = os.path.join(os.getcwd(), "benchmark_suite.toml")
+            legacy = os.path.join(self.script_dir, "benchmarks", "benchmark_suite.toml")
+            if not os.path.isfile(default) and os.path.isfile(legacy):
+                default = legacy
+            _show_cursor()
+            try:
+                path = _edit_value("Benchmark suite TOML path", default, cancel_value="")
+            finally:
+                _hide_cursor()
+            if not path:
+                continue
+            path = os.path.abspath(os.path.expanduser(path))
+            try:
+                from krasis.suite import SuiteRunner
+                runner = SuiteRunner(path)
+                if not runner.load_config():
+                    raise ValueError("No installed models match this suite configuration.")
+            except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
+                self._message_screen("Benchmark suite", [f"{RED}{exc}{NC}"])
+                continue
+            return mode, runner
+
     def _save_config_screen(self) -> None:
         """Prompt for filename and save current config to CWD."""
         _show_cursor()
@@ -4703,6 +4731,7 @@ def main():
         # Interactive TUI
         if launcher.run_interactive():
             # Launch mode selection (skip if --benchmark on CLI)
+            suite_runner = None
             if args.benchmark:
                 launch_mode = "benchmark"
             else:
@@ -4712,7 +4741,7 @@ def main():
                 _discard_pending_keys()
                 _hide_cursor()
                 try:
-                    launch_mode = _launch_mode_screen()
+                    launch_mode, suite_runner = launcher._select_launch_mode()
                 finally:
                     _show_cursor()
                 if launch_mode is None:
@@ -4720,15 +4749,9 @@ def main():
                     sys.exit(0)
 
             if launch_mode == "suite":
-                from krasis.suite import SuiteRunner
-                config_path = os.path.join(launcher.script_dir, "benchmarks", "benchmark_suite.toml")
-                if not os.path.isfile(config_path):
-                    print(f"Error: suite config not found: {config_path}", file=sys.stderr)
-                    sys.exit(1)
-                runner = SuiteRunner(config_path)
-                results = runner.run_all()
+                results = suite_runner.run_all()
                 if results:
-                    summary_path = runner.write_summary(results)
+                    summary_path = suite_runner.write_summary(results)
                     passed = sum(1 for r in results if r.success)
                     failed = len(results) - passed
                     print(f"\n{BOLD}Suite complete: {passed} passed, {failed} failed{NC}")

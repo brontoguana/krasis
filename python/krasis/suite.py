@@ -16,7 +16,10 @@ import signal
 import subprocess
 import sys
 import time
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional

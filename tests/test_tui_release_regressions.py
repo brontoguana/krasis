@@ -46,3 +46,45 @@ class TUIReleaseRegressions(unittest.TestCase):
                 self.assertEqual(list(Path(directory).iterdir()), [])
             finally:
                 os.chdir(previous)
+
+    def test_suite_cancel_returns_to_modes_without_creating_runner(self):
+        instance = launcher.Launcher.__new__(launcher.Launcher)
+        instance.script_dir = "/nonexistent-checkout"
+        with mock.patch.object(launcher, '_launch_mode_screen', side_effect=['suite', 'launch']), \
+             mock.patch.object(launcher, '_edit_value', return_value=''), \
+             mock.patch('krasis.suite.SuiteRunner') as runner, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(instance._select_launch_mode(), ('launch', None))
+            runner.assert_not_called()
+
+    def test_suite_missing_and_invalid_files_return_to_modes(self):
+        instance = launcher.Launcher.__new__(launcher.Launcher)
+        instance.script_dir = "/nonexistent-checkout"
+        with tempfile.TemporaryDirectory() as directory:
+            invalid = Path(directory, 'invalid.toml')
+            invalid.write_text('model = [')
+            for path in (str(Path(directory, 'missing.toml')), str(invalid)):
+                with self.subTest(path=path), \
+                     mock.patch.object(launcher, '_launch_mode_screen', side_effect=['suite', None]), \
+                     mock.patch.object(launcher, '_edit_value', return_value=path), \
+                     mock.patch.object(instance, '_message_screen') as message, \
+                     mock.patch('krasis.suite.create_run_dir', return_value=Path(directory, 'run')), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(instance._select_launch_mode(), (None, None))
+                    message.assert_called_once()
+
+    def test_suite_selection_uses_editable_path_in_installed_layout(self):
+        instance = launcher.Launcher.__new__(launcher.Launcher)
+        instance.script_dir = "/nonexistent-installed-layout"
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, 'custom.toml')
+            config.write_text('[[config]]\nnum_gpus = 1\n[[model]]\nname = "fixture"\npath = "' + directory + '"\n')
+            with mock.patch.object(launcher, '_launch_mode_screen', return_value='suite'), \
+                 mock.patch.object(launcher, '_edit_value', return_value=str(config)), \
+                 mock.patch('krasis.suite.create_run_dir', return_value=Path(directory, 'run')), \
+                 mock.patch('krasis.suite.SuiteRunner.run_all', side_effect=AssertionError('started before selection returned')), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                mode, runner = instance._select_launch_mode()
+                self.assertEqual(mode, 'suite')
+                self.assertEqual(runner.config_path, str(config))
+                self.assertEqual(len(runner.load_config()), 1)
