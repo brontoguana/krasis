@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.21-rc.16 — 2026-10-21
+
+- Fix first-run CUDA setup on minimal Linux installations without wget. Download NVIDIA’s keyring with Python’s standard library, reject failed/empty responses, and remove failed temporary downloads.
+- Add clean-bootstrap and download-failure regressions. rc.15 clean Podman acceptance caught the undeclared wget dependency before the TUI could start.
+
 ## 1.0.21-rc.15 — 2026-10-21
 
 - Update the existing diagnostic-launch mock for the suite-aware selector interface; keep rc.13 and rc.14 as unpublished candidates. Runtime changes match rc.14.

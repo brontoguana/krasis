@@ -18,6 +18,8 @@ import platform
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 BOLD = "\033[1m"
@@ -463,6 +465,17 @@ def _show_required_packages():
     print(f"\n  Install these manually, then re-run {BOLD}krasis-setup{NC}.\n")
 
 
+def _download_cuda_keyring(url: str, path: str) -> bool:
+    """Fetch the repository keyring without optional system download tools."""
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response, open(path, "wb") as output:
+            shutil.copyfileobj(response, output)
+        return os.path.getsize(path) > 0
+    except (OSError, urllib.error.URLError) as exc:
+        print(f"  {YELLOW}Could not download CUDA keyring: {exc}{NC}")
+        return False
+
+
 def _install_system_deps():
     """Install system packages: CUDA toolkit (nvcc), ninja, and python-dev headers."""
     print(f"\n{BOLD}Step 1: System Packages (nvcc, ninja, python-dev){NC}")
@@ -546,12 +559,9 @@ def _install_system_deps():
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".deb", delete=False) as tmp:
             keyring_path = tmp.name
-        ret = _run(["wget", "-q", "-O", keyring_path, keyring_url], check=False)
-        if ret.returncode != 0:
-            # Try curl as fallback
-            ret = _run(["curl", "-sL", "-o", keyring_path, keyring_url], check=False)
+        downloaded = _download_cuda_keyring(keyring_url, keyring_path)
         cuda_installed = False
-        if ret.returncode != 0:
+        if not downloaded:
             print(f"  {YELLOW}Could not download CUDA keyring, checking if nvcc is already available...{NC}")
         else:
             cmds = [
@@ -577,11 +587,11 @@ def _install_system_deps():
             else:
                 print(f"  {YELLOW}Could not set up CUDA repo, checking if nvcc is already available...{NC}")
 
-            # Clean up keyring
-            try:
-                os.unlink(keyring_path)
-            except OSError:
-                pass
+        # Clean up both successful downloads and failed/partial attempts.
+        try:
+            os.unlink(keyring_path)
+        except OSError:
+            pass
 
         # Add to PATH if needed
         cuda_bin = f"/usr/local/cuda-{required_ver[0]}.{required_ver[1]}/bin"
