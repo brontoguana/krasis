@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.21-rc.15 — 2026-10-21
+
+- Update the existing diagnostic-launch mock for the suite-aware selector interface; keep rc.13 and rc.14 as unpublished candidates. Runtime changes match rc.14.
+
 ## 1.0.21-rc.14 — 2026-10-21
 
 - Let installed TUI users choose a benchmark-suite TOML file instead of requiring a developer-checkout path. Cancel returns to launch modes; missing, invalid or unmatched suites show an actionable message without starting a benchmark.

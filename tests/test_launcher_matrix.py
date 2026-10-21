@@ -2669,6 +2669,7 @@ class LauncherMatrixTest(unittest.TestCase):
                     fake.model_info = None
                     fake.selected_gpus = []
                     fake.run_interactive.return_value = True
+                    fake._select_launch_mode.return_value = ("launch", None)
                     with mock.patch.object(sys, "argv", argv), \
                          mock.patch.object(launcher_mod, "Launcher", return_value=fake), \
                          mock.patch.object(launcher_mod, "_check_gpu_deps"), \
