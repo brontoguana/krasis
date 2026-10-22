@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.21 — 2026-10-22
+
+- Promote the rc.19 runtime and TUI fixes to the stable release, with Linux wheels and the exact-commit tested Windows private-runtime installer.
+- Retain experimental single-GPU dense Qwen3.5 text scope and numerical-reference warnings; GLM qualification remains specific to the tested scales-only configuration.
+
 ## 1.0.21-rc.19 — 2026-10-22
 
 - Keep the Q shutdown listener alive until Rust starts serving; cancel it on server exit and handle keyboard shutdown logging. Show the canonical-terminal Q-then-Enter shortcut accurately. Add actual pipe/thread regressions for pre-run startup and cancellation.
