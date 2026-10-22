@@ -21,18 +21,19 @@ budgeting.
 ## Install
 
 The current release is
-[`v1.0.16`](https://github.com/brontoguana/krasis/releases/tag/v1.0.16).
+[`v1.0.21`](https://github.com/brontoguana/krasis/releases/tag/v1.0.21).
 
-**Native Windows:** [Download the Krasis Windows installer](https://github.com/brontoguana/krasis/releases/download/v1.0.16/KrasisSetup-1.0.16-win64.exe).
+**Native Windows:** [Download the Krasis Windows installer](https://github.com/brontoguana/krasis/releases/download/v1.0.21/KrasisSetup-1.0.21-win64.exe).
 It installs Krasis for the current user, includes its own Python runtime, and
 adds `Krasis` to the Start Menu.
 
 **Linux or WSL2:**
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- prerelease
+curl -sSf https://krasis.ai/downloads/install.sh | bash
 ```
 
+See the [download and setup page](https://krasis.ai/install/) for current installers.
 See [all releases](https://github.com/brontoguana/krasis/releases) for older
 versions and individual wheel/source assets.
 
@@ -155,17 +156,17 @@ adaptive-pruning results are not used in this table.
 Linux/WSL:
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- prerelease
+curl -sSf https://krasis.ai/downloads/install.sh | bash
 ```
 
 This creates a managed environment at `~/.krasis/venv`, installs Krasis,
 symlinks commands into `~/.local/bin`, and updates PATH for the current shell.
-No sudo is required for the Krasis install itself. Omit `prerelease` when
-installing the latest stable release.
+No sudo is required for the Krasis install itself. Add `prerelease` to the
+installer arguments only when you explicitly want a prerelease.
 
 Native Windows:
 
-[Download `KrasisSetup-1.0.16-win64.exe`](https://github.com/brontoguana/krasis/releases/download/v1.0.16/KrasisSetup-1.0.16-win64.exe).
+[Download `KrasisSetup-1.0.21-win64.exe`](https://github.com/brontoguana/krasis/releases/download/v1.0.21/KrasisSetup-1.0.21-win64.exe).
 The installer creates a per-user install under
 `%LOCALAPPDATA%\Programs\Krasis`, installs and validates a release-pinned
 private Python/Krasis/PyTorch runtime, and adds `Krasis` and `Krasis Manager`
