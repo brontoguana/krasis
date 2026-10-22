@@ -10101,6 +10101,19 @@ fn validate_dsa_runtime_graph(
     Ok(Some((index_topk, runtime_context_tokens)))
 }
 
+/// Dense-only graph capture must include every layer in its pipeline segment.
+fn dense_graph_routing_range(
+    num_layers: usize,
+    start: usize,
+    configured_end: usize,
+) -> Result<(usize, usize), String> {
+    let end = if configured_end == 0 { num_layers } else { configured_end };
+    if start >= end || end > num_layers {
+        return Err(format!("invalid dense graph layer range {start}..{end} for {num_layers} layers"));
+    }
+    Ok((start, end - 1))
+}
+
 #[cfg(test)]
 pub(crate) mod dsa_registration_tests {
     use std::sync::Mutex;
@@ -10129,6 +10142,16 @@ pub(crate) mod dsa_registration_tests {
         PendingPeerDispatch, RouteLocalityGlobalLruState, SharedExpertPath, DSA_TOPK_RADIX_THREADS,
         MODULE_NAME,
     };
+
+    #[test]
+    fn dense_graph_capture_covers_full_and_split_layer_ranges() {
+        assert_eq!(super::dense_graph_routing_range(64, 0, 0).unwrap(), (0, 63));
+        assert_eq!(super::dense_graph_routing_range(64, 16, 32).unwrap(), (16, 31));
+        assert_eq!(super::dense_graph_routing_range(64, 32, 64).unwrap(), (32, 63));
+        assert!(super::dense_graph_routing_range(64, 32, 32).is_err());
+        assert!(super::dense_graph_routing_range(64, 0, 65).is_err());
+        assert!(super::dense_graph_routing_range(0, 0, 0).is_err());
+    }
 
     static DSA_CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -32159,7 +32182,9 @@ impl GpuDecodeStore {
             lm_head_wid: 0,
             final_norm_ptr: 0,
             final_norm_size: 0,
-            moe_layers: Vec::new(),
+            // Layer-indexed optional metadata exists even for a fully dense
+            // model, which never creates or registers a routed-expert engine.
+            moe_layers: (0..num_layers).map(|_| None).collect(),
             tileq_layers_gpu: Vec::new(),
             expert_hqq_cache: None,
             shared_expert_vram: Vec::new(),
@@ -59206,11 +59231,13 @@ impl GpuDecodeStore {
         }
 
         // Set segment config so run_segment_kernels uses correct GQA cache indices
-        if let Some((start, _end)) = layer_range {
+        if let Some((start, end)) = layer_range {
             graph.segment_layer_start = start;
+            graph.segment_layer_end = end;
             graph.segment_gqa_cache_offset = gqa_cache_offset;
         } else {
             graph.segment_layer_start = 0;
+            graph.segment_layer_end = 0;
             graph.segment_gqa_cache_offset = 0;
         }
 
@@ -59901,7 +59928,9 @@ impl GpuDecodeStore {
                 break;
             }
 
-            let label = if graph_idx == 0 {
+            let label = if num_moe == 0 {
+                "dense-transformer-final".to_string()
+            } else if graph_idx == 0 {
                 format!("routing-L{}", moe_indices[0])
             } else if graph_idx < num_moe {
                 format!(
@@ -60211,7 +60240,13 @@ impl GpuDecodeStore {
         };
 
         // Range of layers whose routing (norm+attn+post-norm+gate+topk) we capture
-        let routing_range = if !is_last {
+        let routing_range = if num_moe == 0 {
+            Some(dense_graph_routing_range(
+                graph.num_layers,
+                graph.segment_layer_start,
+                graph.segment_layer_end,
+            )?)
+        } else if !is_last {
             let moe_layer = moe_indices[graph_idx];
             // Start after the previous MoE layer's experts (or from layer 0 for graph 0)
             let start = if is_first {

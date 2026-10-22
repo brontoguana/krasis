@@ -1170,11 +1170,11 @@ class ModelConfig:
         # Norm convention: Qwen3NextRMSNorm uses (1 + weight) * x
         # with weight initialized to zeros, while standard models use weight * x
         # with weight initialized to ones. We add 1.0 to stored weights at load time.
-        norm_bias_one = arch in ("qwen3_next", "qwen3_5_moe_text") or step3_text
+        norm_bias_one = arch in ("qwen3_next", "qwen3_5_moe_text", "qwen3_5_text") or step3_text
 
         # Gated attention: q_proj outputs [query, gate], apply sigmoid(gate) before o_proj
         # Qwen3.5 uses explicit attn_output_gate flag; Qwen3Next always uses it
-        gated_attention = cfg.get("attn_output_gate", arch in ("qwen3_next", "qwen3_5_moe_text"))
+        gated_attention = cfg.get("attn_output_gate", arch in ("qwen3_next", "qwen3_5_moe_text", "qwen3_5_text"))
 
         # Nemotron-H and Step use separate shared expert field names.
         nemotron_shared_inter = cfg.get("moe_shared_expert_intermediate_size", 0)
@@ -1192,6 +1192,23 @@ class ModelConfig:
                            cfg.get("num_experts",
                                   cfg.get("num_local_experts",
                                           cfg.get("moe_num_experts", 0))))
+        if arch == "qwen3_5_text":
+            # Every text layer has a dense SwiGLU MLP, including GDN layers.
+            if n_experts:
+                raise ValueError("qwen3_5_text must not declare routed experts")
+            first_k_dense = num_layers
+            if len(layer_types or []) != num_layers or any(
+                value not in ("linear_attention", "full_attention")
+                for value in layer_types
+            ):
+                raise ValueError("qwen3_5_text requires an exact GDN/GQA layer schedule")
+            if cfg.get("hidden_activation", cfg.get("hidden_act", "silu")) != "silu":
+                raise ValueError("qwen3_5_text requires the native SwiGLU activation")
+            nk = int(cfg.get("linear_num_key_heads", 0))
+            nv = int(cfg.get("linear_num_value_heads", 0))
+            if nk <= 0 or nv <= 0 or nv % nk:
+                raise ValueError("qwen3_5_text requires an integral GDN value/key head ratio")
+
         # Experts per token: num_experts_per_tok (DeepSeek/Qwen3) /
         # experts_per_token (GPT OSS) / moe_top_k (Step).
         experts_per_tok = cfg.get("num_experts_per_tok",
@@ -1483,7 +1500,22 @@ class ModelConfig:
         return owner_idx is not None and owner_idx == layer_idx
 
     @property
+    def requires_hqq_prefill_materialization(self) -> bool:
+        """Use native dequantization/cuBLAS for non-Marlin attention geometry.
+
+        GDN B/A projections have two rows per value head; Marlin requires a
+        multiple of 64 output rows. Packed HQQ decode is unaffected.
+        """
+        return self.is_deepseek_v4 or self.is_glm5_next or (
+            self.linear_attention_family == "gated_deltanet"
+            and self.linear_num_value_heads > 0
+            and (2 * self.linear_num_value_heads) % 64 != 0
+        )
+
+    @property
     def num_moe_layers(self) -> int:
+        if self.n_routed_experts <= 0:
+            return 0
         if self.moe_layer_indices is not None:
             return len(self.moe_layer_indices)
         if self.hybrid_override_pattern:

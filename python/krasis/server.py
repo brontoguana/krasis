@@ -2943,6 +2943,12 @@ def _mixed_expert_configuration_error(
     return None
 
 
+def _apply_dense_serving_policy(args, cfg) -> None:
+    """Dense models have no routed experts to stream or retain in HCS."""
+    if cfg.n_routed_experts <= 0:
+        args.hcs = False
+
+
 def _resolve_serving_gpu_count(args) -> int:
     """Resolve serving topology and reject unqualified mixed execution."""
     import torch
@@ -3668,11 +3674,14 @@ def main():
     from krasis.config import ModelConfig
 
     cfg = ModelConfig.from_model_path(args.model_path)
+    _apply_dense_serving_policy(args, cfg)
     num_layers = cfg.num_hidden_layers
     try:
         num_gpus_available = _resolve_serving_gpu_count(args)
     except ValueError as exc:
         parser.error(str(exc))
+    if cfg.model_type == "qwen3_5_text" and num_gpus_available != 1:
+        parser.error("Dense Qwen3.5 text execution currently requires one selected GPU")
     if args.multi_gpu_mode == "peer" and num_gpus_available < 2:
         parser.error("--multi-gpu-mode peer requires at least two selected GPUs")
     if args.dynamic_peer and num_gpus_available < 2:
@@ -3694,7 +3703,9 @@ def main():
             f"Selected physical GPUs: {args.selected_gpus} "
             f"({args.selected_gpus_source}; CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')})"
         )
-    if args.gpu_expert_bits == 16:
+    if cfg.n_routed_experts <= 0:
+        expert_detail = f"Dense MLP: {args.dense_mlp_quant}  |  LM head: {args.lm_head_quant}"
+    elif args.gpu_expert_bits == 16:
         expert_detail = "Experts: GPU BF16"
     elif args.gpu_expert_bits == 3:
         expert_detail = f"Experts: TileQ INT3 residual g{args.expert_group_size}"
@@ -3712,7 +3723,7 @@ def main():
             expert_detail = f"Experts: experimental scales-only INT4 (searched + original amax reserve replacements) g{args.expert_group_size}"
     else:
         expert_detail = f"Experts: GPU INT{args.gpu_expert_bits} g{args.expert_group_size}"
-    if args.gpu_expert_bits == 4 and not args.mixed_expert_manifest:
+    if cfg.n_routed_experts > 0 and args.gpu_expert_bits == 4 and not args.mixed_expert_manifest:
         expert_detail += f" ({args.gpu_expert_int4_calib})"
     _detail(f"{expert_detail}  |  Attention: {args.attention_quant}  |  KV: {args.kv_dtype}")
     _detail(f"Layer groups: {args.layer_group_size}  |  KV cache: {args.kv_cache_mb} MB  |  Threads: {args.krasis_threads}")
@@ -3726,7 +3737,10 @@ def main():
         validation_components.append("dense MLP=BF16")
     if args.lm_head_quant == "bf16":
         validation_components.append("lm head=BF16")
-    if validation_components:
+    if cfg.model_type == "qwen3_5_text":
+        _warn("Experimental dense Qwen3.5 text: numerical comparisons retain "
+              "low-margin later-token differences; vision and multi-GPU are unqualified.")
+    if validation_components and cfg.model_type != "qwen3_5_text":
         joined = ", ".join(validation_components)
         _warn(
             "UNVALIDATED BF16 debug path enabled: "

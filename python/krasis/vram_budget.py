@@ -1081,7 +1081,7 @@ def _hqq_attention_tensor_shapes_for_layer(
     gated_attention = bool(
         cfg.get(
             "attn_output_gate",
-            cfg.get("model_type") in ("qwen3_next", "qwen3_5_moe_text"),
+            cfg.get("model_type") in ("qwen3_next", "qwen3_5_moe_text", "qwen3_5_text"),
         )
     )
     q_rows = n_heads * head_dim * (2 if gated_attention else 1)
@@ -1615,6 +1615,10 @@ def compute_launcher_budget(
             n_heads * head_dim * hidden             # O
         )
 
+    if model_cfg.model_type == "qwen3_5_text" and model_cfg.gated_attention:
+        # Gated GQA stores both query and output gate in q_proj.
+        attn_params_per_layer += hidden * n_heads * head_dim
+
     hqq_layer_bytes = None
     hqq_budget_source = None
     if attention_quant in HQQ_ATTENTION_QUANTS:
@@ -1803,6 +1807,11 @@ def compute_launcher_budget(
             cfg["vocab_size"] * hidden, lm_head_quant, expert_group_size,
         )
 
+    if model_cfg.model_type == "qwen3_5_text" and base_lmhead_bytes and lm_head_quant == "int8":
+        # Peak setup holds the INT8 head alongside its BF16 native view;
+        # the INT8 source is moved to CPU after store registration.
+        base_lmhead_bytes += cfg["vocab_size"] * hidden * 2
+
     # Gate weights and norms are PERMANENT on GPU for ALL layers (not streamed).
     # Additionally, f32 copies of gate weights are kept for routing precision.
     total_moe_layers_all = len(moe_layer_indices)
@@ -1851,6 +1860,15 @@ def compute_launcher_budget(
     if dense_inter > 0:
         dense_mlp_workspace_bytes = prefill_chunk * dense_inter * 8
         prefill_workspace_bytes = max(prefill_workspace_bytes, dense_mlp_workspace_bytes)
+    if (model_cfg.model_type == "qwen3_5_text"
+            and attention_quant.startswith("hqq")
+            and model_cfg.requires_hqq_prefill_materialization):
+        # One reusable BF16 projection buffer, not a second resident attention
+        # model. The native materialization path accepts the 96-row B/A matrix.
+        shapes = [shape for i in range(total_layers)
+                  for shape in _hqq_attention_tensor_shapes_for_layer(
+                      cfg, _layer_type_for_hqq_budget(cfg, i), i)]
+        prefill_workspace_bytes += max((rows * cols * 2 for _, rows, cols in shapes), default=0)
 
     for rank_idx in range(num_ranks):
         rank_start = sum(pp_partition[:rank_idx])
@@ -1910,6 +1928,11 @@ def compute_launcher_budget(
         dense_mlp_bytes = _component_weight_bytes(
             dense_mlp_params_per_layer, dense_mlp_quant, expert_group_size,
         ) * dn
+        if model_cfg.model_type == "qwen3_5_text" and dense_mlp_quant == "int8":
+            # The existing native dense dispatcher consumes BF16 dequantized
+            # matrices and retains the loaded INT8 source. Account for both;
+            # INT8 is a precision choice, not native dense VRAM compression.
+            dense_mlp_bytes += dense_mlp_params_per_layer * 2 * dn
 
         # Expert buffers (GPU side)
         # layer_group_size: 0 = persistent (all layers), >=1 = N layers at a time
@@ -2093,7 +2116,22 @@ def compute_launcher_budget(
         hqq_host_staging_bytes = sum(hqq_layer_bytes.values()) * 2
     ram_gpu_experts_mb = ram_gpu_experts_bytes / MB
     ram_hqq_host_staging_mb = hqq_host_staging_bytes / MB
-    ram_total_mb = ram_gpu_experts_mb + ram_hqq_host_staging_mb
+    ram_dense_load_mb = 0.0
+    if model_cfg.model_type == "qwen3_5_text":
+        # Cold loading maps BF16 checkpoint tensors before native registration.
+        # Count text source pages conservatively alongside HQQ host staging;
+        # an expert-only estimate would misleadingly report near-zero dense RAM.
+        source_attention_bytes = sum(
+            rows * cols * 2
+            for i in range(total_layers)
+            for name, rows, cols in _hqq_attention_tensor_shapes_for_layer(
+                cfg, _layer_type_for_hqq_budget(cfg, i), i)
+            if name != "fused_qkv"
+        )
+        source_dense_bytes = dense_mlp_params_per_layer * total_layers * 2
+        source_head_bytes = base_embed_bytes * (1 if cfg.get("tie_word_embeddings", True) else 2)
+        ram_dense_load_mb = (source_attention_bytes + source_dense_bytes + source_head_bytes) / MB
+    ram_total_mb = ram_gpu_experts_mb + ram_hqq_host_staging_mb + ram_dense_load_mb
 
     peak_vram_mb = max(r["total_with_kv_mb"] for r in ranks) if ranks else 0
 
@@ -2125,6 +2163,7 @@ def compute_launcher_budget(
         "mixed_expert_manifest": mixed_expert_manifest,
         "mixed_expert_max_record_bytes": mixed_expert_bytes_max,
         "ram_hqq_host_staging_mb": ram_hqq_host_staging_mb,
+        "ram_dense_load_mb": ram_dense_load_mb,
         "ram_total_mb": ram_total_mb,
         "ram_dspark_experts_mb": dspark_host_cache_bytes / MB,
         "hcs_cacheable_experts_mb": (

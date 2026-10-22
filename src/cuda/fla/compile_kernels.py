@@ -92,6 +92,7 @@ if (
         f"Invalid architecture/H inventory in {SIDECAR_CONTRACT_PATH}"
     )
 # QCN/Q35B: H=32 (32 LA value heads)
+# Qwen3.5-27B: H=48 (48 LA value heads)
 # Qwen3.5-122B: H=64 (64 LA value heads)
 
 # ═══════════════════════════════════════════════════════════════════

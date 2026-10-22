@@ -344,7 +344,7 @@ class LauncherMatrixTest(unittest.TestCase):
             unsupported = root_path / "qwen38-dense"
             unsupported.mkdir()
             (unsupported / "config.json").write_text(
-                json.dumps(_minimal_qwen3_config("qwen3_5_text")), encoding="utf-8"
+                json.dumps(_minimal_qwen3_config("qwen3_8_text")), encoding="utf-8"
             )
             (unsupported / "model.safetensors").write_bytes(b"")
 
@@ -2111,7 +2111,7 @@ class LauncherMatrixTest(unittest.TestCase):
             {
                 "schema_version": 1,
                 "architectures": [80, 89, 90, 120],
-                "h_values": [32, 64],
+                "h_values": [32, 48, 64],
             },
         )
         self.assertIn('f"krasis_fla_sm{arch}.dll"', runtime_manifest_source)

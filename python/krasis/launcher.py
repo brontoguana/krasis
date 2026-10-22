@@ -567,6 +567,7 @@ _STRUCTURALLY_SUPPORTED_MODEL_TYPES = frozenset({
     "qwen3",
     "qwen3_moe",
     "qwen3_5_moe_text",
+    "qwen3_5_text",
     "qwen3_next",
     "step3p5",
     "step3p7",
@@ -965,7 +966,9 @@ class LauncherConfig:
         self.hqq_sidecar_manifest: str = ""
         self.shared_expert_quant: str = "int8"
         self.dense_mlp_quant: str = "int8"
+        self._dense_mlp_quant_explicit: bool = False
         self.lm_head_quant: str = "int8"
+        self._lm_head_quant_explicit: bool = False
         self.krasis_threads: int = 40
         self.host: str = "0.0.0.0"
         self.port: int = 8012
@@ -1164,8 +1167,10 @@ class LauncherConfig:
             self.shared_expert_quant = saved["CFG_SHARED_EXPERT_QUANT"]
         if "CFG_DENSE_MLP_QUANT" in saved:
             self.dense_mlp_quant = saved["CFG_DENSE_MLP_QUANT"]
+            self._dense_mlp_quant_explicit = True
         if "CFG_LM_HEAD_QUANT" in saved:
             self.lm_head_quant = saved["CFG_LM_HEAD_QUANT"]
+            self._lm_head_quant_explicit = True
         if "CFG_KRASIS_THREADS" in saved:
             try:
                 self.krasis_threads = int(saved["CFG_KRASIS_THREADS"])
@@ -1431,6 +1436,10 @@ OPTIONS = [
                  choices=list(GPU_EXPERT_INT4_CALIB_CHOICES), advanced=True),
     ConfigOption("Attention quant", "attention_quant",
                  choices=list(INTERACTIVE_ATTENTION_QUANT_CHOICES), affects_budget=True),
+    ConfigOption("Dense MLP precision", "dense_mlp_quant",
+                 choices=["int8", "bf16"], affects_budget=True),
+    ConfigOption("LM head precision", "lm_head_quant",
+                 choices=["int8", "bf16"], affects_budget=True, advanced=True),
     ConfigOption("Vision quant", "vision_quant",
                  choices=["int4", "bf16"], advanced=True),
     ConfigOption("VRAM safety margin", "vram_safety_margin",
@@ -1551,6 +1560,14 @@ def _is_option_visible(
 ) -> bool:
     """Check if an option should be shown for the current model."""
     if opt.advanced and not show_advanced:
+        return False
+    if model_info and model_info.get("arch") == "qwen3_5_text" and opt.key in {
+        "layer_group_size", "gpu_expert_bits", "expert_group_size",
+        "gpu_expert_int4_calib", "mixed_expert_manifest", "mixed_expert_build_plan",
+        "mixed_expert_calibration", "hcs_host_cache_mode", "expert_compression",
+        "expert_compression_sidecar", "expert_compression_pipeline", "dynamic_hcs",
+        "dynamic_hcs_tail_blocks",
+    }:
         return False
     if opt.key == "dense_mlp_quant":
         # Only show if model has dense (non-MoE) layers
@@ -2212,6 +2229,8 @@ class Launcher:
         spec = self._supported_model_spec()
         if spec is not None:
             return list(spec.attention_modes)
+        if (self.model_info or {}).get("arch") == "qwen3_5_text":
+            return ["bf16", *INTERACTIVE_ATTENTION_QUANT_MODES]
         if self._is_deepseek_v4():
             return list(DEEPSEEK_V4_ATTENTION_QUANT_MODES)
         if self._is_gemma4():
@@ -2259,6 +2278,17 @@ class Launcher:
                 self.cfg.kv_dtype = spec.default_kv
             if spec.default_vision_quant and not self.cfg._vision_quant_explicit:
                 self.cfg.vision_quant = spec.default_vision_quant
+        elif (self.model_info or {}).get("arch") == "qwen3_5_text":
+            # Initial dense text acceptance uses source-precision components.
+            # Native INT8 MLP sources expand to BF16 and cost more VRAM here.
+            if not self.cfg._attention_quant_explicit:
+                self._set_interactive_attention_quant("bf16")
+            if not self.cfg._kv_dtype_explicit:
+                self.cfg.kv_dtype = "bf16"
+            if not self.cfg._dense_mlp_quant_explicit:
+                self.cfg.dense_mlp_quant = "bf16"
+            if not self.cfg._lm_head_quant_explicit:
+                self.cfg.lm_head_quant = "bf16"
         elif self._is_deepseek_v4():
             if not self.cfg._attention_quant_explicit:
                 self._set_interactive_attention_quant("hqq6")
@@ -2524,6 +2554,8 @@ class Launcher:
                 )
     def _validate_model_topology(self) -> None:
         selected_count = len(self.cfg.selected_gpu_indices)
+        if (self.model_info or {}).get("arch") == "qwen3_5_text" and selected_count > 1:
+            raise ValueError("Dense Qwen3.5 text execution currently requires one selected GPU.")
         if self.cfg.mixed_expert_manifest and selected_count != 1:
             raise ValueError(
                 "Mixed routed experts require exactly one selected GPU; "
@@ -3454,6 +3486,8 @@ class Launcher:
             idx = (idx + direction) % len(choices)
             new_val = choices[idx]
             setattr(self.cfg, opt.key, new_val)
+            if opt.key in ("dense_mlp_quant", "lm_head_quant"):
+                setattr(self.cfg, f"_{opt.key}_explicit", True)
             if opt.key == "kv_dtype":
                 self.cfg._kv_dtype_explicit = True
             if opt.key == "gpu_expert_bits":
@@ -4144,8 +4178,10 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.shared_expert_quant = args.shared_expert_quant
     if args.dense_mlp_quant is not None:
         cfg.dense_mlp_quant = args.dense_mlp_quant
+        cfg._dense_mlp_quant_explicit = True
     if args.lm_head_quant is not None:
         cfg.lm_head_quant = args.lm_head_quant
+        cfg._lm_head_quant_explicit = True
     if args.krasis_threads is not None:
         cfg.krasis_threads = args.krasis_threads
     if args.host is not None:

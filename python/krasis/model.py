@@ -1033,6 +1033,11 @@ class KrasisModel:
 
     def supports_qwen_image_inputs(self) -> bool:
         """Return True when the loaded model directory contains Qwen image assets."""
+        # Dense Qwen3.5 is admitted for text only until its distinct vision
+        # encoder/projector path has passed qualification. Asset presence is
+        # insufficient to advertise multimodal support for this new target.
+        if getattr(self.cfg, "model_type", "") == "qwen3_5_text":
+            return False
         config_path = os.path.join(self.cfg.model_path, "config.json")
         index_path = os.path.join(self.cfg.model_path, "model.safetensors.index.json")
         processor_path = os.path.join(self.cfg.model_path, "preprocessor_config.json")
@@ -2836,7 +2841,9 @@ class KrasisModel:
         cache_dir = cache_dir_for_model(self.cfg.model_path)
         has_gpu_cache = False
         marlin_cache_bytes = 0
-        if gpu_bits == 16:
+        if self.cfg.n_routed_experts <= 0:
+            logger.info("Dense model: no routed expert engine/cache required")
+        elif gpu_bits == 16:
             print(
                 f"\n\033[1m\033[36m▸ Loading BF16 expert weights from safetensors "
                 f"(UNVALIDATED debug path only; not for validation or production)\033[0m",
@@ -2895,7 +2902,9 @@ class KrasisModel:
         self._load_cpu_experts(gpu_only=gpu_only)
         cpu_elapsed = time.perf_counter() - cpu_start
         logger.info("Expert weights loaded in %.1fs", cpu_elapsed)
-        if gpu_bits == 16:
+        if self.cfg.n_routed_experts <= 0:
+            print("  Dense MLP weights loaded; no routed expert cache required.", flush=True)
+        elif gpu_bits == 16:
             print(
                 f"  \033[0;32mUNVALIDATED BF16 debug weights loaded in {cpu_elapsed:.0f}s. "
                 f"Do not use this path for validation; use HF BF16 as the oracle.\033[0m",
@@ -3008,6 +3017,12 @@ class KrasisModel:
                     "cuBLAS is required for INT8 matmuls (attention/gates). "
                     "Cannot start without working cuBLAS."
                 ) from e
+
+            # Dense models have no routed expert kernel to warm. The actual
+            # registered native attention/MLP prefill is warmed by server.main.
+            if self.cfg.n_routed_experts <= 0:
+                torch.cuda.synchronize(device)
+                continue
 
             # ── 2. Vendored Marlin kernel loading/workspace allocation ──
             try:
@@ -6263,7 +6278,7 @@ class KrasisModel:
                     backend=manifest["backend"],
                     deepseek_v4=bool(self.cfg.is_deepseek_v4),
                     prefill_materialize_default=bool(
-                        self.cfg.is_deepseek_v4 or self.cfg.is_glm5_next
+                        self.cfg.requires_hqq_prefill_materialization
                     ),
                     nbits=int(desc["nbits"]),
                     format_version=int(manifest["format_version"]),
@@ -7487,6 +7502,13 @@ class KrasisModel:
                 and ~45s load time). GPU Marlin experts are still loaded for
                 prefill and HCS decode. CPU decode will not work in this mode.
         """
+        if self.cfg.n_routed_experts <= 0:
+            # Dense models already loaded every MLP with the non-expert weights.
+            # The MoE engine requires routed-expert fields absent from these
+            # checkpoints; native dense prefill/decode use registered MLPs.
+            self.krasis_engine = None
+            return
+
         from krasis import KrasisEngine
 
         cpu_bits = self.quant_cfg.cpu_expert_bits

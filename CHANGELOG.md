@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.21-rc.18 — 2026-10-22
+
+- Support dense Qwen3.5 text configuration: zero-centred norms, gated attention, exact GDN/GQA scheduling, dense layer counts and native prefill metadata. Skip absent routed-expert engines and unused expert warmup while retaining actual native prefill warmup.
+- Build H=48 FLA variants for SM80/89/90/120. Use the existing Rust/CUDA HQQ materialization path for GDN B/A projections that do not meet Marlin row alignment; packed HQQ decode remains unchanged.
+- Default dense Qwen3.5 TUI profiles to BF16 components while preserving explicit saved/CLI/interactive choices; retain separate numerical warnings for quantized profiles and exclude unqualified vision advertisement. Expose dense MLP and head precision controls, hide irrelevant expert controls for dense Qwen3.5, and account for retained INT8/BF16 dense weights native prefill scratch and conservative cold checkpoint RAM in the TUI budget.
+- Add configuration, normalization, projection-fusion, memory and native GPU regressions. Exact 27B comparisons show close equal-prefix results with low-margin later-token differences; strict free-generation comparison retains an outlier. Dense Qwen remains experimental single-GPU text, with unvalidated confirmation; no vision, multi-GPU or ADQ qualification.
+
+
 ## 1.0.21-rc.17 — 2026-10-22
 
 - Fix supported-catalogue detail selection using the candidate repository identity, without requiring checkpoint shards before download.
