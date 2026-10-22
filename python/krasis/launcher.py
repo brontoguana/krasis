@@ -1566,7 +1566,8 @@ def _is_option_visible(
         "gpu_expert_int4_calib", "mixed_expert_manifest", "mixed_expert_build_plan",
         "mixed_expert_calibration", "hcs_host_cache_mode", "expert_compression",
         "expert_compression_sidecar", "expert_compression_pipeline", "dynamic_hcs",
-        "dynamic_hcs_tail_blocks",
+        "dynamic_hcs_tail_blocks", "multi_gpu_mode", "dynamic_peer",
+        "force_rebuild_cache",
     }:
         return False
     if opt.key == "dense_mlp_quant":
@@ -2695,6 +2696,7 @@ class Launcher:
     def _render_config_screen(self, cursor: int, editing: bool = False,
                               show_advanced: bool = False) -> str:
         """Render the full config screen as a string."""
+        dense_qwen = (self.model_info or {}).get("arch") == "qwen3_5_text"
         lines = []
         terminal = shutil.get_terminal_size(fallback=(80, 24))
         columns, rows = terminal.columns, terminal.lines
@@ -2817,6 +2819,10 @@ class Launcher:
                 rank.get("cuda_overhead_mb", 0)
             )
 
+            if dense_qwen:
+                experts_mb = int(rank.get("dense_mlp_mb", 0))
+                overhead_mb -= experts_mb
+
             # KV allocation (capped to available VRAM)
             free_before_kv = rank.get("free_mb", 0)
             kv_alloc = int(min(self.cfg.kv_cache_mb, max(0, free_before_kv)))
@@ -2835,7 +2841,7 @@ class Launcher:
             total_used = experts_mb + attention_mb + overhead_mb + kv_alloc
 
             # HCS coverage: VRAM available for expert caching vs total expert cache
-            permanent_mb = attention_mb + overhead_mb + kv_alloc
+            permanent_mb = attention_mb + overhead_mb + (experts_mb if dense_qwen else 0) + kv_alloc
             free_for_hcs = max(0, int(gpu_vram - permanent_mb))
             total_expert_cache = b.get(
                 "hcs_cacheable_experts_mb", b.get("ram_gpu_experts_mb", 0)
@@ -2843,7 +2849,8 @@ class Launcher:
             hcs_pct = (free_for_hcs / total_expert_cache * 100) if total_expert_cache > 0 else 0
 
             # Labels
-            expert_label = f"INT{self.cfg.gpu_expert_bits}"
+            expert_label = self.cfg.dense_mlp_quant.upper() if dense_qwen else f"INT{self.cfg.gpu_expert_bits}"
+            weight_label = "Dense MLP" if dense_qwen else "Experts"
             attn_label = _format_attention_quant_value(
                 self.cfg.attention_quant,
                 self.cfg.hqq_auto_budget_pct if self.cfg.attention_quant in ("hqq46_auto", "hqq68_auto") else None,
@@ -2863,18 +2870,20 @@ class Launcher:
             # Left column (VRAM) — 3 categories + KV + total + HCS
             left = [
                 f"{DIM}\u2500\u2500 VRAM Budget \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500{NC}",
-                f"  Experts:     {CYAN}{experts_mb:>8,} MB{NC}  {DIM}({expert_label}){NC}",
+                f"  {weight_label + ':':13}{CYAN}{experts_mb:>8,} MB{NC}  {DIM}({expert_label}){NC}",
                 f"  Attention:   {CYAN}{attention_mb:>8,} MB{NC}  {DIM}({attn_label}){NC}",
                 f"  Overhead:    {CYAN}{overhead_mb:>8,} MB{NC}",
                 f"  KV cache:    {CYAN}{kv_alloc:>8,} MB{NC}  {DIM}({kv_label}){NC}",
                 f"  {DIM}\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500{NC}",
                 f"  Total: {CYAN}{total_used:>8,}{NC} / {int(gpu_vram):,} MB",
-                f"  HCS:   {CYAN}{free_for_hcs:>8,} MB{NC} {DIM}(~{hcs_pct:.0f}% coverage){NC}",
+                (f"  Free VRAM: {CYAN}{free_for_hcs:>8,} MB{NC}" if dense_qwen else
+                 f"  HCS:   {CYAN}{free_for_hcs:>8,} MB{NC} {DIM}(~{hcs_pct:.0f}% coverage){NC}"),
             ]
             # Right column (RAM) — expert cache
             right = [
                 f"{DIM}\u2500\u2500 System RAM \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500{NC}",
-                f"  Expert cache:    {GREEN}{ram_experts_gb:>7.1f} GB{NC}",
+                (f"  Cold model RAM: {GREEN}{b.get('ram_dense_load_mb', 0) / 1024:>7.1f} GB{NC}" if dense_qwen else
+                 f"  Expert cache:    {GREEN}{ram_experts_gb:>7.1f} GB{NC}"),
                 f"  HQQ staging:     {GREEN}{ram_hqq_gb:>7.1f} GB{NC}",
                 "",
                 "",
@@ -3710,6 +3719,7 @@ class Launcher:
     def print_summary(self) -> None:
         """Print non-interactive launch summary."""
         model_name = os.path.basename(self.cfg.model_path)
+        dense_qwen = (self.model_info or {}).get("arch") == "qwen3_5_text"
         print(f"\n{BOLD}Krasis Launch Configuration{NC}")
         print(f"  Krasis home:     {self.krasis_home}")
         print(f"  Models dir:      {self.models_dir}")
@@ -3721,10 +3731,13 @@ class Launcher:
                 print("  Model status:    UNVALIDATED — explicit local checkpoint attempt")
         print(f"  PP partition:    {self.cfg.pp_partition}")
         layer_word = "layer" if self.cfg.layer_group_size == 1 else "layers"
-        print(
-            f"  Layer group:     {self.cfg.layer_group_size} {layer_word} "
-            "(double-buffered)"
-        )
+        if dense_qwen:
+            print(f"  Dense layers:    {(self.model_info or {}).get('dense_layers', 0)}")
+        else:
+            print(
+                f"  Layer group:     {self.cfg.layer_group_size} {layer_word} "
+                "(double-buffered)"
+            )
         print(f"  KV cache:        {self.cfg.kv_cache_mb:,} MB")
         context_display = (
             "model limit"
@@ -3733,10 +3746,11 @@ class Launcher:
         )
         print(f"  Max context:     {context_display}")
         print(f"  KV dtype:        {_format_kv_dtype_value(self.cfg.kv_dtype)}")
-        print(f"  Quantization:    INT{self.cfg.gpu_expert_bits} g{self.cfg.expert_group_size}")
+        if not dense_qwen:
+            print(f"  Quantization:    INT{self.cfg.gpu_expert_bits} g{self.cfg.expert_group_size}")
         if self.cfg.mixed_expert_manifest:
             print(f"  Mixed experts:   {self.cfg.mixed_expert_manifest}")
-        if self.cfg.gpu_expert_bits == 4:
+        if not dense_qwen and self.cfg.gpu_expert_bits == 4:
             print(f"  Expert INT4:     {self.cfg.gpu_expert_int4_calib}")
         attn_display = _format_attention_quant_value(
             self.cfg.attention_quant,
@@ -3747,7 +3761,8 @@ class Launcher:
             print(f"  HQQ profile:     {self.cfg.hqq_cache_profile}")
         if self.cfg.attention_quant == "hqq4" and self.cfg.hqq_sidecar_manifest:
             print(f"  HQQ sidecar:     {self.cfg.hqq_sidecar_manifest}")
-        print(f"  Shared expert:   {self.cfg.shared_expert_quant}")
+        if not dense_qwen:
+            print(f"  Shared expert:   {self.cfg.shared_expert_quant}")
         dense_layers = (self.model_info or {}).get("dense_layers", 0)
         if dense_layers > 0:
             print(f"  Dense MLP quant: {self.cfg.dense_mlp_quant}")
@@ -3755,7 +3770,8 @@ class Launcher:
         if self.cfg.dspark_mode != "off":
             print(f"  D-Spark:         {self.cfg.dspark_mode}")
         print(f"  VRAM safety:     {self.cfg.vram_safety_margin:,} MB")
-        print(f"  HCS RAM saver:   {_ANSI_RE.sub('', _format_value(ConfigOption('', 'hcs_host_cache_mode'), self.cfg.hcs_host_cache_mode))}")
+        if not dense_qwen:
+            print(f"  HCS RAM saver:   {_ANSI_RE.sub('', _format_value(ConfigOption('', 'hcs_host_cache_mode'), self.cfg.hcs_host_cache_mode))}")
         cold_mass_display = _ANSI_RE.sub(
             "",
             _format_value(
@@ -3763,7 +3779,8 @@ class Launcher:
                 self.cfg.adaptive_cold_mass_pruning,
             ),
         )
-        print(f"  Cold-mass prune: {cold_mass_display}")
+        if not dense_qwen:
+            print(f"  Cold-mass prune: {cold_mass_display}")
         print(f"  Server:          {self.cfg.host}:{self.cfg.port}")
         if self.cfg.ssh_tunnel:
             print(f"  SSH tunnel:      {self.cfg.ssh_tunnel} remote 127.0.0.1:{self.cfg.port}")
@@ -3802,7 +3819,12 @@ class Launcher:
                 else "fp8" if self.cfg.kv_dtype == "fp8_e4m3"
                 else "bf16"
             )
-            print(f"\n  Experts:     {experts_mb:>8,} MB  (INT{self.cfg.gpu_expert_bits} g{self.cfg.expert_group_size})")
+            if dense_qwen:
+                experts_mb = int(rank.get("dense_mlp_mb", 0))
+                overhead_mb -= experts_mb
+                print(f"\n  Dense MLP:   {experts_mb:>8,} MB  ({self.cfg.dense_mlp_quant.upper()})")
+            else:
+                print(f"\n  Experts:     {experts_mb:>8,} MB  (INT{self.cfg.gpu_expert_bits} g{self.cfg.expert_group_size})")
             attn_label = _format_attention_quant_value(
                 self.cfg.attention_quant,
                 self.cfg.hqq_auto_budget_pct if self.cfg.attention_quant in ("hqq46_auto", "hqq68_auto") else None,
@@ -3830,17 +3852,21 @@ class Launcher:
             )
             print(f"  KV cache:    {kv_alloc_mb:>8,.0f} MB  {kv_detail}")
             print(f"  Total: {total_with_kv_mb:>8,.0f} / {gpu_vram:,} MB (rank {wr})")
-            permanent_mb = attention_mb + overhead_mb + min(self.cfg.kv_cache_mb, max(0, rank["free_mb"]))
+            permanent_mb = attention_mb + overhead_mb + (experts_mb if dense_qwen else 0) + min(self.cfg.kv_cache_mb, max(0, rank["free_mb"]))
             free_for_hcs = max(0, int(gpu_vram - permanent_mb))
             total_expert_cache = budget.get(
                 "hcs_cacheable_experts_mb", budget.get("ram_gpu_experts_mb", 0)
             )
             hcs_pct = (free_for_hcs / total_expert_cache * 100) if total_expert_cache > 0 else 0
-            print(f"  HCS:   {free_for_hcs:>8,} MB  (~{hcs_pct:.0f}% coverage)")
+            if dense_qwen:
+                print(f"  Free VRAM: {free_for_hcs:>8,} MB")
+            else:
+                print(f"  HCS:   {free_for_hcs:>8,} MB  (~{hcs_pct:.0f}% coverage)")
             if rank["free_mb"] <= 0:
                 print(f"  {RED}WARNING: OVER BUDGET by {-rank['free_mb']:,.0f} MB{NC}")
             ram_gb = budget.get('ram_total_mb', 0) / 1024
-            print(f"  Expert cache: {ram_gb:.1f} GB / {budget['total_ram_gb']} GB RAM")
+            ram_label = "Model load RAM" if dense_qwen else "Expert cache"
+            print(f"  {ram_label}: {ram_gb:.1f} GB / {budget['total_ram_gb']} GB RAM")
         elif self.budget_error:
             print(f"\n  Budget unavailable: {self.budget_error.splitlines()[0]}")
         print()

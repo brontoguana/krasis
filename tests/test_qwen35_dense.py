@@ -188,6 +188,8 @@ class DenseQwen35Tests(unittest.TestCase):
         self.assertNotIn("gpu_expert_bits", visible)
         self.assertNotIn("hcs_host_cache_mode", visible)
         self.assertNotIn("dynamic_hcs_tail_blocks", visible)
+        for key in ("multi_gpu_mode", "dynamic_peer", "force_rebuild_cache"):
+            self.assertNotIn(key, visible)
         dense = next(o for o in OPTIONS if o.key == "dense_mlp_quant")
         self.assertEqual(dense.choices, ["int8", "bf16"])
 

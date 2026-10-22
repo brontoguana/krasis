@@ -2943,6 +2943,24 @@ def _mixed_expert_configuration_error(
     return None
 
 
+def _listen_for_shutdown(server, stop_event, on_exit, input_stream) -> None:
+    """Keep the terminal listener alive across Rust's not-yet-running state."""
+    try:
+        while not stop_event.is_set():
+            if not server.is_running():
+                stop_event.wait(0.05)
+                continue
+            if select.select([input_stream], [], [], 0.5)[0]:
+                ch = input_stream.read(1)
+                if not ch:  # EOF: no keyboard remains to watch.
+                    return
+                if ch in ("q", "Q"):
+                    on_exit(None, None)
+                    return
+    except (OSError, ValueError):
+        return
+
+
 def _apply_dense_serving_policy(args, cfg) -> None:
     """Dense models have no routed experts to stream or retain in HCS."""
     if cfg.n_routed_experts <= 0:
@@ -6312,11 +6330,11 @@ def main():
         # the orderly post-run resource release and final CUDA cleanup still
         # have to run, and their diagnostics are part of the shutdown
         # contract.
-        logger.info("Python shutdown handler completing signal %d", sig)
+        logger.info("Python shutdown handler completing signal %s", sig)
         if ssh_tunnel is not None:
             ssh_tunnel.stop()
         rust_server.stop()
-        logger.info("Python shutdown handler completed signal %d", sig)
+        logger.info("Python shutdown handler completed signal %s", sig)
 
     signal.signal(signal.SIGINT, _handle_exit)
     signal.signal(signal.SIGTERM, _handle_exit)
@@ -6360,22 +6378,18 @@ def main():
     print(f"    Model name:    {_BOLD}{_client_model_name}{_NC}", flush=True)
     if _vision_model_name:
         print(f"                   {_DIM}vision-capable; use this same model for text and images{_NC}", flush=True)
-    print(f"  {_DIM}Press Q or Ctrl-C to stop{_NC}", flush=True)
+    print(f"  {_DIM}Press Q then Enter, or Ctrl-C to stop{_NC}", flush=True)
     print(flush=True)
 
-    # Q to quit (background thread)
-    def _stdin_listener():
-        try:
-            while rust_server.is_running():
-                if select.select([sys.stdin], [], [], 0.5)[0]:
-                    ch = sys.stdin.read(1)
-                    if ch in ("q", "Q"):
-                        _handle_exit(None, None)
-                        break
-        except (OSError, ValueError):
-            pass
+    # Rust marks itself running only inside run(), after this thread starts.
+    # Keep waiting through that startup gap; stop the listener on every exit.
+    stdin_stop = threading.Event()
     if sys.stdin.isatty():
-        t = threading.Thread(target=_stdin_listener, daemon=True)
+        t = threading.Thread(
+            target=_listen_for_shutdown,
+            args=(rust_server, stdin_stop, _handle_exit, sys.stdin),
+            name="terminal-shutdown", daemon=True,
+        )
         t.start()
 
     # Benchmark thread: engine benchmarks run immediately (no HTTP needed),
@@ -6396,13 +6410,16 @@ def main():
                 _headline(f"SERVER READY: {args.host}:{args.port}", _GREEN)
                 if ssh_tunnel is not None:
                     _dim(f"SSH tunnel: {args.ssh_tunnel} remote 127.0.0.1:{args.port}")
-                _dim("Press Q or Ctrl-C to stop")
+                _dim("Press Q then Enter, or Ctrl-C to stop")
 
         bench_thread = threading.Thread(target=_run_benchmark, daemon=True)
         bench_thread.start()
 
     # run() releases the GIL and blocks until stop() is called
-    rust_server.run()
+    try:
+        rust_server.run()
+    finally:
+        stdin_stop.set()
 
     # ── Write VRAM report if enabled ──
     vram_monitor.report_event("server_shutdown")

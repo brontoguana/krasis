@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.21-rc.19 — 2026-10-22
+
+- Keep the Q shutdown listener alive until Rust starts serving; cancel it on server exit and handle keyboard shutdown logging. Show the canonical-terminal Q-then-Enter shortcut accurately. Add actual pipe/thread regressions for pre-run startup and cancellation.
+- Separate dense MLP residency from overhead in the dense Qwen TUI and launch summary; show free VRAM and model-load RAM, and hide irrelevant routed-expert rebuild and multi-GPU controls. Inference arithmetic and total budgets are unchanged.
+- Published rc.18 clean GPU Podman TUI launch of exact Qwen3.5-27B produced 703 and follow-up 714, with clean Ctrl-C shutdown. Its Q shortcut failure motivated this follow-up; retain the numerical outlier warning and experimental single-GPU text scope.
+
 ## 1.0.21-rc.18 — 2026-10-22
 
 - Support dense Qwen3.5 text configuration: zero-centred norms, gated attention, exact GDN/GQA scheduling, dense layer counts and native prefill metadata. Skip absent routed-expert engines and unused expert warmup while retaining actual native prefill warmup.
