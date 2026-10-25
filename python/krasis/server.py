@@ -3044,6 +3044,7 @@ def main():
             "CFG_STEP_VISION_QUANT": "step_vision_quant",
             "CFG_STEP_VISION_GROUP_SIZE": "step_vision_group_size",
             "CFG_KRASIS_THREADS": "krasis_threads",
+            "CFG_API_KEYS_FILE": "api_keys_file",
             "CFG_HOST": "host",
             "CFG_PORT": "port",
             "CFG_SSH_TUNNEL": "ssh_tunnel",
@@ -3192,6 +3193,8 @@ def main():
                         help="Path to HF model")
     parser.add_argument("--num-gpus", type=int, default=None,
                         help="Number of GPUs (auto-detected if omitted)")
+    parser.add_argument("--api-keys-file", default="",
+                        help="JSON names-to-keys file (auto-detects ~/.krasis/api-keys.json)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8012)
     parser.add_argument("--ssh-tunnel", default="",
@@ -6299,6 +6302,7 @@ def main():
         test_endpoints=getattr(args, 'test_endpoints', False),
         prefix_cache=bool(args.prefix_cache),
         prefix_cache_ram_fraction=float(args.prefix_cache_ram_fraction),
+        api_keys_file=os.path.expanduser(str(args.api_keys_file)) or None,
     )
     ssh_tunnel = None
     if str(getattr(args, "ssh_tunnel", "") or "").strip():
@@ -6374,7 +6378,9 @@ def main():
     print(f"    Base URL:      {_BOLD}{_client_base_url}{_NC}", flush=True)
     print(f"    Chat endpoint: {_client_chat_url}", flush=True)
     print(f"    Models:        {_client_models_url}", flush=True)
-    print(f"    API key:       {_BOLD}X{_NC} {_DIM}(any value){_NC}", flush=True)
+    _api_keys_path = args.api_keys_file or os.path.join(
+        os.environ.get("KRASIS_HOME") or os.path.expanduser("~/.krasis"), "api-keys.json")
+    print(f"    API keys file: {os.path.expanduser(_api_keys_path)} (enforced when present)", flush=True)
     print(f"    Model name:    {_BOLD}{_client_model_name}{_NC}", flush=True)
     if _vision_model_name:
         print(f"                   {_DIM}vision-capable; use this same model for text and images{_NC}", flush=True)

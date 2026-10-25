@@ -7,6 +7,10 @@
 //! Single-request at a time (matches our hardware constraint).
 
 use crate::gpu_decode::GpuDecodeStore;
+mod api_keys;
+#[cfg(test)]
+#[path = "server/api_keys_http_tests.rs"]
+mod api_keys_http_tests;
 use sha2::{Digest, Sha256};
 
 /// Streaming detokenizer that buffers incomplete UTF-8 sequences.
@@ -1599,7 +1603,10 @@ fn restore_store_after_rust_prefill(
 }
 
 /// Parse an HTTP request from a TCP stream.
-fn parse_request(stream: &mut BufReader<TcpStream>) -> std::io::Result<HttpRequest> {
+fn parse_request(
+    stream: &mut BufReader<TcpStream>,
+    api_keys: &api_keys::ApiKeys,
+) -> std::io::Result<HttpRequest> {
     // Request line
     let mut request_line = String::new();
     stream.read_line(&mut request_line)?;
@@ -1615,6 +1622,8 @@ fn parse_request(stream: &mut BufReader<TcpStream>) -> std::io::Result<HttpReque
 
     // Headers
     let mut content_length: usize = 0;
+    let mut authorization = None;
+    let mut duplicate_authorization = false;
     loop {
         let mut line = String::new();
         stream.read_line(&mut line)?;
@@ -1622,11 +1631,26 @@ fn parse_request(stream: &mut BufReader<TcpStream>) -> std::io::Result<HttpReque
         if trimmed.is_empty() {
             break;
         }
-        if let Some(val) = trimmed.strip_prefix("Content-Length:") {
-            content_length = val.trim().parse().unwrap_or(0);
-        } else if let Some(val) = trimmed.strip_prefix("content-length:") {
-            content_length = val.trim().parse().unwrap_or(0);
+        if let Some((name, value)) = trimmed.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("authorization") {
+                duplicate_authorization |= authorization.is_some();
+                authorization = Some(value.trim().to_string());
+            }
         }
+    }
+    // Reject before reading the body, queueing, logging, or touching model state.
+    let authorization = if duplicate_authorization {
+        None
+    } else {
+        authorization.as_deref()
+    };
+    if !api_keys.authorize(&method, &path, authorization) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Invalid API key",
+        ));
     }
 
     // Body
@@ -1645,6 +1669,7 @@ fn send_json(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result
     let status_text = match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         413 => "Payload Too Large",
         500 => "Internal Server Error",
@@ -1652,9 +1677,14 @@ fn send_json(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result
         507 => "Insufficient Storage",
         _ => "Unknown",
     };
+    let auth_header = if status == 401 {
+        "WWW-Authenticate: Bearer\r\n"
+    } else {
+        ""
+    };
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\n\
+        "HTTP/1.1 {} {}\r\n{auth_header}Content-Type: application/json\r\n\
          Access-Control-Allow-Origin: *\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         status,
@@ -1712,6 +1742,7 @@ fn handle_front_connection(
     server_info: ServerInfo,
     scheduler: Arc<FairModelScheduler>,
     test_endpoints: bool,
+    api_keys: Arc<api_keys::ApiKeys>,
 ) {
     let cloned = match tcp_stream.try_clone() {
         Ok(c) => c,
@@ -1722,9 +1753,14 @@ fn handle_front_connection(
     };
     let mut reader = BufReader::new(cloned);
 
-    let request = match parse_request(&mut reader) {
+    let request = match parse_request(&mut reader, &api_keys) {
         Ok(r) => r,
         Err(e) => {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                let _ = send_json(&mut tcp_stream, 401,
+                    r#"{"error":{"message":"Invalid or missing API key","type":"authentication_error","code":"invalid_api_key"}}"#);
+                return;
+            }
             if matches!(
                 e.kind(),
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
@@ -9047,6 +9083,7 @@ fn handle_gpu_decode(
 /// The Rust HTTP server, exposed to Python via PyO3.
 #[pyclass]
 pub struct RustServer {
+    api_keys_file: Option<String>,
     host: String,
     port: u16,
     model_name: String,
@@ -9088,7 +9125,7 @@ fn unique_decode_store_addresses(primary: usize, auxiliary: &[usize]) -> Vec<usi
 #[pymethods]
 impl RustServer {
     #[new]
-    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true, thinking_end_token_id=0, gpu_store_addr=0, aux_gpu_store_addrs=Vec::new(), multi_gpu_split_layers=Vec::new(), multi_gpu_gqa_offsets=Vec::new(), supports_vision=false, test_endpoints=false, prefix_cache=true, prefix_cache_ram_fraction=0.25))]
+    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true, thinking_end_token_id=0, gpu_store_addr=0, aux_gpu_store_addrs=Vec::new(), multi_gpu_split_layers=Vec::new(), multi_gpu_gqa_offsets=Vec::new(), supports_vision=false, test_endpoints=false, prefix_cache=true, prefix_cache_ram_fraction=0.25, api_keys_file=None))]
     fn new(
         py_model: PyObject,
         host: String,
@@ -9106,6 +9143,7 @@ impl RustServer {
         test_endpoints: bool,
         prefix_cache: bool,
         prefix_cache_ram_fraction: f64,
+        api_keys_file: Option<String>,
     ) -> Self {
         // Take the pre-allocated Rust prefill engine from the decode store.
         // The engine was pre-allocated from Python (before HCS pool loading)
@@ -9140,6 +9178,7 @@ impl RustServer {
         };
 
         Self {
+            api_keys_file,
             host,
             port,
             model_name,
@@ -9164,6 +9203,10 @@ impl RustServer {
     /// Start the HTTP server. Blocks until stop() is called.
     /// Releases the GIL so Python remains responsive for prefill calls.
     fn run(&self, py: Python<'_>) -> PyResult<()> {
+        let api_keys = Arc::new(
+            api_keys::ApiKeys::new(self.api_keys_file.as_deref())
+                .map_err(pyo3::exceptions::PyValueError::new_err)?,
+        );
         self.running.store(true, Ordering::Release);
 
         let addr = format!("{}:{}", self.host, self.port);
@@ -9548,6 +9591,7 @@ impl RustServer {
                         let info = server_info.clone();
                         let request_scheduler = Arc::clone(&scheduler);
                         let endpoints_enabled = test_endpoints;
+                        let request_api_keys = Arc::clone(&api_keys);
                         if let Err(e) = std::thread::Builder::new()
                             .name("krasis-http-connection".to_string())
                             .spawn(move || {
@@ -9556,6 +9600,7 @@ impl RustServer {
                                     info,
                                     request_scheduler,
                                     endpoints_enabled,
+                                    request_api_keys,
                                 );
                             })
                         {
@@ -10478,6 +10523,7 @@ mod tests {
             server_info,
             Arc::new(FairModelScheduler::new(sender)),
             false,
+            Arc::new(super::api_keys::ApiKeys::for_test_open()),
         );
         let mut response = String::new();
         client.read_to_string(&mut response).unwrap();

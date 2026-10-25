@@ -249,6 +249,7 @@ struct ManagerConfig {
     model_path: String,
     gpu_uuids: Vec<String>,
     host: String,
+    api_keys_file: String,
     port: u16,
     attention_quant: String,
     vision_quant: String,
@@ -297,6 +298,7 @@ impl Default for ManagerConfig {
         Self {
             model_path: String::new(),
             gpu_uuids: Vec::new(),
+            api_keys_file: String::new(),
             host: "0.0.0.0".to_string(),
             port: 8012,
             attention_quant: "hqq6".to_string(),
@@ -1439,6 +1441,7 @@ fn manager_config_from_saved(
             }
         };
     }
+    string_value!(api_keys_file, "CFG_API_KEYS_FILE");
     string_value!(host, "CFG_HOST");
     number_value!(port, "CFG_PORT");
     string_value!(attention_quant, "CFG_ATTENTION_QUANT");
@@ -1696,6 +1699,7 @@ fn config_text_fields(config: &ManagerConfig) -> Vec<(&'static str, &str)> {
         ),
         ("dspark_mode", &config.dspark_mode),
         ("ssh_tunnel", &config.ssh_tunnel),
+        ("api_keys_file", &config.api_keys_file),
         ("ssh_key_path", &config.ssh_key_path),
     ]
 }
@@ -1751,6 +1755,7 @@ fn config_text(config: &ManagerConfig, model_path: &Path) -> String {
         ("CFG_DENSE_MLP_QUANT", config.dense_mlp_quant.clone()),
         ("CFG_LM_HEAD_QUANT", config.lm_head_quant.clone()),
         ("CFG_KRASIS_THREADS", config.krasis_threads.to_string()),
+        ("CFG_API_KEYS_FILE", config.api_keys_file.clone()),
         ("CFG_HOST", config.host.clone()),
         ("CFG_PORT", config.port.to_string()),
         ("CFG_SSH_TUNNEL", config.ssh_tunnel.clone()),
@@ -2801,6 +2806,7 @@ mod tests {
             attention_quant: "hqq6".to_string(),
             kv_dtype: "k6v6".to_string(),
             ssh_tunnel: "user@example".to_string(),
+            api_keys_file: "/private/keys.json".to_string(),
             ..ManagerConfig::default()
         };
         let text = config_text(&config, Path::new("/models/test"));
@@ -2809,6 +2815,7 @@ mod tests {
         assert!(text.contains("CFG_SELECTED_GPUS=\"GPU-one,GPU-two\""));
         assert!(text.contains("CFG_VISION_QUANT=\"int4\""));
         assert!(text.contains("CFG_SSH_TUNNEL=\"user@example\""));
+        assert!(text.contains("CFG_API_KEYS_FILE=\"/private/keys.json\""));
         assert!(text.contains("CFG_DYNAMIC_HCS_TAIL_BLOCKS=\"auto\""));
         assert!(!text.to_lowercase().contains("awq"));
         assert!(!text.to_lowercase().contains("fp8"));

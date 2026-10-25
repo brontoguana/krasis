@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.22
+
+- Automatically enforce JSON bearer API keys when the default key file exists, with live reload, fail-closed errors, and configurable paths preserved through TUI and Manager startup.
+
 ## 1.0.21 — 2026-10-22
 
 - Promote the rc.19 runtime and TUI fixes to the stable release, with Linux wheels and the exact-commit tested Windows private-runtime installer.

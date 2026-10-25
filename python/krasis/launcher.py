@@ -868,7 +868,7 @@ CONFIG_KEYS = [
     "CFG_GPU_EXPERT_INT4_CALIB",
     "CFG_ATTENTION_QUANT", "CFG_HQQ_CACHE_PROFILE", "CFG_HQQ_GROUP_SIZE", "CFG_HQQ_AUTO_BUDGET_PCT", "CFG_HQQ46_AUTO_BUDGET_MB", "CFG_HQQ_SIDECAR_MANIFEST",
     "CFG_SHARED_EXPERT_QUANT", "CFG_DENSE_MLP_QUANT",
-    "CFG_LM_HEAD_QUANT", "CFG_KRASIS_THREADS", "CFG_HOST", "CFG_PORT",
+    "CFG_LM_HEAD_QUANT", "CFG_KRASIS_THREADS", "CFG_HOST", "CFG_PORT", "CFG_API_KEYS_FILE",
     "CFG_SSH_TUNNEL", "CFG_SSH_KEY_PATH",
     "CFG_GPU_PREFILL_THRESHOLD", "CFG_GGUF_PATH", "CFG_HEATMAP_PATH",
     "CFG_VRAM_SAFETY_MARGIN",
@@ -970,6 +970,7 @@ class LauncherConfig:
         self.lm_head_quant: str = "int8"
         self._lm_head_quant_explicit: bool = False
         self.krasis_threads: int = 40
+        self.api_keys_file: str = ""  # Empty selects ~/.krasis/api-keys.json automatically.
         self.host: str = "0.0.0.0"
         self.port: int = 8012
         self.ssh_tunnel: str = ""
@@ -1176,6 +1177,8 @@ class LauncherConfig:
                 self.krasis_threads = int(saved["CFG_KRASIS_THREADS"])
             except ValueError:
                 pass
+        if "CFG_API_KEYS_FILE" in saved:
+            self.api_keys_file = os.path.expanduser(saved["CFG_API_KEYS_FILE"].strip())
         if "CFG_HOST" in saved:
             self.host = saved["CFG_HOST"]
         if "CFG_PORT" in saved:
@@ -1337,6 +1340,7 @@ class LauncherConfig:
             "CFG_DENSE_MLP_QUANT": self.dense_mlp_quant,
             "CFG_LM_HEAD_QUANT": self.lm_head_quant,
             "CFG_KRASIS_THREADS": str(self.krasis_threads),
+            "CFG_API_KEYS_FILE": self.api_keys_file,
             "CFG_HOST": self.host,
             "CFG_PORT": str(self.port),
             "CFG_SSH_TUNNEL": self.ssh_tunnel,
@@ -4045,6 +4049,8 @@ def parse_args() -> argparse.Namespace:
                         help="LM head quant: bf16 or int8")
     parser.add_argument("--krasis-threads", type=int, default=None,
                         help="CPU threads for expert computation")
+    parser.add_argument("--api-keys-file", default=None,
+                        help="JSON names-to-keys file (auto-detects ~/.krasis/api-keys.json)")
     parser.add_argument("--host", default=None,
                         help="Server bind address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=None,
@@ -4210,6 +4216,8 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg._lm_head_quant_explicit = True
     if args.krasis_threads is not None:
         cfg.krasis_threads = args.krasis_threads
+    if getattr(args, "api_keys_file", None) is not None:
+        cfg.api_keys_file = os.path.expanduser(args.api_keys_file.strip())
     if args.host is not None:
         cfg.host = args.host
     if args.port is not None:
@@ -4563,6 +4571,7 @@ def _manager_config_dict(launcher: "Launcher") -> Dict[str, Any]:
     return {
         "model_path": cfg.model_path,
         "gpu_uuids": gpu_uuids,
+        "api_keys_file": cfg.api_keys_file,
         "host": cfg.host,
         "port": cfg.port,
         "attention_quant": cfg.attention_quant,

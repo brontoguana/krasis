@@ -2471,6 +2471,7 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.port = 18012
         cfg.ssh_tunnel = "alice@example.com:2222"
         cfg.ssh_key_path = "~/.ssh/id_ed25519"
+        cfg.api_keys_file = "~/private/client-keys.json"
         cfg.gpu_prefill_threshold = 512
         cfg.gguf_path = "~/models/cpu-experts.gguf"
         cfg.heatmap_path = "~/heatmaps/qcn.json"
@@ -2532,6 +2533,7 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(values.get("CFG_PORT"), "18012")
             self.assertEqual(values.get("CFG_SSH_TUNNEL"), "alice@example.com:2222")
             self.assertEqual(values.get("CFG_SSH_KEY_PATH"), "~/.ssh/id_ed25519")
+            self.assertEqual(values.get("CFG_API_KEYS_FILE"), "~/private/client-keys.json")
             self.assertEqual(values.get("CFG_GPU_PREFILL_THRESHOLD"), "512")
             self.assertEqual(values.get("CFG_GGUF_PATH"), "~/models/cpu-experts.gguf")
             self.assertEqual(values.get("CFG_HEATMAP_PATH"), "~/heatmaps/qcn.json")
@@ -2725,6 +2727,7 @@ class LauncherMatrixTest(unittest.TestCase):
                     'CFG_ADAPTIVE_COLD_MASS_PRUNING="75/5"',
                     'CFG_SSH_TUNNEL="alice@example.com:2222"',
                     'CFG_SSH_KEY_PATH="~/.ssh/id_ed25519"',
+                    'CFG_API_KEYS_FILE="~/private/client-keys.json"',
                     'CFG_ENABLE_THINKING="0"',
                     "",
                 ])
@@ -2747,6 +2750,7 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertEqual(launcher.cfg.ssh_tunnel, "alice@example.com:2222")
         self.assertEqual(launcher.cfg.ssh_key_path, os.path.expanduser("~/.ssh/id_ed25519"))
         self.assertFalse(launcher.cfg.enable_thinking)
+        self.assertEqual(launcher.cfg.api_keys_file, os.path.expanduser("~/private/client-keys.json"))
 
     def test_stable_gpu_selectors_round_trip_and_resolve(self) -> None:
         cfg = LauncherConfig()
@@ -2995,18 +2999,20 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.hqq_auto_budget_pct = 50.0
         cfg.hqq46_auto_budget_mib = 256
         cfg.hqq_sidecar_manifest = ""
+        cfg.api_keys_file = "/tmp/client-keys.json"
         scenarios.append((
             "plain_hqq6_stale_budget",
             cfg,
             {
                 "CFG_ATTENTION_QUANT": "hqq6",
+                "CFG_API_KEYS_FILE": "/tmp/client-keys.json",
                 "CFG_KV_DTYPE": "k6v6",
                 "CFG_GPU_EXPERT_BITS": "4",
                 "CFG_CPU_EXPERT_BITS": "4",
                 "CFG_SELECTED_GPUS": "0",
                 "CFG_NUM_GPUS": "1",
             },
-            ["attention_quant = 'hqq6'", "hqq_auto_budget_pct = None"],
+            ["attention_quant = 'hqq6'", "hqq_auto_budget_pct = None", "api_keys_file = '/tmp/client-keys.json'"],
             {"CFG_HQQ_AUTO_BUDGET_PCT", "CFG_HQQ46_AUTO_BUDGET_MB", "CFG_HQQ_SIDECAR_MANIFEST"},
         ))
 

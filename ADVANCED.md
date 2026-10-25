@@ -139,8 +139,48 @@ a reason to parse unstructured text as a tool call.
 | `--multi-gpu-mode MODE` | auto | Measure and select a compatible topology (`auto`), or explicitly request `layer-split` or `peer` for validation/A-B work |
 | `--host ADDR` | 0.0.0.0 | Server bind address |
 | `--port PORT` | 8012 | Server port |
+| `--api-keys-file PATH` | `~/.krasis/api-keys.json` if present | JSON object mapping client names to bearer keys; automatically reloaded |
 | `--ssh-tunnel TARGET` | off | Reverse SSH tunnel target (`user@host` or `user@host:ssh_port`). Remote `127.0.0.1:<server port>` forwards to local Krasis over SSH with key-only batch mode. |
 | `--ssh-key-path PATH` | off | Optional identity file for `--ssh-tunnel`; passed to `ssh -i` with `IdentitiesOnly=yes`. |
+
+### API keys
+
+Create `~/.krasis/api-keys.json` under the account running Krasis to enable
+API authentication automatically, including servers launched from the TUI. If
+`KRASIS_HOME` is set, the default is `$KRASIS_HOME/api-keys.json`:
+
+```json
+{
+  "desktop": "replace-with-a-long-random-secret",
+  "laptop": "replace-with-another-long-random-secret"
+}
+```
+
+Clients send `Authorization: Bearer <key>` (the key value, rather than its name).
+Names must be nonempty; keys must be nonempty visible ASCII without spaces.
+Keep this file private, for example with `chmod 600 ~/.krasis/api-keys.json`.
+Krasis never logs key values.
+
+Override the location with `--api-keys-file /path/keys.json` or
+`CFG_API_KEYS_FILE="/path/keys.json"` in a saved config. Empty/unset selects the
+default location. Explicitly configured files must exist and be valid at startup.
+Relative paths resolve from the server's working directory.
+
+The file is re-read at request admission, so adding/removing keys needs no restart.
+Use an atomic file replacement when editing to avoid temporarily denying requests.
+An empty object `{}` denies all protected requests. Invalid, unreadable, oversized
+(over 1 MiB), or removed files fail closed once authentication has been detected.
+An invalid existing file prevents server startup; fixing a file while running
+restores access on the next request. To intentionally return to unauthenticated
+serving, remove the default file and restart with no explicit path configured.
+
+All inference-server routes, including model discovery and internal diagnostics,
+require a valid key when enabled. `GET /health` and CORS `OPTIONS` preflight remain
+public. Failed authentication returns HTTP 401 before body processing or model
+queue admission. Requests admitted before a key is removed can finish normally.
+If the default file has never been present, serving remains unauthenticated.
+This controls the inference server; the separate local Manager service retains its
+own access boundary.
 
 ### Quantization
 
