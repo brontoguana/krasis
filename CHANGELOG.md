@@ -1,3 +1,8 @@
+## 2026-11-07 — Matched Gemma context controls
+
+- Add projection-only diagnostic captures and substitutions; allow explicit omission of KV history when capturing bounded rings.
+- Add an opt-in assertion of the final image-aware chunk plan, rejecting silent replanning and recording executed boundaries. Ordinary planning and arithmetic remain unchanged.
+
 ## 2026-11-07 — Bounded Gemma decode diagnosis
 
 - Add explicit fixed-input eager Gemma diagnostic receipts and exact-size boundary capture/substitution, gated by the existing trace and dump controls. Serving arithmetic/defaults unchanged.

@@ -27510,6 +27510,22 @@ impl PrefillEngine {
         } else {
             build_prefill_chunk_plan_at_boundary(total_m, max_chunk, capture_suffix_boundary)?
         };
+        // An explicit diagnostic contract must fail rather than silently replan.
+        // Compare the final image-aware plan, after all memory caps are applied.
+        if let Ok(raw) = std::env::var("KRASIS_PREFILL_DIAG_EXPECT_CHUNKS") {
+            let expected: Vec<usize> = serde_json::from_str(&raw)
+                .map_err(|e| format!("invalid diagnostic expected chunk plan: {e}"))?;
+            if expected != chunk_plan {
+                return Err(format!("diagnostic chunk plan mismatch: expected {:?}, actual {:?}", expected, chunk_plan));
+            }
+            let mut boundary = sequence_start;
+            let boundaries: Vec<_> = chunk_plan.iter().map(|&len| {
+                let start = boundary;
+                boundary += len;
+                (start, boundary)
+            }).collect();
+            eprintln!("[PREFILL-DIAG-EXACT-PLAN] chunks={:?} boundaries={:?}", chunk_plan, boundaries);
+        }
         let num_chunks = chunk_plan.len();
         let chunk_size = chunk_plan.iter().copied().max().unwrap_or(0);
         if let Some(capture) = self.tileq_capture.as_mut() {

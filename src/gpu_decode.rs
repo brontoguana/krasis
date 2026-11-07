@@ -27980,6 +27980,12 @@ impl GpuDecodeStore {
             self.download_device_bf16_as_f32(*graph.d_scratch.device_ptr(), o_size)?;
         capture.o_proj_out =
             self.download_device_bf16_as_f32(*graph.d_hidden.device_ptr(), graph.hidden_size)?;
+        // Projection diagnostics do not require copying the entire KV history.
+        // Explicitly omit it for bounded/ring captures rather than assuming the
+        // logical position is a contiguous physical allocation.
+        if env_truthy("KRASIS_GQA_DIAG_SKIP_KV") {
+            return Ok(capture);
+        }
         if graph.kv_format == 0
             && layer_idx < graph.kv_k_ptrs.len()
             && graph.kv_k_ptrs[layer_idx] != 0
@@ -76197,6 +76203,12 @@ impl GpuDecodeStore {
                             }
                         }
 
+                        if is_gemma4 {
+                            gemma4_decode_diagnostic_boundary(graph, layer_idx, "projection-input", *graph.d_hidden.device_ptr(), hs*2)?;
+                            for (name, ptr, count) in [("q-projection", *graph.d_gqa_q.device_ptr(), nh*hd), ("k-projection", *graph.d_gqa_k.device_ptr(), nkv*hd), ("v-projection", *graph.d_gqa_v.device_ptr(), nkv*hd)] {
+                                gemma4_decode_diagnostic_boundary(graph, layer_idx, name, ptr, count*4)?;
+                            }
+                        }
                         if is_gemma4 && gemma_bf16_boundaries {
                             for (ptr, count) in [(*graph.d_gqa_q.device_ptr(), nh*hd), (*graph.d_gqa_k.device_ptr(), nkv*hd), (*graph.d_gqa_v.device_ptr(), nkv*hd)] {
                                 unsafe {
