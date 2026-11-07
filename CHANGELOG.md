@@ -13420,3 +13420,5 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
 - Bounded Gemma now defaults to BF16 prefill KV staging while retaining INT4 weights and k6v6 decode KV. Alternating precision on identical IDs and a 3,072-token plan causally reverses the failed retrieval digit and its logit margin. Existing native admission charges the additional stage bytes; an explicit FP8 diagnostic opt-out remains.
 
 - Bind bounded Gemma prefill-stage precision into automatic and approved heatmap metadata so FP8/BF16 calibration artifacts cannot silently cross contracts; other models retain their existing metadata.
+
+- Final bounded-profile verification passes the tested 4K/32K text/vision and lifecycle fixtures, including 280 image tokens, with at least 704 MiB observed free. The revised 64K changed fixture remains a failed quality gate; 32K is the validated fixture limit. Documented the staging accuracy/performance tradeoff and remaining numerical qualification limits.
