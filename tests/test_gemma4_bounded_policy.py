@@ -61,6 +61,23 @@ class GemmaBoundedPolicy(unittest.TestCase):
                 after=server._krasis_runtime_code_hash()
             self.assertNotEqual(before['sha256'],after['sha256'])
 
+    def test_stage_precision_is_bound_to_heatmap_compatibility(self):
+        from krasis import server
+        from unittest.mock import Mock
+        store=Mock();store.native_scalar_runtime_identity.return_value=None
+        model=SimpleNamespace(_gpu_decode_store=store,_gemma_prefill_stage_format='bf16')
+        with patch.object(server,'_runtime_heatmap_capture_config',side_effect=lambda args:{'kv_dtype':'k6v6'}):
+            bf16=server._actual_runtime_heatmap_capture_config(model,None)
+            model._gemma_prefill_stage_format='fp8_e4m3'
+            fp8=server._actual_runtime_heatmap_capture_config(model,None)
+        self.assertEqual(bf16['gemma_prefill_stage_format'],'bf16')
+        self.assertEqual(fp8['gemma_prefill_stage_format'],'fp8_e4m3')
+        matches,_=server._runtime_matches_approved_heatmap_policy(fp8,[bf16],{'ignored_runtime_fields':['attention_quant','kv_dtype']})
+        self.assertFalse(matches)
+        with patch.object(server,'_runtime_heatmap_capture_config',side_effect=lambda args:{'kv_dtype':'k6v6'}):
+            other=server._actual_runtime_heatmap_capture_config(SimpleNamespace(_gpu_decode_store=store),None)
+        self.assertNotIn('gemma_prefill_stage_format',other)
+
     def test_explicit_profile_rejects_other_models(self):
         with patch.dict(os.environ,{},clear=False),self.assertRaisesRegex(ValueError,'requires a Gemma4'):
             _apply_dense_serving_policy(self.args(),SimpleNamespace(gemma4_text=False,n_routed_experts=128,model_type='qwen3_moe'))

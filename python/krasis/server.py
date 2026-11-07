@@ -669,6 +669,9 @@ def _runtime_heatmap_capture_config(args) -> dict[str, Any]:
 def _actual_runtime_heatmap_capture_config(model: KrasisModel, args) -> dict[str, Any]:
     """Bind the configured domain's actual kernel arithmetic, once at startup."""
     runtime = _runtime_heatmap_capture_config(args)
+    stage_format = getattr(model, "_gemma_prefill_stage_format", None)
+    if stage_format is not None:
+        runtime["gemma_prefill_stage_format"] = stage_format
     store = getattr(model, "_gpu_decode_store", None)
     if store is None:
         raise RuntimeError("Heatmap arithmetic identity requires the configured GPU decode store")
@@ -811,6 +814,9 @@ def _expected_heatmap_metadata(model: KrasisModel, args, prompts: list[str]) -> 
         "hcs": bool(args.hcs),
         "quant_config": getattr(quant_cfg, "__dict__", {}) if quant_cfg is not None else {},
     }
+    stage_format = getattr(model, "_gemma_prefill_stage_format", None)
+    if stage_format is not None:
+        runtime_metadata["gemma_prefill_stage_format"] = stage_format
     if int(args.max_context_tokens) > 0:
         runtime_metadata["max_context_tokens"] = int(args.max_context_tokens)
 

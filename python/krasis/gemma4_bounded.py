@@ -85,6 +85,12 @@ def load(model, loader):
     os.environ.setdefault('KRASIS_GEMMA_BOUNDED_STAGE', '1')
     os.environ.setdefault('KRASIS_GEMMA_FULL_HISTORY_GEMM', '1')
     os.environ.setdefault('KRASIS_GEMMA_WINDOW_GEMM', '1')
+    # FP8 prompt history causes demonstrated chunk-sensitive retrieval loss.
+    # Canonical decode KV remains k6v6; the native planner charges BF16 stage bytes.
+    stage_precision = os.environ.setdefault('KRASIS_GEMMA_PREFILL_STAGE_BF16', '1')
+    if stage_precision not in ('0', '1'):
+        raise ValueError('KRASIS_GEMMA_PREFILL_STAGE_BF16 must be 0 or 1')
+    model._gemma_prefill_stage_format = 'bf16' if stage_precision == '1' else 'fp8_e4m3'
     device = model.all_devices[0]
     cpu = torch.device('cpu')
     cache = Cache(model, loader)

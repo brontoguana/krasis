@@ -26048,7 +26048,11 @@ impl PrefillEngine {
             }
         }
         if !skip_stage_exact_single_chunk {
-            self.setup_stage_exact_prefill_kv(prompt_tokens, session_cache_exact_stage)?;
+            // Bounded Gemma selects BF16 prompt history at startup. Explicit
+            // FP8 diagnostics and all other model/mode contracts remain available.
+            let gemma_bf16_stage = self.dense_stream.is_some() && self.is_gemma4_model()
+                && std::env::var("KRASIS_GEMMA_PREFILL_STAGE_BF16").as_deref() == Ok("1");
+            self.setup_stage_exact_prefill_kv(prompt_tokens, session_cache_exact_stage || gemma_bf16_stage)?;
         }
         // Old scratch + prefill buffers now dropped, VRAM is freed.
 
