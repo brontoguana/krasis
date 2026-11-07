@@ -13412,3 +13412,5 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
 - Add bounded, opt-in Gemma prefill boundary capture and substitution using the existing diagnostic protocol; normal execution is unchanged.
 
 - Repair in-place half-split RoPE ownership in prefill, eager decode and graph decode: one thread reads and writes both pair elements, avoiding cross-thread read/write races.
+
+- Verified repeated 4K/32K and existing 64K image/code fixtures, exact 280-token images and lifecycle behavior within the enforced 8 GiB profile. Diagnosed independent vision normalization/backend contracts causally without waiving original compatibility failures. Independent full source-BF16 coding controls separate a source-model limitation from runtime correctness.
