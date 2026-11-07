@@ -4332,6 +4332,8 @@ const KERNEL_NAMES: &[&str] = &[
     "peer_wait_response",
     "peer_wait_copy_bf16",
     "add_peer_bf16_if_active",
+    "qwen35_apply_gated_attn_bf16",
+    "qwen35_silu_mul",
     "sigmoid_gate_bf16",
     "scale_bf16",
     "scale_bf16_by_ptr",
@@ -34566,6 +34568,13 @@ impl GpuDecodeStore {
             "graphs_valid":graph.per_layer_graphs_valid,"graph_count":graph.per_layer_graphs.len()}).to_string())
     }
 
+    /// Diagnostic replay of the actual bounded attention used in prefill.
+    fn replay_qwen_attention(&self, q:usize,k:usize,v:usize,ck:usize,cv:usize,out:usize,
+        rows:usize,prefix:usize,heads:usize,kv_heads:usize,dim:usize) -> PyResult<()> {
+        let engine=self.prefill_engine_slot.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("prefill engine required"))?;
+        engine.qwen35_reference_attention(q as u64,k as u64,v as u64,ck as u64,cv as u64,out as u64,
+            rows,prefix,heads,kv_heads,dim,1.0/(dim as f32).sqrt()).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
     fn download_prefill_logits_f32(&self) -> PyResult<Vec<f32>> {
         let engine=self.prefill_engine_slot.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("prefill engine is not owned by this store"))?;
         Ok(engine.h_logits.clone())
@@ -43048,6 +43057,8 @@ impl GpuDecodeStore {
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing Qwen graph rotary"))?;
         kernels.apply_rope = kernels.apply_rope_half_split.clone();
         kernels.apply_rope_g = kernels.apply_rope_half_split_g.clone();
+        kernels.apply_gated_attn_bf16 = self.device.get_func(MODULE_NAME,"qwen35_apply_gated_attn_bf16").ok_or_else(||pyo3::exceptions::PyRuntimeError::new_err("Qwen sigmoid boundary"))?;
+        kernels.silu_mul = self.device.get_func(MODULE_NAME,"qwen35_silu_mul").ok_or_else(||pyo3::exceptions::PyRuntimeError::new_err("Qwen SiLU boundary"))?;
         kernels.rmsnorm = norm;
         kernels.fused_add_rmsnorm = fused;
         kernels.gated_rmsnorm_silu = self.device.get_func(MODULE_NAME, "qwen35_gated_rmsnorm_silu")

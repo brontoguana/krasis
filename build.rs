@@ -695,5 +695,15 @@ fn compile_qwen35_vision() {
             .args(nvcc_host_compiler_args()).status().expect("execute Qwen vision nvcc");
         assert!(status.success(), "Qwen vision compilation failed: {status}");
     }
+    println!("cargo:rerun-if-changed=src/cuda/flash_attn/fa2");
+    if std::env::var_os("NVCC").is_none() { std::env::set_var("NVCC", find_nvcc().expect("vision nvcc")); }
+    cc::Build::new().cuda(true).cudart("shared")
+        .file("src/cuda/flash_attn/fa2/qwen_vision_sdpa.cu")
+        .include("src/cuda/flash_attn/fa2").include("src/cuda/flash_attn/cutlass")
+        .flag("-std=c++17").flag("--expt-relaxed-constexpr").flag("--expt-extended-lambda")
+        .flag("-allow-unsupported-compiler").flag("-arch=sm_80").flag("--use_fast_math")
+        .define("FLASHATTENTION_DISABLE_DROPOUT",None).define("FLASHATTENTION_DISABLE_ALIBI",None)
+        .define("FLASHATTENTION_DISABLE_SOFTCAP",None).define("FLASHATTENTION_DISABLE_LOCAL",None)
+        .opt_level(3).compile("qwen35_sdpa");
     println!("cargo:rustc-cfg=has_qwen35_vision");
 }

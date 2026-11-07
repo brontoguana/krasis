@@ -14629,7 +14629,7 @@ extern "C" __global__ void qwen35_la_gated_rmsnorm_kernel(
     /* Normalize, scale by weight, multiply by silu(gate) */
     for (int i = threadIdx.x; i < dv; i += blockDim.x) {
         float normed = bf16_to_float(float_to_bf16(bf16_to_float(float_to_bf16(x_head[i])) * rms_inv));
-        normed = bf16_to_float(float_to_bf16(normed * weight[i]));
+        normed = bf16_to_float(float_to_bf16(normed * bf16_to_float(float_to_bf16(weight[i]))));
         float g = bf16_to_float(g_head[i]);
         float silu_g = g / (1.0f + __expf(-g));
         o_head[i] = float_to_bf16(normed * silu_g);
@@ -14671,7 +14671,7 @@ extern "C" __global__ void qwen35_la_gated_rmsnorm_bf16in_kernel(
     /* Normalize, scale by weight, multiply by silu(gate) */
     for (int i = threadIdx.x; i < dv; i += blockDim.x) {
         float normed = bf16_to_float(float_to_bf16(bf16_to_float(x_head[i]) * rms_inv));
-        normed = bf16_to_float(float_to_bf16(normed * weight[i]));
+        normed = bf16_to_float(float_to_bf16(normed * bf16_to_float(float_to_bf16(weight[i]))));
         float g = bf16_to_float(g_head[i]);
         float silu_g = g / (1.0f + __expf(-g));
         o_head[i] = float_to_bf16(normed * silu_g);
@@ -14785,4 +14785,98 @@ extern "C" __global__ void qwen35_rope_batched_half_split_kernel(
    v[d+half]=__float2bfloat16(__bfloat162float(__float2bfloat16(b*c))+__bfloat162float(__float2bfloat16(a*s)));
   }
  }
+}
+
+// Frozen eager-attention contract: token-major cache, head-major batched GEMMs.
+extern "C" __global__ void qwen35_attention_pack(
+ const __nv_bfloat16* current,const __nv_bfloat16* cache,__nv_bfloat16* out,
+ int rows,int heads,int source_heads,int dim,int prefix,int offset) {
+ size_t i=(size_t)blockIdx.x*blockDim.x+threadIdx.x;
+ size_t count=(size_t)rows*heads*dim;if(i>=count)return;
+ int d=i%dim,t=(i/dim)%rows,h=i/(dim*rows),sh=h/(heads/source_heads);
+ int pos=t+offset;
+ out[i]=pos<prefix?cache[((size_t)pos*source_heads+sh)*dim+d]:current[((size_t)(pos-prefix)*source_heads+sh)*dim+d];
+}
+extern "C" __global__ void qwen35_attention_unpack(const __nv_bfloat16* x,__nv_bfloat16* y,int rows,int heads,int dim,int offset) {
+ size_t i=(size_t)blockIdx.x*blockDim.x+threadIdx.x;if(i>=(size_t)rows*heads*dim)return;
+ int d=i%dim,t=(i/dim)%rows,h=i/(dim*rows);y[((size_t)(t+offset)*heads+h)*dim+d]=x[i];
+}
+extern "C" __global__ void qwen35_attention_softmax(__nv_bfloat16* score,int queries,int keys,int first,float scale) {
+ int row=blockIdx.x%queries;score+=(size_t)blockIdx.x*keys;
+ __shared__ float reduction[128];float mx=-INFINITY;
+ for(int j=threadIdx.x;j<keys;j+=128){float x=j<=first+row?__bfloat162float(__float2bfloat16(__bfloat162float(score[j])*scale)):-INFINITY;mx=fmaxf(mx,x);}
+ reduction[threadIdx.x]=mx;__syncthreads();
+ for(int step=64;step;step/=2){if(threadIdx.x<step)reduction[threadIdx.x]=fmaxf(reduction[threadIdx.x],reduction[threadIdx.x+step]);__syncthreads();}
+ mx=reduction[0];float sum=0;
+ for(int j=threadIdx.x;j<keys;j+=128){float x=j<=first+row?__bfloat162float(__float2bfloat16(__bfloat162float(score[j])*scale)):-INFINITY;sum+=expf(x-mx);}
+ reduction[threadIdx.x]=sum;__syncthreads();
+ for(int step=64;step;step/=2){if(threadIdx.x<step)reduction[threadIdx.x]+=reduction[threadIdx.x+step];__syncthreads();}
+ sum=reduction[0];for(int j=threadIdx.x;j<keys;j+=128){float x=j<=first+row?__bfloat162float(__float2bfloat16(__bfloat162float(score[j])*scale)):-INFINITY;score[j]=__float2bfloat16(expf(x-mx)/sum);}
+}
+
+extern "C" __global__ void qwen35_sigmoid_mul_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ attn,
+    const __nv_bfloat16* __restrict__ gate,
+    int N)
+{
+    int token = blockIdx.x;
+    const __nv_bfloat16* a_row = attn + (int64_t)token * N;
+    const __nv_bfloat16* g_row = gate + (int64_t)token * N;
+    __nv_bfloat16* o_row = out + (int64_t)token * N;
+
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        float a = bf16_to_float(a_row[i]);
+        float g = bf16_to_float(g_row[i]);
+        float sig = bf16_to_float(float_to_bf16(1.0f / (1.0f + expf(-g))));
+        o_row[i] = float_to_bf16(a * sig);
+    }
+}
+
+extern "C" __global__ void qwen35_silu_mul_batched_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ gate_up,
+    int N)
+{
+    int token = blockIdx.x;
+    int two_N = 2 * N;
+    const __nv_bfloat16* gu = gate_up + (int64_t)token * two_N;
+    __nv_bfloat16* o = out + (int64_t)token * N;
+
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        float gate = bf16_to_float(gu[i]);
+        float up = bf16_to_float(gu[N + i]);
+        float silu_gate = bf16_to_float(float_to_bf16(gate / (1.0f + expf(-gate))));
+        o[i] = float_to_bf16(silu_gate * up);
+    }
+}
+
+extern "C" __global__ void qwen35_gated_activation_split_batched_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ gate,
+    const __nv_bfloat16* __restrict__ up,
+    int activation,
+    int N)
+{
+    int token = blockIdx.x;
+    const __nv_bfloat16* g_row = gate + (int64_t)token * N;
+    const __nv_bfloat16* u_row = up + (int64_t)token * N;
+    __nv_bfloat16* o_row = out + (int64_t)token * N;
+
+    const float c = 0.7978845608028654f;
+    const float k = 0.044715f;
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        float g = bf16_to_float(g_row[i]);
+        float u = bf16_to_float(u_row[i]);
+        float a;
+        if (activation == 2) {
+            a = 0.5f * g * (1.0f + tanhf(c * (g + k * g * g * g)));
+        } else if (activation == 1) {
+            float r = fmaxf(g, 0.0f);
+            a = r * r;
+        } else {
+            a = bf16_to_float(float_to_bf16(g / (1.0f + expf(-g))));
+        }
+        o_row[i] = float_to_bf16(a * u);
+    }
 }

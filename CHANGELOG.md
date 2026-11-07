@@ -2,6 +2,11 @@
 
 ## Unreleased — bounded Qwen3.5
 
+- Preserve CPU FP32 vision inverse-frequency construction and BF16 GDN norm-parameter materialization.
+- Match Qwen BF16 sigmoid/SiLU materialization before attention/MLP multiplies in prefill and decode.
+- Match vision BF16 Linear bias epilogues with bounded cuBLASLt workspace and add native split-KV SDPA; preserve fast and FP32 alternatives.
+- Integrate bounded batched BF16 eager-compatible Qwen text attention with full-key reductions, grouped heads and cached-prefix masks; retain `KRASIS_QWEN_TEXT_ATTENTION=fast`.
+
 - Repair vision rotary frequency construction and separate FP32 multiply/add rounding, verified against identical saved QKV operands.
 - Preserve Qwen3.5 GDN normalized-value and scale BF16 boundaries before the FP32 SiLU gate, validated on captured real operands.
 - Preserve Qwen3.5 delta RMS scales in FP32 and use typed native outer-norm kernels; round decode residuals before normalization as in the reference.

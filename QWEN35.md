@@ -10,7 +10,7 @@ image processing and request bookkeeping.
 - One RTX A6000, physically constrained to a **6,144 MiB device-wide ceiling**
   using an independent allocation. This is constrained-A6000 evidence, **not an
   actual 6GB or 8GB card test**. An 8,192 MiB control also passed. Normal-server peak effective device use
-  was 5,149 MiB, leaving 995 MiB free, sampled every 25 ms.
+  was 5,210 MiB, leaving 934 MiB free in the integrated follow-up, sampled every 25 ms.
 - Original local Qwen/Qwen3.5-27B BF16 safetensors; no model weights downloaded.
 - 4,096-token capacity, including image tokens and requested output; 256 MiB BF16
   KV, complete recurrent state, 256-token language prefill chunks, 600 MiB reserve.
@@ -21,7 +21,7 @@ image processing and request bookkeeping.
   Over-capacity requests return HTTP 413.
 
 Allow **128 GiB system RAM**. Source tensors and immutable pinned native copies
-coexist during preparation; measured peak RSS was approximately 110 GiB. Startup
+coexist during preparation; measured peak RSS was approximately 113 GiB. Startup
 checks available host RAM, including Linux cgroup v2 limits. The launcher budget
 includes setup headroom. Native pinned text weights occupy 53,786,705,920 bytes;
 the reusable GPU weight slab is 2,542,796,800 bytes. Vision streams one block at a
@@ -61,11 +61,25 @@ Multi-GPU, speculation/batched verification and non-BF16 bounded profiles are
 rejected. CPU Torch forward/stress modes are not bounded execution paths.
 
 Vision uses the Qwen3.5 Conv3d patch contract, learned position interpolation,
-axial RoPE, 27 blocks and pre-shuffle merger. The existing FlashAttention
-sidecar uses zero padding from head width 72 to 96 with the original scale;
-`KRASIS_QWEN_VISION_ATTENTION=portable` selects the native CUDA fallback. Both
-were compared against an independent Transformers encoder. Checkpoints without
-local vision assets remain text-only.
+axial RoPE, 27 blocks and pre-shuffle merger. Head-width-72 attention uses a
+native split-KV SDPA contraction, with bounded FP32 partial-output storage and
+an occupancy-based split count. BF16 Linear uses a bias epilogue and a 1 MiB
+cuBLASLt workspace. Inverse rotary frequencies are computed once on the CPU in
+FP32, matching the reference's construction order. Checkpoints without local
+vision assets remain text-only.
+
+`KRASIS_QWEN_VISION_ATTENTION=fast` retains the padded FlashAttention path;
+`portable` retains the CUDA equation fallback. `KRASIS_QWEN_VISION_LINEAR=fp32`
+retains the FP32-output GEMM and separate bias path. These alternatives retain
+their independent numerical verdicts.
+
+Within the 4K BF16 profile, text attention defaults to batched QK/PV contractions
+with BF16 scores, scaling and probabilities, and FP32 accumulation. Query bands
+bound the score buffer to 16 MiB without splitting the key reduction. Grouped
+heads and cached-prefix causal masks use the same contract. Physical allocations
+are charged in joint admission and checked against the 600 MiB reserve.
+`KRASIS_QWEN_TEXT_ATTENTION=fast` retains the previous attention implementation;
+larger contexts and unsupported KV formats retain their existing dispatch.
 
 ## Arête compatibility and qualification limits
 
@@ -102,6 +116,13 @@ Evidence and immutable controllers:
 `krasis-internal/qwen27b-repair-235737/`. The Maya performance work is independently
 preserved on `perf/maya-parity-20261107`; it was not merged into this implementation.
 
+Integrated contraction follow-up:
+`krasis-internal/qwen27b-integrated-235797/RESULTS.md`. This includes the actual
+Rust attention replay, complete block and encoder checks, and serving evidence.
+Qwen-specific sigmoid/SiLU materialization and BF16 GDN norm-parameter boundaries
+apply in prefill and decode. Numerical admission remains governed by the complete
+arrays in that report, separately from memory fit and functional requests.
+
 
 Numerical isolation follow-up (`krasis-internal/qwen27b-numerical-235763/`):
 actual layer0 normalized projection inputs match the independent implementation
@@ -121,8 +142,9 @@ warning does not mean that convolution is unfused. The rejected unfused-BF16
 convolution counterfactual is retained only in the investigation.
 
 Vision claims distinguish individual operators, complete residual blocks and
-complete encoders. Same-input block26 and all three fixed complete-feature
-comparisons retain failures. Independent FP64 projection/attention equations
+complete encoders. The earlier numerical-isolation baseline failed same-input
+block26. The integrated follow-up passes all 81 complete same-input blocks and
+three mergers; all three accumulated complete-feature comparisons still fail. Independent FP64 projection/attention equations
 and reduced-BF16-reduction controls demonstrate backend rounding sensitivity;
 they do not replace the original reference or waive its unchanged acceptance
 checks. Functional image answers and constrained-memory fit remain separate

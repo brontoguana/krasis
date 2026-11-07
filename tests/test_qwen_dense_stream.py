@@ -80,13 +80,16 @@ class BoundedQwenContracts(unittest.TestCase):
             self.assertIn('Weight slab',output.getvalue())
 
     def test_budget_includes_all_phases_and_reserve(self):
-        c=SimpleNamespace(num_full_attention_layers=16,num_key_value_heads=4,
+        c=SimpleNamespace(num_full_attention_layers=16,num_key_value_heads=4,num_attention_heads=24,
             head_dim=256,num_hidden_layers=64,linear_num_value_heads=48,
             linear_key_head_dim=128,linear_value_head_dim=128)
         p=memory_plan(c,248320*5120*2,4096)
         self.assertLess(p['estimated_peak_bytes'],8192<<20)
         self.assertEqual(p['allowance_bytes']['reserve'],600<<20)
         self.assertEqual(p['allowance_bytes']['kv'],256<<20)
+        self.assertLess(memory_plan(c,248320*5120*2,4096,6144)['estimated_peak_bytes'],6144<<20)
+        self.assertGreater(p['allowance_bytes']['reference_attention'],96<<20)
+        self.assertEqual(p['allowance_bytes']['vision_linear_workspace'],1<<20)
         for context,limit in [(4097,8192),(4096,2048)]:
             with self.assertRaises(ValueError):memory_plan(c,248320*5120*2,context,limit)
 

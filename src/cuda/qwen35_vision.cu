@@ -56,11 +56,11 @@ extern "C" __global__ void qv_position(__nv_bfloat16* x,const __nv_bfloat16* pos
  v=__bfloat162float(__float2bfloat16(v+t2));v=__bfloat162float(__float2bfloat16(v+t3));
  x[i]=__float2bfloat16(__bfloat162float(x[i])+v);
 }
-extern "C" __global__ void qv_rope(__nv_bfloat16* qkv,int n,int heads,int dim,int gw){
+extern "C" __global__ void qv_rope(__nv_bfloat16* qkv,int n,int heads,int dim,int gw,const float* inv_freq){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=n*2*heads*(dim/2))return;
  int d=i%(dim/2),h=i/(dim/2)%heads,which=i/(dim/2)/heads%2,p=i/(dim/2)/heads/2;
  int group=p/4,sub=p%4,row=(group/(gw/2))*2+sub/2,col=(group%(gw/2))*2+sub%2;
- int coord=d<dim/4?row:col, f=d%(dim/4);float angle=coord*(1.f/powf(10000.f,float(f)/(dim/4)));
+ int coord=d<dim/4?row:col, f=d%(dim/4);float angle=coord*(inv_freq[f]);
  int j=((p*3+which)*heads+h)*dim+d;float a=__bfloat162float(qkv[j]),b=__bfloat162float(qkv[j+dim/2]);float s,c;sincosf(angle,&s,&c);
  qkv[j]=__float2bfloat16(__fsub_rn(__fmul_rn(a,c),__fmul_rn(b,s)));qkv[j+dim/2]=__float2bfloat16(__fadd_rn(__fmul_rn(b,c),__fmul_rn(a,s)));
 }
@@ -85,3 +85,11 @@ extern "C" __global__ void qv_split_pad(const __nv_bfloat16* src,__nv_bfloat16* 
  v[i]=d<dim?src[((t*3+2)*heads+h)*dim+d]:__float2bfloat16(0.f);
 }
 extern "C" __global__ void qv_unpad(const __nv_bfloat16* src,__nv_bfloat16* out,int total,int dim,int padded){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<total)out[i]=src[i/dim*padded+i%dim];}
+
+extern "C" __global__ void qv_activate(__nv_bfloat16* x,int total,int act) {
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=total)return;
+ float v=__bfloat162float(x[i]);
+ if(act==1)v=.5f*v*(1.f+tanhf(.7978845608028654f*(v+.044715f*v*v*v)));
+ if(act==2)v=.5f*v*(1.f+erff(v*.7071067811865475f));
+ x[i]=__float2bfloat16(v);
+}

@@ -30323,6 +30323,8 @@ impl PrefillEngine {
                         h,
                     );
                 }
+                self.qwen35_boundary("residual",layer_idx,chunk_start,*self.scratch.d_residual.device_ptr(),m*h)?;
+                self.qwen35_boundary("mlp_output",layer_idx,chunk_start,*self.scratch.d_hidden.device_ptr(),m*h)?;
                 self.record_prefill_device_trace_all_layer_bf16_row(
                     PDT_ALL_LAYER_POST_MLP_HIDDEN_LAST,
                     layer_idx,
@@ -49742,6 +49744,7 @@ impl PrefillEngine {
         };
         let q_dim = num_q_heads * head_dim;
         let kv_dim = num_kv_heads * head_dim;
+        self.qwen35_boundary("normalized_input",layer_idx,start_pos,hidden,m*cfg.hidden_size)?;
         let reference_layer1_trace = self.reference_debug_trace_enabled && layer_idx == 1;
         let gqa_debt_timing = gt
             && (prefill_gqa_branch_timing_enabled()
@@ -50079,6 +50082,9 @@ impl PrefillEngine {
             );
         }
 
+        self.qwen35_boundary("projection_q",layer_idx,start_pos,q,m*q_dim)?;
+        self.qwen35_boundary("projection_k",layer_idx,start_pos,k,m*kv_dim)?;
+        self.qwen35_boundary("projection_v",layer_idx,start_pos,v,m*kv_dim)?;
         // QK LayerNorm: per-head RMSNorm on Q and K after projection, before RoPE
         // Q is [m, num_q_heads, head_dim], K is [m, num_kv_heads, head_dim]
         // Treat as [m*num_heads, head_dim] rows — existing rmsnorm kernel handles this.
@@ -50469,6 +50475,8 @@ impl PrefillEngine {
             }
         }
 
+        self.qwen35_boundary("rope_q",layer_idx,start_pos,q,m*q_dim)?;
+        self.qwen35_boundary("rope_k",layer_idx,start_pos,k,m*kv_dim)?;
         // Attention: use vendored FlashAttention-2 when available (start_pos==0),
         // otherwise fall back to custom tiled kernel for cross-chunk KV cache support.
         let mut kv_cache_already_stored = false; // Set true by FP8 cross-chunk path
@@ -50503,7 +50511,13 @@ impl PrefillEngine {
                     && (gemma_custom_window_prefill_enabled()
                         || (layer_specific_sliding_gqa_shape
                             && !prefill_layer_specific_sliding_fa2_enabled()))));
-        if use_ring_fa2_window_prefill {
+        if self.kernels.qwen35_gdn_accurate.is_some() && self.kv_format == 0
+            && start_pos.checked_add(m).is_some_and(|n|n <= 4096)
+            && !use_sliding_window && std::env::var("KRASIS_QWEN_TEXT_ATTENTION").as_deref() != Ok("fast") {
+            self.qwen35_reference_attention(q, k, v, layer_k_ptr, layer_v_ptr, attn_out,
+                m, start_pos, num_q_heads, num_kv_heads, head_dim, sm_scale)?;
+            attn_path = "qwen_bounded_batched_eager";
+        } else if use_ring_fa2_window_prefill {
             if start_pos == 0 {
                 attn_path = "fa2_ring_window_initial";
                 attention_branch_idx = GQA_BRANCH_RING_FA2_INITIAL;
@@ -52396,6 +52410,8 @@ impl PrefillEngine {
             );
         }
 
+        self.qwen35_boundary("attention",layer_idx,start_pos,attn_out,m*q_dim)?;
+        if lw.gqa_gated && gate_ptr != 0 {self.qwen35_boundary("gate",layer_idx,start_pos,gate_ptr,m*q_dim)?;}
         // Gated attention: apply sigmoid(gate) to attention output
         let gt_gate = Instant::now();
         if lw.gqa_gated && gate_ptr != 0 {
@@ -52502,6 +52518,7 @@ impl PrefillEngine {
             );
         }
 
+        self.qwen35_boundary("gated_attention",layer_idx,start_pos,attn_out,m*q_dim)?;
         // O projection (use scratch1 as temp to avoid input/output aliasing)
         let gt_oproj = Instant::now();
         let gqa_oproj_event = self.gqa_timing_event_start("GQA O projection")?;
@@ -52529,6 +52546,7 @@ impl PrefillEngine {
             m,
         )?;
         self.memcpy_d2d(attn_out, o_temp, (m * cfg.hidden_size * 2) as u64)?;
+        self.qwen35_boundary("o_projection",layer_idx,start_pos,attn_out,m*cfg.hidden_size)?;
         if reference_layer1_trace {
             self.push_reference_stage_snapshot(
                 "layer1_o_projection_output_last",
@@ -61614,6 +61632,8 @@ impl PrefillEngine {
                     o_fla
                 };
 
+                self.qwen35_boundary("gdn_output",layer_idx,chunk_start,o_fla,m*nv*dv)?;
+                self.qwen35_boundary("gdn_z",layer_idx,chunk_start,la_z,m*nv*dv)?;
                 // Gated RMSNorm after FLA. Default stays on the direct BF16-input kernel,
                 // but a debug switch can force BF16->FP32 conversion and reuse the
                 // fallback FP32 RMSNorm kernel to isolate fast-path norm issues.
@@ -61701,6 +61721,7 @@ impl PrefillEngine {
                         }
                     }
                 }
+                self.qwen35_boundary("gdn_norm",layer_idx,chunk_start,rmsnorm_out,m*nv*dv)?;
                 if trace_la_projection_summary {
                     self.trace_emit_bf16_row_summary(
                         0,
@@ -63362,7 +63383,11 @@ impl PrefillEngine {
             crate::dense_ffn_probe::row(t, "gate.bf16", gate_buf, t.row, inter, self.stream)?;
             crate::dense_ffn_probe::row(t, "up.bf16", up_buf, t.row, inter, self.stream)?;
         }
+        self.qwen35_boundary("mlp_input",layer_idx,self.active_prefill_chunk_start,input,m*self.config.hidden_size)?;
+        self.qwen35_boundary("mlp_gate",layer_idx,self.active_prefill_chunk_start,gate_buf,m*inter)?;
+        self.qwen35_boundary("mlp_up",layer_idx,self.active_prefill_chunk_start,up_buf,m*inter)?;
         self.launch_gated_activation_split(act_buf, gate_buf, up_buf, lw.moe_activation, m, inter)?;
+        self.qwen35_boundary("mlp_activation",layer_idx,self.active_prefill_chunk_start,act_buf,m*inter)?;
         if let Some(t) = &dense_probe {
             crate::dense_ffn_probe::row(t, "activation.bf16", act_buf, t.row, inter, self.stream)?;
         }
@@ -81320,6 +81345,9 @@ impl PrefillKernels {
     pub(crate) fn select_qwen35_fp32_outer_norms(&mut self, device: &Arc<CudaDevice>) -> Result<(), String> {
         self.rope_half_split = extract_cu_func(&device.get_func("prefill_kernels", "qwen35_rope_batched_half_split_kernel").ok_or("missing Qwen BF16 rotary")?);
         self.rope = self.rope_half_split;
+        self.gated_activation_split = extract_cu_func(&device.get_func("prefill_kernels","qwen35_gated_activation_split_batched_kernel").ok_or("Qwen split SiLU boundary")?);
+        self.sigmoid_mul = extract_cu_func(&device.get_func("prefill_kernels","qwen35_sigmoid_mul_kernel").ok_or("Qwen sigmoid boundary")?);
+        self.silu_mul = extract_cu_func(&device.get_func("prefill_kernels","qwen35_silu_mul_batched_kernel").ok_or("Qwen SiLU boundary")?);
         self.qwen35_gdn_accurate = Some(extract_cu_func(&device.get_func("prefill_kernels", "qwen35_gdn_serial_kernel").ok_or("missing accurate Qwen recurrence")?));
         self.la_fused_repeat_l2norm_bf16 = extract_cu_func(&device.get_func("prefill_kernels", "qwen35_la_fused_repeat_l2norm_bf16_kernel").ok_or("missing Qwen L2 norm")?);
         self.la_gated_rmsnorm = extract_cu_func(&device.get_func("prefill_kernels", "qwen35_la_gated_rmsnorm_kernel").ok_or("missing Qwen gated norm")?);
@@ -81513,6 +81541,12 @@ impl PrefillKernels {
                     "la_compute_gate_beta_kernel",
                     "la_repeat_interleave_kernel",
                     "la_gated_rmsnorm_kernel",
+                    "qwen35_attention_pack",
+                    "qwen35_attention_unpack",
+                    "qwen35_attention_softmax",
+                    "qwen35_gated_activation_split_batched_kernel",
+                    "qwen35_sigmoid_mul_kernel",
+                    "qwen35_silu_mul_batched_kernel",
                     "qwen35_projection_weights_kernel",
                     "qwen35_projection_output_kernel",
                     "qwen35_rope_batched_half_split_kernel",
@@ -100007,3 +100041,5 @@ impl PrefillEngine {
 include!("scalar_gdn_prefill.rs");
 
 include!("gdn_prefill_producer_observe.rs");
+
+include!("qwen35_reference_attention.rs");

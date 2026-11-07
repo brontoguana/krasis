@@ -15357,7 +15357,7 @@ extern "C" __global__ void qwen35_gated_rmsnorm_silu(
     // Apply: output = silu(z) * rmsnorm(recur_out)
     for (int i = tid; i < dv; i += num_threads) {
         float normed = bf16_to_f32(f32_to_bf16(smem[i] * rms_scale));
-        normed = bf16_to_f32(f32_to_bf16(normed * norm_weight[i]));
+        normed = bf16_to_f32(f32_to_bf16(normed * bf16_to_f32(f32_to_bf16(norm_weight[i]))));
         float g = bf16_to_f32(f32_to_bf16(gate[i]));
         float silu_g = g / (1.0f + __expf(-g));
         out[i] = bf16_to_f32(f32_to_bf16(silu_g * normed));
@@ -15411,7 +15411,7 @@ extern "C" __global__ void qwen35_gated_rmsnorm_silu_bf16(
 
     for (int i = tid; i < dv; i += num_threads) {
         float normed = bf16_to_f32(f32_to_bf16(smem[i] * rms_scale));
-        normed = bf16_to_f32(f32_to_bf16(normed * norm_weight[i]));
+        normed = bf16_to_f32(f32_to_bf16(normed * bf16_to_f32(f32_to_bf16(norm_weight[i]))));
         float g = bf16_to_f32(f32_to_bf16(gate[i]));
         float silu_g = g / (1.0f + __expf(-g));
         __nv_bfloat16 result = __float2bfloat16(silu_g * normed);
@@ -15432,3 +15432,30 @@ __device__ void qwen35_rope_pair(float* q,float* k,const float* cos,const float*
 }
 extern "C" __global__ void qwen35_apply_rope_half_split(float* q,float* k,const float* cos,const float* sin,int pos,int nq,int nk,int hd,int half){qwen35_rope_pair(q,k,cos,sin,pos,nq,nk,hd,half);}
 extern "C" __global__ void qwen35_apply_rope_half_split_g(float* q,float* k,const float* cos,const float* sin,const int* pos,int nq,int nk,int hd,int half){qwen35_rope_pair(q,k,cos,sin,*pos,nq,nk,hd,half);}
+
+extern "C" __global__ void qwen35_apply_gated_attn_bf16(
+    unsigned short* __restrict__ output,    // [n] BF16
+    const float* __restrict__ attn_out,     // [n] FP32
+    const float* __restrict__ gate,         // [n] FP32
+    int n
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float g = __bfloat162float(__float2bfloat16(1.0f / (1.0f + expf(-gate[idx]))));
+        __nv_bfloat16 result = __float2bfloat16(__bfloat162float(__float2bfloat16(attn_out[idx])) * g);
+        output[idx] = *reinterpret_cast<unsigned short*>(&result);
+    }
+}
+
+extern "C" __global__ void qwen35_silu_mul(
+    __nv_bfloat16* __restrict__ output,        // [intermediate_size]
+    const __nv_bfloat16* __restrict__ gate_up,  // [2 * intermediate_size]
+    int intermediate_size
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < intermediate_size) {
+        float g = bf16_to_f32(gate_up[i]);
+        float u = bf16_to_f32(gate_up[intermediate_size + i]);
+        output[i] = f32_to_bf16(bf16_to_f32(f32_to_bf16(g / (1.0f + expf(-g)))) * u);
+    }
+}

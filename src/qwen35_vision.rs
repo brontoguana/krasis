@@ -29,6 +29,8 @@ pub struct Qwen35Vision {
     patch: usize,
     side: usize,
     max_patches: usize,
+    rope_inv_freq: CudaSlice<f32>,
+    lt_workspace: CudaSlice<u8>,
     flash: Option<crate::gpu_prefill::FlashAttnFwdFn>,
 }
 fn pyerr(e: impl ToString) -> PyErr {
@@ -65,8 +67,15 @@ impl Qwen35Vision {
             grid_w,
             output_ptr as u64,
             Some(&mut capture),
+            None,
         )
         .map_err(pyerr)?;
+        Ok(capture)
+    }
+    fn block_debug(&self, input_ptr:usize, grid_h:usize, grid_w:usize, block:usize, output_ptr:usize) -> PyResult<HashMap<String,Vec<u16>>> {
+        if block > self.depth { return Err(pyerr("invalid vision block")); }
+        let mut capture=HashMap::new();
+        self.forward_inner(input_ptr as u64,grid_h,grid_w,output_ptr as u64,Some(&mut capture),Some(block)).map_err(pyerr)?;
         Ok(capture)
     }
     fn memory_info(&self) -> PyResult<String> {
@@ -228,6 +237,7 @@ impl Qwen35Vision {
         }
         let names = [
             "qv_finish",
+            "qv_activate",
             "qv_norm",
             "qv_add",
             "qv_position",
@@ -247,7 +257,14 @@ impl Qwen35Vision {
             )
             .map_err(|e| e.to_string())?;
         let blas = CudaBlas::new(device.clone()).map_err(|e| e.to_string())?;
+        let quarter = hidden/heads/4;
+        // Reference constructs inv_freq on CPU in FP32 before moving to CUDA.
+        let frequencies: Vec<f32> = (0..quarter).map(|i|1f32/10000f32.powf(i as f32/quarter as f32)).collect();
+        let rope_inv_freq = device.htod_sync_copy(&frequencies).map_err(|e|e.to_string())?;
+        let lt_workspace = device.alloc_zeros::<u8>(1024*1024).map_err(|e|e.to_string())?;
         Ok(Self {
+            rope_inv_freq,
+            lt_workspace,
             device,
             blas,
             bank,
@@ -291,6 +308,14 @@ impl Qwen35Vision {
             .weights
             .get(&format!("{name}.bias"))
             .map_or(0, |w| w.ptr);
+        if act != 3 && std::env::var("KRASIS_QWEN_VISION_LINEAR").as_deref() != Ok("fp32") {
+            self.linear_lt(x,w.ptr,bias,out,m,n,k)?;
+            if act != 0 {
+                unsafe { self.device.get_func("qwen35_vision","qv_activate").ok_or("activation kernel")?
+                    .launch(LaunchConfig::for_num_elems((m*n) as u32),(out,(m*n) as i32,act)).map_err(|e|e.to_string())?; }
+            }
+            return Ok(());
+        }
         let alpha = 1f32;
         let beta = 0f32;
         unsafe {
@@ -369,7 +394,7 @@ impl Qwen35Vision {
         }
     }
     fn forward(&self, pixels: u64, gh: usize, gw: usize, out: u64) -> Result<(), String> {
-        self.forward_inner(pixels, gh, gw, out, None)
+        self.forward_inner(pixels, gh, gw, out, None, None)
     }
     fn forward_inner(
         &self,
@@ -378,6 +403,7 @@ impl Qwen35Vision {
         gw: usize,
         out: u64,
         mut capture: Option<&mut HashMap<String, Vec<u16>>>,
+        replay: Option<usize>,
     ) -> Result<(), String> {
         let n = gh.checked_mul(gw).ok_or("image extent overflow")?;
         if pixels == 0
@@ -394,7 +420,10 @@ impl Qwen35Vision {
         }
         self.device.bind_to_thread().map_err(|e| e.to_string())?;
         let (free, _) = cudarc::driver::result::mem_get_info().map_err(|e| e.to_string())?;
-        let peak = n * (self.hidden * 7 + self.inter + self.out + self.hidden * 4) * 4;
+        let peak = n * (7*self.hidden+self.inter.max(self.hidden))*2
+            + n*self.inter.max(3*self.hidden).max(self.out)*4
+            + n*self.heads*128*8 + n*self.heads*4
+            + 8*n*self.heads*(96+1)*4;
         if free < peak + 600 * 1024 * 1024 {
             return Err("vision would breach 600 MiB reserve".into());
         }
@@ -416,8 +445,14 @@ impl Qwen35Vision {
             *mid.device_ptr(),
             *merged.device_ptr(),
         );
-        let padded = ((self.hidden / self.heads + 31) / 32 * 32).max(64);
-        let flash_buffers = if self.flash.is_some() {
+        let compatible_sdpa = self.hidden/self.heads == 72
+            && !matches!(std::env::var("KRASIS_QWEN_VISION_ATTENTION").as_deref(),Ok("fast")|Ok("portable"));
+        let padded = if compatible_sdpa {72} else {((self.hidden / self.heads + 31) / 32 * 32).max(64)};
+        let split_buffers = if compatible_sdpa {
+            Some((self.device.alloc_zeros::<f32>(8*self.heads*n*96).map_err(|e|e.to_string())?,
+                  self.device.alloc_zeros::<f32>(8*self.heads*n).map_err(|e|e.to_string())?))
+        } else {None};
+        let flash_buffers = if self.flash.is_some() || compatible_sdpa {
             Some((
                 self.alloc(n * self.heads * padded)?,
                 self.alloc(n * self.heads * padded)?,
@@ -431,6 +466,9 @@ impl Qwen35Vision {
             None
         };
         let stream = *self.device.cu_stream();
+        if replay.is_some() {
+            unsafe { cudarc::driver::sys::lib().cuMemcpyDtoDAsync_v2(xp,pixels,n*self.hidden*2,stream).result().map_err(|e|e.to_string())?; }
+        } else {
         self.bank.stage(0, stream)?;
         self.linear(pixels, xp, n, "patch_embed.proj", 3, &tmp)?;
         if let Some(c) = capture.as_deref_mut() {
@@ -463,7 +501,9 @@ impl Qwen35Vision {
                 self.device.dtoh_sync_copy(&x).map_err(|e| e.to_string())?,
             );
         }
+        }
         for i in 0..self.depth {
+            if replay.is_some_and(|j| j != i) { continue; }
             self.bank.stage(i + 1, stream)?;
             let p = format!("blocks.{i}");
             self.norm(xp, ap, n, &format!("{p}.norm1"))?;
@@ -502,12 +542,11 @@ impl Qwen35Vision {
                             self.heads as i32,
                             (self.hidden / self.heads) as i32,
                             gw as i32,
+                            *self.rope_inv_freq.device_ptr(),
                         ),
                     )
                     .map_err(|e| e.to_string())?;
-                if let (Some(flash), Some((q, k, v, output, lse))) =
-                    (self.flash, flash_buffers.as_ref())
-                {
+                if let Some((q,k,v,output,lse)) = flash_buffers.as_ref() {
                     self.device
                         .get_func("qwen35_vision", "qv_split_pad")
                         .ok_or("split kernel")?
@@ -525,7 +564,12 @@ impl Qwen35Vision {
                             ),
                         )
                         .map_err(|e| e.to_string())?;
-                    let status = flash(
+                    let status = if compatible_sdpa {
+                        let (acc,la)=split_buffers.as_ref().ok_or("missing split buffers")?;
+                        let sm=self.device.attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT).map_err(|e|e.to_string())? as usize;
+                        let splits=qwen_vision_splits(self.heads*((n+63)/64),2*sm,(n+127)/128);
+                        krasis_qwen_vision_sdpa(*q.device_ptr() as _,*k.device_ptr() as _,*v.device_ptr() as _,*output.device_ptr() as _,*lse.device_ptr() as _,*acc.device_ptr() as _,*la.device_ptr() as _,n as i32,self.heads as i32,72,splits as i32,stream as _)
+                    } else { self.flash.ok_or("missing fast vision attention")?(
                         *q.device_ptr() as _,
                         *k.device_ptr() as _,
                         *v.device_ptr() as _,
@@ -545,7 +589,7 @@ impl Qwen35Vision {
                         0,
                         0,
                         stream as _,
-                    );
+                    ) };
                     if status != 0 {
                         return Err(format!("Qwen3.5 vision FlashAttention failed: {status}"));
                     }
@@ -618,6 +662,10 @@ impl Qwen35Vision {
                 );
             }
         }
+        if replay.is_some_and(|i|i < self.depth) {
+            unsafe { cudarc::driver::sys::lib().cuMemcpyDtoDAsync_v2(out,xp,n*self.hidden*2,stream).result().map_err(|e|e.to_string())?; }
+            return self.device.synchronize().map_err(|e|e.to_string());
+        }
         self.bank.stage(self.depth + 1, stream)?;
         self.norm(xp, ap, n, "merger.norm")?;
         self.record(&mut capture, "merger_norm".into(), &a)?;
@@ -687,4 +735,19 @@ pub(crate) fn assemble_qwen35_image(
         }
     }
     device.synchronize().map_err(pyerr)
+}
+
+include!("qwen35_vision_lt.rs");
+
+extern "C" {fn krasis_qwen_vision_sdpa(q:*mut std::ffi::c_void,k:*mut std::ffi::c_void,v:*mut std::ffi::c_void,y:*mut std::ffi::c_void,lse:*mut std::ffi::c_void,acc:*mut std::ffi::c_void,la:*mut std::ffi::c_void,n:i32,heads:i32,dim:i32,splits:i32,stream:*mut std::ffi::c_void)->i32;}
+// Reference occupancy heuristic, bounded by eight KV blocks at 1024 patches.
+fn qwen_vision_splits(blocks:usize,sms:usize,key_blocks:usize)->usize {
+    if blocks as f32 >= 0.8*sms as f32 {return 1;}
+    let max=8.min(sms).min(key_blocks);let mut efficiencies=Vec::new();let mut best=0f32;
+    for s in 1..=max {
+        let eligible=s==1 || (key_blocks+s-1)/s != (key_blocks+s-2)/(s-1);
+        let waves=(blocks*s) as f32/sms as f32;
+        let eff=if eligible {waves/waves.ceil()} else {0.};best=best.max(eff);efficiencies.push(eff);
+    }
+    efficiencies.iter().position(|&x|x>=0.85*best).map_or(1,|i|i+1)
 }
