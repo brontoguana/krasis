@@ -4032,6 +4032,31 @@ fn trace_emit_route(
     );
 }
 
+fn gemma4_decode_diagnostic_boundary(graph: &GpuDecodeGraph, layer: usize, name: &str, ptr: u64, bytes: usize) -> Result<(), String> {
+    let Some(trace) = graph.decode_trace.as_ref() else { return Ok(()); };
+    let Some(dir) = trace.dump_dir.as_ref() else { return Ok(()); };
+    if !trace.should_emit(graph.decode_step_counter, Some(layer), "gemma_diagnostic") { return Ok(()); }
+    let filename = format!("step-{:03}-layer-{:02}-{}.bin", graph.decode_step_counter, layer, name);
+    let result = unsafe { cuda_sys::lib().cuCtxSynchronize() };
+    if result != cuda_sys::CUresult::CUDA_SUCCESS { return Err(format!("Gemma diagnostic synchronization: {result:?}")); }
+    let mut raw = vec![0u8; bytes];
+    let result = unsafe { cuda_sys::lib().cuMemcpyDtoH_v2(raw.as_mut_ptr() as *mut _, ptr, bytes) };
+    if result != cuda_sys::CUresult::CUDA_SUCCESS { return Err(format!("Gemma diagnostic capture: {result:?}")); }
+    std::fs::create_dir_all(dir).map_err(|e|e.to_string())?;
+    std::fs::write(std::path::Path::new(dir).join(&filename), &raw).map_err(|e|e.to_string())?;
+    if let Some(source) = std::env::var_os("KRASIS_GEMMA_DECODE_SUBSTITUTE_DIR") {
+        let source = std::path::PathBuf::from(source).join(&filename);
+        if source.is_file() {
+            let replacement = std::fs::read(&source).map_err(|e|e.to_string())?;
+            if replacement.len() != bytes { return Err("Gemma diagnostic substitution extent mismatch".into()); }
+            let result = unsafe { cuda_sys::lib().cuMemcpyHtoD_v2(ptr, replacement.as_ptr() as *const _, bytes) };
+            if result != cuda_sys::CUresult::CUDA_SUCCESS { return Err(format!("Gemma diagnostic substitution: {result:?}")); }
+            eprintln!("GEMMA_DIAGNOSTIC_SUBSTITUTION {}", source.display());
+        }
+    }
+    Ok(())
+}
+
 fn trace_emit_bf16(
     trace: Option<&DecodeTraceConfig>,
     step: usize,
@@ -34830,6 +34855,27 @@ impl GpuDecodeStore {
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
         graph.lm_head_wid = weight_id;
         Ok(())
+    }
+
+    /// Fixed-input, eager-only diagnostic. Ordinary serving never calls this method.
+    fn debug_gemma4_decode_trace(&mut self, layer: usize) -> PyResult<()> {
+        self.refresh_trace_config();
+        let graph = self.graph.as_mut().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("configure first"))?;
+        if !graph.layers.iter().all(|l| matches!(l.mlp, GpuMlpConfig::Gemma4MoE { .. })) || layer >= graph.layers.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err("Gemma diagnostic layer required"));
+        }
+        graph.decode_trace = self.trace_config.clone();
+        graph.decode_step_counter = 0;
+        graph.debug_decode_hcs_equiv_trace_active = true;
+        graph.debug_decode_hcs_equiv_layer = Some(layer);
+        graph.debug_decode_early_max_steps = 8;
+        graph.debug_decode_hcs_equiv_entries.clear();
+        Ok(())
+    }
+
+    fn debug_gemma4_decode_receipt(&self) -> PyResult<String> {
+        let graph = self.graph.as_ref().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("configure first"))?;
+        serde_json::to_string_pretty(&graph.debug_decode_hcs_equiv_entries).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
     fn debug_gpu_decode_step(&mut self, token_id: usize, position: usize) -> PyResult<()> {
@@ -74277,6 +74323,7 @@ impl GpuDecodeStore {
         if let (Some(audit), Some(selected)) = (&incoming_audit, &self.selected_kda) {
             audit.capture_incoming(selected, 0)?;
         }
+        let gemma_bf16_boundaries = std::env::var("KRASIS_GEMMA_DIAG_BF16_BOUNDARIES").as_deref() == Ok("1");
         let hs = graph.hidden_size;
         let eps = graph.eps;
         let timing = graph.timing_enabled;
@@ -74515,6 +74562,7 @@ impl GpuDecodeStore {
             let layer = &graph.layers[layer_idx];
             let glm5_hc = layer.glm5_hyper_connection.clone();
             let is_gemma4 = matches!(layer.mlp, GpuMlpConfig::Gemma4MoE { .. });
+            if is_gemma4 { gemma4_decode_diagnostic_boundary(graph, layer_idx, "incoming", *graph.d_hidden.device_ptr(), hs*2)?; }
             let debug_attn_kind = match &layer.attn {
                 GpuAttnConfig::KimiDeltaAttention(_) => "kimi_delta_attention",
                 GpuAttnConfig::LinearAttention { .. } => "linear_attention",
@@ -76149,6 +76197,14 @@ impl GpuDecodeStore {
                             }
                         }
 
+                        if is_gemma4 && gemma_bf16_boundaries {
+                            for (ptr, count) in [(*graph.d_gqa_q.device_ptr(), nh*hd), (*graph.d_gqa_k.device_ptr(), nkv*hd), (*graph.d_gqa_v.device_ptr(), nkv*hd)] {
+                                unsafe {
+                                    k.fp32_to_bf16.clone().launch(LaunchConfig::for_num_elems(count as u32), (*graph.d_gqa_out.device_ptr(), ptr, count as i32)).map_err(|e|format!("diagnostic Gemma BF16 boundary: {e:?}"))?;
+                                    k.bf16_to_fp32.clone().launch(LaunchConfig::for_num_elems(count as u32), (ptr, *graph.d_gqa_out.device_ptr(), count as i32)).map_err(|e|format!("diagnostic Gemma FP32 storage: {e:?}"))?;
+                                }
+                            }
+                        }
                         // ── GQA: QK norm (if enabled) ──
                         // q_norm/k_norm are [head_dim] shared across all heads (weight_per_head=0)
                         if *q_norm_ptr != 0 {
@@ -76233,6 +76289,14 @@ impl GpuDecodeStore {
                             }
                         }
 
+                        if is_gemma4 && gemma_bf16_boundaries {
+                            for (ptr, count) in [(*graph.d_gqa_q.device_ptr(), nh*hd), (*graph.d_gqa_k.device_ptr(), nkv*hd), (*graph.d_gqa_v.device_ptr(), nkv*hd)] {
+                                unsafe {
+                                    k.fp32_to_bf16.clone().launch(LaunchConfig::for_num_elems(count as u32), (*graph.d_gqa_out.device_ptr(), ptr, count as i32)).map_err(|e|format!("diagnostic Gemma BF16 boundary: {e:?}"))?;
+                                    k.bf16_to_fp32.clone().launch(LaunchConfig::for_num_elems(count as u32), (ptr, *graph.d_gqa_out.device_ptr(), count as i32)).map_err(|e|format!("diagnostic Gemma FP32 storage: {e:?}"))?;
+                                }
+                            }
+                        }
                         // ── GQA: RoPE ──
                         let layer_rope_cos = if *rope_cos_ptr != 0 {
                             *rope_cos_ptr
@@ -76288,6 +76352,14 @@ impl GpuDecodeStore {
                             }
                         }
 
+                        if is_gemma4 && gemma_bf16_boundaries {
+                            for (ptr, count) in [(*graph.d_gqa_q.device_ptr(), nh*hd), (*graph.d_gqa_k.device_ptr(), nkv*hd)] {
+                                unsafe {
+                                    k.fp32_to_bf16.clone().launch(LaunchConfig::for_num_elems(count as u32), (*graph.d_gqa_out.device_ptr(), ptr, count as i32)).map_err(|e|format!("diagnostic Gemma BF16 boundary: {e:?}"))?;
+                                    k.bf16_to_fp32.clone().launch(LaunchConfig::for_num_elems(count as u32), (ptr, *graph.d_gqa_out.device_ptr(), count as i32)).map_err(|e|format!("diagnostic Gemma FP32 storage: {e:?}"))?;
+                                }
+                            }
+                        }
                         // ── GQA: KV cache write ──
                         let cache_position = graph.kv_cache_position_for_layer(layer_idx, position);
                         let attn_seq_len = graph.kv_attention_len_for_layer(layer_idx, position);
@@ -79422,10 +79494,13 @@ impl GpuDecodeStore {
                         })?;
                 }
 
+                gemma4_decode_diagnostic_boundary(graph, layer_idx, "expert-input", expert_input_ptr, hs*2)?;
+                gemma4_decode_diagnostic_boundary(graph, layer_idx, "router-input", *graph.d_hidden.device_ptr(), hs*2)?;
                 graph.moe_router_override_ptr = *graph.d_hidden.device_ptr();
                 graph.moe_input_override_ptr = expert_input_ptr;
                 self.moe_forward_with_graph(graph, layer_idx)
                     .map_err(|e| format!("gemma4 moe_forward[{}]: {}", layer_idx, e))?;
+                gemma4_decode_diagnostic_boundary(graph, layer_idx, "moe-output", *graph.d_moe_out.device_ptr(), hs*2)?;
                 graph.moe_router_override_ptr = 0;
                 graph.moe_input_override_ptr = 0;
 
@@ -99957,6 +100032,17 @@ impl GpuDecodeStore {
                         &k,
                         is_int8,
                     )?;
+                    if graph.decode_step_counter == 1 && graph.decode_trace.is_some() {
+                        let eid=batch_expert_ids[bi];
+                        let expert=&moe.experts[eid];
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w13"), *graph.d_expert_gate_up.device_ptr(), w13_n*2).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w2"), *graph.d_expert_out.device_ptr(), expert_hs*2).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-accum"), *graph.d_moe_out.device_ptr(), expert_hs*2).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w13-packed"), w13p, expert.w13_packed_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w13-scales"), w13s, expert.w13_scales_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w2-packed"), w2p, expert.w2_packed_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w2-scales"), w2s, expert.w2_scales_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                    }
                 } else {
                     self.launch_fused_silu_accum(
                         w2p,
@@ -100255,6 +100341,16 @@ impl GpuDecodeStore {
                                 &k,
                                 is_int8,
                             )?;
+                    if graph.decode_step_counter == 1 && graph.decode_trace.is_some() {
+                        let expert=&moe.experts[eid];
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w13"), *graph.d_expert_gate_up.device_ptr(), w13_n*2).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w2"), *graph.d_expert_out.device_ptr(), expert_hs*2).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-accum"), *graph.d_moe_out.device_ptr(), expert_hs*2).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w13-packed"), base + w13p_off as u64, expert.w13_packed_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w13-scales"), base + w13s_off as u64, expert.w13_scales_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w2-packed"), base + w2p_off as u64, expert.w2_packed_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w2-scales"), base + w2s_off as u64, expert.w2_scales_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                    }
                         } else {
                             self.launch_fused_silu_accum(
                                 base + w2p_off as u64,
@@ -100673,6 +100769,16 @@ impl GpuDecodeStore {
                                 &k,
                                 is_int8,
                             )?;
+                    if graph.decode_step_counter == 1 && graph.decode_trace.is_some() {
+                        let expert=&moe.experts[eid];
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w13"), *graph.d_expert_gate_up.device_ptr(), w13_n*2).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w2"), *graph.d_expert_out.device_ptr(), expert_hs*2).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-accum"), *graph.d_moe_out.device_ptr(), expert_hs*2).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w13-packed"), buf_w13_packed, expert.w13_packed_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w13-scales"), buf_w13_scales, expert.w13_scales_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w2-packed"), buf_w2_packed, expert.w2_packed_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        gemma4_decode_diagnostic_boundary(graph, layer_idx, &format!("expert-{eid}-w2-scales"), buf_w2_scales, expert.w2_scales_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                    }
                         } else {
                             self.launch_fused_silu_accum(
                                 buf_w2_packed,

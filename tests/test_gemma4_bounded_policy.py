@@ -78,6 +78,22 @@ class GemmaBoundedPolicy(unittest.TestCase):
             other=server._actual_runtime_heatmap_capture_config(SimpleNamespace(_gpu_decode_store=store),None)
         self.assertNotIn('gemma_prefill_stage_format',other)
 
+    def test_diagnostic_arithmetic_cannot_reuse_default_heatmaps(self):
+        from krasis import server
+        from unittest.mock import Mock
+        store=Mock();store.native_scalar_runtime_identity.return_value=None
+        model=SimpleNamespace(_gpu_decode_store=store,_gemma_prefill_stage_format='bf16')
+        with patch.dict(os.environ,{},clear=True),patch.object(server,'_runtime_heatmap_capture_config',side_effect=lambda args:{'kv_dtype':'k6v6'}):
+            ordinary=server._actual_runtime_heatmap_capture_config(model,None)
+            with patch.dict(os.environ,{'KRASIS_GEMMA_DIAG_BF16_BOUNDARIES':'1'}):
+                diagnostic=server._actual_runtime_heatmap_capture_config(model,None)
+                other=server._actual_runtime_heatmap_capture_config(SimpleNamespace(_gpu_decode_store=store),None)
+        self.assertNotIn('gemma_numerical_diagnostics',ordinary)
+        self.assertNotIn('gemma_numerical_diagnostics',other)
+        self.assertEqual(diagnostic['gemma_numerical_diagnostics']['KRASIS_GEMMA_DIAG_BF16_BOUNDARIES'],'1')
+        matches,_=server._runtime_matches_approved_heatmap_policy(diagnostic,[ordinary],{'ignored_runtime_fields':['attention_quant','kv_dtype']})
+        self.assertFalse(matches)
+
     def test_explicit_profile_rejects_other_models(self):
         with patch.dict(os.environ,{},clear=False),self.assertRaisesRegex(ValueError,'requires a Gemma4'):
             _apply_dense_serving_policy(self.args(),SimpleNamespace(gemma4_text=False,n_routed_experts=128,model_type='qwen3_moe'))

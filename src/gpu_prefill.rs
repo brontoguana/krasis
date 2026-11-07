@@ -24709,7 +24709,11 @@ impl PrefillEngine {
             }
             return Ok(());
         }
-        if self.decode_kv_format != 7 && self.decode_kv_format != 9 {
+        let gemma_cache_diagnostic = self.is_gemma4_model()
+            && require_bf16
+            && std::env::var("KRASIS_GEMMA_DIAG_CACHE_CONTROL").as_deref() == Ok("1");
+        if self.decode_kv_format != 7 && self.decode_kv_format != 9
+            && !(gemma_cache_diagnostic && matches!(self.decode_kv_format, 0 | 8)) {
             if diag {
                 eprintln!(
                     "[KV-STAGE] unsupported_decode_format={} prompt_tokens={}",
@@ -24742,13 +24746,15 @@ impl PrefillEngine {
             }
         }
         let mut active_layers = Vec::new();
-        for layer_idx in 0..self.decode_kv_k_radius_ptrs.len() {
-            if self.decode_kv_k_radius_ptrs[layer_idx] != 0
-                && layer_idx < self.decode_kv_v_radius_ptrs.len()
-                && self.decode_kv_v_radius_ptrs[layer_idx] != 0
-            {
-                active_layers.push(layer_idx);
-            }
+        for layer_idx in 0..self.decode_kv_k_radius_ptrs.len().max(self.decode_kv_k_ptrs.len()) {
+            let active = if self.decode_kv_format == 0 && gemma_cache_diagnostic {
+                self.decode_kv_k_ptrs.get(layer_idx).copied().unwrap_or(0) != 0
+                    && self.decode_kv_v_ptrs.get(layer_idx).copied().unwrap_or(0) != 0
+            } else {
+                self.decode_kv_k_radius_ptrs.get(layer_idx).copied().unwrap_or(0) != 0
+                    && self.decode_kv_v_radius_ptrs.get(layer_idx).copied().unwrap_or(0) != 0
+            };
+            if active { active_layers.push(layer_idx); }
         }
         if active_layers.is_empty() {
             if diag {
@@ -24798,7 +24804,7 @@ impl PrefillEngine {
                 ));
             }
             if bounded_gemma_ring && layer.gqa_sliding_window>0 {
-                if layer.gqa_sliding_window!=1024 || layer.gqa_head_dim!=256 || layer.gqa_num_kv_heads!=8 || self.decode_kv_format!=7 {
+                if layer.gqa_sliding_window!=1024 || layer.gqa_head_dim!=256 || layer.gqa_num_kv_heads!=8 || (self.decode_kv_format!=7 && !gemma_cache_diagnostic) {
                     return Err("bounded Gemma stage requires the validated 1024-window k6v6 geometry".into());
                 }
                 ring_capacity[layer_idx]=1056;
@@ -25685,7 +25691,7 @@ impl PrefillEngine {
                 .ok_or("stage-exact KV export layer stride overflow")?;
             let num_blocks = kv_stride / 16;
             let decode_blocks = self.decode_kv_blocks_for_layer(layer_idx);
-            if num_blocks == 0 || num_blocks != decode_blocks {
+            if num_blocks == 0 || (self.decode_kv_format != 0 && num_blocks != decode_blocks) {
                 return Err(format!(
                     "stage-exact KV export block mismatch layer={} kv_stride={} blocks={} decode_blocks={}",
                     layer_idx, kv_stride, num_blocks, decode_blocks
@@ -25693,10 +25699,10 @@ impl PrefillEngine {
             }
             let threads =
                 std::cmp::max(32, ((std::cmp::min(256, num_blocks) + 31) / 32) * 32) as u32;
-            let mut p0 = self.decode_kv_k_radius_ptrs[layer_idx];
-            let mut p1 = self.decode_kv_k_angles_ptrs[layer_idx];
-            let mut p2 = self.decode_kv_v_radius_ptrs[layer_idx];
-            let mut p3 = self.decode_kv_v_angles_ptrs[layer_idx];
+            let mut p0 = self.decode_kv_k_radius_ptrs.get(layer_idx).copied().unwrap_or(0);
+            let mut p1 = self.decode_kv_k_angles_ptrs.get(layer_idx).copied().unwrap_or(0);
+            let mut p2 = self.decode_kv_v_radius_ptrs.get(layer_idx).copied().unwrap_or(0);
+            let mut p3 = self.decode_kv_v_angles_ptrs.get(layer_idx).copied().unwrap_or(0);
             let layer_decode_max_seq = self.decode_kv_max_seq_for_layer(layer_idx);
             if layer_decode_max_seq == 0 {
                 return Err(format!(
@@ -25723,7 +25729,8 @@ impl PrefillEngine {
                 && layer.gqa_sliding_window>0 && layer_decode_max_seq<self.decode_kv_max_seq;
             let export_start=if stage_ring>0 || wrapped_gemma_k6 {0}else{export_start_token};
             let (source_start, export_tokens) =
-                stage_exact_export_range(prompt_tokens, export_start, layer_decode_max_seq)?;
+                stage_exact_export_range(prompt_tokens, export_start,
+                    if stage_ring > 0 {layer_decode_max_seq.min(stage_ring)} else {layer_decode_max_seq})?;
             if export_tokens == 0 {
                 continue;
             }
@@ -25758,6 +25765,22 @@ impl PrefillEngine {
                 converted+=1;
                 continue;
             }
+            if self.decode_kv_format == 0 && self.prefill_kv_temp_format == 0 {
+                let row_bytes = kv_stride * std::mem::size_of::<u16>();
+                for (destination, source) in [(self.decode_kv_k_ptrs[layer_idx], p4), (self.decode_kv_v_ptrs[layer_idx], p5)] {
+                    if destination == 0 { return Err("diagnostic BF16 cache destination absent".into()); }
+                    let mut copied = 0usize;
+                    while copied < export_tokens {
+                        let destination_row = (source_start + copied) % layer_decode_max_seq;
+                        let rows = (export_tokens - copied).min(layer_decode_max_seq - destination_row);
+                        let result = unsafe { cuda_sys::lib().cuMemcpyDtoDAsync_v2(destination + (destination_row*row_bytes) as u64, source + (copied*row_bytes) as u64, rows*row_bytes, self.stream) };
+                        if result != cuda_sys::CUresult::CUDA_SUCCESS { return Err(format!("diagnostic BF16 cache export: {result:?}")); }
+                        copied += rows;
+                    }
+                }
+                converted += 1;
+                continue;
+            }
             // CUDA ABI order is M, kv_stride, max_seq, start_pos,
             // norm_correction. Keep construction centralized and covered by
             // a non-zero-start regression: swapping the final two arguments
@@ -25774,6 +25797,7 @@ impl PrefillEngine {
             if self.prefill_kv_temp_format==1 {std::mem::swap(&mut p9,&mut p10);}
             let kernel = match (self.prefill_kv_temp_format, self.decode_kv_format) {
                 (0, 7) => self.kernels.kv_cache_append_k6v6,
+                (0, 8) => self.kernels.kv_cache_append_k8v6,
                 (0, 9) => self.kernels.kv_cache_append_k4v4,
                 (1, 7) => self.kernels.kv_convert_fp8_to_k6v6,
                 (1, 9) => self.kernels.kv_convert_fp8_to_k4v4,
@@ -25784,10 +25808,22 @@ impl PrefillEngine {
                     ))
                 }
             };
+            let source_k = p4;
+            let source_v = p5;
+            let diagnostic_wrap = self.is_gemma4_model() && self.decode_kv_format == 8
+                && std::env::var("KRASIS_GEMMA_DIAG_CACHE_CONTROL").as_deref() == Ok("1");
+            let mut copied = 0usize;
+            while copied < export_tokens {
+                let destination_row = if diagnostic_wrap {(source_start + copied) % layer_decode_max_seq} else {source_start + copied};
+                let rows = if diagnostic_wrap {(export_tokens - copied).min(layer_decode_max_seq - destination_row)} else {export_tokens};
+                p4 = source_k + (copied*kv_stride*stage_element_size) as u64;
+                p5 = source_v + (copied*kv_stride*stage_element_size) as u64;
+                p6 = rows as i32;
+                if self.prefill_kv_temp_format == 0 {p9 = destination_row as i32;} else {p10 = destination_row as i32;}
             unsafe {
                 launch(
                     kernel,
-                    (export_tokens as u32, 1, 1),
+                    (rows as u32, 1, 1),
                     (threads, 1, 1),
                     0,
                     self.stream,
@@ -25805,6 +25841,8 @@ impl PrefillEngine {
                         &mut p10 as *mut _ as *mut std::ffi::c_void,
                     ],
                 )?;
+            }
+                copied += rows;
             }
             converted += 1;
         }

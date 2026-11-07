@@ -1,3 +1,10 @@
+## 2026-11-07 — Bounded Gemma decode diagnosis
+
+- Add explicit fixed-input eager Gemma diagnostic receipts and exact-size boundary capture/substitution, gated by the existing trace and dump controls. Serving arithmetic/defaults unchanged.
+- Add opt-in Gemma BF16/K8 cache controls with the same BF16 prompt stage and sliding-window contract. Bound ring export to retained rows and split diagnostic canonical exports across physical wrap. Default 32K/k6v6 path remains unchanged.
+- Verify HCS-dependent first-step MoE divergence against independent FP32/BF16 accumulation equations and forward/reverse producer substitutions. Preserve prior numerical and quality verdicts.
+- Bind diagnostic arithmetic into heatmap identity. Higher-precision counterfactuals expose decode-boundary sensitivity, but the ordinary 8 GiB changed fixture still fails; keep the 32K default and 64K quality gate open.
+
 # Changelog
 
 ## Unreleased — bounded Qwen3.5
