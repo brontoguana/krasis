@@ -17,6 +17,10 @@ Krasis has two entry points:
 
 Never run Python scripts directly. Always use one of these commands.
 
+The experimental [bounded Qwen3.5-27B profile](QWEN35.md) streams source BF16
+weights through Rust/CUDA for text and images. Its memory and qualification
+limits are documented separately; it does not enable BF16 routed experts.
+
 BF16 validation policy:
 
 - BF16-heavy configs are validation-only. Use them to prove correctness or isolate quantization from logic bugs.

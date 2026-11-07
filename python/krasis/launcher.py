@@ -2284,8 +2284,11 @@ class Launcher:
             if spec.default_vision_quant and not self.cfg._vision_quant_explicit:
                 self.cfg.vision_quant = spec.default_vision_quant
         elif (self.model_info or {}).get("arch") == "qwen3_5_text":
-            # Initial dense text acceptance uses source-precision components.
-            # Native INT8 MLP sources expand to BF16 and cost more VRAM here.
+            # Bounded dense execution streams source BF16 through a reusable slab.
+            from krasis.qwen_dense_stream import enabled as bounded_dense_enabled
+            bounded = bool(self.cfg.model_path and bounded_dense_enabled(ModelConfig.from_model_path(self.cfg.model_path)))
+            if not self.cfg._max_context_tokens_explicit and bounded:
+                self.cfg.max_context_tokens = min(4096, model_limit or 4096)
             if not self.cfg._attention_quant_explicit:
                 self._set_interactive_attention_quant("bf16")
             if not self.cfg._kv_dtype_explicit:
@@ -2824,8 +2827,10 @@ class Launcher:
             )
 
             if dense_qwen:
-                experts_mb = int(rank.get("dense_mlp_mb", 0))
+                experts_mb = int(rank.get("weight_stream_slab_mb", 0) if b.get("bounded_dense_plan") else rank.get("dense_mlp_mb", 0))
                 overhead_mb -= experts_mb
+                if b.get("bounded_dense_plan"):
+                    overhead_mb += int(rank.get("recurrent_state_mb", 0))
 
             # KV allocation (capped to available VRAM)
             free_before_kv = rank.get("free_mb", 0)
@@ -2854,7 +2859,7 @@ class Launcher:
 
             # Labels
             expert_label = self.cfg.dense_mlp_quant.upper() if dense_qwen else f"INT{self.cfg.gpu_expert_bits}"
-            weight_label = "Dense MLP" if dense_qwen else "Experts"
+            weight_label = "Weight slab" if b.get("bounded_dense_plan") else "Dense MLP" if dense_qwen else "Experts"
             attn_label = _format_attention_quant_value(
                 self.cfg.attention_quant,
                 self.cfg.hqq_auto_budget_pct if self.cfg.attention_quant in ("hqq46_auto", "hqq68_auto") else None,
@@ -3824,9 +3829,14 @@ class Launcher:
                 else "bf16"
             )
             if dense_qwen:
-                experts_mb = int(rank.get("dense_mlp_mb", 0))
+                bounded = bool(budget.get("bounded_dense_plan"))
+                experts_mb = int(rank.get("weight_stream_slab_mb", 0) if bounded else rank.get("dense_mlp_mb", 0))
                 overhead_mb -= experts_mb
-                print(f"\n  Dense MLP:   {experts_mb:>8,} MB  ({self.cfg.dense_mlp_quant.upper()})")
+                if bounded:
+                    overhead_mb += int(rank.get("recurrent_state_mb", 0))
+                    print(f"\n  Weight slab: {experts_mb:>8,} MB  (host-backed BF16 streaming)")
+                else:
+                    print(f"\n  Dense MLP:   {experts_mb:>8,} MB  ({self.cfg.dense_mlp_quant.upper()})")
             else:
                 print(f"\n  Experts:     {experts_mb:>8,} MB  (INT{self.cfg.gpu_expert_bits} g{self.cfg.expert_group_size})")
             attn_label = _format_attention_quant_value(

@@ -15,6 +15,9 @@ pub mod gguf;
 pub mod gguf_kernels;
 pub mod gpu_decode;
 pub mod gpu_prefill;
+mod dense_stream;
+#[cfg(has_qwen35_vision)]
+mod qwen35_vision;
 pub mod hqq;
 pub mod kernel;
 pub mod manager;
@@ -95,6 +98,10 @@ fn krasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<server::RustServer>()?;
     m.add_class::<gpu_decode::GpuDecodeStore>()?;
     m.add_class::<vram_monitor::VramMonitor>()?;
+    #[cfg(has_qwen35_vision)]
+    m.add_class::<qwen35_vision::Qwen35Vision>()?;
+    #[cfg(has_qwen35_vision)]
+    m.add_function(wrap_pyfunction!(qwen35_vision::assemble_qwen35_image, m)?)?;
     m.add_function(wrap_pyfunction!(hqq::hqq4_init_group_ptr, m)?)?;
     m.add_function(wrap_pyfunction!(hqq::hqq4_solve_group_ptr, m)?)?;
     m.add_function(wrap_pyfunction!(hqq::hqq4_rmse_group_ptr, m)?)?;

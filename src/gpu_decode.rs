@@ -18540,6 +18540,7 @@ impl CachedKernels {
 // ── Main GPU decode graph ──────────────────────────────────────────────
 
 struct GpuDecodeGraph {
+    dense_stream: Option<Arc<crate::dense_stream::DenseStream>>,
     native_bf16_projection: Option<Arc<crate::bf16_row_projection::Program>>,
     ordered_expert_projection: Option<Arc<crate::ordered_projection::OrderedProjection>>,
     d_common_moe_accum: Option<cudarc::driver::CudaSlice<f32>>,
@@ -32144,6 +32145,7 @@ impl GpuDecodeStore {
             crate::matched_routes::Experiment::load(self.device.clone(), num_layers)
                 .map_err(pyo3::exceptions::PyValueError::new_err)?;
         self.graph = Some(Box::new(GpuDecodeGraph {
+            dense_stream: None,
             native_bf16_projection: self.native_bf16_projection.clone(),
             ordered_expert_projection: None,
             d_common_moe_accum: None,
@@ -32871,6 +32873,30 @@ impl GpuDecodeStore {
         log::info!("GpuDecodeStore: configured hidden={}, layers={}, vocab={}, intermediate={}, qkv={}, gs={}",
                    hidden_size, num_layers, vocab_size, intermediate, qkv_size, group_size);
         Ok(())
+    }
+
+    fn configure_dense_stream(&mut self, capacity_bytes: usize) -> PyResult<()> {
+        let bank=crate::dense_stream::DenseStream::new(self.device.clone(),capacity_bytes)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let graph=self.graph.as_mut().ok_or_else(||pyo3::exceptions::PyValueError::new_err("configure first"))?;
+        if !graph.weights.is_empty() { return Err(pyo3::exceptions::PyValueError::new_err("stream before weights")); }
+        graph.dense_stream=Some(bank); Ok(())
+    }
+    fn register_streamed_weight(&mut self, group: usize, ptr: usize, rows: usize, cols: usize) -> PyResult<usize> {
+        let bytes=rows.checked_mul(cols).and_then(|n|n.checked_mul(2)).ok_or_else(||pyo3::exceptions::PyValueError::new_err("weight extent overflow"))?;
+        let graph=self.graph.as_mut().ok_or_else(||pyo3::exceptions::PyValueError::new_err("configure first"))?;
+        let bank=graph.dense_stream.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("stream not configured"))?;
+        let gpu=unsafe {bank.register(group,ptr,bytes)}.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let id=graph.weights.len(); graph.weights.push(GpuWeight::new(gpu,rows,cols,0)); Ok(id)
+    }
+    fn register_streamed_embedding(&mut self, ptr: usize, rows: usize, cols: usize) -> PyResult<()> {
+        let wid=self.register_streamed_weight(crate::dense_stream::EMBEDDING,ptr,rows,cols)?;
+        let graph=self.graph.as_mut().unwrap();graph.embedding_ptr=graph.weights[wid].ptr;Ok(())
+    }
+    fn seal_dense_stream(&self)->PyResult<String>{
+        let graph=self.graph.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("configure first"))?;
+        let bank=graph.dense_stream.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("stream absent"))?;
+        bank.seal().and_then(|()|bank.stats()).map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
 
     /// Register a weight matrix. Returns weight ID.
@@ -34524,6 +34550,17 @@ impl GpuDecodeStore {
     fn debug_gpu_decode_step(&mut self, token_id: usize, position: usize) -> PyResult<()> {
         self.gpu_decode_step(token_id, position)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+
+    fn dense_stream_status(&self) -> PyResult<String> {
+        let graph=self.graph.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("configure first"))?;
+        Ok(serde_json::json!({"enabled":graph.dense_stream.is_some(), "graphs_ever_captured":graph.graphs_ever_captured,
+            "graphs_valid":graph.per_layer_graphs_valid,"graph_count":graph.per_layer_graphs.len()}).to_string())
+    }
+
+    fn download_prefill_logits_f32(&self) -> PyResult<Vec<f32>> {
+        let engine=self.prefill_engine_slot.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("prefill engine is not owned by this store"))?;
+        Ok(engine.h_logits.clone())
     }
 
     fn download_logits_f32(&self) -> PyResult<Vec<f32>> {
@@ -54871,6 +54908,7 @@ impl GpuDecodeStore {
         )?;
         // END bounded model KDA diagnostic startup
         let mut engine = PrefillEngine {
+            dense_stream: graph.dense_stream.clone(),
             #[cfg(feature = "scalar-gdn-test")]
             selected_scalar_gdn: None,
             selected_kda: None,
@@ -61818,6 +61856,7 @@ impl GpuDecodeStore {
 
         // ── Embedding lookup ──
         if include_embedding {
+            crate::dense_stream::stage(&graph.dense_stream, crate::dense_stream::EMBEDDING, *self.device.cu_stream())?;
             let d_token_id_ptr = *graph.d_graph_token_id.as_ref().unwrap().device_ptr();
             let threads = 256u32;
             let blocks = ((hs as u32) + threads - 1) / threads;
@@ -61848,6 +61887,7 @@ impl GpuDecodeStore {
         // ── Routing layers (norm + attention + post-norm + gate + topk for MoE layers) ──
         if let Some((range_start, range_end)) = routing_range {
             for layer_idx in range_start..=range_end {
+                crate::dense_stream::stage(&graph.dense_stream, layer_idx, *self.device.cu_stream())?;
                 let layer = &graph.layers[layer_idx];
                 let glm5_hc = layer.glm5_hyper_connection.clone();
                 let is_gemma4 = matches!(layer.mlp, GpuMlpConfig::Gemma4MoE { .. });
@@ -66780,6 +66820,7 @@ impl GpuDecodeStore {
 
             // Use the same dtype/arithmetic dispatch as ordinary eager decode.
             {
+                crate::dense_stream::stage(&graph.dense_stream, crate::dense_stream::HEAD, *self.device.cu_stream())?;
                 let w = &graph.weights[graph.lm_head_wid];
                 self.gemv_bf16_to_f32_internal(
                     w,
@@ -74002,6 +74043,7 @@ impl GpuDecodeStore {
 
         // ── 1. Embedding lookup (skip if this segment receives uploaded hidden state) ──
         if !seg_skip_emb {
+            crate::dense_stream::stage(&graph.dense_stream, crate::dense_stream::EMBEDDING, *self.device.cu_stream())?;
             #[cfg(feature = "gpu-debug")]
             log::info!("gpu_decode_step: token={}, pos={}", token_id, position);
             {
@@ -74098,6 +74140,7 @@ impl GpuDecodeStore {
 
         // ── 2. Layer loop (respects multi-GPU segment bounds) ──
         for layer_idx in seg_start..seg_end.min(num_layers) {
+                crate::dense_stream::stage(&graph.dense_stream, layer_idx, *self.device.cu_stream())?;
             let layer = &graph.layers[layer_idx];
             let glm5_hc = layer.glm5_hyper_connection.clone();
             let is_gemma4 = matches!(layer.mlp, GpuMlpConfig::Gemma4MoE { .. });
@@ -79749,6 +79792,7 @@ impl GpuDecodeStore {
 
         // ── 4. LM head GEMV → logits ──
         {
+            crate::dense_stream::stage(&graph.dense_stream, crate::dense_stream::HEAD, *self.device.cu_stream())?;
             let lm_w = &graph.weights[graph.lm_head_wid];
             // d_hidden (BF16) → d_logits (FP32) via cuBLAS GEMV
             self.gemv_bf16_to_f32_internal(
@@ -82072,6 +82116,9 @@ impl GpuDecodeStore {
         positions: &[usize],
     ) -> Result<usize, String> {
         self.require_sequence_state_ready_rust()?;
+        if self.graph.as_ref().is_some_and(|g|g.dense_stream.is_some()) {
+            return Err("bounded dense streaming currently requires scalar decode; speculative batches are unsupported".into());
+        }
         let batch_size = tokens.len();
         if batch_size == 0 {
             return Ok(0);
@@ -84658,6 +84705,7 @@ impl GpuDecodeStore {
 
         // Batch LM head GEMM: all tokens at once (weights loaded ONCE)
         {
+            crate::dense_stream::stage(&graph.dense_stream, crate::dense_stream::HEAD, *self.device.cu_stream())?;
             let lm_w = &graph.weights[graph.lm_head_wid];
             let logits_ptr = *graph.d_batch_logits.as_ref().unwrap().device_ptr();
             self.gemm_bf16_to_f32_batch(

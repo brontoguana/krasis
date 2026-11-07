@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — bounded Qwen3.5
+
+- Fix prefill token/position buffer reuse across nonblocking-stream chunks: complete previous readers before the legacy synchronous upload can overwrite their RoPE positions. Nonzero repeated-resident and streamed comparisons exposed this inherited race.
+- Preserve Maya comparison optimisations on `perf/maya-parity-20261107`, unrelated work on its own recovery branch/checkpoint, and all original files/binaries in a verified reflink archive. Start Qwen work from clean `2769736` main.
+- Add host-backed dense BF16 streaming with one stable Rust-owned GPU slab, ordered graph/eager copies, joint GPU/host admission budgets, 256-token chunks and a 4K context bound. Enable the 27B geometry by default; retain other model policies and resident opt-out. Preserve complete KV/recurrent state and reject unsupported batched/speculative modes.
+- Implement native bounded Qwen3.5 vision, processor/image-token handoff, exact patch/interpolation/normalisation boundaries, padded FlashAttention and portable CUDA fallback. Add original `qwen3_5` vision metadata compatibility, image bounds and required serving metadata.
+- Validate Arête's Swish/SiLU GDN equation and metadata without downloading weights; preserve the independent sigmoid full-attention gate and reject unsupported variants.
+- Exercise real Qwen27B text/images under 8GB and 6GB constrained-A6000 profiles, graph/eager state identity, 257-token tails, 4,049-token requests, cancellation and active/RAM restoration. Retain complete independent-reference numerical failures separately from functional/memory passes. Preserve the 600 MiB reserve and existing production binaries.
+- Fix pinned-host source destruction order so the CUDA context outlives host unregister/free, and fail early on inadequate host RAM. Add CPU admission and explicit nonzero GDN/GQA/image-placement GPU regressions. See `QWEN35.md` and internal campaign evidence for measured limits.
+
 ## 1.0.22
 
 - Automatically enforce JSON bearer API keys when the default key file exists, with live reload, fail-closed errors, and configurable paths preserved through TUI and Manager startup.

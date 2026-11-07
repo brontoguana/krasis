@@ -1543,7 +1543,9 @@ def compute_launcher_budget(
             f"max_context_tokens {max_context_tokens} exceeds model limit "
             f"{model_context_limit}"
         )
-    effective_context_limit = max_context_tokens or model_context_limit
+    from krasis.qwen_dense_stream import enabled as bounded_dense_enabled
+    bounded_qwen = bounded_dense_enabled(model_cfg)
+    effective_context_limit = max_context_tokens or (4096 if bounded_qwen else model_context_limit)
     effective_kv_capacity_tokens = (
         math.ceil(effective_context_limit / PAGE_SIZE) * PAGE_SIZE
     )
@@ -2141,7 +2143,38 @@ def compute_launcher_budget(
     elif hybrid:
         arch += "+DeltaNet"
 
+    bounded_plan = None
+    if bounded_qwen:
+        if num_ranks != 1 or pp_partition != [total_layers] or dspark_mode != "off":
+            raise ValueError("bounded Qwen requires one complete pipeline rank without speculation")
+        if (attention_quant, dense_mlp_quant, lm_head_quant, kv_dtype) != ("bf16", "bf16", "bf16", "bf16"):
+            raise ValueError("bounded Qwen requires source BF16 attention, MLP, head and KV")
+        from krasis.qwen_dense_stream import memory_plan
+        slab = model_cfg.vocab_size * model_cfg.hidden_size * 2
+        bounded_plan = memory_plan(model_cfg, slab, effective_context_limit,
+            min(gpu_vram_mb, int(os.environ.get("KRASIS_QWEN_GPU_LIMIT_MIB", "8192"))))
+        parts = bounded_plan["allowance_bytes"]
+        rank = ranks[0]
+        for key in ("attention_mb", "shared_expert_mb", "dense_mlp_mb", "embedding_mb", "lm_head_mb", "expert_buffer_mb", "prefill_workspace_mb"):
+            rank[key] = 0
+        rank.update(weight_stream_slab_mb=slab/MB,
+            norms_gates_mb=0, cuda_overhead_mb=(parts["runtime_and_graphs"]+parts["vision_peak"]+parts["reserve"]+slab)/MB,
+            prefill_scratch_mb=parts["prefill_scratch"]/MB,
+            recurrent_state_mb=parts["recurrent_state"]/MB,
+            total_mb=(bounded_plan["estimated_peak_bytes"]-parts["kv"])/MB,
+            total_with_kv_mb=bounded_plan["estimated_peak_bytes"]/MB,
+            kv_required_mb=parts["kv"]/MB, kv_tokens=effective_context_limit,
+            kv_alloc_tokens=effective_kv_capacity_tokens)
+        rank["free_mb"] = gpu_vram_mb-rank["total_mb"]
+        rank["free_after_kv_mb"] = gpu_vram_mb-rank["total_with_kv_mb"]
+        worst = rank
+        peak_vram_mb = rank["total_with_kv_mb"]
+        over_budget = peak_vram_mb > gpu_vram_mb
+        ram_dense_load_mb = ram_dense_load_mb*2 + 12*1024  # source, pinned owners and measured setup headroom
+        ram_total_mb = ram_dense_load_mb + ram_hqq_host_staging_mb
+
     return {
+        "bounded_dense_plan": bounded_plan,
         "model_type": cfg.get("model_type", "unknown"),
         "architecture": arch,
         "num_layers": total_layers,

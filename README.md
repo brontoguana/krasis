@@ -18,6 +18,11 @@ loading work, while the performance-sensitive runtime path uses Rust/CUDA
 orchestration, CUDA kernels, cached quantized weights, and measured VRAM
 budgeting.
 
+The development branch also provides [bounded Qwen3.5-27B text and images](QWEN35.md),
+with demonstrated operation under a 6GB ceiling on an A6000 and approximately
+110 GiB host RAM use. This experimental profile retains numerical qualification
+caveats and has not been tested on an actual 6GB/8GB card.
+
 ## Install
 
 The current release is

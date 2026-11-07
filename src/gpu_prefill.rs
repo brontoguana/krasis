@@ -6915,7 +6915,7 @@ type FusedMoeScatterFn = unsafe extern "C" fn(
 
 /// Function pointer for vendored krasis_flash_attn_fwd_bf16.
 /// Calls FlashAttention-2 forward pass from libkrasis_flash_attn.so.
-type FlashAttnFwdFn = unsafe extern "C" fn(
+pub(crate) type FlashAttnFwdFn = unsafe extern "C" fn(
     /*q_ptr*/ *const std::ffi::c_void,
     /*k_ptr*/ *const std::ffi::c_void,
     /*v_ptr*/ *const std::ffi::c_void,
@@ -11355,6 +11355,7 @@ fn select_prefill_pinning_experts(
 }
 
 pub struct PrefillEngine {
+    pub(crate) dense_stream: Option<Arc<crate::dense_stream::DenseStream>>,
     #[cfg(feature = "scalar-gdn-test")]
     pub(crate) selected_scalar_gdn: Option<Arc<crate::scalar_gdn_runtime::Storage>>,
     pub(crate) selected_kda: Option<Arc<crate::kda_prefix_owner::KdaEngineRequestStorage>>,
@@ -26158,6 +26159,7 @@ impl PrefillEngine {
         }
 
         let mut scratch_tokens = max_by_vram.min(target).max(128);
+        if self.dense_stream.is_some() { scratch_tokens = scratch_tokens.min(256); }
         if let Some(diag_cap) = diag_cap {
             scratch_tokens = scratch_tokens.min(diag_cap);
         }
@@ -28101,6 +28103,7 @@ impl PrefillEngine {
             let mut deepseek_v4_hc_initialized = false;
             let mut glm5_hc_initialized = false;
             for layer_idx in 0..num_hidden_layers {
+                crate::dense_stream::stage(&self.dense_stream, layer_idx, self.stream)?;
                 completion_progress.submitted(|| format!("chunk={chunk_idx} layer={layer_idx}"))?;
                 let liveness_layer_t0 = Instant::now();
                 let layer_type = self.layer_weights[layer_idx].layer_type;
@@ -32457,6 +32460,7 @@ impl PrefillEngine {
         let mut deepseek_v4_hc_initialized = false;
         let mut glm5_hc_initialized = false;
         for layer_idx in 0..num_hidden_layers {
+            crate::dense_stream::stage(&self.dense_stream, layer_idx, self.stream)?;
             let layer_type = self.layer_weights[layer_idx].layer_type;
 
             if self.layer_weights[layer_idx].hyper_connection.is_some() {
@@ -32737,6 +32741,7 @@ impl PrefillEngine {
             )?;
         }
 
+        crate::dense_stream::stage(&self.dense_stream, crate::dense_stream::HEAD, self.stream)?;
         // 5. Extract logits at sampled positions via LM head
         let mut results = Vec::new();
         self.h_logits.resize(v, 0.0);
@@ -32872,6 +32877,12 @@ impl PrefillEngine {
         let ids: Vec<i32> = token_ids.iter().map(|&t| t as i32).collect();
         let positions: Vec<i32> = (offset..offset + m).map(|p| p as i32).collect();
 
+        // These buffers are reused by every chunk. The inference stream is
+        // nonblocking, so a legacy synchronous H2D copy does NOT wait for its
+        // previous readers. Complete the chunk before overwriting token IDs or
+        // positions (otherwise earlier keys can receive the next chunk's RoPE).
+        // This is one ownership handoff per chunk, not a per-operator fence.
+        self.stream_sync()?;
         // Use synchronous copies (cuMemcpyHtoD_v2) because the source Vec is unpinned
         // stack memory. Async copies require page-locked host memory, otherwise the
         // driver falls back to sync or behavior is undefined.
@@ -32899,6 +32910,7 @@ impl PrefillEngine {
     // ── Kernel launchers ──
 
     fn launch_embedding(&self, m: usize) -> Result<(), String> {
+        crate::dense_stream::stage(&self.dense_stream, crate::dense_stream::EMBEDDING, self.stream)?;
         let d = self.config.hidden_size;
         let t = std::cmp::max(32, ((std::cmp::min(1024, d) + 31) / 32) * 32) as u32;
         let mut p0 = *self.scratch.d_hidden.device_ptr();
@@ -80855,6 +80867,7 @@ impl PrefillEngine {
         temperature: f32,
         suppress_tokens: &[u32],
     ) -> Result<u32, String> {
+        crate::dense_stream::stage(&self.dense_stream, crate::dense_stream::HEAD, self.stream)?;
         let cfg = &self.config;
         let h = cfg.hidden_size;
         let v = cfg.vocab_size;
@@ -84188,7 +84201,7 @@ fn load_moe_w2_lane_diag() -> Option<(MoeW2LaneDiagConfigFn, MoeW2LaneDiagFetchF
 }
 
 /// Load vendored FlashAttention-2 from libkrasis_flash_attn.so.
-fn load_flash_attn() -> Option<FlashAttnFwdFn> {
+pub(crate) fn load_flash_attn() -> Option<FlashAttnFwdFn> {
     let path = match find_vendor_so("libkrasis_flash_attn.so") {
         Some(p) => p,
         None => {

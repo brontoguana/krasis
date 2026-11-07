@@ -790,6 +790,8 @@ class KrasisModel:
         max_context_tokens: Optional[int] = None,
     ):
         self.cfg = ModelConfig.from_model_path(model_path)
+        from krasis.qwen_dense_stream import enabled as bounded_dense_enabled
+        self.bounded_dense = bounded_dense_enabled(self.cfg)
         _apply_max_context_limit(self.cfg, max_context_tokens)
         self.quant_cfg = quant_cfg or QuantConfig()
         if self.cfg.is_deepseek_v4:
@@ -1033,11 +1035,9 @@ class KrasisModel:
 
     def supports_qwen_image_inputs(self) -> bool:
         """Return True when the loaded model directory contains Qwen image assets."""
-        # Dense Qwen3.5 is admitted for text only until its distinct vision
-        # encoder/projector path has passed qualification. Asset presence is
-        # insufficient to advertise multimodal support for this new target.
         if getattr(self.cfg, "model_type", "") == "qwen3_5_text":
-            return False
+            from krasis.qwen35_vision import has_image_assets
+            return getattr(self, "bounded_dense", False) and has_image_assets(self.cfg.model_path)
         config_path = os.path.join(self.cfg.model_path, "config.json")
         index_path = os.path.join(self.cfg.model_path, "model.safetensors.index.json")
         processor_path = os.path.join(self.cfg.model_path, "preprocessor_config.json")
@@ -1936,6 +1936,9 @@ class KrasisModel:
         """
         if self.embedding is None:
             raise RuntimeError("Model embedding is not loaded")
+        if self.cfg.model_type == "qwen3_5_text":
+            from krasis.qwen35_vision import prepare
+            return prepare(self, messages_json, rendered_prompt)
         images = self._extract_openai_images(messages_json)
         vision = self._ensure_qwen_vision_model()
         processor = self._qwen_vision_processor
@@ -2752,7 +2755,7 @@ class KrasisModel:
             free_mb //= (1024 * 1024)
             total_mb //= (1024 * 1024)
             used_pct = 100 * (1 - free_mb / total_mb)
-            if used_pct > 50:
+            if used_pct > 50 and not self.bounded_dense:
                 msg = (f"GPU {dev} has only {free_mb} MB free ({used_pct:.0f}% used). "
                        f"A zombie process may be holding GPU memory. "
                        f"Try: sudo kill -9 $(nvidia-smi --query-compute-apps=pid --format=csv,noheader) "
@@ -6559,6 +6562,9 @@ class KrasisModel:
         attention + permanent weights (norms, gates, shared experts, embedding,
         lm_head) instead of the full model.
         """
+        if self.bounded_dense:
+            from krasis.qwen_dense_stream import load_host_backed
+            return load_host_backed(self, loader)
         self.layers = []
         primary_dev = self.all_devices[0]
         torch.cuda.set_device(primary_dev)
@@ -10129,8 +10135,12 @@ class KrasisModel:
             moe_intermediate_size=self.cfg.moe_intermediate_size,
             shared_expert_intermediate_size=self.cfg.effective_shared_expert_intermediate,
         )
-        # Register embedding
-        store.set_embedding(self.embedding.data_ptr())
+        # Large source tensors remain host-backed in bounded dense mode.
+        if self.bounded_dense:
+            store.configure_dense_stream(self._dense_stream_slab_bytes)
+            store.register_streamed_embedding(self.embedding.data_ptr(), *self.embedding.shape)
+        else:
+            store.set_embedding(self.embedding.data_ptr())
         store.set_embedding_scale(float(getattr(self.cfg, "embedding_scale", 1.0)))
         store.set_final_logit_softcap(float(getattr(self.cfg, "final_logit_softcapping", 0.0)))
 
@@ -10153,7 +10163,8 @@ class KrasisModel:
             lm_head_rows = lm_head_w.shape[0]
             lm_head_cols = lm_head_w.shape[1]
         store.set_lm_head(
-            store.register_weight(lm_head_ptr, lm_head_rows, lm_head_cols, 0)  # 0 = BF16
+            store.register_streamed_weight((1 << 64) - 1, lm_head_ptr, lm_head_rows, lm_head_cols)
+            if self.bounded_dense else store.register_weight(lm_head_ptr, lm_head_rows, lm_head_cols, 0)
         )
 
         # Norm bias flag (Qwen3 uses (1+w)*x)
@@ -10255,6 +10266,10 @@ class KrasisModel:
             Returns weight ID in the Rust store. For quantized weights, also
             stores (packed, scales, workspace, scalar_type, N, K) on
             self._marlin_attn_weights[wid] for prefill GEMM."""
+            if self.bounded_dense:
+                if w.device.type != "cpu" or w.dtype != torch.bfloat16 or not w.is_contiguous():
+                    raise ValueError("bounded dense weights require contiguous host BF16")
+                return store.register_streamed_weight(layer_idx, w.data_ptr(), *w.shape)
             # Stash BF16 on CPU for aux store quantization (only when streaming is off)
             if self._aux_bf16_stash is not None and layer_idx >= 0:
                 w_stash = w.cpu().contiguous() if w.is_cuda else w.contiguous()
@@ -11280,9 +11295,9 @@ class KrasisModel:
                 up = self._dense_mlp_tensor(layer.dense_mlp["up_proj"])
                 dp = self._dense_mlp_tensor(layer.dense_mlp["down_proj"])
                 self._rust_decode_weights.extend([gp, up, dp])
-                gp_wid = store.register_weight(gp.data_ptr(), gp.shape[0], gp.shape[1], 0)
-                up_wid = store.register_weight(up.data_ptr(), up.shape[0], up.shape[1], 0)
-                dp_wid = store.register_weight(dp.data_ptr(), dp.shape[0], dp.shape[1], 0)
+                gp_wid = (store.register_streamed_weight(layer_idx, gp.data_ptr(), *gp.shape) if self.bounded_dense else store.register_weight(gp.data_ptr(), gp.shape[0], gp.shape[1], 0))
+                up_wid = (store.register_streamed_weight(layer_idx, up.data_ptr(), *up.shape) if self.bounded_dense else store.register_weight(up.data_ptr(), up.shape[0], up.shape[1], 0))
+                dp_wid = (store.register_streamed_weight(layer_idx, dp.data_ptr(), *dp.shape) if self.bounded_dense else store.register_weight(dp.data_ptr(), dp.shape[0], dp.shape[1], 0))
                 store.register_mlp(
                     layer_idx,
                     "dense",
@@ -11335,6 +11350,8 @@ class KrasisModel:
                 self.cfg.num_hidden_layers,
             )
 
+        if self.bounded_dense:
+            logger.info("Bounded dense registration: %s", store.seal_dense_stream())
         self._finalize_mamba2_projection_int4_cache()
 
         # Register MoE expert data from engine (all MoE layers at once)

@@ -1,6 +1,8 @@
 fn main() {
     let total_timer = BuildTimer::start("build.rs total");
     compile_windows_launcher_resources();
+    println!("cargo::rustc-check-cfg=cfg(has_qwen35_vision)");
+    compile_qwen35_vision();
     let sidecar_abi = std::fs::read_to_string("sidecar_abi_version.txt")
         .expect("sidecar_abi_version.txt is required")
         .trim()
@@ -680,4 +682,18 @@ fn compile_selected_kda_kernels() {
             std::fs::write(&stamp, identity).expect("selected CUDA build identity");
         }
     }
+}
+
+fn compile_qwen35_vision() {
+    let source = "src/cuda/qwen35_vision.cu";
+    println!("cargo:rerun-if-changed={source}");
+    let Some(nvcc) = find_nvcc() else { return; };
+    let output = format!("{}/qwen35_vision.ptx", std::env::var("OUT_DIR").unwrap());
+    if !is_output_fresh(&[source], &[&output]) {
+        let status = std::process::Command::new(nvcc)
+            .args(["-ptx", "-allow-unsupported-compiler", "-arch=sm_80", "-O3", "-std=c++17", "-o", &output, source])
+            .args(nvcc_host_compiler_args()).status().expect("execute Qwen vision nvcc");
+        assert!(status.success(), "Qwen vision compilation failed: {status}");
+    }
+    println!("cargo:rustc-cfg=has_qwen35_vision");
 }

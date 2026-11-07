@@ -2965,6 +2965,12 @@ def _apply_dense_serving_policy(args, cfg) -> None:
     """Dense models have no routed experts to stream or retain in HCS."""
     if cfg.n_routed_experts <= 0:
         args.hcs = False
+    from krasis.qwen_dense_stream import enabled as bounded_dense_enabled
+    if bounded_dense_enabled(cfg):
+        if not getattr(args, "max_context_tokens", 0):
+            args.max_context_tokens = 4096
+        if args.max_context_tokens > 4096:
+            raise ValueError("bounded Qwen supports context <=4096, including image tokens")
 
 
 def _resolve_serving_gpu_count(args) -> int:

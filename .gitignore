@@ -26,3 +26,6 @@ tests/tileq-captures/
 tests/tileq-corpora/
 tests/.ornith_tileq_*.arm
 node_modules/
+
+# Local investigation data
+DEBUGLOG*

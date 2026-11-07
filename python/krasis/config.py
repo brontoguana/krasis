@@ -1192,6 +1192,9 @@ class ModelConfig:
                            cfg.get("num_experts",
                                   cfg.get("num_local_experts",
                                           cfg.get("moe_num_experts", 0))))
+        if arch in ("qwen3_5_text", "qwen3_5_moe_text"):
+            if cfg.get("output_gate_type", "silu") not in ("silu", "swish"):
+                raise ValueError("Qwen GDN output_gate_type requires silu/swish; other recurrent output gates are unsupported")
         if arch == "qwen3_5_text":
             # Every text layer has a dense SwiGLU MLP, including GDN layers.
             if n_experts:

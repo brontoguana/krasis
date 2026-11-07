@@ -193,6 +193,7 @@ class DenseQwen35Tests(unittest.TestCase):
         dense = next(o for o in OPTIONS if o.key == "dense_mlp_quant")
         self.assertEqual(dense.choices, ["int8", "bf16"])
 
+    @mock.patch.dict("os.environ", {"KRASIS_QWEN_DENSE_STREAM": "0"})
     def test_budget_charges_all_dense_mlps_and_no_experts(self):
         cfg = self.load()
         budget = compute_launcher_budget(cfg.model_path, [64], attention_quant='bf16',
