@@ -109,8 +109,20 @@ impl PrefillEngine {
             return self.write_gdn_prefill_window(target,operation,layer,m,start,&[("input.bf16",input,actual.cols,2),("projected.bf16",output,actual.rows,2)],&[("packed.bin",actual.packed,packed),("scales.f32",actual.scales,scales),("zeros.f32",actual.zeros,zeros)],
                 serde_json::json!({"name":name,"rows":actual.rows,"cols":actual.cols,"nbits":4,"group_size":actual.group,"actual_arithmetic_backend":producer.identity,"actual_execution_weight_payloads":{"format":"canonical_row_aligned_u4_f32","packed_bytes":packed,"scales_bytes":scales,"zeros_bytes":zeros,"packed_stride_bytes":actual.packed_stride,"scales_stride_bytes":actual.scales_stride,"zeros_stride_bytes":actual.zeros_stride},"input_dtype":"bfloat16","output_dtype":"bfloat16","hqq_prefill_materialize_bf16":self.config.hqq_prefill_materialize_bf16}));
         }
-        let desc =
-            hqq.ok_or("bounded GDN projection packet requires actual loaded HQQ descriptors")?;
+        if hqq.is_none() {
+            let weights = self.layer_weights.get(layer).ok_or("GDN projection layer absent")?;
+            let weight = match name {
+                "in_proj_qkvz" => weights.la_in_proj_qkvz_bf16.as_ref(),
+                "in_proj_ba" => weights.la_in_proj_ba_bf16.as_ref(),
+                "out_proj" => weights.la_out_proj_bf16.as_ref(),
+                _ => None,
+            }.ok_or("bounded GDN projection has neither HQQ nor BF16 weights")?;
+            return self.write_gdn_prefill_window(target, operation, layer, m, start,
+                &[("input.bf16", input, weight.k, 2), ("projected.bf16", output, weight.n, 2)],
+                &[("weight.bf16", weight.ptr, weight.n.checked_mul(weight.k).and_then(|n| n.checked_mul(2)).ok_or("BF16 projection capture overflow")?)],
+                serde_json::json!({"name":name,"rows":weight.n,"cols":weight.k,"backend":"cublas_bf16","input_dtype":"bfloat16","output_dtype":"bfloat16","weight_dtype":"bfloat16"}));
+        }
+        let desc = hqq.ok_or("HQQ descriptor absent")?;
         let bits = self.validate_hqq_quantized_prefill_tensor_desc(name, desc)?;
         let payload = crate::hqq_observation_layout::describe(
             desc.rows,

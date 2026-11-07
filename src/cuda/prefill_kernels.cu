@@ -14677,3 +14677,112 @@ extern "C" __global__ void qwen35_la_gated_rmsnorm_bf16in_kernel(
         o_head[i] = float_to_bf16(normed * silu_g);
     }
 }
+
+// Qwen BF16 equation boundaries; selected only for Qwen3.5.
+extern "C" __global__ void qwen35_la_fused_repeat_l2norm_bf16_kernel(
+    __nv_bfloat16* __restrict__ output,     /* [M, nv, dk] BF16 */
+    const __nv_bfloat16* __restrict__ input, /* [M, nk, dk] BF16 */
+    int nk, int dk, int hr, float scale)
+{
+    int token = blockIdx.x;
+    int v_head = blockIdx.y;
+    int k_head = v_head / hr;
+
+    const __nv_bfloat16* src = input + ((int64_t)token * nk + k_head) * dk;
+    __nv_bfloat16* dst = output + ((int64_t)token * (nk * hr) + v_head) * dk;
+
+    extern __shared__ float smem[];
+
+    /* Load values and compute sum of squares */
+    float local_ss = 0.0f;
+    for (int i = threadIdx.x; i < dk; i += blockDim.x) {
+        float v = bf16_to_float(src[i]);
+        local_ss += bf16_to_float(float_to_bf16(v * v));
+    }
+    smem[threadIdx.x] = local_ss;
+    __syncthreads();
+
+    /* Tree reduction */
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) smem[threadIdx.x] += smem[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    float sum = bf16_to_float(float_to_bf16(smem[0]));
+    float inv_norm = bf16_to_float(float_to_bf16(rsqrtf(bf16_to_float(float_to_bf16(sum + 1e-6f)))));
+
+    /* Normalize, scale, and write BF16 */
+    for (int i = threadIdx.x; i < dk; i += blockDim.x) {
+        float v = bf16_to_float(src[i]);
+        dst[i] = float_to_bf16(bf16_to_float(float_to_bf16(v * inv_norm)) * scale);
+    }
+}
+
+// Bounded accurate Qwen GDN fallback. A warp owns one value column and
+// keeps its 128-key state in registers across real tokens. No padded updates,
+// transformed BF16 WY state, or chunk-dependent state quantization.
+// ABI: q/k BF16 normalized WITHOUT q scale; raw gate projections BF16;
+// state FP32 [head,key,value], output BF16 [token,head,value].
+extern "C" __global__ void qwen35_gdn_serial_kernel(
+ const __nv_bfloat16* q,const __nv_bfloat16* k,const __nv_bfloat16* v,
+ const __nv_bfloat16* beta,const __nv_bfloat16* a,const float* al,const float* dt,
+ float* state,__nv_bfloat16* out,int tokens,int heads,int dk,int dv,float scale) {
+ int lane=threadIdx.x%32,warp=threadIdx.x/32,h=blockIdx.x,j=blockIdx.y*4+warp;
+ if(dk!=128||j>=dv)return;
+ float st[4];
+ #pragma unroll
+ for(int z=0;z<4;z++)st[z]=state[(h*dk+lane+z*32)*dv+j];
+ for(int t=0;t<tokens;t++){
+  float x=__bfloat162float(a[t*heads+h])+dt[h];
+  float g=expf(-expf(al[h])*(x>20.f?x:log1pf(expf(x))));
+  float kv=0.f,ks[4],qs[4];
+  #pragma unroll
+  for(int z=0;z<4;z++){int index=(t*heads+h)*dk+lane+z*32;ks[z]=__bfloat162float(k[index]);qs[z]=__bfloat162float(q[index])*scale;st[z]=__fmul_rn(st[z],g);kv=__fadd_rn(kv,__fmul_rn(ks[z],st[z]));}
+  for(int off=16;off;off/=2)kv+=__shfl_down_sync(0xffffffff,kv,off);
+  kv=__shfl_sync(0xffffffff,kv,0);
+  float delta=__fmul_rn(__fsub_rn(__bfloat162float(v[(t*heads+h)*dv+j]),kv),__bfloat162float(beta[t*heads+h]));float y=0.f;
+  #pragma unroll
+  for(int z=0;z<4;z++){st[z]=__fadd_rn(st[z],__fmul_rn(ks[z],delta));y=__fadd_rn(y,__fmul_rn(qs[z],st[z]));}
+  for(int off=16;off;off/=2)y+=__shfl_down_sync(0xffffffff,y,off);
+  if(lane==0)out[(t*heads+h)*dv+j]=__float2bfloat16(y);
+ }
+ #pragma unroll
+ for(int z=0;z<4;z++)state[(h*dk+lane+z*32)*dv+j]=st[z];
+}
+// Canonical projection row -> the packed per-key-head row. B/A uses dk=0
+// logically and band=head_ratio; QKV/Z uses band=head_ratio*value_dim.
+__device__ int qwen35_packed_row(int row,int nk,int dk,int band,int ba){
+ if(ba){int hr=band;int width=nk*hr;int part=row>=width;int r=row-part*width;return (r/hr)*(2*hr)+part*hr+r%hr;}
+ int keys=nk*dk,values=nk*band;
+ if(row<keys)return (row/dk)*(2*dk+2*band)+row%dk;
+ if(row<2*keys){row-=keys;return (row/dk)*(2*dk+2*band)+dk+row%dk;}
+ row-=2*keys;int part=row>=values;row-=part*values;
+ return (row/band)*(2*dk+2*band)+2*dk+part*band+row%band;
+}
+extern "C" __global__ void qwen35_projection_weights_kernel(__nv_bfloat16* out,const __nv_bfloat16* in,unsigned long long total,int cols,int nk,int dk,int band,int ba){
+ unsigned long long i=(unsigned long long)blockIdx.x*blockDim.x+threadIdx.x;if(i>=total)return;int row=i/cols;
+ out[i]=in[(unsigned long long)qwen35_packed_row(row,nk,dk,band,ba)*cols+i%cols];
+}
+extern "C" __global__ void qwen35_projection_output_kernel(__nv_bfloat16* out,const __nv_bfloat16* in,unsigned long long total,int rows,int nk,int dk,int band,int ba){
+ unsigned long long i=(unsigned long long)blockIdx.x*blockDim.x+threadIdx.x;if(i>=total)return;
+ int width=ba?2*nk*band:nk*(2*dk+2*band);int c=i%width,t=i/width;
+ int first=ba?width/2:2*nk*dk+nk*band;
+ int source=c<first?t*first+c:rows*first+t*(width-first)+c-first;
+ out[(unsigned long long)t*width+qwen35_packed_row(c,nk,dk,band,ba)]=in[source];
+}
+// Qwen's public BF16 equation rounds trig tables and both products before
+// adding. One lane owns BOTH halves, preventing in-place cross-warp reads.
+extern "C" __global__ void qwen35_rope_batched_half_split_kernel(
+ __nv_bfloat16* q,__nv_bfloat16* k,const int* positions,const float* cos,const float* sin,
+ int nq,int nk,int hd,int half){
+ int t=blockIdx.x,pos=positions[t];
+ for(int h=0;h<nq+nk;h++){
+  __nv_bfloat16* v=h<nq?q+(t*nq+h)*hd:k+(t*nk+h-nq)*hd;
+  for(int d=threadIdx.x;d<half&&d+half<hd;d+=blockDim.x){
+   float a=__bfloat162float(v[d]),b=__bfloat162float(v[d+half]);
+   float c=__bfloat162float(__float2bfloat16(cos[pos*half+d])),s=__bfloat162float(__float2bfloat16(sin[pos*half+d]));
+   v[d]=__float2bfloat16(__bfloat162float(__float2bfloat16(a*c))-__bfloat162float(__float2bfloat16(b*s)));
+   v[d+half]=__float2bfloat16(__bfloat162float(__float2bfloat16(b*c))+__bfloat162float(__float2bfloat16(a*s)));
+  }
+ }
+}

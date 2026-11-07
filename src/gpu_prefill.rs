@@ -6386,6 +6386,7 @@ unsafe fn launch(
 
 /// Handle to loaded prefill kernel functions (raw CUfunction handles).
 pub struct PrefillKernels {
+    qwen35_gdn_accurate: Option<RawCuFunc>,
     rmsnorm: RawCuFunc,
     rmsnorm_fp32w: RawCuFunc,
     rmsnorm_contig_reduce: RawCuFunc,
@@ -43911,12 +43912,54 @@ impl PrefillEngine {
         } else if let Some(w) = marlin {
             self.marlin_gemm(a, w, c, m)
         } else if let Some(w) = bf16 {
-            self.cublas_bf16_gemm(a, w, c, m)
+            if self.kernels.qwen35_gdn_accurate.is_some()
+                && matches!(tensor_name, "in_proj_qkvz" | "in_proj_ba") {
+                self.qwen35_separate_projection(a, w, c, m, tensor_name == "in_proj_ba")
+            } else { self.cublas_bf16_gemm(a, w, c, m) }
         } else {
             Err(format!(
                 "GEMM {tensor_name}: no HQQ, Marlin, or BF16 weight available"
             ))
         }
+    }
+
+    /// Match the published independent QKV/Z and B/A contractions. Combining
+    /// them changes cuBLAS reduction geometry before the sensitive recurrence.
+    /// Temporary ownership is bounded and synchronized before release; no
+    /// persistent weight duplication or changed source precision.
+    fn qwen35_separate_projection(&self, input: u64, w: &Bf16Weight, output: u64, rows: usize, ba: bool) -> Result<(), String> {
+        let cfg = &self.config;
+        let key = cfg.la_num_k_heads * cfg.la_k_head_dim;
+        let value = cfg.la_num_v_heads * cfg.la_v_head_dim;
+        let first = if ba { cfg.la_num_v_heads } else { 2 * key + value };
+        let expected = if ba { 2 * cfg.la_num_v_heads } else { 2 * key + 2 * value };
+        if w.n != expected { return Err("Qwen separate projection geometry mismatch".into()); }
+        let weights = w.n.checked_mul(w.k).ok_or("Qwen layout extent overflow")?;
+        let projected = rows.checked_mul(w.n).ok_or("Qwen projection extent overflow")?;
+        let bytes = weights.checked_add(projected).and_then(|n| n.checked_mul(2)).ok_or("Qwen temporary extent overflow")?;
+        let (free, _) = cudarc::driver::result::mem_get_info().map_err(|e| e.to_string())?;
+        if free < bytes.saturating_add(600 * 1024 * 1024) { return Err("Qwen accurate projection would breach 600 MiB reserve".into()); }
+        let canonical = GpuBuf::<u16>::alloc_uninit(weights)?;
+        let result = GpuBuf::<u16>::alloc_uninit(projected)?;
+        let work = (|| {
+            let mut dst = canonical.ptr; let mut src = w.ptr; let mut total = weights as u64;
+            let mut cols = w.k as i32; let mut nk = cfg.la_num_k_heads as i32;
+            let mut dk = cfg.la_k_head_dim as i32; let mut band = if ba { cfg.la_head_ratio } else { cfg.la_head_ratio * cfg.la_v_head_dim } as i32;
+            let mut mode = ba as i32;
+            let function = self.device.get_func("prefill_kernels", "qwen35_projection_weights_kernel").ok_or("Qwen weight layout kernel missing")?;
+            unsafe { launch(extract_cu_func(&function), (((weights + 255) / 256) as u32, 1, 1), (256, 1, 1), 0, self.stream,
+                &mut [&mut dst as *mut _ as _, &mut src as *mut _ as _, &mut total as *mut _ as _, &mut cols as *mut _ as _, &mut nk as *mut _ as _, &mut dk as *mut _ as _, &mut band as *mut _ as _, &mut mode as *mut _ as _])?; }
+            self.cublas_bf16_gemm(input, &Bf16Weight { ptr: canonical.ptr, n: first, k: w.k }, result.ptr, rows)?;
+            self.cublas_bf16_gemm(input, &Bf16Weight { ptr: canonical.ptr + (first * w.k * 2) as u64, n: w.n - first, k: w.k }, result.ptr + (rows * first * 2) as u64, rows)?;
+            let function = self.device.get_func("prefill_kernels", "qwen35_projection_output_kernel").ok_or("Qwen output layout kernel missing")?;
+            let mut dst = output; let mut src = result.ptr; let mut n = projected as u64; let mut count = rows as i32;
+            unsafe { launch(extract_cu_func(&function), (((projected + 255) / 256) as u32, 1, 1), (256, 1, 1), 0, self.stream,
+                &mut [&mut dst as *mut _ as _, &mut src as *mut _ as _, &mut n as *mut _ as _, &mut count as *mut _ as _, &mut nk as *mut _ as _, &mut dk as *mut _ as _, &mut band as *mut _ as _, &mut mode as *mut _ as _])?; }
+            Ok(())
+        })();
+        // Also wait on error: temporary memory must outlive every submitted reader.
+        let completion = self.stream_sync();
+        work.and(completion)
     }
 
     // ── Custom Tiled Attention (fallback when FA2 not available or cross-chunk) ──
@@ -58781,7 +58824,7 @@ impl PrefillEngine {
                     let mut r2 = nk as i32;
                     let mut r3 = dk as i32;
                     let mut r4 = hr as i32;
-                    let mut r5 = scale;
+                    let mut r5 = if self.kernels.qwen35_gdn_accurate.is_some() && dk == 128 && dv % 4 == 0 { 1.0f32 } else { scale };
                     unsafe {
                         launch(
                             self.kernels.la_fused_repeat_l2norm_bf16,
@@ -59097,7 +59140,18 @@ impl PrefillEngine {
                 };
                 #[cfg(not(feature = "scalar-gdn-test"))]
                 let scalar_output: Option<u64> = None;
-                let o_fla = if let Some(output) = scalar_output {
+                let accurate_qwen = self.kernels.qwen35_gdn_accurate.filter(|_| dk == 128 && dv % 4 == 0);
+                let o_fla = if let Some(kernel) = accurate_qwen {
+                    let output = *self.d_fla_o.as_ref().ok_or("no Qwen output")?.device_ptr();
+                    let mut args = [fla_q_bf16, fla_k_bf16, fla_v_bf16, fla_beta_bf16,
+                        la_a, lw.la_a_log_ptr, lw.la_dt_bias_ptr, lw.la_recur_state_ptr, output];
+                    let mut rows = m as i32; let mut heads = nv as i32;
+                    let mut keys = dk as i32; let mut values = dv as i32; let mut qscale = scale;
+                    let mut params: Vec<*mut std::ffi::c_void> = args.iter_mut().map(|x| x as *mut _ as *mut std::ffi::c_void).collect();
+                    params.extend([&mut rows as *mut _ as *mut std::ffi::c_void, &mut heads as *mut _ as _, &mut keys as *mut _ as _, &mut values as *mut _ as _, &mut qscale as *mut _ as _]);
+                    unsafe { launch(kernel, (nv as u32, (dv / 4) as u32, 1), (128, 1, 1), 0, self.stream, &mut params)?; }
+                    output
+                } else if let Some(output) = scalar_output {
                     output
                 } else {
                     // Buffer assignments for FLA intermediates
@@ -81264,6 +81318,10 @@ impl PrefillEngine {
 
 impl PrefillKernels {
     pub(crate) fn select_qwen35_fp32_outer_norms(&mut self, device: &Arc<CudaDevice>) -> Result<(), String> {
+        self.rope_half_split = extract_cu_func(&device.get_func("prefill_kernels", "qwen35_rope_batched_half_split_kernel").ok_or("missing Qwen BF16 rotary")?);
+        self.rope = self.rope_half_split;
+        self.qwen35_gdn_accurate = Some(extract_cu_func(&device.get_func("prefill_kernels", "qwen35_gdn_serial_kernel").ok_or("missing accurate Qwen recurrence")?));
+        self.la_fused_repeat_l2norm_bf16 = extract_cu_func(&device.get_func("prefill_kernels", "qwen35_la_fused_repeat_l2norm_bf16_kernel").ok_or("missing Qwen L2 norm")?);
         self.la_gated_rmsnorm = extract_cu_func(&device.get_func("prefill_kernels", "qwen35_la_gated_rmsnorm_kernel").ok_or("missing Qwen gated norm")?);
         self.la_gated_rmsnorm_bf16in = extract_cu_func(&device.get_func("prefill_kernels", "qwen35_la_gated_rmsnorm_bf16in_kernel").ok_or("missing Qwen BF16 gated norm")?);
         self.rmsnorm = self.rmsnorm_fp32w;
@@ -81455,6 +81513,11 @@ impl PrefillKernels {
                     "la_compute_gate_beta_kernel",
                     "la_repeat_interleave_kernel",
                     "la_gated_rmsnorm_kernel",
+                    "qwen35_projection_weights_kernel",
+                    "qwen35_projection_output_kernel",
+                    "qwen35_rope_batched_half_split_kernel",
+                    "qwen35_gdn_serial_kernel",
+                    "qwen35_la_fused_repeat_l2norm_bf16_kernel",
                     "qwen35_la_gated_rmsnorm_kernel",
                     "qwen35_la_gated_rmsnorm_bf16in_kernel",
                     "la_cumsum_kernel",
@@ -81793,6 +81856,7 @@ impl PrefillKernels {
         }
 
         Ok(PrefillKernels {
+            qwen35_gdn_accurate: None,
             rmsnorm: get("rmsnorm_batched_kernel")?,
             rmsnorm_fp32w: get("rmsnorm_batched_fp32w_kernel")?,
             rmsnorm_contig_reduce: get("rmsnorm_batched_contig_reduce_kernel")?,

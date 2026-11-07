@@ -13367,3 +13367,5 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
 - Live +5% post-fix validation completed two exact deterministic replays with
   zero Dynamic-HCS budget skips, no-slot events, or copy failures; request VRAM
   lows were 625/649 MiB against the 600 MiB policy.
+
+- Restore separate Qwen BF16 QKV/Z and B/A contraction geometry, BF16 L2 preparation, and a bounded FP32 recurrent fallback. Preserve the actual fused causal-convolution contract. Add bounded live BF16 projection observations and Qwen-only paired BF16 rotary boundaries for prefill/eager/graph execution. Numerical admission remains separate from operator and prefix passes.

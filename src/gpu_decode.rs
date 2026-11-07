@@ -4367,6 +4367,8 @@ const KERNEL_NAMES: &[&str] = &[
     "qwen35_gated_rmsnorm_silu_bf16",
     "per_head_rmsnorm",
     "apply_rope",
+    "qwen35_apply_rope_half_split",
+    "qwen35_apply_rope_half_split_g",
     "apply_rope_half_split",
     "kv_cache_write",
     "kv_cache_write_bf16",
@@ -43040,6 +43042,12 @@ impl GpuDecodeStore {
             return Err(pyo3::exceptions::PyRuntimeError::new_err("norm ABI must be selected before capture/prefill"));
         }
         let kernels = graph.kernels.as_mut().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("kernels absent"))?;
+        kernels.apply_rope_half_split = self.device.get_func(MODULE_NAME, "qwen35_apply_rope_half_split")
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing Qwen rotary"))?;
+        kernels.apply_rope_half_split_g = self.device.get_func(MODULE_NAME, "qwen35_apply_rope_half_split_g")
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing Qwen graph rotary"))?;
+        kernels.apply_rope = kernels.apply_rope_half_split.clone();
+        kernels.apply_rope_g = kernels.apply_rope_half_split_g.clone();
         kernels.rmsnorm = norm;
         kernels.fused_add_rmsnorm = fused;
         kernels.gated_rmsnorm_silu = self.device.get_func(MODULE_NAME, "qwen35_gated_rmsnorm_silu")

@@ -88,10 +88,11 @@ Complete 27B native/reference logits and all 128 sequence-state arrays were
 compared. Follow-up repairs retain FP32 delta-norm scales and the GDN BF16 norm/scale
 boundaries, and round decode residuals before normalization. Real four-layer
 resident and streamed paths agree exactly, including all state arrays. The
-remaining independent-reference discrepancy begins in the first GDN recurrent
-state, before streaming can distinguish the paths. Numerical qualification
-remains incomplete: the strict full-array
-comparison does not pass, despite agreeing first tokens and successful requests.
+matched-operand repairs now clear the independent four-layer prefix, including
+the first GDN recurrent state. Full 64-layer qualification remains incomplete:
+the strict full-array comparison still fails, despite agreeing first tokens and
+successful requests. See the numerical-isolation follow-up below for the
+remaining complete-attention and encoder contract differences.
 The complete vision encoder also retains failures at unchanged `rtol=.01,
 atol=.03`; operator-level agreement is not whole-model admission. No absolute
 quality, ADQ, release or other-GPU qualification is claimed.
@@ -100,3 +101,30 @@ Evidence and immutable controllers:
 `krasis-internal/qwen27b-8gb-235682/` and
 `krasis-internal/qwen27b-repair-235737/`. The Maya performance work is independently
 preserved on `perf/maya-parity-20261107`; it was not merged into this implementation.
+
+
+Numerical isolation follow-up (`krasis-internal/qwen27b-numerical-235763/`):
+actual layer0 normalized projection inputs match the independent implementation
+bitwise. Combining QKV with Z, or B with A, changes BF16 contraction results.
+The native Qwen BF16 path now restores the separate contractions using temporary
+canonical-layout storage; it checks those physical bytes against the 600 MiB
+reserve and waits for readers before release. The largest tested temporary
+weight allocation is 160 MiB, plus the bounded projection output. BF16 L2
+preparation and an FP32 token recurrence avoid the captured FLA final-state
+rounding failure. Other model families retain their existing dispatch. Qwen
+rotary uses pair ownership and the reference BF16 table/product boundaries.
+These are accuracy repairs, not a speed claim.
+
+The actual independent text backend is mixed: installed fused `causal-conv1d`
+with SiLU, plus the Torch chunked delta-rule fallback. Its global fast-path
+warning does not mean that convolution is unfused. The rejected unfused-BF16
+convolution counterfactual is retained only in the investigation.
+
+Vision claims distinguish individual operators, complete residual blocks and
+complete encoders. Same-input block26 and all three fixed complete-feature
+comparisons retain failures. Independent FP64 projection/attention equations
+and reduced-BF16-reduction controls demonstrate backend rounding sensitivity;
+they do not replace the original reference or waive its unchanged acceptance
+checks. Functional image answers and constrained-memory fit remain separate
+from numerical admission. Arête execution and actual small-card qualification
+are still not claimed.

@@ -15418,3 +15418,17 @@ extern "C" __global__ void qwen35_gated_rmsnorm_silu_bf16(
         out[i] = *reinterpret_cast<unsigned short*>(&result);
     }
 }
+// Typed Qwen rotary equation, eager and graph position ABIs. Pair ownership
+// also avoids read-after-write races when the two halves span warps.
+__device__ void qwen35_rope_pair(float* q,float* k,const float* cos,const float* sin,
+ int pos,int nq,int nk,int hd,int half){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=(nq+nk)*half)return;
+ int h=i/half,d=i%half;if(d+half>=hd)return;
+ float* v=h<nq?q+h*hd:k+(h-nq)*hd;
+ float a=__bfloat162float(__float2bfloat16(v[d])),b=__bfloat162float(__float2bfloat16(v[d+half]));
+ float c=__bfloat162float(__float2bfloat16(cos[pos*half+d])),s=__bfloat162float(__float2bfloat16(sin[pos*half+d]));
+ v[d]=__bfloat162float(__float2bfloat16(__bfloat162float(__float2bfloat16(a*c))-__bfloat162float(__float2bfloat16(b*s))));
+ v[d+half]=__bfloat162float(__float2bfloat16(__bfloat162float(__float2bfloat16(b*c))+__bfloat162float(__float2bfloat16(a*s))));
+}
+extern "C" __global__ void qwen35_apply_rope_half_split(float* q,float* k,const float* cos,const float* sin,int pos,int nq,int nk,int hd,int half){qwen35_rope_pair(q,k,cos,sin,pos,nq,nk,hd,half);}
+extern "C" __global__ void qwen35_apply_rope_half_split_g(float* q,float* k,const float* cos,const float* sin,const int* pos,int nq,int nk,int hd,int half){qwen35_rope_pair(q,k,cos,sin,*pos,nq,nk,hd,half);}
