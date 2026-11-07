@@ -76,7 +76,7 @@ impl PrefillEngine {
 
 impl PrefillEngine {
     fn qwen35_boundary(&self,label:&str,layer:usize,position:usize,pointer:u64,count:usize)->Result<(),String> {
-        if self.kernels.qwen35_gdn_accurate.is_none() {return Ok(());}
+        if self.kernels.qwen35_gdn_accurate.is_none() && !self.is_gemma4_model() {return Ok(());}
         self.qwen35_substitute(label,layer,position,pointer,count*2,"bf16")?;
         let Ok(directory)=std::env::var("KRASIS_QWEN_BOUNDARY_DIR") else {return Ok(())};
         if count > 8*1024*1024 {return Err("diagnostic boundary exceeds bounded capture".into());}
@@ -95,7 +95,7 @@ impl PrefillEngine {
 impl PrefillEngine {
     fn qwen35_substitute(&self,label:&str,layer:usize,position:usize,pointer:u64,bytes:usize,dtype:&str)->Result<(),String> {
         let Ok(directory)=std::env::var("KRASIS_QWEN_SUBSTITUTION_DIR") else {return Ok(())};
-        if self.kernels.qwen35_gdn_accurate.is_none() || pointer == 0 || bytes > 32*1024*1024 {return Err("unsupported diagnostic substitution".into());}
+        if (self.kernels.qwen35_gdn_accurate.is_none() && !self.is_gemma4_model()) || pointer == 0 || bytes > 32*1024*1024 {return Err("unsupported diagnostic substitution".into());}
         let path=std::path::Path::new(&directory).join(format!("layer{layer}-pos{position}-{label}.{dtype}"));
         let packet=match std::fs::read(&path) {
             Ok(x)=>x,

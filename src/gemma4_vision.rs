@@ -352,6 +352,18 @@ impl Gemma4Vision {
         x: &CudaSlice<u16>,
     ) -> Result<(), String> {
         if let Some(c) = capture {
+            if let Ok(directory) = std::env::var("KRASIS_GEMMA_VISION_SUBSTITUTION_DIR") {
+                let path = std::path::Path::new(&directory).join(format!("{name}.bf16"));
+                match std::fs::read(&path) {
+                    Ok(data) => {
+                        if data.len() != x.len() * 2 { return Err("vision substitution extent mismatch".into()); }
+                        self.device.synchronize().map_err(|e| e.to_string())?;
+                        unsafe { cudarc::driver::sys::lib().cuMemcpyHtoD_v2(*x.device_ptr(), data.as_ptr() as _, data.len()).result().map_err(|e|e.to_string())?; }
+                    },
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
             c.insert(
                 name,
                 self.device.dtoh_sync_copy(x).map_err(|e| e.to_string())?,
@@ -487,6 +499,7 @@ impl Gemma4Vision {
                 *norm.device_ptr(),
                 h,
             )?;
+            if i == 0 || i == 26 { self.record(&mut capture, format!("layer{i}.attn_input_full"), &norm)?; }
             for (name, target, scaled) in [("q", &q, true), ("k", &k, true), ("v", &v, false)] {
                 self.linear(
                     *norm.device_ptr(),
@@ -496,8 +509,8 @@ impl Gemma4Vision {
                     &matrix,
                 )?;
                 let norm_name = format!("{p}.self_attn.{name}_norm.weight");
-                if i == 0 {
-                    self.record(&mut capture, format!("layer0.{name}_raw"), target)?;
+                if i == 0 || i == 26 {
+                    self.record(&mut capture, format!("layer{i}.{name}_raw"), target)?;
                 }
                 self.rms(
                     *target.device_ptr(),
@@ -510,8 +523,8 @@ impl Gemma4Vision {
                         None
                     },
                 )?;
-                if i == 0 {
-                    self.record(&mut capture, format!("layer0.{name}_norm"), target)?;
+                if i == 0 || i == 26 {
+                    self.record(&mut capture, format!("layer{i}.{name}_norm"), target)?;
                 }
                 if scaled {
                     unsafe {
@@ -532,6 +545,7 @@ impl Gemma4Vision {
                     }
                 }
             }
+            if i == 0 || i == 26 { self.record(&mut capture, format!("layer{i}.q_rotary"), &q)?; self.record(&mut capture, format!("layer{i}.k_rotary"), &k)?; }
             unsafe {
                 gv_pad(
                     self.device.clone(),
@@ -583,8 +597,8 @@ impl Gemma4Vision {
                     true,
                 )?;
             }
-            if i == 0 {
-                self.record(&mut capture, "layer0.attn".into(), &y)?;
+            if i == 0 || i == 26 {
+                self.record(&mut capture, format!("layer{i}.attn"), &y)?;
             }
             self.record_row(
                 &mut capture,
@@ -592,6 +606,7 @@ impl Gemma4Vision {
                 *y.device_ptr(),
                 h,
             )?;
+            if i == 0 || i == 26 { self.record(&mut capture, format!("layer{i}.attention_full"), &y)?; }
             self.linear(
                 *y.device_ptr(),
                 *z.device_ptr(),
@@ -599,6 +614,7 @@ impl Gemma4Vision {
                 &format!("{p}.self_attn.o_proj.linear.weight"),
                 &matrix,
             )?;
+            if i == 0 || i == 26 { self.record(&mut capture, format!("layer{i}.o_raw"), &z)?; }
             self.rms(
                 *z.device_ptr(),
                 *z.device_ptr(),
@@ -606,7 +622,9 @@ impl Gemma4Vision {
                 h,
                 Some(&format!("{p}.post_attention_layernorm.weight")),
             )?;
+            if i == 0 || i == 26 { self.record(&mut capture, format!("layer{i}.o_norm"), &z)?; }
             self.add(*x.device_ptr(), *z.device_ptr(), n * h)?;
+            if i == 0 || i == 26 { self.record(&mut capture, format!("layer{i}.post_attention"), &x)?; }
             self.rms(
                 *x.device_ptr(),
                 *norm.device_ptr(),
@@ -620,6 +638,7 @@ impl Gemma4Vision {
                 *norm.device_ptr(),
                 h,
             )?;
+            if i == 0 || i == 26 { self.record(&mut capture, format!("layer{i}.mlp_input_full"), &norm)?; }
             self.linear(
                 *norm.device_ptr(),
                 *gate.device_ptr(),
@@ -634,6 +653,7 @@ impl Gemma4Vision {
                 &format!("{p}.mlp.up_proj.linear.weight"),
                 &matrix,
             )?;
+            if i == 0 || i == 26 { self.record(&mut capture, format!("layer{i}.gate_raw"), &gate)?; self.record(&mut capture, format!("layer{i}.up_raw"), &up)?; }
             unsafe {
                 self.device
                     .get_func("gemma4_vision", "gv_gate")
@@ -644,6 +664,7 @@ impl Gemma4Vision {
                     )
                     .map_err(|e| e.to_string())?;
             }
+            if i == 0 || i == 26 { self.record(&mut capture, format!("layer{i}.activation_full"), &gate)?; }
             self.record_row(
                 &mut capture,
                 format!("layer{i}.down_input"),
@@ -657,6 +678,7 @@ impl Gemma4Vision {
                 &format!("{p}.mlp.down_proj.linear.weight"),
                 &matrix,
             )?;
+            if i == 0 || i == 26 { self.record(&mut capture, format!("layer{i}.down_raw"), &z)?; }
             self.rms(
                 *z.device_ptr(),
                 *z.device_ptr(),

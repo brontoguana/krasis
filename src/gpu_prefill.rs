@@ -63720,6 +63720,7 @@ impl PrefillEngine {
                 &self.gqa_debt_gemma4_layer_entry_calls,
             )?;
         }
+        self.qwen35_boundary("gemma_entry",layer_idx,chunk_start,hidden,m*h)?;
         self.memcpy_d2d(residual, hidden, (m * h * 2) as u64)?;
         self.launch_rmsnorm(
             hidden,
@@ -63739,6 +63740,7 @@ impl PrefillEngine {
             )?;
         }
 
+        self.qwen35_boundary("gemma_input_norm",layer_idx,chunk_start,hidden,m*h)?;
         if self.layer_weights[layer_idx].moe_gate_ptr != 0 {
             self.prefetch_dense_pointer_table_for_layer(layer_idx, chunk_idx, 0, m)?;
         }
@@ -63772,6 +63774,7 @@ impl PrefillEngine {
             )?;
         }
 
+        self.qwen35_boundary("gemma_attention",layer_idx,chunk_start,attn_out,m*h)?;
         self.launch_rmsnorm(
             dense_branch,
             attn_out,
@@ -63783,6 +63786,7 @@ impl PrefillEngine {
         self.launch_add_bf16(hidden, residual, dense_branch, m, h)
             .map_err(|e| format!("gemma4 post-attn add layer {}: {}", layer_idx, e))?;
 
+        self.qwen35_boundary("gemma_post_attention",layer_idx,chunk_start,hidden,m*h)?;
         self.memcpy_d2d(residual, hidden, (m * h * 2) as u64)?;
 
         self.launch_rmsnorm(
@@ -63804,6 +63808,7 @@ impl PrefillEngine {
         )
         .map_err(|e| format!("gemma4 post-ffn1 rmsnorm layer {}: {}", layer_idx, e))?;
 
+        self.qwen35_boundary("gemma_dense_branch",layer_idx,chunk_start,dense_branch,m*h)?;
         self.launch_rmsnorm(
             hidden,
             residual,
@@ -63824,8 +63829,10 @@ impl PrefillEngine {
         )
         .map_err(|e| format!("gemma4 router rmsnorm layer {}: {}", layer_idx, e))?;
 
+        self.qwen35_boundary("gemma_expert_input",layer_idx,chunk_start,hidden,m*h)?;
         self.forward_moe_with_inputs(layer_idx, m, moe_branch, hidden, hidden)
             .map_err(|e| format!("gemma4 moe layer {}: {}", layer_idx, e))?;
+        self.qwen35_boundary("gemma_moe_output",layer_idx,chunk_start,hidden,m*h)?;
         self.launch_rmsnorm(
             moe_branch,
             hidden,
@@ -63835,6 +63842,7 @@ impl PrefillEngine {
         )
         .map_err(|e| format!("gemma4 post-ffn2 rmsnorm layer {}: {}", layer_idx, e))?;
 
+        self.qwen35_boundary("gemma_moe_norm",layer_idx,chunk_start,moe_branch,m*h)?;
         self.launch_add_bf16(hidden, dense_branch, moe_branch, m, h)
             .map_err(|e| format!("gemma4 dense+moe add layer {}: {}", layer_idx, e))?;
         self.launch_rmsnorm(
@@ -63856,6 +63864,7 @@ impl PrefillEngine {
         )
         .map_err(|e| format!("gemma4 layer_scalar scale layer {}: {}", layer_idx, e))?;
 
+        self.qwen35_boundary("gemma_output",layer_idx,chunk_start,hidden,m*h)?;
         Ok(())
     }
 

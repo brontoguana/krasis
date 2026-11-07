@@ -13406,3 +13406,9 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
 - Keep the k4v4 ring and CUDA graph guards. Preserve explicit image-cache misses. Add transient image admission, at least 664 MiB planner headroom for the 600 MiB reserve, and HTTP 400 for typed invalid-image input.
 - Add real-operand replay APIs, complete packed-operator checks, public text/image, context, restoration and cancellation evidence. Document unconditioned numerical and practical quality limitations separately from passing operator checks.
 - Reject bounded Gemma minimum-scratch requests before allocation when the measured entry floor cannot fit; preserve the failed transient-reserve receipt. Extend heatmap fingerprints to the new execution dependencies and test kernel-change invalidation.
+
+### 2026-11-07 — Gemma repeatability diagnostics
+
+- Add bounded, opt-in Gemma prefill boundary capture and substitution using the existing diagnostic protocol; normal execution is unchanged.
+
+- Repair in-place half-split RoPE ownership in prefill, eager decode and graph decode: one thread reads and writes both pair elements, avoiding cross-thread read/write races.

@@ -5186,15 +5186,12 @@ extern "C" __global__ void apply_rope_half_split(
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_heads = num_q_heads + num_kv_heads;
-    int rotary_dim = half_dim * 2;
-    if (rotary_dim > head_dim) rotary_dim = head_dim;
-    int total_work = total_heads * rotary_dim;
+    int pairs = min(half_dim, head_dim - half_dim);
+    int total_work = total_heads * pairs;
     if (tid >= total_work) return;
 
-    int head = tid / rotary_dim;
-    int i = tid - head * rotary_dim;
-    int ci = i < half_dim ? i : i - half_dim;
-    int src = i < half_dim ? i + half_dim : i - half_dim;
+    int head = tid / pairs;
+    int i = tid - head * pairs;
 
     float* data;
     if (head < num_q_heads) {
@@ -5203,12 +5200,13 @@ extern "C" __global__ void apply_rope_half_split(
         data = k + (head - num_q_heads) * head_dim;
     }
 
-    float x = data[i];
-    float rotated = data[src];
-    if (i < half_dim) rotated = -rotated;
-    float cos_val = cos_table[position * half_dim + ci];
-    float sin_val = sin_table[position * half_dim + ci];
-    data[i] = x * cos_val + rotated * sin_val;
+    // Own both halves before either store; graph and eager use the same rule.
+    float x0 = data[i];
+    float x1 = data[i + half_dim];
+    float cos_val = cos_table[position * half_dim + i];
+    float sin_val = sin_table[position * half_dim + i];
+    data[i] = x0 * cos_val - x1 * sin_val;
+    data[i + half_dim] = x1 * cos_val + x0 * sin_val;
 }
 
 // Write K,V to FP8 E4M3 KV cache at given position
@@ -8746,15 +8744,12 @@ extern "C" __global__ void apply_rope_half_split_g(
     int position = *d_position;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_heads = num_q_heads + num_kv_heads;
-    int rotary_dim = half_dim * 2;
-    if (rotary_dim > head_dim) rotary_dim = head_dim;
-    int total_work = total_heads * rotary_dim;
+    int pairs = min(half_dim, head_dim - half_dim);
+    int total_work = total_heads * pairs;
     if (tid >= total_work) return;
 
-    int head = tid / rotary_dim;
-    int i = tid - head * rotary_dim;
-    int ci = i < half_dim ? i : i - half_dim;
-    int src = i < half_dim ? i + half_dim : i - half_dim;
+    int head = tid / pairs;
+    int i = tid - head * pairs;
 
     float* data;
     if (head < num_q_heads) {
@@ -8763,12 +8758,13 @@ extern "C" __global__ void apply_rope_half_split_g(
         data = k + (head - num_q_heads) * head_dim;
     }
 
-    float x = data[i];
-    float rotated = data[src];
-    if (i < half_dim) rotated = -rotated;
-    float cos_val = cos_table[position * half_dim + ci];
-    float sin_val = sin_table[position * half_dim + ci];
-    data[i] = x * cos_val + rotated * sin_val;
+    // Own both halves before either store; graph and eager use the same rule.
+    float x0 = data[i];
+    float x1 = data[i + half_dim];
+    float cos_val = cos_table[position * half_dim + i];
+    float sin_val = sin_table[position * half_dim + i];
+    data[i] = x0 * cos_val - x1 * sin_val;
+    data[i + half_dim] = x1 * cos_val + x0 * sin_val;
 }
 
 extern "C" __global__ void kv_cache_write_g(

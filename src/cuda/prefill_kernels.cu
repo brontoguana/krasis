@@ -1185,15 +1185,16 @@ extern "C" __global__ void rope_batched_half_split_kernel(
     if (rotary_dim > head_dim) rotary_dim = head_dim;
     for (int h = 0; h < num_q_heads; h++) {
         __nv_bfloat16* qh = q_row + h * head_dim;
-        for (int i = threadIdx.x; i < rotary_dim; i += blockDim.x) {
-            int src = i < half_dim ? i + half_dim : i - half_dim;
-            float x = bf16_to_float(qh[i]);
-            float r = bf16_to_float(qh[src]);
-            if (i < half_dim) r = -r;
-            int ci = i < half_dim ? i : i - half_dim;
-            float c = cos_row[ci];
-            float s = sin_row[ci];
-            qh[i] = float_to_bf16(x * c + r * s);
+        // A single thread owns the pair: neither half can observe a
+        // partner already overwritten by another warp or block.
+        int pairs = min(half_dim, head_dim - half_dim);
+        for (int i = threadIdx.x; i < pairs; i += blockDim.x) {
+            float x0 = bf16_to_float(qh[i]);
+            float x1 = bf16_to_float(qh[i + half_dim]);
+            float c = cos_row[i];
+            float s = sin_row[i];
+            qh[i] = float_to_bf16(x0 * c - x1 * s);
+            qh[i + half_dim] = float_to_bf16(x1 * c + x0 * s);
         }
     }
 
@@ -1201,15 +1202,16 @@ extern "C" __global__ void rope_batched_half_split_kernel(
     __nv_bfloat16* k_row = k + (int64_t)token * k_stride;
     for (int h = 0; h < num_kv_heads; h++) {
         __nv_bfloat16* kh = k_row + h * head_dim;
-        for (int i = threadIdx.x; i < rotary_dim; i += blockDim.x) {
-            int src = i < half_dim ? i + half_dim : i - half_dim;
-            float x = bf16_to_float(kh[i]);
-            float r = bf16_to_float(kh[src]);
-            if (i < half_dim) r = -r;
-            int ci = i < half_dim ? i : i - half_dim;
-            float c = cos_row[ci];
-            float s = sin_row[ci];
-            kh[i] = float_to_bf16(x * c + r * s);
+        // A single thread owns the pair: neither half can observe a
+        // partner already overwritten by another warp or block.
+        int pairs = min(half_dim, head_dim - half_dim);
+        for (int i = threadIdx.x; i < pairs; i += blockDim.x) {
+            float x0 = bf16_to_float(kh[i]);
+            float x1 = bf16_to_float(kh[i + half_dim]);
+            float c = cos_row[i];
+            float s = sin_row[i];
+            kh[i] = float_to_bf16(x0 * c - x1 * s);
+            kh[i + half_dim] = float_to_bf16(x1 * c + x0 * s);
         }
     }
 }
