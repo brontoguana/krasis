@@ -9021,6 +9021,7 @@ struct GpuWeight {
     simple_packed_ptr: u64,
     /// Simple INT4 decode format: [rows, cols/group_size] FP32 scales on GPU.
     simple_scales_f32_ptr: u64,
+    qwen_split: Option<crate::gpu_prefill::QwenPackedSplit>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -9063,6 +9064,7 @@ impl GpuWeight {
             group_size: 0,
             simple_packed_ptr: 0,
             simple_scales_f32_ptr: 0,
+        qwen_split: None,
         }
     }
 
@@ -9083,6 +9085,7 @@ impl GpuWeight {
             group_size,
             simple_packed_ptr: 0,
             simple_scales_f32_ptr: 0,
+        qwen_split: None,
         }
     }
 
@@ -9103,6 +9106,7 @@ impl GpuWeight {
             group_size,
             simple_packed_ptr: 0,
             simple_scales_f32_ptr: 0,
+        qwen_split: None,
         }
     }
 
@@ -24669,6 +24673,7 @@ pub struct GpuDecodeStore {
     /// Pre-allocated Rust prefill engine.
     /// Created early (before HCS) to claim scratch VRAM while it's still available.
     prefill_engine_slot: Option<crate::gpu_prefill::PrefillEngine>,
+    bounded_dense_math: Option<Arc<crate::dense_stream::DenseStream>>,
     /// Cached scratch VRAM computation: (fixed_bytes, per_token_bytes).
     /// Stored when the prefill engine is created so it's available for eviction checks
     /// even after the engine is taken by the RustServer.
@@ -30835,6 +30840,7 @@ impl GpuDecodeStore {
             debug_gqa_diag_capture: None,
             hqq_bf16_weight_bufs: Vec::new(),
             prefill_engine_slot: None,
+            bounded_dense_math: None,
             prefill_scratch_info: None,
             trace_config: DecodeTraceConfig::from_env(),
             pending_trace_request_label: None,
@@ -32885,30 +32891,290 @@ impl GpuDecodeStore {
         Ok(())
     }
 
-    fn configure_dense_stream(&mut self, capacity_bytes: usize) -> PyResult<()> {
-        let bank=crate::dense_stream::DenseStream::new(self.device.clone(),capacity_bytes)
+    #[pyo3(signature = (capacity_bytes, resident_bytes=0, tensorcore_decode=false))]
+    fn configure_dense_stream(
+        &mut self,
+        capacity_bytes: usize,
+        resident_bytes: usize,
+        tensorcore_decode: bool,
+    ) -> PyResult<()> {
+        let bank = crate::dense_stream::DenseStream::new(
+            self.device.clone(),
+            capacity_bytes,
+            resident_bytes,
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let graph = self
+            .graph
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("configure first"))?;
+        if !graph.weights.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "stream before weights",
+            ));
+        }
+        if tensorcore_decode {bank.enable_tensorcore_decode().map_err(pyo3::exceptions::PyRuntimeError::new_err)?;}
+        graph.dense_stream = Some(bank.clone());
+        self.bounded_dense_math=Some(bank);
+        Ok(())
+    }
+    fn register_streamed_weight(
+        &mut self,
+        group: usize,
+        ptr: usize,
+        rows: usize,
+        cols: usize,
+    ) -> PyResult<usize> {
+        let bytes = rows
+            .checked_mul(cols)
+            .and_then(|n| n.checked_mul(2))
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("weight extent overflow"))?;
+        let graph = self
+            .graph
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("configure first"))?;
+        let bank = graph
+            .dense_stream
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("stream not configured"))?;
+        let gpu = unsafe { bank.register(group, ptr, bytes) }
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        let graph=self.graph.as_mut().ok_or_else(||pyo3::exceptions::PyValueError::new_err("configure first"))?;
-        if !graph.weights.is_empty() { return Err(pyo3::exceptions::PyValueError::new_err("stream before weights")); }
-        graph.dense_stream=Some(bank); Ok(())
+        let id = graph.weights.len();
+        graph.weights.push(GpuWeight::new(gpu, rows, cols, 0));
+        Ok(id)
     }
-    fn register_streamed_weight(&mut self, group: usize, ptr: usize, rows: usize, cols: usize) -> PyResult<usize> {
-        let bytes=rows.checked_mul(cols).and_then(|n|n.checked_mul(2)).ok_or_else(||pyo3::exceptions::PyValueError::new_err("weight extent overflow"))?;
-        let graph=self.graph.as_mut().ok_or_else(||pyo3::exceptions::PyValueError::new_err("configure first"))?;
-        let bank=graph.dense_stream.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("stream not configured"))?;
-        let gpu=unsafe {bank.register(group,ptr,bytes)}.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        let id=graph.weights.len(); graph.weights.push(GpuWeight::new(gpu,rows,cols,0)); Ok(id)
+    /// Single-format packed cache: the bank owns pinned file pages, never BF16 copies.
+    /// Explicit diagnostic replay; normal inference never synchronizes per projection.
+    fn debug_dense_stream_gemm(
+        &self,
+        group: usize,
+        wid: usize,
+        input: u64,
+        output: u64,
+        rows: usize,
+    ) -> PyResult<()> {
+        let err = |message: &str| pyo3::exceptions::PyRuntimeError::new_err(message.to_owned());
+        let graph = self.graph.as_ref().ok_or_else(|| err("configure first"))?;
+        let w = graph
+            .weights
+            .get(wid)
+            .ok_or_else(|| err("invalid weight"))?;
+        if w.dtype != 5 || rows == 0 || rows > 256 {
+            return Err(err("packed GEMM replay requires INT4 and 1..256 rows"));
+        }
+        crate::dense_stream::stage(&graph.dense_stream, group, *self.device.cu_stream())
+            .map_err(|e| err(&e))?;
+        self.device.synchronize().map_err(|e| err(&e.to_string()))?;
+        let engine = self
+            .prefill_engine_slot
+            .as_ref()
+            .ok_or_else(|| err("allocate prefill first"))?;
+        engine
+            .debug_dense_packed_gemm(
+                crate::gpu_prefill::MarlinWeight {
+                    qwen_split: w.qwen_split,
+                    packed: w.ptr,
+                    scales: w.scales_ptr,
+                    n: w.rows,
+                    k: w.cols,
+                    num_groups: w.cols / w.group_size,
+                    group_size: w.group_size,
+                    num_bits: 4,
+                },
+                input,
+                output,
+                rows,
+            )
+            .map_err(|e| err(&e))?;
+        self.device.synchronize().map_err(|e| err(&e.to_string()))
     }
-    fn register_streamed_embedding(&mut self, ptr: usize, rows: usize, cols: usize) -> PyResult<()> {
-        let wid=self.register_streamed_weight(crate::dense_stream::EMBEDDING,ptr,rows,cols)?;
-        let graph=self.graph.as_mut().unwrap();graph.embedding_ptr=graph.weights[wid].ptr;Ok(())
+    fn debug_dense_stream_gemv(
+        &self,
+        group: usize,
+        wid: usize,
+        input: u64,
+        output: u64,
+        f32_output: bool,
+    ) -> PyResult<()> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("configure first"))?;
+        let weight = graph
+            .weights
+            .get(wid)
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("invalid weight"))?;
+        crate::dense_stream::stage(&graph.dense_stream, group, *self.device.cu_stream())
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        if f32_output {
+            self.gemv_bf16_to_f32_internal(weight, input, output)
+        } else {
+            self.gemv_bf16_internal(weight, input, output)
+        }
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        self.device
+            .synchronize()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
-    fn seal_dense_stream(&self)->PyResult<String>{
-        let graph=self.graph.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("configure first"))?;
-        let bank=graph.dense_stream.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("stream absent"))?;
-        bank.seal().and_then(|()|bank.stats()).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    fn register_streamed_int4_file(
+        &mut self,
+        group: usize,
+        path: String,
+        rows: usize,
+        cols: usize,
+    ) -> PyResult<usize> {
+        let err = |message: &str| pyo3::exceptions::PyValueError::new_err(message.to_owned());
+        if rows % 64 != 0 || cols % 128 != 0 || rows == 0 || cols == 0 {
+            return Err(err("invalid streamed INT4 shape"));
+        }
+        let packed = rows
+            .checked_mul(cols)
+            .ok_or_else(|| err("INT4 extent overflow"))?
+            / 2;
+        let scales_offset = crate::dense_stream::align(packed).map_err(|e| err(&e))?;
+        let bytes = scales_offset
+            .checked_add(rows * (cols / 128) * 2)
+            .ok_or_else(|| err("INT4 extent overflow"))?;
+        let graph = self.graph.as_mut().ok_or_else(|| err("configure first"))?;
+        let bank = graph
+            .dense_stream
+            .as_ref()
+            .ok_or_else(|| err("stream not configured"))?;
+        let ptr = bank
+            .register_file(group, &path, bytes, false)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let id = graph.weights.len();
+        graph.weights.push(GpuWeight::new_marlin_int4(
+            ptr,
+            ptr + scales_offset as u64,
+            rows,
+            cols,
+            128,
+        ));
+        Ok(id)
     }
-
+    fn register_streamed_qwen_split(
+        &mut self,
+        group: usize,
+        first_file: String,
+        second_file: String,
+        first_rows: usize,
+        second_rows: usize,
+        cols: usize,
+        key_heads: usize,
+        key_dim: usize,
+        value_band: usize,
+    ) -> PyResult<usize> {
+        if first_rows != key_heads * (2 * key_dim + value_band)
+            || second_rows != key_heads * value_band
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "invalid Qwen split geometry",
+            ));
+        }
+        let first = self.register_streamed_int4_file(group, first_file, first_rows, cols)?;
+        let second = self.register_streamed_int4_file(group, second_file, second_rows, cols)?;
+        let graph = self.graph.as_mut().unwrap();
+        let scratch = graph
+            .dense_stream
+            .as_ref()
+            .unwrap()
+            .projection_scratch(256 * (first_rows + second_rows))
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let other = graph.weights[second].clone();
+        let weight = &mut graph.weights[first];
+        weight.rows += second_rows;
+        weight.qwen_split = Some(crate::gpu_prefill::QwenPackedSplit {
+            scratch,
+            second_packed: other.ptr,
+            second_scales: other.scales_ptr,
+            first_rows,
+            key_heads,
+            key_dim,
+            value_band,
+        });
+        Ok(first)
+    }
+    fn register_mapped_embedding_file(
+        &mut self,
+        path: String,
+        rows: usize,
+        cols: usize,
+    ) -> PyResult<()> {
+        let graph = self
+            .graph
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("configure first"))?;
+        let bank = graph
+            .dense_stream
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("stream absent"))?;
+        graph.embedding_ptr = bank
+            .register_file(crate::dense_stream::EMBEDDING, &path, rows * cols * 2, true)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        Ok(())
+    }
+    /// Startup conversion is bounded to one matrix; no BF16 allocation on GPU.
+    fn pack_dense_int4_file(
+        &self,
+        ptr: usize,
+        rows: usize,
+        cols: usize,
+        path: String,
+    ) -> PyResult<()> {
+        use crate::weights::marlin::{marlin_repack_bounded, quantize_int4};
+        use std::io::Write;
+        let err = |message: &str| pyo3::exceptions::PyValueError::new_err(message.to_owned());
+        if ptr == 0 || rows == 0 || rows % 64 != 0 || cols == 0 || cols % 128 != 0 {
+            return Err(err("invalid pack shape"));
+        }
+        let elements = rows
+            .checked_mul(cols)
+            .ok_or_else(|| err("pack extent overflow"))?;
+        let source = unsafe { std::slice::from_raw_parts(ptr as *const u16, elements) };
+        let q = quantize_int4(source, rows, cols, 128);
+        let m = marlin_repack_bounded(&q);
+        drop(q);
+        let mut file = std::fs::File::create(path).map_err(|e| err(&e.to_string()))?;
+        let packed = unsafe {
+            std::slice::from_raw_parts(m.packed.as_ptr() as *const u8, m.packed.len() * 4)
+        };
+        file.write_all(packed).map_err(|e| err(&e.to_string()))?;
+        let padding = crate::dense_stream::align(packed.len()).map_err(|e| err(&e))? - packed.len();
+        file.write_all(&vec![0u8; padding])
+            .map_err(|e| err(&e.to_string()))?;
+        let scales = unsafe {
+            std::slice::from_raw_parts(m.scales.as_ptr() as *const u8, m.scales.len() * 2)
+        };
+        file.write_all(scales)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| err(&e.to_string()))?;
+        Ok(())
+    }
+    fn register_streamed_embedding(
+        &mut self,
+        ptr: usize,
+        rows: usize,
+        cols: usize,
+    ) -> PyResult<()> {
+        let wid = self.register_streamed_weight(crate::dense_stream::EMBEDDING, ptr, rows, cols)?;
+        let graph = self.graph.as_mut().unwrap();
+        graph.embedding_ptr = graph.weights[wid].ptr;
+        Ok(())
+    }
+    fn seal_dense_stream(&self) -> PyResult<String> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("configure first"))?;
+        let bank = graph
+            .dense_stream
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("stream absent"))?;
+        bank.seal()
+            .and_then(|()| bank.stats())
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
     /// Register a weight matrix. Returns weight ID.
     #[pyo3(signature = (ptr, rows, cols, dtype=0))]
     fn register_weight(
@@ -53277,6 +53543,7 @@ impl GpuDecodeStore {
             let w = &graph.weights[wid];
             if w.dtype == 4 || w.dtype == 5 {
                 Some(MarlinWeight {
+                    qwen_split: w.qwen_split,
                     packed: w.ptr,
                     scales: w.scales_ptr,
                     n: w.rows,
@@ -54440,6 +54707,7 @@ impl GpuDecodeStore {
                                     shared_inter
                                 };
                                 lw.shared_w1 = Some(MarlinWeight {
+                                    qwen_split: None,
                                     packed: se_vram.w13_packed_ptr(),
                                     scales: se_vram.w13_scales_ptr(),
                                     n: shared_w13_n,
@@ -54449,6 +54717,7 @@ impl GpuDecodeStore {
                                     num_bits: bits,
                                 });
                                 lw.shared_w2 = Some(MarlinWeight {
+                                    qwen_split: None,
                                     packed: se_vram.w2_packed_ptr(),
                                     scales: se_vram.w2_scales_ptr(),
                                     n: graph.hidden_size,
@@ -86589,6 +86858,22 @@ impl GpuDecodeStore {
         input_ptr: u64,
         output_ptr: u64,
     ) -> Result<(), String> {
+        if let Some(split)=w.qwen_split {
+            let scratch=split.scratch;
+            let first=GpuWeight::new_marlin_int4(w.ptr,w.scales_ptr,split.first_rows,w.cols,w.group_size);
+            let second=GpuWeight::new_marlin_int4(split.second_packed,split.second_scales,w.rows-split.first_rows,w.cols,w.group_size);
+            self.launch_marlin_gemv_int4_bf16(&first,input_ptr,scratch)?;
+            self.launch_marlin_gemv_int4_bf16(&second,input_ptr,scratch+(split.first_rows*2) as u64)?;
+            let function=self.device.get_func("prefill_kernels","qwen35_projection_output_kernel").ok_or("Qwen output reorder missing")?;
+            unsafe { function.launch(cudarc::driver::LaunchConfig{grid_dim:(((w.rows+255)/256) as u32,1,1),block_dim:(256,1,1),shared_mem_bytes:0},
+                (output_ptr,scratch,w.rows as u64,1i32,split.key_heads as i32,split.key_dim as i32,split.value_band as i32,0i32)).map_err(|e|e.to_string())?; }
+            return Ok(());
+        }
+        if w.dtype==5 && !w.has_simple_int4() {
+            if let Some(bank)=&self.bounded_dense_math {
+                if bank.tensorcore_gemv(w.ptr,w.scales_ptr,input_ptr,output_ptr,w.rows,w.cols,w.group_size,*self.device.cu_stream())? {return Ok(());}
+            }
+        }
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         if w.is_marlin_int8() {
@@ -86703,6 +86988,50 @@ impl GpuDecodeStore {
 
     /// GEMV with FP32 output: output_f32[N] = weight[N,K] @ input_bf16[K]
     /// Supports BF16, Marlin INT8, Marlin INT4, and simple INT4 weights.
+    fn qwen_split_gemv_f32(&self, w: &GpuWeight, input: u64, output: u64) -> Result<(), String> {
+        let split = w.qwen_split.ok_or("missing Qwen split")?;
+        let first =
+            GpuWeight::new_marlin_int4(w.ptr, w.scales_ptr, split.first_rows, w.cols, w.group_size);
+        let second = GpuWeight::new_marlin_int4(
+            split.second_packed,
+            split.second_scales,
+            w.rows - split.first_rows,
+            w.cols,
+            w.group_size,
+        );
+        self.launch_marlin_gemv_int4_f32(&first, input, split.scratch)?;
+        self.launch_marlin_gemv_int4_f32(
+            &second,
+            input,
+            split.scratch + (split.first_rows * 4) as u64,
+        )?;
+        let function = self
+            .device
+            .get_func("prefill_kernels", "qwen35_projection_output_f32_kernel")
+            .ok_or("Qwen FP32 reorder missing")?;
+        unsafe {
+            function
+                .launch(
+                    cudarc::driver::LaunchConfig {
+                        grid_dim: (((w.rows + 255) / 256) as u32, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        output,
+                        split.scratch,
+                        w.rows as u64,
+                        1i32,
+                        split.key_heads as i32,
+                        split.key_dim as i32,
+                        split.value_band as i32,
+                        0i32,
+                    ),
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
     fn gemv_bf16_to_f32(
         &self,
         w: &GpuWeight,
@@ -86724,6 +87053,7 @@ impl GpuDecodeStore {
                 };
             }
         }
+        if w.qwen_split.is_some() { return self.qwen_split_gemv_f32(w,input_ptr,output_ptr); }
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         if w.is_marlin_int8() {

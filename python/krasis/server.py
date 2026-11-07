@@ -2967,6 +2967,10 @@ def _apply_dense_serving_policy(args, cfg) -> None:
         args.hcs = False
     from krasis.qwen_dense_stream import enabled as bounded_dense_enabled
     if bounded_dense_enabled(cfg):
+        if (args.attention_quant,args.dense_mlp_quant,args.lm_head_quant)==('bf16','int8','int8'):
+            args.attention_quant=args.dense_mlp_quant=args.lm_head_quant='int4'
+            args.kv_dtype='bf16'
+        args.step_vision_quant='bf16'  # bounded native encoder retains its source precision
         if not getattr(args, "max_context_tokens", 0):
             args.max_context_tokens = 4096
         if args.max_context_tokens > 4096:
@@ -3272,9 +3276,9 @@ def main():
                         help="Explicit diagnostic-only KRHQ cache spec for runtime metadata validation")
     parser.add_argument("--shared-expert-quant", default="int8", choices=["bf16", "int8"],
                         help="Quantization for shared expert weights")
-    parser.add_argument("--dense-mlp-quant", default="int8", choices=["bf16", "int8"],
+    parser.add_argument("--dense-mlp-quant", default="int8", choices=["bf16", "int8", "int4"],
                         help="Quantization for dense MLP weights")
-    parser.add_argument("--lm-head-quant", default="int8", choices=["bf16", "int8"],
+    parser.add_argument("--lm-head-quant", default="int8", choices=["bf16", "int8", "int4"],
                         help="Quantization for lm_head weights")
     parser.add_argument("--step-vision-quant", "--vision-quant", dest="step_vision_quant",
                         default="int4", choices=["bf16", "int4"],
@@ -3634,6 +3638,12 @@ def main():
             "Use 'k6v6' for quality, 'k4v4' for compact KV, or 'bf16' for full precision."
         )
 
+    # Apply architecture defaults before constructing quantisation/KV objects.
+    from krasis.config import ModelConfig
+    args.model_path=os.path.expanduser(args.model_path)
+    cfg=ModelConfig.from_model_path(args.model_path)
+    _apply_dense_serving_policy(args,cfg)
+
     kv_format_str = args.kv_dtype  # includes architecture-owned "native" and generic formats
     if args.kv_dtype in ("k8v4", "k8v6", "k7v4", "k6v6", "k6v4", "k4v4", "tq4"):
         kv_dtype = torch.float8_e4m3fn  # base dtype for size calc; custom formats allocate their own tensors
@@ -3700,8 +3710,6 @@ def main():
     import os, json
     from krasis.config import ModelConfig
 
-    cfg = ModelConfig.from_model_path(args.model_path)
-    _apply_dense_serving_policy(args, cfg)
     num_layers = cfg.num_hidden_layers
     try:
         num_gpus_available = _resolve_serving_gpu_count(args)

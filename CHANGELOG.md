@@ -13381,3 +13381,13 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
   lows were 625/649 MiB against the 600 MiB policy.
 
 - Restore separate Qwen BF16 QKV/Z and B/A contraction geometry, BF16 L2 preparation, and a bounded FP32 recurrent fallback. Preserve the actual fused causal-convolution contract. Add bounded live BF16 projection observations and Qwen-only paired BF16 rotary boundaries for prefill/eager/graph execution. Numerical admission remains separate from operator and prefix passes.
+
+- Add bounded Qwen INT4 cache conversion and native single-owner mapped packed streaming. Keep explicit BF16 reference mode and bounded native vision; validate cache identity and complete artifact extents before use.
+- Bound cache repacking without full unpacked matrix intermediates, preserve separate packed Qwen QKV/Z contractions, and reserve a fixed resident-weight pool alongside the streaming slab. Add explicit graph-stable output scratch for projection layout conversion.
+
+### 2026-11-07 — Practical bounded Qwen INT4 text and vision
+
+- Make uniform INT4 attention, dense MLP and output head the normal bounded 27B launcher/server profile, retaining explicit BF16 reference mode and native BF16 vision.
+- Incrementally convert local sources into checksummed, versioned Marlin artifacts. Pin one authoritative mapped host representation; avoid complete retained BF16 language sources and independent pinned packed copies.
+- Preserve separate QKV/Z contractions and typed head output boundaries. Execute packed projections through native kernels with graph-stable staging, tensor-core decode scratch and a joint resident/head/slab plan.
+- Retain 4K context and one 512×512 image. Exercise enforced 4/6/8 GiB device-wide allowances, complete packed operators, public requests, reset, cancellation and session restoration. Preserve unchanged BF16 numerical gates; document independent INT4 whole-model tolerance failures separately from passing practical tasks.

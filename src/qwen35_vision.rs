@@ -183,6 +183,7 @@ impl Qwen35Vision {
         let bank = DenseStream::new(
             device.clone(),
             *sizes.values().max().ok_or("missing vision weights")?,
+            0,
         )?;
         let mut weights = HashMap::new();
         for (name, full, file, g, shape) in entries {

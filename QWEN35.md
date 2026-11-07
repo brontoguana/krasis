@@ -1,85 +1,121 @@
 # Bounded Qwen3.5-27B text and images
 
-This development path streams the original BF16 language weights from host RAM
-through one reusable GPU slab. Prefill, recurrent state updates, decode scheduling
-and the Qwen3.5 vision network execute in Rust/CUDA. Python handles startup,
-image processing and request bookkeeping.
+The normal 27B development profile uses **INT4 language weights**, a single pinned
+host owner, bounded GPU streaming and the native BF16 vision encoder. Model
+execution and scheduling run in Rust/CUDA. Python handles startup conversion,
+image processing and request bookkeeping. Original local safetensors are required;
+startup does not download model weights.
 
-## Demonstrated profile
+## Current profile
 
-- One RTX A6000, physically constrained to a **6,144 MiB device-wide ceiling**
-  using an independent allocation. This is constrained-A6000 evidence, **not an
-  actual 6GB or 8GB card test**. An 8,192 MiB control also passed. Normal-server peak effective device use
-  was 5,210 MiB, leaving 934 MiB free in the integrated follow-up, sampled every 25 ms.
-- Original local Qwen/Qwen3.5-27B BF16 safetensors; no model weights downloaded.
-- 4,096-token capacity, including image tokens and requested output; 256 MiB BF16
-  KV, complete recurrent state, 256-token language prefill chunks, 600 MiB reserve.
-- One image per request, at most 1,024 encoder patches / 256 image tokens.
-  A 512×512 image was tested, alongside 256×256 red/blue images and text follow-up.
-- Text, image-dependent answers, a 4,049-token prompt, eager/graph state identity,
-  reset, cancellation and active-GPU/pageable-RAM cache restoration were exercised.
-  Over-capacity requests return HTTP 413.
+The launcher and server select INT4 attention, dense MLP and output head, with
+BF16 KV and vision. The supported default geometry is hidden size 5120, 64 layers
+and intermediate size 17408. Other model families retain their precision policy.
 
-Allow **128 GiB system RAM**. Source tensors and immutable pinned native copies
-coexist during preparation; measured peak RSS was approximately 113 GiB. Startup
-checks available host RAM, including Linux cgroup v2 limits. The launcher budget
-includes setup headroom. Native pinned text weights occupy 53,786,705,920 bytes;
-the reusable GPU weight slab is 2,542,796,800 bytes. Vision streams one block at a
-time through an additional 89,677,312-byte slab, never a complete GPU tower.
+- 4,096 tokens including images and output; 256-token prefill bands; full causal
+  attention and recurrent chronology; 256 MiB BF16 KV.
+- One image up to 512×512, at most 1,024 encoder patches / 256 image tokens.
+- Ampere or newer NVIDIA GPU. Measured with independent device-wide allocations
+  on an A6000 at 4, 6 and 8 GiB, including loading, warmup, vision and generation.
+  These are constrained-A6000 results; actual small-card hardware remains untested.
+- The measured minimum free VRAM is above the **600 MiB reserve**. Context overflow
+  returns HTTP 413. Multi-GPU and speculative/batched verification are unsupported.
 
-This is a memory-fit implementation. Sustained BF16 decode measured about
-**0.44 tokens/sec** on the A6000 because nearly 50 GiB of weights cross PCIe per
-forward. A smaller card's throughput has not been measured. No quantisation is
-applied by this profile, so packed-weight quantisation metadata is zero. INT8/HQQ
-settings are rejected before loading rather than silently creating full GPU copies.
+The INT4 representation uses symmetric group-128 quantisation, Marlin layout and
+BF16 scales. Conversion reads and releases checkpoint sources incrementally.
+Versioned, checkpoint-bound, checksummed artifacts publish atomically; incomplete
+or incompatible entries are rebuilt. Native private file mappings are pinned once;
+there is no retained complete BF16 language model or second pinned INT4 model.
+Clean OS file-cache pages are separate, reclaimable memory, not a second serving
+weight owner. Shape-only Python tensors contain no large weight storage.
+
+Physical pinned text backing is **15,741,952,000 bytes (14.66 GiB)**, including
+higher-precision exceptions. Measured cold conversion peaks at **4.36 GiB RSS**.
+Warm core serving uses roughly **16 GiB**, rising to approximately **19–20 GiB**
+with native vision and the exercised session cache. Process RSS/PSS, anonymous/file
+pages, system memory and GPU sampling are retained in the results record. Allow
+**32 GiB system RAM**; startup checks available RAM and cgroup v2 limits. Session
+cache growth has its own budget. A physical 24/32 GiB host limit was not tested.
+
+Higher-precision exceptions are explicit:
+
+| Owner | Representation and footprint |
+|---|---|
+| Embedding access | BF16, 2,542,796,800 host bytes; fetch requested rows from mapped host memory rather than streaming the entire table |
+| Small recurrent B/A projections | BF16, about 45 MiB GPU; their 96-row shape is outside the tensor-core packing contract |
+| Norms, convolution and state parameters | Existing prescribed precision; approximately 6 MiB additional resident parameters |
+| Native vision weights | BF16, 921,460,192 host bytes; one block at a time in an 89,677,312-byte GPU slab |
+
+All large MLP, full-attention/recurrent projections and the output head stream
+packed bytes and scales directly. There are no full BF16 weight expansions on the
+normal execution path. Separate QKV/Z and B/A contractions, repaired norms,
+rotary boundaries, softmax and recurrence remain intact. Packed head results are
+explicitly converted to FP32 logit storage before sampling.
+
+The joint device planner protects resident weights before sizing the cold slab.
+With the head protected, a **197,345,280-byte** slab suffices instead of funding a
+head-sized slab separately. Freed space funds additional resident weights while
+preserving the combined allocation. Defaults protect about 2.43 GiB at 6 GiB and
+4.43 GiB at 8 GiB. Residency automatically scales down for smaller allowances;
+the 4 GiB test uses no resident pool. Explicit resident budgets are respected.
+Pointers and copy ownership remain fixed across eager and graph execution.
+
+Eligible BF16-output INT4 decode contractions use the existing Marlin tensor-core
+program with fixed reduction/lock workspace. FP32-producing projections keep
+their separate dispatch. Same-input operator comparisons and complete-request
+measurements determine promotion; no full-model benchmark depends on proof writes
+or per-tile synchronization.
+
+On identical arithmetic and coding workloads, the preserved BF16 control measures
+about **0.44 tok/s**. The current INT4 path measures about **2.0 tok/s at 6 GiB** and
+**2.5 tok/s at 8 GiB** (about 1.7 tok/s at 4 GiB). These remain PCIe-bound streaming rates, not resident-model
+throughput. First-content and whole-request timings, cold vision costs, actual
+copy bytes and timing overhead controls are recorded in
+`krasis-internal/qwen27b-int4-235939/RESULTS.md`.
 
 ## Run from the development checkout
 
-Use complete local safetensors, tokenizer and processor assets. This command
-keeps all Hugging Face access offline and performs normal server warmup and
-calibration:
+Use complete local tokenizer, processor and safetensors assets:
 
 ```bash
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 KRASIS_QWEN_GPU_LIMIT_MIB=8192 \
 ./dev python -m krasis.server \
   --model-path /path/to/local/Qwen3.5-27B --num-gpus 1 \
-  --attention-quant bf16 --dense-mlp-quant bf16 --lm-head-quant bf16 \
-  --shared-expert-quant bf16 --kv-dtype bf16 --kv-cache-mb 256 \
-  --max-context-tokens 4096 --no-enable-thinking
+  --kv-cache-mb 256 --max-context-tokens 4096 --no-enable-thinking
 ```
 
-Streaming defaults on for the 64-layer, hidden-5120, intermediate-17408 dense
-Qwen3.5-27B geometry. Other model families and dense sizes retain their existing
-policy. `KRASIS_QWEN_DENSE_STREAM=0` restores the old resident path, which requires
-substantially more VRAM. `KRASIS_QWEN_GPU_LIMIT_MIB` controls joint admission
-planning; it is not a replacement for physical GPU limits. Qualification used
-an independent physical allocation plus device-wide NVML sampling.
+The normal launcher applies the same INT4 defaults and joint budget. Precision
+can be stated explicitly with `--attention-quant int4 --dense-mlp-quant int4
+--lm-head-quant int4 --kv-dtype bf16 --vision-quant bf16`. The native vision tower
+retains BF16 regardless of the language quantisation.
 
-Graphs capture ordered H2D copies with stable pointers into the same slab used
-by eager execution. Group ownership remains immutable for the loaded model.
-Multi-GPU, speculation/batched verification and non-BF16 bounded profiles are
-rejected. CPU Torch forward/stress modes are not bounded execution paths.
+`KRASIS_QWEN_GPU_LIMIT_MIB` controls admission, not physical enforcement.
+`KRASIS_QWEN_RESIDENT_MIB` sets an explicit resident-weight budget;
+`KRASIS_QWEN_INT4_CACHE` selects the cache root. Set
+`KRASIS_QWEN_INT4_TENSORCORE_DECODE=0` to retain the scalar Marlin GEMV control.
+`KRASIS_QWEN_DENSE_STREAM=0` exits this bounded profile and requires the resident
+path's own supported precision and substantially larger VRAM budget.
 
-Vision uses the Qwen3.5 Conv3d patch contract, learned position interpolation,
-axial RoPE, 27 blocks and pre-shuffle merger. Head-width-72 attention uses a
-native split-KV SDPA contraction, with bounded FP32 partial-output storage and
-an occupancy-based split count. BF16 Linear uses a bias epilogue and a 1 MiB
-cuBLASLt workspace. Inverse rotary frequencies are computed once on the CPU in
-FP32, matching the reference's construction order. Checkpoints without local
-vision assets remain text-only.
+BF16 remains an explicit numerical reference: pass `--attention-quant bf16
+--dense-mlp-quant bf16 --lm-head-quant bf16 --kv-dtype bf16`. That legacy reference
+retains source and pinned BF16 ownership and needs roughly 110–113 GiB host RAM;
+it is not the default INT4 implementation.
 
-`KRASIS_QWEN_VISION_ATTENTION=fast` retains the padded FlashAttention path;
-`portable` retains the CUDA equation fallback. `KRASIS_QWEN_VISION_LINEAR=fp32`
-retains the FP32-output GEMM and separate bias path. These alternatives retain
-their independent numerical verdicts.
+## INT4 evidence and scope
 
-Within the 4K BF16 profile, text attention defaults to batched QK/PV contractions
-with BF16 scores, scaling and probabilities, and FP32 accumulation. Query bands
-bound the score buffer to 16 MiB without splitting the key reduction. Grouped
-heads and cached-prefix causal masks use the same contract. Physical allocations
-are charged in joint admission and checked against the 600 MiB reserve.
-`KRASIS_QWEN_TEXT_ATTENTION=fast` retains the previous attention implementation;
-larger contexts and unsupported KV formats retain their existing dispatch.
+Complete independent inverse-layout GEMV and 65-row batched GEMM checks pass at
+unchanged `atol=.03, rtol=.01`, including the complete vocabulary head and both
+recurrent projection output types. Text, coding, square/rectangular images,
+image-dependent follow-up, reset, cancellation, cached attention and RAM session
+restoration pass. Changing residency preserves all 128 prefix-state arrays and
+all logits bitwise. Graph execution is active, with stable weight pointers.
+
+Numerical evidence is kept distinct: the preserved BF16 reference passes its
+complete fixed 64-layer gate. The independent INT4 reference has the same top-ten
+first-token ranking and KL divergence about 3.3e-6, but its full-array comparison
+still fails the unchanged absolute/relative gate (67 of 128 state arrays).
+Those failures are retained; these task and operator passes do not establish
+canonical ADQ/release admission or general quantised model quality.
 
 ## Arête compatibility and qualification limits
 
@@ -98,7 +134,7 @@ index metadata were inspected. **No Arête weights were downloaded or executed.*
 This establishes configuration/equation compatibility, not an Arête model verdict.
 
 Functional serving and memory fit are separate from numerical qualification.
-The causal repair follow-up clears the fixed 28-token, complete 64-layer text
+The preserved BF16 causal repair follow-up clears the fixed 28-token, complete 64-layer text
 comparison: zero failing logits and zero failing arrays among all 128 sequence
 state arrays at unchanged `atol=.03, rtol=.01`. Original, square and rectangular
 complete encoders match their frozen reference features bitwise. The original
@@ -109,8 +145,8 @@ ADQ/release admission, Arête execution or other-GPU qualification.
 
 Evidence and immutable controllers:
 `krasis-internal/qwen27b-8gb-235682/` and
-`krasis-internal/qwen27b-repair-235737/`. The Maya performance work is independently
-preserved on `perf/maya-parity-20261107`; it was not merged into this implementation.
+`krasis-internal/qwen27b-repair-235737/`. Separate performance experiments remain
+on the `performance` branch.
 
 Integrated contraction follow-up:
 `krasis-internal/qwen27b-integrated-235797/RESULTS.md`. This includes the actual

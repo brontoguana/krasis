@@ -5355,7 +5355,7 @@ const MARLIN_PIPE_STAGES: usize = 4;
 const MARLIN_MIN_THREAD_N: usize = 64;
 const MARLIN_MIN_THREAD_K: usize = 64;
 const MARLIN_MAX_BLOCKS_PER_SM: usize = 4;
-const MARLIN_MAX_LOCK_SLOTS_PER_SM: usize = 4;
+pub(crate) const MARLIN_MAX_LOCK_SLOTS_PER_SM: usize = 4;
 
 fn marlin_moe_scales_cache_size(
     thread_n: usize,
@@ -6658,7 +6658,7 @@ pub struct PrefillKernels {
 }
 
 /// Function pointer for marlin::marlin_mm<nv_bfloat16>.
-type MarlinMmFn = unsafe extern "C" fn(
+pub(crate) type MarlinMmFn = unsafe extern "C" fn(
     *const std::ffi::c_void,
     *const std::ffi::c_void,
     *mut std::ffi::c_void,
@@ -7303,7 +7303,18 @@ pub struct PrefillModelConfig {
     pub hqq_prefill_materialize_bf16: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct QwenPackedSplit {
+    pub scratch: u64,
+    pub second_packed: u64,
+    pub second_scales: u64,
+    pub first_rows: usize,
+    pub key_heads: usize,
+    pub key_dim: usize,
+    pub value_band: usize,
+}
 pub struct MarlinWeight {
+    pub qwen_split: Option<QwenPackedSplit>,
     pub packed: u64,
     pub scales: u64,
     pub n: usize,
@@ -32759,7 +32770,7 @@ impl PrefillEngine {
             let pos_hidden = *self.scratch.d_hidden.device_ptr() + (pos * h * 2) as u64;
 
             if let Some(ref lm) = self.lm_head {
-                self.marlin_gemm(pos_hidden, lm, *self.scratch.d_logits.device_ptr(), 1)?;
+                self.packed_head_logits(pos_hidden, lm, *self.scratch.d_logits.device_ptr())?;
             } else if self.lm_head_bf16_ptr != 0 {
                 // BF16 LM head via cuBLAS GEMM
                 use cudarc::cublas::result as cublas_result;
@@ -35505,6 +35516,7 @@ impl PrefillEngine {
 
         let scales_by_group = if w2s_ptr != 0 && num_groups_w2 > 0 {
             let weight = MarlinWeight {
+                qwen_split: None,
                 packed: w2_ptr,
                 scales: w2s_ptr,
                 n: expert_h,
@@ -36484,6 +36496,77 @@ impl PrefillEngine {
         Ok(())
     }
 
+    fn packed_head_logits(
+        &self,
+        input: u64,
+        weight: &MarlinWeight,
+        output: u64,
+    ) -> Result<(), String> {
+        // Marlin returns BF16. Logit storage and sampling consume FP32.
+        let fallback = if self.dense_stream.is_none() {
+            let (free, _) = cudarc::driver::result::mem_get_info().map_err(|e| e.to_string())?;
+            if free < weight.n * 2 + 600 * 1024 * 1024 {
+                return Err("packed head scratch would breach reserve".into());
+            }
+            Some(GpuBuf::<u16>::alloc_uninit(weight.n)?)
+        } else {
+            None
+        };
+        let temporary = if let Some(bank) = &self.dense_stream {
+            bank.projection_scratch(weight.n)?
+        } else {
+            fallback.as_ref().unwrap().ptr
+        };
+        let work = (|| {
+            self.marlin_gemm(input, weight, temporary, 1)?;
+            let function = self
+                .device
+                .get_func("prefill_kernels", "bf16_to_fp32_kernel")
+                .ok_or("logit conversion kernel missing")?;
+            let mut dst = output;
+            let mut src = temporary;
+            let mut count = weight.n as i32;
+            unsafe {
+                launch(
+                    extract_cu_func(&function),
+                    (((weight.n + 255) / 256) as u32, 1, 1),
+                    (256, 1, 1),
+                    0,
+                    self.stream,
+                    &mut [
+                        &mut dst as *mut _ as _,
+                        &mut src as *mut _ as _,
+                        &mut count as *mut _ as _,
+                    ],
+                )?;
+            }
+            Ok(())
+        })();
+        let completion = if fallback.is_some() {
+            self.stream_sync()
+        } else {
+            Ok(())
+        };
+        work.and(completion)
+    }
+    pub(crate) fn debug_dense_packed_gemm(
+        &self,
+        weight: MarlinWeight,
+        input: u64,
+        output: u64,
+        rows: usize,
+    ) -> Result<(), String> {
+        self.la_gemm(
+            0,
+            "packed_replay",
+            input,
+            None,
+            &Some(weight),
+            &None,
+            output,
+            rows,
+        )
+    }
     fn marlin_gemm(&self, a: u64, w: &MarlinWeight, c: u64, m: usize) -> Result<(), String> {
         self.marlin_gemm_on_stream(
             a,
@@ -42933,6 +43016,7 @@ impl PrefillEngine {
             output_elems,
         )?;
         let w = MarlinWeight {
+            qwen_split: None,
             packed: desc.packed_ptr,
             scales: desc.scales_ptr,
             n: desc.rows,
@@ -42943,6 +43027,7 @@ impl PrefillEngine {
         };
         self.marlin_gemm(input_ptr, &w, output_ptr, m)?;
         let w_delta = MarlinWeight {
+            qwen_split: None,
             scales: delta_scales_ptr,
             ..w
         };
@@ -43027,6 +43112,7 @@ impl PrefillEngine {
         }
         let groups = desc.cols / desc.group_size;
         let w = MarlinWeight {
+            qwen_split: None,
             packed: desc.packed_ptr,
             scales: desc.scales_ptr,
             n: desc.rows,
@@ -43921,7 +44007,19 @@ impl PrefillEngine {
                 self.hqq_quantized_prefill_gemm_bf16(layer_idx, tensor_name, desc, a, c, m)
             }
         } else if let Some(w) = marlin {
-            self.marlin_gemm(a, w, c, m)
+            if let Some(split)=w.qwen_split {
+                let scratch=self.dense_stream.as_ref().ok_or("split projection requires dense bank")?.projection_scratch(m*w.n)?;
+                let first=MarlinWeight { qwen_split:None, packed:w.packed,scales:w.scales,n:split.first_rows,k:w.k,num_groups:w.num_groups,group_size:w.group_size,num_bits:w.num_bits };
+                let second=MarlinWeight { qwen_split:None, packed:split.second_packed,scales:split.second_scales,n:w.n-split.first_rows,k:w.k,num_groups:w.num_groups,group_size:w.group_size,num_bits:w.num_bits };
+                self.marlin_gemm(a,&first,scratch,m)?;
+                self.marlin_gemm(a,&second,scratch+(m*split.first_rows*2) as u64,m)?;
+                let function=self.device.get_func("prefill_kernels","qwen35_projection_output_kernel").ok_or("Qwen output reorder missing")?;
+                let mut dst=c;let mut src=scratch;let mut total=(m*w.n) as u64;let mut count=m as i32;
+                let mut nk=split.key_heads as i32;let mut dk=split.key_dim as i32;let mut band=split.value_band as i32;let mut mode=0i32;
+                unsafe { launch(extract_cu_func(&function), (((m*w.n+255)/256) as u32,1,1),(256,1,1),0,self.stream,
+                    &mut [&mut dst as *mut _ as _,&mut src as *mut _ as _,&mut total as *mut _ as _,&mut count as *mut _ as _,&mut nk as *mut _ as _,&mut dk as *mut _ as _,&mut band as *mut _ as _,&mut mode as *mut _ as _])?; }
+                Ok(())
+            } else { self.marlin_gemm(a, w, c, m) }
         } else if let Some(w) = bf16 {
             if self.kernels.qwen35_gdn_accurate.is_some()
                 && matches!(tensor_name, "in_proj_qkvz" | "in_proj_ba") {
@@ -68057,6 +68155,7 @@ impl PrefillEngine {
                                     .collect::<Vec<_>>()
                             } else {
                                 let ref_w13 = MarlinWeight {
+                                    qwen_split: None,
                                     packed: packed_ptr,
                                     scales: scales_ptr,
                                     n: w1_n,
@@ -68157,6 +68256,7 @@ impl PrefillEngine {
                             } else {
                                 let raw_scale_bits = download_device_u16(scales_ptr, scales_len)?;
                                 let ref_w13 = MarlinWeight {
+                                    qwen_split: None,
                                     packed: packed_ptr,
                                     scales: scales_ptr,
                                     n: w1_n,
@@ -68448,6 +68548,7 @@ impl PrefillEngine {
                                 )
                             } else {
                                 let ref_w13 = MarlinWeight {
+                                    qwen_split: None,
                                     packed: packed_ptr,
                                     scales: scales_ptr,
                                     n: w1_n,
@@ -68518,6 +68619,7 @@ impl PrefillEngine {
                                         )
                                     } else {
                                         let ref_w13 = MarlinWeight {
+                                            qwen_split: None,
                                             packed: packed_ptr,
                                             scales: scales_ptr,
                                             n: w1_n,
@@ -68533,6 +68635,7 @@ impl PrefillEngine {
                                             Ok(None)
                                         } else {
                                             let ref_w13 = MarlinWeight {
+                                                qwen_split: None,
                                                 packed: packed_ptr,
                                                 scales: scales_ptr,
                                                 n: w1_n,
@@ -68758,6 +68861,7 @@ impl PrefillEngine {
                 ));
             }
             let ref_w13 = MarlinWeight {
+                qwen_split: None,
                 packed: ref_packed,
                 scales: ref_scales,
                 n: w1_n,
@@ -69409,6 +69513,7 @@ impl PrefillEngine {
                         compute_bf16_gemm_row_cpu_reference(input_row, packed_ptr, expert_h, inter)?
                     } else {
                         let weight = MarlinWeight {
+                            qwen_split: None,
                             packed: packed_ptr,
                             scales: scales_ptr,
                             n: expert_h,
@@ -69880,6 +69985,7 @@ impl PrefillEngine {
 
                 // Run pipeline with ORIGINAL weights
                 let orig_w13 = MarlinWeight {
+                    qwen_split: None,
                     packed: orig_w1p,
                     scales: orig_w1s,
                     n: w1_n,
@@ -69902,6 +70008,7 @@ impl PrefillEngine {
                     )?;
                 }
                 let orig_w2 = MarlinWeight {
+                    qwen_split: None,
                     packed: orig_w2p,
                     scales: orig_w2s,
                     n: expert_h,
@@ -80346,6 +80453,7 @@ impl PrefillEngine {
 
         // w1 GEMM: [count, hidden] @ w13 -> [count, w13_n]
         let w13 = MarlinWeight {
+            qwen_split: None,
             packed: w13_packed,
             scales: w13_scales,
             n: w13_n,
@@ -80376,6 +80484,7 @@ impl PrefillEngine {
 
             // w2 GEMM: [count, inter] @ w2 -> [count, hidden]
             let w2 = MarlinWeight {
+                qwen_split: None,
                 packed: w2_packed,
                 scales: w2_scales,
                 n: h,
@@ -80412,6 +80521,7 @@ impl PrefillEngine {
                 )?;
             }
             let w2 = MarlinWeight {
+                qwen_split: None,
                 packed: w2_packed,
                 scales: w2_scales,
                 n: h,
@@ -81019,7 +81129,7 @@ impl PrefillEngine {
         };
 
         if let Some(ref lm) = self.lm_head {
-            self.marlin_gemm(last_tok, lm, *self.scratch.d_logits.device_ptr(), 1)?;
+            self.packed_head_logits(last_tok, lm, *self.scratch.d_logits.device_ptr())?;
         } else if self.lm_head_bf16_ptr != 0 {
             // BF16 LM head via cuBLAS GEMM
             use cudarc::cublas::result as cublas_result;
@@ -81572,6 +81682,7 @@ impl PrefillKernels {
                     "qwen35_silu_mul_batched_kernel",
                     "qwen35_projection_weights_kernel",
                     "qwen35_projection_output_kernel",
+                    "qwen35_projection_output_f32_kernel",
                     "qwen35_rope_batched_half_split_kernel",
                     "qwen35_gdn_serial_kernel",
                     "qwen35_la_fused_repeat_l2norm_bf16_kernel",
@@ -84252,7 +84363,7 @@ unsafe fn verify_sidecar_abi(
     true
 }
 
-fn load_marlin_mm() -> Option<MarlinMmFn> {
+pub(crate) fn load_marlin_mm() -> Option<MarlinMmFn> {
     let path = find_marlin_so()?;
     unsafe {
         let lib = open_sidecar_library(&path, "Marlin")?;

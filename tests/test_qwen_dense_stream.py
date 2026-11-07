@@ -54,7 +54,7 @@ class BoundedQwenContracts(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,'available host RAM'):load_host_backed(model,loader)
                 self.assertFalse(loader.mock_calls)
             model.quant_cfg.dense_mlp='int8'
-            with self.assertRaisesRegex(ValueError,'source BF16'):load_host_backed(model,loader)
+            with self.assertRaisesRegex(ValueError,'uniform INT4'):load_host_backed(model,loader)
             self.assertFalse(loader.mock_calls)
 
     def test_bounded_launcher_renders_shared_slab_without_printing(self):
@@ -78,6 +78,63 @@ class BoundedQwenContracts(unittest.TestCase):
             launcher._compute_budget=lambda:launcher.budget
             with contextlib.redirect_stdout(output):launcher.print_summary()
             self.assertIn('Weight slab',output.getvalue())
+
+    def test_packed_cache_rebuilds_incomplete_or_incompatible_artifacts(self):
+        from krasis.qwen_dense_stream import PackedCache
+        with tempfile.TemporaryDirectory() as directory:
+            cache=PackedCache.__new__(PackedCache)
+            cache.root=Path(directory);cache.identity='fixture';cache.entries={}
+            cache.store=mock.Mock()
+            expected=128*512//2+128*(512//128)*2
+            def pack(ptr,rows,cols,path):Path(path).write_bytes(bytes(expected))
+            cache.store.pack_dense_int4_file.side_effect=pack
+            source=torch.zeros((128,512),dtype=torch.bfloat16)
+            marker=cache.convert(source,'projection')
+            self.assertEqual(marker.device.type,'meta')
+            self.assertEqual(marker._packed_bytes,expected)
+            cache.convert(source,'projection')
+            self.assertEqual(cache.store.pack_dense_int4_file.call_count,1)
+            path=cache.root/'projection.bin';meta=cache.root/'projection.json'
+            path.write_bytes(bytes(expected-1));cache.convert(source,'projection')
+            self.assertEqual(cache.store.pack_dense_int4_file.call_count,2)
+            record=json.loads(meta.read_text());record['identity']='different';meta.write_text(json.dumps(record))
+            cache.convert(source,'projection')
+            self.assertEqual(cache.store.pack_dense_int4_file.call_count,3)
+            path.write_bytes(b'x'+bytes(expected-1));cache.convert(source,'projection')
+            self.assertEqual(cache.store.pack_dense_int4_file.call_count,4)
+
+    @mock.patch.dict('os.environ',{},clear=True)
+    def test_joint_plan_reuses_head_slab_without_increasing_total_allocation(self):
+        from krasis.qwen_dense_stream import packed_device_plan
+        raw=json.loads((Path(__file__).parent/'fixtures/qwen35-27b-config.json').read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory,'config.json').write_text(json.dumps(raw));cfg=ModelConfig.from_model_path(directory)
+            p=packed_device_plan(cfg,6144)
+            self.assertEqual(p['slab_bytes'],197345280)
+            self.assertEqual(p['resident_bytes']+p['slab_bytes'],(2048<<20)+655564800)
+            with mock.patch.dict('os.environ',{'KRASIS_QWEN_RESIDENT_MIB':'0'}):
+                p=packed_device_plan(cfg,6144)
+                self.assertEqual(p['resident_bytes'],0);self.assertEqual(p['slab_bytes'],655564800)
+            with mock.patch.dict('os.environ',{'KRASIS_QWEN_RESIDENT_MIB':'2048'}):
+                self.assertEqual(packed_device_plan(cfg,6144)['resident_bytes'],2048<<20)
+
+    def test_unsupported_large_projection_never_falls_back_to_full_gpu_bf16(self):
+        from krasis.qwen_dense_stream import PackedCache
+        cache=PackedCache.__new__(PackedCache);cache.cfg=SimpleNamespace(hidden_size=5120)
+        with self.assertRaisesRegex(ValueError,'Unsupported streamed INT4'):
+            cache.convert(torch.zeros((96,5120),dtype=torch.bfloat16),'unrecognised_projection')
+
+    def test_normal_server_defaults_select_packed_qwen_before_loading(self):
+        from krasis.server import _apply_dense_serving_policy
+        cfg=SimpleNamespace(model_type='qwen3_5_text',hidden_size=5120,num_hidden_layers=64,intermediate_size=17408,n_routed_experts=0)
+        args=SimpleNamespace(hcs=True,attention_quant='bf16',dense_mlp_quant='int8',lm_head_quant='int8',kv_dtype='k6v6',max_context_tokens=0,step_vision_quant='int4')
+        _apply_dense_serving_policy(args,cfg)
+        self.assertEqual((args.attention_quant,args.dense_mlp_quant,args.lm_head_quant),('int4',)*3)
+        self.assertEqual(args.kv_dtype,'bf16');self.assertEqual(args.step_vision_quant,'bf16')
+        self.assertEqual(args.max_context_tokens,4096);self.assertFalse(args.hcs)
+        args.attention_quant=args.dense_mlp_quant=args.lm_head_quant='bf16'
+        _apply_dense_serving_policy(args,cfg)
+        self.assertEqual(args.attention_quant,'bf16')
 
     def test_budget_includes_all_phases_and_reserve(self):
         c=SimpleNamespace(num_full_attention_layers=16,num_key_value_heads=4,num_attention_heads=24,

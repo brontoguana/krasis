@@ -447,6 +447,43 @@ pub fn generate_scale_perms() -> ([usize; 64], [usize; 32]) {
 /// Marlin format: packed `[K/16, 2*N]`, scales `[ceil(K/group_size), N]`
 ///
 /// N = rows (output dim), K = cols (input dim) of the original weight matrix.
+/// Direct packed-to-packed permutation. Peak scratch excludes N*K byte expansions.
+/// This is byte-identical to marlin_repack, including the scale permutation.
+pub fn marlin_repack_bounded(q: &QuantizedInt4) -> MarlinRepacked {
+    let (n,k)=(q.rows,q.cols);
+    assert!(n % 64 == 0 && k % 16 == 0);
+    let perm=generate_weight_perm_int4();
+    let row_len=n*16;
+    let mut packed=vec![0u32;n*k/8];
+    use rayon::prelude::*;
+    packed.par_iter_mut().enumerate().for_each(|(index,word)| {
+        let kt=index/(row_len/8);
+        let col=index%(row_len/8);
+        let mut result=0;
+        for j in 0..8 {
+            let at=col*8+j;
+            let original=(at/1024)*1024+perm[at%1024];
+            let nt=original/256;
+            let tk=(original%256)/16;
+            let tn=original%16;
+            let r=nt*16+tn;
+            let c=kt*16+tk;
+            let nibble=(q.packed[r*(k/8)+c/8] >> ((c%8)*4)) & 15;
+            result|=nibble << (j*4);
+        }
+        *word=result;
+    });
+    let ng=k.div_ceil(q.group_size);
+    let (grouped,single)=generate_scale_perms();
+    let sperm: &[usize]=if q.group_size<k {&grouped} else {&single};
+    let mut scales=vec![0u16;n*ng];
+    for (i,v) in scales.iter_mut().enumerate() {
+        let original=(i/sperm.len())*sperm.len()+sperm[i%sperm.len()];
+        *v=q.scales[(original%n)*ng+original/n];
+    }
+    MarlinRepacked {packed,scales,n,k,group_size:q.group_size}
+}
+
 pub fn marlin_repack(q: &QuantizedInt4) -> MarlinRepacked {
     let n = q.rows; // output dimension
     let k = q.cols; // input dimension (K)

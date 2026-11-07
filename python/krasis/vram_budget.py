@@ -2147,12 +2147,14 @@ def compute_launcher_budget(
     if bounded_qwen:
         if num_ranks != 1 or pp_partition != [total_layers] or dspark_mode != "off":
             raise ValueError("bounded Qwen requires one complete pipeline rank without speculation")
-        if (attention_quant, dense_mlp_quant, lm_head_quant, kv_dtype) != ("bf16", "bf16", "bf16", "bf16"):
-            raise ValueError("bounded Qwen requires source BF16 attention, MLP, head and KV")
-        from krasis.qwen_dense_stream import memory_plan
-        slab = model_cfg.vocab_size * model_cfg.hidden_size * 2
-        bounded_plan = memory_plan(model_cfg, slab, effective_context_limit,
-            min(gpu_vram_mb, int(os.environ.get("KRASIS_QWEN_GPU_LIMIT_MIB", "8192"))))
+        if (attention_quant, dense_mlp_quant, lm_head_quant, kv_dtype) not in (("bf16",)*4,("int4","int4","int4","bf16")):
+            raise ValueError("bounded Qwen requires uniform INT4 or reference BF16 weights and BF16 KV")
+        from krasis.qwen_dense_stream import memory_plan, packed_device_plan
+        limit_mib=min(gpu_vram_mb,int(os.environ.get("KRASIS_QWEN_GPU_LIMIT_MIB","8192")))
+        device_plan=packed_device_plan(model_cfg,limit_mib) if lm_head_quant=="int4" else dict(slab_bytes=model_cfg.vocab_size*model_cfg.hidden_size*2,resident_bytes=0)
+        slab=device_plan['slab_bytes']
+        bounded_plan=memory_plan(model_cfg,slab,effective_context_limit,limit_mib,
+            resident_bytes=device_plan['resident_bytes'])
         parts = bounded_plan["allowance_bytes"]
         rank = ranks[0]
         for key in ("attention_mb", "shared_expert_mb", "dense_mlp_mb", "embedding_mb", "lm_head_mb", "expert_buffer_mb", "prefill_workspace_mb"):

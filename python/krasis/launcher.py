@@ -1441,9 +1441,9 @@ OPTIONS = [
     ConfigOption("Attention quant", "attention_quant",
                  choices=list(INTERACTIVE_ATTENTION_QUANT_CHOICES), affects_budget=True),
     ConfigOption("Dense MLP precision", "dense_mlp_quant",
-                 choices=["int8", "bf16"], affects_budget=True),
+                 choices=["int4", "int8", "bf16"], affects_budget=True),
     ConfigOption("LM head precision", "lm_head_quant",
-                 choices=["int8", "bf16"], affects_budget=True, advanced=True),
+                 choices=["int4", "int8", "bf16"], affects_budget=True, advanced=True),
     ConfigOption("Vision quant", "vision_quant",
                  choices=["int4", "bf16"], advanced=True),
     ConfigOption("VRAM safety margin", "vram_safety_margin",
@@ -2230,12 +2230,16 @@ class Launcher:
         model_path = str((self.model_info or {}).get("path", self.cfg.model_path or ""))
         return supported_model_for_path(model_path) if model_path else None
 
+    def _bounded_qwen_profile(self) -> bool:
+        from krasis.qwen_dense_stream import enabled
+        return bool(self.cfg.model_path and enabled(ModelConfig.from_model_path(self.cfg.model_path)))
+
     def _attention_modes(self) -> List[str]:
         spec = self._supported_model_spec()
         if spec is not None:
             return list(spec.attention_modes)
         if (self.model_info or {}).get("arch") == "qwen3_5_text":
-            return ["bf16", *INTERACTIVE_ATTENTION_QUANT_MODES]
+            return (["int4"] if self._bounded_qwen_profile() else []) + ["bf16", *INTERACTIVE_ATTENTION_QUANT_MODES]
         if self._is_deepseek_v4():
             return list(DEEPSEEK_V4_ATTENTION_QUANT_MODES)
         if self._is_gemma4():
@@ -2290,13 +2294,15 @@ class Launcher:
             if not self.cfg._max_context_tokens_explicit and bounded:
                 self.cfg.max_context_tokens = min(4096, model_limit or 4096)
             if not self.cfg._attention_quant_explicit:
-                self._set_interactive_attention_quant("bf16")
+                self._set_interactive_attention_quant(("int4" if bounded else "bf16"))
+            if bounded and not self.cfg._vision_quant_explicit:
+                self.cfg.vision_quant = "bf16"
             if not self.cfg._kv_dtype_explicit:
                 self.cfg.kv_dtype = "bf16"
             if not self.cfg._dense_mlp_quant_explicit:
-                self.cfg.dense_mlp_quant = "bf16"
+                self.cfg.dense_mlp_quant = ("int4" if bounded else "bf16")
             if not self.cfg._lm_head_quant_explicit:
-                self.cfg.lm_head_quant = "bf16"
+                self.cfg.lm_head_quant = ("int4" if bounded else "bf16")
         elif self._is_deepseek_v4():
             if not self.cfg._attention_quant_explicit:
                 self._set_interactive_attention_quant("hqq6")
@@ -3497,6 +3503,8 @@ class Launcher:
                 choices = self._vision_choices()
             else:
                 choices = opt.choices
+                if opt.key in ("dense_mlp_quant","lm_head_quant") and not self._bounded_qwen_profile():
+                    choices=[choice for choice in choices if choice!="int4"]
             try:
                 idx = choices.index(val)
             except ValueError:

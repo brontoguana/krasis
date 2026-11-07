@@ -19,9 +19,9 @@ orchestration, CUDA kernels, cached quantized weights, and measured VRAM
 budgeting.
 
 The development branch also provides [bounded Qwen3.5-27B text and images](QWEN35.md),
-with demonstrated operation under a 6GB ceiling on an A6000 and approximately
-110 GiB host RAM use. This experimental profile retains numerical qualification
-caveats and has not been tested on an actual 6GB/8GB card.
+with native INT4 streaming, approximately 16–20 GiB serving RAM, and demonstrated
+text/vision operation under 4/6/8 GiB A6000 allowances. This experimental profile
+retains numerical qualification caveats; actual small-card hardware is untested.
 
 ## Install
 

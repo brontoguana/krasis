@@ -793,7 +793,9 @@ class KrasisModel:
         from krasis.qwen_dense_stream import enabled as bounded_dense_enabled
         self.bounded_dense = bounded_dense_enabled(self.cfg)
         _apply_max_context_limit(self.cfg, max_context_tokens)
-        self.quant_cfg = quant_cfg or QuantConfig()
+        self.quant_cfg = quant_cfg or (QuantConfig(attention='int4',dense_mlp='int4',lm_head='int4',kv_cache_format='bf16',step_vision_quant='bf16') if self.bounded_dense else QuantConfig())
+        if any(getattr(self.quant_cfg,key)=="int4" for key in ("attention","dense_mlp","lm_head")) and not self.bounded_dense:
+            raise ValueError("Streamed language INT4 is implemented only for bounded dense Qwen")
         if self.cfg.is_deepseek_v4:
             if self.quant_cfg.kv_cache_format not in ("native", "bf16"):
                 raise ValueError(
@@ -2782,7 +2784,7 @@ class KrasisModel:
 
         # Phase 1: GPU weights
         print(f"\n\033[1m\033[36m▸ Loading GPU weights\033[0m", flush=True)
-        logger.info("Phase 1: Loading GPU weights (streaming INT8)...")
+        logger.info("Phase 1: Loading weights (%s)...", "bounded "+self.quant_cfg.attention if self.bounded_dense else "streaming INT8")
         loader = WeightLoader(self.cfg, self.quant_cfg)
         self._load_gpu_weights(loader)
         loader.close()
@@ -10056,6 +10058,13 @@ class KrasisModel:
         """
         self._require_supported_runtime_features()
         from krasis import GpuDecodeStore
+        from krasis.qwen_dense_stream import register_weight as _register_dense_weight, tensorcore_decode_enabled
+        self._dense_registered_weights=[]
+        def register_dense_weight(store,group,weight):
+            wid=_register_dense_weight(store,group,weight)
+            if hasattr(weight,'_packed_file'):
+                self._dense_registered_weights.append((wid,group,weight))
+            return wid
 
         device = torch.device(self.ranks[0].device)
         gpu_idx = device.index or 0
@@ -10137,8 +10146,11 @@ class KrasisModel:
         )
         # Large source tensors remain host-backed in bounded dense mode.
         if self.bounded_dense:
-            store.configure_dense_stream(self._dense_stream_slab_bytes)
-            store.register_streamed_embedding(self.embedding.data_ptr(), *self.embedding.shape)
+            store.configure_dense_stream(self._dense_stream_slab_bytes,self._dense_memory_plan["allowance_bytes"].get("resident_weights",0),
+                tensorcore_decode=self.quant_cfg.attention=="int4" and tensorcore_decode_enabled())
+            if hasattr(self.embedding,"_packed_file"):
+                store.register_mapped_embedding_file(self.embedding._packed_file,*self.embedding.shape)
+            else:store.register_streamed_embedding(self.embedding.data_ptr(), *self.embedding.shape)
         else:
             store.set_embedding(self.embedding.data_ptr())
         store.set_embedding_scale(float(getattr(self.cfg, "embedding_scale", 1.0)))
@@ -10158,12 +10170,15 @@ class KrasisModel:
             lm_head_ptr = lm_head_bf16.data_ptr()
             lm_head_rows = lm_head_bf16.shape[0]
             lm_head_cols = lm_head_bf16.shape[1]
+        elif hasattr(lm_head_w,"_packed_file"):
+            lm_head_ptr=0
+            lm_head_rows,lm_head_cols=lm_head_w.shape
         else:
             lm_head_ptr = lm_head_w.data_ptr()
             lm_head_rows = lm_head_w.shape[0]
             lm_head_cols = lm_head_w.shape[1]
         store.set_lm_head(
-            store.register_streamed_weight((1 << 64) - 1, lm_head_ptr, lm_head_rows, lm_head_cols)
+            register_dense_weight(store,(1 << 64) - 1,lm_head_w)
             if self.bounded_dense else store.register_weight(lm_head_ptr, lm_head_rows, lm_head_cols, 0)
         )
 
@@ -10269,9 +10284,7 @@ class KrasisModel:
             stores (packed, scales, workspace, scalar_type, N, K) on
             self._marlin_attn_weights[wid] for prefill GEMM."""
             if self.bounded_dense:
-                if w.device.type != "cpu" or w.dtype != torch.bfloat16 or not w.is_contiguous():
-                    raise ValueError("bounded dense weights require contiguous host BF16")
-                return store.register_streamed_weight(layer_idx, w.data_ptr(), *w.shape)
+                return register_dense_weight(store,layer_idx,w)
             # Stash BF16 on CPU for aux store quantization (only when streaming is off)
             if self._aux_bf16_stash is not None and layer_idx >= 0:
                 w_stash = w.cpu().contiguous() if w.is_cuda else w.contiguous()
@@ -11297,9 +11310,9 @@ class KrasisModel:
                 up = self._dense_mlp_tensor(layer.dense_mlp["up_proj"])
                 dp = self._dense_mlp_tensor(layer.dense_mlp["down_proj"])
                 self._rust_decode_weights.extend([gp, up, dp])
-                gp_wid = (store.register_streamed_weight(layer_idx, gp.data_ptr(), *gp.shape) if self.bounded_dense else store.register_weight(gp.data_ptr(), gp.shape[0], gp.shape[1], 0))
-                up_wid = (store.register_streamed_weight(layer_idx, up.data_ptr(), *up.shape) if self.bounded_dense else store.register_weight(up.data_ptr(), up.shape[0], up.shape[1], 0))
-                dp_wid = (store.register_streamed_weight(layer_idx, dp.data_ptr(), *dp.shape) if self.bounded_dense else store.register_weight(dp.data_ptr(), dp.shape[0], dp.shape[1], 0))
+                gp_wid = (register_dense_weight(store,layer_idx,gp) if self.bounded_dense else store.register_weight(gp.data_ptr(), gp.shape[0], gp.shape[1], 0))
+                up_wid = (register_dense_weight(store,layer_idx,up) if self.bounded_dense else store.register_weight(up.data_ptr(), up.shape[0], up.shape[1], 0))
+                dp_wid = (register_dense_weight(store,layer_idx,dp) if self.bounded_dense else store.register_weight(dp.data_ptr(), dp.shape[0], dp.shape[1], 0))
                 store.register_mlp(
                     layer_idx,
                     "dense",

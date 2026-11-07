@@ -14770,6 +14770,13 @@ extern "C" __global__ void qwen35_projection_output_kernel(__nv_bfloat16* out,co
  int source=c<first?t*first+c:rows*first+t*(width-first)+c-first;
  out[(unsigned long long)t*width+qwen35_packed_row(c,nk,dk,band,ba)]=in[source];
 }
+extern "C" __global__ void qwen35_projection_output_f32_kernel(float* out,const float* in,unsigned long long total,int rows,int nk,int dk,int band,int ba){
+ unsigned long long i=(unsigned long long)blockIdx.x*blockDim.x+threadIdx.x;if(i>=total)return;
+ int width=ba?2*nk*band:nk*(2*dk+2*band);int c=i%width,t=i/width;
+ int first=ba?width/2:2*nk*dk+nk*band;
+ int source=c<first?t*first+c:rows*first+t*(width-first)+c-first;
+ out[(unsigned long long)t*width+qwen35_packed_row(c,nk,dk,band,ba)]=in[source];
+}
 // Qwen's public BF16 equation rounds trig tables and both products before
 // adding. One lane owns BOTH halves, preventing in-place cross-warp reads.
 extern "C" __global__ void qwen35_rope_batched_half_split_kernel(

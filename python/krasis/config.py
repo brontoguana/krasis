@@ -9,6 +9,7 @@ from krasis.checkpoint_identity import cache_namespace
 
 
 ATTENTION_QUANT_CHOICES = (
+    "int4",
     "bf16",
     "hqq4",
     "hqq46",
@@ -414,7 +415,7 @@ class QuantConfig:
             )
         self.kv_cache_format = kv_aliases[self.kv_cache_format]
 
-        if self.attention in ("int4", "int8"):
+        if self.attention == "int8":
             raise ValueError(
                 f"Unsupported attention quant '{self.attention}'. "
                 "Naive int4/int8 attention has been removed; use 'hqq4', 'hqq46', 'hqq46_auto', 'hqq6', 'hqq68_auto', 'hqq8', or 'bf16'."
