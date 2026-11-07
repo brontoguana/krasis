@@ -36556,7 +36556,7 @@ impl PrefillEngine {
         output: u64,
         rows: usize,
     ) -> Result<(), String> {
-        self.la_gemm(
+        let result = self.la_gemm(
             0,
             "packed_replay",
             input,
@@ -36565,7 +36565,11 @@ impl PrefillEngine {
             &None,
             output,
             rows,
-        )
+        );
+        // The store's decode stream is different from this engine's stream.
+        // Retain caller operands and complete actual writers even on error.
+        let completion = self.stream_sync();
+        result.and(completion)
     }
     fn marlin_gemm(&self, a: u64, w: &MarlinWeight, c: u64, m: usize) -> Result<(), String> {
         self.marlin_gemm_on_stream(
@@ -43989,6 +43993,21 @@ impl PrefillEngine {
         c: u64,
         m: usize,
     ) -> Result<(), String> {
+        let diagnostic_dims = if self.kernels.qwen35_gdn_accurate.is_some()
+            && (std::env::var_os("KRASIS_QWEN_BOUNDARY_DIR").is_some()
+                || std::env::var_os("KRASIS_QWEN_SUBSTITUTION_DIR").is_some())
+        {
+            Some(if let Some(w) = marlin { (w.n, w.k) }
+                else if let Some(w) = bf16 { (w.n, w.k) }
+                else if let Some(w) = hqq { (w.rows, w.cols) }
+                else { return Err("Qwen diagnostic projection has no descriptor".into()); })
+        } else { None };
+        // Observe before dispatch: output may alias input for an O projection.
+        if let Some((_, k)) = diagnostic_dims {
+            self.qwen35_boundary(&format!("linear_{tensor_name}_input"), layer_idx,
+                self.active_prefill_chunk_start, a, m * k)?;
+        }
+        let result = (|| -> Result<(), String> {
         #[cfg(feature = "scalar-gdn-test")]
         if self.selected_scalar_gdn.is_some()
             && self
@@ -44030,6 +44049,14 @@ impl PrefillEngine {
                 "GEMM {tensor_name}: no HQQ, Marlin, or BF16 weight available"
             ))
         }
+
+        })();
+        result?;
+        if let Some((n, _)) = diagnostic_dims {
+            self.qwen35_boundary(&format!("linear_{tensor_name}_output"), layer_idx,
+                self.active_prefill_chunk_start, c, m * n)?;
+        }
+        Ok(())
     }
 
     /// Match the published independent QKV/Z and B/A contractions. Combining
@@ -57996,6 +58023,9 @@ impl PrefillEngine {
             proj_buf,
             m,
         )?;
+        // Diagnostic-only packed-equation interventions before convolution.
+        // Extent checks and stream ownership are shared with the other Qwen boundaries.
+        self.qwen35_boundary("gdn_projection", layer_idx, chunk_start, proj_buf, m * qkvz_dim)?;
         self.observe_gdn_prefill_projection(
             layer_idx,
             "in_proj_qkvz",

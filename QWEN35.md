@@ -105,17 +105,31 @@ it is not the default INT4 implementation.
 
 Complete independent inverse-layout GEMV and 65-row batched GEMM checks pass at
 unchanged `atol=.03, rtol=.01`, including the complete vocabulary head and both
-recurrent projection output types. Text, coding, square/rectangular images,
+recurrent projection output types. Earlier arithmetic/is_even smoke, square/rectangular images,
 image-dependent follow-up, reset, cancellation, cached attention and RAM session
 restoration pass. Changing residency preserves all 128 prefix-state arrays and
 all logits bitwise. Graph execution is active, with stable weight pointers.
 
 Numerical evidence is kept distinct: the preserved BF16 reference passes its
-complete fixed 64-layer gate. The independent INT4 reference has the same top-ten
-first-token ranking and KL divergence about 3.3e-6, but its full-array comparison
-still fails the unchanged absolute/relative gate (67 of 128 state arrays).
-Those failures are retained; these task and operator passes do not establish
-canonical ADQ/release admission or general quantised model quality.
+complete fixed 64-layer gate. The original INT4 reference uses different
+projection reductions, an FP32 head and BF16 cache storage for recurrent states.
+A bounded investigation checks all 496 real projection contractions (400 INT4
+contractions and 96 BF16 exceptions) against independent equations: all
+109,312,000 output values pass unchanged
+`atol=.03, rtol=.01`. Substituting native projection outputs into the reference
+makes every later projection input and all 128 outgoing state arrays bit-identical;
+complete logits pass. This localises accumulated differences to contraction
+rounding, rather than a demonstrated packing or recurrence defect.
+
+The unconditioned whole-model backend comparison still fails, including after
+matching the packed equation and precision boundaries. The conditioned replay is
+a causal diagnostic, not an independent whole-model admission pass. All original
+failures remain preserved. Bounded task tests and operator agreement do not
+establish canonical ADQ/release admission or general quantised quality. A bounded
+global-dedup coding task fails identically in INT4 and preserved BF16; filtering,
+arithmetic and image-shape tasks pass in both profiles. See
+`krasis-internal/qwen27b-int4-correctness-236009/RESULTS.md` for contracts, causal
+controls, practical coding limitations and the repaired diagnostic stream wait.
 
 ## Arête compatibility and qualification limits
 

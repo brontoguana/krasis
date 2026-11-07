@@ -2,6 +2,9 @@
 
 ## Unreleased — bounded Qwen3.5
 
+- Synchronize packed GEMM diagnostics on the prefill engine stream before returning results or errors, preventing immediate host copies from observing unfinished output.
+- Add extent-checked Qwen projection input/output boundaries for real-operand arithmetic and causal substitutions; preserve serving defaults and arithmetic.
+
 - Match bounded Qwen FP32 chunked GDN contraction, decay scan and four-accumulator reduction order; charge 32 MiB workspace and retain serial opt-out.
 - Match Qwen outer and attention-head RMS variance reduction on rounded residual inputs; retain an explicit legacy control.
 - Preserve precise exponential, division and warp reduction for bounded Qwen text softmax; retain legacy replay control.
