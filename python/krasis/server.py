@@ -473,6 +473,16 @@ def _krasis_runtime_code_hash() -> dict[str, Any]:
         "python/krasis/model.py",
         "python/krasis/config.py",
         "python/krasis/tokenizer.py",
+        "python/krasis/gemma4_bounded.py",
+        "python/krasis/gemma4_native_vision.py",
+        "python/krasis/gemma4_vision.py",
+        "python/krasis/qwen_dense_stream.py",
+        "src/dense_stream.rs",
+        "src/gemma4_attention.rs",
+        "src/gemma4_vision.rs",
+        "src/cuda/gemma4_attention.cu",
+        "src/cuda/gemma4_vision.cu",
+        "src/cuda/flash_attn/fa2/qwen_vision_sdpa.cu",
         "src/server.rs",
         "src/gpu_decode.rs",
         "src/gpu_prefill.rs",
@@ -2965,6 +2975,21 @@ def _apply_dense_serving_policy(args, cfg) -> None:
     """Dense models have no routed experts to stream or retain in HCS."""
     if cfg.n_routed_experts <= 0:
         args.hcs = False
+    if getattr(args, 'gemma_8gb', False):
+        if not cfg.gemma4_text:
+            raise ValueError('--gemma-8gb requires a Gemma4 checkpoint')
+        os.environ['KRASIS_GEMMA_8GB'] = '1'
+    from krasis.gemma4_bounded import enabled as bounded_gemma_enabled, DEFAULT_CONTEXT
+    if bounded_gemma_enabled(cfg):
+        if (args.attention_quant, args.dense_mlp_quant, args.lm_head_quant) == ('bf16', 'int8', 'int8'):
+            args.attention_quant, args.dense_mlp_quant, args.lm_head_quant = 'hqq4', 'int4', 'int4'
+        if args.kv_dtype == 'k4v4':
+            raise ValueError('Gemma ring-window k4v4 remains unqualified; use k6v6')
+        args.kv_dtype = 'k6v6'
+        args.ring_window_kv = True
+        args.step_vision_quant = 'int4'
+        if not getattr(args, 'max_context_tokens', 0):
+            args.max_context_tokens = DEFAULT_CONTEXT
     from krasis.qwen_dense_stream import enabled as bounded_dense_enabled
     if bounded_dense_enabled(cfg):
         if (args.attention_quant,args.dense_mlp_quant,args.lm_head_quant)==('bf16','int8','int8'):
@@ -3078,6 +3103,7 @@ def main():
             "CFG_KV_CACHE_MB": "kv_cache_mb",
             "CFG_MAX_CONTEXT_TOKENS": "max_context_tokens",
             "CFG_RING_WINDOW_KV": "ring_window_kv",
+            "CFG_GEMMA_8GB": "gemma_8gb",
             "CFG_VRAM_SAFETY_MARGIN": "vram_safety_margin",
             "CFG_DYNAMIC_HCS": "dynamic_hcs",
             "CFG_DYNAMIC_HCS_TAIL_BLOCKS": "dynamic_hcs_tail_blocks",
@@ -3221,6 +3247,8 @@ def main():
                         help="KV cache size in MB (default: 1000)")
     parser.add_argument("--max-context-tokens", type=int, default=0,
                         help="Explicit runtime context cap; 0 uses the model limit")
+    parser.add_argument("--gemma-8gb", action="store_true",
+                        help="Use the native INT4 Gemma 26B-A4B text/image profile (automatic on <=8 GiB GPUs)")
     parser.add_argument("--ring-window-kv", action="store_true",
                         help="Experimental: cap sliding-attention KV layers to their physical window; requires correctness validation")
     parser.add_argument("--heatmap-path", default=None,
@@ -3996,6 +4024,10 @@ def main():
         SAFETY_MARGIN_MB = args.vram_safety_margin
     else:
         SAFETY_MARGIN_MB = 600
+    if getattr(_model, 'bounded_gemma', False):
+        # Leave 64 MiB beyond the 600 MiB contract for transient library and
+        # driver allocations observed at the larger-context boundary.
+        SAFETY_MARGIN_MB = max(SAFETY_MARGIN_MB, 664)
     _vram_poll_raw = os.environ.get("KRASIS_VRAM_MONITOR_POLL_MS")
     if _vram_poll_raw is None:
         _vram_poll_ms = 50

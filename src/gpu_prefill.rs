@@ -11441,6 +11441,7 @@ pub struct PrefillEngine {
     pub prefill_kv_temp_v: Option<CudaSlice<u8>>,
     pub prefill_kv_layer_offsets: Vec<usize>,
     pub prefill_kv_layer_strides: Vec<usize>,
+    pub prefill_kv_ring_capacity: Vec<usize>,
     pub prefill_kv_temp_seq: usize,
     pub prefill_kv_temp_layers: usize,
     /// Temporary prefill-stage representation: 0=BF16, 1=FP8 E4M3.
@@ -24681,6 +24682,7 @@ impl PrefillEngine {
         self.prefill_kv_temp_v = None;
         self.prefill_kv_layer_offsets.clear();
         self.prefill_kv_layer_strides.clear();
+        self.prefill_kv_ring_capacity.clear();
         self.prefill_kv_temp_seq = 0;
         self.prefill_kv_temp_layers = 0;
         self.prefill_kv_temp_format = 1;
@@ -24777,6 +24779,9 @@ impl PrefillEngine {
             .max(self.decode_kv_k_radius_ptrs.len());
         let mut offsets = vec![usize::MAX; ptr_count];
         let mut strides = vec![0usize; ptr_count];
+        let mut ring_capacity = vec![0usize; ptr_count];
+        let bounded_gemma_ring = self.dense_stream.is_some() && self.is_gemma4_model()
+            && std::env::var("KRASIS_GEMMA_BOUNDED_STAGE").as_deref()==Ok("1");
         let mut total_elements = 0usize;
         for &layer_idx in &active_layers {
             let layer = self.layer_weights.get(layer_idx).ok_or_else(|| {
@@ -24792,7 +24797,14 @@ impl PrefillEngine {
                     layer_idx
                 ));
             }
-            let layer_elements = prompt_tokens
+            if bounded_gemma_ring && layer.gqa_sliding_window>0 {
+                if layer.gqa_sliding_window!=1024 || layer.gqa_head_dim!=256 || layer.gqa_num_kv_heads!=8 || self.decode_kv_format!=7 {
+                    return Err("bounded Gemma stage requires the validated 1024-window k6v6 geometry".into());
+                }
+                ring_capacity[layer_idx]=1056;
+            }
+            let physical_rows=if ring_capacity[layer_idx]>0{ring_capacity[layer_idx]}else{prompt_tokens};
+            let layer_elements = physical_rows
                 .checked_mul(layer_stride)
                 .ok_or("stage-exact prefill KV elements/layer overflow")?;
             offsets[layer_idx] = total_elements;
@@ -24817,7 +24829,8 @@ impl PrefillEngine {
                         .get(layer_idx)
                         .is_some_and(|stride| *stride == strides[layer_idx])
             });
-            if !layout_matches || self.prefill_kv_temp_layers != active_layers.len() {
+            if !layout_matches || self.prefill_kv_temp_layers != active_layers.len()
+                || self.prefill_kv_ring_capacity != ring_capacity {
                 return Err("active stage continuation layout changed".to_string());
             }
             if self.prefill_kv_temp_seq >= prompt_tokens {
@@ -24852,7 +24865,7 @@ impl PrefillEngine {
                 self.kv_tq4_sign_ptrs = vec![0u64; ptr_count];
                 self.kv_format = stage_format;
                 self.kv_max_seq = self.prefill_kv_temp_seq;
-                self.kv_max_seq_by_layer = vec![self.prefill_kv_temp_seq; ptr_count];
+                self.kv_max_seq_by_layer = (0..ptr_count).map(|i|self.stage_layer_capacity(i)).collect();
                 self.kv_num_blocks = 0;
                 self.kv_num_blocks_by_layer = vec![0usize; ptr_count];
                 log::info!(
@@ -24926,7 +24939,8 @@ impl PrefillEngine {
             for &layer_idx in &active_layers {
                 let old_offset = self.prefill_kv_layer_offsets[layer_idx];
                 let new_offset = offsets[layer_idx];
-                let copy_bytes = prefix
+                let copy_rows=if ring_capacity[layer_idx]>0{ring_capacity[layer_idx]}else{prefix};
+                let copy_bytes = copy_rows
                     .checked_mul(strides[layer_idx])
                     .and_then(|elements| elements.checked_mul(stage_element_size))
                     .ok_or("active stage prefix byte count overflow")?;
@@ -24990,6 +25004,7 @@ impl PrefillEngine {
         self.prefill_kv_temp_v = Some(temp_v);
         self.prefill_kv_layer_offsets = offsets;
         self.prefill_kv_layer_strides = strides;
+        self.prefill_kv_ring_capacity = ring_capacity;
         self.prefill_kv_temp_seq = prompt_tokens;
         self.prefill_kv_temp_layers = active_layers.len();
         self.prefill_kv_temp_format = stage_format;
@@ -25003,7 +25018,7 @@ impl PrefillEngine {
         self.kv_tq4_sign_ptrs = vec![0u64; ptr_count];
         self.kv_format = stage_format;
         self.kv_max_seq = prompt_tokens;
-        self.kv_max_seq_by_layer = vec![prompt_tokens; ptr_count];
+        self.kv_max_seq_by_layer = (0..ptr_count).map(|i|self.stage_layer_capacity(i)).collect();
         self.kv_num_blocks = 0;
         self.kv_num_blocks_by_layer = vec![0usize; ptr_count];
         log::info!(
@@ -25137,8 +25152,8 @@ impl PrefillEngine {
             let row_bytes = self.prefill_kv_layer_strides[layer_idx]
                 .checked_mul(element_size)
                 .ok_or("stage-exact allocation row byte count overflow")?;
-            let storage_bytes = self
-                .prefill_kv_temp_seq
+            let capacity=self.stage_layer_capacity(layer_idx);
+            let storage_bytes = capacity
                 .checked_mul(row_bytes)
                 .ok_or("stage-exact allocation byte count overflow")?;
             for (suffix, kind, base) in [
@@ -25166,15 +25181,17 @@ impl PrefillEngine {
                     },
                     element_size,
                     shape: vec![
-                        self.prefill_kv_temp_seq,
+                        capacity,
                         self.prefill_kv_layer_strides[layer_idx],
                     ],
                     strides_bytes: vec![row_bytes, element_size],
-                    growth: crate::session_cache::SequenceStateGrowth::TokenRows {
+                    growth: if self.stage_ring_capacity(layer_idx)>0 {
+                        crate::session_cache::SequenceStateGrowth::Fixed
+                    } else {crate::session_cache::SequenceStateGrowth::TokenRows {
                         logical_tokens_per_row: 1,
-                        capacity_rows: self.prefill_kv_temp_seq,
+                        capacity_rows: capacity,
                         row_bytes,
-                    },
+                    }},
                 });
             }
         }
@@ -25698,8 +25715,15 @@ impl PrefillEngine {
                     layer_idx, temp_layer_stride, kv_stride
                 ));
             }
+            let stage_ring=self.stage_ring_capacity(layer_idx);
+            // Decode may have overwritten the oldest canonical ring rows since
+            // this boundary. Reconstruct its complete window from exact stage
+            // storage, including when the chat template rewinds a short suffix.
+            let wrapped_gemma_k6=self.is_gemma4_layer(layer_idx) && self.decode_kv_format==7
+                && layer.gqa_sliding_window>0 && layer_decode_max_seq<self.decode_kv_max_seq;
+            let export_start=if stage_ring>0 || wrapped_gemma_k6 {0}else{export_start_token};
             let (source_start, export_tokens) =
-                stage_exact_export_range(prompt_tokens, export_start_token, layer_decode_max_seq)?;
+                stage_exact_export_range(prompt_tokens, export_start, layer_decode_max_seq)?;
             if export_tokens == 0 {
                 continue;
             }
@@ -25720,6 +25744,20 @@ impl PrefillEngine {
                 .ok_or("stage-exact KV export source byte offset overflow")?;
             let mut p4 = k_base + source_byte_offset as u64;
             let mut p5 = v_base + source_byte_offset as u64;
+            if stage_ring>0 {
+                let row_bytes=kv_stride*stage_element_size;
+                let bytes=export_tokens*row_bytes;
+                if 2*bytes>self.scratch.d_fp32_scratch.len*4 {return Err("stage ring export scratch is too small".into());}
+                let temporary=*self.scratch.d_fp32_scratch.device_ptr();
+                self.gemma4_stage_ring_gather(k_base+(layer_offset*stage_element_size)as u64,temporary,export_tokens,row_bytes,source_start,stage_ring)?;
+                self.gemma4_stage_ring_gather(v_base+(layer_offset*stage_element_size)as u64,temporary+bytes as u64,export_tokens,row_bytes,source_start,stage_ring)?;
+                p4=temporary;p5=temporary+bytes as u64;
+            }
+            if wrapped_gemma_k6 {
+                self.gemma4_stage_k6_export(p0,p1,p2,p3,p4,p5,export_tokens,kv_stride,layer_decode_max_seq,source_start,self.prefill_kv_temp_format,self.polar4_norm_correction_mode)?;
+                converted+=1;
+                continue;
+            }
             // CUDA ABI order is M, kv_stride, max_seq, start_pos,
             // norm_correction. Keep construction centralized and covered by
             // a non-zero-start regression: swapping the final two arguments
@@ -25731,6 +25769,9 @@ impl PrefillEngine {
                 source_start,
                 self.polar4_norm_correction_mode,
             );
+            // FP8 conversion's last arguments are norm_correction then
+            // source_start_pos; BF16 append uses start_pos then correction.
+            if self.prefill_kv_temp_format==1 {std::mem::swap(&mut p9,&mut p10);}
             let kernel = match (self.prefill_kv_temp_format, self.decode_kv_format) {
                 (0, 7) => self.kernels.kv_cache_append_k6v6,
                 (0, 9) => self.kernels.kv_cache_append_k4v4,
@@ -25806,6 +25847,17 @@ impl PrefillEngine {
         sequence_start: usize,
     ) -> Result<(), String> {
         self.export_stage_exact_prefill_kv(prompt_tokens, sequence_start, true)
+    }
+
+    /// A bounded sliding stage can rewind only while every required old key
+    /// still exists. The 32-row margin covers short chat-template suffix edits.
+    /// Larger branches use a suitable RAM boundary or ordinary full prefill.
+    pub fn stage_prefix_rewind_safe(&self, boundary: usize, matched: usize) -> bool {
+        if self.dense_stream.is_none() || !self.is_gemma4_model()
+            || std::env::var("KRASIS_GEMMA_BOUNDED_STAGE").as_deref()!=Ok("1") {
+            return true;
+        }
+        matched.saturating_sub(1024)>=boundary.saturating_sub(1056)
     }
 
     pub fn arm_active_stage_continuation(&mut self, logical_tokens: usize) -> Result<(), String> {
@@ -26007,6 +26059,19 @@ impl PrefillEngine {
         unsafe {
             cuda_sys::lib().cuMemGetInfo_v2(&mut free_bytes, &mut total_bytes);
         }
+        // The chunk search deliberately has a 128-row floor. Refuse an
+        // impossible bounded Gemma entry before trying that allocation: its
+        // prompt-wide arena can exceed the remaining reserve even at 128 rows.
+        if self.dense_stream.is_some() && self.is_gemma4_model() {
+            let required = self.minimum_prefill_entry_free_bytes(prompt_tokens);
+            if free_bytes < required {
+                self.release_prefill_kv_temp();
+                return Err(format!(
+                    "out of memory: bounded Gemma prefill needs {} MiB free including minimum scratch, cold staging and {} MiB reserve; available {} MiB; rejected before scratch allocation",
+                    required.div_ceil(1024 * 1024), safety_margin_mb, free_bytes / (1024 * 1024),
+                ));
+            }
+        }
         // Size for this prompt: cap at prompt_tokens (no point allocating more).
         // Minimum 128: fused MoE Marlin kernels use block_size_m=64, need enough
         // tokens for stable sorted dispatch. 128 adds ~57 MB scratch overhead.
@@ -26171,7 +26236,11 @@ impl PrefillEngine {
         }
 
         let mut scratch_tokens = max_by_vram.min(target).max(128);
-        if self.dense_stream.is_some() { scratch_tokens = scratch_tokens.min(256); }
+        // Qwen split projections retain fixed 256-row reorder scratch. Gemma
+        // uses independent resident projections and the ordinary measured plan.
+        if self.dense_stream.is_some() && !self.is_gemma4_model() {
+            scratch_tokens = scratch_tokens.min(256);
+        }
         if let Some(diag_cap) = diag_cap {
             scratch_tokens = scratch_tokens.min(diag_cap);
         }
@@ -27375,7 +27444,14 @@ impl PrefillEngine {
             self.scratch.max_tokens
         };
         let capture_suffix_boundary = capture_boundary.map(|boundary| boundary - sequence_start);
-        let chunk_plan = if self.config.deepseek_v4_vision_max_tokens > 0 {
+        let chunk_plan = if self.prefill_kv_ring_capacity.iter().any(|&cap|cap>0)
+            && self.external_vision_block_ids_ptr!=0 {
+            if sequence_start!=0 || capture_suffix_boundary.is_some(){return Err("Gemma image requests remain uncacheable".into());}
+            self.stream_sync()?;
+            let mut blocks=vec![-1i32;total_m];
+            unsafe{cuda_sys::lib().cuMemcpyDtoH_v2(blocks.as_mut_ptr()as _,self.external_vision_block_ids_ptr,total_m*4).result().map_err(|e|e.to_string())?;}
+            build_gemma_image_chunk_plan(&blocks,max_chunk)?
+        } else if self.config.deepseek_v4_vision_max_tokens > 0 {
             if sequence_start != 0 || capture_suffix_boundary.is_some() {
                 return Err(
                     "DeepSeek-V4 image requests cannot use prefix-cache continuation boundaries"
@@ -44432,6 +44508,15 @@ impl PrefillEngine {
         sliding_window: usize,
         timing: Option<CustomTiledTiming>,
     ) -> Result<(), String> {
+        if self.prefill_kv_active && self.stage_ring_capacity(layer_idx)>0 {
+            return self.gemma4_window_ring_attention(layer_idx,q,k,v,layer_k_ptr,layer_v_ptr,attn_out,m,start_pos,self.stage_ring_capacity(layer_idx),self.kv_format as i32,self.external_vision_block_ids_ptr);
+        }
+        if self.dense_stream.is_some() && self.is_gemma4_layer(layer_idx)
+            && head_dim==512 && num_q_heads==16 && num_kv_heads==2 && sliding_window==0
+            && matches!(self.kv_format,0|1)
+            && std::env::var("KRASIS_GEMMA_FULL_HISTORY_WMMA").as_deref()==Ok("1") {
+            return self.gemma4_full_history_attention(layer_idx,q,k,v,layer_k_ptr,layer_v_ptr,attn_out,m,start_pos,self.kv_format as i32,softmax_scale);
+        }
         let hd512_base_tile_cols = if self.use_gemma_hqq4_k4_hd512_full_attn(
             layer_idx,
             start_pos,
@@ -50630,7 +50715,8 @@ impl PrefillEngine {
             && self.decode_kv_max_seq > 0
             && self.decode_kv_max_seq_for_layer(layer_idx) > 0
             && self.decode_kv_max_seq_for_layer(layer_idx) < self.decode_kv_max_seq;
-        let use_ring_fa2_window_prefill = use_sliding_window
+        let bounded_stage_ring=self.prefill_kv_active && self.stage_ring_capacity(layer_idx)>0;
+        let use_ring_fa2_window_prefill = use_sliding_window && !bounded_stage_ring
             && !gemma_vision_bidir_sliding
             && ring_window_decode_layer
             && self.kv_format == 1
@@ -50639,7 +50725,7 @@ impl PrefillEngine {
             && self.kernels.flash_attn_fwd_window.is_some()
             && fa2_supports_head_dim;
         let use_custom_sliding_prefill = use_sliding_window
-            && (gemma_vision_bidir_sliding
+            && (bounded_stage_ring || gemma_vision_bidir_sliding
                 || (ring_window_decode_layer && !use_ring_fa2_window_prefill)
                 || (self.prefill_kv_active
                     && (gemma_custom_window_prefill_enabled()
@@ -52203,7 +52289,10 @@ impl PrefillEngine {
         if gqa_debt_timing {
             self.record_gqa_append_gap_checkpoint(GQA_GAP_AFTER_APPEND_SETUP)?;
         }
-        if capture_kv_cache
+        if capture_kv_cache && self.prefill_kv_active && self.stage_ring_capacity(layer_idx)>0 {
+            kv_append_path="bounded_gemma_stage_ring";
+            self.gemma4_stage_ring_append(layer_idx,k,v,layer_k_ptr,layer_v_ptr,m,start_pos,num_kv_heads*head_dim,self.stage_ring_capacity(layer_idx),self.kv_format)?;
+        } else if capture_kv_cache
             && self.kv_format == 2
             && layer_idx < self.kv_k_radius_ptrs.len()
             && self.kv_k_radius_ptrs[layer_idx] != 0
@@ -100207,3 +100296,5 @@ include!("scalar_gdn_prefill.rs");
 include!("gdn_prefill_producer_observe.rs");
 
 include!("qwen35_reference_attention.rs");
+
+include!("gemma4_attention.rs");

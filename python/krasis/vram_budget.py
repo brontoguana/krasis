@@ -1545,7 +1545,8 @@ def compute_launcher_budget(
         )
     from krasis.qwen_dense_stream import enabled as bounded_dense_enabled
     bounded_qwen = bounded_dense_enabled(model_cfg)
-    effective_context_limit = max_context_tokens or (4096 if bounded_qwen else model_context_limit)
+    bounded_gemma = model_cfg.gemma4_text and dense_mlp_quant == "int4" and lm_head_quant == "int4"
+    effective_context_limit = max_context_tokens or (4096 if bounded_qwen else (32768 if bounded_gemma else model_context_limit))
     effective_kv_capacity_tokens = (
         math.ceil(effective_context_limit / PAGE_SIZE) * PAGE_SIZE
     )
@@ -1804,6 +1805,9 @@ def compute_launcher_budget(
     # Replicated on every GPU: embeddings and lm_head
     base_embed_bytes = cfg["vocab_size"] * hidden * 2      # always BF16
     base_lmhead_bytes = 0
+    if bounded_gemma:
+        base_embed_bytes = 0
+        base_lmhead_bytes = _component_weight_bytes(cfg["vocab_size"] * hidden, "int4", 128)
     if not cfg.get("tie_word_embeddings", True):
         base_lmhead_bytes = _component_weight_bytes(
             cfg["vocab_size"] * hidden, lm_head_quant, expert_group_size,
@@ -1936,6 +1940,14 @@ def compute_launcher_budget(
             # INT8 is a precision choice, not native dense VRAM compression.
             dense_mlp_bytes += dense_mlp_params_per_layer * 2 * dn
 
+        if bounded_gemma:
+            # Gemma has a parallel dense MLP in every MoE layer. Its down
+            # projection uses group 64; the others use group 128.
+            intermediate = model_cfg.intermediate_size
+            dense_mlp_bytes = n_layers * (
+                2 * _component_weight_bytes(hidden * intermediate, 'int4', 128)
+                + _component_weight_bytes(hidden * intermediate, 'int4', 64))
+
         # Expert buffers (GPU side)
         # layer_group_size: 0 = persistent (all layers), >=1 = N layers at a time
         # When streaming with DMA pipelining, TWO groups are resident
@@ -2040,6 +2052,18 @@ def compute_launcher_budget(
                 if kv_alloc_tokens > 0
                 else 0
             )
+        elif bounded_gemma:
+            ring_tokens = min(effective_kv_capacity_tokens, math.ceil(model_cfg.sliding_window / PAGE_SIZE) * PAGE_SIZE)
+            fixed = sum(kv_bytes_by_layer[i] * ring_tokens for i in range(rank_start, rank_end) if model_cfg.is_sliding_attention_layer(i))
+            growing = sum(kv_bytes_by_layer[i] for i in range(rank_start, rank_end) if not model_cfg.is_sliding_attention_layer(i))
+            kv_required_bytes = fixed + effective_kv_capacity_tokens * growing
+            def capacity(budget):
+                if budget < fixed or growing <= 0:
+                    return 0
+                return min(effective_kv_capacity_tokens, int((budget-fixed)//(PAGE_SIZE*growing))*PAGE_SIZE)
+            kv_tokens = capacity(max(0, int(free_bytes)))
+            kv_alloc_tokens = capacity(min(kv_cache_mb*1024*1024,max(0,int(free_bytes))))
+            kv_alloc_bytes = fixed + kv_alloc_tokens*growing if kv_alloc_tokens else 0
         else:
             kv_required_bytes = effective_kv_capacity_tokens * kv_per_rank
             kv_tokens = (
@@ -2133,6 +2157,11 @@ def compute_launcher_budget(
         source_dense_bytes = dense_mlp_params_per_layer * total_layers * 2
         source_head_bytes = base_embed_bytes * (1 if cfg.get("tie_word_embeddings", True) else 2)
         ram_dense_load_mb = (source_attention_bytes + source_dense_bytes + source_head_bytes) / MB
+    if bounded_gemma:
+        # One BF16 host embedding, one packed head/dense cache and bounded
+        # conversion. Source checkpoint pages are reclaimable after conversion.
+        ram_dense_load_mb = (cfg['vocab_size'] * hidden * 2 +
+                            base_lmhead_bytes + dense_mlp_bytes) / MB + 2048
     ram_total_mb = ram_gpu_experts_mb + ram_hqq_host_staging_mb + ram_dense_load_mb
 
     peak_vram_mb = max(r["total_with_kv_mb"] for r in ranks) if ranks else 0

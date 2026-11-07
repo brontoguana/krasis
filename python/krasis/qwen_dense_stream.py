@@ -184,7 +184,7 @@ def register_weight(store, group, weight):
         first,second,nk,dk,band=weight._packed_parts
         return store.register_streamed_qwen_split(group,first._packed_file,second._packed_file,first.shape[0],second.shape[0],weight.shape[1],nk,dk,band)
     if hasattr(weight,'_packed_file'):
-        return store.register_streamed_int4_file(group,weight._packed_file,*weight.shape)
+        return store.register_streamed_int4_file(group,weight._packed_file,*weight.shape,getattr(weight,"_packed_group_size",128))
     if weight.is_cuda:
         return store.register_weight(weight.data_ptr(),*weight.shape,0)
     return store.register_streamed_weight(group,weight.data_ptr(),*weight.shape)

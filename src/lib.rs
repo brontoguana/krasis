@@ -18,6 +18,8 @@ pub mod gpu_prefill;
 mod dense_stream;
 #[cfg(has_qwen35_vision)]
 mod qwen35_vision;
+#[cfg(has_qwen35_vision)]
+mod gemma4_vision;
 pub mod hqq;
 pub mod kernel;
 pub mod manager;
@@ -100,6 +102,8 @@ fn krasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<vram_monitor::VramMonitor>()?;
     #[cfg(has_qwen35_vision)]
     m.add_class::<qwen35_vision::Qwen35Vision>()?;
+    #[cfg(has_qwen35_vision)]
+    m.add_class::<gemma4_vision::Gemma4Vision>()?;
     #[cfg(has_qwen35_vision)]
     m.add_function(wrap_pyfunction!(qwen35_vision::assemble_qwen35_image, m)?)?;
     m.add_function(wrap_pyfunction!(hqq::hqq4_init_group_ptr, m)?)?;

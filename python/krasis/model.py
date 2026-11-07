@@ -792,10 +792,17 @@ class KrasisModel:
         self.cfg = ModelConfig.from_model_path(model_path)
         from krasis.qwen_dense_stream import enabled as bounded_dense_enabled
         self.bounded_dense = bounded_dense_enabled(self.cfg)
+        from krasis.gemma4_bounded import enabled as bounded_gemma_enabled
+        self.bounded_gemma = bounded_gemma_enabled(self.cfg)
+        if self.bounded_gemma and max_context_tokens is None:
+            from krasis.gemma4_bounded import DEFAULT_CONTEXT
+            max_context_tokens = DEFAULT_CONTEXT
         _apply_max_context_limit(self.cfg, max_context_tokens)
+        if quant_cfg is None and self.bounded_gemma:
+            quant_cfg = QuantConfig(attention='hqq4', dense_mlp='int4', lm_head='int4', kv_cache_format='k6v6', ring_window_kv=True, step_vision_quant='int4')
         self.quant_cfg = quant_cfg or (QuantConfig(attention='int4',dense_mlp='int4',lm_head='int4',kv_cache_format='bf16',step_vision_quant='bf16') if self.bounded_dense else QuantConfig())
-        if any(getattr(self.quant_cfg,key)=="int4" for key in ("attention","dense_mlp","lm_head")) and not self.bounded_dense:
-            raise ValueError("Streamed language INT4 is implemented only for bounded dense Qwen")
+        if any(getattr(self.quant_cfg,key)=="int4" for key in ("attention","dense_mlp","lm_head")) and not (self.bounded_dense or self.bounded_gemma):
+            raise ValueError("Language INT4 dense/head execution requires the bounded Qwen or Gemma profile")
         if self.cfg.is_deepseek_v4:
             if self.quant_cfg.kv_cache_format not in ("native", "bf16"):
                 raise ValueError(
@@ -2727,6 +2734,9 @@ class KrasisModel:
         if self.supports_step_image_inputs():
             return self._build_step_multimodal_prefill_inputs(messages_json, rendered_prompt)
         if self.supports_gemma_image_inputs():
+            if self.bounded_gemma:
+                from krasis.gemma4_native_vision import prepare
+                return prepare(self, messages_json, rendered_prompt)
             return self._build_gemma_multimodal_prefill_inputs(messages_json, rendered_prompt)
         if self.supports_glm53_image_inputs():
             return self._build_glm53_multimodal_prefill_inputs(messages_json, rendered_prompt)
@@ -2757,7 +2767,7 @@ class KrasisModel:
             free_mb //= (1024 * 1024)
             total_mb //= (1024 * 1024)
             used_pct = 100 * (1 - free_mb / total_mb)
-            if used_pct > 50 and not self.bounded_dense:
+            if used_pct > 50 and not (self.bounded_dense or self.bounded_gemma):
                 msg = (f"GPU {dev} has only {free_mb} MB free ({used_pct:.0f}% used). "
                        f"A zombie process may be holding GPU memory. "
                        f"Try: sudo kill -9 $(nvidia-smi --query-compute-apps=pid --format=csv,noheader) "
@@ -6564,6 +6574,9 @@ class KrasisModel:
         attention + permanent weights (norms, gates, shared experts, embedding,
         lm_head) instead of the full model.
         """
+        if self.bounded_gemma:
+            from krasis.gemma4_bounded import load
+            return load(self, loader)
         if self.bounded_dense:
             from krasis.qwen_dense_stream import load_host_backed
             return load_host_backed(self, loader)
@@ -10151,6 +10164,9 @@ class KrasisModel:
             if hasattr(self.embedding,"_packed_file"):
                 store.register_mapped_embedding_file(self.embedding._packed_file,*self.embedding.shape)
             else:store.register_streamed_embedding(self.embedding.data_ptr(), *self.embedding.shape)
+        elif self.bounded_gemma:
+            store.configure_dense_stream(256, self._gemma_dense_resident_bytes, tensorcore_decode=True)
+            store.register_mapped_embedding_file(self.embedding._packed_file, *self.embedding.shape)
         else:
             store.set_embedding(self.embedding.data_ptr())
         store.set_embedding_scale(float(getattr(self.cfg, "embedding_scale", 1.0)))
@@ -10179,7 +10195,7 @@ class KrasisModel:
             lm_head_cols = lm_head_w.shape[1]
         store.set_lm_head(
             register_dense_weight(store,(1 << 64) - 1,lm_head_w)
-            if self.bounded_dense else store.register_weight(lm_head_ptr, lm_head_rows, lm_head_cols, 0)
+            if (self.bounded_dense or self.bounded_gemma) else store.register_weight(lm_head_ptr, lm_head_rows, lm_head_cols, 0)
         )
 
         # Norm bias flag (Qwen3 uses (1+w)*x)
@@ -11278,9 +11294,9 @@ class KrasisModel:
                 up = self._dense_mlp_tensor(layer.dense_mlp["up_proj"])
                 dp = self._dense_mlp_tensor(layer.dense_mlp["down_proj"])
                 self._rust_decode_weights.extend([gp, up, dp])
-                gp_wid = store.register_weight(gp.data_ptr(), gp.shape[0], gp.shape[1], 0)
-                up_wid = store.register_weight(up.data_ptr(), up.shape[0], up.shape[1], 0)
-                dp_wid = store.register_weight(dp.data_ptr(), dp.shape[0], dp.shape[1], 0)
+                gp_wid = (register_dense_weight(store,layer_idx,gp) if self.bounded_gemma else store.register_weight(gp.data_ptr(), gp.shape[0], gp.shape[1], 0))
+                up_wid = (register_dense_weight(store,layer_idx,up) if self.bounded_gemma else store.register_weight(up.data_ptr(), up.shape[0], up.shape[1], 0))
+                dp_wid = (register_dense_weight(store,layer_idx,dp) if self.bounded_gemma else store.register_weight(dp.data_ptr(), dp.shape[0], dp.shape[1], 0))
                 _gemma_refs = []
                 def _ptr(t):
                     if t is None:
@@ -11365,7 +11381,7 @@ class KrasisModel:
                 self.cfg.num_hidden_layers,
             )
 
-        if self.bounded_dense:
+        if self.bounded_dense or self.bounded_gemma:
             logger.info("Bounded dense registration: %s", store.seal_dense_stream())
         self._finalize_mamba2_projection_int4_cache()
 
@@ -11578,7 +11594,18 @@ class KrasisModel:
 
         # Non-rotary attention (including GLM-5.3) has no tables to upload.
         # Keep the Rust transfer's nonempty-extent contract for actual RoPE.
-        if hqq_active and not rope_set and self.cfg.rotary_dim > 0:
+        gemma_layer_rope_complete = (
+            self.bounded_gemma and hqq_active
+            and os.environ.get('KRASIS_GEMMA_COMPACT_ROPE', '1') == '1'
+            and hasattr(store, 'certify_gemma4_layer_rope')
+            and store.certify_gemma4_layer_rope()
+        )
+        if gemma_layer_rope_complete:
+            # The omitted setup transfer also provided a producer-stream
+            # completion fence. Preserve that startup handoff explicitly.
+            torch.cuda.synchronize(device)
+            logger.info('Bounded Gemma: all 30 native layer RoPE tables certified; omit unused generic fallback and transfer copy')
+        if hqq_active and not rope_set and self.cfg.rotary_dim > 0 and not gemma_layer_rope_complete:
             max_seq = max(
                 c.max_context_tokens for c in self.kv_caches if c is not None
             )
@@ -11668,6 +11695,16 @@ class KrasisModel:
                      len(self.layers), store.gpu_store_addr())
 
         self._register_primary_sequence_state_inventory(store, device)
+        if self.bounded_gemma:
+            # Native registration now owns the sole pinned embedding mapping and
+            # both phase-specific HQQ layouts. Startup sources can be released.
+            self._gemma_embedding_host_ptr = store.mapped_embedding_host_pointer()
+            self.embedding = torch.empty(self.embedding.shape, device='meta', dtype=torch.bfloat16)
+            self._device_state[str(device)]['embedding'] = self.embedding
+            self._hqq_attention_runtime = {}
+            for layer in self.layers:
+                layer._hqq_attention_runtime = {}
+            gc.collect()
 
         # Single-slot AWQ: Marlin data is in the GPU slots from registration.
         # PyTorch tensors stay on GPU permanently (they ARE the slots).

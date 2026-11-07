@@ -3969,7 +3969,13 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                         "build_multimodal_prefill_inputs",
                         (messages_json.as_str(), rendered.as_str()),
                     )
-                    .map_err(|e| format!("image prefill setup failed: {}", e))?;
+                    .map_err(|e| {
+                        if e.is_instance_of::<pyo3::exceptions::PyValueError>(py) {
+                            format!("invalid image request: {}", e)
+                        } else {
+                            format!("image prefill setup failed: {}", e)
+                        }
+                    })?;
                 let mm = obj.bind(py);
                 let token_ids: Vec<u32> = mm
                     .get_item("token_ids")
@@ -4083,6 +4089,8 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 Err(e) => {
                     if let Some(body) = image_vram_error_body(&e) {
                         let _ = send_json(stream, 507, &body);
+                    } else if e.starts_with("invalid image request: ") {
+                        let _ = send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, json_escape(&e)));
                     } else {
                         let _ = send_json(
                             stream,
@@ -4216,13 +4224,27 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         }
         if cache_request_eligible {
             let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-            let active_plan = state.session_cache.active.as_ref().map(|active| {
+            let mut active_plan = state.session_cache.active.as_ref().map(|active| {
                 crate::session_cache::plan_active_prefix(
                     &active.consumed_token_ids,
                     &token_ids,
                     store.sequence_state_has_non_rewindable_rust(),
                 )
             });
+            if let Some(plan)=active_plan {
+                let matched=match plan {
+                    crate::session_cache::ActivePrefixPlan::Append{matched_tokens}
+                    | crate::session_cache::ActivePrefixPlan::TruncateKvAndAppend{matched_tokens}=>Some(matched_tokens),
+                    _=>None,
+                };
+                if let (Some(matched),Some(active))=(matched,state.session_cache.active.as_ref()) {
+                    let guard=state.rust_prefill.lock().unwrap();
+                    if guard.as_ref().is_some_and(|engine| !engine.stage_prefix_rewind_safe(active.consumed_token_ids.len(),matched)) {
+                        log::info!("Request {} active cache branch exceeds retained sliding history; full/RAM prefill required",request_id);
+                        active_plan=None;
+                    }
+                }
+            }
             let active_reusable_tokens = match active_plan {
                 Some(crate::session_cache::ActivePrefixPlan::Append { matched_tokens })
                 | Some(crate::session_cache::ActivePrefixPlan::TruncateKvAndAppend {
@@ -4244,11 +4266,21 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     .ram_store
                     .as_mut()
                     .ok_or_else(|| "RAM session store is unavailable".to_string())?;
-                if store.sequence_state_has_non_rewindable_rust() {
-                    ram_store.longest_proper_prefix(&token_ids, &compatibility)
+                let result=if store.sequence_state_has_non_rewindable_rust() {
+                    ram_store.longest_proper_prefix(&token_ids, &compatibility)?
                 } else {
-                    ram_store.longest_rewindable_prefix(&token_ids, &compatibility)
+                    ram_store.longest_rewindable_prefix(&token_ids, &compatibility)?
+                };
+                if let crate::session_cache::PrefixLookupResult::Hit{snapshot_id,matched_tokens}=result {
+                    if let Some(snapshot)=ram_store.get(snapshot_id)? {
+                        let guard=state.rust_prefill.lock().map_err(|_|"prefill lock poisoned".to_string())?;
+                        if guard.as_ref().is_some_and(|engine| !engine.stage_prefix_rewind_safe(snapshot.consumed_token_ids.len(),matched_tokens)) {
+                            log::info!("Request {} RAM cache branch exceeds saved sliding history; full prefill required",request_id);
+                            return Ok(crate::session_cache::PrefixLookupResult::NoMatch);
+                        }
+                    }
                 }
+                Ok(result)
             }) {
                 Ok(crate::session_cache::PrefixLookupResult::Hit {
                     snapshot_id,

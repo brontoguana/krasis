@@ -150,3 +150,13 @@ extern "C" int krasis_qwen_vision_sdpa(void*q,void*k,void*v,void*y,void*lse,void
  }
  return int(cudaGetLastError());
 }
+
+// Gemma uses unscaled dot products; padded channels are zero. Its valid image
+// rows are supplied without processor padding, preserving the key mask.
+extern "C" int krasis_gemma_vision_sdpa(void*q,void*k,void*v,void*y,void*lse,int n,int heads,void*stream){
+ if(n<1||n>2520||heads!=16)return -1;
+ flash::Flash_fwd_params p;
+ set_params_from_raw(p,q,k,v,y,lse,nullptr,nullptr,1,n,n,heads,heads,96,n,n,1.0f,false,true,false);
+ flash::run_mha_fwd_hdim96<cutlass::bfloat16_t,false>(p,(cudaStream_t)stream);
+ return int(cudaGetLastError());
+}

@@ -2230,11 +2230,22 @@ class Launcher:
         model_path = str((self.model_info or {}).get("path", self.cfg.model_path or ""))
         return supported_model_for_path(model_path) if model_path else None
 
+    def _bounded_gemma_profile(self) -> bool:
+        if not self._is_gemma4():
+            return False
+        setting = os.environ.get('KRASIS_GEMMA_8GB', 'auto').lower()
+        if setting != 'auto':
+            return setting == '1'
+        selected = getattr(self, 'selected_gpus', [])
+        return len(selected) == 1 and 0 < _gpu_vram_mb(selected[0]) <= 8192
+
     def _bounded_qwen_profile(self) -> bool:
         from krasis.qwen_dense_stream import enabled
         return bool(self.cfg.model_path and enabled(ModelConfig.from_model_path(self.cfg.model_path)))
 
     def _attention_modes(self) -> List[str]:
+        if self._bounded_gemma_profile():
+            return ["hqq4"]
         spec = self._supported_model_spec()
         if spec is not None:
             return list(spec.attention_modes)
@@ -2250,6 +2261,8 @@ class Launcher:
         return _expand_interactive_attention_modes(self._attention_modes())
 
     def _kv_choices(self) -> List[str]:
+        if self._bounded_gemma_profile():
+            return ["k6v6"]
         spec = self._supported_model_spec()
         if spec is not None:
             return list(spec.kv_modes)
@@ -2269,6 +2282,8 @@ class Launcher:
         return ["auto", "layer-split", "peer"]
 
     def _vision_choices(self) -> List[str]:
+        if self._bounded_gemma_profile():
+            return ["int4"]
         spec = self._supported_model_spec()
         if spec is not None and spec.vision_modes:
             return list(spec.vision_modes)
@@ -2316,6 +2331,21 @@ class Launcher:
                 self._set_interactive_attention_quant("hqq6")
             if not self.cfg._kv_dtype_explicit:
                 self.cfg.kv_dtype = "k6v6"
+
+        if self._bounded_gemma_profile():
+            from krasis.gemma4_bounded import DEFAULT_CONTEXT
+            if not self.cfg._max_context_tokens_explicit:
+                self.cfg.max_context_tokens = min(DEFAULT_CONTEXT, model_limit or DEFAULT_CONTEXT)
+            if not self.cfg._attention_quant_explicit:
+                self._set_interactive_attention_quant('hqq4')
+            if not self.cfg._kv_dtype_explicit:
+                self.cfg.kv_dtype = 'k6v6'
+            if not self.cfg._dense_mlp_quant_explicit:
+                self.cfg.dense_mlp_quant = 'int4'
+            if not self.cfg._lm_head_quant_explicit:
+                self.cfg.lm_head_quant = 'int4'
+            if not self.cfg._vision_quant_explicit:
+                self.cfg.vision_quant = 'int4'
 
     def _validate_model_capabilities(self) -> None:
         if self.model_info and not self.model_info.get("runnable", True):
@@ -3503,7 +3533,7 @@ class Launcher:
                 choices = self._vision_choices()
             else:
                 choices = opt.choices
-                if opt.key in ("dense_mlp_quant","lm_head_quant") and not self._bounded_qwen_profile():
+                if opt.key in ("dense_mlp_quant","lm_head_quant") and not (self._bounded_qwen_profile() or self._bounded_gemma_profile()):
                     choices=[choice for choice in choices if choice!="int4"]
             try:
                 idx = choices.index(val)

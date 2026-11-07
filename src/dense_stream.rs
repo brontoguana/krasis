@@ -276,8 +276,9 @@ impl DenseStream {
         if rows == 0
             || rows > math.partial.len()
             || rows % 64 != 0
-            || cols % 128 != 0
-            || group != 128
+            || cols % 64 != 0
+            || ![64,128].contains(&group)
+            || cols % group != 0
         {
             return Ok(false);
         }
@@ -329,6 +330,12 @@ impl DenseStream {
             return Err("Qwen projection scratch bound exceeded".into());
         }
         Ok(*self.projection.device_ptr())
+    }
+    pub fn host_pointer(&self, group:usize) -> Result<usize,String> {
+        let g=self.groups.lock().map_err(|_|"dense stream lock poisoned")?;
+        let sources=g.sources.get(&group).ok_or("missing host weight group")?;
+        if sources.len()!=1 {return Err("host pointer requires exactly one owner".into());}
+        Ok(sources[0].ptr as usize)
     }
     pub fn seal(&self) -> Result<(), String> {
         self.groups

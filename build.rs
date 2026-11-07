@@ -685,6 +685,24 @@ fn compile_selected_kda_kernels() {
 }
 
 fn compile_qwen35_vision() {
+    let gemma_attention_source="src/cuda/gemma4_attention.cu";
+    println!("cargo:rerun-if-changed={gemma_attention_source}");
+    if let Some(nvcc)=find_nvcc(){
+        let output=format!("{}/gemma4_attention.ptx",std::env::var("OUT_DIR").unwrap());
+        if !is_output_fresh(&[gemma_attention_source],&[&output]){
+            let status=std::process::Command::new(nvcc).args(["-ptx","-allow-unsupported-compiler","-arch=sm_80","-O3","-std=c++17","-o",&output,gemma_attention_source]).args(nvcc_host_compiler_args()).status().expect("Gemma attention nvcc");
+            assert!(status.success(),"Gemma attention compilation failed");
+        }
+    }
+    let gemma_source = "src/cuda/gemma4_vision.cu";
+    println!("cargo:rerun-if-changed={gemma_source}");
+    if let Some(nvcc) = find_nvcc() {
+        let output = format!("{}/gemma4_vision.ptx", std::env::var("OUT_DIR").unwrap());
+        if !is_output_fresh(&[gemma_source], &[&output]) {
+            let status=std::process::Command::new(nvcc).args(["-ptx","-allow-unsupported-compiler","-arch=sm_80","-O3","-std=c++17","-fmad=false","-o",&output,gemma_source]).args(nvcc_host_compiler_args()).status().expect("Gemma vision nvcc");
+            assert!(status.success(), "Gemma vision compilation failed");
+        }
+    }
     let source = "src/cuda/qwen35_vision.cu";
     println!("cargo:rerun-if-changed={source}");
     let Some(nvcc) = find_nvcc() else { return; };

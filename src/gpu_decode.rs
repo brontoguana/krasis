@@ -33016,15 +33016,17 @@ impl GpuDecodeStore {
             .synchronize()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
+    #[pyo3(signature=(group,path,rows,cols,group_size=128))]
     fn register_streamed_int4_file(
         &mut self,
         group: usize,
         path: String,
         rows: usize,
         cols: usize,
+        group_size: usize,
     ) -> PyResult<usize> {
         let err = |message: &str| pyo3::exceptions::PyValueError::new_err(message.to_owned());
-        if rows % 64 != 0 || cols % 128 != 0 || rows == 0 || cols == 0 {
+        if rows % 64 != 0 || cols % 64 != 0 || ![64,128].contains(&group_size) || cols % group_size != 0 || rows == 0 || cols == 0 {
             return Err(err("invalid streamed INT4 shape"));
         }
         let packed = rows
@@ -33033,7 +33035,7 @@ impl GpuDecodeStore {
             / 2;
         let scales_offset = crate::dense_stream::align(packed).map_err(|e| err(&e))?;
         let bytes = scales_offset
-            .checked_add(rows * (cols / 128) * 2)
+            .checked_add(rows * (cols / group_size) * 2)
             .ok_or_else(|| err("INT4 extent overflow"))?;
         let graph = self.graph.as_mut().ok_or_else(|| err("configure first"))?;
         let bank = graph
@@ -33049,7 +33051,7 @@ impl GpuDecodeStore {
             ptr + scales_offset as u64,
             rows,
             cols,
-            128,
+            group_size,
         ));
         Ok(id)
     }
@@ -33072,8 +33074,8 @@ impl GpuDecodeStore {
                 "invalid Qwen split geometry",
             ));
         }
-        let first = self.register_streamed_int4_file(group, first_file, first_rows, cols)?;
-        let second = self.register_streamed_int4_file(group, second_file, second_rows, cols)?;
+        let first = self.register_streamed_int4_file(group, first_file, first_rows, cols, 128)?;
+        let second = self.register_streamed_int4_file(group, second_file, second_rows, cols, 128)?;
         let graph = self.graph.as_mut().unwrap();
         let scratch = graph
             .dense_stream
@@ -33115,24 +33117,26 @@ impl GpuDecodeStore {
         Ok(())
     }
     /// Startup conversion is bounded to one matrix; no BF16 allocation on GPU.
+    #[pyo3(signature=(ptr,rows,cols,path,group_size=128))]
     fn pack_dense_int4_file(
         &self,
         ptr: usize,
         rows: usize,
         cols: usize,
         path: String,
+        group_size: usize,
     ) -> PyResult<()> {
         use crate::weights::marlin::{marlin_repack_bounded, quantize_int4};
         use std::io::Write;
         let err = |message: &str| pyo3::exceptions::PyValueError::new_err(message.to_owned());
-        if ptr == 0 || rows == 0 || rows % 64 != 0 || cols == 0 || cols % 128 != 0 {
+        if ptr == 0 || rows == 0 || rows % 64 != 0 || cols == 0 || cols % 64 != 0 || ![64,128].contains(&group_size) || cols % group_size != 0 {
             return Err(err("invalid pack shape"));
         }
         let elements = rows
             .checked_mul(cols)
             .ok_or_else(|| err("pack extent overflow"))?;
         let source = unsafe { std::slice::from_raw_parts(ptr as *const u16, elements) };
-        let q = quantize_int4(source, rows, cols, 128);
+        let q = quantize_int4(source, rows, cols, group_size);
         let m = marlin_repack_bounded(&q);
         drop(q);
         let mut file = std::fs::File::create(path).map_err(|e| err(&e.to_string()))?;
@@ -33161,6 +33165,11 @@ impl GpuDecodeStore {
         let graph = self.graph.as_mut().unwrap();
         graph.embedding_ptr = graph.weights[wid].ptr;
         Ok(())
+    }
+    fn mapped_embedding_host_pointer(&self) -> PyResult<usize> {
+        self.graph.as_ref().and_then(|g|g.dense_stream.as_ref())
+            .ok_or_else(||pyo3::exceptions::PyValueError::new_err("mapped embedding not registered"))?
+            .host_pointer(crate::dense_stream::EMBEDDING).map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
     fn seal_dense_stream(&self) -> PyResult<String> {
         let graph = self
@@ -34834,7 +34843,36 @@ impl GpuDecodeStore {
             "graphs_valid":graph.per_layer_graphs_valid,"graph_count":graph.per_layer_graphs.len()}).to_string())
     }
 
+    /// Provision the same FP32 attention arena for isolated operator replay.
+    /// Production obtains this arena from its ordinary prefill scratch planner.
+    fn prepare_gemma4_attention_replay(&mut self, total_tokens: usize) -> PyResult<String> {
+        if total_tokens == 0 || total_tokens > 131072 {
+            return Err(pyo3::exceptions::PyValueError::new_err("replay tokens must be in 1..=131072"));
+        }
+        let e = self.prefill_engine_slot.as_mut().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("prefill engine required"))?;
+        e.gemma4_prepare_attention_replay(total_tokens).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+
     /// Diagnostic replay of the actual bounded attention used in prefill.
+    fn replay_gemma4_k6_export(&self,ks:usize,ki:usize,vs:usize,vi:usize,k:usize,v:usize,rows:usize,stride:usize,capacity:usize,first:usize,dtype:u32)->PyResult<()> {
+        let e=self.prefill_engine_slot.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("prefill engine required"))?;
+        let result=e.gemma4_stage_k6_export(ks as u64,ki as u64,vs as u64,vi as u64,k as u64,v as u64,rows,stride,capacity,first,dtype,3);
+        let completion=e.gemma4_ring_replay_completion();result.and(completion).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+    #[pyo3(signature=(q,k,v,ck,cv,out,rows,prefix,cache_dtype,vision,capacity=1024))]
+    fn replay_gemma4_window_ring(&self,q:usize,k:usize,v:usize,ck:usize,cv:usize,out:usize,rows:usize,prefix:usize,cache_dtype:i32,vision:usize,capacity:usize)->PyResult<()> {
+        let e=self.prefill_engine_slot.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("prefill engine required"))?;
+        let result=e.gemma4_window_ring_attention(usize::MAX,q as u64,k as u64,v as u64,ck as u64,cv as u64,out as u64,rows,prefix,capacity,cache_dtype,vision as u64)
+          ;
+        let completion=e.gemma4_ring_replay_completion();
+        result.and(completion).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+    fn replay_gemma4_attention(&self,q:usize,k:usize,v:usize,ck:usize,cv:usize,out:usize,rows:usize,prefix:usize,cache_dtype:i32)->PyResult<()> {
+        let e=self.prefill_engine_slot.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("prefill engine required"))?;
+        let result=e.gemma4_full_history_attention(usize::MAX,q as u64,k as u64,v as u64,ck as u64,cv as u64,out as u64,rows,prefix,cache_dtype,1.);
+        let completion=e.gemma4_ring_replay_completion();
+        result.and(completion).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
     fn replay_qwen_attention(&self, q:usize,k:usize,v:usize,ck:usize,cv:usize,out:usize,
         rows:usize,prefix:usize,heads:usize,kv_heads:usize,dim:usize) -> PyResult<()> {
         let engine=self.prefill_engine_slot.as_ref().ok_or_else(||pyo3::exceptions::PyValueError::new_err("prefill engine required"))?;
@@ -42348,6 +42386,12 @@ impl GpuDecodeStore {
 
     /// Set up RoPE tables in VRAM for GQA attention.
     /// cos_ptr, sin_ptr: device pointers to FP32 [max_seq, half_dim] on GPU.
+    fn certify_gemma4_layer_rope(&self) -> bool {
+        self.graph.as_ref().is_some_and(|g| g.layers.len()==30 && g.layers.iter().all(|l| {
+            matches!(l.mlp,GpuMlpConfig::Gemma4MoE{..}) && matches!(l.hqq_exec.as_ref(),
+                Some(HqqExecutionDescriptor::Gqa(d)) if d.rope_half_dim>0 && d.rope_cos_ptr!=0 && d.rope_sin_ptr!=0)
+        }))
+    }
     #[pyo3(signature = (cos_ptr, sin_ptr, half_dim, max_seq, producer_stream))]
     fn set_rope_tables(
         &mut self,
@@ -46254,9 +46298,9 @@ impl GpuDecodeStore {
 
     /// Evict soft-tier HCS experts before prefill (PyO3 wrapper).
     /// Returns (evicted_count, freed_mb).
-    #[pyo3(signature = (estimated_tokens))]
-    fn py_hcs_evict_for_prefill(&mut self, estimated_tokens: usize) -> (usize, f64) {
-        self.hcs_evict_for_prefill(estimated_tokens)
+    #[pyo3(signature=(estimated_tokens, external_engine_entry_floor_bytes=0))]
+    fn py_hcs_evict_for_prefill(&mut self, estimated_tokens: usize, external_engine_entry_floor_bytes: usize) -> (usize, f64) {
+        self.hcs_evict_for_prefill_with_engine_floor(estimated_tokens, external_engine_entry_floor_bytes)
     }
 
     /// Reload soft-tier HCS experts after prefill (PyO3 wrapper).
@@ -53312,11 +53356,19 @@ impl GpuDecodeStore {
 
         let has_linear_attention = layer_types.iter().any(|&t| t == 3);
 
-        let full_history_gqa_kv_dim = prefill_full_history_gqa_kv_dim(
-            target_layers
-                .iter()
-                .map(|layer| (&layer.attn, layer.deepseek_v4.is_some())),
-        )?;
+        // Bounded Gemma reads full caches directly and gathers only the 1024-row
+        // sliding ring at export. Its chunk-local arena already covers that
+        // gather; allocating another prompt-sized concatenation wastes VRAM.
+        let direct_gemma_cache = graph.dense_stream.is_some()
+            && target_layers.iter().all(|l| matches!(l.mlp, GpuMlpConfig::Gemma4MoE { .. }))
+            && ["KRASIS_GEMMA_FULL_HISTORY_WMMA", "KRASIS_GEMMA_BOUNDED_STAGE"].iter()
+                .all(|name| std::env::var(name).map(|v| v == "1").unwrap_or(false));
+        let full_history_gqa_kv_dim = if direct_gemma_cache {
+            if std::env::var("KRASIS_GEMMA_FULL_HISTORY_GEMM").as_deref()==Ok("1") { 608 } else { 0 }
+        } else {
+            prefill_full_history_gqa_kv_dim(target_layers.iter()
+                .map(|layer| (&layer.attn, layer.deepseek_v4.is_some())))?
+        };
         let mut config = PrefillModelConfig {
             hidden_size: graph.hidden_size,
             intermediate_size: graph
@@ -55313,6 +55365,7 @@ impl GpuDecodeStore {
             prefill_kv_temp_v: None,
             prefill_kv_layer_offsets: Vec::new(),
             prefill_kv_layer_strides: Vec::new(),
+            prefill_kv_ring_capacity: Vec::new(),
             prefill_kv_temp_seq: 0,
             prefill_kv_temp_layers: 0,
             prefill_kv_temp_format: 1,

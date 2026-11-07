@@ -13394,3 +13394,15 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
 - Incrementally convert local sources into checksummed, versioned Marlin artifacts. Pin one authoritative mapped host representation; avoid complete retained BF16 language sources and independent pinned packed copies.
 - Preserve separate QKV/Z contractions and typed head output boundaries. Execute packed projections through native kernels with graph-stable staging, tensor-core decode scratch and a joint resident/head/slab plan.
 - Retain 4K context and one 512×512 image. Exercise enforced 4/6/8 GiB device-wide allowances, complete packed operators, public requests, reset, cancellation and session restoration. Preserve unchanged BF16 numerical gates; document independent INT4 whole-model tolerance failures separately from passing practical tasks.
+
+### 2026-11-07 — Bounded native Gemma INT4 text and vision
+
+- Add a single-GPU Gemma 26B-A4B profile selected automatically on GPUs up to 8 GiB, with explicit launcher/server selection and a 32K context default. Preserve Qwen's bounded implementation and precision defaults for existing callers.
+- Convert dense/head weights incrementally into checksummed, checkpoint-bound INT4 artifacts. Support group-64 dense down projections and retain group 128 elsewhere. Keep one mapped host backing for each representation; release startup embedding and HQQ sources after native ownership is established.
+- Execute streamed INT4 vision in Rust/CUDA, including normalization, positions, attention, pooling, projector and embedding assembly. Retain measured BF16 embedding, positional and small-parameter exceptions.
+- Bound 25 sliding prefill stages to 1,056 physical rows while preserving their mathematical 1,024-token windows; retain full history in five full-attention layers. Keep complete image blocks within chunks and preserve bidirectional image masks.
+- Replace dominant full/sliding attention work with bounded FP32-accumulating matrix contractions and retain the existing WMMA fallback. Omit unused generic RoPE copies only after all layer-specific descriptors are certified, retaining the startup completion fence.
+- Repair k6v6 physical-ring exports and FP8 conversion argument order. Reconstruct complete decode windows after continuation and reject cache rewinds beyond retained sliding history.
+- Keep the k4v4 ring and CUDA graph guards. Preserve explicit image-cache misses. Add transient image admission, at least 664 MiB planner headroom for the 600 MiB reserve, and HTTP 400 for typed invalid-image input.
+- Add real-operand replay APIs, complete packed-operator checks, public text/image, context, restoration and cancellation evidence. Document unconditioned numerical and practical quality limitations separately from passing operator checks.
+- Reject bounded Gemma minimum-scratch requests before allocation when the measured entry floor cannot fit; preserve the failed transient-reserve receipt. Extend heatmap fingerprints to the new execution dependencies and test kernel-change invalidation.
