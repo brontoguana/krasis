@@ -33665,6 +33665,9 @@ impl PrefillEngine {
                     .enqueue(out, x, w, d, m, self.config.rms_norm_eps, self.stream)
             };
         }
+        if self.kernels.qwen35_gdn_accurate.is_some() && d==self.config.hidden_size && d<=8192 && d%4==0 && m<=4096 && std::env::var("KRASIS_QWEN_OUTER_NORM").as_deref()!=Ok("legacy") {
+            return self.qwen35_outer_norm(0,out,x,w,m,d);
+        }
         let t = std::cmp::max(32, ((std::cmp::min(1024, d) + 31) / 32) * 32) as u32;
         let mut p0 = out;
         let mut p1 = x;
@@ -33731,6 +33734,9 @@ impl PrefillEngine {
         m: usize,
         d: usize,
     ) -> Result<(), String> {
+        if self.kernels.qwen35_gdn_accurate.is_some() && d>=128 && d<=8192 && d%4==0 && m<=1048576 && std::env::var("KRASIS_QWEN_HEAD_NORM").as_deref()!=Ok("legacy") {
+            return self.qwen35_outer_norm(0,out,x,w,m,d);
+        }
         let t = std::cmp::max(32, ((std::cmp::min(1024, d) + 31) / 32) * 32) as u32;
         let mut p0 = out;
         let mut p1 = x;
@@ -33764,6 +33770,9 @@ impl PrefillEngine {
         m: usize,
         d: usize,
     ) -> Result<(), String> {
+        if self.kernels.qwen35_gdn_accurate.is_some() && d==self.config.hidden_size && d<=8192 && d%4==0 && m<=4096 && std::env::var("KRASIS_QWEN_OUTER_NORM").as_deref()!=Ok("legacy") {
+            return self.qwen35_outer_norm(residual,x,x,w,m,d);
+        }
         let t = std::cmp::max(32, ((std::cmp::min(1024, d) + 31) / 32) * 32) as u32;
         let mut p0 = residual;
         let mut p1 = x;
@@ -57502,6 +57511,7 @@ impl PrefillEngine {
         m: usize,
         chunk_start: usize,
     ) -> Result<(), String> {
+        self.qwen35_boundary("normalized_input",layer_idx,chunk_start,*self.scratch.d_hidden.device_ptr(),m*self.config.hidden_size)?;
         let cfg = &self.config;
         let lw = &self.layer_weights[layer_idx];
         if let Some(hqq) = &lw.hqq_linear_attention {
@@ -59167,7 +59177,11 @@ impl PrefillEngine {
                     let mut keys = dk as i32; let mut values = dv as i32; let mut qscale = scale;
                     let mut params: Vec<*mut std::ffi::c_void> = args.iter_mut().map(|x| x as *mut _ as *mut std::ffi::c_void).collect();
                     params.extend([&mut rows as *mut _ as *mut std::ffi::c_void, &mut heads as *mut _ as _, &mut keys as *mut _ as _, &mut values as *mut _ as _, &mut qscale as *mut _ as _]);
-                    unsafe { launch(kernel, (nv as u32, (dv / 4) as u32, 1), (128, 1, 1), 0, self.stream, &mut params)?; }
+                    if dv==128 && nv<=64 && m<=4096 && std::env::var("KRASIS_QWEN_GDN_RECURRENCE").as_deref()!=Ok("serial") {
+                        self.qwen35_chunk_recurrence(fla_q_bf16,fla_k_bf16,fla_v_bf16,fla_beta_bf16,la_a,lw.la_a_log_ptr,lw.la_dt_bias_ptr,lw.la_recur_state_ptr,output,m,nv)?;
+                    } else {
+                        unsafe { launch(kernel, (nv as u32, (dv / 4) as u32, 1), (128, 1, 1), 0, self.stream, &mut params)?; }
+                    }
                     output
                 } else if let Some(output) = scalar_output {
                     output
@@ -61632,6 +61646,7 @@ impl PrefillEngine {
                     o_fla
                 };
 
+                self.qwen35_substitute("gdn_state",layer_idx,chunk_start,lw.la_recur_state_ptr,nv*dk*dv*4,"f32")?;
                 self.qwen35_boundary("gdn_output",layer_idx,chunk_start,o_fla,m*nv*dv)?;
                 self.qwen35_boundary("gdn_z",layer_idx,chunk_start,la_z,m*nv*dv)?;
                 // Gated RMSNorm after FLA. Default stays on the direct BF16-input kernel,
@@ -61689,6 +61704,14 @@ impl PrefillEngine {
                             ],
                         )?;
                     }
+                } else if accurate_qwen.is_some() && dv==128 && nv<=64 && m<=4096 && std::env::var("KRASIS_QWEN_GDN_NORM").as_deref()!=Ok("legacy") {
+                    #[cfg(not(has_qwen35_vision))]
+        #[allow(unused_variables)]
+        unsafe extern "C" fn krasis_qwen_norm128(out:u64,x:u64,z:u64,w:u64,rows:i32,heads:i32,eps:f32,stream:*mut std::ffi::c_void)->i32 { -1 }
+        #[cfg(has_qwen35_vision)]
+        extern "C" {fn krasis_qwen_norm128(out:u64,x:u64,z:u64,w:u64,rows:i32,heads:i32,eps:f32,stream:*mut std::ffi::c_void)->i32;}
+                    let status=unsafe {krasis_qwen_norm128(rmsnorm_out,o_fla,la_z,lw.la_norm_weight_ptr,m as i32,nv as i32,cfg.rms_norm_eps,self.stream as _)};
+                    if status!=0 {return Err(format!("bounded Qwen norm failed {status}"));}
                 } else {
                     {
                         let nt =

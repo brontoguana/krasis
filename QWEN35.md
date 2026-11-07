@@ -98,18 +98,14 @@ index metadata were inspected. **No Arête weights were downloaded or executed.*
 This establishes configuration/equation compatibility, not an Arête model verdict.
 
 Functional serving and memory fit are separate from numerical qualification.
-Complete 27B native/reference logits and all 128 sequence-state arrays were
-compared. Follow-up repairs retain FP32 delta-norm scales and the GDN BF16 norm/scale
-boundaries, and round decode residuals before normalization. Real four-layer
-resident and streamed paths agree exactly, including all state arrays. The
-matched-operand repairs now clear the independent four-layer prefix, including
-the first GDN recurrent state. Full 64-layer qualification remains incomplete:
-the strict full-array comparison still fails, despite agreeing first tokens and
-successful requests. See the numerical-isolation follow-up below for the
-remaining complete-attention and encoder contract differences.
-The complete vision encoder also retains failures at unchanged `rtol=.01,
-atol=.03`; operator-level agreement is not whole-model admission. No absolute
-quality, ADQ, release or other-GPU qualification is claimed.
+The causal repair follow-up clears the fixed 28-token, complete 64-layer text
+comparison: zero failing logits and zero failing arrays among all 128 sequence
+state arrays at unchanged `atol=.03, rtol=.01`. Original, square and rectangular
+complete encoders match their frozen reference features bitwise. The original
+failed identities remain preserved; see the causal report for substitutions,
+reference repeatability, operator checks and the exact measured scope.
+These fixed-fixture passes do not establish general model quality, canonical
+ADQ/release admission, Arête execution or other-GPU qualification.
 
 Evidence and immutable controllers:
 `krasis-internal/qwen27b-8gb-235682/` and
@@ -143,10 +139,26 @@ convolution counterfactual is retained only in the investigation.
 
 Vision claims distinguish individual operators, complete residual blocks and
 complete encoders. The earlier numerical-isolation baseline failed same-input
-block26. The integrated follow-up passes all 81 complete same-input blocks and
-three mergers; all three accumulated complete-feature comparisons still fail. Independent FP64 projection/attention equations
+block26. The integrated-235797 baseline passed all 81 complete same-input blocks and
+three mergers; its three accumulated complete-feature comparisons failed. Independent FP64 projection/attention equations
 and reduced-BF16-reduction controls demonstrate backend rounding sensitivity;
 they do not replace the original reference or waive its unchanged acceptance
 checks. Functional image answers and constrained-memory fit remain separate
 from numerical admission. Arête execution and actual small-card qualification
 are still not claimed.
+
+
+Causal repair follow-up: `krasis-internal/qwen27b-causal-235834/RESULTS.md`.
+The bounded native GDN path now uses 64-token FP32 chunk contractions, matching
+reference decay scans and reduction order without changing chronological state
+semantics. Its largest live workspace is covered by a separate 32 MiB admission
+allowance and a physical 600 MiB reserve check. Gated, outer and attention-head RMSNorm use the
+reference reduction/materialization contract. Diagnostic rollback controls are
+`KRASIS_QWEN_GDN_RECURRENCE=serial`, `KRASIS_QWEN_GDN_NORM=legacy`, and
+`KRASIS_QWEN_OUTER_NORM=legacy`, `KRASIS_QWEN_HEAD_NORM=legacy`, and
+`KRASIS_QWEN_SOFTMAX=legacy`; these isolate arithmetic changes independently.
+Vision SDPA uses the frozen PyTorch `UNFUSE_FMA` compiler contract with precise
+math. Complete original, square and rectangular encoders now match the frozen
+reference bitwise. The report records full-text numerical, functional and memory
+verdicts separately; historical failed identities and independent FP64 evidence
+remain preserved. No Arête execution or actual small-card qualification is implied.

@@ -2,6 +2,13 @@
 
 ## Unreleased — bounded Qwen3.5
 
+- Match bounded Qwen FP32 chunked GDN contraction, decay scan and four-accumulator reduction order; charge 32 MiB workspace and retain serial opt-out.
+- Match Qwen outer and attention-head RMS variance reduction on rounded residual inputs; retain an explicit legacy control.
+- Preserve precise exponential, division and warp reduction for bounded Qwen text softmax; retain legacy replay control.
+- Match Qwen gated norm variance reduction and precise SiLU arithmetic; compile vision SDPA with the frozen backend UNFUSE_FMA contract.
+- Guard native arithmetic symbols when NVCC objects are unavailable; preserve supported CUDA execution.
+- Add explicit diagnostic-only, extent-checked Qwen boundary/output-state substitution for causal replay; normal serving arithmetic is unchanged.
+
 - Preserve CPU FP32 vision inverse-frequency construction and BF16 GDN norm-parameter materialization.
 - Match Qwen BF16 sigmoid/SiLU materialization before attention/MLP multiplies in prefill and decode.
 - Match vision BF16 Linear bias epilogues with bounded cuBLASLt workspace and add native split-KV SDPA; preserve fast and FP32 alternatives.

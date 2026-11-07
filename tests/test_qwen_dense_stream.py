@@ -90,6 +90,9 @@ class BoundedQwenContracts(unittest.TestCase):
         self.assertLess(memory_plan(c,248320*5120*2,4096,6144)['estimated_peak_bytes'],6144<<20)
         self.assertGreater(p['allowance_bytes']['reference_attention'],96<<20)
         self.assertEqual(p['allowance_bytes']['vision_linear_workspace'],1<<20)
+        # The complete largest live chunk workspace must be admitted jointly.
+        recurrence_bytes=48*(12*64*128+2*64*64+64+128*128)*4
+        self.assertGreaterEqual(p['allowance_bytes']['recurrence_workspace'],recurrence_bytes)
         for context,limit in [(4097,8192),(4096,2048)]:
             with self.assertRaises(ValueError):memory_plan(c,248320*5120*2,context,limit)
 

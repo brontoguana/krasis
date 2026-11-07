@@ -146,7 +146,7 @@ def memory_plan(cfg, slab_bytes, context_tokens, limit_mib=8192):
     band = min(256, context_tokens, max(1, (16<<20)//(heads*context_tokens*2)))
     attention = (2*heads*context_tokens*dim + 2*heads*band*dim + heads*band*context_tokens)*2
     items = dict(weight_slab=slab_bytes, kv=kv, recurrent_state=gdn*2,
-        reference_attention=attention, vision_linear_workspace=1<<20,
+        reference_attention=attention, recurrence_workspace=32<<20, vision_linear_workspace=1<<20,
         prefill_scratch=512<<20, vision_peak=256<<20,
         runtime_and_graphs=1024<<20, reserve=600<<20)
     peak = sum(items.values())

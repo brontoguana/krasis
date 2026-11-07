@@ -6,7 +6,7 @@ use crate::{
 };
 use cudarc::{
     cublas::{sys as bs, CudaBlas},
-    driver::{CudaDevice, CudaSlice, DevicePtr, LaunchAsync, LaunchConfig},
+    driver::{CudaDevice, CudaSlice, DevicePtr, DeviceSlice, LaunchAsync, LaunchConfig},
 };
 use pyo3::prelude::*;
 use std::{collections::HashMap, path::Path, sync::Arc};
@@ -379,6 +379,19 @@ impl Qwen35Vision {
         }
     }
     fn record(&self, capture: &mut Option<&mut HashMap<String, Vec<u16>>>, name: String, value: &CudaSlice<u16>) -> Result<(), String> {
+        // Explicit offline diagnostic intervention; no automatic serving input.
+        if let Ok(directory)=std::env::var("KRASIS_QWEN_VISION_SUBSTITUTION_DIR") {
+            let path=std::path::Path::new(&directory).join(format!("{name}.bf16"));
+            match std::fs::read(&path) {
+                Ok(packet)=>{
+                    if packet.len()!=value.len()*2 || packet.len()>32*1024*1024 {return Err("invalid vision substitution extent".into());}
+                    self.device.synchronize().map_err(|e|e.to_string())?;
+                    unsafe {cudarc::driver::sys::lib().cuMemcpyHtoD_v2(*value.device_ptr(),packet.as_ptr() as _,packet.len()).result().map_err(|e|e.to_string())?;}
+                }
+                Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
+                Err(e)=>return Err(e.to_string()),
+            }
+        }
         if let Some(c) = capture.as_deref_mut() {
             c.insert(name, self.device.dtoh_sync_copy(value).map_err(|e| e.to_string())?);
         }
