@@ -60,9 +60,9 @@ extern "C" __global__ void qv_rope(__nv_bfloat16* qkv,int n,int heads,int dim,in
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=n*2*heads*(dim/2))return;
  int d=i%(dim/2),h=i/(dim/2)%heads,which=i/(dim/2)/heads%2,p=i/(dim/2)/heads/2;
  int group=p/4,sub=p%4,row=(group/(gw/2))*2+sub/2,col=(group%(gw/2))*2+sub%2;
- int coord=d<dim/4?row:col, f=d%(dim/4);float angle=coord*powf(10000.f,-float(f)/(dim/4));
+ int coord=d<dim/4?row:col, f=d%(dim/4);float angle=coord*(1.f/powf(10000.f,float(f)/(dim/4)));
  int j=((p*3+which)*heads+h)*dim+d;float a=__bfloat162float(qkv[j]),b=__bfloat162float(qkv[j+dim/2]);float s,c;sincosf(angle,&s,&c);
- qkv[j]=__float2bfloat16(a*c-b*s);qkv[j+dim/2]=__float2bfloat16(b*c+a*s);
+ qkv[j]=__float2bfloat16(__fsub_rn(__fmul_rn(a,c),__fmul_rn(b,s)));qkv[j+dim/2]=__float2bfloat16(__fadd_rn(__fmul_rn(b,c),__fmul_rn(a,s)));
 }
 extern "C" __global__ void qv_attention(const __nv_bfloat16* qkv,__nv_bfloat16* out,int n,int heads,int dim){
  // One warp owns a query/head; no cross-query scratch or N^2 buffer.

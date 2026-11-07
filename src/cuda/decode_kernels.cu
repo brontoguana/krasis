@@ -15203,3 +15203,218 @@ extern "C" __global__ void record_globaltimer_u64_g(
     }
 }
 #include "expert_codec_kernels.cu"
+
+// Qwen3.5 outer norms retain FP32 (1 + source BF16 delta).
+extern "C" __global__ void qwen35_fused_add_rmsnorm_fp32w(
+    __nv_bfloat16* __restrict__ hidden,     // [hidden_size] in/out
+    __nv_bfloat16* __restrict__ residual,   // [hidden_size] in/out
+    const float* __restrict__ weight, // [hidden_size]
+    float eps,
+    int hidden_size,
+    int first_layer  // 1 = first layer (no add), 0 = add residual
+) {
+    extern __shared__ float smem[];
+
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+
+    // Step 1: Load hidden into shared mem as FP32, optionally add residual
+    float sum_sq = 0.0f;
+    for (int i = tid; i < hidden_size; i += num_threads) {
+        float h = bf16_to_f32(hidden[i]);
+        if (!first_layer) {
+            float r = bf16_to_f32(residual[i]);
+            h += r;
+        }
+        h = bf16_to_f32(f32_to_bf16(h)); // Reference residual boundary precedes norm.
+        smem[i] = h;
+        sum_sq += h * h;
+    }
+
+    // Warp reduction for sum_sq
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+    }
+
+    // Block reduction across warps using shared memory
+    __shared__ float warp_sums[32]; // max 32 warps per block
+    int warp_id = tid / warpSize;
+    int lane_id = tid % warpSize;
+    if (lane_id == 0) warp_sums[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (tid == 0) {
+        float total = 0.0f;
+        int num_warps = (num_threads + warpSize - 1) / warpSize;
+        for (int w = 0; w < num_warps; w++) total += warp_sums[w];
+        // Store the RMS scale factor
+        warp_sums[0] = rsqrtf(total / (float)hidden_size + eps);
+    }
+    __syncthreads();
+    float rms_scale = warp_sums[0];
+
+    // Step 2: Write residual = pre-norm value, hidden = normalized * weight
+    for (int i = tid; i < hidden_size; i += num_threads) {
+        float h = smem[i];
+        residual[i] = f32_to_bf16(h);  // save pre-norm value
+        float w = weight[i];
+        hidden[i] = f32_to_bf16(h * rms_scale * w);
+    }
+}
+
+// Simple RMSNorm (no residual, no fused add). Used for final norm.
+extern "C" __global__ void qwen35_rmsnorm_fp32w(
+    __nv_bfloat16* __restrict__ output,      // [hidden_size]
+    const __nv_bfloat16* __restrict__ input,  // [hidden_size]
+    const float* __restrict__ weight, // [hidden_size]
+    float eps,
+    int hidden_size
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+
+    float sum_sq = 0.0f;
+    for (int i = tid; i < hidden_size; i += num_threads) {
+        float x = bf16_to_f32(input[i]);
+        smem[i] = x;
+        sum_sq += x * x;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+    }
+    __shared__ float warp_sums[32];
+    int warp_id = tid / warpSize;
+    int lane_id = tid % warpSize;
+    if (lane_id == 0) warp_sums[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (tid == 0) {
+        float total = 0.0f;
+        int num_warps = (num_threads + warpSize - 1) / warpSize;
+        for (int w = 0; w < num_warps; w++) total += warp_sums[w];
+        warp_sums[0] = rsqrtf(total / (float)hidden_size + eps);
+    }
+    __syncthreads();
+    float rms_scale = warp_sums[0];
+
+    for (int i = tid; i < hidden_size; i += num_threads) {
+        float w = weight[i];
+        output[i] = f32_to_bf16(smem[i] * rms_scale * w);
+    }
+}
+
+
+
+// Qwen3.5 recurrent output is BF16 before gated normalization.
+extern "C" __global__ void qwen35_gated_rmsnorm_silu(
+    float* __restrict__ output,              // [nv * dv]
+    const float* __restrict__ recur_out,      // [nv * dv]
+    const float* __restrict__ z,              // [nv * dv]
+    const float* __restrict__ norm_weight,    // [dv] (shared across heads)
+    float eps,
+    int nv, int dv
+) {
+    int head = blockIdx.x;
+    if (head >= nv) return;
+
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+
+    const float* r = recur_out + head * dv;
+    const float* gate = z + head * dv;
+    float* out = output + head * dv;
+
+    // RMSNorm over dv elements for this head
+    extern __shared__ float smem[];
+    float sum_sq = 0.0f;
+    for (int i = tid; i < dv; i += num_threads) {
+        float x = bf16_to_f32(f32_to_bf16(r[i]));
+        smem[i] = x;
+        sum_sq += x * x;
+    }
+
+    // Warp reduction
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+    }
+    __shared__ float warp_sums[32];
+    int warp_id = tid / warpSize;
+    int lane_id = tid % warpSize;
+    if (lane_id == 0) warp_sums[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (tid == 0) {
+        float total = 0.0f;
+        int num_warps = (num_threads + warpSize - 1) / warpSize;
+        for (int w = 0; w < num_warps; w++) total += warp_sums[w];
+        warp_sums[0] = rsqrtf(total / (float)dv + eps);
+    }
+    __syncthreads();
+    float rms_scale = warp_sums[0];
+
+    // Apply: output = silu(z) * rmsnorm(recur_out)
+    for (int i = tid; i < dv; i += num_threads) {
+        float normed = bf16_to_f32(f32_to_bf16(smem[i] * rms_scale));
+        normed = bf16_to_f32(f32_to_bf16(normed * norm_weight[i]));
+        float g = bf16_to_f32(f32_to_bf16(gate[i]));
+        float silu_g = g / (1.0f + __expf(-g));
+        out[i] = bf16_to_f32(f32_to_bf16(silu_g * normed));
+    }
+}
+
+// Qwen3.5 recurrent output is BF16 before gated normalization.
+extern "C" __global__ void qwen35_gated_rmsnorm_silu_bf16(
+    unsigned short* __restrict__ output,         // [nv * dv] BF16
+    const float* __restrict__ recur_out,         // [nv * dv]
+    const float* __restrict__ z,                 // [nv * dv]
+    const float* __restrict__ norm_weight,       // [dv]
+    float eps,
+    int nv, int dv
+) {
+    int head = blockIdx.x;
+    if (head >= nv) return;
+
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+
+    const float* r = recur_out + head * dv;
+    const float* gate = z + head * dv;
+    unsigned short* out = output + head * dv;
+
+    extern __shared__ float smem[];
+    float sum_sq = 0.0f;
+    for (int i = tid; i < dv; i += num_threads) {
+        float x = bf16_to_f32(f32_to_bf16(r[i]));
+        smem[i] = x;
+        sum_sq += x * x;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+    }
+    __shared__ float warp_sums[32];
+    int warp_id = tid / warpSize;
+    int lane_id = tid % warpSize;
+    if (lane_id == 0) warp_sums[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (tid == 0) {
+        float total = 0.0f;
+        int num_warps = (num_threads + warpSize - 1) / warpSize;
+        for (int w = 0; w < num_warps; w++) total += warp_sums[w];
+        warp_sums[0] = rsqrtf(total / (float)dv + eps);
+    }
+    __syncthreads();
+    float rms_scale = warp_sums[0];
+
+    for (int i = tid; i < dv; i += num_threads) {
+        float normed = bf16_to_f32(f32_to_bf16(smem[i] * rms_scale));
+        normed = bf16_to_f32(f32_to_bf16(normed * norm_weight[i]));
+        float g = bf16_to_f32(f32_to_bf16(gate[i]));
+        float silu_g = g / (1.0f + __expf(-g));
+        __nv_bfloat16 result = __float2bfloat16(silu_g * normed);
+        out[i] = *reinterpret_cast<unsigned short*>(&result);
+    }
+}

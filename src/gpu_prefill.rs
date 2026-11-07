@@ -81263,6 +81263,15 @@ impl PrefillEngine {
 // ════════════════════════════════════════════════════════════════════════
 
 impl PrefillKernels {
+    pub(crate) fn select_qwen35_fp32_outer_norms(&mut self, device: &Arc<CudaDevice>) -> Result<(), String> {
+        self.la_gated_rmsnorm = extract_cu_func(&device.get_func("prefill_kernels", "qwen35_la_gated_rmsnorm_kernel").ok_or("missing Qwen gated norm")?);
+        self.la_gated_rmsnorm_bf16in = extract_cu_func(&device.get_func("prefill_kernels", "qwen35_la_gated_rmsnorm_bf16in_kernel").ok_or("missing Qwen BF16 gated norm")?);
+        self.rmsnorm = self.rmsnorm_fp32w;
+        self.fused_add_rmsnorm = extract_cu_func(&device.get_func(
+            "prefill_kernels", "qwen35_fused_add_rmsnorm_batched_fp32w_kernel"
+        ).ok_or("missing Qwen prefill FP32 fused norm")?);
+        Ok(())
+    }
     #[cfg(has_prefill_kernels)]
     pub fn load(device: Arc<CudaDevice>) -> Result<Self, String> {
         use cudarc::nvrtc::Ptx;
@@ -81275,6 +81284,7 @@ impl PrefillKernels {
                     "rmsnorm_batched_fp32w_kernel",
                     "rmsnorm_batched_contig_reduce_kernel",
                     "fused_add_rmsnorm_batched_kernel",
+                    "qwen35_fused_add_rmsnorm_batched_fp32w_kernel",
                     "add_bf16_batched_kernel",
                     "scale_bf16_batched_kernel",
                     "scale_bf16_by_ptr_batched_kernel",
@@ -81445,6 +81455,8 @@ impl PrefillKernels {
                     "la_compute_gate_beta_kernel",
                     "la_repeat_interleave_kernel",
                     "la_gated_rmsnorm_kernel",
+                    "qwen35_la_gated_rmsnorm_kernel",
+                    "qwen35_la_gated_rmsnorm_bf16in_kernel",
                     "la_cumsum_kernel",
                     "la_build_attn_matrix_kernel",
                     "la_triangular_solve_kernel",

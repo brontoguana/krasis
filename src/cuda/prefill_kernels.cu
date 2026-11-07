@@ -14550,3 +14550,130 @@ extern "C" __global__ void kv_cache_dequant_concat_tq4_v_kernel(
         }
     }
 }
+
+extern "C" __global__ void qwen35_fused_add_rmsnorm_batched_fp32w_kernel(
+    __nv_bfloat16* __restrict__ residual,
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ x,
+    const float* __restrict__ weight,
+    int D,
+    float eps)
+{
+    int token = blockIdx.x;
+    __nv_bfloat16* res_row = residual + (int64_t)token * D;
+    __nv_bfloat16* o_row = out + (int64_t)token * D;
+    const __nv_bfloat16* x_row = x + (int64_t)token * D;
+
+    extern __shared__ float smem[];
+
+    /* First pass: add and compute sum of squares */
+    float local_ss = 0.0f;
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        float r = bf16_to_float(res_row[i]) + bf16_to_float(x_row[i]);
+        __nv_bfloat16 rounded = float_to_bf16(r);
+        res_row[i] = rounded;
+        float v = bf16_to_float(rounded);
+        local_ss += v * v;
+    }
+    smem[threadIdx.x] = local_ss;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) smem[threadIdx.x] += smem[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    float rms_inv = rsqrtf(smem[0] / (float)D + eps);
+
+    /* Second pass: normalize */
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        float v = bf16_to_float(res_row[i]) * rms_inv;
+        o_row[i] = float_to_bf16(v * weight[i]);
+    }
+}
+
+
+
+// Qwen3.5 BF16 norm/scale boundaries, before the FP32 SiLU gate.
+extern "C" __global__ void qwen35_la_gated_rmsnorm_kernel(
+    __nv_bfloat16* __restrict__ out,      /* [M, nv*dv] BF16 */
+    const float* __restrict__ x,          /* [M, nv, dv] FP32 */
+    const __nv_bfloat16* __restrict__ gate, /* [M, nv, dv] BF16 */
+    const float* __restrict__ weight,     /* [dv] FP32 */
+    int nv, int dv, float eps)
+{
+    int token = blockIdx.x;
+    int head = blockIdx.y;
+    const float* x_head = x + ((int64_t)token * nv + head) * dv;
+    const __nv_bfloat16* g_head = gate + ((int64_t)token * nv + head) * dv;
+    __nv_bfloat16* o_head = out + ((int64_t)token * nv + head) * dv;
+
+    extern __shared__ float smem[];
+
+    /* Compute variance */
+    float local_ss = 0.0f;
+    for (int i = threadIdx.x; i < dv; i += blockDim.x) {
+        float v = bf16_to_float(float_to_bf16(x_head[i]));
+        local_ss += v * v;
+    }
+    smem[threadIdx.x] = local_ss;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) smem[threadIdx.x] += smem[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    float rms_inv = rsqrtf(smem[0] / (float)dv + eps);
+
+    /* Normalize, scale by weight, multiply by silu(gate) */
+    for (int i = threadIdx.x; i < dv; i += blockDim.x) {
+        float normed = bf16_to_float(float_to_bf16(bf16_to_float(float_to_bf16(x_head[i])) * rms_inv));
+        normed = bf16_to_float(float_to_bf16(normed * weight[i]));
+        float g = bf16_to_float(g_head[i]);
+        float silu_g = g / (1.0f + __expf(-g));
+        o_head[i] = float_to_bf16(normed * silu_g);
+    }
+}
+
+// Qwen3.5 BF16 norm/scale boundaries, before the FP32 SiLU gate.
+extern "C" __global__ void qwen35_la_gated_rmsnorm_bf16in_kernel(
+    __nv_bfloat16* __restrict__ out,          /* [M, nv*dv] BF16 */
+    const __nv_bfloat16* __restrict__ x,      /* [M, nv, dv] BF16 */
+    const __nv_bfloat16* __restrict__ gate,   /* [M, nv, dv] BF16 */
+    const float* __restrict__ weight,         /* [dv] FP32 */
+    int nv, int dv, float eps)
+{
+    int token = blockIdx.x;
+    int head = blockIdx.y;
+    const __nv_bfloat16* x_head = x + ((int64_t)token * nv + head) * dv;
+    const __nv_bfloat16* g_head = gate + ((int64_t)token * nv + head) * dv;
+    __nv_bfloat16* o_head = out + ((int64_t)token * nv + head) * dv;
+
+    extern __shared__ float smem[];
+
+    /* Compute variance in FP32 */
+    float local_ss = 0.0f;
+    for (int i = threadIdx.x; i < dv; i += blockDim.x) {
+        float v = bf16_to_float(x_head[i]);
+        local_ss += v * v;
+    }
+    smem[threadIdx.x] = local_ss;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) smem[threadIdx.x] += smem[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    float rms_inv = rsqrtf(smem[0] / (float)dv + eps);
+
+    /* Normalize, scale by weight, multiply by silu(gate) */
+    for (int i = threadIdx.x; i < dv; i += blockDim.x) {
+        float normed = bf16_to_float(float_to_bf16(bf16_to_float(x_head[i]) * rms_inv));
+        normed = bf16_to_float(float_to_bf16(normed * weight[i]));
+        float g = bf16_to_float(g_head[i]);
+        float silu_g = g / (1.0f + __expf(-g));
+        o_head[i] = float_to_bf16(normed * silu_g);
+    }
+}

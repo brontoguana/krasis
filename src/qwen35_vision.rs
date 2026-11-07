@@ -353,6 +353,12 @@ impl Qwen35Vision {
                 .map_err(|e| e.to_string())
         }
     }
+    fn record(&self, capture: &mut Option<&mut HashMap<String, Vec<u16>>>, name: String, value: &CudaSlice<u16>) -> Result<(), String> {
+        if let Some(c) = capture.as_deref_mut() {
+            c.insert(name, self.device.dtoh_sync_copy(value).map_err(|e| e.to_string())?);
+        }
+        Ok(())
+    }
     fn add(&self, x: u64, y: u64, n: usize) -> Result<(), String> {
         unsafe {
             self.device
@@ -461,6 +467,7 @@ impl Qwen35Vision {
             self.bank.stage(i + 1, stream)?;
             let p = format!("blocks.{i}");
             self.norm(xp, ap, n, &format!("{p}.norm1"))?;
+            self.record(&mut capture, format!("{i}.norm1"), &a)?;
             if i == 0 {
                 if let Some(c) = capture.as_deref_mut() {
                     c.insert(
@@ -470,6 +477,7 @@ impl Qwen35Vision {
                 }
             }
             self.linear(ap, qp, n, &format!("{p}.attn.qkv"), 0, &tmp)?;
+            self.record(&mut capture, format!("{i}.qkv"), &qkv)?;
             if i == 0 {
                 if let Some(c) = capture.as_deref_mut() {
                     c.insert(
@@ -590,11 +598,18 @@ impl Qwen35Vision {
                     );
                 }
             }
+            self.record(&mut capture, format!("{i}.attn_core"), &b)?;
+            self.record(&mut capture, format!("{i}.qkv_rope"), &qkv)?;
             self.linear(bp, ap, n, &format!("{p}.attn.proj"), 0, &tmp)?;
+            self.record(&mut capture, format!("{i}.attn_proj"), &a)?;
             self.add(xp, ap, n * self.hidden)?;
+            self.record(&mut capture, format!("{i}.post_attn"), &x)?;
             self.norm(xp, ap, n, &format!("{p}.norm2"))?;
+            self.record(&mut capture, format!("{i}.norm2"), &a)?;
             self.linear(ap, mp, n, &format!("{p}.mlp.linear_fc1"), 1, &tmp)?;
+            self.record(&mut capture, format!("{i}.fc1_act"), &mid)?;
             self.linear(mp, ap, n, &format!("{p}.mlp.linear_fc2"), 0, &tmp)?;
+            self.record(&mut capture, format!("{i}.fc2"), &a)?;
             self.add(xp, ap, n * self.hidden)?;
             if let Some(c) = capture.as_deref_mut() {
                 c.insert(
@@ -605,6 +620,7 @@ impl Qwen35Vision {
         }
         self.bank.stage(self.depth + 1, stream)?;
         self.norm(xp, ap, n, "merger.norm")?;
+        self.record(&mut capture, "merger_norm".into(), &a)?;
         self.linear(ap, mergep, n / 4, "merger.linear_fc1", 2, &tmp)?;
         self.linear(mergep, out, n / 4, "merger.linear_fc2", 0, &tmp)?;
         self.device.synchronize().map_err(|e| e.to_string())?;

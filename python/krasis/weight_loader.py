@@ -470,7 +470,7 @@ class WeightLoader:
                 "Applying +1 RMSNorm bias for %s (delta-RMS role)",
                 label,
             )
-            return weight + 1.0
+            return (weight.float() if self.cfg.model_type == "qwen3_5_text" else weight) + 1.0
 
         logger.debug(
             "Leaving RMSNorm weight unchanged for %s (direct-scale role)",

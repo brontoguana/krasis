@@ -85,12 +85,18 @@ This establishes configuration/equation compatibility, not an Arête model verdi
 
 Functional serving and memory fit are separate from numerical qualification.
 Complete 27B native/reference logits and all 128 sequence-state arrays were
-compared. The inherited Qwen norm/rounding caveat remains: the strict full-array
+compared. Follow-up repairs retain FP32 delta-norm scales and the GDN BF16 norm/scale
+boundaries, and round decode residuals before normalization. Real four-layer
+resident and streamed paths agree exactly, including all state arrays. The
+remaining independent-reference discrepancy begins in the first GDN recurrent
+state, before streaming can distinguish the paths. Numerical qualification
+remains incomplete: the strict full-array
 comparison does not pass, despite agreeing first tokens and successful requests.
 The complete vision encoder also retains failures at unchanged `rtol=.01,
 atol=.03`; operator-level agreement is not whole-model admission. No absolute
 quality, ADQ, release or other-GPU qualification is claimed.
 
 Evidence and immutable controllers:
-`krasis-internal/qwen27b-8gb-235682/`. The Maya performance work is independently
+`krasis-internal/qwen27b-8gb-235682/` and
+`krasis-internal/qwen27b-repair-235737/`. The Maya performance work is independently
 preserved on `perf/maya-parity-20261107`; it was not merged into this implementation.

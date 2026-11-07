@@ -2,6 +2,10 @@
 
 ## Unreleased — bounded Qwen3.5
 
+- Repair vision rotary frequency construction and separate FP32 multiply/add rounding, verified against identical saved QKV operands.
+- Preserve Qwen3.5 GDN normalized-value and scale BF16 boundaries before the FP32 SiLU gate, validated on captured real operands.
+- Preserve Qwen3.5 delta RMS scales in FP32 and use typed native outer-norm kernels; round decode residuals before normalization as in the reference.
+
 - Fix prefill token/position buffer reuse across nonblocking-stream chunks: complete previous readers before the legacy synchronous upload can overwrite their RoPE positions. Nonzero repeated-resident and streamed comparisons exposed this inherited race.
 - Preserve Maya comparison optimisations on `perf/maya-parity-20261107`, unrelated work on its own recovery branch/checkpoint, and all original files/binaries in a verified reflink archive. Start Qwen work from clean `2769736` main.
 - Add host-backed dense BF16 streaming with one stable Rust-owned GPU slab, ordered graph/eager copies, joint GPU/host admission budgets, 256-token chunks and a 4K context bound. Enable the 27B geometry by default; retain other model policies and resident opt-out. Preserve complete KV/recurrent state and reject unsupported batched/speculative modes.

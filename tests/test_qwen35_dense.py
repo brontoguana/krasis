@@ -77,6 +77,16 @@ class DenseQwen35Tests(unittest.TestCase):
         label = 'model.language_model.layers.0.linear_attn.norm.weight'
         torch.testing.assert_close(loader._maybe_apply_delta_rms_bias(w, label), w)
 
+    def test_bf16_delta_norm_keeps_fp32_addition(self):
+        loader = WeightLoader.__new__(WeightLoader)
+        loader.cfg = self.load()
+        # These deltas disappear if (1+w) is rounded back to BF16.
+        w = torch.tensor([.001, -.001, .003], dtype=torch.bfloat16)
+        actual = loader._maybe_apply_delta_rms_bias(w, 'model.language_model.norm.weight')
+        self.assertEqual(actual.dtype, torch.float32)
+        torch.testing.assert_close(actual, 1 + w.float(), rtol=0, atol=0)
+        self.assertTrue(bool((actual != (1 + w).float()).any()))
+
     def test_gdn_three_value_heads_per_key_fusion(self):
         loader = WeightLoader.__new__(WeightLoader)
         loader.cfg = SimpleNamespace(layers_prefix='model', linear_num_key_heads=2,

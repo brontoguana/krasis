@@ -10169,6 +10169,8 @@ class KrasisModel:
 
         # Norm bias flag (Qwen3 uses (1+w)*x)
         store.set_norm_bias_one(getattr(self.cfg, 'norm_bias_one', False))
+        if self.cfg.model_type == "qwen3_5_text":
+            store.set_qwen35_fp32_norms()
 
         # Track weight IDs for LA layers (needed for re-registration after state reset)
         self._la_wids = {}
@@ -12180,6 +12182,8 @@ class KrasisModel:
             store.set_lm_head(lm_head_wid)
 
         store.set_norm_bias_one(getattr(self.cfg, 'norm_bias_one', False))
+        if self.cfg.model_type == "qwen3_5_text":
+            store.set_qwen35_fp32_norms()
 
         # ── AWQ support for aux stores ──
         # Aux GPUs never do prefill, so they only need simple INT4 (no Marlin, no swap).

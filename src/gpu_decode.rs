@@ -4258,6 +4258,8 @@ const DEEPSEEK_V4_DECODE_FP4_QAT_BLOCK_SIZE: usize = 32;
 const KERNEL_NAMES: &[&str] = &[
     "embedding_lookup",
     "fused_add_rmsnorm",
+    "qwen35_fused_add_rmsnorm_fp32w",
+    "qwen35_rmsnorm_fp32w",
     "rmsnorm",
     "rmsnorm_scale",
     "dual_rmsnorm_scale",
@@ -4361,6 +4363,8 @@ const KERNEL_NAMES: &[&str] = &[
     "kimi_delta_rmsnorm_gate_bf16",
     "la_recurrence",
     "gated_rmsnorm_silu",
+    "qwen35_gated_rmsnorm_silu",
+    "qwen35_gated_rmsnorm_silu_bf16",
     "per_head_rmsnorm",
     "apply_rope",
     "apply_rope_half_split",
@@ -18814,6 +18818,7 @@ struct GpuDecodeGraph {
     // ── Full decode step state ──
     /// Whether model norms use (1+w)*x instead of w*x.
     norm_bias_one: bool,
+    qwen35_fp32_norms: bool,
 
     /// GQA KV cache: raw device pointers to FP8 E4M3 [max_seq, kv_stride] per layer.
     /// Memory is owned by Python (PagedKVCache tensors). Rust prefill writes FP8
@@ -32300,6 +32305,7 @@ impl GpuDecodeStore {
             kernels: None,
             pre_events: None,
             norm_bias_one: false,
+            qwen35_fp32_norms: false,
             kv_k_ptrs: Vec::new(),
             kv_v_ptrs: Vec::new(),
             kv_max_seq: 0,
@@ -43023,6 +43029,27 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    /// Select the typed Qwen3.5 outer norm ABI before graph/prefill allocation.
+    fn set_qwen35_fp32_norms(&mut self) -> PyResult<()> {
+        let norm = self.device.get_func(MODULE_NAME, "qwen35_rmsnorm_fp32w")
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing Qwen FP32 norm"))?;
+        let fused = self.device.get_func(MODULE_NAME, "qwen35_fused_add_rmsnorm_fp32w")
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing Qwen FP32 fused norm"))?;
+        let graph = self.graph.as_mut().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("graph absent"))?;
+        if graph.per_layer_graphs_valid || self.prefill_engine_slot.is_some() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("norm ABI must be selected before capture/prefill"));
+        }
+        let kernels = graph.kernels.as_mut().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("kernels absent"))?;
+        kernels.rmsnorm = norm;
+        kernels.fused_add_rmsnorm = fused;
+        kernels.gated_rmsnorm_silu = self.device.get_func(MODULE_NAME, "qwen35_gated_rmsnorm_silu")
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing Qwen gated norm"))?;
+        kernels.gated_rmsnorm_silu_bf16 = self.device.get_func(MODULE_NAME, "qwen35_gated_rmsnorm_silu_bf16")
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing Qwen BF16 gated norm"))?;
+        graph.qwen35_fp32_norms = true;
+        Ok(())
+    }
+
     /// Set norm_bias_one flag (Qwen3-Next uses (1+w)*x norms).
     fn set_norm_bias_one(&mut self, flag: bool) -> PyResult<()> {
         if let Some(ref mut graph) = self.graph {
@@ -52671,7 +52698,10 @@ impl GpuDecodeStore {
         }
 
         // Load prefill kernels
-        let kernels = PrefillKernels::load(self.device.clone())?;
+        let mut kernels = PrefillKernels::load(self.device.clone())?;
+        if graph.qwen35_fp32_norms {
+            kernels.select_qwen35_fp32_outer_norms(&self.device)?;
+        }
 
         // Create streams
         let prefill_stream_owner =
@@ -83416,7 +83446,7 @@ impl GpuDecodeStore {
                                 let out_ptr = d_bao_ptr + (t * gated_size * 2) as u64;
                                 let f = self
                                     .device
-                                    .get_func(MODULE_NAME, "gated_rmsnorm_silu_bf16")
+                                    .get_func(MODULE_NAME, if graph.qwen35_fp32_norms {"qwen35_gated_rmsnorm_silu_bf16"} else {"gated_rmsnorm_silu_bf16"})
                                     .ok_or_else(|| {
                                         "gated_rmsnorm_silu_bf16 not found".to_string()
                                     })?;
