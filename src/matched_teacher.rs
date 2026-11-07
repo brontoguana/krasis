@@ -1,5 +1,5 @@
 //! Explicit, checksum-bound token forcing for numerical diagnostics only.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -45,9 +45,12 @@ impl CheckedFile {
     }
 }
 
+fn default_audit_routes() -> bool { true }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Trial {
+    #[serde(default = "default_audit_routes")]
+    audit_routes: bool,
     #[serde(default)]
     raw_input: bool,
     label: String,
@@ -57,10 +60,11 @@ struct Trial {
     max_tokens: usize,
     forced_inputs: Vec<u32>,
 }
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Arithmetic {
     Native,
+    NativeServingDecode,
     CenteredNativeProjection,
     RawPrefillOnly,
     RawSharedPrefill,
@@ -74,7 +78,7 @@ impl Arithmetic {
     ) -> Result<(), String> {
         let enabled = Some(OsStr::new("1"));
         let valid = match self {
-            Self::Native | Self::CenteredNativeProjection | Self::HqqBf16Decode => raw.is_none() && shared.is_none(),
+            Self::Native | Self::NativeServingDecode | Self::CenteredNativeProjection | Self::HqqBf16Decode => raw.is_none() && shared.is_none(),
             Self::RawPrefillOnly => raw == enabled && shared.is_none(),
             Self::RawSharedPrefill => raw == enabled && shared == enabled,
         };
@@ -95,6 +99,8 @@ struct Plan {
     identities: Vec<CheckedFile>,
     trials: Vec<Trial>,
     #[serde(default)]
+    defer_step_proofs: bool,
+    #[serde(default)]
     centered_module: Option<CheckedFile>,
 }
 
@@ -113,7 +119,10 @@ fn parse(raw: &[u8]) -> Result<Plan, String> {
             "teacher-forcing plan requires schema1/template, schema2/raw or schema3/combined diagnostics, absolute output, identities and trials".into(),
         );
     }
-    if p.schema>=2 && !matches!(p.arithmetic,Arithmetic::Native|Arithmetic::HqqBf16Decode) { return Err("raw teacher requires a single native or HQQ reconstruction arithmetic contract".into()); }
+    if p.schema>=2 && !matches!(p.arithmetic,Arithmetic::Native|Arithmetic::NativeServingDecode|Arithmetic::HqqBf16Decode) { return Err("raw teacher requires a single native or HQQ reconstruction arithmetic contract".into()); }
+    if matches!(p.arithmetic,Arithmetic::NativeServingDecode) && (p.schema!=2 || !p.defer_step_proofs) {
+        return Err("native serving replay requires raw schema and deferred receipts; it is a separate performance diagnostic".into());
+    }
     if p.schema==3 && (!p.trials.iter().any(|t|t.raw_input)||!p.trials.iter().any(|t|!t.raw_input)) { return Err("schema3 requires both explicitly admitted template controls and raw quality trials".into()); }
     if matches!(p.arithmetic,Arithmetic::CenteredNativeProjection) != p.centered_module.is_some() || (p.centered_module.is_some() && p.schema!=1) { return Err("centered projection teacher requires schema1 and explicit center identity; older modes forbid it".into()); }
     let mut labels = HashSet::new();
@@ -226,11 +235,19 @@ fn validate_first_logits(logits: &[f32]) -> Result<(), String> {
     if logits.is_empty() || logits.iter().any(|v|!v.is_finite()) { return Err("raw teacher first logits are missing or nonfinite".into()); }
     Ok(())
 }
+pub(crate) fn native_serving_decode_admitted()->Result<bool,String>{
+    Ok(matches!(plan()?.arithmetic,Arithmetic::NativeServingDecode))
+}
 pub(crate) struct Session {
     trial: Trial,
+    arithmetic: Arithmetic,
     directory: PathBuf,
     next_step: usize,
+    decode_elapsed_seconds:Option<f64>,
+    raw_step_seen: Option<usize>,
     first_logits_len: Option<usize>,
+    defer_step_proofs: bool,
+    deferred_steps: Vec<Value>,
 }
 impl Session {
     pub(crate) fn prepare(
@@ -252,14 +269,26 @@ impl Session {
             .map_err(|e| format!("fresh teacher-forcing evidence required: {e}"))?;
         Ok(Self {
             trial: t.clone(),
+            arithmetic:p.arithmetic,
             directory,
             next_step: 0,
+            decode_elapsed_seconds:None,
+            raw_step_seen: None,
             first_logits_len: None,
+            defer_step_proofs: p.defer_step_proofs,
+            deferred_steps: Vec::new(),
         })
     }
     pub(crate) fn raw_first(&mut self, logits: &[f32]) -> Result<(), String> {
         if !self.trial.raw_input || self.first_logits_len.is_some() { return Err("raw teacher first-logit contract/order mismatch".into()); }
         validate_first_logits(logits)?;
+        // Timing-only serving replay preserves finite/vocabulary validation but
+        // omits all numerical dumps, including the first distribution. Legacy
+        // numerical contracts still persist their authentic proofs below.
+        if self.defer_step_proofs && matches!(self.arithmetic, Arithmetic::NativeServingDecode) {
+            self.first_logits_len = Some(logits.len());
+            return Ok(());
+        }
         persist(&self.directory.join("first-logits.f32"),&logits.iter().flat_map(|v|v.to_le_bytes()).collect::<Vec<_>>())?;
         persist(&self.directory.join("first-logits.json"),&serde_json::to_vec_pretty(&json!({
             "input_ids_sha256":self.trial.input_ids_sha256,"logical_tokens":self.trial.logical_tokens,
@@ -309,8 +338,9 @@ impl Session {
         }
         Ok(())
     }
-    pub(crate) fn raw_step(&self, step: usize, input: usize, logits: &[f32]) -> Result<(), String> {
+    pub(crate) fn raw_step(&mut self, step: usize, input: usize, logits: &[f32]) -> Result<(), String> {
         if step >= self.trial.max_tokens - 1
+            || self.raw_step_seen==Some(step)
             || step != self.next_step
             || (step < self.trial.forced_inputs.len()
                 && input != self.trial.forced_inputs[step] as usize)
@@ -319,11 +349,13 @@ impl Session {
         {
             return Err("teacher-forcing step/input/logits admission failed".into());
         }
+        if self.defer_step_proofs { self.raw_step_seen=Some(step);return Ok(()); }
         let bytes: Vec<u8> = logits.iter().flat_map(|x| x.to_le_bytes()).collect();
         persist(
             &self.directory.join(format!("step-{step}-logits.f32")),
             &bytes,
-        )
+        )?;
+        self.raw_step_seen=Some(step);Ok(())
     }
     pub(crate) fn select(
         &mut self,
@@ -331,25 +363,43 @@ impl Session {
         input: usize,
         greedy: usize,
     ) -> Result<usize, String> {
-        if step >= self.trial.max_tokens - 1 || step != self.next_step {
-            return Err("teacher-forcing selection order changed".into());
+        if step >= self.trial.max_tokens - 1 || step != self.next_step || self.raw_step_seen!=Some(step)
+            || self.trial.forced_inputs.get(step).is_some_and(|id|*id as usize!=input) {
+            return Err("teacher-forcing selection order/input or proof validation changed".into());
         }
         let selected = match self.trial.forced_inputs.get(step + 1) {
             Some(&id) => id as usize,
             None => greedy,
         };
-        persist(&self.directory.join(format!("step-{step}.json")),&serde_json::to_vec_pretty(&json!({
+        let receipt=json!({
             "diagnostic_only":true,"qualifies_candidate":false,"step":step,"input_token":input,
             "ordinary_greedy_under_forced_prefix":greedy,"actually_fed_next":selected,
             "next_token_forced":step+1<self.trial.forced_inputs.len(),"logical_tokens":self.trial.logical_tokens+step+1,
-        })).map_err(|e|e.to_string())?)?;
+        });
+        if self.defer_step_proofs { self.deferred_steps.push(receipt); }
+        else { persist(&self.directory.join(format!("step-{step}.json")),&serde_json::to_vec_pretty(&receipt).map_err(|e|e.to_string())?)?; }
+        self.raw_step_seen=None;
         self.next_step += 1;
         Ok(selected)
     }
+    pub(crate) fn record_decode_elapsed(&mut self,seconds:f64){self.decode_elapsed_seconds=Some(seconds);}
+    pub(crate) fn flush_deferred(&self) -> Result<(),String> {
+        if self.defer_step_proofs {
+            persist(&self.directory.join("deferred-steps.json"),
+                &serde_json::to_vec_pretty(&self.metadata()).map_err(|e|e.to_string())?)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn deferred_proofs(&self)->bool {self.defer_step_proofs}
+    pub(crate) fn audit_routes(&self)->bool {self.trial.audit_routes}
+    pub(crate) fn evidence_directory(&self)->&Path {&self.directory}
     pub(crate) fn diagnostic_label(&self) -> &str { &self.trial.label }
     pub(crate) fn metadata(&self) -> Value {
-        json!({"diagnostic_only":true,"qualifies_candidate":false,"label":self.trial.label,
-        "history":"explicit_teacher_forced_saved_tokens","ordinary_cache_equality_evidence":false,"forced_inputs":self.trial.forced_inputs})
+        json!({"diagnostic_only":true,"qualifies_candidate":false,"label":self.trial.label,"arithmetic":self.arithmetic,
+        "history":"explicit_teacher_forced_saved_tokens","ordinary_cache_equality_evidence":false,"forced_inputs":self.trial.forced_inputs,
+        "defer_step_proofs":self.defer_step_proofs,"audit_routes":self.trial.audit_routes,
+        "first_logit_proof_saved":!(self.defer_step_proofs && matches!(self.arithmetic,Arithmetic::NativeServingDecode)),"step_receipts":self.deferred_steps,
+        "completed_decode_steps":self.next_step,"decode_elapsed_seconds":self.decode_elapsed_seconds,"logit_proofs_saved":!self.defer_step_proofs})
     }
 }
 fn validate_inputs(t: &Trial, ids: &[u32], start: usize, max: usize) -> Result<(), String> {
@@ -441,8 +491,53 @@ mod tests {
         assert!(Arithmetic::CenteredNativeProjection.validate_environment(None,None).is_ok());
         assert!(Arithmetic::CenteredNativeProjection.validate_environment(Some(OsStr::new("1")),None).is_err());
     }
+    #[test]
+    fn serving_replay_requires_raw_history_and_deferred_receipts() {
+        let base=json!({"schema":2,"arithmetic":"native_serving_decode","defer_step_proofs":true,"directory":"/tmp/replay","loaded_native":{"path":"/tmp/native","sha256":"a".repeat(64)},"identities":[{"path":"/tmp/config","sha256":"b".repeat(64)}],"trials":[{"raw_input":true,"label":"fixed","logical_tokens":2,"expected_sequence_start":0,"max_tokens":3,"input_ids_sha256":"c".repeat(64),"forced_inputs":[4,5]}]});
+        assert!(parse(&serde_json::to_vec(&base).unwrap()).is_ok());
+        for key in ["defer_step_proofs","raw_input"] {let mut p=base.clone();if key=="raw_input"{p["trials"][0][key]=json!(false);}else{p[key]=json!(false);}assert!(parse(&serde_json::to_vec(&p).unwrap()).is_err());}
+        assert!(Arithmetic::NativeServingDecode.validate_environment(None,None).is_ok());
+        assert!(Arithmetic::NativeServingDecode.validate_environment(Some(OsStr::new("1")),None).is_err());
+    }
+    #[test]
+    fn deferred_receipts_preserve_order_and_write_once_after_measurement() {
+        let dir=std::env::temp_dir().join(format!("teacher-deferred-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));fs::create_dir(&dir).unwrap();
+        let mut s=Session{trial:trial(),arithmetic:Arithmetic::NativeServingDecode,directory:dir.clone(),next_step:0,decode_elapsed_seconds:None,raw_step_seen:None,first_logits_len:None,defer_step_proofs:true,deferred_steps:Vec::new()};
+        assert!(s.select(0,4,7).is_err());s.raw_step(0,4,&[1.,2.]).unwrap();assert!(s.raw_step(0,4,&[1.,2.]).is_err());assert!(s.select(0,6,7).is_err());assert_eq!(s.select(0,4,7).unwrap(),5);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(),0);s.flush_deferred().unwrap();let v:Value=serde_json::from_slice(&fs::read(dir.join("deferred-steps.json")).unwrap()).unwrap();assert_eq!(v["completed_decode_steps"],1);assert_eq!(v["logit_proofs_saved"],false);assert!(s.flush_deferred().is_err());fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn serving_timing_omits_first_dump_but_retains_validation_and_numerical_mode() {
+        for mode in [Arithmetic::NativeServingDecode, Arithmetic::Native] {
+            let dir=std::env::temp_dir().join(format!("teacher-first-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            fs::create_dir(&dir).unwrap();
+            let mut t=trial();t.raw_input=true;t.audit_routes=false;
+            let mut s=Session{trial:t,arithmetic:mode,directory:dir.clone(),next_step:0,decode_elapsed_seconds:None,raw_step_seen:None,first_logits_len:None,defer_step_proofs:true,deferred_steps:Vec::new()};
+            assert!(s.raw_first(&[f32::NAN]).is_err());
+            assert!(s.first_logits_len.is_none());
+            s.raw_first(&[-1.,0.,1.]).unwrap();
+            assert_eq!(s.first_logits_len,Some(3));
+            assert!(!s.audit_routes());
+            assert!(s.raw_first(&[-1.,0.,1.]).is_err());
+            let saved=matches!(mode,Arithmetic::Native);
+            assert_eq!(dir.join("first-logits.f32").exists(),saved);
+            assert_eq!(dir.join("first-logits.json").exists(),saved);
+            assert_eq!(s.metadata()["first_logit_proof_saved"],saved);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+    #[test]
+    fn route_observation_control_is_explicit_and_defaults_to_legacy_enabled() {
+        let t:Trial=serde_json::from_value(json!({"raw_input":true,"label":"observer","logical_tokens":2,"expected_sequence_start":0,"max_tokens":3,"input_ids_sha256":"a".repeat(64),"forced_inputs":[4,5]})).unwrap();
+        assert!(t.audit_routes);
+        let mut value=serde_json::to_value(json!({"raw_input":true,"label":"observer","logical_tokens":2,"expected_sequence_start":0,"max_tokens":3,"input_ids_sha256":"a".repeat(64),"forced_inputs":[4,5]})).unwrap();
+        value["audit_routes"]=json!(false);
+        let t:Trial=serde_json::from_value(value).unwrap();assert!(!t.audit_routes);
+        assert!(validate_inputs(&t,&[4,5],0,3).is_err()); // Observer switch cannot waive prompt checksum.
+    }
     fn trial() -> Trial {
         Trial {
+            audit_routes: true,
             raw_input: false,
             label: "control".into(),
             input_ids_sha256: token_hash(&[3, 7]),
@@ -498,9 +593,14 @@ mod tests {
         fs::create_dir(&dir).unwrap();
         let mut s = Session {
             trial: trial(),
+            arithmetic:Arithmetic::Native,
             directory: dir.clone(),
             next_step: 0,
+            decode_elapsed_seconds:None,
+            raw_step_seen: None,
             first_logits_len: None,
+            defer_step_proofs: false,
+            deferred_steps: Vec::new(),
         };
         assert!(s.admit_decode(5, &[], 4).is_err());
         assert!(s.admit_decode(10, &[5], 4).is_err());

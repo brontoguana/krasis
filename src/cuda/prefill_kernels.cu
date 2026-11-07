@@ -14550,3 +14550,282 @@ extern "C" __global__ void kv_cache_dequant_concat_tq4_v_kernel(
         }
     }
 }
+
+/* Experimental sparse MLA tensor-core attention.
+ * Inputs are quantized KV rows and the exact
+ * existing selected-index/position contract. FP16 matrix operands and FP32
+ * accumulation change arithmetic, so this path must remain opt-in until
+ * complete output and end-to-end qualification passes. */
+template <bool K6>
+__device__ void glm53_sparse_mla_tensor_core_body(
+    float* __restrict__ output, const float* __restrict__ q_absorbed,
+    const __nv_bfloat16* __restrict__ packed_q,
+    const unsigned char* __restrict__ ckv_cache,
+    const unsigned char* __restrict__ kpe_cache,
+    const int* __restrict__ selected_indices, const int* __restrict__ positions,
+    float sm_scale, int rows, int num_heads, int qk_dim, int nope_dim,
+    int rope_dim, int ckv_dim, int selected_per_row, int max_context)
+{
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    using namespace nvcuda;
+    const int row = blockIdx.y, h0 = blockIdx.x * 16, tid = threadIdx.x;
+    const int warp = tid >> 5;
+    const int width = ckv_dim + rope_dim;
+    if (row >= rows || h0 >= num_heads || blockDim.x != 256 ||
+        width <= 0 || (width & 15) || ckv_dim <= 0 || (ckv_dim & 15)) return;
+    extern __shared__ __align__(32) unsigned char shared_raw[];
+    __half* const sq = reinterpret_cast<__half*>(shared_raw);
+    __half* const sq_residual = sq + 16 * width;
+    __half* const sk = sq_residual + 16 * width;
+    __half* const sk_residual = sk + 16 * width;
+    __half* const prob = sk_residual + 16 * width;
+    __half* const prob_residual = prob + 256;
+    float* const score = reinterpret_cast<float*>(prob_residual + 256);
+    float* const acc = score + 256;
+    float* const maximum = acc + 16 * ckv_dim;
+    float* const total = maximum + 16;
+    float* const alpha = total + 16;
+    const int seq = min(max(positions[row] + 1, 0), max_context);
+    const int count = min(seq, max(selected_per_row, 0));
+    const int* const indices = selected_indices + (long long)row * selected_per_row;
+    for (int x=tid; x<16*width; x+=256) {
+        const int h = x / width, d = x % width;
+        float value = 0.0f;
+        if (h0+h < num_heads) {
+            if (d < ckv_dim) value = q_absorbed[((long long)row*num_heads+h0+h)*ckv_dim+d];
+            else value = bf16_to_float(packed_q[((long long)row*num_heads+h0+h)*qk_dim+nope_dim+d-ckv_dim]);
+        }
+        const __half hi = __float2half_rn(value);
+        sq[x] = hi;
+        sq_residual[x] = __float2half_rn(value - __half2float(hi));
+    }
+    for (int x=tid; x<16*ckv_dim; x+=256) acc[x] = 0.0f;
+    if (tid < 16) { maximum[tid] = -INFINITY; total[tid] = 0.0f; }
+    __syncthreads();
+    for (int first=0; first<count; first+=16) {
+        for (int x=tid; x<16*width; x+=256) {
+            const int slot = x / width, d = x % width;
+            const int idx = first+slot < count ? indices[first+slot] : -1;
+            float value = 0.0f;
+            if (idx >= 0 && idx < seq) {
+                const unsigned char* cache = d < ckv_dim ? ckv_cache : kpe_cache;
+                const int dim = d < ckv_dim ? ckv_dim : rope_dim;
+                const int element = d < ckv_dim ? d : d-ckv_dim;
+                value = K6 ? mla_prefill_load_k6_value(cache,idx,dim,element)
+                           : mla_prefill_load_k4_value(cache,idx,dim,element);
+            }
+            const __half hi = __float2half_rn(value);
+            sk[x] = hi;
+            sk_residual[x] = __float2half_rn(value - __half2float(hi));
+        }
+        __syncthreads();
+        if (warp == 0) {
+            wmma::fragment<wmma::accumulator,16,16,16,float> c;
+            wmma::fill_fragment(c,0.0f);
+            for (int d=0; d<width; d+=16) {
+                wmma::fragment<wmma::matrix_a,16,16,16,__half,wmma::row_major> a;
+                wmma::fragment<wmma::matrix_b,16,16,16,__half,wmma::col_major> b;
+                wmma::load_matrix_sync(a,sq+d,width);
+                wmma::load_matrix_sync(b,sk+d,width);
+                wmma::mma_sync(c,a,b,c);
+                wmma::load_matrix_sync(b,sk_residual+d,width);
+                wmma::mma_sync(c,a,b,c);
+                wmma::load_matrix_sync(a,sq_residual+d,width);
+                wmma::load_matrix_sync(b,sk+d,width);
+                wmma::mma_sync(c,a,b,c);
+                wmma::load_matrix_sync(b,sk_residual+d,width);
+                wmma::mma_sync(c,a,b,c);
+            }
+            wmma::store_matrix_sync(score,c,16,wmma::mem_row_major);
+        }
+        __syncthreads();
+        if (tid < 16) {
+            float next = maximum[tid];
+            for (int j=0; j<16; ++j) {
+                const int idx = first+j < count ? indices[first+j] : -1;
+                const float value = score[tid*16+j]*sm_scale;
+                if (idx >= 0 && idx < seq && h0+tid < num_heads && isfinite(value))
+                    next = fmaxf(next, value);
+            }
+            const bool valid = next != -INFINITY;
+            const float a = valid && maximum[tid] != -INFINITY ? __expf(maximum[tid]-next) : 0.0f;
+            float sum = total[tid]*a;
+            for (int j=0; j<16; ++j) {
+                const int idx = first+j < count ? indices[first+j] : -1;
+                const float value = score[tid*16+j]*sm_scale;
+                const float p = valid && idx >= 0 && idx < seq && h0+tid < num_heads && isfinite(value)
+                    ? __expf(value-next) : 0.0f;
+                const __half hi = __float2half_rn(p);
+                prob[tid*16+j] = hi;
+                prob_residual[tid*16+j] = __float2half_rn(p-__half2float(hi));
+                sum += p;
+            }
+            alpha[tid] = a; maximum[tid] = next; total[tid] = sum;
+        }
+        __syncthreads();
+        for (int x=tid; x<16*ckv_dim; x+=256) acc[x] *= alpha[x/ckv_dim];
+        __syncthreads();
+        for (int tile=warp; tile<ckv_dim/16; tile+=8) {
+            wmma::fragment<wmma::matrix_a,16,16,16,__half,wmma::row_major> p;
+            wmma::fragment<wmma::matrix_b,16,16,16,__half,wmma::row_major> v;
+            wmma::fragment<wmma::accumulator,16,16,16,float> c;
+            wmma::load_matrix_sync(p,prob,16);
+            wmma::load_matrix_sync(v,sk+tile*16,width);
+            wmma::load_matrix_sync(c,acc+tile*16,ckv_dim,wmma::mem_row_major);
+            wmma::mma_sync(c,p,v,c);
+            wmma::load_matrix_sync(v,sk_residual+tile*16,width);
+            wmma::mma_sync(c,p,v,c);
+            wmma::load_matrix_sync(p,prob_residual,16);
+            wmma::load_matrix_sync(v,sk+tile*16,width);
+            wmma::mma_sync(c,p,v,c);
+            wmma::load_matrix_sync(v,sk_residual+tile*16,width);
+            wmma::mma_sync(c,p,v,c);
+            wmma::store_matrix_sync(acc+tile*16,c,ckv_dim,wmma::mem_row_major);
+        }
+        __syncthreads();
+    }
+    for (int x=tid; x<16*ckv_dim; x+=256) {
+        const int h=x/ckv_dim, d=x%ckv_dim;
+        if (h0+h < num_heads)
+            output[((long long)row*num_heads+h0+h)*ckv_dim+d] = total[h] == 0.0f ? 0.0f : acc[x]/total[h];
+    }
+#endif
+}
+#define GLM53_FUSED_MLA_ARGS float* output, const float* q, const __nv_bfloat16* pq, const unsigned char* ckv, const unsigned char* kpe, const int* ids, const int* pos, float scale, int rows, int heads, int qdim, int nope, int rope, int cdim, int selected, int context
+#define GLM53_FUSED_MLA_PASS output,q,pq,ckv,kpe,ids,pos,scale,rows,heads,qdim,nope,rope,cdim,selected,context
+extern "C" __global__ void glm53_fused_mla_k4_candidate(GLM53_FUSED_MLA_ARGS) { glm53_sparse_mla_tensor_core_body<false>(GLM53_FUSED_MLA_PASS); }
+extern "C" __global__ void glm53_fused_mla_k6_candidate(GLM53_FUSED_MLA_ARGS) { glm53_sparse_mla_tensor_core_body<true>(GLM53_FUSED_MLA_PASS); }
+#undef GLM53_FUSED_MLA_ARGS
+#undef GLM53_FUSED_MLA_PASS
+
+
+/* Experimental register-accumulator sparse MLA.
+ * Four warps cooperate on QK; each retains its PV accumulator tiles in
+ * registers. Compressed KV is decoded once per 16-head group. Only a 16-column
+ * query slice is staged; no full FP32 gather/score or shared PV accumulator.
+ * Arithmetic remains compensated FP16 products with FP32 accumulation. */
+template <bool K6, int GROUPS = 1, bool ALIAS_PHASES = false>
+__device__ void glm53_sparse_mla_reuse_body(
+    float* __restrict__ output, const float* __restrict__ q_absorbed,
+    const __nv_bfloat16* __restrict__ packed_q,
+    const unsigned char* __restrict__ ckv_cache,
+    const unsigned char* __restrict__ kpe_cache,
+    const int* __restrict__ selected_indices, const int* __restrict__ positions,
+    float sm_scale, int rows, int num_heads, int qk_dim, int nope_dim,
+    int rope_dim, int ckv_dim, int selected_per_row, int max_context)
+{
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    using namespace nvcuda;
+    const int row=blockIdx.y, h0=blockIdx.x*(16*GROUPS), tid=threadIdx.x;
+    const int warp=tid/32, lane=tid%32, group=warp/4, local_warp=warp%4, width=ckv_dim+rope_dim;
+    if(row>=rows || h0>=num_heads || blockDim.x!=128*GROUPS || ckv_dim!=512 ||
+       rope_dim<0 || rope_dim>128 || (width%16)) return;
+    extern __shared__ __align__(32) unsigned char reuse_raw[];
+    __half* const keys=reinterpret_cast<__half*>(reuse_raw);
+    __half* const keys_lo=keys+16*width;
+    __half* const query=keys_lo+16*width; // four disjoint 16x16 slices
+    __half* const query_lo=query+4*GROUPS*256;
+    __half* const prob=query_lo+4*GROUPS*256;
+    __half* const prob_lo=prob+GROUPS*256;
+    float* const partial=ALIAS_PHASES?reinterpret_cast<float*>(query):reinterpret_cast<float*>(prob_lo+GROUPS*256); // [4,16,16]
+    float* const alpha=ALIAS_PHASES?reinterpret_cast<float*>(prob_lo+GROUPS*256):partial+4*GROUPS*256;
+    float* const maxima=alpha+16*GROUPS;
+    float* const totals=maxima+16*GROUPS;
+    wmma::fragment<wmma::accumulator,16,16,16,float> accum[8];
+    #pragma unroll
+    for(int t=0;t<8;++t) wmma::fill_fragment(accum[t],0.0f);
+    if(tid<16*GROUPS){maxima[tid]=-INFINITY;totals[tid]=0.0f;}
+    const int seq=min(max(positions[row]+1,0),max_context);
+    const int count=min(seq,max(selected_per_row,0));
+    const int* const indices=selected_indices+(long long)row*selected_per_row;
+    __syncthreads();
+    for(int first=0;first<count;first+=16){
+        for(int x=tid;x<16*width;x+=128*GROUPS){
+            int slot=x/width,d=x%width;
+            int idx=first+slot<count?indices[first+slot]:-1;
+            float v=0.0f;
+            if(idx>=0&&idx<seq){
+                const unsigned char* cache=d<ckv_dim?ckv_cache:kpe_cache;
+                int dim=d<ckv_dim?ckv_dim:rope_dim,element=d<ckv_dim?d:d-ckv_dim;
+                v=K6?mla_prefill_load_k6_value(cache,idx,dim,element):mla_prefill_load_k4_value(cache,idx,dim,element);
+            }
+            __half hi=__float2half_rn(v);keys[x]=hi;keys_lo[x]=__float2half_rn(v-__half2float(hi));
+        }
+        __syncthreads();
+        wmma::fragment<wmma::accumulator,16,16,16,float> score;
+        wmma::fill_fragment(score,0.0f);
+        for(int d=local_warp*16;d<width;d+=64){
+            for(int x=lane;x<256;x+=32){
+                int h=x/16,dim=d+x%16;float v=0.0f;
+                if(h0+group*16+h<num_heads){v=dim<ckv_dim?q_absorbed[((long long)row*num_heads+h0+group*16+h)*ckv_dim+dim]:bf16_to_float(packed_q[((long long)row*num_heads+h0+group*16+h)*qk_dim+nope_dim+dim-ckv_dim]);}
+                __half hi=__float2half_rn(v);query[warp*256+x]=hi;query_lo[warp*256+x]=__float2half_rn(v-__half2float(hi));
+            }
+            __syncwarp();
+            wmma::fragment<wmma::matrix_a,16,16,16,__half,wmma::row_major> a;
+            wmma::fragment<wmma::matrix_b,16,16,16,__half,wmma::col_major> b;
+            wmma::load_matrix_sync(a,query+warp*256,16);wmma::load_matrix_sync(b,keys+d,width);wmma::mma_sync(score,a,b,score);
+            wmma::load_matrix_sync(b,keys_lo+d,width);wmma::mma_sync(score,a,b,score);
+            wmma::load_matrix_sync(a,query_lo+warp*256,16);wmma::load_matrix_sync(b,keys+d,width);wmma::mma_sync(score,a,b,score);
+            wmma::load_matrix_sync(b,keys_lo+d,width);wmma::mma_sync(score,a,b,score);
+        }
+        // Phase alias crosses warp slices; all QK query loads must finish.
+        if(ALIAS_PHASES)__syncthreads();
+        wmma::store_matrix_sync(partial+warp*256,score,16,wmma::mem_row_major);
+        __syncthreads();
+        if(tid<16*GROUPS){
+            const int offset=(tid/16)*1024+(tid%16)*16;
+            float values[16],next=maxima[tid];
+            #pragma unroll
+            for(int j=0;j<16;++j){
+                int idx=first+j<count?indices[first+j]:-1;
+                float value=((partial[offset+j]+partial[256+offset+j])+partial[512+offset+j])+partial[768+offset+j];
+                value*=sm_scale;
+                values[j]=idx>=0&&idx<seq&&h0+tid<num_heads&&isfinite(value)?value:-INFINITY;
+                next=fmaxf(next,values[j]);
+            }
+            float a=next!=-INFINITY&&maxima[tid]!=-INFINITY?__expf(maxima[tid]-next):0.0f;
+            float sum=totals[tid]*a;
+            #pragma unroll
+            for(int j=0;j<16;++j){float v=values[j]!=-INFINITY?__expf(values[j]-next):0.0f;__half hi=__float2half_rn(v);prob[tid*16+j]=hi;prob_lo[tid*16+j]=__float2half_rn(v-__half2float(hi));sum+=v;}
+            alpha[tid]=a;maxima[tid]=next;totals[tid]=sum;
+        }
+        __syncthreads();
+        // A fragment's accumulator element-to-row mapping is deliberately not
+        // assumed. Rescale through each warp's independent shared 16x16 tile.
+        #pragma unroll
+        for(int t=0;t<8;++t){
+            const int col=(t*4+local_warp)*16;
+            wmma::store_matrix_sync(partial+warp*256,accum[t],16,wmma::mem_row_major);
+            __syncwarp();
+            for(int x=lane;x<256;x+=32)partial[warp*256+x]*=alpha[group*16+x/16];
+            __syncwarp();
+            wmma::load_matrix_sync(accum[t],partial+warp*256,16,wmma::mem_row_major);
+            wmma::fragment<wmma::matrix_a,16,16,16,__half,wmma::row_major> p;
+            wmma::fragment<wmma::matrix_b,16,16,16,__half,wmma::row_major> v;
+            wmma::load_matrix_sync(p,prob+group*256,16);wmma::load_matrix_sync(v,keys+col,width);wmma::mma_sync(accum[t],p,v,accum[t]);
+            wmma::load_matrix_sync(v,keys_lo+col,width);wmma::mma_sync(accum[t],p,v,accum[t]);
+            wmma::load_matrix_sync(p,prob_lo+group*256,16);wmma::load_matrix_sync(v,keys+col,width);wmma::mma_sync(accum[t],p,v,accum[t]);
+            wmma::load_matrix_sync(v,keys_lo+col,width);wmma::mma_sync(accum[t],p,v,accum[t]);
+        }
+        __syncthreads();
+    }
+    #pragma unroll
+    for(int t=0;t<8;++t){
+        wmma::store_matrix_sync(partial+warp*256,accum[t],16,wmma::mem_row_major);__syncwarp();
+        for(int x=lane;x<256;x+=32){int h=x/16,d=(t*4+local_warp)*16+x%16;if(h0+group*16+h<num_heads)output[((long long)row*num_heads+h0+group*16+h)*ckv_dim+d]=totals[group*16+h]==0.0f?0.0f:partial[warp*256+x]/totals[group*16+h];}
+        __syncwarp();
+    }
+#endif
+}
+#define GLM53_REUSE_ARGS float* output, const float* q, const __nv_bfloat16* pq, const unsigned char* ckv, const unsigned char* kpe, const int* ids, const int* pos, float scale, int rows, int heads, int qdim, int nope, int rope, int cdim, int selected, int context
+#define GLM53_REUSE_PASS output,q,pq,ckv,kpe,ids,pos,scale,rows,heads,qdim,nope,rope,cdim,selected,context
+extern "C" __global__ void glm53_reuse_mla_k4_candidate(GLM53_REUSE_ARGS){glm53_sparse_mla_reuse_body<false>(GLM53_REUSE_PASS);}
+extern "C" __global__ void glm53_reuse_mla_k6_candidate(GLM53_REUSE_ARGS){glm53_sparse_mla_reuse_body<true>(GLM53_REUSE_PASS);}
+// Two 32-head blocks fit the A6000 shared-memory/register budget. Query
+// staging and score/PV rescale tiles have disjoint lifetimes and share storage.
+extern "C" __global__ __launch_bounds__(256,2) void glm53_reuse32_mla_k4_candidate(GLM53_REUSE_ARGS){glm53_sparse_mla_reuse_body<false,2,true>(GLM53_REUSE_PASS);}
+extern "C" __global__ __launch_bounds__(256,2) void glm53_reuse32_mla_k6_candidate(GLM53_REUSE_ARGS){glm53_sparse_mla_reuse_body<true,2,true>(GLM53_REUSE_PASS);}
+extern "C" __global__ __launch_bounds__(512,1) void glm53_reuse64_mla_k4_candidate(GLM53_REUSE_ARGS){glm53_sparse_mla_reuse_body<false,4>(GLM53_REUSE_PASS);}
+extern "C" __global__ __launch_bounds__(512,1) void glm53_reuse64_mla_k6_candidate(GLM53_REUSE_ARGS){glm53_sparse_mla_reuse_body<true,4>(GLM53_REUSE_PASS);}
+#undef GLM53_REUSE_ARGS
+#undef GLM53_REUSE_PASS

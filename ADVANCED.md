@@ -353,3 +353,40 @@ Attention precision and KV format are independent launcher controls. Changing
 one never changes the other. Each model still advertises only KV formats its
 architecture can represent—for example, DeepSeek-V4 uses Native or BF16 shared
 sequence state rather than conventional separate K/V formats.
+
+## Prefill transfer scheduling
+
+Pure KDA models automatically omit unused gated-delta scratch. Independent shared experts overlap routed DMA when dedicated scratch and event ownership permit it. Set `KRASIS_PREFILL_COMPACT_KDA_SCRATCH=0` or `KRASIS_PREFILL_SHARED_OVERLAP_DMA=0` to restore the prior paths. Mixed KDA/gated-delta, latent, scratch-aliasing and forced/deferred shared modes retain their existing fallback. These defaults do not enable experimental attention arithmetic or split recurrence. GLM heatmap identities record the transfer policy; regenerate captures for the changed policy.
+
+The eligible homogeneous GLM pure-KDA INT4 path also uses joint transfer planning (`KRASIS_PREFILL_TRANSFER_PLAN=0` opts out). It ranks bounded logical chunks by predicted repeated expert payload plus restoration bytes, with operator-band launch count as a tie-breaker. Actual routing remains authoritative. Routed MoE activation scratch is bounded to 8,192 token rows; each layer retains immutable expert-index slab slots across its bands. Attention and KDA still execute the complete logical chunk, with original causal and recurrent ordering. The planner budgets 32 gathered-attention workspace rows unless explicitly configured, retains surviving HCS ownership, and reloads only missing chunks without prompt-tail reordering. Predictions are not reported as actual demand or guaranteed savings. Unsupported alternate kernels, vision, latent, sequential and scratch-aliasing configurations require their original allocation/dispatch paths. Numerical witness and behavioral failures remain separately recorded in the investigation report. The live chunk guard subtracts the already-owned cold slab from the remaining runtime budget, so the same memory is not funded again by evicting resident slots at the next chunk. The estimator ranks predicted transferred bytes first and band launches second; it is a heuristic, not an optimal latency model. Use `KRASIS_PREFILL_TRANSFER_PLAN=0` to compare the original scheduling while keeping the two new automatic scratch/overlap defaults, or set their independent controls to `0` as well for the earlier behavior.
+
+When explicitly selecting host-backed MLA KV, budget its GPU window jointly with
+workspace and expert residency. A small window can cause repeated mapped-host
+reads during prefill, which CUDA memcpy totals do not include. The retained 65K
+experiment compares `KRASIS_MLA_HOST_BACKED_WINDOW_TOKENS=32768` with `69632`
+using full-context backing and the same native binary; this is a placement
+control, not a context limit. Ordinary configurations without host-backed MLA
+continue to use their existing GPU KV allocation. Compare HTTP-to-first-content
+latency including restoration, and report sampled PCIe traffic separately from
+exact copied expert bytes. See the internal transfer235113 placement report
+record for measurements and unresolved numerical qualification.
+
+GLM single-GPU native serving releases redundant Torch shared-expert weight sources
+after the store certifies that both native phases use immutable graph-owned slabs.
+The gate remains GPU-resident; CPU source weights remain available for reload.
+`KRASIS_RECLAIM_SHARED_SOURCES=0` keeps the old source ownership. HQQ runtime
+components use a single fixed-offset VMM arena when it saves physical bytes in
+both phases; independent mappings remain the fallback.
+`KRASIS_HQQ_PACK_COMPONENTS=0` retains separate component mappings. Registered
+arena extents cannot be resized in place; recreate the store for changed shapes.
+These storage policies do not change quantisation, arithmetic, logical chunk
+boundaries or workspace budgets. Saved heatmaps bind both controls.
+
+Eligible GLM prefill reuses four allocations across the ordered attention and
+FFN phases: Q/MoE gather, K/MoE output, V/MoE gate-up, and attention output/FFN
+activation. Persistent KV/recurrent state and all weights remain separate.
+`KRASIS_PREFILL_PHASE_ARENA=0` retains independent buffers. Retained KDA-prefix
+execution, DeepSeek attention that borrows MoE buffers, legacy HQQ8 correction
+scratch, and unsupported planner paths retain independent allocation. Exact
+prompt budgeting rebates the pairwise savings; the linear estimate remains
+a conservative upper bound. No chunk, arithmetic or stream-order change is made.

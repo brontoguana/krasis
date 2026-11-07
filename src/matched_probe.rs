@@ -359,6 +359,7 @@ fn parse(raw: &str) -> Result<Config, String> {
                 | "dense_prefill_operands"
                 | "dense_decode_operands"
                 | "hc_prepare_operands"
+                | "hc_prepare_full"
                 | "decode_eager_hc_prepare"
                 | "decode_eager_hc_post"
                 | "decode_graph_kda_selected_prepared_q"
@@ -373,6 +374,7 @@ fn parse(raw: &str) -> Result<Config, String> {
                 | "sequence_state"
                 | "snapshot"
                 | "kda_inputs"
+                | "kda_tail_operands"
                 | "kda_full_batch"
                 | "decode_boundary"
                 | "decode_current_decision"
@@ -831,6 +833,9 @@ impl Target {
             .and_then(|n| n.checked_mul(mult))
             .ok_or("HC observed mix overflow")?;
         self.hc_observed_row("state.bf16", state, row, flat, 2, stream)?;
+        self.device("state-full.bf16", state,
+            rows.checked_mul(flat).and_then(|n| n.checked_mul(2))
+                .ok_or("HC full state extent overflow")?, stream)?;
         self.device(
             "function.f32",
             function,

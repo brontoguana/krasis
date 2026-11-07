@@ -15,6 +15,8 @@
 
 #[path = "prefill_progress.rs"]
 mod prefill_progress;
+#[path = "prefill_transfer.rs"]
+pub(crate) mod prefill_transfer;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -165,6 +167,69 @@ fn optional_bool_env(name: &str) -> Result<Option<bool>, String> {
             )),
         },
     }
+}
+
+// Diagnostic only until output and recurrent-state qualification succeeds.
+fn glm53_fused_mla_candidate_enabled() -> Result<bool, String> {
+    static ENABLED: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
+    ENABLED.get_or_init(|| Ok(optional_bool_env("KRASIS_GLM53_FUSED_MLA_CANDIDATE")?.unwrap_or(false))).clone()
+}
+
+fn glm53_kda_split_candidate_enabled() -> Result<bool, String> {
+    static ENABLED: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
+    ENABLED.get_or_init(|| Ok(optional_bool_env("KRASIS_GLM53_KDA_SPLIT_CANDIDATE")?.unwrap_or(false))).clone()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KdaSplitPreparation { Raw, Bf16Beta, Bf16QkBeta }
+fn glm53_kda_split_preparation() -> Result<KdaSplitPreparation,String> {
+    static MODE:std::sync::OnceLock<Result<KdaSplitPreparation,String>>=std::sync::OnceLock::new();
+    MODE.get_or_init(||match std::env::var("KRASIS_GLM53_KDA_SPLIT_PREPARATION") {
+        Err(std::env::VarError::NotPresent)=>Ok(KdaSplitPreparation::Raw),
+        Ok(v)=>match v.as_str(){"raw"=>Ok(KdaSplitPreparation::Raw),"bf16_beta"=>Ok(KdaSplitPreparation::Bf16Beta),"bf16_qk_beta"=>Ok(KdaSplitPreparation::Bf16QkBeta),_=>Err("KRASIS_GLM53_KDA_SPLIT_PREPARATION must be raw, bf16_beta or bf16_qk_beta".into())},
+        Err(e)=>Err(e.to_string()),
+    }).clone()
+}
+
+// Opt-in planning experiment. Invalid configuration retains the conservative
+// allocation and is rejected during prefill preparation.
+fn kda_skip_chunk_scratch() -> bool {
+    glm53_kda_split_candidate_enabled().unwrap_or(false)
+        && optional_bool_env("KRASIS_DIAG_KDA_SKIP_CHUNK_SCRATCH").ok().flatten().unwrap_or(false)
+}
+
+// Pure KDA consumes BF16 Q/K/V and descriptor-owned recurrent state, not
+// the legacy gated-delta LA intermediates. Keep beta and all KDA/DSA workspace.
+// Mixed KDA/gated-delta models deliberately retain the legacy allocation.
+fn prefill_compact_kda_scratch(config: &PrefillModelConfig) -> bool {
+    config.layer_types.iter().any(|&kind| kind == 5)
+        && !config.layer_types.iter().any(|&kind| kind == 3)
+        && optional_bool_env("KRASIS_PREFILL_COMPACT_KDA_SCRATCH")
+            .map(|value| value.unwrap_or(true)).unwrap_or(false)
+}
+
+// Bounded activation scratch is independent of logical attention/KDA chunks.
+// Scope initially to homogeneous GLM pure-KDA Marlin paths. Unsupported debug,
+// latent and alternate kernel configurations retain their original allocations.
+pub(crate) fn prefill_transfer_plan_enabled(config: &PrefillModelConfig) -> bool {
+    config.transfer_bands_supported
+        && config.deepseek_v4_hc_mult > 0
+        && config.layer_types.iter().any(|&t| t == 5)
+        && !config.layer_types.iter().any(|&t| t == 1 || t == 3)
+        && config.deepseek_v4_vision_max_tokens == 0
+        && config.expert_bits == 4 && config.max_expert_bits == 4
+        && config.n_routed_experts > 0
+        && config.shared_expert_bits != 16
+        && optional_bool_env("KRASIS_PREFILL_TRANSFER_PLAN").ok().flatten().unwrap_or(true)
+        && ["KRASIS_SEQUENTIAL_MOE", "KRASIS_PREFILL_FORCE_SYNC_SHARED_EXPERT",
+            "KRASIS_PREFILL_SHARED_EXPERT_USE_MAIN_SCRATCH", "KRASIS_SYNTH_REPACK",
+            "KRASIS_PREFILL_PREDICTED_W1"]
+            .iter().all(|name| std::env::var(name).is_err())
+        && !prefill_disable_ptr_table()
+}
+const PREFILL_MOE_BAND_ROWS: usize = 8192;
+fn prefill_moe_scratch_rows(config: &PrefillModelConfig, rows: usize) -> usize {
+    if prefill_transfer_plan_enabled(config) { rows.min(PREFILL_MOE_BAND_ROWS) } else { rows }
 }
 
 pub(crate) fn glm53_kda_recurrent_oracle_enabled() -> Result<bool, String> {
@@ -363,6 +428,17 @@ enum DsaMlaGatheredComputeMode {
     Tf32Score,
     Tf32Output,
     Tf32Both,
+}
+
+// Narrow, default-off dispatch experiment; no host identity is consulted.
+fn dsa_mla_sm86_dispatch_rows(major: i32, minor: i32, heads: usize, width: usize, selected: usize, pedantic: bool, tile_capacity: usize) -> Option<usize> {
+    if (major, minor, heads, width, selected, pedantic) == (8, 6, 64, 512, 2051, true)
+        && (2..=4).contains(&tile_capacity) { Some(1) } else { None }
+}
+
+fn dsa_mla_sm86_dispatch_enabled() -> Result<bool, String> {
+    static ENABLED: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
+    ENABLED.get_or_init(|| Ok(optional_bool_env("KRASIS_DSA_MLA_SM86_DISPATCH")?.unwrap_or(false))).clone()
 }
 
 fn parse_dsa_mla_gathered_compute_mode(
@@ -672,6 +748,7 @@ pub(crate) enum DeepseekV4PrefillSparseScoreMode {
 pub(crate) enum DeepseekV4PrefillHcProjectMode {
     Scalar,
     Tf32Gemm,
+    Fp32PedanticGemm,
 }
 
 impl DeepseekV4PrefillHcProjectMode {
@@ -688,8 +765,9 @@ impl DeepseekV4PrefillHcProjectMode {
             Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
                 "scalar" => Ok(Self::Scalar),
                 "tf32_gemm" => Ok(Self::Tf32Gemm),
+                "fp32_pedantic_gemm" => Ok(Self::Fp32PedanticGemm),
                 other => Err(format!(
-                    "invalid KRASIS_DEEPSEEK_V4_PREFILL_HC_PROJECT_MODE={other:?}; expected scalar or tf32_gemm"
+                    "invalid KRASIS_DEEPSEEK_V4_PREFILL_HC_PROJECT_MODE={other:?}; expected scalar, tf32_gemm or fp32_pedantic_gemm"
                 )),
             },
         }
@@ -699,6 +777,7 @@ impl DeepseekV4PrefillHcProjectMode {
         match self {
             Self::Scalar => "scalar",
             Self::Tf32Gemm => "tf32_gemm",
+            Self::Fp32PedanticGemm => "fp32_pedantic_gemm",
         }
     }
 }
@@ -6427,6 +6506,10 @@ pub struct PrefillKernels {
     mla_prefill_absorb_wkc: RawCuFunc,
     mla_prefill_sparse_attention_k4: RawCuFunc,
     mla_prefill_sparse_attention_k6: RawCuFunc,
+    glm53_fused_mla_k4_candidate: RawCuFunc,
+    glm53_fused_mla_k6_candidate: RawCuFunc,
+    glm53_reuse_mla_k4_candidate: RawCuFunc,
+    glm53_reuse_mla_k6_candidate: RawCuFunc,
     mla_prefill_sparse_attention_k4_score_reuse: RawCuFunc,
     mla_prefill_sparse_attention_k6_score_reuse: RawCuFunc,
     mla_prefill_sparse_scores_k4_grouped_exact: RawCuFunc,
@@ -6461,6 +6544,7 @@ pub struct PrefillKernels {
     deepseek_v4_hc_head_prepare: RawCuFunc,
     kimi_delta_recurrent_scan_bf16: RawCuFunc,
     kimi_delta_recurrent_scan_tiled_bf16: RawCuFunc,
+    glm53_kda_prepared_relay: RawCuFunc,
     kimi_delta_chunk_prepare_bf16: RawCuFunc,
     kimi_delta_conv_silu_bf16: RawCuFunc,
     kimi_delta_conv_silu_parallel_bf16: RawCuFunc,
@@ -6915,7 +6999,7 @@ type FusedMoeScatterFn = unsafe extern "C" fn(
 
 /// Function pointer for vendored krasis_flash_attn_fwd_bf16.
 /// Calls FlashAttention-2 forward pass from libkrasis_flash_attn.so.
-type FlashAttnFwdFn = unsafe extern "C" fn(
+pub(crate) type FlashAttnFwdFn = unsafe extern "C" fn(
     /*q_ptr*/ *const std::ffi::c_void,
     /*k_ptr*/ *const std::ffi::c_void,
     /*v_ptr*/ *const std::ffi::c_void,
@@ -7226,8 +7310,12 @@ impl ScalarType {
 //  Model config, weights, scratch
 // ════════════════════════════════════════════════════════════════════════
 
+#[derive(Clone)]
 pub struct PrefillModelConfig {
     pub hidden_size: usize,
+    pub transfer_bands_supported: bool,
+    /// False when attention itself borrows MoE work buffers.
+    pub phase_arena_supported: bool,
     pub intermediate_size: usize, // max(moe_inter, dense_inter) for general scratch
     pub moe_intermediate_size: usize, // actual MoE expert intermediate for MoE-specific buffers
     pub num_hidden_layers: usize,
@@ -7562,6 +7650,21 @@ fn dsa_prefill_workspace_deficit_bytes(
 
 const DSA_MLA_WORKSPACE_ALIGNMENT_BYTES: usize = 256;
 
+fn dsa_planned_workspace_bytes(
+    minimum: usize,
+    transient_minimum: usize,
+    row_bytes: usize,
+    alignment: usize,
+    chunk_rows: usize,
+    requested_rows: usize,
+) -> Result<usize, String> {
+    let target = row_bytes.checked_mul(requested_rows.min(chunk_rows))
+        .and_then(|n| n.checked_add(alignment))
+        .ok_or_else(|| "DSA planned workspace size overflow".to_string())?;
+    minimum.checked_add(target.saturating_sub(transient_minimum))
+        .ok_or_else(|| "DSA planned total workspace size overflow".to_string())
+}
+
 fn dsa_mla_grouped_exact_workspace_row_layout(
     num_heads: usize,
     selected_per_row: usize,
@@ -7642,7 +7745,7 @@ fn dsa_mla_minimum_transient_workspace_bytes(
     ))?;
     if usize::from(gathered_gemm) + usize::from(score_reuse) + usize::from(grouped_exact) > 1 {
         return Err(
-            "KRASIS_DSA_MLA_GATHERED_GEMM, KRASIS_DSA_MLA_SCORE_REUSE, and KRASIS_DSA_MLA_GROUPED_EXACT are mutually exclusive"
+            "gathered GEMM, score reuse, grouped exact, and fused MLA candidate are mutually exclusive"
                 .to_string(),
         );
     }
@@ -9817,7 +9920,7 @@ pub struct PrefillScratch {
     /// selection and main sparse attention use it sequentially, avoiding any
     /// persistent per-layer BF16 mirror.
     pub d_deepseek_v4_native_history: Option<GpuBuf<u16>>,
-    pub d_attn_out: GpuBuf<u16>,
+    pub d_attn_out: Arc<GpuBuf<u16>>,
     pub d_q: Arc<GpuBuf<u16>>,
     pub d_k: Arc<GpuBuf<u16>>,
     pub d_v: Arc<GpuBuf<u16>>,
@@ -9832,12 +9935,12 @@ pub struct PrefillScratch {
     // sized for fused_sorted_count (= max_tokens * topk + n_routed * block_size).
     // Used by BOTH sequential and fused MoE paths (never simultaneously).
     pub d_moe_accum: GpuBuf<f32>, // [max_tokens, hidden] FP32 -- routed/shared accumulator
-    pub d_moe_gathered: GpuBuf<u16>, // [fused_sorted_count, hidden] BF16 -- fused_input or gathered
-    pub d_moe_expert_out: GpuBuf<u16>, // [fused_sorted_count, hidden] BF16 -- fused_output or expert_out
-    pub d_moe_gate_up: GpuBuf<u16>, // [fused_sorted_count, w1_n] BF16 -- fused_inter_cache or gate_up
+    pub d_moe_gathered: Arc<GpuBuf<u16>>, // [fused_sorted_count, hidden] BF16 -- fused_input or gathered
+    pub d_moe_expert_out: Arc<GpuBuf<u16>>, // [fused_sorted_count, hidden] BF16 -- fused_output or expert_out
+    pub d_moe_gate_up: Arc<GpuBuf<u16>>, // [fused_sorted_count, w1_n] BF16 -- fused_inter_cache or gate_up
     /// BF16 activation scratch shared by routed-MoE sorted rows and
     /// split-dense prompt rows; allocated to the larger runtime geometry.
-    pub d_moe_inter: GpuBuf<u16>,
+    pub d_moe_inter: Arc<GpuBuf<u16>>,
     pub d_gather_src_map: GpuBuf<i32>, // [fused_sorted_count] -- sorted_token_ids or gather_src_map
     pub d_gather_weight_map: GpuBuf<f32>, // [max_tokens * topk]
     // Fused MoE sorted dispatch buffers (in scratch so both paths share VRAM)
@@ -11500,6 +11603,14 @@ pub struct PrefillEngine {
     // HCS snapshot: flat [num_layers * num_experts] -> [w13_packed, w13_scales, w2_packed, w2_scales]
     // Zero = not cached. Updated before each prefill from decode store's HCS state.
     pub hcs_cache_fast: Vec<[u64; 4]>,
+    // A single routed layer owns the cold slab for all of its token bands.
+    // Entries never outlive that call; fixed expert-index slots cannot alias.
+    pub(crate) band_layer: Option<usize>,
+    pub(crate) band_expert_ptrs: Vec<[u64; 4]>,
+    pub(crate) band_shared_input: Option<u64>,
+    pub(crate) band_row_start: usize,
+    pub(crate) transfer_plan_rows: std::cell::Cell<usize>,
+
     pub hcs_num_experts_per_layer: usize,
     // CUDA events for double-buffer expert DMA synchronization
     pub dma_event: cuda_sys::CUevent,
@@ -19929,7 +20040,58 @@ impl PrefillEngine {
         )
     }
 
+    pub(crate) fn transfer_planner_enabled(&self) -> bool {
+        prefill_transfer_plan_enabled(&self.config)
+    }
+
+    // Predicted demand is deliberately conservative: no future route is known.
+    // Rank by repeated expert bytes plus restoration, then by band launches.
+    // Actual routing still has exact-demand fallback in forward_moe_fused.
+    fn transfer_plan(&self, prompt_tokens: usize) -> Option<(usize, usize, usize)> {
+        if !self.transfer_planner_enabled() { return None; }
+        // HTTP worker threads do not inherit the calibration thread's CUDA
+        // context. Querying without binding silently defeated runtime planning.
+        self.device.bind_to_thread().ok()?;
+        let mut free = 0usize;
+        let mut total = 0usize;
+        if unsafe { cuda_sys::lib().cuMemGetInfo_v2(&mut free, &mut total) }
+            != cuda_sys::CUresult::CUDA_SUCCESS { return None; }
+        let resident_bytes = self.hcs_cached_expert_count().saturating_mul(self.cold_expert_bytes);
+        let available = free.saturating_add(resident_bytes);
+        let expert_bytes = self.all_expert_cold_staging_bytes();
+        let reserve = self.measured_post_scratch_runtime_reserve_bytes(prompt_tokens)
+            .max(expert_bytes);
+        let guard = self.safety_margin_mb.max(PREFILL_SAFETY_MARGIN_MB)
+            .saturating_add(256).saturating_mul(1024*1024);
+        let layers = self.config.num_hidden_layers.saturating_sub(self.config.first_k_dense);
+        let mut best: Option<((usize, usize), (usize, usize, usize))> = None;
+        for cap in [32768usize, 24576, 16384, 8192] {
+            let rows = prompt_tokens.min(cap).max(128);
+            let workspace = self.planned_dsa_prefill_workspace_bytes(rows, prompt_tokens).ok()?;
+            let required = estimate_scratch_vram_for_prompt(&self.config, rows, prompt_tokens)
+                .saturating_add(workspace).saturating_add(reserve)
+                .saturating_add(self.measured_scratch_alloc_overhead_bytes)
+                .saturating_add(guard);
+            if required > available { continue; }
+            let kept = prefill_transfer::protected_resident_bytes(available, required, resident_bytes);
+            let key = prefill_transfer::traffic_score(prompt_tokens, rows,
+                self.config.n_routed_experts, self.config.num_experts_per_tok,
+                self.cold_expert_bytes, layers, resident_bytes, kept, PREFILL_MOE_BAND_ROWS);
+            if best.as_ref().is_none_or(|(previous, _)| key < *previous) {
+                best = Some((key, (rows, required, kept)));
+            }
+        }
+        best.map(|(_, plan)| plan)
+    }
+
     pub fn minimum_prefill_entry_free_bytes(&self, prompt_tokens: usize) -> usize {
+        self.transfer_plan_rows.set(0);
+        if let Some((rows, required, kept)) = self.transfer_plan(prompt_tokens) {
+            self.transfer_plan_rows.set(rows);
+            log::info!("PREFILL TRANSFER PLAN prompt_tokens={} logical_rows={} entry_free_bytes={} predicted_retained_bytes={} band_rows={} objective=repeated_payload_plus_restoration", prompt_tokens, rows, required, kept, PREFILL_MOE_BAND_ROWS);
+            return required;
+        }
+
         let safety_margin_mb = self.safety_margin_mb.max(PREFILL_SAFETY_MARGIN_MB);
         let safety_bytes = safety_margin_mb.saturating_mul(1024 * 1024);
         let scratch_tokens = clean_runtime_chunk_tokens(prompt_tokens, 128);
@@ -20560,6 +20722,11 @@ impl PrefillEngine {
         moe_layer_idx: usize,
         expert_idx: usize,
     ) -> Option<(u64, u64, u64, u64)> {
+        if self.band_layer == Some(moe_layer_idx) {
+            if let Some(&p) = self.band_expert_ptrs.get(expert_idx) {
+                if p[0] != 0 { return Some((p[0], p[1], p[2], p[3])); }
+            }
+        }
         if self.hcs_num_experts_per_layer == 0 {
             return None;
         }
@@ -21456,6 +21623,10 @@ impl PrefillEngine {
         chunk_start: usize,
         m: usize,
     ) -> Result<(), String> {
+        // The band planner owns fixed expert-index cold slots for the complete
+        // logical layer. Dense prefetch uses compact cold-slot numbering and
+        // speculative all-expert fills; mixing owners would copy weights twice.
+        if self.transfer_planner_enabled() { return Ok(()); }
         if self.layer_weights[layer_idx].moe_gate_ptr == 0
             || self.d_expert_w1_ptrs.is_none()
             || self.d_cold_staging.is_none()
@@ -21813,14 +21984,29 @@ impl PrefillEngine {
         let prompt_tokens =
             prefill_chunk_guard_prompt_tokens(self.active_prefill_prompt_tokens, chunk_tokens)?;
 
+        let owned_cold_bytes = self.d_cold_staging.as_ref().map_or(0, |buf| buf.len());
+        let runtime_reserve = self.measured_post_scratch_runtime_reserve_bytes(prompt_tokens)
+            .max(self.all_expert_cold_staging_bytes());
+        let live_floor = prefill_transfer::live_runtime_floor(
+            self.safety_margin_mb.max(PREFILL_SAFETY_MARGIN_MB).saturating_mul(1024*1024),
+            runtime_reserve, owned_cold_bytes);
         let (evicted, freed_mb, cache_fast_snapshot, num_experts_per_layer) = unsafe {
             let store =
                 &mut *(self.prefill_hcs_store_addr as *mut crate::gpu_decode::GpuDecodeStore);
-            let (evicted, freed_mb) = store.hcs_evict_for_prefill_post_scratch(prompt_tokens);
+            let (evicted, freed_mb) = if self.transfer_planner_enabled() {
+                store.hcs_evict_for_prefill_live_floor(prompt_tokens, live_floor)
+            } else { store.hcs_evict_for_prefill_post_scratch(prompt_tokens) };
             let (cache_fast, ne) = store.export_hcs_snapshot();
             (evicted, freed_mb, cache_fast.to_vec(), ne)
         };
         self.update_hcs_snapshot(&cache_fast_snapshot, num_experts_per_layer);
+        if self.transfer_planner_enabled() {
+            eprintln!("[PREFILL-JOINT-GUARD] {}", serde_json::json!({
+                "prompt_tokens":prompt_tokens,"chunk":chunk_idx,"rows":chunk_tokens,
+                "owned_cold_bytes":owned_cold_bytes,"required_free_bytes":live_floor,
+                "evicted":evicted,"resident_experts":self.hcs_cached_expert_count(),
+            }));
+        }
         trace_emit_prefill_global_mark(
             self.trace.as_ref(),
             "hcs_prefill",
@@ -25853,6 +26039,17 @@ impl PrefillEngine {
                 .require_sequence_state_ready_rust()?;
         }
         self.bind_cuda_context()?;
+        let skip_kda = optional_bool_env("KRASIS_DIAG_KDA_SKIP_CHUNK_SCRATCH")?.unwrap_or(false);
+        if glm53_kda_split_preparation()? != KdaSplitPreparation::Raw && !glm53_kda_split_candidate_enabled()? {
+            return Err("KDA split preparation control requires KRASIS_GLM53_KDA_SPLIT_CANDIDATE=1".into());
+        }
+        if glm53_kda_split_candidate_enabled()? && glm53_kda_split_preparation()? != KdaSplitPreparation::Bf16QkBeta {
+            return Err("KDA relay requires KRASIS_GLM53_KDA_SPLIT_PREPARATION=bf16_qk_beta; raw and bf16_beta experiments have been retired".into());
+        }
+
+        if skip_kda && !glm53_kda_split_candidate_enabled()? {
+            return Err("KDA scratch planning experiment requires split candidate".into());
+        }
         self.refresh_trace_config();
         trace_emit_prefill_global_mark(
             self.trace.as_ref(),
@@ -25931,6 +26128,10 @@ impl PrefillEngine {
         self.d_fla_v_new = None;
         self.d_fla_o = None;
         self.clear_kda_chunk_scratch();
+        self.band_layer = None;
+        self.band_expert_ptrs.clear();
+        self.band_shared_input = None;
+        self.band_row_start = 0;
         self.prescan_active_experts.clear();
         self.prescan_token_count = 0;
         self.dsa_prefill_workspace = None;
@@ -25997,7 +26198,10 @@ impl PrefillEngine {
         // Size for this prompt: cap at prompt_tokens (no point allocating more).
         // Minimum 128: fused MoE Marlin kernels use block_size_m=64, need enough
         // tokens for stable sorted dispatch. 128 adds ~57 MB scratch overhead.
-        let target = prompt_tokens.min(50000);
+        let target = if self.transfer_planner_enabled() {
+            let planned = self.transfer_plan_rows.get();
+            prompt_tokens.min(if planned >= 128 { planned.min(32768) } else { 32768 })
+        } else { prompt_tokens.min(50000) };
         let mut scratch_budget_bytes = free_bytes
             .saturating_sub(safety_bytes)
             .saturating_sub(self.measured_scratch_alloc_overhead_bytes)
@@ -26074,13 +26278,14 @@ impl PrefillEngine {
             std::env::var("KRASIS_PREFILL_DISABLE_EXTRA_HCS_EVICT").is_ok();
         if diag_cap.is_none()
             && !disable_extra_hcs_evict
+            && !self.transfer_planner_enabled()
             && prompt_tokens <= target
             && max_by_vram < prompt_tokens
             && self.prefill_hcs_store_addr != 0
             && self.hcs_cached_expert_count() > 0
         {
             let dsa_workspace_bytes = if configure_dsa_workspace {
-                self.minimum_dsa_prefill_workspace_bytes(target, prompt_tokens)?
+                self.planned_dsa_prefill_workspace_bytes(target, prompt_tokens)?
             } else {
                 0
             };
@@ -26288,7 +26493,12 @@ impl PrefillEngine {
                         .map_err(|e| format!("alloc fla_o: {e}"))?,
                 );
             }
-            self.allocate_kda_chunk_scratch(scratch_tokens)?;
+            if kda_skip_chunk_scratch() {
+                self.clear_kda_chunk_scratch();
+                if debug_prefill { eprintln!("[EXPERIMENT] KDA chunk scratch omitted for split recurrence"); }
+            } else {
+                self.allocate_kda_chunk_scratch(scratch_tokens)?;
+            }
 
             // Shared expert Marlin workspace: sized for actual chunk, not max possible.
             let shared_w13_n = if self.config.moe_gated {
@@ -26302,7 +26512,7 @@ impl PrefillEngine {
                     .max(self.config.moe_intermediate_size)
             };
             let shared_scratch_n = std::cmp::max(self.config.hidden_size, shared_w13_n);
-            let shared_scratch_elems = scratch_tokens * shared_scratch_n;
+            let shared_scratch_elems = prefill_moe_scratch_rows(&self.config, scratch_tokens) * shared_scratch_n;
             if shared_scratch_elems > 0 {
                 self.d_shared_bf16_scratch1 = Some(
                     self.device
@@ -26467,7 +26677,7 @@ impl PrefillEngine {
                 ),
             );
             let minimum_dsa_workspace_bytes = if configure_dsa_workspace {
-                self.minimum_dsa_prefill_workspace_bytes(
+                self.planned_dsa_prefill_workspace_bytes(
                     scratch_tokens.min(prompt_tokens),
                     prompt_tokens,
                 )?
@@ -26710,6 +26920,17 @@ impl PrefillEngine {
             }
         }
 
+        if self.transfer_planner_enabled() {
+            eprintln!("[PREFILL-JOINT-PLAN] {}", serde_json::json!({
+                "prompt_tokens": prompt_tokens, "logical_capacity": scratch_tokens,
+                "moe_band_rows": PREFILL_MOE_BAND_ROWS,
+                "resident_experts": self.hcs_cached_expert_count(),
+                "resident_representation_bytes": self.hcs_cached_expert_count().saturating_mul(self.cold_expert_bytes),
+                "workspace_bytes": dsa_plan.as_ref().map(|p| p.workspace_capacity_bytes),
+                "free_after_prepare_bytes": post_alloc_free_bytes,
+                "required_floor_bytes": dsa_required_free_floor_bytes,
+            }));
+        }
         let scratch_mb =
             estimate_scratch_vram_for_prompt(&self.config, scratch_tokens, prompt_tokens) as f64
                 / (1024.0 * 1024.0);
@@ -27361,7 +27582,9 @@ impl PrefillEngine {
             self.scratch.max_tokens
         };
         let capture_suffix_boundary = capture_boundary.map(|boundary| boundary - sequence_start);
-        let chunk_plan = if self.config.deepseek_v4_vision_max_tokens > 0 {
+        let chunk_plan = if self.transfer_planner_enabled() && capture_suffix_boundary.is_none() {
+            prefill_transfer::logical_chunks(total_m, max_chunk)
+        } else if self.config.deepseek_v4_vision_max_tokens > 0 {
             if sequence_start != 0 || capture_suffix_boundary.is_some() {
                 return Err(
                     "DeepSeek-V4 image requests cannot use prefix-cache continuation boundaries"
@@ -27945,6 +28168,13 @@ impl PrefillEngine {
             let chunk_tokens = &token_ids[suffix_chunk_start..suffix_chunk_end];
             self.active_prefill_chunk_idx = chunk_idx;
             self.active_prefill_chunk_start = chunk_start;
+            if self.transfer_planner_enabled() && self.trace.is_some() {
+                let ids: Vec<(usize, usize)> = self.hcs_cache_fast.iter().enumerate()
+                    .filter_map(|(index, pointers)| (pointers[0] != 0).then_some(
+                        (index / self.hcs_num_experts_per_layer.max(1), index % self.hcs_num_experts_per_layer.max(1))))
+                    .collect();
+                log::info!("PREFILL RESIDENT BOUNDARY chunk={} start={} ids={:?}", chunk_idx, chunk_start, ids);
+            }
             completion_progress
                 .submitted(|| format!("chunk={chunk_idx} start={chunk_start} end={chunk_end}"))?;
             let chunk_tok0 = chunk_tokens.first().copied().unwrap_or(0) as usize;
@@ -33187,7 +33417,8 @@ impl PrefillEngine {
                         )?;
                     }
                 }
-                DeepseekV4PrefillHcProjectMode::Tf32Gemm => {
+                DeepseekV4PrefillHcProjectMode::Tf32Gemm
+                | DeepseekV4PrefillHcProjectMode::Fp32PedanticGemm => {
                     let normalized_ptr = *self.scratch.d_moe_accum.device_ptr();
                     let tile_capacity = self.scratch.d_moe_accum.len() / flat;
                     if normalized_ptr == 0 || tile_capacity == 0 {
@@ -33337,7 +33568,13 @@ impl PrefillEngine {
                                 i32::try_from(mix_width).map_err(|_| {
                                     "DeepSeek-V4 HC TF32 mix width exceeds i32"
                                 })?,
-                                cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+                                if self.deepseek_v4_prefill_hc_project_mode
+                                    == DeepseekV4PrefillHcProjectMode::Fp32PedanticGemm
+                                {
+                                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC
+                                } else {
+                                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32
+                                },
                                 cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
                             )
                             .map_err(|error| {
@@ -33370,6 +33607,8 @@ impl PrefillEngine {
 
         if let Some((target, row)) = observed {
             target.hc_observed_row("mixes.f32", mixes_ptr, row, mix_width, 4, self.stream)?;
+            target.device("mixes-full.f32", mixes_ptr, m * mix_width * 4, self.stream)?;
+            target.device("inverse-rms-full.f32", inv_ptr, m * 4, self.stream)?;
         }
         let mut k0 = pre_ptr;
         let mut k1 = post_ptr;
@@ -33411,6 +33650,9 @@ impl PrefillEngine {
         if let Some((target, row)) = observed {
             target.hc_observed_row("pre.f32", pre_ptr, row, hc_mult, 4, self.stream)?;
             target.hc_observed_row("post.f32", post_ptr, row, hc_mult, 4, self.stream)?;
+            target.device("pre-full.f32", pre_ptr, m * hc_mult * 4, self.stream)?;
+            target.device("post-full.f32", post_ptr, m * hc_mult * 4, self.stream)?;
+            target.device("comb-full.f32", comb_ptr, m * hc_mult * hc_mult * 4, self.stream)?;
             target.hc_observed_row(
                 "comb.f32",
                 comb_ptr,
@@ -40433,7 +40675,17 @@ impl PrefillEngine {
         let temp_state = *temp_state_buffer.device_ptr();
         let hidden = *self.scratch.d_hidden.device_ptr();
         let trace_position = chunk_start.saturating_add(m.saturating_sub(1));
-        let hc_producer_capture = crate::matched_prefill_capture::target(
+        let hc_producer_capture = if chunk_start == 0 {
+            crate::matched_prefill_capture::target(
+                self.matched_prefill_invocation.as_ref(),
+                "hc_prepare_full", layer_idx,
+                self.matched_prefill_invocation.as_ref().map(|i| i.logical_tokens()).unwrap_or(0),
+                None,
+            )?
+        } else { None };
+        let hc_producer_capture = if hc_producer_capture.is_some() {
+            hc_producer_capture
+        } else { crate::matched_prefill_capture::target(
             self.matched_prefill_invocation.as_ref(),
             "hc_prepare_operands",
             layer_idx,
@@ -40441,7 +40693,7 @@ impl PrefillEngine {
                 .checked_add(m)
                 .ok_or("HC producer height overflow")?,
             None,
-        )?;
+        )? };
         let hc_producer_row = hc_producer_capture
             .as_ref()
             .map(|target| {
@@ -40513,6 +40765,10 @@ impl PrefillEngine {
             m,
             h,
         )?;
+        if let Some((target, _)) = hc_observed {
+            target.device("normalized-hidden-full.bf16", hidden, m * h * 2, self.stream)?;
+            target.device("norm-weight.bf16", self.layer_weights[layer_idx].input_norm, h * 2, self.stream)?;
+        }
         self.record_prefill_device_trace_all_layer_bf16_row(
             PDT_LAYER_GLM5_ATTN_NORM_HIDDEN_LAST,
             layer_idx,
@@ -40784,12 +41040,44 @@ impl PrefillEngine {
         let mut q_scale = (desc.head_dim as f32).sqrt().recip();
         let mut norm_eps = 1.0e-6f32;
         let legacy_recurrent = glm53_kda_legacy_recurrent_oracle_enabled()?;
-        let threads = if legacy_recurrent {
+        let split_candidate = glm53_kda_split_candidate_enabled()?;
+        if split_candidate && (desc.head_dim != 128 || legacy_recurrent) {
+            return Err(format!("GLM-5.3 layer {layer_idx} split KDA candidate requires head dimension 128 and no legacy override"));
+        }
+        let preparation = glm53_kda_split_preparation()?;
+        if preparation != KdaSplitPreparation::Raw && !split_candidate {
+            return Err("KDA preparation requires the recurrence control".into());
+        }
+        if split_candidate && preparation != KdaSplitPreparation::Bf16QkBeta {
+            return Err("KDA relay requires KRASIS_GLM53_KDA_SPLIT_PREPARATION=bf16_qk_beta; raw and bf16_beta experiments have been retired".into());
+        }
+        let relay = split_candidate && true;
+        if relay {
+            // Reuse the exact ordinary preparation operator and its BF16 stores.
+            let mut a0=q;let mut a1=k;let mut a2=beta;let mut a3=tokens;let mut a4=heads;let mut a5=dim;
+            let mut a6=1.0f32;let mut a7=1.0e-6f32;
+            unsafe {launch(self.kernels.kimi_delta_chunk_prepare_bf16,
+                (u32::try_from(m.checked_mul(desc.num_heads).ok_or("KDA preparation grid overflow")?).map_err(|_|"KDA preparation grid exceeds u32")?,1,1),
+                (128,1,1),2*128*4,self.stream,&mut[
+                    &mut a0 as *mut _ as *mut _,&mut a1 as *mut _ as *mut _,&mut a2 as *mut _ as *mut _,&mut a3 as *mut _ as *mut _,
+                    &mut a4 as *mut _ as *mut _,&mut a5 as *mut _ as *mut _,&mut a6 as *mut _ as *mut _,&mut a7 as *mut _ as *mut _,
+                ])?;}
+        }
+
+        if relay {
+            static KDA_RELAY_LOG: std::sync::Once = std::sync::Once::new();
+            KDA_RELAY_LOG.call_once(|| eprintln!("[KDA] prepared relay recurrence active"));
+        }
+        let threads = if relay {
+            128
+        } else if legacy_recurrent {
             desc.head_dim.next_power_of_two().max(32)
         } else {
             32
         };
-        let value_tiles = if legacy_recurrent {
+        let value_tiles = if relay {
+            2
+        } else if legacy_recurrent {
             1
         } else {
             desc.head_dim.div_ceil(threads)
@@ -40813,7 +41101,9 @@ impl PrefillEngine {
             })?;
         unsafe {
             launch(
-                if legacy_recurrent {
+                if relay {
+                    self.kernels.glm53_kda_prepared_relay
+                } else if legacy_recurrent {
                     self.kernels.kimi_delta_recurrent_scan_bf16
                 } else {
                     self.kernels.kimi_delta_recurrent_scan_tiled_bf16
@@ -40834,7 +41124,7 @@ impl PrefillEngine {
                     1,
                     1,
                 ),
-                u32::try_from(shared_bytes).map_err(|_| {
+                u32::try_from(if relay { 0 } else { shared_bytes }).map_err(|_| {
                     format!(
                         "GLM-5.3 layer {} recurrent-oracle shared memory exceeds u32",
                         layer_idx
@@ -41458,8 +41748,47 @@ impl PrefillEngine {
             Ok(())
         };
         observe_transition("normalized-input.bf16", hidden, self.config.hidden_size)?;
+        // Opt-in, read-only capture of actual projection/convolution operands.
+        // No GPU allocations or alternate computation: replay runs offline.
+        let tail_target = self.matched_prefill_target("kda_tail_operands", layer_idx, m, None)?;
+        if let Some(target) = &tail_target {
+            target.device("conv-weight.f32", desc.conv_weight_ptr,
+                3 * width * desc.kernel_dim * 4, self.stream)?;
+            target.device("conv-initial-state.f32", desc.conv_state_ptr,
+                3 * width * (desc.kernel_dim - 1) * 4, self.stream)?;
+            target.write("geometry.json", serde_json::to_vec_pretty(&serde_json::json!({
+                "tokens":m,"width":width,"kernel_dim":desc.kernel_dim,
+                "chunk_start":self.active_prefill_chunk_start,
+                "capture":"same-stream before convolution; actual materialized projection operands",
+                "device_diagnostic_allocation_bytes":0
+            })).map_err(|e| e.to_string())?.as_slice())?;
+        }
+        let capture_projection = |name: &str, projection: &DeepseekV4ProjectionPrefillDescriptor,
+                                  input: u64, output: u64| -> Result<(), String> {
+            if let Some(target) = &tail_target {
+                let DeepseekV4ProjectionPrefillDescriptor::Hqq { desc: weight, .. } = projection else {
+                    return Err("KDA tail capture requires HQQ materialized projection".into());
+                };
+                if !self.config.hqq_prefill_materialize_bf16 || self.ordered_kda_projection.is_some() {
+                    return Err("KDA tail capture requires actual materialized BF16 weights".into());
+                }
+                let materialized = self.scratch.d_hqq_bf16_weight.as_ref()
+                    .ok_or("KDA tail capture missing materialized weight")?;
+                target.device(&format!("{name}-input.bf16"), input, m * weight.cols * 2, self.stream)?;
+                target.device(&format!("{name}-output.bf16"), output, m * weight.rows * 2, self.stream)?;
+                target.device(&format!("{name}-weight.bf16"), *materialized.device_ptr(),
+                    weight.rows * weight.cols * 2, self.stream)?;
+                target.write(&format!("{name}-geometry.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                    "tokens":m,"rows":weight.rows,"cols":weight.cols,
+                    "weight_layout":"row-major [output,input]", "compute":"BF16 operands, FP32 accumulation, BF16 output",
+                    "transpose_a":"T","transpose_b":"N","algorithm":"CUBLAS_GEMM_DEFAULT"
+                })).map_err(|e|e.to_string())?.as_slice())?;
+            }
+            Ok(())
+        };
         let qkv_timing = self.glm5_timing_start("glm5 kda_qkv_proj")?;
         self.kda_projection_prefill(layer_idx, &desc.q_proj, hidden, q, m)?;
+        capture_projection("q", &desc.q_proj, hidden, q)?;
         // BEGIN bounded full Q projection diagnostic selection
         let row_q_target = self.matched_prefill_target("q_projection", layer_idx, m, None)?;
         let full_q_target = self.matched_prefill_target("q_projection_full", layer_idx, m, None)?;
@@ -41600,7 +41929,9 @@ impl PrefillEngine {
             })).map_err(|e|e.to_string())?.as_bytes())?;
         }
         self.kda_projection_prefill(layer_idx, &desc.k_proj, hidden, k, m)?;
+        capture_projection("k", &desc.k_proj, hidden, k)?;
         self.kda_projection_prefill(layer_idx, &desc.v_proj, hidden, v, m)?;
+        capture_projection("v", &desc.v_proj, hidden, v)?;
         for (stage, ptr) in [
             (PDT_LAYER_GLM5_KDA_Q_PROJ_LAST, q),
             (PDT_LAYER_GLM5_KDA_K_PROJ_LAST, k),
@@ -41783,8 +42114,11 @@ impl PrefillEngine {
 
         let forget_beta_timing = self.glm5_timing_start("glm5 kda_forget_beta_proj")?;
         self.kda_projection_prefill(layer_idx, &desc.f_a_proj, hidden, low_rank, m)?;
+        capture_projection("f_a", &desc.f_a_proj, hidden, low_rank)?;
         self.kda_projection_prefill(layer_idx, &desc.f_b_proj, low_rank, gate, m)?;
+        capture_projection("f_b", &desc.f_b_proj, low_rank, gate)?;
         self.kda_projection_prefill(layer_idx, &desc.b_proj, hidden, beta, m)?;
+        capture_projection("b", &desc.b_proj, hidden, beta)?;
         if let Some(target) = self.matched_prefill_target("beta_projection", layer_idx, m, None)? {
             let DeepseekV4ProjectionPrefillDescriptor::Hqq {
                 tensor_name,
@@ -41926,6 +42260,9 @@ impl PrefillEngine {
             })).map_err(|e|e.to_string())?.as_slice())?;
         }
         let recurrent_timing = self.glm5_timing_start("glm5 kda_recurrent")?;
+        if kda_phase.is_some() && glm53_kda_split_candidate_enabled()? {
+            return Err("experimental KDA split candidate is incompatible with a prefix-owned phase".into());
+        }
         if let Some(phase) = kda_phase {
             phase.enqueue_recurrence(
                 layer_idx,
@@ -41935,7 +42272,7 @@ impl PrefillEngine {
                 recurrent_out,
                 self.matched_prefill_invocation.as_ref(),
             )?;
-        } else if glm53_kda_recurrent_oracle_enabled()? {
+        } else if glm53_kda_split_candidate_enabled()? || glm53_kda_recurrent_oracle_enabled()? {
             self.forward_kimi_delta_recurrent_oracle(
                 layer_idx,
                 desc,
@@ -41972,6 +42309,7 @@ impl PrefillEngine {
                 .ok_or("matched KDA prepared beta overflow")?;
             for (name, ptr, bytes) in [
                 ("native-output.bf16", recurrent_out, tensor_bytes),
+                ("outgoing-state.f32", desc.recur_state_ptr, desc.num_heads * desc.head_dim * desc.head_dim * 4),
                 ("prepared-q.bf16", q, tensor_bytes),
                 ("prepared-k.bf16", k, tensor_bytes),
                 ("prepared-beta.bf16", beta, beta_bytes),
@@ -44924,7 +45262,7 @@ impl PrefillEngine {
         while low < high {
             let candidate = low + (high - low).div_ceil(2);
             let required = estimate_scratch_vram_for_prompt(&self.config, candidate, prompt_tokens)
-                .checked_add(self.minimum_dsa_prefill_workspace_bytes(candidate, prompt_tokens)?)
+                .checked_add(self.planned_dsa_prefill_workspace_bytes(candidate, prompt_tokens)?)
                 .ok_or_else(|| "DSA prefill combined scratch size overflow".to_string())?;
             if required <= scratch_and_dsa_budget_bytes {
                 low = candidate;
@@ -44933,6 +45271,57 @@ impl PrefillEngine {
             }
         }
         Ok(low)
+    }
+
+    // Optional experiment: budget enough transient space for a chosen number
+    // of gathered-attention rows before allocating chunk scratch. The actual
+    // allocator still measures free VRAM and enforces its existing floor.
+    fn planned_dsa_prefill_workspace_bytes(
+        &self,
+        chunk_rows: usize,
+        context_end: usize,
+    ) -> Result<usize, String> {
+        let minimum = self.minimum_dsa_prefill_workspace_bytes(chunk_rows, context_end)?;
+        let raw = match std::env::var("KRASIS_DSA_PREFILL_WORKSPACE_ROWS") {
+            Ok(raw) => raw,
+            Err(std::env::VarError::NotPresent) if self.transfer_planner_enabled() => "32".to_string(),
+            Err(std::env::VarError::NotPresent) => return Ok(minimum),
+            Err(error) => return Err(format!("invalid DSA workspace rows: {error}")),
+        };
+        let rows = raw.parse::<usize>().map_err(|error| {
+            format!("KRASIS_DSA_PREFILL_WORKSPACE_ROWS must be a positive integer: {error}")
+        })?;
+        if rows == 0 {
+            return Err("KRASIS_DSA_PREFILL_WORKSPACE_ROWS must be positive".to_string());
+        }
+        let Some(geometry) = self.dsa_prefill_workspace_geometry()? else {
+            return Ok(minimum);
+        };
+        if geometry.mla_num_heads == 0 {
+            return Ok(minimum);
+        }
+        let score_reuse = dsa_mla_score_reuse_enabled()?;
+        let grouped_exact = dsa_mla_grouped_exact_enabled()?;
+        if !dsa_mla_gathered_gemm_enabled(dsa_mla_gathered_default_enabled(
+            true, score_reuse, grouped_exact,
+        ))? {
+            return Ok(minimum);
+        }
+        let score_buffers = if self.config.deepseek_v4_hc_mult > 0 {
+            self.deepseek_v4_prefill_index_score_mode.score_buffer_count()
+        } else { 1 };
+        let one_row = plan_dsa_prefill_selection(
+            1, dsa_score_context_rows(context_end, geometry.context_divisor).max(1),
+            geometry.index_topk, usize::MAX, score_buffers, geometry.causal_context_row_span,
+        )?;
+        let transient_minimum = one_row.workspace_row_bytes
+            .max(dsa_mla_minimum_transient_workspace_bytes(geometry)?)
+            .max(self.common_mla_minimum_transient_workspace_bytes(geometry)?);
+        let (row_bytes, alignment) = dsa_mla_gathered_gemm_workspace_row_layout(
+            geometry.mla_num_heads, geometry.output_topk, geometry.mla_ckv_cache_dim,
+            geometry.mla_qk_rope_dim,
+        )?;
+        dsa_planned_workspace_bytes(minimum, transient_minimum, row_bytes, alignment, chunk_rows, rows)
     }
 
     fn dsa_retry_chunk_cap_for_measured_deficit(
@@ -44947,7 +45336,7 @@ impl PrefillEngine {
         let current_required =
             estimate_scratch_vram_for_prompt(&self.config, current_chunk_rows, prompt_tokens)
                 .checked_add(
-                    self.minimum_dsa_prefill_workspace_bytes(current_chunk_rows, prompt_tokens)?,
+                    self.planned_dsa_prefill_workspace_bytes(current_chunk_rows, prompt_tokens)?,
                 )
                 .ok_or_else(|| "DSA retry combined workspace size overflow".to_string())?;
         let retry_budget = current_required
@@ -45048,6 +45437,10 @@ impl PrefillEngine {
         let fixed_bytes = minimum_total
             .checked_sub(minimum_transient_workspace_bytes)
             .ok_or_else(|| "DSA prefill fixed workspace size underflow".to_string())?;
+        let required_transient_workspace_bytes = self
+            .planned_dsa_prefill_workspace_bytes(chunk_rows, context_end)?
+            .checked_sub(fixed_bytes)
+            .ok_or_else(|| "DSA planned transient workspace size underflow".to_string())?;
         let mut observed_allocation_overhead = 0usize;
         loop {
             self.dsa_prefill_workspace = None;
@@ -45063,13 +45456,16 @@ impl PrefillEngine {
             let score_workspace_capacity = headroom
                 .saturating_sub(fixed_bytes)
                 .saturating_sub(observed_allocation_overhead);
-            if score_workspace_capacity < minimum_transient_workspace_bytes {
+            let score_workspace_capacity = if self.transfer_planner_enabled() {
+                score_workspace_capacity.min(required_transient_workspace_bytes)
+            } else { score_workspace_capacity };
+            if score_workspace_capacity < required_transient_workspace_bytes {
                 let deficit_bytes = dsa_prefill_workspace_deficit_bytes(
                     free_before,
                     required_free_floor_bytes,
                     fixed_bytes,
                     observed_allocation_overhead,
-                    minimum_transient_workspace_bytes,
+                    required_transient_workspace_bytes,
                 )?;
                 if deficit_bytes > 0
                     && self.prefill_hcs_store_addr != 0
@@ -45106,7 +45502,7 @@ impl PrefillEngine {
                                 required_free_floor_bytes as f64 / (1024.0 * 1024.0),
                                 fixed_bytes as f64 / (1024.0 * 1024.0),
                                 observed_allocation_overhead as f64 / (1024.0 * 1024.0),
-                                minimum_transient_workspace_bytes as f64 / (1024.0 * 1024.0),
+                                required_transient_workspace_bytes as f64 / (1024.0 * 1024.0),
                                 self.hcs_cached_expert_count(),
                             );
                         }
@@ -45122,7 +45518,7 @@ impl PrefillEngine {
                             required_free_floor_bytes,
                             fixed_bytes,
                             observed_allocation_overhead,
-                            minimum_transient_workspace_bytes,
+                            required_transient_workspace_bytes,
                             deficit_bytes,
                         ),
                     },
@@ -45950,11 +46346,47 @@ impl PrefillEngine {
             rope_dim,
         )?;
         let capacity_bytes = workspace.selection_workspace_capacity_bytes;
-        let tile_capacity = capacity_bytes
+        let mut tile_capacity = capacity_bytes
             .saturating_sub(alignment_reserve)
             .checked_div(bytes_per_row)
             .unwrap_or(0)
             .min(rows);
+        if let Ok(raw) = std::env::var("KRASIS_DSA_MLA_GEMM_TILE_ROWS") {
+            let limit = raw.parse::<usize>().map_err(|error| {
+                format!("KRASIS_DSA_MLA_GEMM_TILE_ROWS must be a positive integer: {error}")
+            })?;
+            if limit == 0 {
+                return Err("KRASIS_DSA_MLA_GEMM_TILE_ROWS must be positive".to_string());
+            }
+            tile_capacity = tile_capacity.min(limit);
+        }
+        if dsa_mla_sm86_dispatch_enabled()? {
+            if std::env::var_os("KRASIS_DSA_MLA_GEMM_TILE_ROWS").is_some() {
+                return Err("SM86 dispatch policy and explicit tile-row override are mutually exclusive".into());
+            }
+            if num_heads == 64 && combined_dim == 512 && selected.selected_per_row == 2051
+                && dsa_mla_gathered_compute_mode()? == DsaMlaGatheredComputeMode::Pedantic {
+                let mut device = 0;
+                let mut major = 0;
+                let mut minor = 0;
+                let lib = unsafe { cuda_sys::lib() };
+                let rc = unsafe { lib.cuCtxGetDevice(&mut device) };
+                if rc != cuda_sys::CUresult::CUDA_SUCCESS { return Err(format!("query dispatch device: {rc:?}")); }
+                for (out, attr) in [
+                    (&mut major, cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR),
+                    (&mut minor, cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR),
+                ] {
+                    let rc = unsafe { lib.cuDeviceGetAttribute(out, attr, device) };
+                    if rc != cuda_sys::CUresult::CUDA_SUCCESS { return Err(format!("query dispatch compute capability: {rc:?}")); }
+                }
+                if let Some(limit) = dsa_mla_sm86_dispatch_rows(major, minor, num_heads, combined_dim,
+                    selected.selected_per_row, true, tile_capacity) {
+                    tile_capacity = tile_capacity.min(limit);
+                    static DISPATCH_LOG: std::sync::Once = std::sync::Once::new();
+                    DISPATCH_LOG.call_once(|| eprintln!("[EXPERIMENT] SM86 GLM53 gathered MLA one-row dispatch active"));
+                }
+            }
+        }
         if tile_capacity == 0 {
             return Err(format!(
                 "DSA MLA gathered-GEMM layer {layer_idx} workspace cannot hold one tile row: capacity={} bytes required_per_row={} alignment_reserve={}",
@@ -47519,6 +47951,9 @@ impl PrefillEngine {
             .mla_prefill
             .as_ref()
             .ok_or_else(|| format!("layer {} has no native MLA prefill descriptor", layer_idx))?;
+        let end = start_pos.checked_add(m).ok_or("streamed KV prefill position overflow")?;
+        crate::streamed_kv::prepare_layer(mla.ckv_cache_ptr, end, self.stream)?;
+        crate::streamed_kv::prepare_layer(mla.kpe_cache_ptr, end, self.stream)?;
         let nh = mla.num_heads;
         let klr = mla.kv_lora_rank;
         let ccd = mla.ckv_cache_dim;
@@ -48804,17 +49239,20 @@ impl PrefillEngine {
 
             let use_score_reuse = dsa_mla_score_reuse_enabled()?;
             let use_grouped_exact = dsa_mla_grouped_exact_enabled()?;
+            let use_reuse_candidate = optional_bool_env("KRASIS_GLM53_FUSED_MLA_REUSE_CANDIDATE")?.unwrap_or(false);
+            let use_fused_candidate = glm53_fused_mla_candidate_enabled()? || use_reuse_candidate;
             let native_dsa_registered =
                 native_dsa_gathered_capability(lw.dsa_prefill.is_some(), lw.deepseek_v4.is_some());
             let use_gathered_gemm =
                 dsa_mla_gathered_gemm_enabled(dsa_mla_gathered_default_enabled(
-                    native_dsa_registered,
+                    native_dsa_registered && !use_fused_candidate,
                     use_score_reuse,
                     use_grouped_exact,
                 ))?;
             if usize::from(use_gathered_gemm)
                 + usize::from(use_score_reuse)
                 + usize::from(use_grouped_exact)
+                + usize::from(use_fused_candidate)
                 > 1
             {
                 return Err(
@@ -48822,7 +49260,7 @@ impl PrefillEngine {
                         .to_string(),
                 );
             }
-            let use_gathered_wvc = dsa_mla_gathered_wvc_enabled(use_gathered_gemm)?;
+            let use_gathered_wvc = dsa_mla_gathered_wvc_enabled(use_gathered_gemm || use_fused_candidate)?;
             let num_warps = usize::try_from(threads.div_ceil(32))
                 .map_err(|_| "DSA sparse MLA warp count exceeds usize".to_string())?;
             let shared_floats = ccd
@@ -48891,6 +49329,50 @@ impl PrefillEngine {
                 false
             };
             if common_projected {
+            } else if use_fused_candidate {
+                // Kernels compile tensor-core bodies only for Ampere and newer.
+                // Explicit opt-in must fail rather than silently write no output.
+                let mut device=0;let mut major=0;
+                let lib=unsafe{cuda_sys::lib()};
+                let rc=unsafe{lib.cuCtxGetDevice(&mut device)};
+                if rc!=cuda_sys::CUresult::CUDA_SUCCESS{return Err(format!("fused MLA device query: {rc:?}"));}
+                let rc=unsafe{lib.cuDeviceGetAttribute(&mut major,cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,device)};
+                if rc!=cuda_sys::CUresult::CUDA_SUCCESS || major<8{return Err(format!("experimental fused MLA requires Ampere or newer; major={major} query={rc:?}"));}
+                if ccd == 0 || ccd % 16 != 0 || rope % 16 != 0 || nope.checked_add(rope).map_or(true, |sum| sum > qk_dim) {
+                    return Err(format!("experimental fused MLA unsupported geometry: ckv={ccd} rope={rope} qk={qk_dim} nope={nope}"));
+                }
+                static FUSED_CANDIDATE_LOG: std::sync::Once = std::sync::Once::new();
+                FUSED_CANDIDATE_LOG.call_once(|| eprintln!("[EXPERIMENT] GLM53 fused MLA candidate active"));
+                let width = ccd.checked_add(rope).ok_or("fused MLA width overflow")?;
+                if use_reuse_candidate && (ccd != 512 || rope > 128) { return Err("reuse MLA requires ckv512 and rope<=128".into()); }
+                let shared = if use_reuse_candidate {
+                    16usize.checked_mul(width).and_then(|v|v.checked_mul(4))
+                        .and_then(|v|v.checked_add(4*256*4 + 256*4 + 4*256*4 + 48*4))
+                        .ok_or("reuse MLA shared-memory overflow")?
+                } else { 16usize.checked_mul(width).and_then(|v| v.checked_mul(8))
+                    .and_then(|v| v.checked_add(256 * 4 + 256 * 4))
+                    .and_then(|v| v.checked_add(16usize.checked_mul(ccd)?.checked_mul(4)?))
+                    .and_then(|v| v.checked_add(48 * 4)).ok_or("fused MLA shared-memory overflow")? };
+                let kernel = if use_reuse_candidate {
+                    native_mla_kernel_for_format(self.kv_format,self.kernels.glm53_reuse_mla_k4_candidate,self.kernels.glm53_reuse_mla_k6_candidate)?
+                } else { native_mla_kernel_for_format(self.kv_format,
+                    self.kernels.glm53_fused_mla_k4_candidate, self.kernels.glm53_fused_mla_k6_candidate)? };
+                let shared = dsa_prefill_configure_dynamic_shared(kernel, shared, "experimental fused MLA")?;
+                unsafe {
+                    launch(kernel,
+                        (u32::try_from(nh.div_ceil(16)).map_err(|_| "fused MLA heads overflow")?,
+                         u32::try_from(m).map_err(|_| "fused MLA rows overflow")?, 1),
+                        (if use_reuse_candidate {128} else {256}, 1, 1), shared, self.stream, &mut [
+                            &mut s0 as *mut _ as *mut _, &mut s1 as *mut _ as *mut _,
+                            &mut s2 as *mut _ as *mut _, &mut s3 as *mut _ as *mut _,
+                            &mut s4 as *mut _ as *mut _, &mut s5 as *mut _ as *mut _,
+                            &mut s6 as *mut _ as *mut _, &mut s7 as *mut _ as *mut _,
+                            &mut s8 as *mut _ as *mut _, &mut s9 as *mut _ as *mut _,
+                            &mut s10 as *mut _ as *mut _, &mut s11 as *mut _ as *mut _,
+                            &mut s12 as *mut _ as *mut _, &mut s13 as *mut _ as *mut _,
+                            &mut s14 as *mut _ as *mut _, &mut s15 as *mut _ as *mut _,
+                        ])?;
+                }
             } else if use_grouped_exact {
                 self.run_dsa_mla_grouped_exact_attention(
                     layer_idx,
@@ -49018,7 +49500,7 @@ impl PrefillEngine {
                 && self.prefill_device_trace_mla_only.get()
                 && self.prefill_device_trace_all_layers.get();
             if dsa_mla_scalar_trace_shadow_enabled(
-                use_gathered_gemm,
+                use_gathered_gemm || use_fused_candidate,
                 self.prefill_device_trace_enabled.get() || self.prefill_device_trace_mla_only.get(),
                 self.prefill_device_trace_layer.get() == layer_idx,
                 trace_grouped_shadow_all_layers,
@@ -63543,6 +64025,49 @@ impl PrefillEngine {
         expert_input: u64,
         output: u64,
     ) -> Result<(), String> {
+        if prefill_transfer_plan_enabled(&self.config) && m > PREFILL_MOE_BAND_ROWS {
+            if self.layer_weights[layer_idx].moe_input_size != 0
+                || self.kernels.fused_moe_fn.is_none() || self.d_expert_w1_ptrs.is_none()
+                || self.synthetic_repack.is_some() || self.ordered_kda_projection.is_some()
+                || self.predicted_w1_layer.is_some()
+            {
+                return Err("bounded MoE scratch cannot execute this unsupported layer/kernel configuration".into());
+            }
+            self.release_prefetched_ptr_table();
+            // Reserve one immutable slot per expert. This is a capacity reserve,
+            // not speculative loading: only actually routed experts are copied.
+            self.ensure_cold_staging_capacity(self.config.n_routed_experts, m)?;
+            self.band_layer = Some(self.layer_weights[layer_idx].moe_layer_idx.unwrap_or(layer_idx));
+            self.band_expert_ptrs = vec![[0; 4]; self.config.n_routed_experts];
+            let result = (|| {
+                for row in (0..m).step_by(PREFILL_MOE_BAND_ROWS) {
+                    let rows = (m-row).min(PREFILL_MOE_BAND_ROWS);
+                    let offset = (row * self.config.hidden_size * 2) as u64;
+                    self.band_row_start = row;
+                    self.band_shared_input = Some(expert_input + offset);
+                    self.forward_moe_fused(layer_idx, rows, router_input + offset,
+                        expert_input + offset, output + offset)?;
+                    // CPU tables now describe accepted DMA. The next invocation
+                    // waits the same W1/W2 events and main->copy ownership event.
+                    for eid in 0..self.band_expert_ptrs.len() {
+                        if self.h_expert_w1_ptrs[eid] != 0 {
+                            self.band_expert_ptrs[eid] = [self.h_expert_w1_ptrs[eid],
+                                self.h_expert_w1s_ptrs[eid], self.h_expert_w2_ptrs[eid],
+                                self.h_expert_w2s_ptrs[eid]];
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            self.band_layer = None;
+            self.band_expert_ptrs.clear();
+            self.band_shared_input = None;
+            self.band_row_start = 0;
+            // Even a final band with no new copies still reads the cold slab.
+            // Protect the next layer producer, including cancellation/error paths.
+            let ownership = self.order_copy_stream_after_compute_for_cold_staging();
+            return result.and(ownership);
+        }
         // Use fused MoE path when available (default for prefill).
         // Supports two modes: contiguous buffer (d_fused_expert_w1_a) or pointer table
         // (d_expert_w1_ptrs). Pointer table mode computes B_expert_off = expert_ptr - B;
@@ -63866,8 +64391,8 @@ impl PrefillEngine {
 
         let hidden = router_input;
         let gate_out = *self.scratch.d_gate_out.device_ptr();
-        let topk_ids_ptr = *self.scratch.d_topk_ids.device_ptr();
-        let topk_weights_ptr = *self.scratch.d_topk_weights.device_ptr();
+        let topk_ids_ptr = *self.scratch.d_topk_ids.device_ptr() + (self.band_row_start * topk * 4) as u64;
+        let topk_weights_ptr = *self.scratch.d_topk_weights.device_ptr() + (self.band_row_start * topk * 4) as u64;
         let diag_router_topk = std::env::var("KRASIS_PREFILL_DIAG_ROUTER_TOPK").is_ok();
         let diag_router_topk_layer = std::env::var("KRASIS_PREFILL_DIAG_ROUTER_TOPK_LAYER")
             .ok()
@@ -66247,6 +66772,11 @@ impl PrefillEngine {
                             cold_slot += 1;
                         }
                     }
+                    if self.band_layer.is_some() {
+                        // Stable slab ownership across token bands. Never reuse
+                        // a previous band's slot for a newly demanded expert.
+                        cold_slot = prefill_transfer::fixed_expert_slot(eid, self.max_cold_experts)?;
+                    }
                     // Cold expert: H2D to staging slot. If cold staging is
                     // unexpectedly full, fall back to the contiguous fused
                     // buffer only when that legacy buffer exists.
@@ -66594,6 +67124,59 @@ impl PrefillEngine {
             }
         }
 
+        // Host-only diagnostic: counts already downloaded by the routing path.
+        // No tensor export, CUDA event, extra synchronization or inference math.
+        // Kept off for ordinary timing; reconcile copied bytes with CUPTI.
+        if self.reference_debug_trace_enabled
+            && optional_bool_env("KRASIS_PREFILL_TRANSFER_LEDGER").ok().flatten().unwrap_or(false)
+            && use_ptr_table
+        {
+            if let Some(data) = moe_layer_idx.and_then(|idx| self.moe_layers.get(idx)).and_then(|x| x.as_ref()) {
+                let resident: Vec<usize> = (0..n_experts).filter(|&eid| {
+                    !forced_active_hcs_experts.contains(&eid) && self.expert_lookup(hcs_layer_idx, eid).is_some()
+                }).collect();
+                let pinned: Vec<usize> = (0..n_experts).filter(|&eid| {
+                    !resident.contains(&eid) && !forced_active_hcs_experts.contains(&eid)
+                        && self.pinning_active
+                        && self.pinned_expert_offsets.get(pinning_layer_idx)
+                            .and_then(|row| row.get(eid)).copied().flatten().is_some()
+                }).collect();
+                let demanded: Vec<usize> = active.iter().copied().filter(|eid| {
+                    !resident.contains(eid) && !pinned.contains(eid)
+                }).collect();
+                let copied: Vec<usize> = (0..n_experts.min(data.experts.len())).filter(|eid| {
+                    !resident.contains(eid) && !pinned.contains(eid)
+                        && (ptr_prefetched || demanded.contains(eid))
+                }).collect();
+                let bytes = |ids: &[usize]| -> usize { ids.iter().map(|&eid| {
+                    let e = &data.experts[eid];
+                    e.w13_packed_bytes + e.w13_scales_bytes + e.w2_packed_bytes + e.w2_scales_bytes
+                }).sum() };
+                let band_reused: Vec<usize> = resident.iter().copied().filter(|&eid| {
+                    self.band_layer == Some(hcs_layer_idx)
+                        && self.band_expert_ptrs.get(eid).is_some_and(|p| p[0] != 0)
+                        && self.hcs_cache_fast.get(hcs_layer_idx * self.hcs_num_experts_per_layer + eid)
+                            .is_none_or(|p| p[0] == 0)
+                }).collect();
+                let persistent_resident: Vec<usize> = resident.iter().copied()
+                    .filter(|eid| !band_reused.contains(eid)).collect();
+                eprintln!("[PREFILL-TRANSFER] {}", serde_json::json!({
+                    "layer":layer_idx,"moe_layer":hcs_layer_idx,
+                    "chunk":self.active_prefill_chunk_idx,"start":self.active_prefill_chunk_start,
+                    "rows":m,"prompt_tokens":self.active_prefill_prompt_tokens,
+                    "active_ids":active,"selection_counts":h_expert_counts,
+                    "resident_ids":resident,"persistent_resident_ids":persistent_resident,
+                    "band_reused_ids":band_reused,"band_row_start":self.band_row_start,
+                    "pinned_ids":pinned,
+                    "demanded_cold_ids":demanded,"copied_ids":copied,
+                    "demanded_bytes":bytes(&demanded),"copied_bytes":bytes(&copied),
+                    "ptr_prefetched":ptr_prefetched,"reported_copies":trace_cold_count,
+                    "speculative_groups":copied.len().saturating_sub(demanded.len()),
+                    "scope":"current layer pointer-table payload including dense prestage; excludes pin pool fills, HCS restoration, KV and metadata"
+                }));
+            }
+        }
+
         set_vram_phase("pointer_dma");
         if use_ptr_table {
             self.verify_cold_staging_layer(
@@ -66627,6 +67210,35 @@ impl PrefillEngine {
                 self.preloaded_moe_layer,
             ),
         );
+
+        let force_sync_shared_expert =
+            std::env::var("KRASIS_PREFILL_FORCE_SYNC_SHARED_EXPERT").is_ok();
+        let defer_shared_expert_launch = !force_sync_shared_expert
+            && std::env::var("KRASIS_PREFILL_DEFER_SHARED_EXPERT_LAUNCH").is_ok();
+        // The shared expert consumes the prepared hidden input, not cold routed
+        // weights. Its dedicated scratch can run while routed W1 DMA completes.
+        // Keep aliasing/debug modes and nonstandard input paths on the old order.
+        // The existing shared->main join still owns output visibility/lifetime.
+        let early_shared_expert = has_shared
+            && !force_sync_shared_expert
+            && !defer_shared_expert_launch
+            && !latent_moe
+            && hidden == self.band_shared_input.unwrap_or(*self.scratch.d_hidden.device_ptr())
+            && std::env::var("KRASIS_PREFILL_SHARED_EXPERT_USE_MAIN_SCRATCH").is_err()
+            && optional_bool_env("KRASIS_PREFILL_SHARED_OVERLAP_DMA")?.unwrap_or(true);
+        if early_shared_expert {
+            unsafe {
+                let err = cuda_sys::lib().cuEventRecord(self.shared_launch_event, self.stream);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("early shared input event failed: {:?}", err));
+                }
+                let err = cuda_sys::lib().cuStreamWaitEvent(self.shared_stream, self.shared_launch_event, 0);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("early shared input wait failed: {:?}", err));
+                }
+            }
+            self.launch_shared_expert_on_shared_stream(layer_idx, m)?;
+        }
 
         // Wait for DMA/pointer table upload to complete (stream dependency)
         let mt_dma_wait = if mt { Some(Instant::now()) } else { None };
@@ -66696,14 +67308,11 @@ impl PrefillEngine {
             );
         }
 
-        let force_sync_shared_expert =
-            std::env::var("KRASIS_PREFILL_FORCE_SYNC_SHARED_EXPERT").is_ok();
-        let defer_shared_expert_launch = !force_sync_shared_expert
-            && std::env::var("KRASIS_PREFILL_DEFER_SHARED_EXPERT_LAUNCH").is_ok();
-
         // 5. Launch shared expert on dedicated shared_stream (async overlap with fused MoE)
         set_vram_phase("shared_launch");
-        if has_shared && !force_sync_shared_expert && !defer_shared_expert_launch {
+        if has_shared && !force_sync_shared_expert && !defer_shared_expert_launch
+            && !early_shared_expert
+        {
             unsafe {
                 cuda_sys::lib().cuEventRecord(self.shared_launch_event, self.stream);
                 cuda_sys::lib().cuStreamWaitEvent(self.shared_stream, self.shared_launch_event, 0);
@@ -78512,7 +79121,7 @@ impl PrefillEngine {
         let activation = lw.moe_activation;
         let shared_swiglu_limit = lw.shared_swiglu_limit;
         let deepseek_v4_activation = lw.moe_deepseek_v4_activation;
-        let hidden = *self.scratch.d_hidden.device_ptr();
+        let hidden = self.band_shared_input.unwrap_or(*self.scratch.d_hidden.device_ptr());
         let s1_buf = *self
             .d_shared_bf16_scratch1
             .as_ref()
@@ -79953,7 +80562,7 @@ impl PrefillEngine {
         let activation = lw.moe_activation;
         let shared_swiglu_limit = lw.shared_swiglu_limit;
         let deepseek_v4_activation = lw.moe_deepseek_v4_activation;
-        let hidden = *self.scratch.d_hidden.device_ptr();
+        let hidden = self.band_shared_input.unwrap_or(*self.scratch.d_hidden.device_ptr());
         let use_main_scratch =
             std::env::var("KRASIS_PREFILL_SHARED_EXPERT_USE_MAIN_SCRATCH").is_ok();
         let s1_buf = if use_main_scratch {
@@ -81299,6 +81908,10 @@ impl PrefillKernels {
                     "mla_prefill_absorb_wkc_kernel",
                     "mla_prefill_sparse_attention_k4_kernel",
                     "mla_prefill_sparse_attention_k6_kernel",
+                    "glm53_fused_mla_k4_candidate",
+                    "glm53_fused_mla_k6_candidate",
+                    "glm53_reuse_mla_k4_candidate",
+                    "glm53_reuse_mla_k6_candidate",
                     "mla_prefill_sparse_attention_k4_score_reuse_kernel",
                     "mla_prefill_sparse_attention_k6_score_reuse_kernel",
                     "mla_prefill_sparse_scores_k4_grouped_exact_kernel",
@@ -81513,6 +82126,7 @@ impl PrefillKernels {
                 &[
                     "kimi_delta_recurrent_scan_bf16",
                     "kimi_delta_recurrent_scan_tiled_bf16",
+                    "glm53_kda_prepared_relay",
                     "kimi_delta_chunk_prepare_bf16",
                     "kimi_delta_conv_silu_bf16",
                     "kimi_delta_conv_silu_parallel_bf16",
@@ -81813,6 +82427,10 @@ impl PrefillKernels {
             mla_prefill_absorb_wkc: get("mla_prefill_absorb_wkc_kernel")?,
             mla_prefill_sparse_attention_k4: get("mla_prefill_sparse_attention_k4_kernel")?,
             mla_prefill_sparse_attention_k6: get("mla_prefill_sparse_attention_k6_kernel")?,
+            glm53_fused_mla_k4_candidate: get("glm53_fused_mla_k4_candidate")?,
+            glm53_fused_mla_k6_candidate: get("glm53_fused_mla_k6_candidate")?,
+            glm53_reuse_mla_k4_candidate: get("glm53_reuse_mla_k4_candidate")?,
+            glm53_reuse_mla_k6_candidate: get("glm53_reuse_mla_k6_candidate")?,
             mla_prefill_sparse_attention_k4_score_reuse: get(
                 "mla_prefill_sparse_attention_k4_score_reuse_kernel",
             )?,
@@ -81871,6 +82489,7 @@ impl PrefillKernels {
             kimi_delta_recurrent_scan_tiled_bf16: get_decode_helper(
                 "kimi_delta_recurrent_scan_tiled_bf16",
             )?,
+            glm53_kda_prepared_relay: get_decode_helper("glm53_kda_prepared_relay")?,
             kimi_delta_chunk_prepare_bf16: get_decode_helper("kimi_delta_chunk_prepare_bf16")?,
             kimi_delta_conv_silu_bf16: get_decode_helper("kimi_delta_conv_silu_bf16")?,
             kimi_delta_conv_silu_parallel_bf16: get_decode_helper(
@@ -82695,7 +83314,7 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     let topk = config.num_experts_per_tok.max(1);
     let has_la = config.layer_types.iter().any(|&t| t == 3 || t == 5);
     let has_fla_delta = config.layer_types.iter().any(|&t| t == 3);
-    let has_kda_chunk = config.layer_types.iter().any(|&t| t == 5);
+    let has_kda_chunk = config.layer_types.iter().any(|&t| t == 5) && !kda_skip_chunk_scratch();
     let has_mamba2 = config.layer_types.iter().any(|&t| t == 1);
     let (native_history_fixed_bytes, native_history_per_token_bytes) =
         if config.deepseek_v4_native_cache && config.deepseek_v4_min_compress_ratio > 0 {
@@ -82857,6 +83476,9 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
         let nv = config.la_num_v_heads;
         let dk = config.la_k_head_dim;
         let dv = config.la_v_head_dim;
+        if prefill_compact_kda_scratch(config) {
+            per_token += nv * 2; // KDA beta only; other KDA scratch below
+        } else {
         // d_la_q, d_la_k: max_tokens * nv * dk * 4 (FP32) each
         per_token += nv * dk * 4 * 2;
         // d_la_v: max_tokens * nv * dv * 4
@@ -82878,6 +83500,7 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
         let group_dim_proj = 2 * dk + 2 * hr * dv;
         per_token += config.la_num_k_heads * group_dim_proj * 2;
         // d_la_chunk_out, d_la_q_contig: nv * chunk_size * dk * 4 -- fixed, not per-token
+        }
         if has_fla_delta {
             // Dedicated gated-delta FLA buffers. KDA uses a different exact
             // scratch family below, so do not reserve nonexistent buffers.
@@ -82974,7 +83597,9 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
             fixed += PREFILL_PTR_TABLE_REUSE_SLOTS * 4 * n_routed * 8;
         }
     }
-    if has_la {
+    if has_la && prefill_compact_kda_scratch(config) {
+        fixed += config.la_chunk_size * config.la_num_v_heads * 2;
+    } else if has_la {
         let nv = config.la_num_v_heads;
         let dk = config.la_k_head_dim;
         let dv = config.la_v_head_dim;
@@ -83011,7 +83636,7 @@ fn estimate_scratch_vram_for_prompt(
     let block_size_moe: usize = 64;
     let n_routed = config.n_routed_experts;
     let fsc = if max_tokens > 0 {
-        max_tokens
+        prefill_moe_scratch_rows(config, max_tokens)
             .saturating_mul(topk)
             .saturating_add(n_routed.saturating_mul(block_size_moe))
     } else {
@@ -83020,7 +83645,7 @@ fn estimate_scratch_vram_for_prompt(
     let has_mamba2 = config.layer_types.iter().any(|&t| t == 1);
     let has_la = config.layer_types.iter().any(|&t| t == 3 || t == 5);
     let has_fla_delta = config.layer_types.iter().any(|&t| t == 3);
-    let has_kda_chunk = config.layer_types.iter().any(|&t| t == 5);
+    let has_kda_chunk = config.layer_types.iter().any(|&t| t == 5) && !kda_skip_chunk_scratch();
     let la_max_len = if has_la {
         max_tokens.saturating_add(config.la_chunk_size)
     } else {
@@ -83048,7 +83673,7 @@ fn estimate_scratch_vram_for_prompt(
             shared_inter
         };
         let shared_scratch_n = h.max(shared_w13_n);
-        let shared_scratch_elems = max_tokens.saturating_mul(shared_scratch_n);
+        let shared_scratch_elems = prefill_moe_scratch_rows(config, max_tokens).saturating_mul(shared_scratch_n);
         add(shared_scratch_elems, 2); // d_shared_bf16_scratch1
         add(shared_scratch_elems, 2); // d_shared_bf16_scratch2
         add(shared_scratch_elems, 4); // d_shared_fp32_scratch
@@ -83244,7 +83869,9 @@ fn estimate_scratch_vram_for_prompt(
         add(8, 1);
     }
 
-    if has_la {
+    if has_la && prefill_compact_kda_scratch(config) {
+        add(la_max_len.saturating_mul(config.la_num_v_heads), 2); // KDA beta
+    } else if has_la {
         let nv = config.la_num_v_heads;
         let dk = config.la_k_head_dim;
         let dv = config.la_v_head_dim;
@@ -83291,7 +83918,10 @@ fn estimate_scratch_vram_for_prompt(
         add(max_q_heads.saturating_mul(max_tokens), 4); // fa2_lse
     }
 
-    bytes
+    if prefill_phase_arena_enabled(config) {
+        let (attention,ffn)=phase_scratch_elements(config,max_tokens,fsc);
+        bytes.saturating_sub(prefill_transfer::phase_pair_savings(attention,ffn).saturating_mul(2))
+    } else { bytes }
 }
 
 fn estimate_mamba2_ssd_runtime_temp_bytes(config: &PrefillModelConfig, tokens: usize) -> usize {
@@ -83372,6 +84002,27 @@ fn exact_scratch_token_cap(
     lo
 }
 
+/// GLM attention is complete before FFN starts on the ordered main stream.
+/// The shared FFN lane reads hidden and owns dedicated scratch, never Q/K/V or
+/// attention output. Retained KDA-prefix execution disables transfer bands and
+/// keeps independent buffers. No persistent state or weight allocation aliases.
+fn prefill_phase_arena_enabled(config: &PrefillModelConfig) -> bool {
+    config.phase_arena_supported && prefill_transfer_plan_enabled(config)
+        && !matches!(std::env::var("KRASIS_PREFILL_PHASE_ARENA")
+            .unwrap_or_default().to_ascii_lowercase().as_str(), "0"|"false"|"no"|"off")
+}
+
+fn phase_scratch_elements(config: &PrefillModelConfig, rows: usize, fsc: usize)
+    -> ([usize;4], [usize;4]) {
+    let h=config.hidden_size;
+    let q=config.max_gqa_q_dim.max(config.num_q_heads*config.head_dim);
+    let kv=config.max_gqa_kv_dim.max(config.num_kv_heads*config.head_dim);
+    let out=h.max(q).max(config.la_num_v_heads*config.la_v_head_dim);
+    let w1=if config.moe_gated {2*config.moe_intermediate_size} else {config.moe_intermediate_size};
+    ([rows*q,rows*kv,rows*kv,rows*out],
+     [fsc*h,fsc*h,fsc*w1,shared_moe_inter_scratch_elements(rows,config.intermediate_size,fsc,config.moe_intermediate_size)])
+}
+
 pub fn allocate_scratch(
     _device: &Arc<CudaDevice>,
     config: &PrefillModelConfig,
@@ -83400,7 +84051,7 @@ pub fn allocate_scratch_for_prompt(
     let block_size_moe: usize = 64;
     let n_routed = config.n_routed_experts;
     let fsc = if max_tokens > 0 {
-        max_tokens * topk + n_routed * block_size_moe
+        prefill_moe_scratch_rows(config, max_tokens) * topk + n_routed * block_size_moe
     } else {
         1 // minimal placeholder — no MoE execution at 0 tokens
     };
@@ -83445,6 +84096,25 @@ pub fn allocate_scratch_for_prompt(
         if fla_req > max_inter {
             max_inter = fla_req;
         }
+    }
+
+    let (attention,ffn)=phase_scratch_elements(config,max_tokens,fsc);
+    let phase_arena=prefill_phase_arena_enabled(config);
+    let pair = |a:usize,b:usize,name:&str| -> Result<(Arc<GpuBuf<u16>>,Arc<GpuBuf<u16>>),String> {
+        if phase_arena {
+            let owner=Arc::new(alloc_u16(a.max(b),name)?);
+            Ok((owner.clone(),owner))
+        } else {
+            Ok((Arc::new(alloc_u16(a,name)?),Arc::new(alloc_u16(b,name)?)))
+        }
+    };
+    let (d_q,d_moe_gathered)=pair(attention[0],ffn[0],"q/moe_gathered")?;
+    let (d_k,d_moe_expert_out)=pair(attention[1],ffn[1],"k/moe_expert_out")?;
+    let (d_v,d_moe_gate_up)=pair(attention[2],ffn[2],"v/moe_gate_up")?;
+    let (d_attn_out,d_moe_inter)=pair(attention[3],ffn[3],"attn_out/moe_inter")?;
+    if phase_arena && max_tokens>0 {
+        eprintln!("[PREFILL-PHASE-ARENA] rows={} saved_physical_bytes={} attention_elements={:?} ffn_elements={:?} owners=4 ordering=attention_then_ffn",max_tokens,
+            prefill_transfer::phase_pair_savings(attention,ffn)*2,attention,ffn);
     }
 
     Ok(PrefillScratch {
@@ -83543,38 +84213,10 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_attn_out: {
-            // Must fit max(hidden_size, num_q_heads*head_dim, value_dim) per token
-            let attn_dim = h
-                .max(
-                    config
-                        .max_gqa_q_dim
-                        .max(config.num_q_heads * config.head_dim),
-                )
-                .max(config.la_num_v_heads * config.la_v_head_dim);
-            alloc_u16(max_tokens * attn_dim, "attn_out")?
-        },
-        d_q: Arc::new(alloc_u16(
-            max_tokens
-                * config
-                    .max_gqa_q_dim
-                    .max(config.num_q_heads * config.head_dim),
-            "q",
-        )?),
-        d_k: Arc::new(alloc_u16(
-            max_tokens
-                * config
-                    .max_gqa_kv_dim
-                    .max(config.num_kv_heads * config.head_dim),
-            "k",
-        )?),
-        d_v: Arc::new(alloc_u16(
-            max_tokens
-                * config
-                    .max_gqa_kv_dim
-                    .max(config.num_kv_heads * config.head_dim),
-            "v",
-        )?),
+        d_attn_out,
+        d_q,
+        d_k,
+        d_v,
         d_logits: alloc_f32(config.vocab_size, "logits")?,
         d_mamba2_conv_state: if has_mamba2 {
             Some(alloc_f32(
@@ -83614,20 +84256,10 @@ pub fn allocate_scratch_for_prompt(
         // When max_tokens=0 (init/release), fsc=1 to avoid wasting ~608 MB on block padding.
         d_gate_out: alloc_f32(max_tokens * config.n_routed_experts.max(1), "gate_out")?,
         d_moe_accum: alloc_f32(max_tokens.max(1) * h, "moe_accum")?,
-        d_moe_gathered: alloc_u16(fsc * h, "moe_gathered")?,
-        d_moe_expert_out: alloc_u16(fsc * h, "moe_expert_out")?,
-        d_moe_gate_up: {
-            let w1_n = if config.moe_gated {
-                2 * moe_inter
-            } else {
-                moe_inter
-            };
-            alloc_u16(fsc * w1_n, "moe_gate_up")?
-        },
-        d_moe_inter: alloc_u16(
-            shared_moe_inter_scratch_elements(max_tokens, inter, fsc, moe_inter),
-            "moe_inter",
-        )?,
+        d_moe_gathered,
+        d_moe_expert_out,
+        d_moe_gate_up,
+        d_moe_inter,
         d_gather_src_map: alloc_i32(fsc, "gather_src_map")?,
         d_gather_weight_map: alloc_f32(max_tokens * topk, "gather_weight_map")?,
         d_fused_expert_ids: {
@@ -83737,7 +84369,7 @@ pub fn allocate_scratch_for_prompt(
         // Linear attention scratch buffers
         // LA pads to chunk_size multiples, so total_len can be up to max_tokens + chunk_size - 1.
         // Allocate with la_max_len to avoid buffer overflow on padded data.
-        d_la_q: if has_la {
+        d_la_q: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_f32(
                 la_max_len * config.la_num_v_heads * config.la_k_head_dim,
                 "la_q",
@@ -83745,7 +84377,7 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_la_k: if has_la {
+        d_la_k: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_f32(
                 la_max_len * config.la_num_v_heads * config.la_k_head_dim,
                 "la_k",
@@ -83753,7 +84385,7 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_la_v: if has_la {
+        d_la_v: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_f32(
                 la_max_len * config.la_num_v_heads * config.la_v_head_dim,
                 "la_v",
@@ -83761,7 +84393,7 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_la_z: if has_la {
+        d_la_z: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_u16(
                 la_max_len * config.la_num_v_heads * config.la_v_head_dim,
                 "la_z",
@@ -83777,27 +84409,27 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_la_a: if has_la {
+        d_la_a: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_u16(la_max_len * config.la_num_v_heads, "la_a")?)
         } else {
             None
         },
-        d_la_beta: if has_la {
+        d_la_beta: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_f32(la_max_len * config.la_num_v_heads, "la_beta")?)
         } else {
             None
         },
-        d_la_gate: if has_la {
+        d_la_gate: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_f32(la_max_len * config.la_num_v_heads, "la_gate")?)
         } else {
             None
         },
-        d_la_conv_out: if has_la {
+        d_la_conv_out: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_f32(config.la_conv_dim * la_max_len, "la_conv_out")?)
         } else {
             None
         },
-        d_la_v_beta: if has_la {
+        d_la_v_beta: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_f32(
                 config.la_num_v_heads * la_max_len * config.la_v_head_dim,
                 "la_v_beta",
@@ -83805,7 +84437,7 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_la_k_beta: if has_la {
+        d_la_k_beta: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_f32(
                 config.la_num_v_heads * la_max_len * config.la_k_head_dim,
                 "la_k_beta",
@@ -83813,7 +84445,7 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_la_v_new: if has_la {
+        d_la_v_new: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_f32(
                 config.la_num_v_heads * config.la_chunk_size * config.la_v_head_dim,
                 "la_v_new",
@@ -83821,7 +84453,7 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_la_g_cum: if has_la {
+        d_la_g_cum: if has_la && !prefill_compact_kda_scratch(config) {
             let num_chunks = (la_max_len + config.la_chunk_size - 1) / config.la_chunk_size;
             Some(alloc_f32(
                 config.la_num_v_heads * num_chunks * config.la_chunk_size,
@@ -83830,7 +84462,7 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_la_attn: if has_la {
+        d_la_attn: if has_la && !prefill_compact_kda_scratch(config) {
             let num_chunks = (la_max_len + config.la_chunk_size - 1) / config.la_chunk_size;
             Some(alloc_f32(
                 config.la_num_v_heads * num_chunks * config.la_chunk_size * config.la_chunk_size,
@@ -83839,7 +84471,7 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_la_state: if has_la {
+        d_la_state: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_f32(
                 config.la_num_v_heads * config.la_k_head_dim * config.la_v_head_dim,
                 "la_state",
@@ -83847,7 +84479,7 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_la_chunk_out: if has_la {
+        d_la_chunk_out: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_f32(
                 config.la_num_v_heads * config.la_chunk_size * config.la_v_head_dim,
                 "la_chunk_out",
@@ -83855,7 +84487,7 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_la_q_contig: if has_la {
+        d_la_q_contig: if has_la && !prefill_compact_kda_scratch(config) {
             Some(alloc_f32(
                 config.la_num_v_heads * config.la_chunk_size * config.la_k_head_dim,
                 "la_q_contig",
@@ -83863,7 +84495,7 @@ pub fn allocate_scratch_for_prompt(
         } else {
             None
         },
-        d_la_proj_buf: if has_la {
+        d_la_proj_buf: if has_la && !prefill_compact_kda_scratch(config) {
             // Projection buffer: max of qkvz_dim and ba_dim
             let group_dim =
                 2 * config.la_k_head_dim + 2 * config.la_head_ratio * config.la_v_head_dim;
@@ -84188,7 +84820,7 @@ fn load_moe_w2_lane_diag() -> Option<(MoeW2LaneDiagConfigFn, MoeW2LaneDiagFetchF
 }
 
 /// Load vendored FlashAttention-2 from libkrasis_flash_attn.so.
-fn load_flash_attn() -> Option<FlashAttnFwdFn> {
+pub(crate) fn load_flash_attn() -> Option<FlashAttnFwdFn> {
     let path = match find_vendor_so("libkrasis_flash_attn.so") {
         Some(p) => p,
         None => {
@@ -84545,7 +85177,7 @@ mod chunk_plan_tests {
         build_image_aware_prefill_chunk_plan, build_prefill_chunk_plan,
         build_prefill_chunk_plan_at_boundary, deepseek_v4_native_prefix_rows_to_restore,
         dsa_mla_gathered_gemm_workspace_row_layout, dsa_mla_grouped_exact_workspace_row_layout,
-        dsa_mla_wvc_workspace_row_layout, dsa_prefill_workspace_deficit_bytes,
+        dsa_mla_wvc_workspace_row_layout, dsa_mla_sm86_dispatch_rows, dsa_planned_workspace_bytes, dsa_prefill_workspace_deficit_bytes,
         fused_moe_fp32_reduce_floats, fused_moe_fp32_reduce_floats_for_precisions,
         glm5_hc_temp_state_elements_from_geometry, is_prefill_cancelled_error,
         kimi_delta_state_elements_from_geometry, marlin_moe_uses_sparse_block_filter,
@@ -84555,6 +85187,21 @@ mod chunk_plan_tests {
         stage_exact_export_range, synchronous_cold_staging_reuse_requires_host_wait,
         PortablePredictedW1Policy,
     };
+
+    #[test]
+    fn sm86_dispatch_policy_is_narrow_and_falls_back() {
+        assert_eq!(dsa_mla_sm86_dispatch_rows(8, 6, 64, 512, 2051, true, 2), Some(1));
+        assert_eq!(dsa_mla_sm86_dispatch_rows(8, 6, 64, 512, 2051, true, 4), Some(1));
+        assert_eq!(dsa_mla_sm86_dispatch_rows(8, 6, 64, 512, 2051, true, 1), None);
+        assert_eq!(dsa_mla_sm86_dispatch_rows(8, 6, 64, 512, 2051, true, 5), None);
+        assert_eq!(dsa_mla_sm86_dispatch_rows(8, 6, 64, 512, 2051, true, 33), None);
+        assert_eq!(dsa_mla_sm86_dispatch_rows(8, 0, 64, 512, 2051, true, 4), None);
+        assert_eq!(dsa_mla_sm86_dispatch_rows(9, 0, 64, 512, 2051, true, 4), None);
+        assert_eq!(dsa_mla_sm86_dispatch_rows(8, 6, 32, 512, 2051, true, 4), None);
+        assert_eq!(dsa_mla_sm86_dispatch_rows(8, 6, 64, 576, 2051, true, 4), None);
+        assert_eq!(dsa_mla_sm86_dispatch_rows(8, 6, 64, 512, 2048, true, 4), None);
+        assert_eq!(dsa_mla_sm86_dispatch_rows(8, 6, 64, 512, 2051, false, 4), None);
+    }
 
     #[test]
     fn prefill_cancellation_error_contract_is_narrow() {
@@ -84584,6 +85231,14 @@ mod chunk_plan_tests {
             400
         );
         assert!(dsa_prefill_workspace_deficit_bytes(0, usize::MAX, 1, 0, 0).is_err());
+    }
+
+    #[test]
+    fn dsa_workspace_plan_preserves_existing_minimum_and_bounds_rows() {
+        assert_eq!(dsa_planned_workspace_bytes(1200, 200, 100, 10, 8, 1).unwrap(), 1200);
+        assert_eq!(dsa_planned_workspace_bytes(1200, 200, 100, 10, 3, 8).unwrap(), 1310);
+        assert!(dsa_planned_workspace_bytes(1, 0, usize::MAX, 1, 2, 2).is_err());
+        assert!(dsa_planned_workspace_bytes(usize::MAX, 0, 1, 0, 1, 1).is_err());
     }
 
     #[test]
@@ -85719,6 +86374,10 @@ mod kernel_tests {
                     "mla_prefill_absorb_wkc_kernel",
                     "mla_prefill_sparse_attention_k4_kernel",
                     "mla_prefill_sparse_attention_k6_kernel",
+                    "glm53_fused_mla_k4_candidate",
+                    "glm53_fused_mla_k6_candidate",
+                    "glm53_reuse_mla_k4_candidate",
+                    "glm53_reuse_mla_k6_candidate",
                     "mla_prefill_sparse_attention_k4_score_reuse_kernel",
                     "mla_prefill_sparse_attention_k6_score_reuse_kernel",
                     "mla_prefill_sparse_scores_k4_grouped_exact_kernel",
@@ -85888,6 +86547,7 @@ mod kernel_tests {
                     "gated_delta_net_step",
                     "kimi_delta_recurrent_scan_bf16",
                     "kimi_delta_recurrent_scan_tiled_bf16",
+                    "glm53_kda_prepared_relay",
                     "kimi_delta_chunk_prepare_bf16",
                     "kimi_delta_conv_silu_bf16",
                     "kimi_delta_conv_silu_parallel_bf16",
@@ -92788,6 +93448,31 @@ mod kernel_tests {
             }
             self::cuda_sync();
             let prefill_attention = ctx.dev.dtoh_sync_copy(&d_prefill_attention).unwrap();
+            if std::env::var_os("KRASIS_TEST_FUSED_MLA_CANDIDATE").is_some() {
+                let kernel = ctx.get_kernel("glm53_fused_mla_k4_candidate");
+                let output = ctx.alloc_f32(prefill_rows * ckv_dim);
+                let mut o = *output.device_ptr() as u64;
+                let shared = 16 * (ckv_dim + rope_dim) * 8 + 256 * 4 + 256 * 4 + 16 * ckv_dim * 4 + 48 * 4;
+                let shared = dsa_prefill_configure_dynamic_shared(kernel, shared, "test fused MLA").unwrap();
+                unsafe {
+                    launch(kernel, (1, prefill_rows as u32, 1), (256, 1, 1), shared, ctx.stream(), &mut [
+                        &mut o as *mut _ as *mut _, &mut pa1 as *mut _ as *mut _,
+                        &mut pa2 as *mut _ as *mut _, &mut pa3 as *mut _ as *mut _,
+                        &mut pa4 as *mut _ as *mut _, &mut pa5 as *mut _ as *mut _,
+                        &mut pa6 as *mut _ as *mut _, &mut pa7 as *mut _ as *mut _,
+                        &mut pa8 as *mut _ as *mut _, &mut pa9 as *mut _ as *mut _,
+                        &mut pa10 as *mut _ as *mut _, &mut pa11 as *mut _ as *mut _,
+                        &mut pa12 as *mut _ as *mut _, &mut pa13 as *mut _ as *mut _,
+                        &mut pa14 as *mut _ as *mut _, &mut pa15 as *mut _ as *mut _,
+                    ]).unwrap();
+                }
+                self::cuda_sync();
+                let actual = ctx.dev.dtoh_sync_copy(&output).unwrap();
+                for (index, (&x, &y)) in actual.iter().zip(&prefill_attention).enumerate() {
+                    assert!(x.is_finite() && y.is_finite() && (x-y).abs() <= 2e-4,
+                            "fused MLA output mismatch index={index}: actual={x} scalar={y}");
+                }
+            }
             for (dim, expected) in decoded_ckv[..ckv_dim].iter().enumerate() {
                 assert!(
                     (prefill_attention[dim] - expected).abs() <= 2e-4,
@@ -98775,6 +99460,7 @@ mod kernel_tests {
             )
             .unwrap();
         }
+
 
         let d_q = ctx.upload_bf16(&bf16_bytes(&q));
         let d_k = ctx.upload_bf16(&bf16_bytes(&k));

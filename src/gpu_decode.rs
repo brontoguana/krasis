@@ -12,6 +12,8 @@
 //! decode_kernels.cu at build time via nvcc, embedded as PTX, and loaded
 //! into the CUDA module at init time.
 
+mod memory_audit;
+
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -303,6 +305,17 @@ fn env_enabled_default(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+// Filter by this graph's registered MLA cache pointers, never context alone.
+fn graph_owns_streamed_kv(graph:&GpuDecodeGraph,base:u64,bytes:usize)->bool {
+    let Some(end)=base.checked_add(bytes as u64) else{return false;};
+    graph.layers.iter().any(|layer|match &layer.attn {
+        GpuAttnConfig::MLA{ckv_cache_ptr,kpe_cache_ptr,..}=>[*ckv_cache_ptr,*kpe_cache_ptr].iter().any(|&p|p>=base&&p<end),
+        _=>false,
+    })
+}
+fn prepare_graph_streamed_kv(graph:&GpuDecodeGraph,end:usize,stream:cuda_sys::CUstream,context:cuda_sys::CUcontext)->Result<(),String>{
+    crate::streamed_kv::prepare_matching(end,stream,context,|base,bytes|graph_owns_streamed_kv(graph,base,bytes))
+}
 fn split_expert_launch_enabled(
     dsa_runtime_registered: bool,
     override_value: Option<&str>,
@@ -4476,6 +4489,7 @@ const KERNEL_NAMES: &[&str] = &[
     "mla_attention_k6_g",
     "mla_attention_k6",
     "mla_sparse_attention_k6_g",
+    "mla_stage_selected_packed_g",
     "mla_sparse_attention_k6",
     "mla_deinterleave",
     "mla_split_q",
@@ -6808,6 +6822,7 @@ impl HcsState {
             "phase": phase,
             "resident_count": resident.len(),
             "resident_hash": validation_hash_pairs(&resident),
+            "resident_ids": resident,
             "num_cached": self.num_cached,
             "soft_num_cached": self.soft_num_cached,
             "hard_num_cached": self.num_cached.saturating_sub(self.soft_num_cached),
@@ -18127,6 +18142,7 @@ struct CachedKernels {
     mla_attention_k6_g: cudarc::driver::CudaFunction,
     mla_attention_k6: cudarc::driver::CudaFunction,
     mla_sparse_attention_k6_g: cudarc::driver::CudaFunction,
+    mla_stage_selected_packed_g: cudarc::driver::CudaFunction,
     mla_sparse_attention_k6: cudarc::driver::CudaFunction,
     mla_deinterleave: cudarc::driver::CudaFunction,
     mla_split_q: cudarc::driver::CudaFunction,
@@ -18514,6 +18530,7 @@ impl CachedKernels {
             mla_attention_k6_g: "mla_attention_k6_g",
             mla_attention_k6: "mla_attention_k6",
             mla_sparse_attention_k6_g: "mla_sparse_attention_k6_g",
+            mla_stage_selected_packed_g: "mla_stage_selected_packed_g",
             mla_sparse_attention_k6: "mla_sparse_attention_k6",
             mla_deinterleave: "mla_deinterleave",
             mla_split_q: "mla_split_q",
@@ -18727,6 +18744,8 @@ struct GpuDecodeGraph {
     d_mla_q_absorbed: cudarc::driver::CudaSlice<f32>, // [num_heads * kv_lora_rank] for absorbed query
     d_mla_kv: cudarc::driver::CudaSlice<f32>, // [kv_lora_rank + qk_rope_dim] for KV projection
     d_mla_attn_out: cudarc::driver::CudaSlice<f32>, // [num_heads * kv_lora_rank] attention output
+    // Packed rows, compact indices and count; allocated before graph capture.
+    mla_selected_stage: Option<(CudaSlice<u8>, CudaSlice<i32>, CudaSlice<i32>)>,
     mla_sparse_attention_threads: u32,
     mla_sparse_attention_threads_forced: bool,
     mla_sparse_attention_threads_autotuned: bool,
@@ -19175,6 +19194,7 @@ struct GpuDecodeGraph {
     cpu_tail_transposed_compute_s: f64,
     cpu_tail_transposed_saved_weight_bytes: u64,
     cpu_tail_output_bytes: u64,
+    cpu_tail_host_timing_enabled: bool,
     cpu_tail_input_d2h_s: f64,
     cpu_tail_compute_s: f64,
     cpu_tail_race_wait_s: f64,
@@ -23444,6 +23464,67 @@ struct HqqRuntimeDeviceBuffers {
     packed: HqqRuntimeVmmBuffer,
     scales: HqqRuntimeVmmBuffer,
     zeros: HqqRuntimeVmmBuffer,
+    // Component pointers are non-owning views when this arena is present.
+    // Offsets use maximum phase extents, so graph pointers never move.
+    arena: Option<HqqRuntimeVmmBuffer>,
+}
+
+impl HqqRuntimeDeviceBuffers {
+    fn new(device: &Arc<CudaDevice>, prefill: [usize; 3], decode: [usize; 3],
+        active: [usize; 3]) -> Result<Self, String> {
+        let reserve = std::array::from_fn::<_, 3, _>(|i| prefill[i].max(decode[i]));
+        let granularity = HqqRuntimeVmmBuffer::allocation_granularity(
+            &HqqRuntimeVmmBuffer::allocation_prop(device.ordinal() as i32))?;
+        let layout = crate::gpu_prefill::prefill_transfer::fixed_component_arena(prefill, decode, granularity)?;
+        let enabled = !matches!(std::env::var("KRASIS_HQQ_PACK_COMPONENTS")
+            .unwrap_or_default().to_ascii_lowercase().as_str(), "0"|"false"|"no"|"off");
+        // Fixed arenas must save physical memory in BOTH phases; otherwise retain
+        // independent compaction/remapping. No quantisation or layout changes.
+        if let Some((offsets, total)) = layout.filter(|_| enabled) {
+            let arena = HqqRuntimeVmmBuffer::new(device, total, total)?;
+            let view = |i: usize| HqqRuntimeVmmBuffer {
+                ptr: arena.ptr + offsets[i] as u64, reserved_bytes: 0,
+                mapped_bytes: 0, handle: None, device_ordinal: arena.device_ordinal,
+            };
+            let result = Self { packed: view(0), scales: view(1), zeros: view(2), arena: Some(arena) };
+            log::info!("HQQ PACKED ARENA physical_bytes={} component_max_bytes={:?}",
+                result.mapped_bytes(), reserve);
+            Ok(result)
+        } else {
+            Ok(Self {
+                packed: HqqRuntimeVmmBuffer::new(device, reserve[0], active[0])?,
+                scales: HqqRuntimeVmmBuffer::new(device, reserve[1], active[1])?,
+                zeros: HqqRuntimeVmmBuffer::new(device, reserve[2], active[2])?,
+                arena: None,
+            })
+        }
+    }
+
+    fn unmap_current(&mut self) -> Result<(), String> {
+        if let Some(arena) = self.arena.as_mut() { return arena.unmap_current(); }
+        self.packed.unmap_current()?;
+        self.scales.unmap_current()?;
+        self.zeros.unmap_current()
+    }
+
+    fn remap(&mut self, active: [usize; 3]) -> Result<(), String> {
+        if let Some(arena) = self.arena.as_mut() {
+            // Reuse the fixed, maximum-phase layout; component addresses survive.
+            return arena.remap(arena.reserved_bytes);
+        }
+        self.packed.remap(active[0])?;
+        self.scales.remap(active[1])?;
+        self.zeros.remap(active[2])
+    }
+
+    fn mapped_bytes(&self) -> usize {
+        self.arena.as_ref().map(|a| a.mapped_bytes).unwrap_or(
+            self.packed.mapped_bytes + self.scales.mapped_bytes + self.zeros.mapped_bytes)
+    }
+    fn reserved_bytes(&self) -> usize {
+        self.arena.as_ref().map(|a| a.reserved_bytes).unwrap_or(
+            self.packed.reserved_bytes + self.scales.reserved_bytes + self.zeros.reserved_bytes)
+    }
 }
 
 struct HqqRuntimeSlotEntry {
@@ -24663,6 +24744,8 @@ pub struct GpuDecodeStore {
     /// Stored when the prefill engine is created so it's available for eviction checks
     /// even after the engine is taken by the RustServer.
     prefill_scratch_info: Option<(usize, usize)>,
+    prefill_transfer_planning: bool,
+    prefill_transfer_entry_floor: Option<(usize, usize)>,
     /// Store-scoped trace config for setup/prefill/HCS work outside active decode requests.
     trace_config: Option<DecodeTraceConfig>,
     pending_trace_request_label: Option<String>,
@@ -24799,7 +24882,10 @@ impl GpuDecodeStore {
     /// and speculative decoding currently has different rollback semantics.
     // BEGIN explicit teacher-forced store arming
     pub(crate) fn diagnostic_vocab_size_rust(&self) -> Result<usize, String> {
-        if self.matched_hqq_rounding.is_none()
+        // Original reconstruction admission remains intact. Exact serving
+        // replay is an explicit checksum-bound raw diagnostic contract.
+        let serving=crate::matched_teacher::native_serving_decode_admitted()?;
+        if (self.matched_hqq_rounding.is_none() && !serving)
             || self.cuda_graphs_disabled()
             || self.draft.is_some()
             || self.dspark.is_some()
@@ -30826,6 +30912,8 @@ impl GpuDecodeStore {
             hqq_bf16_weight_bufs: Vec::new(),
             prefill_engine_slot: None,
             prefill_scratch_info: None,
+            prefill_transfer_planning: false,
+            prefill_transfer_entry_floor: None,
             trace_config: DecodeTraceConfig::from_env(),
             pending_trace_request_label: None,
             debug_decode_state_trace_once: false,
@@ -30974,7 +31062,11 @@ impl GpuDecodeStore {
         let mut cuda_device_ordinal = -1i32;
         let mut range_start = 0u64;
         let mut range_size = 0usize;
-        unsafe {
+        let native_vmm=crate::streamed_kv::owns_vmm_range(ptr_u64,storage_bytes,self.device.ordinal())
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        if native_vmm {
+            cuda_device_ordinal=self.device.ordinal() as i32;range_start=ptr_u64;range_size=storage_bytes;
+        } else { unsafe {
             let ordinal_rc = cuda_sys::lib().cuPointerGetAttribute(
                 &mut cuda_device_ordinal as *mut i32 as *mut std::ffi::c_void,
                 cuda_sys::CUpointer_attribute_enum::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
@@ -31004,6 +31096,7 @@ impl GpuDecodeStore {
                     name, range_start_rc, range_size_rc
                 )));
             }
+        }
         }
         if cuda_device_ordinal < 0 || cuda_device_ordinal as usize != self.device.ordinal() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -31455,6 +31548,7 @@ impl GpuDecodeStore {
                 // Cache scratch VRAM computation for eviction checks (survives take_prefill_engine)
                 self.prefill_scratch_info =
                     Some(crate::gpu_prefill::compute_scratch_vram(&engine.config));
+                self.prefill_transfer_planning = engine.transfer_planner_enabled();
                 self.prefill_engine_slot = Some(engine);
                 if self.has_hqq_runtime_slots() {
                     self.prepare_runtime_for_decode_rust()
@@ -31835,6 +31929,9 @@ impl GpuDecodeStore {
         };
         let cpu_tail_enabled = env_truthy("KRASIS_CPU_TAIL_RACE");
         let cpu_tail_transposed_enabled = env_truthy("KRASIS_CPU_TAIL_TRANSPOSED");
+        crate::cpu_tail::validate_calibration_mode(cpu_tail_enabled,cpu_tail_transposed_enabled,
+            std::env::var_os("KRASIS_CPU_TAIL_CALIBRATION_JSON").is_some())
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
         let synthetic_repack_enabled = crate::synthetic_repack::synthetic_repack_enabled();
         if cpu_tail_transposed_enabled && !cpu_tail_enabled {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -31876,7 +31973,7 @@ impl GpuDecodeStore {
                         hidden_size,
                         moe_inter,
                         group_size,
-                        env_truthy("KRASIS_DECODE_TIMING"),
+                        env_truthy("KRASIS_DECODE_TIMING") || env_truthy("KRASIS_CPU_TAIL_HOST_TIMING"),
                         worker_index,
                         worker_count,
                     )
@@ -32248,6 +32345,7 @@ impl GpuDecodeStore {
             d_mla_q_absorbed,
             d_mla_kv,
             d_mla_attn_out,
+            mla_selected_stage: None,
             mla_sparse_attention_threads,
             mla_sparse_attention_threads_forced,
             mla_sparse_attention_threads_autotuned: false,
@@ -32626,6 +32724,7 @@ impl GpuDecodeStore {
             cpu_tail_transposed_compute_s: 0.0,
             cpu_tail_transposed_saved_weight_bytes: 0,
             cpu_tail_output_bytes: 0,
+            cpu_tail_host_timing_enabled: env_truthy("KRASIS_CPU_TAIL_HOST_TIMING"),
             cpu_tail_input_d2h_s: 0.0,
             cpu_tail_compute_s: 0.0,
             cpu_tail_race_wait_s: 0.0,
@@ -33484,6 +33583,14 @@ impl GpuDecodeStore {
             .position(|slot| slot.layer_idx == layer_idx && slot.tensor_name == tensor_name);
         if let Some(slot_idx) = existing_slot_idx {
             let slot = &mut self.hqq_runtime_slots[slot_idx];
+            if slot.device_buffers.as_ref().is_some_and(|b| b.arena.is_some())
+                && ([slot.prefill.packed_host.len(), slot.prefill.scales_host.len(), slot.prefill.zeros_host.len()]
+                    != [prefill.packed_host.len(), prefill.scales_host.len(), prefill.zeros_host.len()]
+                    || [slot.decode.packed_host.len(), slot.decode.scales_host.len(), slot.decode.zeros_host.len()]
+                    != [decode.packed_host.len(), decode.scales_host.len(), decode.zeros_host.len()]) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Cannot resize a registered packed HQQ arena; recreate store before changing extents"));
+            }
             let preserved_registration = slot.is_registered();
             let preserved_registered_ms = slot.registered_ms;
             let preserved_packed_slot_ptr = slot.packed_slot_ptr;
@@ -33830,37 +33937,20 @@ impl GpuDecodeStore {
                 .zeros_host
                 .len()
                 .max(slot.decode.zeros_host.len());
-            let packed = HqqRuntimeVmmBuffer::new(&self.device, reserve_packed_bytes, slot_packed_bytes)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                    format!(
-                        "HQQ register packed VMM slot layer={} tensor={} active_bytes={} reserve_bytes={}: {}",
-                        slot.layer_idx, slot.tensor_name, slot_packed_bytes, reserve_packed_bytes, e
-                    )))?;
-            let scales = HqqRuntimeVmmBuffer::new(&self.device, reserve_scales_bytes, slot_scales_bytes)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                    format!(
-                        "HQQ register scales VMM slot layer={} tensor={} active_bytes={} reserve_bytes={}: {}",
-                        slot.layer_idx, slot.tensor_name, slot_scales_bytes, reserve_scales_bytes, e
-                    )))?;
-            let zeros = HqqRuntimeVmmBuffer::new(&self.device, reserve_zeros_bytes, slot_zeros_bytes)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                    format!(
-                        "HQQ register zeros VMM slot layer={} tensor={} active_bytes={} reserve_bytes={}: {}",
-                        slot.layer_idx, slot.tensor_name, slot_zeros_bytes, reserve_zeros_bytes, e
-                    )))?;
-            slot.packed_slot_ptr = packed.device_ptr();
-            slot.scales_slot_ptr = scales.device_ptr();
-            slot.zeros_slot_ptr = zeros.device_ptr();
+            let buffers = HqqRuntimeDeviceBuffers::new(&self.device,
+                [slot.prefill.packed_host.len(), slot.prefill.scales_host.len(), slot.prefill.zeros_host.len()],
+                [slot.decode.packed_host.len(), slot.decode.scales_host.len(), slot.decode.zeros_host.len()],
+                [slot_packed_bytes, slot_scales_bytes, slot_zeros_bytes])
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            slot.packed_slot_ptr = buffers.packed.device_ptr();
+            slot.scales_slot_ptr = buffers.scales.device_ptr();
+            slot.zeros_slot_ptr = buffers.zeros.device_ptr();
             slot.packed_slot_bytes = slot_packed_bytes;
             slot.scales_slot_bytes = slot_scales_bytes;
             slot.zeros_slot_bytes = slot_zeros_bytes;
             slot.registered_ms = t0.elapsed().as_secs_f64() * 1000.0;
             slot.current_stage = "registered_unloaded".to_string();
-            slot.device_buffers = Some(HqqRuntimeDeviceBuffers {
-                packed,
-                scales,
-                zeros,
-            });
+            slot.device_buffers = Some(buffers);
 
             registered += 1;
             total_ms += slot.registered_ms;
@@ -35273,6 +35363,26 @@ impl GpuDecodeStore {
             log::info!("APFL: {}", if enabled { "enabled" } else { "disabled" });
         }
         Ok(())
+    }
+
+    /// Torch sources can leave VRAM only when BOTH Rust phases use this
+    /// graph-owned immutable slab. This does not release the host engine source
+    /// or the separately registered sigmoid gate. Called before graph capture.
+    fn shared_expert_owned_layers(&self) -> Vec<usize> {
+        let Some(graph) = self.graph.as_ref() else { return Vec::new(); };
+        graph.layers.iter().enumerate().filter_map(|(i, layer)| {
+            if !matches!(layer.mlp, GpuMlpConfig::None) { return None; }
+            let moe = graph.moe_layers.get(i)?.as_ref()?;
+            let shared = moe.shared.as_ref()?;
+            let owned = graph.shared_expert_vram.get(i)?.as_ref()?;
+            (owned.d_buf.is_some()
+                && shared.bits == graph.shared_expert_bits
+                && owned.w13_packed_size == shared.w13_packed_bytes
+                && owned.w13_scales_size == shared.w13_scales_bytes
+                && owned.w2_packed_size == shared.w2_packed_bytes
+                && owned.w2_scales_size == shared.w2_scales_bytes)
+                .then_some(i)
+        }).collect()
     }
 
     /// Register MoE expert data pointers for one layer.
@@ -40014,6 +40124,39 @@ impl GpuDecodeStore {
     }
 
     fn finalize_dsa_indexer_resources(&mut self) -> PyResult<usize> {
+        if std::env::var("KRASIS_MLA_STAGE_SELECTED_KV").as_deref() == Ok("1") {
+            let graph = self.graph.as_ref().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+            if graph.dsa_indexer_resources_finalized {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("DSA resources already finalized"));
+            }
+            if !matches!(graph.kv_format, 7 | 9) {
+                return Err(pyo3::exceptions::PyValueError::new_err("selected packed KV staging requires K4/K6"));
+            }
+            let block_bytes = if graph.kv_format == 7 { 14 } else { 10 };
+            let mut max_bytes = 0usize;
+            let mut max_capacity = 0usize;
+            for layer in &graph.layers {
+                if let (Some(reg), GpuAttnConfig::MLA { ckv_cache_dim, qk_rope_dim, .. }) = (&layer.dsa_indexer, &layer.attn) {
+                    if ckv_cache_dim % 16 != 0 || qk_rope_dim % 16 != 0 {
+                        return Err(pyo3::exceptions::PyValueError::new_err("packed KV staging requires block-aligned widths"));
+                    }
+                    let cap = graph.dsa_indexer_owners.iter().filter(|x| x.owner_layer_idx == reg.owner_layer_idx).map(|x| x.topk_capacity)
+                        .chain(graph.dsa_indexshare_replicas.iter().filter(|x| x.owner_layer_idx == reg.owner_layer_idx).map(|x| x.topk_capacity)).max().unwrap_or(0);
+                    let bytes = (ckv_cache_dim + qk_rope_dim).checked_div(16).and_then(|x| x.checked_mul(block_bytes)).and_then(|x| x.checked_mul(cap))
+                        .ok_or_else(|| pyo3::exceptions::PyOverflowError::new_err("selected KV staging size overflow"))?;
+                    max_bytes = max_bytes.max(bytes); max_capacity = max_capacity.max(cap);
+                }
+            }
+            if max_capacity > 0 {
+                let buffers = (
+                    self.device.alloc_zeros::<u8>(max_bytes).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("KV staging: {e:?}")))?,
+                    self.device.alloc_zeros::<i32>(max_capacity).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("KV staging: {e:?}")))?,
+                    self.device.alloc_zeros::<i32>(1).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("KV staging: {e:?}")))?,
+                );
+                self.graph.as_mut().unwrap().mla_selected_stage = Some(buffers);
+                log::info!("MLA selected packed KV staging: bytes={} capacity={} (before calibration/graph capture)", max_bytes + 4 * max_capacity + 4, max_capacity);
+            }
+        }
         let replica_only_count = {
             let graph = self
                 .graph
@@ -50991,6 +51134,25 @@ impl GpuDecodeStore {
                 ))
             }
         };
+        let (attention_ckv, attention_kpe, attention_indices, attention_seq_len) =
+            if let Some((packed, indices, count)) = &graph.mla_selected_stage {
+                let block = if graph.kv_format == 7 { 14 } else { 10 };
+                let ckv_row = ckv_cache_dim / 16 * block;
+                let kpe_row = qk_rope_dim / 16 * block;
+                let ckv_bytes = selected.topk_capacity.checked_mul(ckv_row).ok_or("KV stage size overflow")?;
+                let total = selected.topk_capacity.checked_mul(ckv_row + kpe_row).ok_or("KV stage size overflow")?;
+                if total > packed.len() || selected.topk_capacity > indices.len() || ckv_row > i32::MAX as usize || kpe_row > i32::MAX as usize {
+                    return Err("selected KV stage exceeds graph-owned capacity".into());
+                }
+                let c = *packed.device_ptr();
+                let p = c + ckv_bytes as u64;
+                unsafe { kernels.mla_stage_selected_packed_g.clone().launch(
+                    LaunchConfig { grid_dim: (selected_capacity_i32 as u32, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 },
+                    (c, p, *indices.device_ptr(), *count.device_ptr(), ckv_cache_ptr, kpe_cache_ptr,
+                     selected.d_indices_ptr, d_seq_len_ptr, selected_capacity_i32, ckv_row as i32, kpe_row as i32)
+                ).map_err(|e| format!("stage selected packed KV: {e:?}"))?; }
+                (c, p, *indices.device_ptr(), *count.device_ptr())
+            } else { (ckv_cache_ptr, kpe_cache_ptr, selected.d_indices_ptr, d_seq_len_ptr) };
         unsafe {
             attention_kernel
                 .launch(
@@ -51009,15 +51171,15 @@ impl GpuDecodeStore {
                         *graph.d_mla_attn_out.device_ptr(),
                         *graph.d_mla_q_absorbed.device_ptr(),
                         *graph.d_gqa_v.device_ptr(),
-                        ckv_cache_ptr,
-                        kpe_cache_ptr,
-                        selected.d_indices_ptr,
+                        attention_ckv,
+                        attention_kpe,
+                        attention_indices,
                         sm_scale,
                         num_heads_i32,
                         ckv_cache_dim_i32,
                         qk_rope_dim_i32,
                         selected_capacity_i32,
-                        d_seq_len_ptr,
+                        attention_seq_len,
                     ),
                 )
                 .map_err(|error| {
@@ -51976,24 +52138,8 @@ impl GpuDecodeStore {
                         layer_idx, tensor_name,
                     )
                 })?;
-                buffers.packed.unmap_current().map_err(|e| {
-                    format!(
-                        "HQQ {} packed VMM pre-unmap layer={} tensor={}: {}",
-                        stage, layer_idx, tensor_name, e
-                    )
-                })?;
-                buffers.scales.unmap_current().map_err(|e| {
-                    format!(
-                        "HQQ {} scales VMM pre-unmap layer={} tensor={}: {}",
-                        stage, layer_idx, tensor_name, e
-                    )
-                })?;
-                buffers.zeros.unmap_current().map_err(|e| {
-                    format!(
-                        "HQQ {} zeros VMM pre-unmap layer={} tensor={}: {}",
-                        stage, layer_idx, tensor_name, e
-                    )
-                })?;
+                buffers.unmap_current().map_err(|e| format!(
+                    "HQQ {} pre-unmap layer={} tensor={}: {}", stage, layer_idx, tensor_name, e))?;
                 slot.current_stage = "registered_unloaded".to_string();
                 log::debug!(
                     "HQQ runtime VMM slot pre-unmapped: stage={} layer={} tensor={} old_active_mb={:.3}",
@@ -52066,44 +52212,21 @@ impl GpuDecodeStore {
                     )
                 };
                 let t_alloc = std::time::Instant::now();
-                let packed = HqqRuntimeVmmBuffer::new(
-                    &self.device,
-                    reserve_packed_bytes,
-                    target_packed_bytes,
-                ).map_err(|e| format!(
-                    "HQQ {} packed VMM slot alloc layer={} tensor={} active_bytes={} reserve_bytes={}: {}",
-                    stage, layer_idx, tensor_name, target_packed_bytes, reserve_packed_bytes, e
-                ))?;
-                let scales = HqqRuntimeVmmBuffer::new(
-                    &self.device,
-                    reserve_scales_bytes,
-                    target_scales_bytes,
-                ).map_err(|e| format!(
-                    "HQQ {} scales VMM slot alloc layer={} tensor={} active_bytes={} reserve_bytes={}: {}",
-                    stage, layer_idx, tensor_name, target_scales_bytes, reserve_scales_bytes, e
-                ))?;
-                let zeros = HqqRuntimeVmmBuffer::new(
-                    &self.device,
-                    reserve_zeros_bytes,
-                    target_zeros_bytes,
-                ).map_err(|e| format!(
-                    "HQQ {} zeros VMM slot alloc layer={} tensor={} active_bytes={} reserve_bytes={}: {}",
-                    stage, layer_idx, tensor_name, target_zeros_bytes, reserve_zeros_bytes, e
-                ))?;
+                let slot = &self.hqq_runtime_slots[slot_idx];
+                let buffers = HqqRuntimeDeviceBuffers::new(&self.device,
+                    [slot.prefill.packed_host.len(), slot.prefill.scales_host.len(), slot.prefill.zeros_host.len()],
+                    [slot.decode.packed_host.len(), slot.decode.scales_host.len(), slot.decode.zeros_host.len()],
+                    [target_packed_bytes, target_scales_bytes, target_zeros_bytes])?;
                 let slot = &mut self.hqq_runtime_slots[slot_idx];
-                slot.packed_slot_ptr = packed.device_ptr();
-                slot.scales_slot_ptr = scales.device_ptr();
-                slot.zeros_slot_ptr = zeros.device_ptr();
+                slot.packed_slot_ptr = buffers.packed.device_ptr();
+                slot.scales_slot_ptr = buffers.scales.device_ptr();
+                slot.zeros_slot_ptr = buffers.zeros.device_ptr();
                 slot.packed_slot_bytes = target_packed_bytes;
                 slot.scales_slot_bytes = target_scales_bytes;
                 slot.zeros_slot_bytes = target_zeros_bytes;
                 slot.registered_ms = t_alloc.elapsed().as_secs_f64() * 1000.0;
                 slot.current_stage = "registered_unloaded".to_string();
-                slot.device_buffers = Some(HqqRuntimeDeviceBuffers {
-                    packed,
-                    scales,
-                    zeros,
-                });
+                slot.device_buffers = Some(buffers);
                 log::info!(
                     "HQQ runtime VMM slot registered: stage={} layer={} tensor={} old_mb={:.3} active_mb={:.3} reserve_mb={:.3} alloc_ms={:.3}",
                     stage,
@@ -52131,24 +52254,8 @@ impl GpuDecodeStore {
                         layer_idx, tensor_name,
                     )
                 })?;
-                buffers.packed.remap(target_packed_bytes).map_err(|e| {
-                    format!(
-                        "HQQ {} packed VMM remap layer={} tensor={} bytes={}: {}",
-                        stage, layer_idx, tensor_name, target_packed_bytes, e
-                    )
-                })?;
-                buffers.scales.remap(target_scales_bytes).map_err(|e| {
-                    format!(
-                        "HQQ {} scales VMM remap layer={} tensor={} bytes={}: {}",
-                        stage, layer_idx, tensor_name, target_scales_bytes, e
-                    )
-                })?;
-                buffers.zeros.remap(target_zeros_bytes).map_err(|e| {
-                    format!(
-                        "HQQ {} zeros VMM remap layer={} tensor={} bytes={}: {}",
-                        stage, layer_idx, tensor_name, target_zeros_bytes, e
-                    )
-                })?;
+                buffers.remap([target_packed_bytes, target_scales_bytes, target_zeros_bytes])
+                    .map_err(|e| format!("HQQ {} remap layer={} tensor={}: {}", stage, layer_idx, tensor_name, e))?;
                 let old_packed_ptr = slot.packed_slot_ptr;
                 let old_scales_ptr = slot.scales_slot_ptr;
                 let old_zeros_ptr = slot.zeros_slot_ptr;
@@ -52967,6 +53074,14 @@ impl GpuDecodeStore {
         )?;
         let mut config = PrefillModelConfig {
             hidden_size: graph.hidden_size,
+            // DeepSeek gathered attention and the legacy HQQ8 correction path
+            // borrow MoE temporaries while Q/K/V may still be live.
+            phase_arena_supported: target_layers.iter().all(|l| l.deepseek_v4.is_none())
+                && self.hqq_runtime_slots.iter().all(|slot|
+                    slot.prefill.layout != "marlin_u8b128_zero_correction_axis1_grouped_uint8"),
+            transfer_bands_supported: target_moe_layers.iter().filter_map(|m| m.as_ref()).all(|m|
+                m.moe_input_size == 0 && m.latent_down_wid.is_none()
+                && m.latent_up_wid.is_none() && m.tileq.is_none()),
             intermediate_size: graph
                 .shared_expert_intermediate_size
                 .max(graph.moe_intermediate_size)
@@ -54753,6 +54868,7 @@ impl GpuDecodeStore {
         let has_moe = n_routed > 0;
         let has_fused_kernel = kernels.fused_moe_fn.is_some();
         let can_fused = has_moe && has_fused_kernel;
+        config.transfer_bands_supported &= can_fused;
 
         // Cold staging + pointer tables are the PRIMARY approach for fused MoE.
         // They allow zero-copy HCS expert access and H2D staging without contiguous buffers.
@@ -55011,6 +55127,11 @@ impl GpuDecodeStore {
             h_gather_src_map: Vec::new(),
             h_gather_weight_map: Vec::new(),
             hcs_cache_fast,
+            band_layer: None,
+            band_expert_ptrs: Vec::new(),
+            band_shared_input: None,
+            band_row_start: 0,
+            transfer_plan_rows: std::cell::Cell::new(0),
             hcs_num_experts_per_layer: hcs_ne,
             dma_event,
             dma_w1_event,
@@ -55671,6 +55792,7 @@ impl GpuDecodeStore {
                     .recur_state_ptr = latest;
             }
             self.sequence_state_registry = registry;
+            engine.config.transfer_bands_supported = false;
             engine.ordered_kda_projection = Some(projection.clone());
             self.ordered_kda_projection = Some(projection);
             engine.selected_kda = Some(selected.clone());
@@ -69279,10 +69401,13 @@ impl GpuDecodeStore {
         position: usize,
         do_final: bool,
     ) -> Result<(), String> {
+        crate::route_audit::forward(position,token_id,"graph_replay")?;
+
         let graph = self
             .graph
             .as_mut()
             .ok_or_else(|| "No graph configured".to_string())?;
+        prepare_graph_streamed_kv(graph,position.checked_add(1).ok_or("KV position overflow")?,*self.device.cu_stream(),*self.device.cu_primary_ctx())?;
         if let Some(experiment) = graph.matched_routes.as_mut() {
             experiment.arm(&graph.trace_request_label)?;
         }
@@ -70718,7 +70843,7 @@ impl GpuDecodeStore {
                                 }
                             }
                             if let Some(result) = finished {
-                                if graph.timing_enabled {
+                                if graph.timing_enabled || graph.cpu_tail_host_timing_enabled {
                                     let depth_bucket = result.depth_bucket;
                                     if depth_bucket >= graph.cpu_tail_stage_results_by_depth.len() {
                                         graph.cpu_tail_errors += 1;
@@ -70834,7 +70959,7 @@ impl GpuDecodeStore {
                                 };
                                 let input_bytes = graph.hidden_size * std::mem::size_of::<u16>();
                                 let input_ptr = graph.cpu_tail_workers[worker_index].input_ptr();
-                                let t_input = graph.timing_enabled.then(std::time::Instant::now);
+                                let t_input = (graph.timing_enabled || graph.cpu_tail_host_timing_enabled).then(std::time::Instant::now);
                                 let copy_err = unsafe {
                                     cuda_sys::lib().cuMemcpyDtoH_v2(
                                         input_ptr as *mut std::ffi::c_void,
@@ -70904,7 +71029,7 @@ impl GpuDecodeStore {
                                     claim_started,
                                 )?;
                                 let submitted_at =
-                                    graph.timing_enabled.then(std::time::Instant::now);
+                                    (graph.timing_enabled || graph.cpu_tail_host_timing_enabled).then(std::time::Instant::now);
                                 let base = graph_buf_base[candidate_index];
                                 let dma_bytes = if expert.contiguous_ptr != 0 {
                                     expert.contiguous_bytes as u64
@@ -71363,6 +71488,16 @@ impl GpuDecodeStore {
                             batch_count, topk, moe_layer_idx
                         ));
                     }
+                    if crate::route_audit::active() {
+                        let mut observed=Vec::with_capacity(cold_experts.len());
+                        for &(slot,eid,weight) in &cold_experts {
+                            let expert=&graph.moe_layers[moe_layer_idx].as_ref().ok_or("route audit missing MoE owner")?.experts[eid];
+                            observed.push(crate::route_audit::Cold{slot,expert:eid,weight,
+                                component_bytes:expert.w13_packed_bytes+expert.w13_scales_bytes+expert.w2_packed_bytes+expert.w2_scales_bytes,
+                                allocation_bytes:expert.contiguous_bytes});
+                        }
+                        crate::route_audit::record(position,moe_layer_idx,&graph.h_topk_ids[..topk],&graph.h_topk_weights[..topk],hot_batch_count,observed)?;
+                    }
                     if graph.debug_decode_hcs_equiv_trace_active
                         && graph.debug_decode_hcs_equiv_layer == Some(moe_layer_idx)
                         && graph.validation_decode_steps < graph.debug_decode_early_max_steps
@@ -71594,7 +71729,7 @@ impl GpuDecodeStore {
                 let mut actual_dma_experts = cpu_tail_pending[0].front_dma_experts;
                 for pending in std::mem::take(&mut cpu_tail_pending) {
                     let worker_index = pending.worker_index;
-                    let race_started = graph.timing_enabled.then(std::time::Instant::now);
+                    let race_started = (graph.timing_enabled || graph.cpu_tail_host_timing_enabled).then(std::time::Instant::now);
                     let mut cpu_result = None;
                     let cpu_won = loop {
                         if let Some(result) = graph.cpu_tail_workers[worker_index].try_result()? {
@@ -71649,7 +71784,7 @@ impl GpuDecodeStore {
 
                     if cpu_won {
                         let result = cpu_result.unwrap();
-                        if graph.timing_enabled {
+                        if graph.timing_enabled || graph.cpu_tail_host_timing_enabled {
                             let depth_bucket = result.depth_bucket;
                             if depth_bucket >= graph.cpu_tail_stage_results_by_depth.len() {
                                 graph.cpu_tail_errors += 1;
@@ -73846,6 +73981,8 @@ impl GpuDecodeStore {
         token_id: usize,
         position: usize,
     ) -> Result<(), String> {
+        crate::route_audit::forward(position,token_id,"eager")?;
+        prepare_graph_streamed_kv(graph,position.checked_add(1).ok_or("KV position overflow")?,*self.device.cu_stream(),*self.device.cu_primary_ctx())?;
         use cudarc::driver::LaunchConfig;
         use std::time::Instant;
 
@@ -82804,6 +82941,7 @@ impl GpuDecodeStore {
         tokens: &[usize],
         positions: &[usize],
     ) -> Result<usize, String> {
+        crate::streamed_kv::require_scalar_for(*self.device.cu_primary_ctx(),|base,bytes|graph_owns_streamed_kv(graph,base,bytes))?;
         use cudarc::driver::LaunchConfig;
 
         let mut batch_size = tokens.len();
@@ -87052,6 +87190,15 @@ impl GpuDecodeStore {
         self.last_soft_reload_queued = 0;
         self.last_soft_reload_alloc_mb = 0.0;
         self.last_soft_reload_activated = 0;
+        if self.prefill_transfer_planning && external_engine_entry_floor_bytes > 0 {
+            self.prefill_transfer_entry_floor = Some((estimated_tokens, external_engine_entry_floor_bytes));
+        }
+        let transfer_entry_floor = if self.prefill_transfer_planning {
+            self.prefill_engine_slot.as_ref()
+                .map(|engine| engine.minimum_prefill_entry_free_bytes(estimated_tokens))
+                .or_else(|| self.prefill_transfer_entry_floor
+                    .filter(|(tokens, _)| *tokens == estimated_tokens).map(|(_, bytes)| bytes))
+        } else { None };
         let calibrated_base_needed_bytes = self
             .vram_calibration
             .as_ref()
@@ -87248,7 +87395,12 @@ impl GpuDecodeStore {
         let calibrated_needed_bytes = base_needed_bytes
             .saturating_add(hqq_prefill_growth_bytes)
             .saturating_add(prefill_entry_guard_bytes);
-        let needed_bytes = calibrated_needed_bytes.max(engine_entry_floor_bytes);
+        // The joint plan already includes bounded scratch, workspace, full
+        // cold-layer staging, allocator overhead and the safety floor. Old
+        // no-HCS/full-prompt calibration must not evict its protected main pool.
+        let needed_bytes = transfer_entry_floor
+            .map(|floor| floor.saturating_add(hqq_prefill_growth_bytes))
+            .unwrap_or_else(|| calibrated_needed_bytes.max(engine_entry_floor_bytes));
         if env_truthy("KRASIS_VRAM_LEDGER") {
             vram_ledger_log!(
                 "VRAM LEDGER hcs_evict_prefill prompt_tokens={} eviction_tokens={} free_mb={:.0} base_needed_mb={:.0} hqq_prefill_growth_mb={:.0} entry_guard_mb={:.0} engine_entry_floor_mb={:.0} needed_mb={:.0} soft_cached={} soft_slots={} soft_slot_mb={:.3} soft_chunks_loaded={} soft_total_chunks={} hard_budget_mb={} soft_max_mb={} safety_mb={}",
@@ -87637,6 +87789,24 @@ impl GpuDecodeStore {
     /// the only remaining requirement is the measured runtime transient plus the
     /// safety margin. Reusing the pre-scratch floor here over-evicts HCS and
     /// forces prefill to fetch every active expert from host memory.
+    /// The planner tracks already-owned cold staging. Its live floor must not
+    /// charge that same slab a second time at the next logical chunk.
+    pub fn hcs_evict_for_prefill_live_floor(&mut self, prompt_tokens: usize, required: usize) -> (usize, f64) {
+        if self.device.bind_to_thread().is_err() {
+            return self.hcs_evict_for_prefill_post_scratch(prompt_tokens);
+        }
+        let safety_mb = self.graph.as_ref().and_then(|g|g.hcs.as_ref())
+            .map(|h|h.safety_margin_mb).unwrap_or(crate::gpu_prefill::PREFILL_SAFETY_MARGIN_MB)
+            .max(crate::gpu_prefill::PREFILL_SAFETY_MARGIN_MB);
+        let required = required.max(safety_mb.saturating_mul(1024*1024));
+        let Ok((free, _)) = cudarc::driver::result::mem_get_info() else {
+            return self.hcs_evict_for_prefill_post_scratch(prompt_tokens);
+        };
+        let deficit = required.saturating_sub(free);
+        if deficit == 0 { return (0,0.0); }
+        self.hcs_evict_additional_for_prefill(deficit, prompt_tokens)
+    }
+
     pub fn hcs_evict_for_prefill_post_scratch(&mut self, prompt_tokens: usize) -> (usize, f64) {
         let Some(cal) = self.vram_calibration.as_ref() else {
             return self.hcs_evict_for_prefill(prompt_tokens);
@@ -87898,7 +88068,7 @@ impl GpuDecodeStore {
                 cal.required_idle_free_mb(actual_tokens) as usize,
             )
         });
-        let preserve_dspark_resident_order = self
+        let preserve_dspark_resident_order = self.prefill_transfer_planning || self
             .dspark
             .as_ref()
             .is_some_and(|runtime| runtime.mode == DsparkResidencyMode::Resident);
@@ -88384,7 +88554,7 @@ impl GpuDecodeStore {
                 cal.required_idle_free_mb(actual_tokens) as usize,
             )
         });
-        let preserve_dspark_resident_order = self
+        let preserve_dspark_resident_order = self.prefill_transfer_planning || self
             .dspark
             .as_ref()
             .is_some_and(|runtime| runtime.mode == DsparkResidencyMode::Resident);
@@ -89496,6 +89666,14 @@ impl GpuDecodeStore {
                 }));
                 return 0;
             }
+        }
+        let mut route_audit=match crate::route_audit::Scope::begin(
+            teacher_forcing.as_ref().filter(|t|t.audit_routes()).map(|t|t.diagnostic_label()),
+            teacher_forcing.as_ref().is_some_and(|t|t.deferred_proofs())) {
+            Ok(scope)=>scope,Err(error)=>{self.last_stream_failure=Some(error);return 0;}
+        };
+        if crate::route_audit::active() && self.graph.as_ref().is_some_and(|g|g.gpu_route_sync) {
+            self.last_stream_failure=Some("deferred route audit requires host-visible routing; no route-sync mode is changed implicitly".into());return 0;
         }
         // END explicit teacher-forced decode start
         let mut projection_scope = match crate::matched_projection_transfer::Scope::enter(
@@ -91580,7 +91758,7 @@ impl GpuDecodeStore {
                     break;
                 }
                 // BEGIN explicit teacher-forced raw decision capture
-                if let Some(teacher) = teacher_forcing.as_ref() {
+                if let Some(teacher) = teacher_forcing.as_mut() {
                     if let Err(error) =
                         teacher.raw_step(step, next_token, &self.graph.as_ref().unwrap().h_logits)
                     {
@@ -91805,6 +91983,23 @@ impl GpuDecodeStore {
         }
 
         let elapsed = decode_start.elapsed().as_secs_f64();
+        // Final diagnostic receipts are outside the measured decode interval.
+        if let Some(teacher)=teacher_forcing.as_mut() {
+            teacher.record_decode_elapsed(elapsed);
+            if teacher.deferred_proofs() {
+                use std::io::Write;
+                let result=(|| -> Result<(),String>{
+                    let data=serde_json::to_vec(&memory_audit::snapshot(self)).map_err(|e|e.to_string())?;
+                    let mut f=std::fs::OpenOptions::new().write(true).create_new(true).open(teacher.evidence_directory().join("native-memory.json")).map_err(|e|e.to_string())?;
+                    f.write_all(&data).map_err(|e|e.to_string())
+                })();
+                if let Err(error)=result{self.last_stream_failure=Some(error);}
+            }
+            if let Err(error)=route_audit.finish(teacher.evidence_directory()) {self.last_stream_failure=Some(error);}
+
+            if let Err(error)=teacher.flush_deferred() { self.last_stream_failure=Some(error); }
+        }
+
         if let Some(graph) = self.graph.as_mut() {
             check_peer_mode_prediction(graph, generated, elapsed);
         }

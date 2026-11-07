@@ -471,11 +471,19 @@ def _krasis_runtime_code_hash() -> dict[str, Any]:
         "python/krasis/server.py",
         "python/krasis/benchmark.py",
         "python/krasis/model.py",
+        "python/krasis/weight_loader.py",
+        "python/krasis/kv_cache.py",
         "python/krasis/config.py",
         "python/krasis/tokenizer.py",
         "src/server.rs",
         "src/gpu_decode.rs",
         "src/gpu_prefill.rs",
+        "src/prefill_transfer.rs",
+        "src/streamed_kv.rs",
+        "src/streamed_kv/vmm.rs",
+        "src/streamed_kv/dlpack.rs",
+        "src/matched_teacher.rs",
+        "src/route_audit.rs",
         "src/weights/mod.rs",
         "src/weights/mixed_precision.rs",
         "src/cuda/decode_kernels.cu",
@@ -659,6 +667,56 @@ def _runtime_heatmap_capture_config(args) -> dict[str, Any]:
 def _actual_runtime_heatmap_capture_config(model: KrasisModel, args) -> dict[str, Any]:
     """Bind the configured domain's actual kernel arithmetic, once at startup."""
     runtime = _runtime_heatmap_capture_config(args)
+    # Experimental GLM controls change routes without changing checkpoint or
+    # binary bytes. Never silently reuse a heatmap across these treatments.
+    if bool(getattr(getattr(model, "cfg", None), "is_glm5_next", False)):
+        names = (
+            "KRASIS_GLM53_PRESERVE_NUMERIC_F32",
+            "KRASIS_DEEPSEEK_V4_PREFILL_HC_PROJECT_MODE",
+            "KRASIS_DSA_PREFILL_WORKSPACE_ROWS",
+            "KRASIS_GLM53_KDA_SPLIT_CANDIDATE",
+            "KRASIS_GLM53_KDA_SPLIT_PREPARATION",
+            "KRASIS_DIAG_KDA_SKIP_CHUNK_SCRATCH",
+            "KRASIS_PREFILL_TRANSFER_PLAN",
+            "KRASIS_RECLAIM_SHARED_SOURCES",
+            "KRASIS_HQQ_PACK_COMPONENTS",
+            "KRASIS_PREFILL_PHASE_ARENA",
+            "KRASIS_PREFILL_COMPACT_KDA_SCRATCH",
+            "KRASIS_PREFILL_SHARED_OVERLAP_DMA",
+            "KRASIS_DSA_MLA_SM86_DISPATCH",
+            "KRASIS_DSA_MLA_GEMM_TILE_ROWS",
+            "KRASIS_GLM53_FUSED_MLA_CANDIDATE",
+            "KRASIS_GLM53_FUSED_MLA_REUSE_CANDIDATE",
+            "KRASIS_MLA_HOST_BACKED_WINDOW_TOKENS",
+            "KRASIS_MLA_STAGE_SELECTED_KV",
+            "KRASIS_CPU_TAIL_HOST_TIMING",
+            "KRASIS_MLA_HOST_BACKED_BACKEND",
+            "KRASIS_CPU_TAIL_RACE",
+            "KRASIS_CPU_TAIL_TRANSPOSED",
+            "KRASIS_CPU_TAIL_WORKERS",
+            "KRASIS_CPU_TAIL_CALIBRATION_JSON",
+            "KRASIS_SPLIT_EXPERT_LAUNCH",
+            "KRASIS_GPU_ROUTE_SYNC",
+            "KRASIS_PREFETCH",
+        )
+        # Policy version distinguishes automatic scheduling from old default-off
+        # captures, including when neither environment override is supplied.
+        runtime["prefill_transfer_policy"] = {
+            "version": 4,
+            "shared_source_reclaim": os.environ.get("KRASIS_RECLAIM_SHARED_SOURCES", "1"),
+            "phase_arena": os.environ.get("KRASIS_PREFILL_PHASE_ARENA", "1"),
+            "hqq_packed_components": os.environ.get("KRASIS_HQQ_PACK_COMPONENTS", "1"),
+            "joint_planner": os.environ.get("KRASIS_PREFILL_TRANSFER_PLAN", "1"),
+            "compact_pure_kda": os.environ.get("KRASIS_PREFILL_COMPACT_KDA_SCRATCH", "1"),
+            "shared_overlap_eligible": os.environ.get("KRASIS_PREFILL_SHARED_OVERLAP_DMA", "1"),
+        }
+        controls = {name: os.environ.get(name) for name in names}
+        calibration = controls.get("KRASIS_CPU_TAIL_CALIBRATION_JSON")
+        if calibration:
+            with open(calibration, "rb") as artifact:
+                controls["cpu_tail_calibration_sha256"] = hashlib.sha256(artifact.read()).hexdigest()
+        if any(value is not None for value in controls.values()):
+            runtime["experimental_glm53_controls"] = controls
     store = getattr(model, "_gpu_decode_store", None)
     if store is None:
         raise RuntimeError("Heatmap arithmetic identity requires the configured GPU decode store")
@@ -706,6 +764,8 @@ def _runtime_matches_approved_heatmap_policy(
     if not isinstance(ignored, list) or not all(isinstance(item, str) for item in ignored):
         return False, "invalid ignored_runtime_fields policy"
     ignored_fields = set(ignored)
+    if {"experimental_glm53_controls", "prefill_transfer_policy"} & ignored_fields:
+        return False, "GLM arithmetic controls and prefill transfer policy cannot be ignored"
 
     comparable_current = {
         key: value for key, value in current.items() if key not in ignored_fields
@@ -3915,6 +3975,7 @@ def main():
         _model.log_vram_ledger_residency("after-decode-store-setup-before-release")
     release_gpu_sources = not (args.stress_test or args.perplexity)
     if release_gpu_sources:
+        _model.release_owned_shared_expert_sources(gpu_store)
         released_mb = _model.release_redundant_gpu_execution_tensors(
             release_lm_head_source=True,
             allow_multi_gpu_lm_head=True,

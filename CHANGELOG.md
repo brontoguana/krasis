@@ -1,5 +1,39 @@
 # Changelog
 
+- 2026-11-07: Add eligible GLM phase reuse for Q/K/V/attention-output and MoE work buffers with four Arc-owned allocations, fixed logical chunks and exact budget rebates. Selected KDA prefix owners and unsupported paths retain independent buffers. `KRASIS_PREFILL_PHASE_ARENA=0` opts out; heatmaps bind policy version 4. Targeted235458 validation: complete3K/65K state/logits and48saved operator arrays match control bitwise; live reset/cancel/session tests pass. Protected experts60→435; expert staging314.98→305.06GiB, complete-request H2D448.96→429.14GiB. Ordinary prefill stays~113s. Relative storage evidence does not clear inherited absolute qualification failures.
+
+- 2026-11-06: Pack eligible HQQ runtime components into one fixed-offset VMM arena only when both stages save physical bytes, with independent mapping fallback and explicit opt-out. Preserve pointers and layouts across phase swaps; reject extent-changing restaging. Account for arena physical mappings once. Bind storage policies into heatmap identity; keep reclaimed capacity in the protected expert budget. Matched startup headroom improves1062MiB beyond source reclamation; eligible packed arm retains210experts. Pointer/lifecycle and full-state comparisons pass in235458.
+
+- 2026-11-06: Reclaim GLM shared-expert Torch sources only after native ownership certification for prefill and decode; retain gate pointers and graph-owned packed slabs. Matched net pre-expert headroom improves772MiB; source-only protected residents60→120. Preserve separate gate/Torch-graph consumers and older-native fallback. `KRASIS_RECLAIM_SHARED_SOURCES=0` opts out.
+
+- 2026-11-06: Complete transfer235113 placement matrix: 48 ordinary requests across same-native 32K/69K GPU KV placement and pinned reference, with all 16 paired native input lists exact. At 65K, the larger window improves prefill 8.4–10.0% and reaches 48.1–48.3% of reference throughput. The earlier joint planner reduces matched expert staging 27.6%; mapped receive traffic falls about 34% with the window change while traced H2D stays about 354 GiB. Full placement states/logits at 3K/65K and fresh post-matrix reset match bitwise. Keep eligible scratch/overlap/planner defaults on with opt-outs; retain unresolved changed-chunk and inherited model-quality failures separately. Baseline native preserved; no arithmetic candidate blanket-enabled.
+
+- 2026-11-05: Transfer235113 follow-up: bind the planner CUDA context on the model worker, clear stale capacity, bound dedicated shared-expert scratch with routed bands, and subtract already-owned cold staging from the live chunk guard. Keep the configured safety floor and existing synchronized eviction/generation handling. Added a regression check for double budgeting; GPU qualification continues.
+
+- 2026-11-05: Transfer235113: enable compact scratch automatically for pure KDA and shared-expert/DMA overlap on the existing eligible dedicated-scratch path. Explicit `=0` opt-outs retain prior scheduling; unsupported and aliasing paths keep their fallbacks. Version the GLM heatmap transfer policy. Add eligible joint residency/chunk planning, bounded 8K routed-MoE activation bands with fixed expert slots, bounded gathered workspace, refreshed live HCS snapshots and retained-ownership restoration. CPU planner/slot and heatmap identity checks pass; GPU measurements in progress; inherited absolute qualification failures remain recorded.
+
+- 2026-11-05: Complete bounded prefill transfer234972 experiments: compact pure-KDA scratch plus independent shared-expert/DMA overlap controls remain default-off. At65K, clean-profile model expert payload576.4→434.1GiB (−24.68%); complete-prefill H2D616.1→473.7GiB (−23.12%). Observed ordinary TTFT improves~2.7–3.0%, but parity is not reached. Complete3Kstate/first-logits are bit-exact; changed-chunk long-state differences and inherited witness/quality failures remain unqualified. Preserve600MiB floor, original binaries, raw failures and owned-process cleanup.
+
+- 2026-11-05: Add default-off `KRASIS_PREFILL_COMPACT_KDA_SCRATCH` to omit unused generic linear-attention intermediates for pure KDA models, preserving beta, recurrent state, DSA workspace and reserve checks. Bind the control into experimental heatmap identity. Prefill transfer qualification pending; mixed gated-delta models retain prior allocation.
+
+- 2026-11-04: Repair234370: add opt-in pedantic FP32 HC projection and source-FP32 GLM numeric loading, complete HC captures, and CPU-tested heatmap guards for experimental controls/parameter-loader source identity. Resolve the full HC replay alignment mismatch; retain failed absolute witnesses and coding repetition/truncation. One isolated native build; all48 ordinary measurements complete: combined1.03–1.55× baseline prefill,50–53% of reference EXL3 at16K–65K. Model qualification remains failed; controls stay default-off. Preserve verified GPU cleanup recovery and all original infrastructure failures.
+
+- 2026-11-04: Complete focused prefill repair evidence: exact split-KDA PTX passes full FP64 output/state checks on saved witness chunks and continuous32K serving trace. Isolate upstream HC TF32 tiny-tail operand change; keep experimental controls default-off because whole-model witness still fails. Optional operand/outgoing-state captures added; production extension unchanged.
+
+- 2026-11-04: Add opt-in same-stream KDA tail operand and outgoing-state captures to isolate chunk-tail projection/convolution differences; no inference arithmetic change. Split recurrence and workspace remain experimental.
+
+- 2026-11-04: Add a default-off diagnostic KDA scratch-planning ablation; allocation and both estimates omit chunk buffers only when the split candidate and diagnostic control are enabled. Unqualified; prefix-owned recurrence remains rejected.
+
+- 2026-11-04: Complete isolated r8 baseline and individual workspace, SM86 dispatch, fused MLA and split KDA witness/output diagnostics. The baseline and all four candidates failed the retained numerical review; keep the candidates default-off. Workspace improved individual 32K/64K diagnostic prefill but changed outputs, and dispatch/KDA/fused showed additional reference divergences. No qualified combined benchmark or production binary change.
+
+- 2026-11-04: Add a default-off SM86 GLM-5.3 gathered-attention dispatch experiment for the measured pedantic geometry, limited to workspace tiles of two through four rows; larger tiles and other devices, shapes and arithmetic fall back unchanged. Requires full runtime and quality qualification.
+
+- 2026-11-03: Add a default-off experimental split KDA recurrence with a complete-output/state oracle fixture; unqualified.
+
+- 2026-11-03: Add default-off experimental DSA workspace-row budgeting and gathered-GEMM tile-row controls for GLM prefill investigation. These controls are unqualified and require numerical, safety and performance testing before use.
+
+- 2026-11-05 Optimisation234544: add opt-in source-typed KDA preparation modes with full continuous-state evidence, separate deferred native-serving replay/route journal, and fixed-budget full-context VMM KV. All remain disabled pending model qualification and performance measurements; legacy numerical admission preserved.
+
 ## 1.0.21 — 2026-10-22
 
 - Promote the rc.19 runtime and TUI fixes to the stable release, with Linux wheels and the exact-commit tested Windows private-runtime installer.

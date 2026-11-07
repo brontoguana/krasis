@@ -14,6 +14,7 @@ GQA (Qwen3): standard K/V caches with head dimension (NHD layout).
 
 import logging
 import math
+import os
 from typing import List, Optional, Tuple
 
 import torch
@@ -56,6 +57,9 @@ class PagedKVCache:
         layer_indices: Optional[List[int]] = None,
         enable_ring_window: bool = False,
     ):
+        requested_window = int(os.environ.get("KRASIS_MLA_HOST_BACKED_WINDOW_TOKENS", "0"))
+        if requested_window and (not bool(cfg.is_mla) or combined or not bool(getattr(cfg, "is_glm5_next", False))):
+            raise ValueError("host-backed KV candidate currently requires GLM5-next native split MLA")
         self.cfg = cfg
         self.num_layers = num_layers
         self.layer_indices = list(layer_indices) if layer_indices is not None else list(range(num_layers))
@@ -649,14 +653,36 @@ class PagedKVCache:
         else:
             # Native MLA split format. The row width was derived from the
             # selected compact cache format during configuration validation.
-            self.ckv_cache = torch.zeros(
-                num_layers, max_pages, page_size, self.ckv_row_bytes,
-                dtype=torch.uint8, device=device,
-            )
-            self.kpe_cache = torch.zeros(
-                num_layers, max_pages, page_size, self.kpe_row_bytes,
-                dtype=torch.uint8, device=device,
-            )
+            stream_window = int(os.environ.get("KRASIS_MLA_HOST_BACKED_WINDOW_TOKENS", "0"))
+            if stream_window:
+                if stream_window < 0 or self.kv_format_str not in ("k6v6", "k4v4"):
+                    raise ValueError("host-backed MLA currently supports positive windows with k6v6/k4v4 only")
+                from krasis.krasis import StreamedKvBacking
+                ordinal = device.index if device.index is not None else torch.cuda.current_device()
+                self._streamed_kv_owners = []
+                planes = []
+                for width in (self.ckv_row_bytes, self.kpe_row_bytes):
+                    if width == 0:
+                        planes.append(torch.zeros(num_layers, max_pages, page_size, 0,
+                                                  dtype=torch.uint8, device=device))
+                        continue
+                    owner = StreamedKvBacking([num_layers, max_pages, page_size, width], ordinal, stream_window,
+                                              os.environ.get("KRASIS_MLA_HOST_BACKED_BACKEND", "vmm"))
+                    tensor = torch.utils.dlpack.from_dlpack(owner)
+                    if tensor.data_ptr() != owner.pointer:
+                        raise RuntimeError("host-backed KV import copied the allocation")
+                    self._streamed_kv_owners.append(owner)
+                    planes.append(tensor)
+                self.ckv_cache, self.kpe_cache = planes
+            else:
+                self.ckv_cache = torch.zeros(
+                    num_layers, max_pages, page_size, self.ckv_row_bytes,
+                    dtype=torch.uint8, device=device,
+                )
+                self.kpe_cache = torch.zeros(
+                    num_layers, max_pages, page_size, self.kpe_row_bytes,
+                    dtype=torch.uint8, device=device,
+                )
             alloc_mb = (self.ckv_cache.nbytes + self.kpe_cache.nbytes) / (1024**2)
             layout_str = f"mla-{self.kv_format_str}-split"
 

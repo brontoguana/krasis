@@ -26,6 +26,12 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+/// The calibrated persistent team executes the transposed CPU kernel. The
+/// direct Marlin path uses Rayon and cannot claim that team's affinity/costs.
+pub(crate) fn validate_calibration_mode(race:bool,transposed:bool,calibration:bool)->Result<(),String>{
+    if calibration && (!race || !transposed){return Err("KRASIS_CPU_TAIL_CALIBRATION_JSON requires KRASIS_CPU_TAIL_RACE=1 and KRASIS_CPU_TAIL_TRANSPOSED=1; calibrated persistent affinity is not used by direct Marlin/Rayon execution".into());}
+    Ok(())
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuTailWeightFormat {
     Marlin,
@@ -1582,6 +1588,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn calibration_cannot_claim_an_unused_persistent_execution_team(){
+        assert!(validate_calibration_mode(true,true,true).is_ok());
+        assert!(validate_calibration_mode(true,false,true).is_err());
+        assert!(validate_calibration_mode(false,true,true).is_err());
+        assert!(validate_calibration_mode(false,false,false).is_ok());
+        assert!(validate_calibration_mode(true,false,false).is_ok());
+    }
     #[test]
     fn two_persistent_cpu_tail_teams_cancel_independently_and_together() {
         let allowed = process_allowed_cpus();

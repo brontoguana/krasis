@@ -402,6 +402,12 @@ class WeightLoader:
         mHC projections. It is distinct from `_load_f32`, which verifies that
         the source tensor itself is stored as FP32.
         """
+        # Keep this repair selectable while the GLM model is being qualified.
+        # FP8 still uses the established dequantization and BF16 rounding path.
+        if os.environ.get("KRASIS_GLM53_PRESERVE_NUMERIC_F32") == "1":
+            w = self._read_tensor(name)
+            if w.dtype == torch.float32:
+                return w.to(device)
         return self._read_and_dequant(name).float().to(device)
 
     def _load_i64(self, name: str, device: torch.device) -> torch.Tensor:

@@ -4185,6 +4185,29 @@ extern "C" __global__ void mla_sparse_attention_k6(
         sm_scale, num_heads, kv_lora_rank, qk_rope_dim, selected_count, seq_len);
 }
 
+// Copy selected packed rows once before sparse decode attention. Each destination
+// retains the original bytes and selection order; invalid/sentinel entries stay
+// masked. Graph-owned destinations outlive every replay. No arithmetic changes.
+extern "C" __global__ void mla_stage_selected_packed_g(
+    unsigned char* out_ckv, unsigned char* out_kpe, int* out_indices,
+    int* out_count, const unsigned char* ckv, const unsigned char* kpe,
+    const int* indices, const int* seq_len, int capacity,
+    int ckv_row_bytes, int kpe_row_bytes
+) {
+    const int count = min(max(*seq_len, 0), capacity);
+    const int slot = blockIdx.x;
+    if (slot == 0 && threadIdx.x == 0) *out_count = count;
+    if (slot >= count) return;
+    const int pos = indices[slot];
+    const bool valid = pos >= 0 && pos < *seq_len;
+    if (threadIdx.x == 0) out_indices[slot] = valid ? slot : -1;
+    if (!valid) return;
+    for (int b = threadIdx.x; b < ckv_row_bytes; b += blockDim.x)
+        out_ckv[(long long)slot * ckv_row_bytes + b] = ckv[(long long)pos * ckv_row_bytes + b];
+    for (int b = threadIdx.x; b < kpe_row_bytes; b += blockDim.x)
+        out_kpe[(long long)slot * kpe_row_bytes + b] = kpe[(long long)pos * kpe_row_bytes + b];
+}
+
 extern "C" __global__ void mla_sparse_attention_k6_g(
     float* __restrict__ output,
     const float* __restrict__ q_absorbed,
@@ -15203,3 +15226,6 @@ extern "C" __global__ void record_globaltimer_u64_g(
     }
 }
 #include "expert_codec_kernels.cu"
+
+#include "kda_relay.cuh"
+

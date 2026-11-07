@@ -1556,13 +1556,21 @@ fn prepare_store_for_rust_prefill(
 fn prefill_entry_floor_bytes_for_server(
     rust_prefill: &Arc<std::sync::Mutex<Option<crate::gpu_prefill::PrefillEngine>>>,
     prompt_tokens: usize,
+    gpu_store_addr: usize,
 ) -> Result<usize, String> {
-    let guard = rust_prefill
+    let mut guard = rust_prefill
         .lock()
         .map_err(|e| format!("Prefill engine lock poisoned: {}", e))?;
     Ok(guard
-        .as_ref()
-        .map(|engine| engine.minimum_prefill_entry_free_bytes(prompt_tokens))
+        .as_mut()
+        .map(|engine| {
+            // The old engine snapshot predates post-prefill restoration and
+            // dynamic decode promotions. Plan against current owned slots.
+            let store = unsafe { &*(gpu_store_addr as *const GpuDecodeStore) };
+            let (cache_fast, stride) = store.export_hcs_snapshot();
+            engine.update_hcs_snapshot(cache_fast, stride);
+            engine.minimum_prefill_entry_free_bytes(prompt_tokens)
+        })
         .unwrap_or(0))
 }
 
@@ -3818,7 +3826,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     crate::vram_monitor::report_event("evict_start");
     let t_evict = Instant::now();
     let prefill_entry_floor_bytes =
-        match prefill_entry_floor_bytes_for_server(&state.rust_prefill, estimated_tokens) {
+        match prefill_entry_floor_bytes_for_server(&state.rust_prefill, estimated_tokens, state.gpu_store_addr) {
             Ok(bytes) => bytes,
             Err(e) => {
                 log::error!(
@@ -6193,7 +6201,7 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
     // conservative VRAM budget as the production and reference-test paths.
     crate::vram_monitor::report_event("prefill_logits_evict_start");
     let prefill_entry_floor_bytes =
-        match prefill_entry_floor_bytes_for_server(&state.rust_prefill, token_ids.len()) {
+        match prefill_entry_floor_bytes_for_server(&state.rust_prefill, token_ids.len(), state.gpu_store_addr) {
             Ok(bytes) => bytes,
             Err(e) => {
                 log::error!(
@@ -7269,7 +7277,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
 
     // ── Evict soft HCS before prefill ──
     let prefill_entry_floor_bytes =
-        match prefill_entry_floor_bytes_for_server(&state.rust_prefill, input_token_ids.len()) {
+        match prefill_entry_floor_bytes_for_server(&state.rust_prefill, input_token_ids.len(), state.gpu_store_addr) {
             Ok(bytes) => bytes,
             Err(e) => {
                 log::error!(
@@ -9652,7 +9660,7 @@ impl RustServer {
 
         // Evict soft HCS before prefill (both stores in multi-GPU)
         let prefill_entry_floor_bytes =
-            prefill_entry_floor_bytes_for_server(&self.prefill_engine, estimated_tokens).map_err(
+            prefill_entry_floor_bytes_for_server(&self.prefill_engine, estimated_tokens, self.gpu_store_addr).map_err(
                 |e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
                         "Prefill engine floor unavailable before HCS eviction: {}",
