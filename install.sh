@@ -400,6 +400,14 @@ fi
 "$VENV_DIR/bin/pip" "${PIP_INSTALL_ARGS[@]}" "$TMPDIR/$FILENAME" \
     || err "pip install failed. Check the output above for details."
 
+# Existing GPU environments gain newly required image preprocessing on update.
+# Fresh installations still select their CUDA Torch build through krasis-setup.
+if "$VENV_DIR/bin/python" -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then
+    info "Checking CUDA image preprocessing..."
+    "$VENV_DIR/bin/python" -c 'from krasis.setup import _install_gpu_packages; raise SystemExit(0 if _install_gpu_packages() else 1)' \
+        || err "Image preprocessing setup failed. Run krasis-setup to retry."
+fi
+
 # ── Symlink commands ─────────────────────────────────────────────────
 mkdir -p "$BIN_DIR"
 for cmd in $COMMANDS; do
