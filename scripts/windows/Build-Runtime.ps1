@@ -95,6 +95,12 @@ try {
         throw "Private-runtime package installation failed with status $LASTEXITCODE."
     }
 
+    $VisionWheel = @(Get-ChildItem $WheelhousePath -Filter "torchvision-0.24.1+cu128-cp312-cp312-win_amd64.whl")
+    if ($VisionWheel.Count -ne 1) { throw "Expected one pinned torchvision wheel." }
+    & $BuildPythonPath -m pip install --target $PrivateSitePackages `
+        --no-index --no-deps --no-compile --disable-pip-version-check $VisionWheel[0].FullName
+    if ($LASTEXITCODE -ne 0) { throw "Private torchvision installation failed." }
+
     # Console-script wrappers contain build-machine paths and are never used.
     # Krasis and pip are always invoked as modules by the absolute interpreter.
     Remove-Item -Recurse -Force (Join-Path $OutputPath "Scripts") -ErrorAction SilentlyContinue

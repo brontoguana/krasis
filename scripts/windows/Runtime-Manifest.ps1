@@ -204,6 +204,10 @@ if os.environ.get("KRASIS_RUNTIME_PROBE_TORCH") == "1":
     torch = importlib.import_module("torch")
     data["torch_version"] = torch.__version__
     data["torch_cuda"] = torch.version.cuda
+    torchvision = importlib.import_module("torchvision")
+    assert torchvision.extension._has_ops(), "torchvision extension unavailable"
+    assert torch.ops.torchvision._cuda_version() == 12080, "torchvision CUDA ABI mismatch"
+    data["torchvision_version"] = torchvision.__version__
 print("KRASIS_RUNTIME_PROBE=" + json.dumps(data, sort_keys=True))
 '@
 

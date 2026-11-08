@@ -2,7 +2,7 @@
 
 Handles:
   1. CUDA toolkit installation (nvcc needed for kernel compilation)
-  2. CUDA-enabled PyTorch
+  2. CUDA-enabled PyTorch and matching torchvision
   3. GPU kernel compilation (Marlin GEMM vendored, no sgl-kernel needed)
 
 Usage:
@@ -416,7 +416,7 @@ def _show_required_packages():
             if error:
                 print(f"  • torch — {error}")
             else:
-                print(f"  • torch (CUDA {cu_ver}) — pip install torch --index-url https://download.pytorch.org/whl/{cu_tag}")
+                print(f"  • torch / torchvision (CUDA {cu_ver}) — pip install torch torchvision --index-url https://download.pytorch.org/whl/{cu_tag}")
             for item in unsupported:
                 print(f"    unsupported by installed torch: {item}")
         else:
@@ -459,6 +459,10 @@ def _show_required_packages():
             print(f"  • torch (CUDA {cu_ver}) — pip install torch --index-url https://download.pytorch.org/whl/{cu_tag}")
         for item in unsupported:
             print(f"    unsupported by installed torch: {item}")
+    elif not _probe_torchvision():
+        cuda = str(torch_probe.get("cuda_version") or "").replace(".", "")
+        version = str(torch_probe.get("version") or "")
+        print(f"  • torchvision — pip install torchvision 'torch=={version}' --index-url https://download.pytorch.org/whl/cu{cuda}")
 
     # sgl-kernel is no longer needed — Marlin GEMM kernels are vendored in libkrasis_marlin.so
 
@@ -756,10 +760,43 @@ def _install_cuda_torch():
 
 
 def _install_gpu_packages():
-    """GPU packages check (Marlin GEMM kernels are now vendored)."""
+    """Install image preprocessing against the selected CUDA Torch ABI."""
     print(f"\n{BOLD}Step 3: GPU Kernels{NC}")
     print(f"  {GREEN}Marlin GEMM kernels are vendored in Krasis sidecars (no pip install needed).{NC}")
+    if _probe_torchvision():
+        print(f"  {GREEN}Torchvision image preprocessing is available.{NC}")
+        return True
+    probe = _probe_torch_cuda()
+    cuda = str(probe.get("cuda_version") or "")
+    version = str(probe.get("version") or "")
+    if not probe.get("cuda_available") or not version or not cuda:
+        print(f"  {RED}CUDA Torch must be installed before torchvision.{NC}")
+        return False
+    # Constrain the already selected Torch build. Installing torchvision from
+    # PyPI independently can silently replace it with another CUDA family.
+    index = "https://download.pytorch.org/whl/cu" + cuda.replace(".", "")
+    result = _run([sys.executable, "-m", "pip", "install", "--upgrade",
+                   "torchvision", "torch==" + version, "--index-url", index], check=False)
+    if result.returncode != 0 or not _probe_torchvision():
+        print(f"  {RED}Torchvision installation or CUDA ABI check failed.{NC}")
+        return False
     return True
+
+
+def _probe_torchvision():
+    """Use a subprocess so a failed extension import cannot poison setup."""
+    script = """
+import torch, torchvision
+assert torchvision.extension._has_ops()
+runtime = torch.ops.torchvision._cuda_version()
+assert runtime > 0
+assert (runtime // 1000, (runtime % 1000) // 10) == tuple(map(int, torch.version.cuda.split('.')[:2]))
+"""
+    try:
+        return subprocess.run([sys.executable, "-c", script], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=60).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def main():

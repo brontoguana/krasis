@@ -122,5 +122,24 @@ class SetupCudaSelectionTests(unittest.TestCase):
         self.assertIn("https://download.pytorch.org/whl/cu128", calls[0])
 
 
+class SetupVisionTests(unittest.TestCase):
+    def test_missing_vision_keeps_selected_torch_and_cuda_index(self):
+        with mock.patch.object(setup, '_probe_torchvision', side_effect=[False, True]), \
+             mock.patch.object(setup, '_probe_torch_cuda', return_value={
+                 'cuda_available': True, 'version': '2.9.1+cu126', 'cuda_version': '12.6'}), \
+             mock.patch.object(setup, '_run', return_value=type('Result', (), {'returncode': 0})()) as run:
+            self.assertTrue(setup._install_gpu_packages())
+        command = run.call_args.args[0]
+        self.assertIn('torchvision', command)
+        self.assertIn('torch==2.9.1+cu126', command)
+        self.assertIn('https://download.pytorch.org/whl/cu126', command)
+
+    def test_working_vision_needs_no_install(self):
+        with mock.patch.object(setup, '_probe_torchvision', return_value=True), \
+             mock.patch.object(setup, '_run') as run:
+            self.assertTrue(setup._install_gpu_packages())
+            run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@
 - Add native single-host-copy INT4 Qwen3.5-27B text/vision streaming and compatible Arête Swish configuration parsing.
 - Add bounded Gemma-4-26B-A4B INT4 text/vision serving with BF16 prompt staging, k6v6 rings, guarded graphs and validated 32K defaults.
 - Repair half-split rotary ownership and Qwen numerical boundaries.
+- Install torchvision against the selected CUDA Torch ABI on Linux and include a hash-pinned matching wheel in the private Windows runtime. Require the Qwen3-VL processor-capable Transformers version.
 - Include vendored FlashAttention, Marlin, FLA and CUTLASS licence notices in binary wheels.
 - Pin Windows FLA source generation to Ubuntu 24.04 and install the CUDA installer libxml2 prerequisite.
 - Align Manager schema regression coverage with the existing API-key configuration field.

@@ -636,6 +636,12 @@ jobs:
             --dest wheelhouse `
             --requirement scripts/windows/windows-runtime-requirements.txt `
             $wheel.FullName
+          # Match the separately pinned Torch 2.9.1+cu128 runtime. Keep this
+          # small preprocessing wheel in the private payload without pulling
+          # another complete Torch build into the core installer.
+          python -m pip download --no-deps --dest wheelhouse `
+            "https://download-r2.pytorch.org/whl/cu128/torchvision-0.24.1%2Bcu128-cp312-cp312-win_amd64.whl#sha256=33ecea57afa1daeedfed443a8a0cb8e4b0b403fdf18c2a328ba6f9069d403384"
+          if ($LASTEXITCODE -ne 0) { throw "Pinned torchvision download failed." }
           Get-ChildItem wheelhouse | Format-Table Name,Length
 
       - name: Download embedded Python runtime
