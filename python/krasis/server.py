@@ -3214,7 +3214,8 @@ def main():
                             config_defaults[dest] = float(val)
                         except ValueError:
                             config_defaults[dest] = val
-        if config_defaults.get("attention_quant") in ("int4", "int8"):
+        # Native INT4 is validated against the checkpoint by the dense policy.
+        if config_defaults.get("attention_quant") == "int8":
             raise ValueError(
                 f"Unsupported attention_quant={config_defaults['attention_quant']} in {config_path}. "
                 "Naive int4/int8 attention has been removed; use 'hqq4', 'hqq46', 'hqq46_auto', 'hqq6', 'hqq68_auto', 'hqq8', or 'bf16'."

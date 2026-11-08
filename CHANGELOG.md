@@ -1,5 +1,6 @@
 # 1.0.23
 
+- Admit native Qwen INT4 through the server's actual launcher-config reader, then enforce checkpoint-specific capability checks.
 - Repair native Qwen INT4 launcher selection, labels, CLI and saved-profile round trips; retain other models' mode restrictions and separate packed/HQQ cache identities.
 - Share the single-owner host-RAM estimate between Qwen runtime admission and launcher budgeting.
 - Restore runner ownership of container-built release artifacts before host wheel verification.

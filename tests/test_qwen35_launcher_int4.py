@@ -1,5 +1,6 @@
 """Exercise native dense defaults through the public launch/config surfaces."""
 import json
+import argparse
 import os
 from pathlib import Path
 import tempfile
@@ -9,7 +10,8 @@ from unittest import mock
 
 from krasis.attention_backend import attention_quant_cache_nbits, attention_quant_nbits
 from krasis.launcher import (Launcher, LauncherConfig, _apply_cli_overrides,
-    _format_attention_quant_value, parse_args)
+    _format_attention_quant_value, parse_args, _save_config)
+from krasis import server
 from krasis.server import _apply_dense_serving_policy
 from krasis.config import ModelConfig
 from krasis.qwen_dense_stream import estimated_host_peak_bytes
@@ -60,6 +62,25 @@ class QwenInt4LauncherTests(unittest.TestCase):
                 _apply_cli_overrides(LauncherConfig(),args)
             with self.assertRaisesRegex(ValueError,'Unsupported saved CFG_ATTENTION_QUANT'):
                 LauncherConfig().apply_saved({'MODEL_PATH':self.root,'CFG_ATTENTION_QUANT':'int4'})
+
+    def test_server_reads_the_actual_launcher_config_before_gpu_startup(self):
+        launcher=self.launcher()
+        launcher._apply_model_recommended_defaults()
+        path=Path(self.root,'launch.conf')
+        _save_config(str(path),launcher.cfg.to_save_dict())
+        captured={}
+        class ParsedConfig(Exception):
+            pass
+        def stop_after_config(parser,*args,**kwargs):
+            captured.update(parser._defaults)
+            raise ParsedConfig()
+        with mock.patch('sys.argv',['krasis.server','--config',str(path)]), \
+             mock.patch.object(argparse.ArgumentParser,'parse_args',stop_after_config), \
+             mock.patch.dict(os.environ):
+            with self.assertRaises(ParsedConfig):
+                server.main()
+        self.assertEqual(captured['attention_quant'],'int4')
+        self.assertEqual(captured['model_path'],self.root)
 
     def test_native_precision_does_not_select_hqq_cache(self):
         self.assertEqual(attention_quant_nbits('int4'),4)
