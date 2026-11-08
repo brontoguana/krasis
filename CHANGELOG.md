@@ -3,6 +3,7 @@
 - Add native single-host-copy INT4 Qwen3.5-27B text/vision streaming and compatible Arête Swish configuration parsing.
 - Add bounded Gemma-4-26B-A4B INT4 text/vision serving with BF16 prompt staging, k6v6 rings, guarded graphs and validated 32K defaults.
 - Repair half-split rotary ownership and Qwen numerical boundaries.
+- Pin release packaging on Linux and Windows to verified maturin 1.15.0.
 - Remove new cuBLAS/shared CUDA load-time dependencies from the native module: reuse the owning loaded BLAS API and link CUDA runtime statically; provision CI headers explicitly.
 - Repair existing CUDA environments during the supported Linux update flow when image preprocessing is missing.
 - Install torchvision against the selected CUDA Torch ABI on Linux and include a hash-pinned matching wheel in the private Windows runtime. Require the Qwen3-VL processor-capable Transformers version.
