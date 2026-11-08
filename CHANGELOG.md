@@ -1,5 +1,6 @@
 # 1.0.23
 
+- Keep image preprocessing on the supported Transformers 4.57 series; version 5 removes the explicit Qwen image processor used by this runtime.
 - Add native single-host-copy INT4 Qwen3.5-27B text/vision streaming and compatible Arête Swish configuration parsing.
 - Add bounded Gemma-4-26B-A4B INT4 text/vision serving with BF16 prompt staging, k6v6 rings, guarded graphs and validated 32K defaults.
 - Repair half-split rotary ownership and Qwen numerical boundaries.
