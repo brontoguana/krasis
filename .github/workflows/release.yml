@@ -27,6 +27,9 @@ jobs:
             --workdir "$GITHUB_WORKSPACE" \
             quay.io/pypa/manylinux_2_28_x86_64:latest \
             bash scripts/build-release-linux.sh
+          # Container builds run as root for toolkit provisioning. The host
+          # verifier must be able to create temporary extraction directories.
+          sudo chown -R "$(id -u):$(id -g)" dist
 
       - name: Upload sidecar bundle cache asset
         if: github.event_name == 'release'
