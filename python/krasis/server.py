@@ -3982,6 +3982,7 @@ def main():
         _model.log_vram_ledger_residency("after-decode-store-setup-before-release")
     release_gpu_sources = not (args.stress_test or args.perplexity)
     if release_gpu_sources:
+        _model.release_owned_shared_expert_sources(gpu_store)
         released_mb = _model.release_redundant_gpu_execution_tensors(
             release_lm_head_source=True,
             allow_multi_gpu_lm_head=True,

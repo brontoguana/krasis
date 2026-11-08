@@ -1,3 +1,11 @@
+# 1.0.23
+
+- Add native single-host-copy INT4 Qwen3.5-27B text/vision streaming and compatible Arête Swish configuration parsing.
+- Add bounded Gemma-4-26B-A4B INT4 text/vision serving with BF16 prompt staging, k6v6 rings, guarded graphs and validated 32K defaults.
+- Repair half-split rotary ownership and Qwen numerical boundaries.
+- Retain experimental model qualification warnings and small-card hardware limits.
+- Reclaim redundant GLM shared-expert source tensors only after native ownership certification; preserve gates and captured Torch consumers.
+
 ## 2026-11-07 — Matched Gemma context controls
 
 - Add projection-only diagnostic captures and substitutions; allow explicit omission of KV history when capturing bounded rings.

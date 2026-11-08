@@ -6954,6 +6954,62 @@ class KrasisModel:
             logger.info(message)
             print(message, flush=True)
 
+    def release_owned_shared_expert_sources(self, store) -> int:
+        """Release only source storage certified unused by both native phases.
+
+        Keep a CPU representation for explicit offload/reload paths. The native
+        graph owns the serving pointers; its slab is never moved or replaced.
+        Sigmoid gates remain on GPU because they have separate registrations.
+        """
+        if not self.cfg.is_glm5_next or len(self.all_devices) != 1:
+            return 0
+        if os.environ.get("KRASIS_RECLAIM_SHARED_SOURCES", "1").lower() in (
+            "0", "false", "no", "off"
+        ):
+            return 0
+        certify = getattr(store, "shared_expert_owned_layers", None)
+        if certify is None:
+            # Older installed natives have no ownership proof. Keep their source
+            # storage rather than guessing or requiring a production replacement.
+            return 0
+        owned = set(certify())
+        released = 0
+        def cpu(value):
+            nonlocal released
+            if isinstance(value, torch.Tensor):
+                if value.device.type == "cuda":
+                    released += value.numel() * value.element_size()
+                    return value.cpu()
+                return value
+            if isinstance(value, tuple):
+                return tuple(cpu(v) for v in value)
+            if isinstance(value, list):
+                return [cpu(v) for v in value]
+            return value
+        free_before = torch.cuda.mem_get_info(self.all_devices[0])[0]
+        allocated_before = torch.cuda.memory_allocated(self.all_devices[0])
+        reserved_before = torch.cuda.memory_reserved(self.all_devices[0])
+        for i in sorted(owned):
+            layer = self.layers[i]
+            if layer.shared_expert is None or getattr(layer, "_se_graph", None) is not None:
+                # A captured Torch graph is another consumer of these sources.
+                # Native certification does not retire that graph's pointers.
+                continue
+            # Do not move a gate that is aliased by layer.shared_expert_gate.
+            layer.shared_expert = {
+                key: value if key == "shared_expert_gate" else cpu(value)
+                for key, value in layer.shared_expert.items()
+            }
+        gc.collect()
+        torch.cuda.empty_cache()
+        logger.info(
+            "SHARED SOURCE RECLAIM layers=%s source_bytes=%d driver_free_before=%d driver_free_after=%d allocated_before=%d allocated_after=%d reserved_before=%d reserved_after=%d",
+            sorted(owned), released, free_before, torch.cuda.mem_get_info(self.all_devices[0])[0],
+            allocated_before, torch.cuda.memory_allocated(self.all_devices[0]),
+            reserved_before, torch.cuda.memory_reserved(self.all_devices[0]),
+        )
+        return released
+
     def release_redundant_gpu_execution_tensors(
         self,
         *,

@@ -35685,6 +35685,26 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    /// Torch sources can leave VRAM only when BOTH Rust phases use this
+    /// graph-owned immutable slab. This does not release the host engine source
+    /// or the separately registered sigmoid gate. Called before graph capture.
+    fn shared_expert_owned_layers(&self) -> Vec<usize> {
+        let Some(graph) = self.graph.as_ref() else { return Vec::new(); };
+        graph.layers.iter().enumerate().filter_map(|(i, layer)| {
+            if !matches!(layer.mlp, GpuMlpConfig::None) { return None; }
+            let moe = graph.moe_layers.get(i)?.as_ref()?;
+            let shared = moe.shared.as_ref()?;
+            let owned = graph.shared_expert_vram.get(i)?.as_ref()?;
+            (owned.d_buf.is_some()
+                && shared.bits == graph.shared_expert_bits
+                && owned.w13_packed_size == shared.w13_packed_bytes
+                && owned.w13_scales_size == shared.w13_scales_bytes
+                && owned.w2_packed_size == shared.w2_packed_bytes
+                && owned.w2_scales_size == shared.w2_scales_bytes)
+                .then_some(i)
+        }).collect()
+    }
+
     /// Register MoE expert data pointers for one layer.
     /// expert_ptrs: list of (w13p_ptr, w13p_bytes, w13s_ptr, w13s_bytes,
     ///                        w2p_ptr, w2p_bytes, w2s_ptr, w2s_bytes)
