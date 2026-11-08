@@ -66,10 +66,15 @@ def available_host_bytes():
     return min(available)
 
 
-def host_memory_plan(cfg, packed=False):
+def estimated_host_peak_bytes(cfg, packed=False):
     source=source_bf16_bytes(cfg)
     headroom=(12<<30) if source>(1<<30) else (64<<20)
-    required=(source//4+6*(1<<30)) if packed else 2*source+headroom
+    return (source//4+6*(1<<30)) if packed else 2*source+headroom
+
+
+def host_memory_plan(cfg, packed=False):
+    source=source_bf16_bytes(cfg)
+    required=estimated_host_peak_bytes(cfg, packed=packed)
     available=available_host_bytes()
     if available<required:
         profile='INT4' if packed else 'BF16 reference'

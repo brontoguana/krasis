@@ -118,6 +118,7 @@ class DenseQwen35Tests(unittest.TestCase):
         aligned = self.load(lambda c: c.update(linear_num_value_heads=32))
         self.assertFalse(aligned.requires_hqq_prefill_materialization)
 
+    @mock.patch.dict("os.environ", {"KRASIS_QWEN_DENSE_STREAM": "0"})
     def test_dense_defaults_and_explicit_precision_roundtrip(self):
         cfg = self.load()
         launcher = Launcher.__new__(Launcher)
@@ -161,6 +162,7 @@ class DenseQwen35Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'one selected GPU'):
             launcher._validate_model_topology()
 
+    @mock.patch.dict("os.environ", {"KRASIS_QWEN_DENSE_STREAM": "0"})
     def test_dense_serving_does_not_enter_hcs_expert_admission(self):
         args = SimpleNamespace(hcs=True)
         _apply_dense_serving_policy(args, self.load())
@@ -201,7 +203,7 @@ class DenseQwen35Tests(unittest.TestCase):
         for key in ("multi_gpu_mode", "dynamic_peer", "force_rebuild_cache"):
             self.assertNotIn(key, visible)
         dense = next(o for o in OPTIONS if o.key == "dense_mlp_quant")
-        self.assertEqual(dense.choices, ["int8", "bf16"])
+        self.assertEqual(dense.choices, ["int4", "int8", "bf16"])
 
     @mock.patch.dict("os.environ", {"KRASIS_QWEN_DENSE_STREAM": "0"})
     def test_budget_charges_all_dense_mlps_and_no_experts(self):

@@ -151,6 +151,17 @@ INTERACTIVE_HQQ_AUTO_BUDGET_PCTS = (10.0, 15.0, 20.0)
 MIN_LAUNCHER_DEFAULT_CONTEXT_TOKENS = 60_000
 
 
+def _supports_native_dense_int4(model_path: str) -> bool:
+    if not model_path:
+        return False
+    try:
+        cfg = ModelConfig.from_model_path(model_path)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    from krasis.qwen_dense_stream import enabled
+    return enabled(cfg)
+
+
 def _default_context_tokens(model_limit: int) -> int:
     """Return the launcher default without exceeding the checkpoint limit."""
     model_limit = int(model_limit)
@@ -1099,7 +1110,7 @@ class LauncherConfig:
                 pass
         if "CFG_ATTENTION_QUANT" in saved:
             val = saved["CFG_ATTENTION_QUANT"]
-            if val in ("int4", "int8"):
+            if val == "int8" or (val == "int4" and not _supports_native_dense_int4(self.model_path)):
                 raise ValueError(
                     f"Unsupported saved CFG_ATTENTION_QUANT={val}. "
                     "Naive int4/int8 attention has been removed; use hqq8, hqq68_auto, hqq6, hqq46_auto, hqq46, hqq4, or bf16."
@@ -2163,7 +2174,9 @@ class Launcher:
         else:
             value = raw_value
 
-        if value in ("hqq8", "bf16"):
+        if value == "int4" and not self._bounded_qwen_profile():
+            return False
+        if value in ("int4", "hqq8", "bf16"):
             self.cfg.attention_quant = value
             self.cfg.hqq_cache_profile = HQQ_CACHE_PROFILE_BASELINE
             self.cfg.hqq_group_size = HQQ_ATTENTION_DEFAULT_GROUP_SIZE
@@ -2240,8 +2253,7 @@ class Launcher:
         return len(selected) == 1 and 0 < _gpu_vram_mb(selected[0]) <= 8192
 
     def _bounded_qwen_profile(self) -> bool:
-        from krasis.qwen_dense_stream import enabled
-        return bool(self.cfg.model_path and enabled(ModelConfig.from_model_path(self.cfg.model_path)))
+        return _supports_native_dense_int4(self.cfg.model_path)
 
     def _attention_modes(self) -> List[str]:
         if self._bounded_gemma_profile():
@@ -2303,7 +2315,7 @@ class Launcher:
             if spec.default_vision_quant and not self.cfg._vision_quant_explicit:
                 self.cfg.vision_quant = spec.default_vision_quant
         elif (self.model_info or {}).get("arch") == "qwen3_5_text":
-            # Bounded dense execution streams source BF16 through a reusable slab.
+            # Bounded dense execution streams packed INT4 through a reusable slab.
             from krasis.qwen_dense_stream import enabled as bounded_dense_enabled
             bounded = bool(self.cfg.model_path and bounded_dense_enabled(ModelConfig.from_model_path(self.cfg.model_path)))
             if not self.cfg._max_context_tokens_explicit and bounded:
@@ -3872,7 +3884,7 @@ class Launcher:
                 overhead_mb -= experts_mb
                 if bounded:
                     overhead_mb += int(rank.get("recurrent_state_mb", 0))
-                    print(f"\n  Weight slab: {experts_mb:>8,} MB  (host-backed BF16 streaming)")
+                    print(f"\n  Weight slab: {experts_mb:>8,} MB  (host-backed {self.cfg.attention_quant.upper()} streaming)")
                 else:
                     print(f"\n  Dense MLP:   {experts_mb:>8,} MB  ({self.cfg.dense_mlp_quant.upper()})")
             else:
@@ -4217,7 +4229,7 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.gpu_expert_int4_calib = args.gpu_expert_int4_calib
     if args.attention_quant is not None:
         val = args.attention_quant
-        if val in ("int4", "int8"):
+        if val == "int8" or (val == "int4" and not _supports_native_dense_int4(cfg.model_path)):
             raise ValueError(
                 f"Unsupported --attention-quant {val}. "
                 "Naive int4/int8 attention has been removed; use hqq8, hqq68_auto, hqq6, hqq46_auto, hqq46, hqq4, or bf16."

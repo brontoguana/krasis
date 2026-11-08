@@ -3013,6 +3013,8 @@ def _apply_dense_serving_policy(args, cfg) -> None:
         if not getattr(args, 'max_context_tokens', 0):
             args.max_context_tokens = DEFAULT_CONTEXT
     from krasis.qwen_dense_stream import enabled as bounded_dense_enabled
+    if getattr(args, 'attention_quant', None) == 'int4' and not bounded_dense_enabled(cfg):
+        raise ValueError('native INT4 attention requires the bounded Qwen dense profile')
     if bounded_dense_enabled(cfg):
         if (args.attention_quant,args.dense_mlp_quant,args.lm_head_quant)==('bf16','int8','int8'):
             args.attention_quant=args.dense_mlp_quant=args.lm_head_quant='int4'

@@ -1,5 +1,7 @@
 # 1.0.23
 
+- Repair native Qwen INT4 launcher selection, labels, CLI and saved-profile round trips; retain other models' mode restrictions and separate packed/HQQ cache identities.
+- Share the single-owner host-RAM estimate between Qwen runtime admission and launcher budgeting.
 - Restore runner ownership of container-built release artifacts before host wheel verification.
 - Keep image preprocessing on the supported Transformers 4.57 series; version 5 removes the explicit Qwen image processor used by this runtime.
 - Add native single-host-copy INT4 Qwen3.5-27B text/vision streaming and compatible Arête Swish configuration parsing.

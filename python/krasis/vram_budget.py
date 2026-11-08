@@ -2201,8 +2201,10 @@ def compute_launcher_budget(
         worst = rank
         peak_vram_mb = rank["total_with_kv_mb"]
         over_budget = peak_vram_mb > gpu_vram_mb
-        ram_dense_load_mb = ram_dense_load_mb*2 + 12*1024  # source, pinned owners and measured setup headroom
-        ram_total_mb = ram_dense_load_mb + ram_hqq_host_staging_mb
+        from krasis.qwen_dense_stream import estimated_host_peak_bytes
+        ram_dense_load_mb = estimated_host_peak_bytes(model_cfg, packed=lm_head_quant=='int4') / MB
+        ram_hqq_host_staging_mb = 0.0  # native packed slabs have no HQQ staging owners
+        ram_total_mb = ram_dense_load_mb
 
     return {
         "bounded_dense_plan": bounded_plan,

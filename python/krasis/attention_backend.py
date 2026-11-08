@@ -181,6 +181,12 @@ class AttentionBackendSpec:
 
 
 def get_attention_backend_spec(attention_quant: str) -> AttentionBackendSpec:
+    if attention_quant == "int4":
+        # Model capability checks restrict this to native bounded dense serving.
+        return AttentionBackendSpec(
+            quant="int4", label="INT4", quantized=True,
+            requires_template=False, runtime_ready=True, nbits=4,
+        )
     if attention_quant == "bf16":
         return AttentionBackendSpec(
             quant="bf16",
@@ -304,6 +310,9 @@ def validate_hqq_cache_nbits(nbits: int) -> None:
 
 
 def attention_quant_cache_nbits(attention_quant: str) -> Optional[int]:
+    if attention_quant == "int4":
+        # Packed dense files have their own identity/layout, never an HQQ cache.
+        return None
     return get_attention_backend_spec(attention_quant).nbits
 
 
