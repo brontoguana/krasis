@@ -20,6 +20,7 @@ jobs:
           KRASIS_GITHUB_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         with:
+          maturin-version: v1.15.0
           target: x86_64
           args: --release --out dist -i python3.10 python3.11 python3.12 python3.13
           manylinux: "2_28"
@@ -272,6 +273,7 @@ jobs:
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
+          maturin-version: v1.15.0
           command: sdist
           args: --out dist
 
