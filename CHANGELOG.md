@@ -3,6 +3,7 @@
 - Add native single-host-copy INT4 Qwen3.5-27B text/vision streaming and compatible Arête Swish configuration parsing.
 - Add bounded Gemma-4-26B-A4B INT4 text/vision serving with BF16 prompt staging, k6v6 rings, guarded graphs and validated 32K defaults.
 - Repair half-split rotary ownership and Qwen numerical boundaries.
+- Build Linux wheels/sdist in the official manylinux container with pinned PyPI packaging tools and explicit release-token forwarding, avoiding a failing GitHub binary bootstrap.
 - Pin release packaging on Linux and Windows to verified maturin 1.15.0.
 - Remove new cuBLAS/shared CUDA load-time dependencies from the native module: reuse the owning loaded BLAS API and link CUDA runtime statically; provision CI headers explicitly.
 - Repair existing CUDA environments during the supported Linux update flow when image preprocessing is missing.
