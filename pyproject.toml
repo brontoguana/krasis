@@ -47,6 +47,7 @@ features = ["pyo3/extension-module", "cuda"]
 python-source = "python"
 module-name = "krasis.krasis"
 include = [
+    {path = "python/krasis/NVIDIA_CUDA_EULA", format = "wheel"},
     {path = "python/krasis/THIRD_PARTY_NOTICES", format = "wheel"},
     {path = "python/krasis/PYTORCH_VISION_NOTICE", format = "wheel"},
     {path = "python/krasis/prompts/*", format = "wheel"},

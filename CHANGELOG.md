@@ -5,6 +5,7 @@
 - Repair half-split rotary ownership and Qwen numerical boundaries.
 - Repair existing CUDA environments during the supported Linux update flow when image preprocessing is missing.
 - Install torchvision against the selected CUDA Torch ABI on Linux and include a hash-pinned matching wheel in the private Windows runtime. Require the Qwen3-VL processor-capable Transformers version.
+- Include the CUDA 12.6 toolkit licence and bundled-component notices alongside the new native CUDA runtime dependencies.
 - Include vendored FlashAttention, Marlin, FLA and CUTLASS licence notices in binary wheels.
 - Pin Windows FLA source generation to Ubuntu 24.04 and install the CUDA installer libxml2 prerequisite.
 - Align Manager schema regression coverage with the existing API-key configuration field.
