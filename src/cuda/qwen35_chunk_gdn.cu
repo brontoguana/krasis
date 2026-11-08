@@ -3,6 +3,16 @@
 #include <cuda_bf16.h>
 #include <cublas_v2.h>
 #include <cmath>
+// Resolve through the same loaded library that created the Rust-owned handle.
+// No cuBLAS import library is needed by the Python module at load time.
+struct KrasisQwenBlasApi {
+ decltype(&cublasSgemmStridedBatched) gemm;
+ decltype(&cublasGetStream) get_stream;
+ decltype(&cublasSetStream) set_stream;
+ decltype(&cublasGetMathMode) get_math;
+ decltype(&cublasSetMathMode) set_math;
+};
+static_assert(sizeof(KrasisQwenBlasApi)==5*sizeof(void*), "BLAS API table layout");
 namespace {
 constexpr int B=64,D=128;
 __global__ void prep(const __nv_bfloat16*q,const __nv_bfloat16*k,const __nv_bfloat16*v,const __nv_bfloat16*beta,const __nv_bfloat16*a,const float*al,const float*dt,float*Q,float*K,float*V,float*KB,float*VB,float*G,int start,int rows,int H){
@@ -42,20 +52,22 @@ __global__ void finish(const float*X,const float*Y,const float*S,const float*G,f
  if(ix<B*D){int t=ix/D,c=ix%D;if(start+t<rows)out[((start+t)*H+h)*D+c]=__float2bfloat16(X[h*B*D+ix]+Y[h*B*D+ix]);}
  if(ix<D*D)state[h*D*D+ix]=state[h*D*D+ix]*expf(G[h*B+B-1])+S[h*D*D+ix];
 }
-int gemm(cublasHandle_t handle,const float*A,const float*BB,float*C,int m,int n,int k,int H,bool ta=false,bool tb=false){float one=1.f,zero=0.f;return int(cublasSgemmStridedBatched(handle,tb?CUBLAS_OP_T:CUBLAS_OP_N,ta?CUBLAS_OP_T:CUBLAS_OP_N,n,m,k,&one,BB,tb?k:n,(long long)k*n,A,ta?m:k,(long long)m*k,&zero,C,n,(long long)m*n,H));}
+int gemm(const KrasisQwenBlasApi& api,cublasHandle_t handle,const float*A,const float*BB,float*C,int m,int n,int k,int H,bool ta=false,bool tb=false){float one=1.f,zero=0.f;return int(api.gemm(handle,tb?CUBLAS_OP_T:CUBLAS_OP_N,ta?CUBLAS_OP_T:CUBLAS_OP_N,n,m,k,&one,BB,tb?k:n,(long long)k*n,A,ta?m:k,(long long)m*k,&zero,C,n,(long long)m*n,H));}
 }
 // Workspace: heads * (12*64*128 + 2*64*64 + 64 + 128*128) floats.
-extern "C" int krasis_qwen_chunk_gdn(const void*q,const void*k,const void*v,const void*beta,const void*a,const float*al,const float*dt,float*state,void*out,int rows,int H,float*ws,void*blas,void*stream){
+extern "C" int krasis_qwen_chunk_gdn(const void*q,const void*k,const void*v,const void*beta,const void*a,const float*al,const float*dt,float*state,void*out,int rows,int H,float*ws,void*blas,void*stream,const KrasisQwenBlasApi* blas_api){
  if(rows<1||rows>4096||H<1||H>64)return -1;
+ if(!blas_api||!blas_api->gemm||!blas_api->get_stream||!blas_api->set_stream||!blas_api->get_math||!blas_api->set_math)return -3;
+ const auto& api=*blas_api;
  auto st=(cudaStream_t)stream;auto handle=(cublasHandle_t)blas;
- struct Restore {cublasHandle_t h;cudaStream_t s;cublasMath_t m;~Restore(){cublasSetStream(h,s);cublasSetMathMode(h,m);}};
+ struct Restore {const KrasisQwenBlasApi* api;cublasHandle_t h;cudaStream_t s;cublasMath_t m;~Restore(){api->set_stream(h,s);api->set_math(h,m);}};
  cudaStream_t old_stream;cublasMath_t old_math;
- if(cublasGetStream(handle,&old_stream)!=CUBLAS_STATUS_SUCCESS||cublasGetMathMode(handle,&old_math)!=CUBLAS_STATUS_SUCCESS)return -2;
- Restore restore{handle,old_stream,old_math};
- auto status=cublasSetStream(handle,st);if(status)return int(status);
- status=cublasSetMathMode(handle,CUBLAS_DEFAULT_MATH);if(status)return int(status);
+ if(api.get_stream(handle,&old_stream)!=CUBLAS_STATUS_SUCCESS||api.get_math(handle,&old_math)!=CUBLAS_STATUS_SUCCESS)return -2;
+ Restore restore{&api,handle,old_stream,old_math};
+ auto status=api.set_stream(handle,st);if(status)return int(status);
+ status=api.set_math(handle,CUBLAS_DEFAULT_MATH);if(status)return int(status);
  float *Q=ws,*K=Q+H*B*D,*V=K+H*B*D,*KB=V+H*B*D,*VB=KB+H*B*D,*KD=VB+H*B*D,*QE=KD+H*B*D,*KT=QE+H*B*D,*VV=KT+H*B*D,*KC=VV+H*B*D,*VN=KC+H*B*D,*Y=VN+H*B*D,*A=Y+H*B*D,*AT=A+H*B*B,*G=AT+H*B*B,*S=G+H*B;
- #define MM(a,b,c,m,n,k,ta,tb) do{int err=gemm(handle,a,b,c,m,n,k,H,ta,tb);if(err)return err;}while(0)
+ #define MM(a,b,c,m,n,k,ta,tb) do{int err=gemm(api,handle,a,b,c,m,n,k,H,ta,tb);if(err)return err;}while(0)
  for(int start=0;start<rows;start+=B){
  prep<<<H,128,0,st>>>((const __nv_bfloat16*)q,(const __nv_bfloat16*)k,(const __nv_bfloat16*)v,(const __nv_bfloat16*)beta,(const __nv_bfloat16*)a,al,dt,Q,K,V,KB,VB,G,start,rows,H);
  MM(KB,K,A,B,B,D,false,true);transform<<<H,64,0,st>>>(A,G);

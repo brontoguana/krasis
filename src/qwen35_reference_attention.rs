@@ -114,15 +114,26 @@ impl PrefillEngine {
     fn qwen35_chunk_recurrence(&self,q:u64,k:u64,v:u64,beta:u64,a:u64,al:u64,dt:u64,state:u64,out:u64,rows:usize,heads:usize)->Result<(),String> {
         #[cfg(not(has_qwen35_vision))]
         #[allow(unused_variables)]
-        unsafe extern "C" fn krasis_qwen_chunk_gdn(q:u64,k:u64,v:u64,beta:u64,a:u64,al:u64,dt:u64,state:u64,out:u64,rows:i32,heads:i32,workspace:u64,blas:*mut std::ffi::c_void,stream:*mut std::ffi::c_void)->i32 { -1 }
+        unsafe extern "C" fn krasis_qwen_chunk_gdn(q:u64,k:u64,v:u64,beta:u64,a:u64,al:u64,dt:u64,state:u64,out:u64,rows:i32,heads:i32,workspace:u64,blas:*mut std::ffi::c_void,stream:*mut std::ffi::c_void,api:*const usize)->i32 { -1 }
         #[cfg(has_qwen35_vision)]
-        extern "C" {fn krasis_qwen_chunk_gdn(q:u64,k:u64,v:u64,beta:u64,a:u64,al:u64,dt:u64,state:u64,out:u64,rows:i32,heads:i32,workspace:u64,blas:*mut std::ffi::c_void,stream:*mut std::ffi::c_void)->i32;}
+        extern "C" {fn krasis_qwen_chunk_gdn(q:u64,k:u64,v:u64,beta:u64,a:u64,al:u64,dt:u64,state:u64,out:u64,rows:i32,heads:i32,workspace:u64,blas:*mut std::ffi::c_void,stream:*mut std::ffi::c_void,api:*const usize)->i32;}
         if rows==0 || rows>4096 || heads==0 || heads>64 {return Err("unsupported bounded GDN geometry".into());}
         let count=heads*(12*64*128+2*64*64+64+128*128);
         let (free,_)=cudarc::driver::result::mem_get_info().map_err(|e|e.to_string())?;
         if free<count*4+600*1024*1024 {return Err("chunk GDN would breach 600 MiB reserve".into());}
         let scratch=GpuBuf::<f32>::alloc_uninit(count)?;
-        let status=unsafe {krasis_qwen_chunk_gdn(q,k,v,beta,a,al,dt,state,out,rows as i32,heads as i32,scratch.ptr,self.cublas_handle as _,self.stream as _)};
+        // Match the C++ table order. Every entry comes from the same loaded
+        // cuBLAS library that owns this engine's handle, with no import-library
+        // dependency on module load (notably before Windows Torch activation).
+        let blas = unsafe { cudarc::cublas::sys::lib() };
+        macro_rules! symbol {
+            ($name:ident) => {
+                *blas.$name.as_ref().map_err(|e| format!("Qwen cuBLAS {}: {e}", stringify!($name)))? as usize
+            };
+        }
+        let api = [symbol!(cublasSgemmStridedBatched), symbol!(cublasGetStream_v2),
+            symbol!(cublasSetStream_v2), symbol!(cublasGetMathMode), symbol!(cublasSetMathMode)];
+        let status=unsafe {krasis_qwen_chunk_gdn(q,k,v,beta,a,al,dt,state,out,rows as i32,heads as i32,scratch.ptr,self.cublas_handle as _,self.stream as _,api.as_ptr())};
         let completion=self.stream_sync(); // Own scratch until all readers complete, including failure.
         if status!=0 {return Err(format!("bounded chunk GDN failed {status}"));}
         completion

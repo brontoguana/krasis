@@ -51,6 +51,14 @@ jobs:
                 dnf install -y --nogpgcheck cuda-nvcc-12-6 cuda-cudart-devel-12-6 cuda-driver-devel-12-6 2>/dev/null || true
               ls -la /usr/local/cuda-12.6/bin/nvcc 2>/dev/null && echo "nvcc installed OK" || echo "WARNING: nvcc install failed"
             fi
+            # The native GDN wrapper needs the cuBLAS API headers. Calls use
+            # the already loaded runtime API; no cuBLAS binary is bundled.
+            yum install -y --nogpgcheck libcublas-devel-12-6 2>/dev/null || \
+              dnf install -y --nogpgcheck libcublas-devel-12-6 2>/dev/null || true
+            test -f /usr/local/cuda-12.6/targets/x86_64-linux/include/cublas_v2.h || {
+              echo "ERROR: required CUDA 12.6 cuBLAS headers are missing" >&2
+              exit 1
+            }
             if [ ! -x /usr/local/cuda-12.6/bin/nvcc ]; then
               echo "ERROR: required release nvcc not found at /usr/local/cuda-12.6/bin/nvcc" >&2
               find /usr/local -path '*/bin/nvcc' -print 2>/dev/null || true

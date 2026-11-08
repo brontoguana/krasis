@@ -684,6 +684,19 @@ fn compile_selected_kda_kernels() {
     }
 }
 
+fn native_vision_cuda_build() -> cc::Build {
+    let mut build = cc::Build::new();
+    build.cuda(true).cudart("static");
+    let host_args = nvcc_host_compiler_args();
+    if !host_args.is_empty() {
+        // Reuse the release CI compiler selected for the PTX and sidecars.
+        // Avoid cc choosing a different system compiler for these wrappers.
+        build.ccbin(false);
+        for arg in host_args { build.flag(&arg); }
+    }
+    build
+}
+
 fn compile_qwen35_vision() {
     let gemma_attention_source="src/cuda/gemma4_attention.cu";
     println!("cargo:rerun-if-changed={gemma_attention_source}");
@@ -715,7 +728,7 @@ fn compile_qwen35_vision() {
     }
     println!("cargo:rerun-if-changed=src/cuda/flash_attn/fa2");
     if std::env::var_os("NVCC").is_none() { std::env::set_var("NVCC", find_nvcc().expect("vision nvcc")); }
-    cc::Build::new().cuda(true).cudart("shared")
+    native_vision_cuda_build()
         .file("src/cuda/flash_attn/fa2/qwen_vision_sdpa.cu")
         .include("src/cuda/flash_attn/fa2").include("src/cuda/flash_attn/cutlass")
         .flag("-std=c++17").flag("--expt-relaxed-constexpr").flag("--expt-extended-lambda")
@@ -726,10 +739,9 @@ fn compile_qwen35_vision() {
         .define("FLASHATTENTION_DISABLE_SOFTCAP",None).define("FLASHATTENTION_DISABLE_LOCAL",None)
         .opt_level(3).compile("qwen35_sdpa");
     println!("cargo:rerun-if-changed=src/cuda/qwen35_chunk_gdn.cu");
-    cc::Build::new().cuda(true).cudart("shared")
+    native_vision_cuda_build()
         .file("src/cuda/qwen35_chunk_gdn.cu").flag("-std=c++17")
         .flag("-allow-unsupported-compiler").flag("-arch=sm_80").flag("-fmad=false")
         .opt_level(3).compile("qwen35_chunk_gdn");
-    println!("cargo:rustc-link-lib=cublas");
     println!("cargo:rustc-cfg=has_qwen35_vision");
 }
