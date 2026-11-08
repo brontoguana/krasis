@@ -36,7 +36,7 @@ class ManagerLauncherTests(unittest.TestCase):
         self.assertNotIn("gpu_expert_bits", result)
         self.assertNotIn("cpu_expert_bits", result)
         expected = {
-            "model_path", "gpu_uuids", "host", "port", "attention_quant",
+            "model_path", "gpu_uuids", "host", "port", "api_keys_file", "attention_quant",
             "vision_quant",
             "hqq_cache_profile", "hqq_group_size", "hqq_auto_budget_pct",
             "hqq_sidecar_manifest", "kv_dtype", "kv_cache_mb",

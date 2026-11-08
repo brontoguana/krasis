@@ -3,6 +3,7 @@
 - Add native single-host-copy INT4 Qwen3.5-27B text/vision streaming and compatible Arête Swish configuration parsing.
 - Add bounded Gemma-4-26B-A4B INT4 text/vision serving with BF16 prompt staging, k6v6 rings, guarded graphs and validated 32K defaults.
 - Repair half-split rotary ownership and Qwen numerical boundaries.
+- Align Manager schema regression coverage with the existing API-key configuration field.
 - Retain experimental model qualification warnings and small-card hardware limits.
 - Reclaim redundant GLM shared-expert source tensors only after native ownership certification; preserve gates and captured Torch consumers.
 
