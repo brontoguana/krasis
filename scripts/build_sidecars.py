@@ -39,6 +39,7 @@ BUILD_ROOT = REPO / "target" / "sidecars"
 BUNDLE_DIR = BUILD_ROOT / "bundles"
 MANIFEST_PATH = PACKAGE_DIR / "sidecar_manifest.json"
 FLA_CONTRACT_PATH = PACKAGE_DIR / "fla_sidecar_contract.json"
+CUDA_GLIBC_COMPAT_HEADER = REPO / "src" / "cuda" / "cuda_glibc_compat.h"
 
 
 def read_sidecar_abi_version() -> int:
@@ -145,7 +146,21 @@ def command_output(args: list[str]) -> str:
 
 def nvcc_host_compiler_args() -> list[str]:
     ccbin = os.environ.get("KRASIS_NVCC_CCBIN", "").strip()
-    return ["-ccbin", ccbin] if ccbin else []
+    args = ["-ccbin", ccbin] if ccbin else []
+    # glibc 2.43 exposes rsqrt/rsqrtf under _GNU_SOURCE with noexcept
+    # declarations that conflict with CUDA 13.0/13.1's math_functions.h.
+    # Match build.rs so direct Marlin/FlashAttention sidecar builds work on
+    # the same modern Linux hosts as the Rust-managed CUDA compilation.
+    if not IS_WINDOWS:
+        args.extend(
+            [
+                "-U_GNU_SOURCE",
+                "-D_DEFAULT_SOURCE",
+                "-include",
+                rel(CUDA_GLIBC_COMPAT_HEADER),
+            ]
+        )
+    return args
 
 
 def nvcc_pic_args() -> list[str]:
@@ -196,6 +211,7 @@ def sidecar_inputs(nvcc: str) -> dict[str, dict[str, object]]:
     marlin_dir = REPO / "src" / "cuda" / "marlin"
     fa_dir = REPO / "src" / "cuda" / "flash_attn" / "fa2"
     cutlass_dir = REPO / "src" / "cuda" / "flash_attn" / "cutlass"
+    compat_sources = [CUDA_GLIBC_COMPAT_HEADER] if not IS_WINDOWS else []
 
     marlin_flags = [
         "-std=c++17",
@@ -238,7 +254,7 @@ def sidecar_inputs(nvcc: str) -> dict[str, dict[str, object]]:
 
     return {
         "marlin": {
-            "sources": source_files(marlin_dir),
+            "sources": source_files(marlin_dir, *compat_sources),
             "flags": marlin_flags,
             "env": env_contract,
             "compiled_units": [
@@ -249,7 +265,7 @@ def sidecar_inputs(nvcc: str) -> dict[str, dict[str, object]]:
             "output": MARLIN_SO,
         },
         "flash_attn": {
-            "sources": source_files(fa_dir, cutlass_dir),
+            "sources": source_files(fa_dir, cutlass_dir, *compat_sources),
             "flags": fa_common_flags,
             "env": env_contract,
             "compiled_units": [f"src/cuda/flash_attn/fa2/{name}" for name in flash_attn_cu_files()],
