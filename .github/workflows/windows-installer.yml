@@ -12,7 +12,7 @@ permissions:
 jobs:
   generate-windows-fla-sources:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +28,10 @@ jobs:
         if: steps.fla-source-cache.outputs.cache-hit != 'true'
         with:
           python-version: "3.12"
+
+      - name: Install CUDA installer prerequisites
+        if: steps.fla-source-cache.outputs.cache-hit != 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y libxml2
 
       - name: Install CUDA toolkit
         if: steps.fla-source-cache.outputs.cache-hit != 'true'
