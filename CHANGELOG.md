@@ -1,3 +1,9 @@
+## 2026-11-09 — Correct pruning adoption after controlled placement check
+
+- Withdraw the 75/10 default: with one identical recorded residency fixture, the baseline passes the unchanged JSON task and pruning fails it. Earlier independently sampled startup maps confounded the original adoption evidence; preserve those observations without isolated attribution.
+- Reduce the experimental omission ceiling to 5% of routed mass for a later fast-tier retry. Keep its compile-time switch off until the new policy passes, while retaining the measured speed opportunity.
+- Include the pure CPU split planner in runtime identity hashing so planner-only changes invalidate stale calibration identity.
+
 ## 2026-11-09 — Calibrated native CPU lane under qualification
 
 - Add separate compile-time switches for a group-banded AVX2 Marlin reader and an upfront CPU/GPU cold-expert split. Both remain off during this pass until fast-tier qualification.

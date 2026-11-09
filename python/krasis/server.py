@@ -480,6 +480,7 @@ def _krasis_runtime_code_hash() -> dict[str, Any]:
         "src/optimisations.rs",
         "src/cpu_tail.rs",
         "src/cpu_cold_lane.rs",
+        "src/cpu_cold_plan.rs",
         "src/kernel/avx2.rs",
         "src/weights/marlin.rs",
         "src/gpu_prefill.rs",

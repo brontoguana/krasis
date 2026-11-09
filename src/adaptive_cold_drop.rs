@@ -174,7 +174,7 @@ impl AdaptiveColdDropRuntime {
     pub(crate) fn from_compiled_policy() -> Self {
         Self { stats: Some(ShadowPolicyStats::new(ColdDropPolicy {
             protect_rank_fraction: 0.75,
-            max_mass_fraction: 0.10,
+            max_mass_fraction: 0.05,
         })) }
     }
 
