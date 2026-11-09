@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased: attention materialization screen
+
+- Measure accepted pedantic FP32 score/value plans and resident/full-pipeline costs on actual K6 operands.
+- Reject a shared-tile direct K6 value contraction: complete operator equations and graph checks pass, but the paired pipeline regresses about 40%. Keep serving, the accepted exact profile and disabled value reassociation unchanged.
+
 ## Unreleased: register and bandwidth headroom screening
 
 - Reject a 192-register M64/N256/K64 replay after complete natural-output checks, including a 691-token expert. Preserve invalid 512-thread feasibility evidence separately.
