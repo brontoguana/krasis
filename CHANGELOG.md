@@ -13448,3 +13448,5 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
 
 - Add default-off FP32 index-score physical row bands and admitted same-process controls. Complete equations and trajectory checks pass, with 22.6% less score-pipeline GPU time and no new serving allocation. Preserve failed residency-observer receipts; strict same-placement request promotion remains unqualified.
 - Guard offline tie fixtures with fewer than seven rows and malformed captured producer extents; valid measured launch bodies remain unchanged.
+
+- Add opt-in passive host HCS placement receipts at normal request boundaries, deferring serialization and file writes until decode/response delivery ends. Record slot ownership, capacity and actual promotion policy without CUDA observation.

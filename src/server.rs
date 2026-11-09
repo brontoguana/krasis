@@ -3837,6 +3837,14 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         return;
     }
 
+    // Opt-in passive host metadata. The request owns the store on this thread.
+    let placement_dir = std::env::var_os("KRASIS_PASSIVE_PLACEMENT_DIR");
+    let mut placement = Vec::with_capacity(if placement_dir.is_some() { 3 } else { 0 });
+    if placement_dir.is_some() {
+        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+        placement.push(store.passive_hcs_placement("before_prefill"));
+    }
+
     // ── Evict soft HCS before prefill to free VRAM ──
     crate::vram_monitor::report_event("evict_start");
     let t_evict = Instant::now();
@@ -5800,6 +5808,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     let tokenizer = &state.tokenizer;
 
     // ── GPU decode: GIL-free Rust decode via GpuDecodeStore ──
+    if placement_dir.is_some() {
+        placement.push(store.passive_hcs_placement("before_decode"));
+    }
     crate::vram_monitor::report_event("decode_start");
     let decode_outcome = handle_gpu_decode(
         stream,
@@ -5827,6 +5838,21 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         chat_first_token_logprobs,
     );
     crate::vram_monitor::report_event("decode_end");
+    if let Some(dir) = placement_dir {
+        placement.push(store.passive_hcs_placement("after_decode"));
+        // Decode and response delivery have finished. Serialization and disk work
+        // are excluded from request execution, but recorded for overhead review.
+        let start = Instant::now();
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let bytes = serde_json::to_vec(&placement)?;
+            let path = std::path::PathBuf::from(dir).join(format!("{}.json", request_id));
+            std::fs::write(path, bytes)?;
+            Ok(())
+        })();
+        log::info!("PASSIVE_PLACEMENT request={} deferred_ns={} result={:?}",
+            request_id, start.elapsed().as_nanos(), result);
+    }
+
 
     // ── Transactional sequence-state publication and cleanup ──
     crate::vram_monitor::report_event("cleanup_start");

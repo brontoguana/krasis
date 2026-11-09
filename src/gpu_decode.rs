@@ -5165,6 +5165,50 @@ impl Drop for PinnedHostChunk {
 /// Max waste: 64 KB per allocation (< 0.05% of a typical 128 MB chunk).
 const ALIGN_64KB: u64 = 64 * 1024;
 
+/// Passive host metadata only. No CUDA calls, serialization or file I/O at capture.
+#[derive(serde::Serialize)]
+pub(crate) struct HcsPlacementReceipt {
+    phase: &'static str,
+    capture_ns: u64,
+    slots: Vec<(&'static str, usize, usize, usize)>,
+    resident: Vec<(usize, usize)>,
+    loaded_slots: usize,
+    dynamic_tail_policy: &'static str,
+    vram_bytes: usize,
+    num_cached: usize,
+    soft_num_cached: usize,
+    pool_num_slots: usize,
+    pool_slot_size: usize,
+    pool_slot_offsets: Vec<usize>,
+    pool_slot_sizes: Vec<usize>,
+    pool_free_slots: Vec<usize>,
+    pool_slot_to_expert: Vec<Option<(usize, usize)>>,
+    soft_chunks_loaded: usize,
+    soft_total_chunks: usize,
+    soft_pressure_cap_chunks: Option<usize>,
+    soft_num_slots: usize,
+    soft_slot_size: usize,
+    soft_slot_chunks: Vec<usize>,
+    soft_slot_offsets: Vec<usize>,
+    soft_slot_sizes: Vec<usize>,
+    soft_chunk_slot_ranges: Vec<(usize, usize)>,
+    soft_chunk_bytes: Vec<usize>,
+    soft_slot_to_expert: Vec<Option<(usize, usize)>>,
+    dynamic_enabled: bool,
+    dynamic_slot_evictable: Vec<bool>,
+    dynamic_tail_blocks: Option<f64>,
+    dynamic_active_block_slots: usize,
+    dynamic_tail_slots: usize,
+    dynamic_protected_slots: usize,
+    dynamic_promotion_budget_mult: f64,
+    dynamic_request_promotions: u64,
+    dynamic_request_promotion_limit: u64,
+    dynamic_promotions: u64,
+    dynamic_evictions: u64,
+    soft_reload_pending: bool,
+    safety_margin_mb: usize,
+}
+
 struct AlignedGpuBuffer {
     /// The underlying raw allocation (overallocated by up to ALIGN_64KB).
     raw_ptr: u64,
@@ -56283,6 +56327,57 @@ impl GpuDecodeStore {
             .and_then(|g| g.hcs.as_ref())
             .map(|h| h.soft_reload_pending)
             .unwrap_or(false)
+    }
+
+    pub(crate) fn passive_hcs_placement(&self, phase: &'static str) -> Option<HcsPlacementReceipt> {
+        let start = std::time::Instant::now();
+        let h = self.graph.as_ref()?.hcs.as_ref()?;
+        let mut receipt = HcsPlacementReceipt {
+            phase,
+            capture_ns: 0,
+            slots: h.validation_slot_entries(),
+            resident: h.validation_sorted_resident_experts(),
+            loaded_slots: h.soft_loaded_slots(),
+            dynamic_tail_policy: match h.dynamic_tail_policy {
+                DynamicHcsTailPolicy::MeasuredEntropy => "measured_entropy",
+                DynamicHcsTailPolicy::FixedBlocks(_) => "fixed_blocks",
+            },
+            vram_bytes: h.vram_bytes,
+            num_cached: h.num_cached,
+            soft_num_cached: h.soft_num_cached,
+            pool_num_slots: h.pool_num_slots,
+            pool_slot_size: h.pool_slot_size,
+            pool_slot_offsets: h.pool_slot_offsets.clone(),
+            pool_slot_sizes: h.pool_slot_sizes.clone(),
+            pool_free_slots: h.pool_free_slots.clone(),
+            pool_slot_to_expert: h.pool_slot_to_expert.clone(),
+            soft_chunks_loaded: h.soft_chunks_loaded,
+            soft_total_chunks: h.soft_total_chunks,
+            soft_pressure_cap_chunks: h.soft_pressure_cap_chunks,
+            soft_num_slots: h.soft_num_slots,
+            soft_slot_size: h.soft_slot_size,
+            soft_slot_chunks: h.soft_slot_chunks.clone(),
+            soft_slot_offsets: h.soft_slot_offsets.clone(),
+            soft_slot_sizes: h.soft_slot_sizes.clone(),
+            soft_chunk_slot_ranges: h.soft_chunk_slot_ranges.clone(),
+            soft_chunk_bytes: h.soft_chunk_bytes.clone(),
+            soft_slot_to_expert: h.soft_slot_to_expert.clone(),
+            dynamic_enabled: h.dynamic_enabled,
+            dynamic_slot_evictable: h.dynamic_slot_evictable.clone(),
+            dynamic_tail_blocks: h.dynamic_tail_blocks,
+            dynamic_active_block_slots: h.dynamic_active_block_slots,
+            dynamic_tail_slots: h.dynamic_tail_slots,
+            dynamic_protected_slots: h.dynamic_protected_slots,
+            dynamic_promotion_budget_mult: h.dynamic_promotion_budget_mult,
+            dynamic_request_promotions: h.dynamic_request_promotions,
+            dynamic_request_promotion_limit: h.dynamic_request_promotion_limit,
+            dynamic_promotions: h.dynamic_promotions,
+            dynamic_evictions: h.dynamic_evictions,
+            soft_reload_pending: h.soft_reload_pending,
+            safety_margin_mb: h.safety_margin_mb,
+        };
+        receipt.capture_ns = start.elapsed().as_nanos() as u64;
+        Some(receipt)
     }
 
     pub fn hcs_debug_summary_json(&self, phase: &str) -> String {
