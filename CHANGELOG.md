@@ -13444,3 +13444,4 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
   lows were 625/649 MiB against the 600 MiB policy.
 
 - Screened globally prepared four-product TF32 attention with bounded operand ownership; rejected a2.69x full-pipeline cost despite passing complete independent operator equations. Preserved exact serving settings and added no model-quality or request-gain claim.
+- Measured actual-route gate/up and down BF16 contraction headroom with explicit active/rebuilt controls. Stopped row-ownership specialization before compilation: no substantial diagnostic throughput gap, unchanged shared-memory occupancy and doubled weight preparation. Added complete eager/graph control replay and documented limits; serving unchanged.
