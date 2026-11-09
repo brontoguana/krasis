@@ -1,3 +1,9 @@
+## 2026-11-09 — Adopt current-model cold-expert pruning
+
+- Enable the isolated 75/10 GLM host-route pruning policy by default after the fast tier: paired 65K decode improves 175.3→156.2 ms/token, with no new held-out failures and improved long-coding output.
+- Mean full-distribution KL is 0.011–0.018 nats across three frozen histories, with mixed token-likelihood changes. Preserve the 600 MiB reserve, unsupported-mode fallbacks and compile-time disable switch.
+- Active/RAM-cache lifecycle smoke and preservation checks pass. Full ADQ is deferred; this development stack cannot merge to main or ship before ADQ passes.
+
 ## 2026-11-09 — Bounded causal index-score feasibility
 
 - Reconstruct accepted FP32 row-band headroom and review the existing BF16 causal mode separately.
