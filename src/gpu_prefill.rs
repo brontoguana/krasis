@@ -8562,8 +8562,20 @@ fn launch_dsa_prefill_gemm_scores(
         let output_row_bytes = context_end
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| "DSA prefill GEMM output row-byte size overflow".to_string())?;
+        // Physical scheduling only: retain the full score context, FP32
+        // temporaries and ascending head accumulation. Never alter causal
+        // GEMM bands or the separately qualified BF16 temporary contract.
+        let physical_bands = rows >= 64 && !causal_bands_enabled && !temporary_is_bf16
+            && buffers.score_temp_capacity / output_score_elements < index_n_heads
+            && match crate::matched_teacher::active_index_score_execution() {
+                Some(mode) => mode == 1,
+                None => std::env::var("KRASIS_PREFILL_INDEX_SCORE_ROW_BANDS")
+                    .map(|v| v == "1").unwrap_or(false),
+            };
         let band_row_limit = if causal_bands_enabled {
             causal_band_rows.min(rows)
+        } else if physical_bands {
+            (rows / 8).max(1)
         } else {
             rows
         };

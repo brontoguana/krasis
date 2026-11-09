@@ -65,24 +65,26 @@ pub(crate) fn admitted_prefill_attention_execution(label: &str) -> Result<Option
 }
 
 thread_local! { static INDEXER_PROJECTION_LAUNCHES: std::cell::RefCell<Vec<(usize,usize,usize,usize,usize,u8)>> = const { std::cell::RefCell::new(Vec::new()) };
+static INDEX_SCORE_EXECUTION: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
 static INDEXER_PROJECTION_EXECUTION: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) }; }
+pub(crate) fn active_index_score_execution() -> Option<u8> { INDEX_SCORE_EXECUTION.with(|v|v.get()) }
 pub(crate) fn active_indexer_projection_execution() -> Option<u8> { INDEXER_PROJECTION_EXECUTION.with(|v|v.get()) }
 pub(crate) fn record_indexer_projection(layer:usize,start:usize,rows:usize,n:usize,k:usize,path:u8) {
     if active_indexer_projection_execution().is_some() { INDEXER_PROJECTION_LAUNCHES.with(|v|v.borrow_mut().push((layer,start,rows,n,k,path))); }
 }
-pub(crate) struct IndexerProjectionGuard { previous_launches:Vec<(usize,usize,usize,usize,usize,u8)>, previous:Option<u8>, _not_send:std::marker::PhantomData<std::rc::Rc<()>> }
+pub(crate) struct IndexerProjectionGuard { previous_score:Option<u8>, previous_launches:Vec<(usize,usize,usize,usize,usize,u8)>, previous:Option<u8>, _not_send:std::marker::PhantomData<std::rc::Rc<()>> }
 impl IndexerProjectionGuard {
     pub(crate) fn enter(label:Option<&str>) -> Result<Self,String> {
-        let mode=if let Some(label)=label {
+        let (mode,score_mode)=if let Some(label)=label {
             let p=plan()?;let t=p.trials.iter().find(|t|t.label==label).ok_or("unadmitted indexer label")?;
             if !t.raw_input { return Err("indexer intervention requires admitted raw history".into()); }
-            t.indexer_projection_execution
-        }else{None};
+            (t.indexer_projection_execution,t.index_score_execution)
+        }else{(None,None)};
         let previous=INDEXER_PROJECTION_EXECUTION.with(|v|v.replace(mode));
-        Ok(Self{previous,previous_launches:INDEXER_PROJECTION_LAUNCHES.with(|v|v.replace(Vec::new())),_not_send:std::marker::PhantomData})
+        Ok(Self{previous,previous_score:INDEX_SCORE_EXECUTION.with(|v|v.replace(score_mode)),previous_launches:INDEXER_PROJECTION_LAUNCHES.with(|v|v.replace(Vec::new())),_not_send:std::marker::PhantomData})
     }
 }
-impl Drop for IndexerProjectionGuard {fn drop(&mut self){INDEXER_PROJECTION_EXECUTION.with(|v|v.set(self.previous));INDEXER_PROJECTION_LAUNCHES.with(|v|v.replace(std::mem::take(&mut self.previous_launches)));}}
+impl Drop for IndexerProjectionGuard {fn drop(&mut self){INDEX_SCORE_EXECUTION.with(|v|v.set(self.previous_score));INDEXER_PROJECTION_EXECUTION.with(|v|v.set(self.previous));INDEXER_PROJECTION_LAUNCHES.with(|v|v.replace(std::mem::take(&mut self.previous_launches)));}}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -124,6 +126,8 @@ fn default_audit_routes() -> bool { true }
 struct Trial {
     #[serde(default)]
     indexer_projection_execution: Option<u8>,
+    #[serde(default)]
+    index_score_execution: Option<u8>,
     #[serde(default)]
     attention_execution: Option<u8>,
     #[serde(default)]
@@ -208,6 +212,10 @@ fn parse(raw: &[u8]) -> Result<Plan, String> {
     if matches!(p.arithmetic,Arithmetic::CenteredNativeProjection) != p.centered_module.is_some() || (p.centered_module.is_some() && p.schema!=1) { return Err("centered projection teacher requires schema1 and explicit center identity; older modes forbid it".into()); }
     let mut labels = HashSet::new();
     for t in &p.trials {
+        if t.index_score_execution.is_some_and(|v|v>1)
+            || (t.index_score_execution.is_some() && (!t.raw_input || !matches!(p.arithmetic,Arithmetic::NativeServingDecode))) {
+            return Err("index score intervention requires modes 0/1 and native serving raw history".into());
+        }
         if t.indexer_projection_execution.is_some_and(|v|v>1)
             || (t.indexer_projection_execution.is_some() && (!t.raw_input || !matches!(p.arithmetic,Arithmetic::NativeServingDecode))) {
             return Err("indexer intervention requires modes 0/1 and native serving raw history".into());
@@ -493,7 +501,7 @@ impl Session {
         json!({"diagnostic_only":true,"qualifies_candidate":false,"label":self.trial.label,"arithmetic":self.arithmetic,
         "history":"explicit_teacher_forced_saved_tokens","ordinary_cache_equality_evidence":false,"forced_inputs":self.trial.forced_inputs,
         "defer_step_proofs":self.defer_step_proofs,"audit_routes":self.trial.audit_routes,
-        "indexer_projection_launches":INDEXER_PROJECTION_LAUNCHES.with(|v|v.borrow().clone()),"indexer_projection_execution":self.trial.indexer_projection_execution,"attention_execution":self.trial.attention_execution,"prefill_attention_execution":self.trial.prefill_attention_execution,"prefill_tensor_stats":PREFILL_ATTENTION_STATS.with(|v|v.get()),"capture_full_logits":self.trial.capture_full_logits,"first_logit_proof_saved":self.trial.capture_full_logits || !(self.defer_step_proofs && matches!(self.arithmetic,Arithmetic::NativeServingDecode)),"step_receipts":self.deferred_steps,
+        "index_score_execution":self.trial.index_score_execution,"indexer_projection_launches":INDEXER_PROJECTION_LAUNCHES.with(|v|v.borrow().clone()),"indexer_projection_execution":self.trial.indexer_projection_execution,"attention_execution":self.trial.attention_execution,"prefill_attention_execution":self.trial.prefill_attention_execution,"prefill_tensor_stats":PREFILL_ATTENTION_STATS.with(|v|v.get()),"capture_full_logits":self.trial.capture_full_logits,"first_logit_proof_saved":self.trial.capture_full_logits || !(self.defer_step_proofs && matches!(self.arithmetic,Arithmetic::NativeServingDecode)),"step_receipts":self.deferred_steps,
         "completed_decode_steps":self.next_step,"decode_elapsed_seconds":self.decode_elapsed_seconds,"logit_proofs_saved":self.trial.capture_full_logits || !self.defer_step_proofs})
     }
 }
@@ -592,6 +600,8 @@ mod tests {
         assert!(parse(&serde_json::to_vec(&base).unwrap()).is_ok());
         for key in ["defer_step_proofs","raw_input"] {let mut p=base.clone();if key=="raw_input"{p["trials"][0][key]=json!(false);}else{p[key]=json!(false);}assert!(parse(&serde_json::to_vec(&p).unwrap()).is_err());}
         for mode in [0,1,2] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
+        for mode in [0,1] { let mut q=base.clone();q["trials"][0]["index_score_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
+        for mode in [2,255] { let mut q=base.clone();q["trials"][0]["index_score_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
         for mode in [0,1] { let mut q=base.clone();q["trials"][0]["indexer_projection_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
         for mode in [2,3,255] { let mut q=base.clone();q["trials"][0]["indexer_projection_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
         for mode in [3,255] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
@@ -686,6 +696,7 @@ mod tests {
     fn trial() -> Trial {
         Trial {
             indexer_projection_execution: None,
+            index_score_execution: None,
             attention_execution: None,
             prefill_attention_execution: None,
             capture_full_logits: false,

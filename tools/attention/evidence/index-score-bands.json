@@ -1,0 +1,249 @@
+{
+  "status": "operator_qualified_experimental_opt_in; strict_request_placement_gate_open",
+  "base_commit": "615feb3",
+  "flag": "KRASIS_PREFILL_INDEX_SCORE_ROW_BANDS=1",
+  "default_enabled": false,
+  "intervention": "FP32 temporary score rows split physically to accumulate eight ascending heads per pass in the existing partition. Keep original dispatch below64 rows, when all heads fit, and for BF16/causal-band modes.",
+  "arithmetic": "Unchanged BF16 query/key/head-weight operands, FP32 temporary scores, ascending FP32 head order, causal masks, logical chunks and K6V6 caches. No value reassociation.",
+  "normal_dynamic_policy_requests": [
+    {
+      "history": 3072,
+      "logit_vectors": 64,
+      "logit_values": 9912320,
+      "all_bitwise": true,
+      "state_bytes": 188079040,
+      "state_allocations": 112,
+      "paired": [
+        {
+          "mode": 0,
+          "wall_s": [
+            18.763627356,
+            18.732089674
+          ],
+          "median_s": 18.747858515,
+          "decode_ms_per_forward": [
+            146.17154601587302,
+            146.07400623809525
+          ],
+          "median_decode_ms_per_forward": 146.12277612698415
+        },
+        {
+          "mode": 1,
+          "wall_s": [
+            18.759713598,
+            18.731526565
+          ],
+          "median_s": 18.7456200815,
+          "decode_ms_per_forward": [
+            146.05045014285713,
+            146.04126861904763
+          ],
+          "median_decode_ms_per_forward": 146.04585938095238
+        }
+      ],
+      "wall_improvement_pct": 0.011939675660610494
+    },
+    {
+      "history": 16384,
+      "logit_vectors": 64,
+      "logit_values": 9912320,
+      "all_bitwise": true,
+      "state_bytes": 338038784,
+      "state_allocations": 112,
+      "paired": [
+        {
+          "mode": 0,
+          "wall_s": [
+            33.423932804,
+            33.467409376
+          ],
+          "median_s": 33.445671090000005,
+          "decode_ms_per_forward": [
+            145.52336641269844,
+            145.02561017460317
+          ],
+          "median_decode_ms_per_forward": 145.2744882936508
+        },
+        {
+          "mode": 1,
+          "wall_s": [
+            33.309009331,
+            33.375103431
+          ],
+          "median_s": 33.342056381,
+          "decode_ms_per_forward": [
+            144.86076465079364,
+            145.10367753968254
+          ],
+          "median_decode_ms_per_forward": 144.9822210952381
+        }
+      ],
+      "wall_improvement_pct": 0.3098000596884032
+    },
+    {
+      "history": 65536,
+      "logit_vectors": 64,
+      "logit_values": 9912320,
+      "all_bitwise": true,
+      "state_bytes": 891686912,
+      "state_allocations": 112,
+      "paired": [
+        {
+          "mode": 0,
+          "wall_s": [
+            99.870609326,
+            99.83575189
+          ],
+          "median_s": 99.853180608,
+          "decode_ms_per_forward": [
+            149.16709536507938,
+            148.5056848412698
+          ],
+          "median_decode_ms_per_forward": 148.8363901031746
+        },
+        {
+          "mode": 1,
+          "wall_s": [
+            98.231734873,
+            98.218398434
+          ],
+          "median_s": 98.2250666535,
+          "decode_ms_per_forward": [
+            148.81951566666666,
+            148.43024373015874
+          ],
+          "median_decode_ms_per_forward": 148.6248796984127
+        }
+      ],
+      "wall_improvement_pct": 1.6305078562210196
+    }
+  ],
+  "static_policy_requests_observed_not_strictly_qualified": [
+    {
+      "history": 65536,
+      "logit_vectors": 64,
+      "logit_values": 9912320,
+      "all_bitwise": true,
+      "state_bytes": 891686912,
+      "state_allocations": 112,
+      "paired": [
+        {
+          "mode": 0,
+          "wall_s": [
+            101.326903556,
+            101.548315275
+          ],
+          "median_s": 101.43760941549999,
+          "decode_ms_per_forward": [
+            173.1126836190476,
+            173.00178357142858
+          ],
+          "median_decode_ms_per_forward": 173.05723359523807
+        },
+        {
+          "mode": 1,
+          "wall_s": [
+            99.928978133,
+            99.90820178
+          ],
+          "median_s": 99.9185899565,
+          "decode_ms_per_forward": [
+            172.80741241269843,
+            172.80500139682542
+          ],
+          "median_decode_ms_per_forward": 172.80620690476192
+        }
+      ],
+      "wall_improvement_pct": 1.497491381897531
+    }
+  ],
+  "qualified_request_gain": null,
+  "qualification_limit": "Cross-request strict expert-roster equality was not established. Diagnostic reference endpoint reloads181 chunks/2715 experts whereas ordinary long chat ends with180 chunks/2700 experts, even at identical prompt history. The observer re-enters a different allocation/admission lifecycle; its boundary comparison is rejected. Exact allocation responsible is not isolated. No further startup or calibration campaign is justified before passive normal-request receipts exist.",
+  "oversized_intermediate_diagnostic_excluded": true,
+  "corrected_intermediate": {
+    "label": "h16397-native",
+    "rows": 2335,
+    "context": 4099,
+    "workspace_row_bytes": 73752,
+    "workspace_partition_bytes": 172210920,
+    "workspace_budget_bytes": 172212989,
+    "replay_sha256": "e6e9d5ea9a8f141a3b01b32269b9954bf9c7e2ad38560459e751106b7f384c43",
+    "source": "Native planner formula and saved4099-position layout; earlier3269-row fixture retained as oversized diagnostic only.",
+    "times": {
+      "0": {
+        "0": 9.74264288,
+        "1": 8.02990055,
+        "2": 1.730048,
+        "3": 9.666559695
+      },
+      "1": {
+        "0": 7.482470755,
+        "1": 5.735219239999999,
+        "2": 1.785753605,
+        "3": 7.40863991
+      }
+    }
+  },
+  "memory": {
+    "added_serving_gpu_workspace_bytes": 0,
+    "added_host_weight_copies": 0,
+    "existing_selection_workspace_budget_bytes": 172212989,
+    "reserve_mib": 600,
+    "observed": [
+      {
+        "cohort": "requests",
+        "min_external_free_mib": 926.0,
+        "min_native_free_mib": 925,
+        "normal_shutdown": true
+      },
+      {
+        "cohort": "requests-frozen",
+        "min_external_free_mib": 988.0,
+        "min_native_free_mib": 1013,
+        "normal_shutdown": true
+      },
+      {
+        "cohort": "requests-frozen-final",
+        "min_external_free_mib": 988.0,
+        "min_native_free_mib": 1013,
+        "normal_shutdown": true
+      }
+    ]
+  },
+  "lifecycle": {
+    "concurrent_clients": true,
+    "continuation_after_cancel": true,
+    "reset": true,
+    "active_session_hit_delta": 1,
+    "ram_restore_hit_delta": 1,
+    "restoration_probability_equivalence": false,
+    "cancellation_followup_s": 45.439672201,
+    "previous_cancellation_bound_s": 46.25
+  },
+  "native_sha256": "a6ee10bd0d96ae0a5b11837c8505dfd448ec6a22273e5cbdc7b1bd4ee2e0c047",
+  "tests": {
+    "native_teacher_policy_tests": 15,
+    "complete_equations_pass": true,
+    "operator_graph_eager_equal": true
+  },
+  "no_weights_downloaded": true,
+  "no_release": true,
+  "no_push": true,
+  "tool_review_delta": {
+    "file": "krasis-attention/tools/attention/replay_score_bands.cu",
+    "measured_source_sha256": "d43700c0f9f58abe31ed97ad30b7a7f554a6a9e494cc255e5f941a2e7b585b4d",
+    "reviewed_source_sha256": "520875f6a533aaba88158f87e47fa36929ebc9cdcc869e85173043018bc269a8",
+    "delta": "Only reject invalid fixture arguments before CUDA creation and malformed captured producer-row extents before memcmp. All measured fixtures satisfy both checks; timed launch bodies and CUDA kernels are unchanged.",
+    "serving_code_changed": false
+  },
+  "primary_65k_observed": {
+    "baseline_s": 99.853180608,
+    "candidate_s": 98.2250666535,
+    "improvement_pct": 1.6305078562210196
+  },
+  "complete_score_pipeline_kernel_ms": [
+    7426.222909,
+    5749.2427529999995
+  ],
+  "independent_max_abs": 9.356667993642986e-05
+}
