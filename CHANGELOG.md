@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased: contraction-local tensor value screen
+
+- Screen direct K6 shared tiles with all four TF32 high/residual products and no global partial-output buffer. Independent complete equations pass; reject on an 85% full-pipeline regression. Preserve exact serving controls and disabled value reassociation.
+
 ## Unreleased: attention materialization screen
 
 - Measure accepted pedantic FP32 score/value plans and resident/full-pipeline costs on actual K6 operands.
