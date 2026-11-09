@@ -1,4 +1,7 @@
 // Private matched operator measurement; no serving dispatch or arithmetic changes.
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 mod operator {
     include!("row-projection-tile-probe.rs");
     #[derive(Deserialize)]
@@ -478,6 +481,7 @@ mod operator {
     }
 }
 fn main() {
+    build_optimisations::print_startup();
     let result = (|| -> Result<(), String> {
         if std::env::var("KRASIS_DEV_SCRIPT").as_deref() != Ok("1") {
             return Err("Use ./dev row-projection-tile-profile".into());

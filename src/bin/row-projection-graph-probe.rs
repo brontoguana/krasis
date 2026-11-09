@@ -1,4 +1,7 @@
 // Private graph diagnostic. No serving dispatch changes.
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 #[path = "row_projection_graph/owner.rs"]
 mod graph_owner;
 use cudarc::driver::{CudaDevice, DevicePtr, LaunchAsync, LaunchConfig};
@@ -697,6 +700,7 @@ fn run() -> Result<(), String> {
     }
 }
 fn main() {
+    build_optimisations::print_startup();
     if let Err(e) = run() {
         eprintln!("{e}");
         std::process::exit(1)

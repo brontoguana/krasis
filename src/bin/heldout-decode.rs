@@ -1,4 +1,7 @@
 //! Checksum-bound decode and cached-continuation likelihood diagnostics. Use ./dev.
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{fs,io::{Read,Write},net::{SocketAddr,TcpStream},path::{Path,PathBuf},time::Duration};
@@ -110,7 +113,8 @@ fn run(args:&[String])->Result<()> {
     }
     let result=json!({"schema":1,"diagnostic_only":true,"qualifies_candidate":false,"inputs_sha256":args[2],"corpus_sha256":input["corpus_sha256"],"targets_per_contract":count,"full_mean_nll":full_nll/count as f64,"cached_mean_nll":cached_nll/count as f64,"documents":documents,"independent_BF16_Witness_comparison_still_required":true,"ordinary_consistency_not_established_by_forcing":true});write_new(&output.join("RESULT.json"),&serde_json::to_vec_pretty(&result).map_err(|e|e.to_string())?)?;println!("Targets per contract: {count}; full NLL {:.9}; cached NLL {:.9}; diagnostic only",full_nll/count as f64,cached_nll/count as f64);Ok(())
 }
-fn main(){if let Err(error)=run(&std::env::args().skip(1).collect::<Vec<_>>()){eprintln!("ERROR: {error}");std::process::exit(1);}}
+fn main(){
+    build_optimisations::print_startup();if let Err(error)=run(&std::env::args().skip(1).collect::<Vec<_>>()){eprintln!("ERROR: {error}");std::process::exit(1);}}
 #[cfg(test)] mod tests {
     use super::*;
     struct Temp(PathBuf);

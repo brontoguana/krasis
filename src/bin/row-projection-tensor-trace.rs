@@ -1,4 +1,7 @@
 // Private matched operand observer; no serving dispatch.
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 mod observer {
     #![allow(dead_code)]
     include!("row-projection-tensor-probe.rs");
@@ -349,6 +352,7 @@ mod observer {
     }
 }
 fn main() {
+    build_optimisations::print_startup();
     if let Err(e) = observer::run_observer() {
         eprintln!("{e}");
         std::process::exit(1)

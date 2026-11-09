@@ -1,4 +1,7 @@
 //! Offline real-corpus next-token likelihood client. Run through ./dev.
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
@@ -320,6 +323,7 @@ fn run(args: &[String]) -> Result<()> {
 }
 
 fn main() {
+    build_optimisations::print_startup();
     if let Err(error) = run(&std::env::args().skip(1).collect::<Vec<_>>()) {
         eprintln!("heldout-nll: {error}");
         std::process::exit(1);

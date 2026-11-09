@@ -1,3 +1,6 @@
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 #[path = "../chat_template.rs"]
 mod chat_template;
 
@@ -466,6 +469,7 @@ fn run() -> Result<()> {
 }
 
 fn main() {
+    build_optimisations::print_startup();
     if let Err(error) = run() {
         eprintln!("ERROR: {error}");
         std::process::exit(1);

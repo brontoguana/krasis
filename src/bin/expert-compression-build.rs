@@ -1,5 +1,8 @@
 //! Build a versioned, expert-contiguous, bit-exact compression sidecar.
 
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 use krasis::expert_codec::{encode_expert, CodecHistogram, ComponentKind, ExpertComponent};
 use krasis::expert_sidecar::{
     encode_header, routed_expert_sha256_from_digests, source_header_sha256, ExpertSidecarHeader,
@@ -51,6 +54,7 @@ impl Drop for TempOutput {
 }
 
 fn main() {
+    build_optimisations::print_startup();
     if let Err(error) = run() {
         eprintln!("ERROR: {error}");
         std::process::exit(1);

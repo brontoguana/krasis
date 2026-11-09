@@ -1,3 +1,6 @@
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -148,6 +151,7 @@ fn run() -> Result<i32, String> {
 }
 
 fn main() {
+    build_optimisations::print_startup();
     match run() {
         Ok(code) => std::process::exit(code),
         Err(message) => {

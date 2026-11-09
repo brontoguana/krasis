@@ -8567,11 +8567,7 @@ fn launch_dsa_prefill_gemm_scores(
         // GEMM bands or the separately qualified BF16 temporary contract.
         let physical_bands = rows >= 64 && !causal_bands_enabled && !temporary_is_bf16
             && buffers.score_temp_capacity / output_score_elements < index_n_heads
-            && match crate::matched_teacher::active_index_score_execution() {
-                Some(mode) => mode == 1,
-                None => std::env::var("KRASIS_PREFILL_INDEX_SCORE_ROW_BANDS")
-                    .map(|v| v == "1").unwrap_or(true),
-            };
+            && crate::optimisations::INDEX_SCORE_ROW_BANDS;
         let band_row_limit = if causal_bands_enabled {
             causal_band_rows.min(rows)
         } else if physical_bands {
@@ -36815,7 +36811,7 @@ impl PrefillEngine {
                 bank.enqueue_dense_bf16(w.ptr, input, output, w.n, w.k, rows, self.stream).map(|_|2)
             };
         }
-        if crate::matched_teacher::active_indexer_projection_execution() != Some(0) {
+        if crate::optimisations::INDEXER_QUERY_TILE {
             if let Some(tile) = &self.indexer_query_tile {
                 if unsafe { tile.enqueue(self.cublas_handle,self.stream,input,w.ptr,output,rows,w.n,w.k)? } {
                     return Ok(1);
@@ -41086,7 +41082,7 @@ impl PrefillEngine {
         if split_candidate && preparation != KdaSplitPreparation::Bf16QkBeta {
             return Err("KDA relay requires KRASIS_GLM53_KDA_SPLIT_PREPARATION=bf16_qk_beta; raw and bf16_beta experiments have been retired".into());
         }
-        let relay = split_candidate && true;
+        let relay = split_candidate && crate::optimisations::KDA_RELAY;
         if relay {
             // Reuse the exact ordinary preparation operator and its BF16 stores.
             let mut a0=q;let mut a1=k;let mut a2=beta;let mut a3=tokens;let mut a4=heads;let mut a5=dim;
@@ -46295,9 +46291,8 @@ impl PrefillEngine {
         &self, output: u64, query: u64, weight: u64, rows: usize,
         heads: usize, qk: usize, nope: usize, cache: usize,
     ) -> Result<bool, String> {
-        let mode = std::env::var("KRASIS_PREFILL_MLA_ABSORB")
-            .or_else(|_| std::env::var("KRASIS_PREFILL_MLA_TENSOR_ABSORB")).unwrap_or_else(|_| "2".into());
-        if !matches!(mode.as_str(), "1" | "2") || rows < 128
+        let mode = if crate::optimisations::TENSOR_ABSORPTION { 1 } else if crate::optimisations::ORDERED_ABSORPTION { 2 } else { 0 };
+        if !matches!(mode, 1 | 2) || rows < 128
             || (heads, qk, nope, cache) != (64, 256, 256, 512)
         { return Ok(false); }
         let mut device = 0;
@@ -46309,7 +46304,7 @@ impl PrefillEngine {
             { return Err("MLA absorption compute capability query failed".into()); }
         }
         if major < 8 { return Ok(false); }
-        if mode == "2" {
+        if mode == 2 {
             if rows > i32::MAX as usize || rows.div_ceil(32) > 65535 { return Ok(false); }
             let mut out = output;
             let mut q = query;
@@ -46452,13 +46447,8 @@ impl PrefillEngine {
             ));
         }
 
-        let requested=match crate::matched_teacher::active_prefill_attention_execution(){
-            Some(mode)=>mode>=1,None=>optional_bool_env("KRASIS_PREFILL_MLA_F32")?.unwrap_or(true),
-        };
-        let reassociated_value = match crate::matched_teacher::active_prefill_attention_execution() {
-            Some(mode) => mode == 2,
-            None => optional_bool_env("KRASIS_PREFILL_MLA_VALUE_REASSOC")?.unwrap_or(false),
-        };
+        let requested = crate::optimisations::PREFILL_F32;
+        let reassociated_value = crate::optimisations::VALUE_REASSOCIATION;
         let fused_mask=requested&&rows>=32&&prefill_mla_f32_geometry(self.kv_format,num_heads,nope_dim,rope_dim,ckv_cache_dim,selected.selected_per_row,sm_scale)
             &&dsa_mla_gathered_compute_mode()?==DsaMlaGatheredComputeMode::Pedantic;
         let workspace = self

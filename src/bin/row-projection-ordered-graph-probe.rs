@@ -1,4 +1,7 @@
 // Unadopted fixed tensor batch diagnostic; explicit new arithmetic contract.
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 #[path = "row_projection_resident_graph/artifact.rs"]
 mod artifact;
 #[path = "row_projection_resident_graph/owner.rs"]
@@ -820,6 +823,7 @@ fn run() -> Result<(), String> {
     }
 }
 fn main() {
+    build_optimisations::print_startup();
     if let Err(e) = run() {
         eprintln!("{e}");
         std::process::exit(1)

@@ -1,3 +1,6 @@
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 use cudarc::driver::sys as cuda_sys;
 use krasis::pcie_batch::CudaBatchCopy;
 use serde::Serialize;
@@ -141,6 +144,7 @@ impl Drop for Stream {
 }
 
 fn main() {
+    build_optimisations::print_startup();
     if let Err(error) = run() {
         eprintln!("ERROR: {error}");
         std::process::exit(1);

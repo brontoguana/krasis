@@ -1,4 +1,7 @@
 // Private instrumented phase-cost control; never a serving or speed benchmark.
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 #[path = "row_projection_resident_graph/artifact.rs"]
 mod artifact;
 mod operator {
@@ -399,6 +402,7 @@ mod operator {
     }
 }
 fn main() {
+    build_optimisations::print_startup();
     if let Err(e) = operator::entry() {
         eprintln!("{e}");
         std::process::exit(1);

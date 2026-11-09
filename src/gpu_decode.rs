@@ -23950,7 +23950,6 @@ struct DeepseekV4DecodePolicy {
     /// loaded routed-expert tensors before graph capture.
     int4_w13_n32: Option<bool>,
     int4_w2_n32: Option<bool>,
-    index_radix_topk: bool,
     parallel_wkv: bool,
     parallel_qb: bool,
     hc_tiled: bool,
@@ -23972,7 +23971,6 @@ impl DeepseekV4DecodePolicy {
             )?,
             int4_w13_n32,
             int4_w2_n32,
-            index_radix_topk: resolve_bool_env("KRASIS_DECODE_V4_INDEX_RADIX_TOPK", true)?,
             parallel_wkv: resolve_bool_env(
                 "KRASIS_DECODE_V4_PARALLEL_WKV",
                 deepseek_specific_default,
@@ -40292,7 +40290,7 @@ impl GpuDecodeStore {
     fn finalize_dsa_indexer_resources(&mut self) -> PyResult<usize> {
         // Allocate before calibration/capture. One owner is shared by serial
         // main-stream MLA layers; no graph replay may outlive this graph.
-        let split_mode = std::env::var("KRASIS_MLA_K6_SPLIT").unwrap_or_else(|_| "3".into());
+        let split_mode = if crate::optimisations::TENSOR_DECODE_ATTENTION { "5" } else if crate::optimisations::EXACT_ATTENTION { "3" } else { "0" }.to_string();
         if matches!(split_mode.as_str(), "1" | "2" | "3" | "5" | "6") {
             let graph = self.graph.as_ref().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
             if graph.dsa_indexer_resources_finalized {
@@ -48378,7 +48376,7 @@ impl GpuDecodeStore {
         let native_score_cache = indexer.compressor.native_cache.as_ref();
         let occupancy_grid_enabled = env_truthy("KRASIS_DECODE_V4_INDEX_OCCUPANCY_GRID");
         let skip_inactive_tail_clear = env_truthy("KRASIS_DECODE_V4_INDEX_SKIP_TAIL_CLEAR");
-        let radix_topk_enabled = self.deepseek_v4_decode_policy.index_radix_topk;
+        let radix_topk_enabled = crate::optimisations::INDEX_RADIX_TOPK;
         if (occupancy_grid_enabled || skip_inactive_tail_clear || radix_topk_enabled)
             && native_score_cache.is_none()
         {
@@ -50996,7 +50994,7 @@ impl GpuDecodeStore {
                 .d_topk_indices_b
                 .as_ref()
                 .map(|buffer| *buffer.device_ptr()),
-            self.deepseek_v4_decode_policy.index_radix_topk
+            crate::optimisations::INDEX_RADIX_TOPK
                 && plan.selected <= DSA_TOPK_RADIX_CAPACITY
                 && plan.sort_width <= DSA_TOPK_RADIX_CAPACITY,
         )?;
@@ -51301,11 +51299,12 @@ impl GpuDecodeStore {
         capacity: usize, seq_len: i32, seq_pointer: u64,
         ckv: u64, kpe: u64, indices: u64, scale: f32,
     ) -> Result<bool, String> {
-        let intervention = crate::matched_teacher::active_attention_execution();
-        if intervention == Some(0) { return Ok(false); }
-        let tensor = intervention.map(|_| false).unwrap_or(graph.mla_tensor);
-        let unpack = intervention.map(|m| m == 3).unwrap_or(graph.mla_split_unpack);
-        let exact = intervention.map(|m| matches!(m, 2 | 3)).unwrap_or(graph.mla_split_exact);
+        if !crate::optimisations::EXACT_ATTENTION && !crate::optimisations::TENSOR_DECODE_ATTENTION {
+            return Ok(false);
+        }
+        let tensor = crate::optimisations::TENSOR_DECODE_ATTENTION && graph.mla_tensor;
+        let unpack = crate::optimisations::EXACT_ATTENTION && graph.mla_split_unpack;
+        let exact = crate::optimisations::EXACT_ATTENTION && graph.mla_split_exact;
         if graph.kv_format != 7 || dim != 512 || !matches!(rope, 0 | 64) || capacity == 0 {
             return Ok(false);
         }

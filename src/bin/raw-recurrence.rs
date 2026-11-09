@@ -1,3 +1,6 @@
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 #[cfg(has_decode_kernels)]
 mod diagnostic {
     use cudarc::driver::{sys, CudaDevice, CudaSlice, DevicePtr, LaunchAsync, LaunchConfig};
@@ -681,10 +684,12 @@ mod diagnostic {
 }
 #[cfg(has_decode_kernels)]
 fn main() {
+    build_optimisations::print_startup();
     diagnostic::main()
 }
 #[cfg(not(has_decode_kernels))]
 fn main() {
+    build_optimisations::print_startup();
     eprintln!("raw-recurrence requires built CUDA decode kernels; unavailable in this build");
     std::process::exit(1)
 }

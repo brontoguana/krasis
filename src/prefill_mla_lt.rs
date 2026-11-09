@@ -46,6 +46,7 @@ impl Cache {
         can_select: bool,
         reference: &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<bool, String> {
+        let allow_value_reassociation = crate::optimisations::VALUE_REASSOCIATION && allow_value_reassociation;
         if allow_value_reassociation && (shape.transpose_a || shape.transpose_b
             || shape.a.rows != 512 || shape.a.cols != 2051 || shape.b.cols != 64
             || shape.a.batch != 32) {

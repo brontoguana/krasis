@@ -1,4 +1,9 @@
+#[allow(dead_code)]
+#[path = "src/optimisations.rs"]
+mod optimisation_registry;
+
 fn main() {
+    generate_optimisations();
     let total_timer = BuildTimer::start("build.rs total");
     compile_windows_launcher_resources();
     let sidecar_abi = std::fs::read_to_string("sidecar_abi_version.txt")
@@ -339,10 +344,12 @@ fn compile_cuda_kernels() {
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let ptx_path = format!("{out_dir}/decode_kernels.ptx");
+    let opt_header = format!("{out_dir}/optimisations.h");
 
     if is_output_fresh(
         &[
             cu_src,
+            &opt_header,
             mla_sparse_split_header,
             "src/cuda/mla_sparse_tensor.cuh",
             expert_codec_src,
@@ -370,7 +377,8 @@ fn compile_cuda_kernels() {
         &ptx_path,
         cu_src,
     ])
-    .args(nvcc_host_compiler_args());
+    .args(nvcc_host_compiler_args())
+    .arg("-include").arg(&opt_header);
     let start = std::time::Instant::now();
     let output = cmd.output();
     log_build_timing("nvcc decode PTX compile", start.elapsed());
@@ -689,5 +697,46 @@ fn compile_selected_kda_kernels() {
             assert!(status.success(), "selected KDA compilation failed: {stem}");
             std::fs::write(&stamp, identity).expect("selected CUDA build identity");
         }
+    }
+}
+
+fn generate_optimisations() {
+    use std::collections::BTreeSet;
+    println!("cargo:rerun-if-changed=src/optimisations.rs");
+    for key in ["KRASIS_OPT_DISABLE", "KRASIS_OPT_ENABLE"] {
+        println!("cargo:rerun-if-env-changed={key}");
+    }
+    let parse = |key: &str| -> BTreeSet<String> {
+        let value = std::env::var(key).unwrap_or_default();
+        if value.trim().is_empty() { return BTreeSet::new(); }
+        value.split(',').map(|name| {
+            let name = name.trim().to_ascii_uppercase();
+            assert!(optimisation_registry::ENTRIES.iter().any(|e| e.0 == name),
+                "unknown optimisation in {key}: {name}");
+            name
+        }).collect()
+    };
+    let disabled = parse("KRASIS_OPT_DISABLE");
+    let enabled = parse("KRASIS_OPT_ENABLE");
+    assert!(disabled.is_disjoint(&enabled), "optimisation is both enabled and disabled");
+    let effective: std::collections::BTreeMap<_, _> = optimisation_registry::ENTRIES.iter()
+        .map(|e| (e.0, if disabled.contains(e.0) { false } else { e.1 || enabled.contains(e.0) })).collect();
+    let mut json = Vec::new();
+    let mut header = String::from("// Generated compile-time optimisation configuration.\n");
+    for &(name, default, kind, description, requires) in optimisation_registry::ENTRIES {
+        let active = effective[name];
+        if active {
+            for dependency in requires {
+                assert!(effective.get(dependency) == Some(&true), "{name} requires {dependency}");
+            }
+        }
+        println!("cargo:rustc-env=KRASIS_OPT_{name}={}", u8::from(active));
+        header.push_str(&format!("#define KRASIS_OPT_{name} {}\n", u8::from(active)));
+        json.push(format!(r#"{{"name":"{name}","enabled":{active},"default":{default},"kind":"{kind}","description":"{description}"}}"#));
+    }
+    println!("cargo:rustc-env=KRASIS_OPT_MANIFEST=[{}]", json.join(","));
+    let path = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("optimisations.h");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(&header) {
+        std::fs::write(path, header).expect("write CUDA optimisation header");
     }
 }

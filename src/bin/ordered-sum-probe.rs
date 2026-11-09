@@ -1,4 +1,7 @@
 // Private primitive qualification. No model dispatch or speed benchmark.
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 mod operator {
     include!("row-projection-compensated-probe.rs");
     use cudarc::driver::CudaSlice;
@@ -264,6 +267,7 @@ mod operator {
     }
 }
 fn main() {
+    build_optimisations::print_startup();
     if let Err(e) = operator::entry() {
         eprintln!("{e}");
         std::process::exit(1);

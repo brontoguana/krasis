@@ -1,4 +1,7 @@
 // Private, explicitly admitted diagnostic. No serving dispatch changes.
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 use cudarc::driver::{CudaDevice, DevicePtr, LaunchAsync, LaunchConfig};
 use half::bf16;
 use serde::{Deserialize, Serialize};
@@ -660,6 +663,7 @@ fn run() -> Result<(), String> {
     }
 }
 fn main() {
+    build_optimisations::print_startup();
     if let Err(e) = run() {
         eprintln!("{e}");
         std::process::exit(1)

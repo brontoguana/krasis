@@ -1,3 +1,4 @@
+pub mod optimisations;
 pub mod adaptive_cold_drop;
 mod bf16_row_projection;
 mod capture_phase;
@@ -89,6 +90,8 @@ use pyo3::prelude::*;
 /// Krasis — hybrid LLM MoE runtime
 #[pymodule]
 fn krasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    optimisations::print_startup();
+    m.add("optimisation_manifest", optimisations::manifest())?;
     let _ = env_logger::try_init();
     m.add_function(wrap_pyfunction!(owned_cuda_warmup::warmup_int8_cuda, m)?)?;
     m.add_class::<moe::KrasisEngine>()?;

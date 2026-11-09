@@ -1,6 +1,10 @@
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 use std::path::PathBuf;
 
 fn main() {
+    build_optimisations::print_startup();
     let mut args = std::env::args().skip(1);
     let Some(manifest) = args.next() else {
         eprintln!("Usage: expert_hqq_cache_generate <manifest.json>");

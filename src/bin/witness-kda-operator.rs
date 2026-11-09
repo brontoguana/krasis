@@ -1,4 +1,7 @@
 // Explicit reference-only GGML operator execution; never linked into serving.
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 #[cfg(unix)]
 mod probe {
     use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
@@ -413,6 +416,7 @@ mod probe {
     }
 }
 fn main() {
+    build_optimisations::print_startup();
     #[cfg(unix)]
     if let Err(e) = probe::run() {
         eprintln!("{e}");

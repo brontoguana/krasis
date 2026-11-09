@@ -5,6 +5,9 @@
 //! 12 KiB D2H request and consumes the peer's 12 KiB H2D response on one CUDA
 //! stream, so every sample covers the actual request/response critical path.
 
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 #[cfg(not(has_peer_rtt_kernels))]
 compile_error!("peer-rtt requires nvcc-built peer RTT kernels");
 
@@ -463,6 +466,7 @@ mod probe {
 
 #[cfg(has_peer_rtt_kernels)]
 fn main() {
+    build_optimisations::print_startup();
     if let Err(error) = probe::main() {
         eprintln!("ERROR: {error}");
         std::process::exit(1);

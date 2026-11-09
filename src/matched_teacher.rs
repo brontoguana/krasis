@@ -212,6 +212,10 @@ fn parse(raw: &[u8]) -> Result<Plan, String> {
     if matches!(p.arithmetic,Arithmetic::CenteredNativeProjection) != p.centered_module.is_some() || (p.centered_module.is_some() && p.schema!=1) { return Err("centered projection teacher requires schema1 and explicit center identity; older modes forbid it".into()); }
     let mut labels = HashSet::new();
     for t in &p.trials {
+        if t.attention_execution.is_some() || t.prefill_attention_execution.is_some()
+            || t.indexer_projection_execution.is_some() || t.index_score_execution.is_some() {
+            return Err("runtime treatment overrides are retired; rebuild with compile-time optimisation switches".into());
+        }
         if t.index_score_execution.is_some_and(|v|v>1)
             || (t.index_score_execution.is_some() && (!t.raw_input || !matches!(p.arithmetic,Arithmetic::NativeServingDecode))) {
             return Err("index score intervention requires modes 0/1 and native serving raw history".into());
@@ -599,13 +603,13 @@ mod tests {
         let base=json!({"schema":2,"arithmetic":"native_serving_decode","defer_step_proofs":true,"directory":"/tmp/replay","loaded_native":{"path":"/tmp/native","sha256":"a".repeat(64)},"identities":[{"path":"/tmp/config","sha256":"b".repeat(64)}],"trials":[{"raw_input":true,"label":"fixed","logical_tokens":2,"expected_sequence_start":0,"max_tokens":3,"input_ids_sha256":"c".repeat(64),"forced_inputs":[4,5]}]});
         assert!(parse(&serde_json::to_vec(&base).unwrap()).is_ok());
         for key in ["defer_step_proofs","raw_input"] {let mut p=base.clone();if key=="raw_input"{p["trials"][0][key]=json!(false);}else{p[key]=json!(false);}assert!(parse(&serde_json::to_vec(&p).unwrap()).is_err());}
-        for mode in [0,1,2] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
-        for mode in [0,1] { let mut q=base.clone();q["trials"][0]["index_score_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
+        for mode in [0,1,2] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
+        for mode in [0,1] { let mut q=base.clone();q["trials"][0]["index_score_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
         for mode in [2,255] { let mut q=base.clone();q["trials"][0]["index_score_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
-        for mode in [0,1] { let mut q=base.clone();q["trials"][0]["indexer_projection_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
+        for mode in [0,1] { let mut q=base.clone();q["trials"][0]["indexer_projection_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
         for mode in [2,3,255] { let mut q=base.clone();q["trials"][0]["indexer_projection_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
         for mode in [3,255] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
-        for mode in [0,2,3] { let mut q=base.clone();q["trials"][0]["attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
+        for mode in [0,2,3] { let mut q=base.clone();q["trials"][0]["attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
         for mode in [1,5,6,255] { let mut q=base.clone();q["trials"][0]["attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
         let mut q=base.clone();q["arithmetic"]=json!("native");q["trials"][0]["attention_execution"]=json!(3);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err());
         assert!(Arithmetic::NativeServingDecode.validate_environment(None,None).is_ok());

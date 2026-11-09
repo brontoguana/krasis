@@ -1,4 +1,7 @@
 //! Exact source-record ablation assembly and independent verification via ./dev.
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 #[path = "../weights/mixed_precision.rs"]
 mod mixed_precision;
 #[path = "../weights/scales_ablation.rs"]
@@ -336,6 +339,7 @@ fn run(mode: &str, plan_path: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 fn main() {
+    build_optimisations::print_startup();
     let args: Vec<_> = std::env::args().collect();
     if std::env::var("KRASIS_DEV_SCRIPT").as_deref() != Ok("1") {
         eprintln!("use ./dev scales-only");

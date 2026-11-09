@@ -1,3 +1,6 @@
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 #[path = "../sequence_copy_completion.rs"]
 mod completion;
 use krasis::vram_monitor;
@@ -511,6 +514,7 @@ mod operator {
     }
 }
 fn main() {
+    build_optimisations::print_startup();
     if let Err(e) = operator::entry() {
         eprintln!("{e}");
         std::process::exit(1)

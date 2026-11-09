@@ -2,6 +2,9 @@
 //! expert cache bytes.  This command is intentionally offline: it mmaps the
 //! canonical cache, samples real experts, and performs no model execution.
 
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 use libloading::Library;
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
@@ -297,6 +300,7 @@ impl Default for Histograms {
 }
 
 fn main() {
+    build_optimisations::print_startup();
     if let Err(error) = run() {
         eprintln!("ERROR: {error}");
         std::process::exit(1);

@@ -13466,3 +13466,10 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
 Enable supported exact sparse attention, ordered absorption, FP32 prefill attention, tiled indexer projection, index-score row bands and radix selection by default, preserving explicit controls and geometry fallbacks. Integrate arithmetic-preserving recurrence partial-array lifetime simplification. Bind effective defaults into heatmap identity. Approximate paths remain under active qualification; no release or ADQ claim.
 
 Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: complete medians 21.665/41.255/125.337 → 20.633/35.363/100.466 seconds. All 29,736,960 logits and 1,417,804,736 registered-state bytes match; existing lifecycle smoke checks pass. Sampled reserve floors are 938/920 MiB. This is relative regression evidence, not new ADQ/model admission; installed binaries remain preserved.
+
+## 2026-11-09 — Compile-time optimisation isolation
+
+- Add central named Boolean registry, validated build overrides, dependency checks and effective manifest.
+- Migrate seven cumulative exact defaults to build selection; restore the earlier recurrence body when disabled.
+- Add `dev build-variant` while retaining existing build memory limits and incremental cache.
+- Validated default/all-off builds against retained complete proofs at 3K/16K/65K: all 59,473,920 logits and 2,835,609,472 state bytes match. Both short cache lifecycle suites pass; 30/30 preservation checks pass. No ADQ or release qualification is claimed.

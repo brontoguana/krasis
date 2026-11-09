@@ -18,76 +18,44 @@ class Glm53HeatmapControlsTest(unittest.TestCase):
         with patch.object(server, '_runtime_heatmap_capture_config', return_value={'base': 1}):
             return server._actual_runtime_heatmap_capture_config(model, SimpleNamespace())
 
-    def test_value_reassociation_treatment_is_bound_and_cannot_be_ignored(self):
-        with patch.dict(os.environ, {}, clear=True):
-            baseline = self.capture(False)
-        with patch.dict(os.environ, {"KRASIS_PREFILL_MLA_VALUE_REASSOC": "1"}, clear=True):
-            actual = self.capture(False)
-            self.assertEqual(actual["prefill_mla_value_reassociation_control"], "1")
+    def setUp(self):
+        self.compiled = dict(EXACT_ATTENTION=True, ORDERED_ABSORPTION=True,
+            PREFILL_F32=True, INDEXER_QUERY_TILE=True, INDEX_SCORE_ROW_BANDS=True,
+            INDEX_RADIX_TOPK=True, KDA_RELAY=True,
+            VALUE_REASSOCIATION=False, TENSOR_DECODE_ATTENTION=False, TENSOR_ABSORPTION=False)
+        self.patcher = patch.object(server, '_compiled_optimisations', side_effect=lambda: dict(self.compiled))
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+
+    def test_compiled_set_cannot_be_ignored(self):
+        baseline = self.capture(False)
+        for name in self.compiled:
+            original = self.compiled[name]
+            self.compiled[name] = not original
+            current = self.capture(False)
+            self.assertNotEqual(current, baseline)
             self.assertFalse(server._runtime_matches_approved_heatmap_policy(
-                actual, [baseline], {"ignored_runtime_fields": ["prefill_mla_value_reassociation_control"]})[0])
-        with patch.dict(os.environ, {"KRASIS_PREFILL_MLA_VALUE_REASSOC": "invalid"}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "Invalid KRASIS_PREFILL_MLA_VALUE_REASSOC"):
-                self.capture(False)
+                current, [baseline], {'ignored_runtime_fields': ['compiled_optimisations']})[0])
+            self.compiled[name] = original
 
-    def test_prepared_attention_plan_identity_cannot_be_ignored(self):
-        identity = {"format": "prefill_mla_f32_v1", "sealed": True, "plans": []}
-        with patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": "1"}, clear=True):
-            actual = self.capture(False, identity)
-        self.assertTrue(server._runtime_matches_approved_heatmap_policy(actual, [actual], {})[0])
-        changed = {**actual, "prefill_mla_f32_identity": {**identity, "plans": [{"plan": "different"}]}}
+    def test_retired_runtime_controls_cannot_change_build(self):
+        baseline = self.capture(False)
+        for key in ['KRASIS_PREFILL_MLA_F32', 'KRASIS_INDEXER_QUERY_TILE',
+                    'KRASIS_PREFILL_INDEX_SCORE_ROW_BANDS', 'KRASIS_PREFILL_MLA_VALUE_REASSOC',
+                    'KRASIS_MLA_K6_SPLIT', 'KRASIS_PREFILL_MLA_ABSORB']:
+            with patch.dict(os.environ, {key: 'invalid'}):
+                self.assertEqual(self.capture(False), baseline)
+
+    def test_prepared_plans_must_be_sealed_and_identity_bound(self):
+        identity = {'format': 'prefill_mla_f32_v1', 'sealed': True, 'plans': []}
+        actual = self.capture(False, identity)
+        changed = {**actual, 'prefill_mla_f32_identity': {**identity, 'plans': [{'plan': 'different'}]}}
         self.assertFalse(server._runtime_matches_approved_heatmap_policy(
-            changed, [actual], {"ignored_runtime_fields": ["prefill_mla_f32_identity"]})[0])
-
-    def test_indexer_treatment_identity_is_bound_and_cannot_be_ignored(self):
-        with patch.dict(os.environ, {"KRASIS_INDEXER_QUERY_TILE": "0"}, clear=True):
-            baseline = self.capture(False)
-        with patch.dict(os.environ, {"KRASIS_INDEXER_QUERY_TILE": "1"}, clear=True):
-            candidate = self.capture(False)
-        self.assertEqual(candidate["indexer_query_tile_control"], "1")
-        self.assertNotEqual(candidate, baseline)
-        self.assertFalse(server._runtime_matches_approved_heatmap_policy(
-            candidate, [baseline], {"ignored_runtime_fields": ["indexer_query_tile_control"]})[0])
-
-    def test_prefill_treatment_binds_non_glm_fallback_and_finalized_plans(self):
-        identity = {"format": "prefill_mla_f32_v1", "sealed": True, "plans": []}
-        with patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": "1"}, clear=True):
-            actual = self.capture(False, identity)
-            self.assertEqual(actual["prefill_mla_f32_control"], "1")
-            self.assertEqual(actual["prefill_mla_f32_identity"], identity)
-            with self.assertRaisesRegex(RuntimeError, "not finalized"):
-                self.capture(False, {**identity, "sealed": False})
-            with self.assertRaisesRegex(RuntimeError, "not finalized"):
-                self.capture(False, {**identity, "format": "unknown"})
-        with patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": "0"}, clear=True):
-            self.assertEqual(self.capture(False), {"base": 1, "prefill_mla_f32_control": "0", "indexer_query_tile_control": "1", "index_score_row_bands_control": "1"})
-
-    def test_prefill_boolean_aliases_require_finalized_identity(self):
-        identity = {"format": "prefill_mla_f32_v1", "sealed": True, "plans": []}
-        for raw in ["1", "true", "yes", "on", " TRUE ", " On "]:
-            with self.subTest(raw=raw), patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": raw}, clear=True):
-                self.assertTrue(server._prefill_mla_f32_enabled())
-                self.assertEqual(self.capture(False, identity)["prefill_mla_f32_identity"], identity)
-                with self.assertRaisesRegex(RuntimeError, "not finalized"):
-                    self.capture(False, {**identity, "sealed": False})
-        for raw in ["0", "false", "no", "off", " FALSE ", " Off "]:
-            with self.subTest(raw=raw), patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": raw}, clear=True):
-                self.assertFalse(server._prefill_mla_f32_enabled())
-                self.assertEqual(self.capture(False), {"base": 1, "prefill_mla_f32_control": raw, "indexer_query_tile_control": "1", "index_score_row_bands_control": "1"})
-
-    def test_invalid_prefill_boolean_fails_before_loading(self):
-        for raw in ["", "2", "enabled", "invalid"]:
-            with self.subTest(raw=raw), patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": raw}, clear=True):
-                with self.assertRaisesRegex(RuntimeError, "Invalid KRASIS_PREFILL_MLA_F32"):
-                    server._prefill_mla_f32_enabled()
-
-    def test_default_and_other_architectures_keep_compatibility_shape(self):
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(self.capture()['prefill_transfer_policy'], {
-                'version': 4, 'phase_arena': '1', 'shared_source_reclaim': '1', 'hqq_packed_components': '1', 'joint_planner': '1', 'compact_pure_kda': '1', 'shared_overlap_eligible': '1'})
-        with patch.dict(os.environ, {'KRASIS_GLM53_PRESERVE_NUMERIC_F32': '1'}, clear=True):
-            self.assertNotIn('experimental_glm53_controls', self.capture(False))
-            self.assertEqual(self.capture(False)['indexer_query_tile_control'], '1')
+            changed, [actual], {'ignored_runtime_fields': ['prefill_mla_f32_identity']})[0])
+        with self.assertRaisesRegex(RuntimeError, 'not finalized'):
+            self.capture(False, {**identity, 'sealed': False})
+        self.compiled['PREFILL_F32'] = False
+        self.assertNotIn('prefill_mla_f32_identity', self.capture(False))
 
     def test_control_switch_rejects_other_treatment_even_under_ignore_policy(self):
         for key, value in [('KRASIS_PREFILL_PHASE_ARENA', '0'),
@@ -119,20 +87,6 @@ class Glm53HeatmapControlsTest(unittest.TestCase):
                 self.assertFalse(server._runtime_matches_approved_heatmap_policy(current,[baseline],None)[0])
                 self.assertFalse(server._runtime_matches_approved_heatmap_policy(current,[baseline],
                     {'ignored_runtime_fields':['experimental_glm53_controls']})[0])
-
-    def test_cumulative_defaults_bind_plans_and_explicit_optouts(self):
-        with patch.dict(os.environ, {}, clear=True):
-            current = self.capture()
-            self.assertTrue(server._prefill_mla_f32_enabled())
-            self.assertEqual(current['experimental_glm53_controls']['KRASIS_MLA_K6_SPLIT'], '3')
-            self.assertEqual(current['experimental_glm53_controls']['KRASIS_PREFILL_MLA_ABSORB'], '2')
-            self.assertEqual(current['index_score_row_bands_control'], '1')
-            for field in ['index_score_row_bands_control', 'indexer_query_tile_control']:
-                other = {**current, field: '0'}
-                self.assertFalse(server._runtime_matches_approved_heatmap_policy(
-                    current, [other], {'ignored_runtime_fields': [field]})[0])
-        with patch.dict(os.environ, {'KRASIS_PREFILL_MLA_F32': '0'}, clear=True):
-            self.assertFalse(server._prefill_mla_f32_enabled())
 
     def test_transfer_policy_cannot_be_ignored(self):
         with patch.dict(os.environ, {}, clear=True):

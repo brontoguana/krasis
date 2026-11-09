@@ -6,6 +6,9 @@
 //! real pageable-RAM restore rather than the active-GPU fast path. Cache-off
 //! runs bracket the cache-on run to expose process-local timing drift.
 
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -47,6 +50,7 @@ struct ConversationRun {
 }
 
 fn main() {
+    build_optimisations::print_startup();
     if let Err(error) = run() {
         eprintln!("session-cache benchmark failed: {error}");
         std::process::exit(1);

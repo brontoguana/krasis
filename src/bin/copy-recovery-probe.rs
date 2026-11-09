@@ -1,4 +1,7 @@
 //! Installed HTTP controls. Run through ./dev copy-recovery-probe only.
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 #[path = "session_cache_benchmark/evidence.rs"]
 mod evidence;
 use evidence::{save, Client};
@@ -8,6 +11,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
 fn main() {
+    build_optimisations::print_startup();
     if let Err(e) = run() {
         eprintln!("copy recovery probe: {e}");
         std::process::exit(1)

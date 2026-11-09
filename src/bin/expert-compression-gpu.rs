@@ -1,5 +1,8 @@
 //! Real-data correctness and throughput gate for the GPU expert entropy codec.
 
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 #[cfg(not(has_expert_codec_kernels))]
 compile_error!("expert-compression-gpu requires nvcc-built expert codec kernels");
 
@@ -842,6 +845,7 @@ mod probe {
 
 #[cfg(has_expert_codec_kernels)]
 fn main() {
+    build_optimisations::print_startup();
     if let Err(error) = probe::main() {
         eprintln!("ERROR: {error}");
         std::process::exit(1);

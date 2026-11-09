@@ -1,3 +1,6 @@
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 #[path = "../reference_rounding.rs"]
 mod reference_rounding;
 use cudarc::driver::{CudaDevice, DevicePtr, LaunchAsync, LaunchConfig};
@@ -370,7 +373,8 @@ fn run() -> Result<(),String> {
     println!("Matched arithmetic evidence saved: {} (diagnostic collection, not qualification)",out.display());
     Ok(())
 }
-fn main() { if let Err(e)=run() {eprintln!("{e}");std::process::exit(1)} }
+fn main() {
+    build_optimisations::print_startup(); if let Err(e)=run() {eprintln!("{e}");std::process::exit(1)} }
 
 #[cfg(test)]
 mod tests {

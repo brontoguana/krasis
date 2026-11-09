@@ -1,3 +1,6 @@
+#[path = "../optimisations.rs"]
+#[allow(dead_code)]
+mod build_optimisations;
 use half::bf16;
 use memmap2::Mmap;
 use serde_json::json;
@@ -150,6 +153,7 @@ fn map(path: &Path) -> Result<Mmap> {
 }
 
 fn main() {
+    build_optimisations::print_startup();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = (|| {
         if args.len() != 2 {

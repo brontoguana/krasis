@@ -3,6 +3,7 @@
 # Krasis dev helper — single entry point for build, run, test, benchmark.
 #
 # Usage:
+#   ./dev build-variant DISABLE_LIST [ENABLE_LIST]  Rebuild with compile-time switches
 #   ./dev build                     Rebuild Rust extension into this repo only
 #   ./dev build-sidecars            Build Marlin/FlashAttention package sidecars
 #   ./dev verify-sidecars           Verify package sidecar manifest and hashes
@@ -5188,6 +5189,10 @@ shift || true
 
 dispatch_dev_command() {
 case "$cmd" in
+    build-variant)
+        [[ $# -ge 1 ]] || err "Usage: ./dev build-variant DISABLE_LIST [ENABLE_LIST]"
+        export KRASIS_OPT_DISABLE="$1" KRASIS_OPT_ENABLE="${2:-}"
+        do_build ;;
     build)          do_build ;;
     build-fla)      [[ $# == 0 ]] || err "build-fla takes no arguments"; do_build_fla ;;
     fla-wrapper-test) [[ $# == 0 ]] || err "fla-wrapper-test takes no arguments"; KRASIS_DEV_SCRIPT=1 "$PYTHON" "$SCRIPT_DIR/tests/test_fla_context_wrapper.py" ;;
