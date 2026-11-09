@@ -422,6 +422,15 @@ fn dsa_mla_gathered_wvc_enabled(gathered_attention_enabled: bool) -> Result<bool
         .unwrap_or(gathered_attention_enabled))
 }
 
+// Complete request qualification covers this selected-row geometry.
+fn prefill_mla_f32_geometry(
+    kv: u32, heads: usize, nope: usize, rope: usize,
+    width: usize, slots: usize, scale: f32,
+) -> bool {
+    kv == 7 && heads == 64 && nope == 256 && rope == 0
+        && width == 512 && slots == 2051 && scale == 0.0625
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DsaMlaGatheredComputeMode {
     Pedantic,
@@ -6523,6 +6532,8 @@ pub struct PrefillKernels {
     mla_prefill_gather_query_k6_f32: RawCuFunc,
     mla_prefill_gather_query_k4_f32_structured: RawCuFunc,
     mla_prefill_gather_query_k6_f32_structured: RawCuFunc,
+    mla_prefill_gather_k6_no_mask: RawCuFunc,
+    mla_prefill_masked_softmax_f32: RawCuFunc,
     mla_prefill_softmax_weights_warp_f32: RawCuFunc,
     mla_prefill_pack_attention_head_major_bf16: RawCuFunc,
     mla_prefill_scatter_wvc_head_major_bf16: RawCuFunc,
@@ -11718,6 +11729,7 @@ pub struct PrefillEngine {
     /// unset; the HTTP server installs it only for an active streaming prefill.
     pub prefill_cancel_signal: Option<Arc<AtomicBool>>,
     pub(crate) dsa_prefill_workspace: Option<DsaPrefillRequestWorkspace>,
+    pub(crate) prefill_mla_lt: RefCell<crate::prefill_mla_lt::Cache>,
     pub(crate) dsa_mla_gather_autotune:
         RefCell<std::collections::HashMap<DsaMlaGatherAutotuneKey, DsaMlaGatherMode>>,
     pub(crate) prefill_prescan_accuracy_enabled: bool,
@@ -46419,6 +46431,11 @@ impl PrefillEngine {
             ));
         }
 
+        let requested=match crate::matched_teacher::active_prefill_attention_execution(){
+            Some(mode)=>mode==1,None=>optional_bool_env("KRASIS_PREFILL_MLA_F32")?.unwrap_or(false),
+        };
+        let fused_mask=requested&&rows>=32&&prefill_mla_f32_geometry(self.kv_format,num_heads,nope_dim,rope_dim,ckv_cache_dim,selected.selected_per_row,sm_scale)
+            &&dsa_mla_gathered_compute_mode()?==DsaMlaGatheredComputeMode::Pedantic;
         let workspace = self
             .dsa_prefill_workspace
             .as_ref()
@@ -46680,7 +46697,7 @@ impl PrefillEngine {
         let run_result = (|| -> Result<(), String> {
 
             let alpha_score = sm_scale;
-            let beta_score = 1.0f32;
+            let beta_score = if fused_mask {0.0f32}else{1.0f32};
             let alpha_output = 1.0f32;
             let beta_output = 0.0f32;
             let mut tile_start = 0usize;
@@ -46701,7 +46718,7 @@ impl PrefillEngine {
                     ckv_cache_dim,
                     combined_dim,
                 };
-                let mut gather_mode = match gather_policy {
+                let mut gather_mode = if fused_mask {Some(DsaMlaGatherMode::Structured)}else{match gather_policy {
                     DsaMlaGatherMode::Auto => self
                         .dsa_mla_gather_autotune
                         .borrow()
@@ -46709,7 +46726,7 @@ impl PrefillEngine {
                         .copied(),
                     DsaMlaGatherMode::Flat => Some(DsaMlaGatherMode::Flat),
                     DsaMlaGatherMode::Structured => Some(DsaMlaGatherMode::Structured),
-                };
+                }};
                 let gather_work = tile_rows
                     .checked_mul(gathered_elements_per_row)
                     .and_then(|value| {
@@ -46745,6 +46762,17 @@ impl PrefillEngine {
                     )
                     })?;
                 let launch_gather = |mode: DsaMlaGatherMode| -> Result<(), String> {
+                    if fused_mask {
+                        let mut a0=gathered;let mut a1=query;
+                        let mut a2=q_absorbed+(tile_start*query_elements_per_row*4)as u64;
+                        let mut a3=ckv_cache;let mut a4=selected.ptr+(tile_start*selected.selected_per_row*4)as u64;
+                        let mut a5=positions+(tile_start*4)as u64;let mut a6=selected_i32;
+                        let mut a7=i32::try_from(max_context).map_err(|_|"prefill mask context exceeds i32")?;
+                        unsafe {launch(self.kernels.mla_prefill_gather_k6_no_mask,
+                            (selected.selected_per_row.max(num_heads).div_ceil(8)as u32,tile_rows as u32,1),(256,1,1),0,self.stream,
+                            &mut [&mut a0 as *mut _ as *mut _,&mut a1 as *mut _ as *mut _,&mut a2 as *mut _ as *mut _,&mut a3 as *mut _ as *mut _,&mut a4 as *mut _ as *mut _,&mut a5 as *mut _ as *mut _,&mut a6 as *mut _ as *mut _,&mut a7 as *mut _ as *mut _])?;}
+                        return Ok(());
+                    }
                     let (kernel, grid_blocks) = match mode {
                         DsaMlaGatherMode::Auto => {
                             return Err(format!(
@@ -46874,7 +46902,7 @@ impl PrefillEngine {
                 } else {
                     None
                 };
-                unsafe {
+                let mut score_classic=||->Result<(),String>{unsafe{
                     cublas_result::gemm_strided_batched_ex(
                         self.cublas_handle,
                         cublas_sys::cublasOperation_t::CUBLAS_OP_T,
@@ -46905,7 +46933,22 @@ impl PrefillEngine {
                             "DSA MLA gathered-GEMM layer {layer_idx} score GEMM tile_start={tile_start} tile_rows={tile_rows}: {error:?}"
                         )
                     })?;
-                }
+                    Ok(())
+                }};
+                let score_lt=if fused_mask&&tile_rows==32&&selected.selected_per_row==2051
+                    &&cublas_workspace_bytes>=crate::prefill_mla_lt::WORKSPACE_CAP {
+                    use crate::stable_mla_gemm::{Element,Matrix,Shape,Span};
+                    let a=unsafe{Span::region(&workspace.d_selection_workspace,0,(tile_rows*gathered_elements_per_row)*4,Element::F32)?};
+                    let b=unsafe{Span::region(&workspace.d_selection_workspace,query_offset,(tile_rows*query_elements_per_row)*4,Element::F32)?};
+                    let out=unsafe{Span::region(&workspace.d_selection_workspace,score_offset,(tile_rows*score_elements_per_row)*4,Element::F32)?};
+                    let work=unsafe{Span::region(&self.scratch.d_moe_accum,0,crate::prefill_mla_lt::WORKSPACE_CAP,Element::F32)?};
+                    let shape=Shape{a:Matrix{rows:combined_dim,cols:selected.selected_per_row,leading:combined_dim,batch:tile_rows,stride:gathered_elements_per_row},
+                        b:Matrix{rows:combined_dim,cols:num_heads,leading:combined_dim,batch:tile_rows,stride:query_elements_per_row},
+                        c:Matrix{rows:selected.selected_per_row,cols:num_heads,leading:selected.selected_per_row,batch:tile_rows,stride:score_elements_per_row},transpose_a:true,transpose_b:false};
+                    unsafe{self.prefill_mla_lt.borrow_mut().enqueue(self.device.clone(),shape,&a,&b,&out,&work,
+                        alpha_score,beta_score,self.stream,max_context.saturating_sub(rows)+tile_start>=selected.selected_per_row,&mut score_classic)?}
+                }else{false};
+                if !score_lt{score_classic()?;}
                 if let Some(started) = score_started {
                     self.stream_sync()?;
                     gathered_substage_ms[1] += started.elapsed().as_secs_f64() * 1000.0;
@@ -46926,6 +46969,14 @@ impl PrefillEngine {
                 } else {
                     None
                 };
+                if fused_mask {
+                    let mut ids=selected.ptr+(tile_start*selected.selected_per_row*4)as u64;
+                    let mut pos=positions+(tile_start*4)as u64;
+                    let mut context=i32::try_from(max_context).map_err(|_|"prefill softmax context exceeds i32")?;
+                    unsafe{launch(self.kernels.mla_prefill_masked_softmax_f32,
+                        (softmax_rows.div_ceil(WARPS_PER_BLOCK)as u32,1,1),(256,1,1),0,self.stream,
+                        &mut [&mut s0 as *mut _ as *mut _,&mut s1 as *mut _ as *mut _,&mut ids as *mut _ as *mut _,&mut pos as *mut _ as *mut _,&mut s2 as *mut _ as *mut _,&mut s4 as *mut _ as *mut _,&mut context as *mut _ as *mut _])?;}
+                }else{
                 unsafe {
                     launch(
                         self.kernels.mla_prefill_softmax_weights_warp_f32,
@@ -46951,6 +47002,7 @@ impl PrefillEngine {
                             &mut s4 as *mut _ as *mut std::ffi::c_void,
                         ],
                     )?;
+                }
                 }
                 if let Some(started) = softmax_started {
                     self.stream_sync()?;
@@ -46986,7 +47038,7 @@ impl PrefillEngine {
                 } else {
                     None
                 };
-                unsafe {
+                let mut value_classic=||->Result<(),String>{unsafe{
                     cublas_result::gemm_strided_batched_ex(
                         self.cublas_handle,
                         cublas_sys::cublasOperation_t::CUBLAS_OP_N,
@@ -47017,7 +47069,23 @@ impl PrefillEngine {
                             "DSA MLA gathered-GEMM layer {layer_idx} output GEMM tile_start={tile_start} tile_rows={tile_rows}: {error:?}"
                         )
                     })?;
-                }
+                    Ok(())
+                }};
+                let value_lt=if fused_mask&&tile_rows==32&&selected.selected_per_row==2051
+                    &&cublas_workspace_bytes>=crate::prefill_mla_lt::WORKSPACE_CAP {
+                    use crate::stable_mla_gemm::{Element,Matrix,Shape,Span};
+                    let a=unsafe{Span::region(&workspace.d_selection_workspace,0,(tile_rows*gathered_elements_per_row)*4,Element::F32)?};
+                    let b=unsafe{Span::region(&workspace.d_selection_workspace,weight_offset,(tile_rows*score_elements_per_row)*4,Element::F32)?};
+                    let out=unsafe{Span::region(&workspace.d_mla_attention,tile_start*output_elements_per_row*4,tile_rows*output_elements_per_row*4,Element::F32)?};
+                    if out.pointer()!=tile_output{return Err("prefill Lt output differs from actual retained owner".into());}
+                    let work=unsafe{Span::region(&self.scratch.d_moe_accum,0,crate::prefill_mla_lt::WORKSPACE_CAP,Element::F32)?};
+                    let shape=Shape{a:Matrix{rows:ckv_cache_dim,cols:selected.selected_per_row,leading:combined_dim,batch:tile_rows,stride:gathered_elements_per_row},
+                        b:Matrix{rows:selected.selected_per_row,cols:num_heads,leading:selected.selected_per_row,batch:tile_rows,stride:score_elements_per_row},
+                        c:Matrix{rows:ckv_cache_dim,cols:num_heads,leading:ckv_cache_dim,batch:tile_rows,stride:output_elements_per_row},transpose_a:false,transpose_b:false};
+                    unsafe{self.prefill_mla_lt.borrow_mut().enqueue(self.device.clone(),shape,&a,&b,&out,&work,
+                        alpha_output,beta_output,self.stream,max_context.saturating_sub(rows)+tile_start>=selected.selected_per_row,&mut value_classic)?}
+                }else{false};
+                if !value_lt{value_classic()?;}
                 if let Some(started) = output_started {
                     self.stream_sync()?;
                     gathered_substage_ms[3] += started.elapsed().as_secs_f64() * 1000.0;
@@ -47062,6 +47130,7 @@ impl PrefillEngine {
                 gathered_substage_ms[3],
             );
         }
+        if fused_mask&&run_result.is_ok(){crate::matched_teacher::record_prefill_attention(rows,gathered_tile_count,used_bytes);}
         run_result
     }
 
@@ -82033,6 +82102,8 @@ impl PrefillKernels {
                     "mla_prefill_gather_query_k6_f32_kernel",
                     "mla_prefill_gather_query_k4_f32_structured_kernel",
                     "mla_prefill_gather_query_k6_f32_structured_kernel",
+                    "mla_prefill_gather_k6_no_mask",
+                    "mla_prefill_masked_softmax_f32",
                     "mla_prefill_softmax_weights_warp_f32_kernel",
                     "mla_prefill_pack_attention_head_major_bf16_kernel",
                     "mla_prefill_scatter_wvc_head_major_bf16_kernel",
@@ -82570,6 +82641,8 @@ impl PrefillKernels {
             mla_prefill_gather_query_k6_f32_structured: get(
                 "mla_prefill_gather_query_k6_f32_structured_kernel",
             )?,
+            mla_prefill_gather_k6_no_mask: get("mla_prefill_gather_k6_no_mask")?,
+            mla_prefill_masked_softmax_f32: get("mla_prefill_masked_softmax_f32")?,
             mla_prefill_softmax_weights_warp_f32: get(
                 "mla_prefill_softmax_weights_warp_f32_kernel",
             )?,
@@ -86503,6 +86576,8 @@ mod kernel_tests {
                     "mla_prefill_gather_query_k6_f32_kernel",
                     "mla_prefill_gather_query_k4_f32_structured_kernel",
                     "mla_prefill_gather_query_k6_f32_structured_kernel",
+                    "mla_prefill_gather_k6_no_mask",
+                    "mla_prefill_masked_softmax_f32",
                     "mla_prefill_softmax_weights_warp_f32_kernel",
                     "mla_prefill_pack_attention_head_major_bf16_kernel",
                     "mla_prefill_scatter_wvc_head_major_bf16_kernel",

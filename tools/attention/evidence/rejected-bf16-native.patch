@@ -1,0 +1,421 @@
+diff --git a/build.rs b/build.rs
+index 00213ec..bfd60f0 100644
+--- a/build.rs
++++ b/build.rs
+@@ -394,6 +394,7 @@ fn compile_cuda_kernels() {
+ }
+ 
+ fn compile_prefill_kernels() {
++    println!("cargo:rerun-if-changed=src/cuda/mla_prefill_bf16.cuh");
+     let cu_src = "src/cuda/prefill_kernels.cu";
+     let shim_header = "src/cuda/prefill_shim.h";
+     let deepseek_v4_hc_header = "src/cuda/deepseek_v4_hc.cuh";
+@@ -417,6 +418,7 @@ fn compile_prefill_kernels() {
+     if is_output_fresh(
+         &[
+             cu_src,
++            "src/cuda/mla_prefill_bf16.cuh",
+             shim_header,
+             deepseek_v4_hc_header,
+             deepseek_v4_attention_header,
+diff --git a/python/krasis/server.py b/python/krasis/server.py
+index 400a824..f31b9c3 100644
+--- a/python/krasis/server.py
++++ b/python/krasis/server.py
+@@ -488,6 +488,7 @@ def _krasis_runtime_code_hash() -> dict[str, Any]:
+         "src/weights/mixed_precision.rs",
+         "src/cuda/decode_kernels.cu",
+         "src/cuda/prefill_kernels.cu",
++        "src/cuda/mla_prefill_bf16.cuh",
+     ]
+     h = hashlib.sha256()
+     hashed_files: list[str] = []
+@@ -693,6 +694,7 @@ def _actual_runtime_heatmap_capture_config(model: KrasisModel, args) -> dict[str
+             "KRASIS_DECODE_V4_INDEX_RADIX_TOPK",
+             "KRASIS_PREFILL_MLA_TENSOR_ABSORB",
+             "KRASIS_PREFILL_MLA_ABSORB",
++            "KRASIS_PREFILL_MLA_BF16_RESIDUAL",
+             "KRASIS_CPU_TAIL_HOST_TIMING",
+             "KRASIS_MLA_HOST_BACKED_BACKEND",
+             "KRASIS_CPU_TAIL_RACE",
+diff --git a/src/cuda/mla_prefill_bf16.cuh b/src/cuda/mla_prefill_bf16.cuh
+new file mode 100644
+index 0000000..87f4182
+--- /dev/null
++++ b/src/cuda/mla_prefill_bf16.cuh
+@@ -0,0 +1,53 @@
++// Bounded K6 unpacking and high/residual BF16 intermediates.
++// Cache bytes, selection order and causal masking are unchanged.
++#pragma once
++namespace mla_bf16 {
++__device__ __forceinline__ void store(__nv_bfloat16* high,__nv_bfloat16* low,long long i,float x){
++ const auto h=__float2bfloat16_rn(x);high[i]=h;low[i]=__float2bfloat16_rn(x-__bfloat162float(h));
++}
++}
++extern "C" __global__ void mla_bf16_unpack(
++ __nv_bfloat16* values,__nv_bfloat16* query,const float* q,const unsigned char* cache,
++ const int* indices,const int* positions,int capacity,int padded_capacity,int context,int rows
++){
++ const int row=blockIdx.y,slot=blockIdx.x*8+threadIdx.x/32,lane=threadIdx.x&31;
++ const long long nv=(long long)rows*padded_capacity*512,nq=(long long)rows*64*512;
++ if(slot<padded_capacity){
++  const int pos=slot<capacity?indices[(long long)row*capacity+slot]:-1;
++  const bool valid=pos>=0 && pos<context && pos<=positions[row];
++  for(int d=lane;d<512;d+=32){
++   float x=valid?mla_prefill_load_k6_value(cache,pos,512,d):0.0f;
++   mla_bf16::store(values,values+nv,((long long)row*padded_capacity+slot)*512+d,x);
++  }
++ }
++ if(slot<64){
++  for(int d=lane;d<512;d+=32){long long i=((long long)row*64+slot)*512+d;mla_bf16::store(query,query+nq,i,q[i]);}
++ }
++}
++extern "C" __global__ void mla_bf16_softmax(
++ __nv_bfloat16* probabilities,const float* scores,const int* indices,const int* positions,
++ float scale,int capacity,int padded_capacity,int context,int rows
++){
++ const int row=blockIdx.y,h=blockIdx.x,tid=threadIdx.x;
++ const long long plane=(long long)rows*64*padded_capacity,base=((long long)row*64+h)*padded_capacity;
++ const int seq=min(max(positions[row]+1,0),context);
++ extern __shared__ float bf16_softmax_shared[];float* reduce=bf16_softmax_shared;float* weight=bf16_softmax_shared+8;
++ float m=-INFINITY;
++ for(int i=tid;i<padded_capacity;i+=256){
++  const int pos=i<capacity?indices[(long long)row*capacity+i]:-1;
++  const float s=pos>=0 && pos<seq?scores[base+i]*scale:-INFINITY;
++  weight[i]=s;m=fmaxf(m,s);
++ }
++ for(int o=16;o;o>>=1)m=fmaxf(m,__shfl_down_sync(0xffffffff,m,o));
++ if((tid&31)==0)reduce[tid/32]=m;
++ __syncthreads();
++ if(tid==0){float v=reduce[0];for(int w=1;w<8;w++)v=fmaxf(v,reduce[w]);reduce[0]=v;}
++ __syncthreads();m=reduce[0];__syncthreads();float sum=0;
++ for(int i=tid;i<padded_capacity;i+=256){float e=isfinite(weight[i])?__expf(weight[i]-m):0;weight[i]=e;sum+=e;}
++ for(int o=16;o;o>>=1)sum+=__shfl_down_sync(0xffffffff,sum,o);
++ if((tid&31)==0)reduce[tid/32]=sum;
++ __syncthreads();
++ if(tid==0){float s=0;for(int w=0;w<8;w++)s+=reduce[w];reduce[0]=s>0?1/s:0;}
++ __syncthreads();
++ for(int i=tid;i<padded_capacity;i+=256)mla_bf16::store(probabilities,probabilities+plane,base+i,weight[i]*reduce[0]);
++}
+diff --git a/src/cuda/prefill_kernels.cu b/src/cuda/prefill_kernels.cu
+index 78f721c..73d10af 100644
+--- a/src/cuda/prefill_kernels.cu
++++ b/src/cuda/prefill_kernels.cu
+@@ -2381,6 +2381,8 @@ __device__ inline float mla_prefill_load_k6_value(
+         (float)(mla_prefill_unpack_k6(packed + 2, element & 15) - 32);
+ }
+ 
++#include "mla_prefill_bf16.cuh"
++
+ __device__ inline float mla_prefill_dot_k6(
+     const unsigned char* cache,
+     int position,
+diff --git a/src/gpu_prefill.rs b/src/gpu_prefill.rs
+index 1c7abbd..dd9e95b 100644
+--- a/src/gpu_prefill.rs
++++ b/src/gpu_prefill.rs
+@@ -6523,6 +6523,8 @@ pub struct PrefillKernels {
+     mla_prefill_gather_query_k6_f32: RawCuFunc,
+     mla_prefill_gather_query_k4_f32_structured: RawCuFunc,
+     mla_prefill_gather_query_k6_f32_structured: RawCuFunc,
++    mla_bf16_unpack: RawCuFunc,
++    mla_bf16_softmax: RawCuFunc,
+     mla_prefill_softmax_weights_warp_f32: RawCuFunc,
+     mla_prefill_pack_attention_head_major_bf16: RawCuFunc,
+     mla_prefill_scatter_wvc_head_major_bf16: RawCuFunc,
+@@ -46355,6 +46357,104 @@ impl PrefillEngine {
+         Ok(true)
+     }
+ 
++    // Reuse the owned selection arena, serially on the existing prefill stream.
++    // Each FP32 operand becomes BF16 high/residual planes; three products retain
++    // high*high, high*residual and residual*high with FP32 accumulation.
++    fn try_dsa_mla_bf16_attention(
++        &self, output:u64, q:u64, cache:u64, selected:DsaPrefillSelectedIndexView,
++        positions:u64, rows:usize, heads:usize, rope:usize, width:usize,
++        scale:f32, context:usize,
++    ) -> Result<bool,String> {
++        let enabled=match crate::matched_teacher::active_prefill_attention_execution() {
++            Some(mode)=>mode==1,
++            None=>optional_bool_env("KRASIS_PREFILL_MLA_BF16_RESIDUAL")?.unwrap_or(false),
++        };
++        if !enabled || self.kv_format!=7 || heads!=64 || width!=512 || rope!=0
++            || selected.selected_per_row>4096 || rows<32 { return Ok(false); }
++        let mut device=0;let mut major=0;
++        let cuda=unsafe{cuda_sys::lib()};
++        let status=unsafe{cuda.cuCtxGetDevice(&mut device)};
++        if status!=cuda_sys::CUresult::CUDA_SUCCESS {return Err(format!("prefill tensor device: {status:?}"));}
++        let status=unsafe{cuda.cuDeviceGetAttribute(&mut major,cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,device)};
++        if status!=cuda_sys::CUresult::CUDA_SUCCESS {return Err(format!("prefill tensor capability: {status:?}"));}
++        if major<8 {return Ok(false);}
++        if context>i32::MAX as usize || rows>i32::MAX as usize {return Err("prefill tensor index range exceeds i32".into());}
++        let workspace=self.dsa_prefill_workspace.as_ref().ok_or("prefill tensor requires owned selection workspace")?;
++        let capacity=workspace.selection_workspace_capacity_bytes;
++        let padded=selected.selected_per_row.div_ceil(16)*16;
++        // Four byte-equivalent high/residual planes, all offsets aligned to 256.
++        let row_values=padded*512;let row_query=64*512;let row_scores=64*padded;
++        let row_bytes=(row_values+row_query+2*row_scores)*4;
++        let tile=rows.min(32).min(capacity.saturating_sub(3*255)/row_bytes);
++        if tile==0 {return Ok(false);}
++        let align=|v:usize| (v+255)&!255;
++        let query_offset=align(tile*row_values*4);
++        let scores_offset=align(query_offset+tile*row_query*4);
++        let probabilities_offset=align(scores_offset+tile*row_scores*4);
++        let used=probabilities_offset+tile*row_scores*4;
++        if used>capacity {return Err(format!("prefill tensor workspace {used} exceeds {capacity}"));}
++        let base=*workspace.d_selection_workspace.device_ptr();
++        let query=base.checked_add(query_offset as u64).ok_or("prefill tensor query overflow")?;
++        let scores=base.checked_add(scores_offset as u64).ok_or("prefill tensor score overflow")?;
++        let probabilities=base.checked_add(probabilities_offset as u64).ok_or("prefill tensor probabilities overflow")?;
++        let blas_workspace=*self.scratch.d_moe_accum.device_ptr();
++        let blas_bytes=self.scratch.d_moe_accum.len().checked_mul(4).ok_or("prefill tensor BLAS workspace overflow")?;
++        if blas_workspace==0 || blas_bytes==0 {return Err("prefill tensor requires owned BLAS workspace".into());}
++        let lib=unsafe{cublas_sys::lib()};
++        let mut previous=cublas_sys::cublasMath_t::CUBLAS_DEFAULT_MATH;
++        unsafe {
++            cublas_result::set_stream(self.cublas_handle,self.stream as cublas_sys::cudaStream_t).map_err(|e|format!("prefill tensor stream: {e:?}"))?;
++            if lib.cublasGetMathMode(self.cublas_handle,&mut previous)!=cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {return Err("prefill tensor read math mode".into());}
++            if lib.cublasSetWorkspace_v2(self.cublas_handle,blas_workspace as *mut std::ffi::c_void,blas_bytes)!=cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {return Err("prefill tensor bind workspace".into());}
++        }
++        let result=(|| -> Result<(),String> {
++            if unsafe{lib.cublasSetMathMode(self.cublas_handle,cublas_sys::cublasMath_t::CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION)}!=cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {return Err("prefill tensor requires FP32 partial sums".into());}
++            let one=1f32;let zero=0f32;
++            for start in (0..rows).step_by(tile) {
++                let n=(rows-start).min(tile);
++                let mut v=base;let mut qh=query;
++                let mut qi=q+(start*64*512*4)as u64;let mut cv=cache;
++                let mut ids=selected.ptr+(start*selected.selected_per_row*4)as u64;
++                let mut pos=positions+(start*4)as u64;
++                let mut count=selected.selected_per_row as i32;let mut pad=padded as i32;
++                let mut ctx=context as i32;let mut nr=n as i32;
++                unsafe {launch(self.kernels.mla_bf16_unpack, (padded.max(64).div_ceil(8)as u32,n as u32,1),(256,1,1),0,self.stream,
++                    &mut [&mut v as *mut _ as *mut _,&mut qh as *mut _ as *mut _,&mut qi as *mut _ as *mut _,&mut cv as *mut _ as *mut _,&mut ids as *mut _ as *mut _,&mut pos as *mut _ as *mut _,&mut count as *mut _ as *mut _,&mut pad as *mut _ as *mut _,&mut ctx as *mut _ as *mut _,&mut nr as *mut _ as *mut _])?;}
++                // Plane offsets use the live row count, including the final tail.
++                let value_low=base+(n*row_values*2)as u64;
++                let query_low=query+(n*row_query*2)as u64;
++                for part in 0..3 {
++                    unsafe {cublas_result::gemm_strided_batched_ex(self.cublas_handle,
++                        cublas_sys::cublasOperation_t::CUBLAS_OP_T,cublas_sys::cublasOperation_t::CUBLAS_OP_N,
++                        padded as i32,64,512,&one as *const _ as *const _,
++                        (if part==1{value_low}else{base})as *const _,cublas_sys::cudaDataType::CUDA_R_16BF,512,row_values as i64,
++                        (if part==2{query_low}else{query})as *const _,cublas_sys::cudaDataType::CUDA_R_16BF,512,row_query as i64,
++                        (if part==0{&zero}else{&one})as *const _ as *const _,scores as *mut _,cublas_sys::cudaDataType::CUDA_R_32F,padded as i32,row_scores as i64,n as i32,
++                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP).map_err(|e|format!("prefill tensor score: {e:?}"))?;}
++                }
++                let mut probs=probabilities;let mut score=scores;let mut sm_scale=scale;
++                unsafe {launch(self.kernels.mla_bf16_softmax,(64,n as u32,1),(256,1,1),((padded+8)*4)as u32,self.stream,
++                    &mut [&mut probs as *mut _ as *mut _,&mut score as *mut _ as *mut _,&mut ids as *mut _ as *mut _,&mut pos as *mut _ as *mut _,&mut sm_scale as *mut _ as *mut _,&mut count as *mut _ as *mut _,&mut pad as *mut _ as *mut _,&mut ctx as *mut _ as *mut _,&mut nr as *mut _ as *mut _])?;}
++                let prob_low=probabilities+(n*row_scores*2)as u64;
++                for part in 0..3 {
++                    unsafe {cublas_result::gemm_strided_batched_ex(self.cublas_handle,
++                        cublas_sys::cublasOperation_t::CUBLAS_OP_N,cublas_sys::cublasOperation_t::CUBLAS_OP_N,
++                        512,64,padded as i32,&one as *const _ as *const _,
++                        (if part==1{value_low}else{base})as *const _,cublas_sys::cudaDataType::CUDA_R_16BF,512,row_values as i64,
++                        (if part==2{prob_low}else{probabilities})as *const _,cublas_sys::cudaDataType::CUDA_R_16BF,padded as i32,row_scores as i64,
++                        (if part==0{&zero}else{&one})as *const _ as *const _,(output+(start*64*512*4)as u64)as *mut _,cublas_sys::cudaDataType::CUDA_R_32F,512,row_query as i64,n as i32,
++                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP).map_err(|e|format!("prefill tensor values: {e:?}"))?;}
++                }
++            }
++            Ok(())
++        })();
++        let (math,work)=unsafe{(lib.cublasSetMathMode(self.cublas_handle,previous),lib.cublasSetWorkspace_v2(self.cublas_handle,std::ptr::null_mut(),0))};
++        if math!=cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS || work!=cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {return Err(format!("prefill tensor restore: {math:?} {work:?}; operation={result:?}"));}
++        result?;
++        crate::matched_teacher::record_prefill_attention(rows,rows.div_ceil(tile),used);
++        Ok(true)
++    }
++
+     fn run_dsa_mla_gathered_gemm_attention(
+         &self,
+         layer_idx: usize,
+@@ -46416,6 +46516,11 @@ impl PrefillEngine {
+             ));
+         }
+ 
++        if self.try_dsa_mla_bf16_attention(output, q_absorbed, ckv_cache, selected, positions,
++            rows, num_heads, rope_dim, ckv_cache_dim, sm_scale, max_context)? {
++            return Ok(());
++        }
++
+         let workspace = self
+             .dsa_prefill_workspace
+             .as_ref()
+@@ -82030,6 +82135,8 @@ impl PrefillKernels {
+                     "mla_prefill_gather_query_k6_f32_kernel",
+                     "mla_prefill_gather_query_k4_f32_structured_kernel",
+                     "mla_prefill_gather_query_k6_f32_structured_kernel",
++                    "mla_bf16_unpack",
++                    "mla_bf16_softmax",
+                     "mla_prefill_softmax_weights_warp_f32_kernel",
+                     "mla_prefill_pack_attention_head_major_bf16_kernel",
+                     "mla_prefill_scatter_wvc_head_major_bf16_kernel",
+@@ -82569,6 +82676,8 @@ impl PrefillKernels {
+             mla_prefill_gather_query_k6_f32_structured: get(
+                 "mla_prefill_gather_query_k6_f32_structured_kernel",
+             )?,
++            mla_bf16_unpack: get("mla_bf16_unpack")?,
++            mla_bf16_softmax: get("mla_bf16_softmax")?,
+             mla_prefill_softmax_weights_warp_f32: get(
+                 "mla_prefill_softmax_weights_warp_f32_kernel",
+             )?,
+@@ -86504,6 +86613,8 @@ mod kernel_tests {
+                     "mla_prefill_gather_query_k6_f32_kernel",
+                     "mla_prefill_gather_query_k4_f32_structured_kernel",
+                     "mla_prefill_gather_query_k6_f32_structured_kernel",
++                    "mla_bf16_unpack",
++                    "mla_bf16_softmax",
+                     "mla_prefill_softmax_weights_warp_f32_kernel",
+                     "mla_prefill_pack_attention_head_major_bf16_kernel",
+                     "mla_prefill_scatter_wvc_head_major_bf16_kernel",
+diff --git a/src/matched_teacher.rs b/src/matched_teacher.rs
+index ea9e423..9e415ad 100644
+--- a/src/matched_teacher.rs
++++ b/src/matched_teacher.rs
+@@ -31,6 +31,39 @@ impl Drop for AttentionExecutionGuard {
+     fn drop(&mut self) { ATTENTION_EXECUTION.with(|v| v.set(self.previous)); }
+ }
+ 
++thread_local! {
++    static PREFILL_ATTENTION_STATS: std::cell::Cell<(usize,usize,usize)> = const { std::cell::Cell::new((0,0,0)) };
++    static PREFILL_ATTENTION_EXECUTION: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
++}
++pub(crate) fn active_prefill_attention_execution() -> Option<u8> {
++    PREFILL_ATTENTION_EXECUTION.with(|v| v.get())
++}
++pub(crate) fn record_prefill_attention(rows:usize,tiles:usize,workspace:usize) {
++    PREFILL_ATTENTION_STATS.with(|v|{let (r,t,w)=v.get();v.set((r+rows,t+tiles,w.max(workspace)));});
++}
++pub(crate) struct PrefillAttentionGuard {
++    previous_stats:(usize,usize,usize),
++    previous: Option<u8>,
++    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
++}
++impl PrefillAttentionGuard {
++    pub(crate) fn enter(mode: Option<u8>) -> Result<Self, String> {
++        if mode.is_some_and(|v| v > 1) { return Err("prefill attention permits modes 0 and 1 only".into()); }
++        let previous=PREFILL_ATTENTION_EXECUTION.with(|v|v.replace(mode));
++        Ok(Self{previous,previous_stats:PREFILL_ATTENTION_STATS.with(|v|v.replace((0,0,0))),_not_send:std::marker::PhantomData})
++    }
++}
++impl Drop for PrefillAttentionGuard {
++    fn drop(&mut self) { PREFILL_ATTENTION_EXECUTION.with(|v|v.set(self.previous));PREFILL_ATTENTION_STATS.with(|v|v.set(self.previous_stats)); }
++}
++// Call only after the server has checksum-validated the complete raw request.
++pub(crate) fn admitted_prefill_attention_execution(label: &str) -> Result<Option<u8>,String> {
++    let p=plan()?;
++    let trial=p.trials.iter().find(|t|t.label==label).ok_or("unadmitted prefill label")?;
++    if !trial.raw_input { return Err("prefill intervention requires admitted raw history".into()); }
++    Ok(trial.prefill_attention_execution)
++}
++
+ #[derive(Deserialize)]
+ #[serde(deny_unknown_fields)]
+ struct CheckedFile {
+@@ -72,6 +105,8 @@ struct Trial {
+     #[serde(default)]
+     attention_execution: Option<u8>,
+     #[serde(default)]
++    prefill_attention_execution: Option<u8>,
++    #[serde(default)]
+     capture_full_logits: bool,
+     #[serde(default = "default_audit_routes")]
+     audit_routes: bool,
+@@ -151,6 +186,10 @@ fn parse(raw: &[u8]) -> Result<Plan, String> {
+     if matches!(p.arithmetic,Arithmetic::CenteredNativeProjection) != p.centered_module.is_some() || (p.centered_module.is_some() && p.schema!=1) { return Err("centered projection teacher requires schema1 and explicit center identity; older modes forbid it".into()); }
+     let mut labels = HashSet::new();
+     for t in &p.trials {
++        if t.prefill_attention_execution.is_some_and(|v|v>1)
++            || (t.prefill_attention_execution.is_some() && (!t.raw_input || !matches!(p.arithmetic,Arithmetic::NativeServingDecode))) {
++            return Err("prefill intervention requires admitted raw native-serving trials and modes 0/1".into());
++        }
+         if t.attention_execution.is_some_and(|v| !matches!(v, 0 | 2 | 3))
+             || (t.attention_execution.is_some() && (!t.raw_input || !matches!(p.arithmetic, Arithmetic::NativeServingDecode))) {
+             return Err("exact attention intervention requires admitted raw native-serving trials and modes 0/2/3".into());
+@@ -428,7 +467,7 @@ impl Session {
+         json!({"diagnostic_only":true,"qualifies_candidate":false,"label":self.trial.label,"arithmetic":self.arithmetic,
+         "history":"explicit_teacher_forced_saved_tokens","ordinary_cache_equality_evidence":false,"forced_inputs":self.trial.forced_inputs,
+         "defer_step_proofs":self.defer_step_proofs,"audit_routes":self.trial.audit_routes,
+-        "attention_execution":self.trial.attention_execution,"capture_full_logits":self.trial.capture_full_logits,"first_logit_proof_saved":self.trial.capture_full_logits || !(self.defer_step_proofs && matches!(self.arithmetic,Arithmetic::NativeServingDecode)),"step_receipts":self.deferred_steps,
++        "attention_execution":self.trial.attention_execution,"prefill_attention_execution":self.trial.prefill_attention_execution,"prefill_tensor_stats":PREFILL_ATTENTION_STATS.with(|v|v.get()),"capture_full_logits":self.trial.capture_full_logits,"first_logit_proof_saved":self.trial.capture_full_logits || !(self.defer_step_proofs && matches!(self.arithmetic,Arithmetic::NativeServingDecode)),"step_receipts":self.deferred_steps,
+         "completed_decode_steps":self.next_step,"decode_elapsed_seconds":self.decode_elapsed_seconds,"logit_proofs_saved":self.trial.capture_full_logits || !self.defer_step_proofs})
+     }
+ }
+@@ -526,6 +565,8 @@ mod tests {
+         let base=json!({"schema":2,"arithmetic":"native_serving_decode","defer_step_proofs":true,"directory":"/tmp/replay","loaded_native":{"path":"/tmp/native","sha256":"a".repeat(64)},"identities":[{"path":"/tmp/config","sha256":"b".repeat(64)}],"trials":[{"raw_input":true,"label":"fixed","logical_tokens":2,"expected_sequence_start":0,"max_tokens":3,"input_ids_sha256":"c".repeat(64),"forced_inputs":[4,5]}]});
+         assert!(parse(&serde_json::to_vec(&base).unwrap()).is_ok());
+         for key in ["defer_step_proofs","raw_input"] {let mut p=base.clone();if key=="raw_input"{p["trials"][0][key]=json!(false);}else{p[key]=json!(false);}assert!(parse(&serde_json::to_vec(&p).unwrap()).is_err());}
++        for mode in [0,1] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
++        for mode in [2,3,255] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
+         for mode in [0,2,3] { let mut q=base.clone();q["trials"][0]["attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
+         for mode in [1,5,6,255] { let mut q=base.clone();q["trials"][0]["attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
+         let mut q=base.clone();q["arithmetic"]=json!("native");q["trials"][0]["attention_execution"]=json!(3);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err());
+@@ -596,9 +637,27 @@ mod tests {
+         let t:Trial=serde_json::from_value(value).unwrap();assert!(!t.audit_routes);
+         assert!(validate_inputs(&t,&[4,5],0,3).is_err()); // Observer switch cannot waive prompt checksum.
+     }
++    #[test]
++    fn prefill_intervention_restores_modes_and_statistics() {
++        assert_eq!(active_prefill_attention_execution(),None);
++        { let _outer=PrefillAttentionGuard::enter(Some(0)).unwrap();
++          record_prefill_attention(32,1,100);
++          { let _inner=PrefillAttentionGuard::enter(Some(1)).unwrap();
++            assert_eq!(active_prefill_attention_execution(),Some(1));
++            assert_eq!(PREFILL_ATTENTION_STATS.with(|v|v.get()),(0,0,0));
++            record_prefill_attention(64,2,200);
++            assert!(PrefillAttentionGuard::enter(Some(2)).is_err());
++          }
++          assert_eq!(active_prefill_attention_execution(),Some(0));
++          assert_eq!(PREFILL_ATTENTION_STATS.with(|v|v.get()),(32,1,100));
++        }
++        assert_eq!(active_prefill_attention_execution(),None);
++        assert_eq!(PREFILL_ATTENTION_STATS.with(|v|v.get()),(0,0,0));
++    }
+     fn trial() -> Trial {
+         Trial {
+             attention_execution: None,
++            prefill_attention_execution: None,
+             capture_full_logits: false,
+             audit_routes: true,
+             raw_input: false,
+diff --git a/src/server.rs b/src/server.rs
+index e7dbefc..83dfa88 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -3750,6 +3750,16 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
+             }
+         }
+     };
++    let prefill_intervention = if raw_teacher_tokens.is_some() {
++        match crate::matched_teacher::admitted_prefill_attention_execution(teacher_label.unwrap()) {
++            Ok(mode) => mode,
++            Err(error) => { let _=send_json(stream,400,&serde_json::json!({"error":error}).to_string());return; }
++        }
++    } else { None };
++    let _prefill_attention_guard = match crate::matched_teacher::PrefillAttentionGuard::enter(prefill_intervention) {
++        Ok(scope) => scope,
++        Err(error) => { let _=send_json(stream,400,&serde_json::json!({"error":error}).to_string());return; }
++    };
+     let mut raw_teacher_first_logits: Option<Vec<f32>> = None;
+     // END explicit teacher-forced request admission
+ 
+diff --git a/tests/test_glm53_heatmap_controls.py b/tests/test_glm53_heatmap_controls.py
+index eb8962b..938eab1 100644
+--- a/tests/test_glm53_heatmap_controls.py
++++ b/tests/test_glm53_heatmap_controls.py
+@@ -22,7 +22,8 @@ class Glm53HeatmapControlsTest(unittest.TestCase):
+             self.assertEqual(self.capture(False), {'base': 1})
+ 
+     def test_control_switch_rejects_other_treatment_even_under_ignore_policy(self):
+-        for key, value in [('KRASIS_PREFILL_PHASE_ARENA', '0'),
++        for key, value in [('KRASIS_PREFILL_MLA_BF16_RESIDUAL', '1'),
++                           ('KRASIS_PREFILL_PHASE_ARENA', '0'),
+                            ('KRASIS_RECLAIM_SHARED_SOURCES', '0'),
+                            ('KRASIS_HQQ_PACK_COMPONENTS', '0'),
+                            ('KRASIS_PREFILL_TRANSFER_PLAN', '0'),
+@@ -75,5 +76,6 @@ class Glm53HeatmapControlsTest(unittest.TestCase):
+         files=server._krasis_runtime_code_hash()['files']
+         self.assertIn('python/krasis/weight_loader.py',files)
+         self.assertIn('src/prefill_transfer.rs',files)
++        self.assertIn('src/cuda/mla_prefill_bf16.cuh',files)
+ 
+ if __name__=='__main__':unittest.main()

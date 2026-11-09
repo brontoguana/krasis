@@ -46263,6 +46263,21 @@ impl GpuDecodeStore {
         self.hcs_drain_vram_pressure(reason, force_measure)
     }
 
+    /// Seal startup-only prefill tuning before heatmap identity and requests.
+    fn finalize_prefill_mla_tuning(&self) -> PyResult<()> {
+        let engine = self.prefill_engine_slot.as_ref().ok_or_else(||
+            pyo3::exceptions::PyRuntimeError::new_err("prefill engine unavailable during tuning finalization"))?;
+        engine.prefill_mla_lt.borrow_mut().finalize();
+        Ok(())
+    }
+
+    fn native_prefill_mla_identity(&self) -> PyResult<String> {
+        let engine = self.prefill_engine_slot.as_ref().ok_or_else(||
+            pyo3::exceptions::PyRuntimeError::new_err("prefill engine unavailable during arithmetic identity"))?;
+        serde_json::to_string(&engine.prefill_mla_lt.borrow().identity())
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+    }
+
     /// Cold, actual loaded arithmetic identity for heatmap compatibility.
     /// None means no selected native arithmetic; a router/shared-gate auxiliary
     /// partition reports its actual program without inventing scalar state.
@@ -52104,7 +52119,10 @@ impl GpuDecodeStore {
     /// Take the pre-allocated prefill engine from the slot.
     /// Called by the Rust server during startup. Returns None if not pre-allocated.
     pub fn take_prefill_engine(&mut self) -> Option<crate::gpu_prefill::PrefillEngine> {
-        self.prefill_engine_slot.take()
+        let engine = self.prefill_engine_slot.take()?;
+        // Requests, including diagnostic overrides, cannot start cold tuning.
+        engine.prefill_mla_lt.borrow_mut().finalize();
+        Some(engine)
     }
 
     /// Export HCS cache_fast snapshot for the Rust prefill engine.
@@ -55534,6 +55552,7 @@ impl GpuDecodeStore {
             active_prefill_chunk_start: 0,
             prefill_cancel_signal: None,
             dsa_prefill_workspace: None,
+            prefill_mla_lt: std::cell::RefCell::new(crate::prefill_mla_lt::Cache::default()),
             dsa_mla_gather_autotune: std::cell::RefCell::new(std::collections::HashMap::new()),
             prefill_prescan_accuracy_enabled: false,
             prefill_prescan_accuracy_stats: Vec::new(),

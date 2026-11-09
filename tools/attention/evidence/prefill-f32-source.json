@@ -1,0 +1,93 @@
+{
+  "measured_source": {
+    "build.rs": "589afe5a98b57ede103aa629ebb358af07c83c8438b98d8c2136bde5a5d36c58",
+    "python/krasis/server.py": "911e6c820c8832b0fb9607144f85938e2a8d0a3315810a66c1f06ee426028cde",
+    "src/prefill_mla_lt.rs": "43c6b5b15577a5ecb38d2f86609b311e54de43ccdd74e543c5c120907a872c69",
+    "src/stable_mla_gemm.rs": "2cebe71a947b6811718695d9eb74384cc3bcb4678e71869260d61353dab6ad79",
+    "src/gpu_prefill.rs": "9fdd59535ef1f19a1b3560b52ccd8ea4230661273421c46f33e3577743fedc88",
+    "src/gpu_decode.rs": "8c916057a18c48e45d263d420ff103ecd729e90695a9f3190436267492f52258",
+    "src/server.rs": "6d17226e6dc0f349f6d2514997322a7f0f50d4cd5ab57d09dfa76b8571b158b0",
+    "src/matched_teacher.rs": "95dd2b9b21903c2bf0b891578d95658319547cfb0a5d8c6df67d71260b43418e",
+    "src/cuda/prefill_kernels.cu": "6cb23dc4c3bb9184654317429fea9e83c9192587f736eb82585473ffdb1f0cd9",
+    "src/cuda/mla_prefill_mask_fusion.cuh": "232cb5c91f6bb45084c04ee605b505aae1a92015bb64abc51a5d74ac288a1cce",
+    "python/krasis/krasis.cpython-311-x86_64-linux-gnu.so": "fc338f13a038b1c5dd405ac13e2c3c358ab8f10ee86aded517221d4e22c87703"
+  },
+  "final_source": {
+    "build.rs": "589afe5a98b57ede103aa629ebb358af07c83c8438b98d8c2136bde5a5d36c58",
+    "python/krasis/server.py": "05cac1f77f704523c5780d526e69efa2cb0677d452bbf4400c66cb075af9366c",
+    "src/prefill_mla_lt.rs": "a10ec528491a97ed40f9dff9d83d248b860766a3d257da8c30f83c65d04df11f",
+    "src/stable_mla_gemm.rs": "2cebe71a947b6811718695d9eb74384cc3bcb4678e71869260d61353dab6ad79",
+    "src/gpu_prefill.rs": "e7ace0cdd283e1191d8f7cf8965beb69f91e7df2762c721e5a8d7c0c1279e4c3",
+    "src/gpu_decode.rs": "549cea7498e811e0abfc6d437390172d32b91f3154c909e5b0f02979f2dc1767",
+    "src/server.rs": "6d17226e6dc0f349f6d2514997322a7f0f50d4cd5ab57d09dfa76b8571b158b0",
+    "src/matched_teacher.rs": "95dd2b9b21903c2bf0b891578d95658319547cfb0a5d8c6df67d71260b43418e",
+    "src/cuda/prefill_kernels.cu": "6cb23dc4c3bb9184654317429fea9e83c9192587f736eb82585473ffdb1f0cd9",
+    "src/cuda/mla_prefill_mask_fusion.cuh": "232cb5c91f6bb45084c04ee605b505aae1a92015bb64abc51a5d74ac288a1cce",
+    "python/krasis/krasis.cpython-311-x86_64-linux-gnu.so": "c88546847252de0a892de30ad604cd53d655c3e5efa15d1e7c4f3dded75c0aec",
+    "src/lib.rs": "129897dae7add2eaa2d8b13aa00a5fc045d4b3aadf58c2c6d3e5075c4b96cc94"
+  },
+  "measured_source_patch_sha256": "77d4f6d639f099562b1fb9daa3cf62f71b18db5547383cc09fdbfae17e8e31ab",
+  "final_guard_delta_sha256": "fc2a997202abf09be584b06e48babbbca187a5c93f111effb4b16a58577148eb",
+  "selected_plans": [
+    {
+      "baseline_ms": 0.41737601161003113,
+      "candidates": [
+        {
+          "exact": true,
+          "identity": "stable_mla_f32_pedantic_v1:fa9a864fc226439edcbda2919c8c6d4c275442ce204aa486d731749c7b26ccd6",
+          "median_ms": 0.4158079922199249,
+          "workspace": 0
+        },
+        {
+          "exact": true,
+          "identity": "stable_mla_f32_pedantic_v1:1ca5e4e593ecfb3f4970473fb8cbe7178f985bc43756cc424762a1b3e3b5d37d",
+          "median_ms": 0.44092801213264465,
+          "workspace": 0
+        },
+        {
+          "exact": true,
+          "identity": "stable_mla_f32_pedantic_v1:b23410ccda7e640022d0468fbf232802ef5aa96a864d6506ac8bd41b1eb28cfc",
+          "median_ms": 0.3245759904384613,
+          "workspace": 0
+        }
+      ],
+      "criterion": "complete actual-output bitwise equality; at least five percent timing margin",
+      "reference_values": 4200448,
+      "selected": "stable_mla_f32_pedantic_v1:b23410ccda7e640022d0468fbf232802ef5aa96a864d6506ac8bd41b1eb28cfc",
+      "selected_ms": 0.3245759904384613,
+      "shape": "Shape { a: Matrix { rows: 512, cols: 2051, leading: 512, batch: 32, stride: 1050112 }, b: Matrix { rows: 512, cols: 64, leading: 512, batch: 32, stride: 32768 }, c: Matrix { rows: 2051, cols: 64, leading: 2051, batch: 32, stride: 131264 }, transpose_a: true, transpose_b: false }"
+    },
+    {
+      "baseline_ms": 0.44806399941444397,
+      "candidates": [
+        {
+          "exact": true,
+          "identity": "stable_mla_f32_pedantic_v1:3fb324fbc441ffd35f3f70a704e8d328c6db3353cf6e3603cd33a14e4441ff8c",
+          "median_ms": 0.44710400700569153,
+          "workspace": 0
+        },
+        {
+          "exact": false,
+          "identity": "stable_mla_f32_pedantic_v1:2f446672b290f529af8f4fd14480e09cf19847e2bb11e7af273330b8b66cc56c"
+        },
+        {
+          "exact": true,
+          "identity": "stable_mla_f32_pedantic_v1:8f1426e2aa75f074f323fbd3b4a9fe342d92bbd1da3a507d8220bf43418a7ebb",
+          "median_ms": 0.35235199332237244,
+          "workspace": 0
+        },
+        {
+          "exact": true,
+          "identity": "stable_mla_f32_pedantic_v1:1ad6621514bbfd461958bf714016555c56e92fbdf672b80148958190ca589af8",
+          "median_ms": 0.36473599076271057,
+          "workspace": 0
+        }
+      ],
+      "criterion": "complete actual-output bitwise equality; at least five percent timing margin",
+      "reference_values": 1048576,
+      "selected": "stable_mla_f32_pedantic_v1:8f1426e2aa75f074f323fbd3b4a9fe342d92bbd1da3a507d8220bf43418a7ebb",
+      "selected_ms": 0.35235199332237244,
+      "shape": "Shape { a: Matrix { rows: 512, cols: 2051, leading: 512, batch: 32, stride: 1050112 }, b: Matrix { rows: 2051, cols: 64, leading: 2051, batch: 32, stride: 131264 }, c: Matrix { rows: 512, cols: 64, leading: 512, batch: 32, stride: 32768 }, transpose_a: false, transpose_b: false }"
+    }
+  ]
+}

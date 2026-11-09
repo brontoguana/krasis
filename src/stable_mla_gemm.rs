@@ -448,6 +448,18 @@ impl Candidates {
         workspace_cap: usize,
         alignments: [usize; 4],
     ) -> Result<Self, String> {
+        Self::discover_inner(device,shape,workspace_cap,alignments,None)?
+            .ok_or_else(||"no admitted explicit F32 Lt candidate; refusing alternate arithmetic".into())
+    }
+    pub(crate) fn discover_bounded(
+        device:Arc<CudaDevice>,shape:Shape,workspace_cap:usize,alignments:[usize;4],limit:usize,
+    )->Result<Option<Self>,String>{
+        if !(1..=4).contains(&limit){return Err("bounded Lt discovery requires one through four candidates".into());}
+        Self::discover_inner(device,shape,workspace_cap,alignments,Some(limit))
+    }
+    fn discover_inner(
+        device:Arc<CudaDevice>,shape:Shape,workspace_cap:usize,alignments:[usize;4],limit:Option<usize>,
+    )->Result<Option<Self>,String>{
         shape.validate()?;
         let mut current = std::ptr::null_mut();
         unsafe { cu::lib().cuCtxGetCurrent(&mut current) }
@@ -501,7 +513,7 @@ impl Candidates {
             }
             .map_err(|e| e.to_string())?;
         }
-        let mut capacity = 1i32;
+        let mut capacity = limit.unwrap_or(1) as i32;
         let mut values = Vec::new();
         loop {
             let mut list =
@@ -510,7 +522,7 @@ impl Candidates {
                     capacity as usize
                 ];
             let mut count = 0;
-            unsafe {
+            let status=unsafe {
                 sys::lib().cublasLtMatmulAlgoGetHeuristic(
                     handle.raw,
                     desc.0,
@@ -523,19 +535,21 @@ impl Candidates {
                     list.as_mut_ptr(),
                     &mut count,
                 )
-            }
-            .result()
+            };
+            if limit.is_some()&&status==sys::cublasStatus_t::CUBLAS_STATUS_NOT_SUPPORTED {return Ok(None);}
+            status.result()
             .map_err(|e| format!("Lt full candidate discovery: {e:?}"))?;
             if count < 0 || count > capacity {
                 return Err("invalid Lt discovery count".into());
             }
-            if count == capacity {
+            if count == capacity && limit.is_none() {
                 capacity = capacity
                     .checked_mul(2)
                     .ok_or("Lt discovery count overflow")?;
                 continue;
             }
             for item in list.into_iter().take(count as usize) {
+                if limit.is_some()&&(item.state==sys::cublasStatus_t::CUBLAS_STATUS_NOT_SUPPORTED||item.workspaceSize>workspace_cap){continue;}
                 if item.state != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS
                     || item.workspaceSize > workspace_cap
                 {
@@ -576,12 +590,8 @@ impl Candidates {
             }
             break;
         }
-        if values.is_empty() {
-            return Err(
-                "no admitted explicit F32 Lt candidate; refusing alternate arithmetic".into(),
-            );
-        }
-        Ok(Self { values })
+        if values.is_empty() { return Ok(None); }
+        Ok(Some(Self { values }))
     }
 }
 

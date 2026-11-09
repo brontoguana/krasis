@@ -1,5 +1,6 @@
 """No-GPU negative controls for experimental GLM heatmap treatment identity."""
 import os
+import json
 import unittest
 import tempfile
 from pathlib import Path
@@ -8,11 +9,44 @@ from unittest.mock import patch
 from krasis import server
 
 class Glm53HeatmapControlsTest(unittest.TestCase):
-    def capture(self, glm=True):
+    def capture(self, glm=True, prefill=None):
         model = SimpleNamespace(cfg=SimpleNamespace(is_glm5_next=glm),
-            _gpu_decode_store=SimpleNamespace(native_scalar_runtime_identity=lambda: None))
+            _gpu_decode_store=SimpleNamespace(native_scalar_runtime_identity=lambda: None,
+                native_prefill_mla_identity=lambda: json.dumps(prefill)))
         with patch.object(server, '_runtime_heatmap_capture_config', return_value={'base': 1}):
             return server._actual_runtime_heatmap_capture_config(model, SimpleNamespace())
+
+    def test_prefill_treatment_binds_non_glm_fallback_and_finalized_plans(self):
+        identity = {"format": "prefill_mla_f32_v1", "sealed": True, "plans": []}
+        with patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": "1"}, clear=True):
+            actual = self.capture(False, identity)
+            self.assertEqual(actual["prefill_mla_f32_control"], "1")
+            self.assertEqual(actual["prefill_mla_f32_identity"], identity)
+            with self.assertRaisesRegex(RuntimeError, "not finalized"):
+                self.capture(False, {**identity, "sealed": False})
+            with self.assertRaisesRegex(RuntimeError, "not finalized"):
+                self.capture(False, {**identity, "format": "unknown"})
+        with patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": "0"}, clear=True):
+            self.assertEqual(self.capture(False), {"base": 1, "prefill_mla_f32_control": "0"})
+
+    def test_prefill_boolean_aliases_require_finalized_identity(self):
+        identity = {"format": "prefill_mla_f32_v1", "sealed": True, "plans": []}
+        for raw in ["1", "true", "yes", "on", " TRUE ", " On "]:
+            with self.subTest(raw=raw), patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": raw}, clear=True):
+                self.assertTrue(server._prefill_mla_f32_enabled())
+                self.assertEqual(self.capture(False, identity)["prefill_mla_f32_identity"], identity)
+                with self.assertRaisesRegex(RuntimeError, "not finalized"):
+                    self.capture(False, {**identity, "sealed": False})
+        for raw in ["0", "false", "no", "off", " FALSE ", " Off "]:
+            with self.subTest(raw=raw), patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": raw}, clear=True):
+                self.assertFalse(server._prefill_mla_f32_enabled())
+                self.assertEqual(self.capture(False), {"base": 1, "prefill_mla_f32_control": raw})
+
+    def test_invalid_prefill_boolean_fails_before_loading(self):
+        for raw in ["", "2", "enabled", "invalid"]:
+            with self.subTest(raw=raw), patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": raw}, clear=True):
+                with self.assertRaisesRegex(RuntimeError, "Invalid KRASIS_PREFILL_MLA_F32"):
+                    server._prefill_mla_f32_enabled()
 
     def test_default_and_other_architectures_keep_compatibility_shape(self):
         with patch.dict(os.environ, {}, clear=True):

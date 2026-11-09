@@ -396,6 +396,7 @@ fn compile_cuda_kernels() {
 }
 
 fn compile_prefill_kernels() {
+    println!("cargo:rerun-if-changed=src/cuda/mla_prefill_mask_fusion.cuh");
     let cu_src = "src/cuda/prefill_kernels.cu";
     let shim_header = "src/cuda/prefill_shim.h";
     let deepseek_v4_hc_header = "src/cuda/deepseek_v4_hc.cuh";
@@ -419,6 +420,7 @@ fn compile_prefill_kernels() {
     if is_output_fresh(
         &[
             cu_src,
+            "src/cuda/mla_prefill_mask_fusion.cuh",
             shim_header,
             deepseek_v4_hc_header,
             deepseek_v4_attention_header,

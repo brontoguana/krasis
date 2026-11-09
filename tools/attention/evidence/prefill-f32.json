@@ -1,0 +1,1067 @@
+{
+  "scope": "Relative qualification of bounded FP32 selected-row prefill on RTX A6000 SM86; no whole-model admission",
+  "base_commit": "6aeabd2c0f586d0accda399bb4183c36f45e715b",
+  "control": {
+    "prefill_execution": 0,
+    "decode_execution": 3,
+    "absorption": 2,
+    "index_radix": 1,
+    "logical_chunk_max": 32768,
+    "kv_window": 69632,
+    "cpu_tail": false,
+    "kv_format": "K6V6",
+    "attention": "HQQ6",
+    "outputs": 64,
+    "logical_kv": "cold",
+    "experts": "warm/adaptive"
+  },
+  "candidate": {
+    "flag": "KRASIS_PREFILL_MLA_F32=1",
+    "prefill_execution": 1,
+    "geometry": {
+      "heads": 64,
+      "nope": 256,
+      "rope": 0,
+      "latent": 512,
+      "selections": 2051
+    },
+    "explicit_new_gpu_data_bytes": 0,
+    "existing_selected_workspace_used_bytes": 172212224,
+    "existing_selected_workspace_capacity_bytes": 172212989,
+    "library_workspace_cap_bytes": 16777216,
+    "selected_plan_workspace_bytes": 0,
+    "hot_tuning": false,
+    "default_enabled": false
+  },
+  "operators": {
+    "saved_bank_outputs": 589824000,
+    "saved_bank_bitwise": true,
+    "independent_fixture_comparisons": 24248320,
+    "fixture_max_abs": 9.274482727050781e-05,
+    "eager_graph_bitwise": true,
+    "live_values": 196608,
+    "live_max_abs": 7.843652516825728e-06,
+    "unchanged_threshold_abs": 0.0002
+  },
+  "requests": {
+    "scope": "Exact relative prefill regression; no independent whole-model admission",
+    "rows": [
+      {
+        "history": 3072,
+        "logit_vectors": 64,
+        "logit_values": 9912320,
+        "all_bitwise": true,
+        "state_bytes": 188079040,
+        "state_allocations": 112,
+        "paired": [
+          {
+            "mode": 0,
+            "wall_s": [
+              21.593936967,
+              20.354277512
+            ],
+            "median_s": 20.9741072395,
+            "decode_ms_per_forward": [
+              149.82233104761903,
+              149.19618982539683
+            ],
+            "median_decode_ms_per_forward": 149.50926043650793
+          },
+          {
+            "mode": 1,
+            "wall_s": [
+              19.751597969,
+              19.646404206
+            ],
+            "median_s": 19.6990010875,
+            "decode_ms_per_forward": [
+              149.27028536507936,
+              149.13661742857144
+            ],
+            "median_decode_ms_per_forward": 149.20345139682541
+          }
+        ],
+        "wall_improvement_pct": 6.07942992490581
+      },
+      {
+        "history": 16384,
+        "logit_vectors": 64,
+        "logit_values": 9912320,
+        "all_bitwise": true,
+        "state_bytes": 338038784,
+        "state_allocations": 112,
+        "paired": [
+          {
+            "mode": 0,
+            "wall_s": [
+              48.165776281,
+              46.85295052
+            ],
+            "median_s": 47.5093634005,
+            "decode_ms_per_forward": [
+              149.2969578095238,
+              149.00446255555556
+            ],
+            "median_decode_ms_per_forward": 149.15071018253968
+          },
+          {
+            "mode": 1,
+            "wall_s": [
+              48.23551451,
+              43.434787209
+            ],
+            "median_s": 45.835150859500004,
+            "decode_ms_per_forward": [
+              148.9982806984127,
+              148.964738984127
+            ],
+            "median_decode_ms_per_forward": 148.98150984126985
+          }
+        ],
+        "wall_improvement_pct": 3.5239633225276568
+      },
+      {
+        "history": 65536,
+        "logit_vectors": 64,
+        "logit_values": 9912320,
+        "all_bitwise": true,
+        "state_bytes": 891686912,
+        "state_allocations": 112,
+        "paired": [
+          {
+            "mode": 0,
+            "wall_s": [
+              119.151990809,
+              119.168055165
+            ],
+            "median_s": 119.16002298699999,
+            "decode_ms_per_forward": [
+              152.71255855555555,
+              151.6689578888889
+            ],
+            "median_decode_ms_per_forward": 152.19075822222223
+          },
+          {
+            "mode": 1,
+            "wall_s": [
+              112.980605417,
+              112.990377944
+            ],
+            "median_s": 112.9854916805,
+            "decode_ms_per_forward": [
+              151.75690603174604,
+              151.72383825396827
+            ],
+            "median_decode_ms_per_forward": 151.74037214285715
+          }
+        ],
+        "wall_improvement_pct": 5.181713759130114
+      }
+    ],
+    "quality": [
+      {
+        "label": "constraints",
+        "baseline_pass": true,
+        "candidate_pass": true
+      },
+      {
+        "label": "coding",
+        "baseline_pass": false,
+        "candidate_pass": false
+      },
+      {
+        "label": "long-retrieval",
+        "baseline_pass": true,
+        "candidate_pass": true
+      },
+      {
+        "label": "long-coding",
+        "baseline_pass": true,
+        "candidate_pass": true
+      }
+    ],
+    "thresholds_changed": false
+  },
+  "registered_state": {
+    "rows": [
+      {
+        "history": 3072,
+        "candidate": {
+          "bytes": 188079040,
+          "allocations": 112,
+          "all_bitwise": true
+        },
+        "accepted": {
+          "bytes": 188079040,
+          "allocations": 112,
+          "all_bitwise": true
+        }
+      },
+      {
+        "history": 16384,
+        "candidate": {
+          "bytes": 338038784,
+          "allocations": 112,
+          "all_bitwise": true
+        },
+        "accepted": {
+          "bytes": 338038784,
+          "allocations": 112,
+          "all_bitwise": true
+        }
+      },
+      {
+        "history": 65536,
+        "candidate": {
+          "bytes": 891686912,
+          "allocations": 112,
+          "all_bitwise": true
+        },
+        "accepted": {
+          "bytes": 891686912,
+          "allocations": 112,
+          "all_bitwise": true
+        }
+      }
+    ],
+    "bytes": 1417804736,
+    "all_bitwise": true
+  },
+  "profiles": [
+    {
+      "history": 3072,
+      "native_input_ids": 3084,
+      "arms": [
+        {
+          "mode": 0,
+          "disjoint_ms": {
+            "kernels_or_graph_only_ms": 3406.003744,
+            "copy_only_ms": 5831.408184,
+            "overlap_ms": 712.444478,
+            "uncovered_ms": 750.729659
+          },
+          "copies": [
+            {
+              "kind": 1,
+              "count": 44874,
+              "bytes": 143951124192
+            },
+            {
+              "kind": 2,
+              "count": 85,
+              "bytes": 668072
+            },
+            {
+              "kind": 8,
+              "count": 124,
+              "bytes": 5709692928
+            }
+          ],
+          "pipeline": {
+            "stages": [
+              {
+                "operation": "gather",
+                "count": 1067,
+                "elapsed_sum_ms": 301.3665,
+                "interval_union_ms": 301.3665,
+                "exposed_without_other_gpu_work_ms": 301.3665,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "mla_prefill_gather_query_k6_f32_structured_kernel": 1067
+                }
+              },
+              {
+                "operation": "score",
+                "count": 1067,
+                "elapsed_sum_ms": 480.686323,
+                "interval_union_ms": 480.686323,
+                "exposed_without_other_gpu_work_ms": 480.686323,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "ampere_sgemm_128x128_tn": 1067
+                }
+              },
+              {
+                "operation": "softmax",
+                "count": 1067,
+                "elapsed_sum_ms": 98.368236,
+                "interval_union_ms": 98.368236,
+                "exposed_without_other_gpu_work_ms": 98.368236,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "mla_prefill_softmax_weights_warp_f32_kernel": 1067
+                }
+              },
+              {
+                "operation": "value",
+                "count": 1067,
+                "elapsed_sum_ms": 521.677734,
+                "interval_union_ms": 521.677734,
+                "exposed_without_other_gpu_work_ms": 521.677734,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "ampere_sgemm_128x128_nn": 1067
+                }
+              }
+            ],
+            "verified_tiles": {
+              "legacy": 1067
+            },
+            "combined_interval_ms": 1402.098793,
+            "pipeline_only_without_other_gpu_work_ms": 1402.098793,
+            "prefill_disjoint": {
+              "kernels_or_graph_only_ms": 3406.003744,
+              "copy_only_ms": 5831.408184,
+              "overlap_ms": 712.444478,
+              "uncovered_ms": 750.729659
+            },
+            "operations": {
+              "score": "scaled Q_absorbed @ selected_K6_values.T",
+              "value": "softmax_scores @ selected_K6_values"
+            },
+            "interpretation": "Same-stream sequences identify actual attention calls, including residual products and legacy tails. Each tile feeds value projection on the required main-stream chain. Exposure excludes concurrent traced copies and other kernels; it is not a prediction of recoverable wall time. Host launch gaps lie outside kernel intervals."
+          }
+        },
+        {
+          "mode": 1,
+          "disjoint_ms": {
+            "kernels_or_graph_only_ms": 3110.646736,
+            "copy_only_ms": 5846.994292,
+            "overlap_ms": 699.682194,
+            "uncovered_ms": 690.810219
+          },
+          "copies": [
+            {
+              "kind": 1,
+              "count": 44923,
+              "bytes": 143951124388
+            },
+            {
+              "kind": 2,
+              "count": 85,
+              "bytes": 668072
+            },
+            {
+              "kind": 8,
+              "count": 124,
+              "bytes": 5709692928
+            }
+          ],
+          "pipeline": {
+            "stages": [
+              {
+                "operation": "gather",
+                "count": 1067,
+                "elapsed_sum_ms": 243.855453,
+                "interval_union_ms": 243.855453,
+                "exposed_without_other_gpu_work_ms": 243.855453,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "mla_prefill_gather_k6_no_mask": 1067
+                }
+              },
+              {
+                "operation": "score",
+                "count": 1067,
+                "elapsed_sum_ms": 351.182652,
+                "interval_union_ms": 351.182652,
+                "exposed_without_other_gpu_work_ms": 351.182652,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "void magma_sgemmEx_kernel<float, float, float, (bool)1, (bool)0, (int)6, (int)4, (int)6, (int)3, (int)4>(int, int, int, Tensor, int, Tensor, int, Tensor, int, Tensor, int, int, int, const T1 *, const T1 *, T1, T1, int, cublasLtEpilogue_t, int, const void *, long)": 1056,
+                  "ampere_sgemm_128x128_tn": 11
+                }
+              },
+              {
+                "operation": "softmax",
+                "count": 1067,
+                "elapsed_sum_ms": 93.752447,
+                "interval_union_ms": 93.752447,
+                "exposed_without_other_gpu_work_ms": 93.752447,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "mla_prefill_masked_softmax_f32": 1067
+                }
+              },
+              {
+                "operation": "value",
+                "count": 1067,
+                "elapsed_sum_ms": 403.088717,
+                "interval_union_ms": 403.088717,
+                "exposed_without_other_gpu_work_ms": 403.088717,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(T1::Params)": 1056,
+                  "ampere_sgemm_128x128_nn": 11
+                }
+              }
+            ],
+            "verified_tiles": {
+              "fused_f32": 1067
+            },
+            "combined_interval_ms": 1091.879269,
+            "pipeline_only_without_other_gpu_work_ms": 1091.879269,
+            "prefill_disjoint": {
+              "kernels_or_graph_only_ms": 3110.646736,
+              "copy_only_ms": 5846.994292,
+              "overlap_ms": 699.682194,
+              "uncovered_ms": 690.810219
+            },
+            "operations": {
+              "score": "scaled Q_absorbed @ selected_K6_values.T",
+              "value": "softmax_scores @ selected_K6_values"
+            },
+            "interpretation": "Same-stream sequences identify actual attention calls, including residual products and legacy tails. Each tile feeds value projection on the required main-stream chain. Exposure excludes concurrent traced copies and other kernels; it is not a prediction of recoverable wall time. Host launch gaps lie outside kernel intervals."
+          }
+        }
+      ]
+    },
+    {
+      "history": 16384,
+      "native_input_ids": 16397,
+      "arms": [
+        {
+          "mode": 0,
+          "disjoint_ms": {
+            "kernels_or_graph_only_ms": 20586.388443,
+            "copy_only_ms": 6813.278595,
+            "overlap_ms": 1746.12456,
+            "uncovered_ms": 6568.095196
+          },
+          "copies": [
+            {
+              "kind": 1,
+              "count": 53488,
+              "bytes": 165648141736
+            },
+            {
+              "kind": 2,
+              "count": 631,
+              "bytes": 1853442392
+            },
+            {
+              "kind": 8,
+              "count": 124,
+              "bytes": 30357274624
+            }
+          ],
+          "pipeline": {
+            "stages": [
+              {
+                "operation": "gather",
+                "count": 5643,
+                "elapsed_sum_ms": 1719.529879,
+                "interval_union_ms": 1719.529879,
+                "exposed_without_other_gpu_work_ms": 1719.529879,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "mla_prefill_gather_query_k6_f32_structured_kernel": 5643
+                }
+              },
+              {
+                "operation": "score",
+                "count": 5643,
+                "elapsed_sum_ms": 2643.512858,
+                "interval_union_ms": 2643.512858,
+                "exposed_without_other_gpu_work_ms": 2643.512858,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "ampere_sgemm_128x128_tn": 5643
+                }
+              },
+              {
+                "operation": "softmax",
+                "count": 5643,
+                "elapsed_sum_ms": 524.575673,
+                "interval_union_ms": 524.575673,
+                "exposed_without_other_gpu_work_ms": 524.575673,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "mla_prefill_softmax_weights_warp_f32_kernel": 5643
+                }
+              },
+              {
+                "operation": "value",
+                "count": 5643,
+                "elapsed_sum_ms": 2874.872621,
+                "interval_union_ms": 2874.872621,
+                "exposed_without_other_gpu_work_ms": 2874.872621,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "ampere_sgemm_128x128_nn": 5643
+                }
+              }
+            ],
+            "verified_tiles": {
+              "legacy": 5643
+            },
+            "combined_interval_ms": 7762.491031,
+            "pipeline_only_without_other_gpu_work_ms": 7762.491031,
+            "prefill_disjoint": {
+              "kernels_or_graph_only_ms": 20586.388443,
+              "copy_only_ms": 6813.278595,
+              "overlap_ms": 1746.12456,
+              "uncovered_ms": 6568.095196
+            },
+            "operations": {
+              "score": "scaled Q_absorbed @ selected_K6_values.T",
+              "value": "softmax_scores @ selected_K6_values"
+            },
+            "interpretation": "Same-stream sequences identify actual attention calls, including residual products and legacy tails. Each tile feeds value projection on the required main-stream chain. Exposure excludes concurrent traced copies and other kernels; it is not a prediction of recoverable wall time. Host launch gaps lie outside kernel intervals."
+          }
+        },
+        {
+          "mode": 1,
+          "disjoint_ms": {
+            "kernels_or_graph_only_ms": 19001.645405,
+            "copy_only_ms": 6853.403203,
+            "overlap_ms": 1743.079868,
+            "uncovered_ms": 6647.512945
+          },
+          "copies": [
+            {
+              "kind": 1,
+              "count": 53537,
+              "bytes": 165648141932
+            },
+            {
+              "kind": 2,
+              "count": 631,
+              "bytes": 1853442392
+            },
+            {
+              "kind": 8,
+              "count": 124,
+              "bytes": 30357274624
+            }
+          ],
+          "pipeline": {
+            "stages": [
+              {
+                "operation": "gather",
+                "count": 5643,
+                "elapsed_sum_ms": 1410.618242,
+                "interval_union_ms": 1410.618242,
+                "exposed_without_other_gpu_work_ms": 1410.618242,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "mla_prefill_gather_k6_no_mask": 5643
+                }
+              },
+              {
+                "operation": "score",
+                "count": 5643,
+                "elapsed_sum_ms": 1913.379501,
+                "interval_union_ms": 1913.379501,
+                "exposed_without_other_gpu_work_ms": 1913.379501,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "void magma_sgemmEx_kernel<float, float, float, (bool)1, (bool)0, (int)6, (int)4, (int)6, (int)3, (int)4>(int, int, int, Tensor, int, Tensor, int, Tensor, int, Tensor, int, int, int, const T1 *, const T1 *, T1, T1, int, cublasLtEpilogue_t, int, const void *, long)": 5632,
+                  "ampere_sgemm_128x128_tn": 11
+                }
+              },
+              {
+                "operation": "softmax",
+                "count": 5643,
+                "elapsed_sum_ms": 625.206427,
+                "interval_union_ms": 625.206427,
+                "exposed_without_other_gpu_work_ms": 625.206427,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "mla_prefill_masked_softmax_f32": 5643
+                }
+              },
+              {
+                "operation": "value",
+                "count": 5643,
+                "elapsed_sum_ms": 2246.762826,
+                "interval_union_ms": 2246.762826,
+                "exposed_without_other_gpu_work_ms": 2246.762826,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(T1::Params)": 5632,
+                  "ampere_sgemm_128x128_nn": 11
+                }
+              }
+            ],
+            "verified_tiles": {
+              "fused_f32": 5643
+            },
+            "combined_interval_ms": 6195.966996,
+            "pipeline_only_without_other_gpu_work_ms": 6195.966996,
+            "prefill_disjoint": {
+              "kernels_or_graph_only_ms": 19001.645405,
+              "copy_only_ms": 6853.403203,
+              "overlap_ms": 1743.079868,
+              "uncovered_ms": 6647.512945
+            },
+            "operations": {
+              "score": "scaled Q_absorbed @ selected_K6_values.T",
+              "value": "softmax_scores @ selected_K6_values"
+            },
+            "interpretation": "Same-stream sequences identify actual attention calls, including residual products and legacy tails. Each tile feeds value projection on the required main-stream chain. Exposure excludes concurrent traced copies and other kernels; it is not a prediction of recoverable wall time. Host launch gaps lie outside kernel intervals."
+          }
+        }
+      ]
+    },
+    {
+      "history": 65536,
+      "native_input_ids": 65549,
+      "arms": [
+        {
+          "mode": 0,
+          "disjoint_ms": {
+            "kernels_or_graph_only_ms": 90885.377693,
+            "copy_only_ms": 13493.787438,
+            "overlap_ms": 3596.556479,
+            "uncovered_ms": 1914.946519
+          },
+          "copies": [
+            {
+              "kind": 1,
+              "count": 118164,
+              "bytes": 366145070632
+            },
+            {
+              "kind": 2,
+              "count": 757,
+              "bytes": 1056488
+            },
+            {
+              "kind": 8,
+              "count": 372,
+              "bytes": 121356894208
+            }
+          ],
+          "pipeline": {
+            "stages": [
+              {
+                "operation": "gather",
+                "count": 22539,
+                "elapsed_sum_ms": 7271.088786,
+                "interval_union_ms": 7271.088786,
+                "exposed_without_other_gpu_work_ms": 7271.088786,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "mla_prefill_gather_query_k6_f32_structured_kernel": 22539
+                }
+              },
+              {
+                "operation": "score",
+                "count": 22539,
+                "elapsed_sum_ms": 10638.8463,
+                "interval_union_ms": 10638.8463,
+                "exposed_without_other_gpu_work_ms": 10638.8463,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "ampere_sgemm_128x128_tn": 22539
+                }
+              },
+              {
+                "operation": "softmax",
+                "count": 22539,
+                "elapsed_sum_ms": 2095.590591,
+                "interval_union_ms": 2095.590591,
+                "exposed_without_other_gpu_work_ms": 2095.590591,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "mla_prefill_softmax_weights_warp_f32_kernel": 22539
+                }
+              },
+              {
+                "operation": "value",
+                "count": 22539,
+                "elapsed_sum_ms": 11562.173132,
+                "interval_union_ms": 11562.173132,
+                "exposed_without_other_gpu_work_ms": 11562.173132,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "ampere_sgemm_128x128_nn": 22539
+                }
+              }
+            ],
+            "verified_tiles": {
+              "legacy": 22539
+            },
+            "combined_interval_ms": 31567.698809,
+            "pipeline_only_without_other_gpu_work_ms": 31567.698809,
+            "prefill_disjoint": {
+              "kernels_or_graph_only_ms": 90885.377693,
+              "copy_only_ms": 13493.787438,
+              "overlap_ms": 3596.556479,
+              "uncovered_ms": 1914.946519
+            },
+            "operations": {
+              "score": "scaled Q_absorbed @ selected_K6_values.T",
+              "value": "softmax_scores @ selected_K6_values"
+            },
+            "interpretation": "Same-stream sequences identify actual attention calls, including residual products and legacy tails. Each tile feeds value projection on the required main-stream chain. Exposure excludes concurrent traced copies and other kernels; it is not a prediction of recoverable wall time. Host launch gaps lie outside kernel intervals."
+          }
+        },
+        {
+          "mode": 1,
+          "disjoint_ms": {
+            "kernels_or_graph_only_ms": 84953.285968,
+            "copy_only_ms": 13491.546802,
+            "overlap_ms": 3601.00329,
+            "uncovered_ms": 1924.843067
+          },
+          "copies": [
+            {
+              "kind": 1,
+              "count": 118213,
+              "bytes": 366145070828
+            },
+            {
+              "kind": 2,
+              "count": 757,
+              "bytes": 1056488
+            },
+            {
+              "kind": 8,
+              "count": 372,
+              "bytes": 121356894208
+            }
+          ],
+          "pipeline": {
+            "stages": [
+              {
+                "operation": "gather",
+                "count": 22539,
+                "elapsed_sum_ms": 6037.899744,
+                "interval_union_ms": 6037.899744,
+                "exposed_without_other_gpu_work_ms": 6037.899744,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "mla_prefill_gather_k6_no_mask": 22528,
+                  "mla_prefill_gather_query_k6_f32_structured_kernel": 11
+                }
+              },
+              {
+                "operation": "score",
+                "count": 22539,
+                "elapsed_sum_ms": 7732.297595,
+                "interval_union_ms": 7732.297595,
+                "exposed_without_other_gpu_work_ms": 7732.297595,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "void magma_sgemmEx_kernel<float, float, float, (bool)1, (bool)0, (int)6, (int)4, (int)6, (int)3, (int)4>(int, int, int, Tensor, int, Tensor, int, Tensor, int, Tensor, int, int, int, const T1 *, const T1 *, T1, T1, int, cublasLtEpilogue_t, int, const void *, long)": 22528,
+                  "ampere_sgemm_128x128_tn": 11
+                }
+              },
+              {
+                "operation": "softmax",
+                "count": 22539,
+                "elapsed_sum_ms": 2579.254109,
+                "interval_union_ms": 2579.254109,
+                "exposed_without_other_gpu_work_ms": 2579.254109,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "mla_prefill_masked_softmax_f32": 22528,
+                  "mla_prefill_softmax_weights_warp_f32_kernel": 11
+                }
+              },
+              {
+                "operation": "value",
+                "count": 22539,
+                "elapsed_sum_ms": 9162.688547,
+                "interval_union_ms": 9162.688547,
+                "exposed_without_other_gpu_work_ms": 9162.688547,
+                "traced_copy_overlap_ms": 0.0,
+                "kernels": {
+                  "void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(T1::Params)": 22528,
+                  "ampere_sgemm_128x128_nn": 11
+                }
+              }
+            ],
+            "verified_tiles": {
+              "fused_f32": 22528,
+              "legacy": 11
+            },
+            "combined_interval_ms": 25512.139995,
+            "pipeline_only_without_other_gpu_work_ms": 25512.139995,
+            "prefill_disjoint": {
+              "kernels_or_graph_only_ms": 84953.285968,
+              "copy_only_ms": 13491.546802,
+              "overlap_ms": 3601.00329,
+              "uncovered_ms": 1924.843067
+            },
+            "operations": {
+              "score": "scaled Q_absorbed @ selected_K6_values.T",
+              "value": "softmax_scores @ selected_K6_values"
+            },
+            "interpretation": "Same-stream sequences identify actual attention calls, including residual products and legacy tails. Each tile feeds value projection on the required main-stream chain. Exposure excludes concurrent traced copies and other kernels; it is not a prediction of recoverable wall time. Host launch gaps lie outside kernel intervals."
+          }
+        }
+      ]
+    }
+  ],
+  "ordinary": [
+    {
+      "history": 3072,
+      "rep": 0,
+      "wall_s": 19.84425772097893,
+      "first_content_s": 10.341410905006342,
+      "baseline_wall_s": 20.556275859009475,
+      "baseline_first_content_s": 10.635962050000671,
+      "accepted_text_equal": true,
+      "rendered_input_count": 3084,
+      "engine_timing": {
+        "decode_tokens": 63,
+        "decode_time_ms": 9502.9,
+        "decode_tok_s": 6.63,
+        "thinking_tokens": 0,
+        "answer_tokens": 64,
+        "total_generated": 64,
+        "prompt_tokens": 3084,
+        "prefill_tok_s": 315.5,
+        "overhead_ms": 10337.4,
+        "overhead": {
+          "parse_ms": 109.0,
+          "evict_ms": 68.3,
+          "prefill_ms": 9776.2,
+          "reload_ms": 383.9,
+          "real_reload_dma_ms": 383.4
+        }
+      }
+    },
+    {
+      "history": 3072,
+      "rep": 1,
+      "wall_s": 19.81046723999316,
+      "first_content_s": 10.323218553035986,
+      "baseline_wall_s": 20.130769036943093,
+      "baseline_first_content_s": 10.55354689998785,
+      "accepted_text_equal": true,
+      "rendered_input_count": 3084,
+      "engine_timing": {
+        "decode_tokens": 63,
+        "decode_time_ms": 9487.5,
+        "decode_tok_s": 6.64,
+        "thinking_tokens": 0,
+        "answer_tokens": 64,
+        "total_generated": 64,
+        "prompt_tokens": 3084,
+        "prefill_tok_s": 312.1,
+        "overhead_ms": 10318.2,
+        "overhead": {
+          "parse_ms": 4.3,
+          "evict_ms": 60.0,
+          "prefill_ms": 9881.1,
+          "reload_ms": 372.8,
+          "real_reload_dma_ms": 372.3
+        }
+      }
+    },
+    {
+      "history": 16384,
+      "rep": 0,
+      "wall_s": 42.86994245398091,
+      "first_content_s": 33.52238611201756,
+      "baseline_wall_s": 44.85237082099775,
+      "baseline_first_content_s": 35.39442494499963,
+      "accepted_text_equal": true,
+      "rendered_input_count": 16397,
+      "engine_timing": {
+        "decode_tokens": 63,
+        "decode_time_ms": 9347.8,
+        "decode_tok_s": 6.74,
+        "thinking_tokens": 0,
+        "answer_tokens": 64,
+        "total_generated": 64,
+        "prompt_tokens": 16397,
+        "prefill_tok_s": 505.3,
+        "overhead_ms": 33514.2,
+        "overhead": {
+          "parse_ms": 34.6,
+          "evict_ms": 134.5,
+          "prefill_ms": 32447.9,
+          "reload_ms": 897.1,
+          "real_reload_dma_ms": 896.7
+        }
+      }
+    },
+    {
+      "history": 16384,
+      "rep": 1,
+      "wall_s": 43.651250521012116,
+      "first_content_s": 34.309885440045036,
+      "baseline_wall_s": 44.99761636799667,
+      "baseline_first_content_s": 35.59742387000006,
+      "accepted_text_equal": true,
+      "rendered_input_count": 16397,
+      "engine_timing": {
+        "decode_tokens": 63,
+        "decode_time_ms": 9341.4,
+        "decode_tok_s": 6.74,
+        "thinking_tokens": 0,
+        "answer_tokens": 64,
+        "total_generated": 64,
+        "prompt_tokens": 16397,
+        "prefill_tok_s": 492.6,
+        "overhead_ms": 34299.6,
+        "overhead": {
+          "parse_ms": 17.2,
+          "evict_ms": 130.8,
+          "prefill_ms": 33283.6,
+          "reload_ms": 868.0,
+          "real_reload_dma_ms": 867.5
+        }
+      }
+    },
+    {
+      "history": 65536,
+      "rep": 0,
+      "wall_s": 112.74810783198336,
+      "first_content_s": 103.42935747100273,
+      "baseline_wall_s": 118.83955427299952,
+      "baseline_first_content_s": 109.49168523401022,
+      "accepted_text_equal": true,
+      "rendered_input_count": 65549,
+      "engine_timing": {
+        "decode_tokens": 63,
+        "decode_time_ms": 9318.9,
+        "decode_tok_s": 6.76,
+        "thinking_tokens": 0,
+        "answer_tokens": 64,
+        "total_generated": 64,
+        "prompt_tokens": 65549,
+        "prefill_tok_s": 645.1,
+        "overhead_ms": 103422.5,
+        "overhead": {
+          "parse_ms": 66.0,
+          "evict_ms": 246.9,
+          "prefill_ms": 101613.1,
+          "reload_ms": 1496.4,
+          "real_reload_dma_ms": 1495.9
+        }
+      }
+    },
+    {
+      "history": 65536,
+      "rep": 1,
+      "wall_s": 112.93432031903649,
+      "first_content_s": 103.6429114729981,
+      "baseline_wall_s": 118.87512349698227,
+      "baseline_first_content_s": 109.57639449497219,
+      "accepted_text_equal": true,
+      "rendered_input_count": 65549,
+      "engine_timing": {
+        "decode_tokens": 63,
+        "decode_time_ms": 9291.7,
+        "decode_tok_s": 6.78,
+        "thinking_tokens": 0,
+        "answer_tokens": 64,
+        "total_generated": 64,
+        "prompt_tokens": 65549,
+        "prefill_tok_s": 643.8,
+        "overhead_ms": 103634.6,
+        "overhead": {
+          "parse_ms": 92.4,
+          "evict_ms": 223.9,
+          "prefill_ms": 101819.8,
+          "reload_ms": 1498.5,
+          "real_reload_dma_ms": 1497.9
+        }
+      }
+    }
+  ],
+  "quality": [
+    {
+      "label": "constraints",
+      "baseline_pass": true,
+      "candidate_pass": true,
+      "text_equal": true,
+      "finish_reason": "stop"
+    },
+    {
+      "label": "coding",
+      "baseline_pass": false,
+      "candidate_pass": false,
+      "text_equal": true,
+      "finish_reason": "length"
+    },
+    {
+      "label": "long-retrieval",
+      "baseline_pass": true,
+      "candidate_pass": true,
+      "text_equal": true,
+      "finish_reason": "stop"
+    },
+    {
+      "label": "long-coding",
+      "baseline_pass": true,
+      "candidate_pass": true,
+      "text_equal": true,
+      "finish_reason": "stop"
+    }
+  ],
+  "lifecycle": {
+    "concurrent_clients_pass": true,
+    "cancel_witness_token_equal": true,
+    "prefill_cancel_followup_seconds": 52.563608055,
+    "session_test_exit": 0,
+    "active_hit_delta": 1,
+    "ram_hit_delta": 1,
+    "restore_failures": [],
+    "score_equivalence_claimed": false
+  },
+  "memory": {
+    "minimum_external_free_mib": 908.0,
+    "minimum_native_reported_free_mib": 925,
+    "reserve_mib": 600
+  },
+  "artifacts": {
+    "measured_native_sha256": "fc338f13a038b1c5dd405ac13e2c3c358ab8f10ee86aded517221d4e22c87703",
+    "final_native_sha256": "c88546847252de0a892de30ad604cd53d655c3e5efa15d1e7c4f3dded75c0aec",
+    "cuda_ptx": {
+      "prefill_kernels.ptx": "08477f86b0d9c4ec16149718cef95c2df8b9809c1274ef9e1880a051cd349e36",
+      "decode_kernels.ptx": "03add0684f392b7b8b5b7fc19fb591e40a57170af4e5214153d03d0f344d8985"
+    },
+    "cuda_ptx_identical": true,
+    "measured_source": "source-f32-r1-identities.json",
+    "final_source": "source-f32-final-identities.json",
+    "guard_delta": "final-guard-delta.patch",
+    "guard_only_changes": {
+      "scope": "Startup/fallback guards and Rust formatting only",
+      "measured_control": "literal1,64heads,256nope,zero rope,512latent,2051selections,FP32pedantic",
+      "changes": [
+        "Normalize native boolean aliases in Python and reject malformed controls before weight loading",
+        "Seal cache on every native engine handoff; measuredflag1alreadysealed",
+        "Restrict native selected-row geometry to complete-request-qualified2051selections",
+        "Format new Rustmodule; restore scalar-identity doc comment"
+      ],
+      "cuda_sources_changed": false,
+      "full_request_cohort_repeated": false
+    }
+  },
+  "protected": {
+    "installed_binaries_unchanged": true,
+    "commits_preserved": [
+      "6aeabd2",
+      "deadc3e"
+    ],
+    "model_cleanup": {
+      "exit": 0,
+      "remaining_owners": [],
+      "forced_stops": 0
+    },
+    "non_working_refs_preserved": true
+  },
+  "rejected_bf16": {
+    "operator_pass": true,
+    "request_gain_65k_pct": 5.17,
+    "promotion": false,
+    "reason": "new frozen JSON self-correction/format failure; baseline JSON passes; inherited coding failure retained",
+    "source_patch_sha256": "fe23e02dce216e438105656c685f4ae2e07772dd4237d1ab8c3f16e94ae90c73"
+  },
+  "limitations": [
+    "Independent absolute witness remains unqualified",
+    "Frozen source-only coding oracle still fails identically to the accepted path",
+    "Restored-vs-fresh score drift retained under existing session test gates; lifecycle/token checks do not prove numerical restoration",
+    "Long-chunk cancellation follow-up still takes about53seconds",
+    "16K ordinary timing varies; profiled uncovered intervals do not causally explain ordinary variation",
+    "Only RTX A6000 SM86 tested; new selected algorithms or other hardware do not inherit whole-model admission",
+    "Final startup/fallback guards leave measured literal1/2051 CUDA execution unchanged; final native rebuilt, identical CUDA/PTX; full model cohort not repeated for guards"
+  ]
+}

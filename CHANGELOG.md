@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased: bounded FP32 prefill
+
+- Add opt-in selected K6 gather/mask fusion and startup-qualified owned FP32 Lt contractions, with sealed plans, bounded existing workspace, strict heatmap identity and geometry fallbacks. On the measured 65K profile, pipeline intervals fall 31.57→25.51 seconds and paired complete requests 119.16→112.99 seconds (5.18%).
+- Preserve complete relative logits/state bitwise, unchanged independent operator gates and all accepted-baseline quality results. Retain inherited coding/witness failures, session score drift and long-chunk cancellation limits. Reject the separate BF16 candidate's new JSON regression; preserve its evidence.
+- Add reproducible operator, timing, quality and attribution tools. Final startup/fallback guards pass CPU tests and rebuild with identical CUDA/PTX; installed binaries and protected refs remain unchanged. No release or publication.
+
 ## Unreleased: attention execution
 
 - Add opt-in exact sparse K6 decode attention with once-unpacked values and existing FP32 accumulation order, and reuse exact radix/linear index selection within supported geometry. Preserve packed cache semantics and legacy fallbacks.

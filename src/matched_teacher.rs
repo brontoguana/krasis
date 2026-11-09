@@ -31,6 +31,39 @@ impl Drop for AttentionExecutionGuard {
     fn drop(&mut self) { ATTENTION_EXECUTION.with(|v| v.set(self.previous)); }
 }
 
+thread_local! {
+    static PREFILL_ATTENTION_STATS: std::cell::Cell<(usize,usize,usize)> = const { std::cell::Cell::new((0,0,0)) };
+    static PREFILL_ATTENTION_EXECUTION: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+}
+pub(crate) fn active_prefill_attention_execution() -> Option<u8> {
+    PREFILL_ATTENTION_EXECUTION.with(|v| v.get())
+}
+pub(crate) fn record_prefill_attention(rows:usize,tiles:usize,workspace:usize) {
+    PREFILL_ATTENTION_STATS.with(|v|{let (r,t,w)=v.get();v.set((r+rows,t+tiles,w.max(workspace)));});
+}
+pub(crate) struct PrefillAttentionGuard {
+    previous_stats:(usize,usize,usize),
+    previous: Option<u8>,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+impl PrefillAttentionGuard {
+    pub(crate) fn enter(mode: Option<u8>) -> Result<Self, String> {
+        if mode.is_some_and(|v| v > 1) { return Err("prefill attention permits modes 0 and 1 only".into()); }
+        let previous=PREFILL_ATTENTION_EXECUTION.with(|v|v.replace(mode));
+        Ok(Self{previous,previous_stats:PREFILL_ATTENTION_STATS.with(|v|v.replace((0,0,0))),_not_send:std::marker::PhantomData})
+    }
+}
+impl Drop for PrefillAttentionGuard {
+    fn drop(&mut self) { PREFILL_ATTENTION_EXECUTION.with(|v|v.set(self.previous));PREFILL_ATTENTION_STATS.with(|v|v.set(self.previous_stats)); }
+}
+// Call only after the server has checksum-validated the complete raw request.
+pub(crate) fn admitted_prefill_attention_execution(label: &str) -> Result<Option<u8>,String> {
+    let p=plan()?;
+    let trial=p.trials.iter().find(|t|t.label==label).ok_or("unadmitted prefill label")?;
+    if !trial.raw_input { return Err("prefill intervention requires admitted raw history".into()); }
+    Ok(trial.prefill_attention_execution)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CheckedFile {
@@ -71,6 +104,8 @@ fn default_audit_routes() -> bool { true }
 struct Trial {
     #[serde(default)]
     attention_execution: Option<u8>,
+    #[serde(default)]
+    prefill_attention_execution: Option<u8>,
     #[serde(default)]
     capture_full_logits: bool,
     #[serde(default = "default_audit_routes")]
@@ -151,6 +186,10 @@ fn parse(raw: &[u8]) -> Result<Plan, String> {
     if matches!(p.arithmetic,Arithmetic::CenteredNativeProjection) != p.centered_module.is_some() || (p.centered_module.is_some() && p.schema!=1) { return Err("centered projection teacher requires schema1 and explicit center identity; older modes forbid it".into()); }
     let mut labels = HashSet::new();
     for t in &p.trials {
+        if t.prefill_attention_execution.is_some_and(|v|v>1)
+            || (t.prefill_attention_execution.is_some() && (!t.raw_input || !matches!(p.arithmetic,Arithmetic::NativeServingDecode))) {
+            return Err("prefill intervention requires admitted raw native-serving trials and modes 0/1".into());
+        }
         if t.attention_execution.is_some_and(|v| !matches!(v, 0 | 2 | 3))
             || (t.attention_execution.is_some() && (!t.raw_input || !matches!(p.arithmetic, Arithmetic::NativeServingDecode))) {
             return Err("exact attention intervention requires admitted raw native-serving trials and modes 0/2/3".into());
@@ -428,7 +467,7 @@ impl Session {
         json!({"diagnostic_only":true,"qualifies_candidate":false,"label":self.trial.label,"arithmetic":self.arithmetic,
         "history":"explicit_teacher_forced_saved_tokens","ordinary_cache_equality_evidence":false,"forced_inputs":self.trial.forced_inputs,
         "defer_step_proofs":self.defer_step_proofs,"audit_routes":self.trial.audit_routes,
-        "attention_execution":self.trial.attention_execution,"capture_full_logits":self.trial.capture_full_logits,"first_logit_proof_saved":self.trial.capture_full_logits || !(self.defer_step_proofs && matches!(self.arithmetic,Arithmetic::NativeServingDecode)),"step_receipts":self.deferred_steps,
+        "attention_execution":self.trial.attention_execution,"prefill_attention_execution":self.trial.prefill_attention_execution,"prefill_tensor_stats":PREFILL_ATTENTION_STATS.with(|v|v.get()),"capture_full_logits":self.trial.capture_full_logits,"first_logit_proof_saved":self.trial.capture_full_logits || !(self.defer_step_proofs && matches!(self.arithmetic,Arithmetic::NativeServingDecode)),"step_receipts":self.deferred_steps,
         "completed_decode_steps":self.next_step,"decode_elapsed_seconds":self.decode_elapsed_seconds,"logit_proofs_saved":self.trial.capture_full_logits || !self.defer_step_proofs})
     }
 }
@@ -526,6 +565,8 @@ mod tests {
         let base=json!({"schema":2,"arithmetic":"native_serving_decode","defer_step_proofs":true,"directory":"/tmp/replay","loaded_native":{"path":"/tmp/native","sha256":"a".repeat(64)},"identities":[{"path":"/tmp/config","sha256":"b".repeat(64)}],"trials":[{"raw_input":true,"label":"fixed","logical_tokens":2,"expected_sequence_start":0,"max_tokens":3,"input_ids_sha256":"c".repeat(64),"forced_inputs":[4,5]}]});
         assert!(parse(&serde_json::to_vec(&base).unwrap()).is_ok());
         for key in ["defer_step_proofs","raw_input"] {let mut p=base.clone();if key=="raw_input"{p["trials"][0][key]=json!(false);}else{p[key]=json!(false);}assert!(parse(&serde_json::to_vec(&p).unwrap()).is_err());}
+        for mode in [0,1] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
+        for mode in [2,3,255] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
         for mode in [0,2,3] { let mut q=base.clone();q["trials"][0]["attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
         for mode in [1,5,6,255] { let mut q=base.clone();q["trials"][0]["attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
         let mut q=base.clone();q["arithmetic"]=json!("native");q["trials"][0]["attention_execution"]=json!(3);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err());
@@ -596,9 +637,27 @@ mod tests {
         let t:Trial=serde_json::from_value(value).unwrap();assert!(!t.audit_routes);
         assert!(validate_inputs(&t,&[4,5],0,3).is_err()); // Observer switch cannot waive prompt checksum.
     }
+    #[test]
+    fn prefill_intervention_restores_modes_and_statistics() {
+        assert_eq!(active_prefill_attention_execution(),None);
+        { let _outer=PrefillAttentionGuard::enter(Some(0)).unwrap();
+          record_prefill_attention(32,1,100);
+          { let _inner=PrefillAttentionGuard::enter(Some(1)).unwrap();
+            assert_eq!(active_prefill_attention_execution(),Some(1));
+            assert_eq!(PREFILL_ATTENTION_STATS.with(|v|v.get()),(0,0,0));
+            record_prefill_attention(64,2,200);
+            assert!(PrefillAttentionGuard::enter(Some(2)).is_err());
+          }
+          assert_eq!(active_prefill_attention_execution(),Some(0));
+          assert_eq!(PREFILL_ATTENTION_STATS.with(|v|v.get()),(32,1,100));
+        }
+        assert_eq!(active_prefill_attention_execution(),None);
+        assert_eq!(PREFILL_ATTENTION_STATS.with(|v|v.get()),(0,0,0));
+    }
     fn trial() -> Trial {
         Trial {
             attention_execution: None,
+            prefill_attention_execution: None,
             capture_full_logits: false,
             audit_routes: true,
             raw_input: false,

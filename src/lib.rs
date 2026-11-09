@@ -151,6 +151,7 @@ mod mla_f32;
 mod model_tensor_owner;
 mod ordered_projection;
 mod stable_mla_gemm;
+mod prefill_mla_lt;
 mod stable_mla_ops;
 mod stable_mla_owned;
 mod stable_mla_path;

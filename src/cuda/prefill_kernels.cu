@@ -2381,6 +2381,8 @@ __device__ inline float mla_prefill_load_k6_value(
         (float)(mla_prefill_unpack_k6(packed + 2, element & 15) - 32);
 }
 
+#include "mla_prefill_mask_fusion.cuh"
+
 __device__ inline float mla_prefill_dot_k6(
     const unsigned char* cache,
     int position,

@@ -92,3 +92,71 @@ Immutable controllers retain source and binary identities, frozen native input I
 The device-wide reserve remains 600 MiB. CUDA kernel elapsed sums are investigation scopes; disjoint kernel-only, copy-only, overlap and uncovered intervals reconcile against wall time. Full logits and registered states are compared without declaring bit differences equivalent or relaxing existing gates. Inherited absolute model-quality failures remain separate.
 
 A startup stall in inherited CPU-tier construction and an initial diagnostic-fixture admission failure produced no scored request. Failed receipts are retained. Protected refs, installed binaries and prior evidence remain preserved.
+
+## Bounded FP32 selected-row prefill
+
+`KRASIS_PREFILL_MLA_F32=1` opts into the next qualified relative improvement on the retained exact profile. Full request qualification is specific to RTX A6000 SM86, K6 values, 64 heads, 256 non-positional query dimensions, zero rotary dimensions, 512 latent dimensions, 2,051 selections and pedantic FP32 GEMMs. Other geometry retains the existing path. The measured profile also uses split mode 3, absorption mode 2, radix indexing, 32-row attention tiles, a 69,632-token GPU KV window and no CPU expert tier. Packed cache bytes, indices, causal masking and logical chunks remain unchanged.
+
+Gather copies queries alongside selected K6 values and leaves score masking to softmax. Score GEMM uses beta zero; softmax applies the original valid-index/position predicate and warp reduction order. This removes score-mask initialization and its GEMM read/modify/write. Score and value contractions use owned FP32 Lt plans on full 32-row tiles; partial tiles retain classic GEMMs. Chunks below 32 rows retain the prior pipeline. There are still four stages and 22,539 launches per stage in the 65K trace.
+
+Startup tests at most four discovered pedantic FP32 configurations per role on actual operands. It requires complete bitwise output equality to the classic contraction and a five-percent timing margin. Selected library version/configuration identities are bound into the heatmap. Plans are sealed after calibration and at every engine handoff; requests cannot start cold tuning. Real allocation borrows check context, extent, alignment and aliases. Engine teardown completes owned streams before releasing prepared descriptors and handles. Hot execution stays in Rust/CUDA.
+
+The selected-row tile uses 172,212,224 bytes of its existing 172,212,989-byte arena. Library workspace is capped at 16 MiB borrowed from existing serial MoE scratch; both selected plans need zero workspace on the measured GPU. No additional explicit persistent GPU data allocation is introduced. Minimum externally sampled free VRAM across the complete run is **908 MiB**, above the **600 MiB** reserve; native request reports reach 925 MiB. These measurements include library initialization and lifecycle work.
+
+### Complete requests
+
+One loaded process, frozen native IDs, 64 outputs, logical KV cold and expert placement warm/adaptive. Timing is separate from tensor capture and profiling. The 65K chunk plan remains `[32768,32768,13]`.
+
+| Nominal history (native input IDs) | Control complete seconds | Candidate complete seconds |
+|---|---:|---:|
+| 3,072 (3,084) | 21.594 / 20.354 | 19.752 / 19.646 |
+| 16,384 (16,397) | 48.166 / 46.853 | 48.236 / 43.435 |
+| 65,536 (65,549) | 119.152 / 119.168 | 112.981 / 112.990 |
+
+65K medians are **119.160 → 112.985 seconds**, a **5.18%** reduction. Every timing is retained. Short prefill itself is 10.08/10.08 versus 9.76/9.79 seconds, with decode near 9.40 seconds in both arms. The first short control has extra time outside those printed prefill/decode intervals; its cause is not assigned. Consequently the 6.08% short HTTP median difference should not all be attributed to the operator. The prior separate-process short regression remains recorded above; the new paired short sequence does not reproduce a slowdown. Intermediate request variation remains substantial. Its separate profiles contain about 6.6 seconds of uncovered time in both arms, without establishing a causal explanation for ordinary-run variation. The feature remains opt-in.
+
+Unforced streaming requests repeat in forward and reverse history order. All six satisfy the existing validity and native-ID checks, and all response texts equal the separate accepted baseline. Candidate medians:
+
+| Nominal history | Complete seconds | First content seconds |
+|---|---:|---:|
+| 3,072 | 19.827 | 10.332 |
+| 16,384 | 43.261 | 33.916 |
+| 65,536 | 112.841 | 103.536 |
+
+The separate accepted streaming baseline at 65K has medians 118.857 seconds complete and 109.534 seconds to first content. That process comparison supports the result but does not replace the paired control.
+
+### Exposed pipeline work
+
+Separate 65K trace, through the first native decode embedding rather than HTTP first content:
+
+| Attention operation | Control seconds | Candidate seconds |
+|---|---:|---:|
+| Selected K6 gather and query staging | 7.271 | 6.038 |
+| Scaled absorbed-query/selected-value score contraction | 10.639 | 7.732 |
+| Mask and softmax | 2.096 | 2.579 |
+| Weighted selected-value contraction | 11.562 | 9.163 |
+| Pipeline interval union | 31.568 | 25.512 |
+
+Actual same-stream sequences establish the operation mapping, including legacy small-chunk tails. Pipeline intervals have no overlap with other traced GPU work. Moving masking makes softmax slower, while gather and contractions provide a net **19.18%** pipeline improvement. These elapsed scopes are measurements, not additive promised savings.
+
+Disjoint predecode seconds reconcile: kernel-only **90.885 → 84.953**, copy-only **13.494 → 13.492**, overlap **3.597 → 3.601**, uncovered **1.915 → 1.925**. H2D payload is 366,145,070,632 versus 366,145,070,828 bytes; D2D is 121,356,894,208 bytes in both arms. This supports a compute gain with effectively unchanged transfers. Profiles are excluded from ordinary latency scoring. The added 16K pair uses already-admitted trials in the same loaded profiling session, after ordinary paired timing, with independent reserve monitoring and no request overlap.
+
+### Numerical, quality and lifecycle evidence
+
+The saved 18,000-row bank checks all 589,824,000 outputs bitwise. Independent float64 packed equations cover capacities 1/17/129/2051/4096, masked/duplicate/future/sentinel selections, empty history, and 1/17/31-row query tails. Baseline/candidate and eager/graph fixture outputs agree bitwise across 24,248,320 comparisons. Runtime dispatch is narrower than these stress fixtures: only 2,051 selections is request-qualified. Six actual native captures check 196,608 values, maximum error 7.85e-6 at the unchanged 2e-4 absolute threshold. Native prefill is eager; decode graph behavior is retained.
+
+All **192 complete logit vectors (29,736,960 values)** and **1,417,804,736 registered-state bytes** match both the same-process accepted path and prior accepted captures bitwise. Fixed-token NLL and KL changes are zero at every tested history. All four frozen free-generation response texts also equal the accepted baseline: JSON passes, source-only coding still **fails** through repeated self-correction/truncation, 18K retrieval passes and 18K coding passes. The inherited coding failure is retained. Independent absolute witness admission remains unpassed.
+
+Long-prefill disconnect, concurrent-client isolation, subsequent cancellation/reset continuation and live session/RAM restoration pass their existing gates. Before/after cancellation witness tokens match. Restored-versus-fresh log-probability drift remains recorded; these lifecycle/token checks do not prove numerical restoration equivalence. A subsequent short request completes about **52.6 seconds after a long-prefill disconnect**, preserving the existing logical-chunk responsiveness limitation. Model shutdown exits normally and leaves no GPU owner.
+
+A separate BF16 high/residual tensor candidate passed independent operator equations and improved request time, but introduced a frozen JSON-format failure where the accepted path passes. It is rejected and is absent from native serving dispatch. Its source patch, tools and failed receipts are preserved. Its changed floating-point values are not classified as an implementation defect merely for differing from the exact path.
+
+After the measured cohort, final review normalizes boolean aliases, seals every engine handoff, narrows unsupported selection-count fallback and formats the new Rust module. Five pure dispatch tests and eight heatmap/identity tests pass; the final native imports successfully. The final rebuild has identical CUDA/PTX. The measured literal `1`/2,051-selection execution is unchanged; the complete model cohort was not repeated for these startup/fallback-only guards. Measured/final source and binary hashes plus the reversible guard delta are retained in the evidence files.
+
+### Remaining costs and reproduction
+
+Prefill still contains 25.51 seconds in this pipeline, about 17.85 seconds of routed-expert kernels, 12.78 seconds in a 22-call BF16 family, another dense family near 6.19 seconds, KDA near 4.05 seconds and index-score accumulation near 3.62 seconds. These are investigation scopes, not additive savings. Source/launch-order mapping places the 12.78-second family at indexer query projection between pooled-key construction and query RoPE. Its row-independent strided-batch path broadcasts weights for one token per batch. A bounded replay that shares weights across token rows is the next concrete lead; reassociated arithmetic requires independent equations and the same fixed-token/held-out quality gates. The other dense family is not assigned a specific operation without further evidence. Decode receives no new intervention here and remains transfer-dominated. The overall performance objective remains unfinished.
+
+`tools/attention/prepare_prefill_pipeline.py` extracts the retained native gather equations and derives independent fixtures; `prepare_prefill_tails.py` adds query-tile boundaries. `qualify_prefill_f32.cu` checks full eager/graph outputs. `replay_prefill_lt.cu ... exact` reproduces the bounded FP32 algorithm replay, and `attribute_prefill.py` maps profiled launch sequences. `request_prefill.py` replays a checksum-admitted trial against an already loaded server; `check_prefill_likelihood.py`, `check_prefill_run.py` and `check_prefill_quality.py` reproduce distribution, state and frozen-oracle checks. The quality harness uses the cached Node image with network disabled. Controls and thresholds are preserved; no weights were downloaded.
+
+See [measurements](tools/attention/evidence/prefill-f32.json), [source/plan identities](tools/attention/evidence/prefill-f32-source.json), [final guard delta](tools/attention/evidence/prefill-f32-final-guards.patch) and [rejected tensor source](tools/attention/evidence/rejected-bf16-native.patch). Protected commits, installed binaries and prior evidence remain intact. Nothing is released or pushed by this work.

@@ -3750,6 +3750,16 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             }
         }
     };
+    let prefill_intervention = if raw_teacher_tokens.is_some() {
+        match crate::matched_teacher::admitted_prefill_attention_execution(teacher_label.unwrap()) {
+            Ok(mode) => mode,
+            Err(error) => { let _=send_json(stream,400,&serde_json::json!({"error":error}).to_string());return; }
+        }
+    } else { None };
+    let _prefill_attention_guard = match crate::matched_teacher::PrefillAttentionGuard::enter(prefill_intervention) {
+        Ok(scope) => scope,
+        Err(error) => { let _=send_json(stream,400,&serde_json::json!({"error":error}).to_string());return; }
+    };
     let mut raw_teacher_first_logits: Option<Vec<f32>> = None;
     // END explicit teacher-forced request admission
 

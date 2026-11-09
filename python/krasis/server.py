@@ -479,6 +479,9 @@ def _krasis_runtime_code_hash() -> dict[str, Any]:
         "src/gpu_decode.rs",
         "src/gpu_prefill.rs",
         "src/prefill_transfer.rs",
+        "src/prefill_mla_lt.rs",
+        "src/stable_mla_gemm.rs",
+        "src/cuda/mla_prefill_mask_fusion.cuh",
         "src/streamed_kv.rs",
         "src/streamed_kv/vmm.rs",
         "src/streamed_kv/dlpack.rs",
@@ -664,6 +667,19 @@ def _runtime_heatmap_capture_config(args) -> dict[str, Any]:
     return config
 
 
+def _prefill_mla_f32_enabled() -> bool:
+    """Match the native boolean parser for startup sealing and identity."""
+    raw = os.environ.get("KRASIS_PREFILL_MLA_F32")
+    if raw is None:
+        return False
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError("Invalid KRASIS_PREFILL_MLA_F32; expected 0/1, false/true, no/yes, or off/on")
+
+
 def _actual_runtime_heatmap_capture_config(model: KrasisModel, args) -> dict[str, Any]:
     """Bind the configured domain's actual kernel arithmetic, once at startup."""
     runtime = _runtime_heatmap_capture_config(args)
@@ -724,6 +740,21 @@ def _actual_runtime_heatmap_capture_config(model: KrasisModel, args) -> dict[str
     store = getattr(model, "_gpu_decode_store", None)
     if store is None:
         raise RuntimeError("Heatmap arithmetic identity requires the configured GPU decode store")
+    # Bind this treatment for every architecture, including fallback geometry.
+    prefill_control = os.environ.get("KRASIS_PREFILL_MLA_F32")
+    if prefill_control is not None:
+        runtime["prefill_mla_f32_control"] = prefill_control
+    if _prefill_mla_f32_enabled():
+        try:
+            prefill_identity = json.loads(store.native_prefill_mla_identity())
+        except (AttributeError, TypeError, ValueError) as error:
+            raise RuntimeError("Native prefill arithmetic identity unavailable") from error
+        if (not isinstance(prefill_identity, dict)
+                or prefill_identity.get("format") != "prefill_mla_f32_v1"
+                or prefill_identity.get("sealed") is not True
+                or not isinstance(prefill_identity.get("plans"), list)):
+            raise RuntimeError("Native prefill arithmetic identity is not finalized")
+        runtime["prefill_mla_f32_identity"] = prefill_identity
     raw = store.native_scalar_runtime_identity()
     if raw is None:
         return runtime
@@ -3045,6 +3076,7 @@ def _resolve_serving_gpu_count(args) -> int:
 
 
 def main():
+    _prefill_mla_f32_enabled()  # Reject malformed controls before loading weights.
     import os # Ensure os is in local scope
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True" # Mitigate fragmentation
 
@@ -4544,6 +4576,8 @@ def main():
     torch.cuda.empty_cache()
     _model.server_cleanup()
     time.sleep(0.1)
+    if _prefill_mla_f32_enabled():
+        gpu_store.finalize_prefill_mla_tuning()
     post_calibration_free_mb = int(vram_monitor.current_free_mb(dev_idx))
 
     vram_monitor.disable_precision_windows()
