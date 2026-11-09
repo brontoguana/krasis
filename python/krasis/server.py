@@ -741,6 +741,9 @@ def _actual_runtime_heatmap_capture_config(model: KrasisModel, args) -> dict[str
     if store is None:
         raise RuntimeError("Heatmap arithmetic identity requires the configured GPU decode store")
     # Bind this treatment for every architecture, including fallback geometry.
+    indexer_control = os.environ.get("KRASIS_INDEXER_QUERY_TILE")
+    if indexer_control is not None:
+        runtime["indexer_query_tile_control"] = indexer_control
     prefill_control = os.environ.get("KRASIS_PREFILL_MLA_F32")
     if prefill_control is not None:
         runtime["prefill_mla_f32_control"] = prefill_control
@@ -799,7 +802,7 @@ def _runtime_matches_approved_heatmap_policy(
     if not isinstance(ignored, list) or not all(isinstance(item, str) for item in ignored):
         return False, "invalid ignored_runtime_fields policy"
     ignored_fields = set(ignored)
-    if {"experimental_glm53_controls", "prefill_transfer_policy"} & ignored_fields:
+    if {"experimental_glm53_controls", "prefill_transfer_policy", "indexer_query_tile_control"} & ignored_fields:
         return False, "GLM arithmetic controls and prefill transfer policy cannot be ignored"
 
     comparable_current = {

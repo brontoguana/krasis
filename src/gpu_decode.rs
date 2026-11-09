@@ -55553,6 +55553,7 @@ impl GpuDecodeStore {
             prefill_cancel_signal: None,
             dsa_prefill_workspace: None,
             prefill_mla_lt: std::cell::RefCell::new(crate::prefill_mla_lt::Cache::default()),
+            indexer_query_tile: crate::indexer_projection::Tile::create(&self.device)?,
             dsa_mla_gather_autotune: std::cell::RefCell::new(std::collections::HashMap::new()),
             prefill_prescan_accuracy_enabled: false,
             prefill_prescan_accuracy_stats: Vec::new(),

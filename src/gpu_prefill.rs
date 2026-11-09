@@ -11730,6 +11730,7 @@ pub struct PrefillEngine {
     pub prefill_cancel_signal: Option<Arc<AtomicBool>>,
     pub(crate) dsa_prefill_workspace: Option<DsaPrefillRequestWorkspace>,
     pub(crate) prefill_mla_lt: RefCell<crate::prefill_mla_lt::Cache>,
+    pub(crate) indexer_query_tile: Option<crate::indexer_projection::Tile>,
     pub(crate) dsa_mla_gather_autotune:
         RefCell<std::collections::HashMap<DsaMlaGatherAutotuneKey, DsaMlaGatherMode>>,
     pub(crate) prefill_prescan_accuracy_enabled: bool,
@@ -36796,13 +36797,21 @@ impl PrefillEngine {
         w: &Bf16Weight,
         output: u64,
         rows: usize,
-    ) -> Result<(), String> {
+    ) -> Result<u8, String> {
         if let Some(bank) = &self.ordered_kda_projection {
             return unsafe {
-                bank.enqueue_dense_bf16(w.ptr, input, output, w.n, w.k, rows, self.stream)
+                bank.enqueue_dense_bf16(w.ptr, input, output, w.n, w.k, rows, self.stream).map(|_|2)
             };
         }
-        self.dsa_owner_projection_gemm(input, w, output, rows)
+        if crate::matched_teacher::active_indexer_projection_execution() != Some(0) {
+            if let Some(tile) = &self.indexer_query_tile {
+                if unsafe { tile.enqueue(self.cublas_handle,self.stream,input,w.ptr,output,rows,w.n,w.k)? } {
+                    return Ok(1);
+                }
+            }
+        }
+        self.dsa_owner_projection_gemm(input, w, output, rows)?;
+        Ok(if dsa_owner_row_independent_projection_enabled()? {0}else{3})
     }
 
     fn dsa_owner_projection_gemm(
@@ -47541,12 +47550,13 @@ impl PrefillEngine {
         self.populate_dsa_prefill_owner_key_cache(layer_idx, chunk_start, rows, observed)?;
         let raw_queries_ptr = *self.scratch.d_q.device_ptr();
         let head_weights_ptr = *self.scratch.d_scratch1.device_ptr();
-        self.dsa_owner_query_projection_gemm(
+        let query_dispatch = self.dsa_owner_query_projection_gemm(
             q_lora_residual_ptr,
             &owner.wq_b,
             raw_queries_ptr,
             rows,
         )?;
+        crate::matched_teacher::record_indexer_projection(layer_idx,chunk_start,rows,owner.wq_b.n,owner.wq_b.k,query_dispatch);
         self.dsa_owner_projection_gemm(
             *self.scratch.d_hidden.device_ptr(),
             &owner.weights_proj,

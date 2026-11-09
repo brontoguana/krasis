@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased: indexer query projection
+
+- Add opt-in `KRASIS_INDEXER_QUERY_TILE=1` fixed 64-row BF16 index-query GEMMs with owned, stream-ordered tail storage, capability/geometry/math fallbacks and preserved small-chunk arithmetic. Reuse existing weights without host duplication; add 704 KiB of explicit GPU scratch.
+- Reduce the clean 32K-row projection replay 580.69→12.09 ms and paired 65K complete requests 112.76→100.24 seconds (11.1%). Preserve all 192 tested logit vectors and 1.42 GB of registered state bitwise, zero fixed-token likelihood changes, and existing held-out results. Keep inherited coding/witness failures and session score drift explicit.
+- Add actual dispatch/chunk receipts, complete operator and index equations, separate observer-free timing, trace attribution and reproducible evidence. Bind the execution control into non-ignorable heatmap identity. Keep the feature off by default; no release or installation changes.
+
 ## Unreleased: bounded FP32 prefill
 
 - Add opt-in selected K6 gather/mask fusion and startup-qualified owned FP32 Lt contractions, with sealed plans, bounded existing workspace, strict heatmap identity and geometry fallbacks. On the measured 65K profile, pipeline intervals fall 31.57→25.51 seconds and paired complete requests 119.16→112.99 seconds (5.18%).

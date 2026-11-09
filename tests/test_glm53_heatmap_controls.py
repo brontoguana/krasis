@@ -16,6 +16,16 @@ class Glm53HeatmapControlsTest(unittest.TestCase):
         with patch.object(server, '_runtime_heatmap_capture_config', return_value={'base': 1}):
             return server._actual_runtime_heatmap_capture_config(model, SimpleNamespace())
 
+    def test_indexer_treatment_identity_is_bound_and_cannot_be_ignored(self):
+        with patch.dict(os.environ, {}, clear=True):
+            baseline = self.capture(False)
+        with patch.dict(os.environ, {"KRASIS_INDEXER_QUERY_TILE": "1"}, clear=True):
+            candidate = self.capture(False)
+        self.assertEqual(candidate["indexer_query_tile_control"], "1")
+        self.assertNotEqual(candidate, baseline)
+        self.assertFalse(server._runtime_matches_approved_heatmap_policy(
+            candidate, [baseline], {"ignored_runtime_fields": ["indexer_query_tile_control"]})[0])
+
     def test_prefill_treatment_binds_non_glm_fallback_and_finalized_plans(self):
         identity = {"format": "prefill_mla_f32_v1", "sealed": True, "plans": []}
         with patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": "1"}, clear=True):

@@ -163,3 +163,5 @@ mod prefix_recurrence;
 mod prefix_lifecycle_observer;
 
 mod reference_numbers;
+
+mod indexer_projection;

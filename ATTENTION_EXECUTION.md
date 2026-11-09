@@ -160,3 +160,56 @@ Prefill still contains 25.51 seconds in this pipeline, about 17.85 seconds of ro
 `tools/attention/prepare_prefill_pipeline.py` extracts the retained native gather equations and derives independent fixtures; `prepare_prefill_tails.py` adds query-tile boundaries. `qualify_prefill_f32.cu` checks full eager/graph outputs. `replay_prefill_lt.cu ... exact` reproduces the bounded FP32 algorithm replay, and `attribute_prefill.py` maps profiled launch sequences. `request_prefill.py` replays a checksum-admitted trial against an already loaded server; `check_prefill_likelihood.py`, `check_prefill_run.py` and `check_prefill_quality.py` reproduce distribution, state and frozen-oracle checks. The quality harness uses the cached Node image with network disabled. Controls and thresholds are preserved; no weights were downloaded.
 
 See [measurements](tools/attention/evidence/prefill-f32.json), [source/plan identities](tools/attention/evidence/prefill-f32-source.json), [final guard delta](tools/attention/evidence/prefill-f32-final-guards.patch) and [rejected tensor source](tools/attention/evidence/rejected-bf16-native.patch). Protected commits, installed binaries and prior evidence remain intact. Nothing is released or pushed by this work.
+
+
+## Fixed-row indexer query projection
+
+`KRASIS_INDEXER_QUERY_TILE=1` opts into the next exact relative improvement on the accepted FP32 attention profile. The active operation is the indexer `wq_b` projection, not main MLA query absorption. At 65,549 native input IDs there are 22 large calls at layers 3,7,…,43 across two 32,768-row chunks, plus 11 calls for the 13-row tail. Each large call consumes BF16 `[32768,1536]` normalized Q-LoRA inputs and existing BF16 `[4096,1536]` weights, with BF16 output and `CUBLAS_COMPUTE_32F`. Native dispatch receipts confirm the control uses per-token strided-batch cuBLAS; the ordered projection bank is absent in this profile and retains priority when present.
+
+The candidate submits fixed 64-row GEMMs, sharing weight tiles across token rows. It pads an internal partial tile in engine-owned storage and copies only live output rows back, all on the existing serial compute stream. Standalone chunks below 64 rows retain the original operation. This is important: the original library changes its reduction family for some small batch counts at real dimensions. Forcing 64-row arithmetic onto standalone 13/31-row captures changed 11/28 BF16 outputs. The narrowed candidate preserves all tested original batch behaviors; it does not claim to repair general rechunking invariance. Unsupported geometry or math mode retains the old path; devices below Ampere do not create the candidate. Only SM86 hardware is measured here.
+
+The existing weight allocation is reused. Tail storage adds **720,896 bytes (704 KiB)**, allocated before calibration; hot execution stays in Rust/CUDA. The existing engine teardown completes streams before freeing storage. The flag is bound into heatmap treatment identity and cannot be ignored by compatibility policy. No cache precision, selection policy, HCS policy or default execution is changed.
+
+### Measured complete requests
+
+One loaded process, accepted FP32 attention enabled in both arms, frozen IDs and 64 forced outputs, logical KV cold, expert placement warm/adaptive, CPU tier off. Retained K6V6 settings use a 69,632-row GPU window, 131,072-token allocation and the same `[32768,32768,13]` long chunk plan. Ordinary timing precedes trace collection. Every request asserts that no operand capture was emitted. Real diagnostic targets remain admitted at a separate 65,536-token observation height and are exercised after timing.
+
+| Native input IDs | Control seconds | Candidate seconds | Median reduction |
+|---|---|---|---:|
+| 3,084 | 20.101 / 19.604 | 19.100 / 19.028 | 3.97% |
+| 16,397 | 36.936 / 36.962 | 33.840 / 33.831 | 8.43% |
+| 65,549 | 112.813 / 112.715 | 100.241 / 100.230 | 11.11% |
+
+The 65K medians are **112.764→100.236 seconds**. Decode remains near 150 ms/forward; it receives no new intervention. Short control variation is retained rather than discarded or wholly attributed to the projection. Earlier 16K timings matched operand observer targets; their extra time is not assigned to this operator, and those receipts remain unchanged. The accepted 65K timing receipts did not match such observers.
+
+Six unforced streaming repetitions retain identical native IDs and response texts. Candidate median complete/first-content times are **19.130/9.713**, **33.770/24.446**, and **100.198/90.924 seconds** at the three histories. These secondary measurements occur after trace collection with adaptive expert placement; paired pre-profile timings establish the primary speed claim.
+
+### Operator and trace evidence
+
+Clean actual-operand replay: **580.686→12.085 ms (48.05×)** for a 32,768-row projection. Six saved layer/history banks plus nine row-boundary cases compare **606,683,136 outputs bitwise**. Eager and graph arithmetic replays agree. Native prefill remains eager; existing decode graph validation is retained. Independent float64 equations cover 2,740,224 projection values, including direct BF16 rounding diagnostics; baseline and candidate retain identical typed-boundary results. The expected differences from an ideal float64 contraction are not treated as new implementation errors.
+
+All nine observed indexing boundaries match raw queries, rotated queries, head weights, complete causal scores and all selected indices. Independent score equations have maximum error **5.16e-5**, below the unchanged **2e-4** absolute threshold. Stable ordering, near-tied scores, chunk positions and masked sentinels are checked. The minimum observed cutoff margin is about **0.00120**; changed selections: **zero**. This profile has zero rotary dimensions. Three additional post-timing 65,536-token observations match the accepted complete normalized-input banks, weights, raw/rotated queries, causal scores and selections.
+
+Separate 65K profiling maps source boundaries, actual dispatch receipts and library kernels:
+
+| Scope | Control seconds | Candidate seconds |
+|---|---:|---:|
+| Indexer query kernels | 12.779 | 0.283 |
+| Indexer query spans, including intervening gaps | 12.779 | 0.294 |
+| Selected-row attention pipeline | 25.470 | 25.486 |
+
+Disjoint predecode intervals reconcile independently: kernel-only **84.887→72.490**, copy-only **13.435→13.423**, overlap **3.576→3.570**, uncovered **1.932→1.893 seconds**. These total **103.830→91.377 seconds** through first native decode entry, rather than HTTP first content. Named operator scopes overlap the disjoint categories and are not additional savings. H2D payload is 366.249 versus 365.860 decimal GB; expert placement remains adaptive. D2D payload is identical at 121,356,894,208 bytes. No transfer policy change is claimed.
+
+### Qualification and remaining work
+
+All **192 complete logit vectors (29,736,960 values)** and **1,417,804,736 registered-state bytes** match both paired control and accepted captures bitwise. Fixed-token NLL/KL changes are zero. All four held-out texts match: constrained JSON, long retrieval and long coding pass; the inherited source-only coding failure remains identical. Independent witness first-token disagreement and selected-token logprob delta **2.8826026334** remain identical. These relative checks do not grant absolute model admission.
+
+Concurrent-client isolation, continuation after cancellation/reset, active-session hits and RAM restoration pass existing gates. Session probability equality is not established; score drift remains recorded. Following a long-prefill disconnect, the next isolated short request completes after **46.25 seconds**, retaining the active-chunk responsiveness limit. Normal shutdown exits cleanly and leaves no GPU owner. Minimum free VRAM is **926 MiB externally sampled / 925 MiB natively reported**, above the **600 MiB** reserve.
+
+The remaining attention pipeline costs **25.49 seconds**: value contraction 9.15, score contraction 7.72, gather 6.04 and softmax 2.58. Routed expert kernels cost **17.83 seconds** and are now the largest individual family. Another BF16 dense family costs **6.18 seconds** but remains semantically unmapped; KDA preparation/split costs 4.06 and index-score accumulation 3.65 seconds. These scopes are not additive promised savings. A bounded actual-operand routed-expert replay is the next concrete lead; the overall performance objective remains unfinished.
+
+Grouped strided-64 arithmetic changed outputs and remains unselected. Those differences are not classified as an implementation defect; its optimistic incremental gain beyond the exact path is under 0.15 seconds per long request from isolated operator timings, which does not justify a separate arithmetic/quality campaign here. A full variable-row matrix call was fast on the large bank but is not promoted without chunk-size arithmetic qualification; the fixed64 candidate already removes almost all projection cost. The earlier rejected BF16 attention candidate remains rejected and untouched. Failed startup/preflight receipts and all prototype outputs remain retained.
+
+`src/indexer_projection.rs` owns dispatch and tail storage. `replay_query_projection.cu` reproduces default exact replay; `--diagnostics`, `--force-tiny` and `--repeat-row` reproduce the separate probes. `check_query_equations.py` reconstructs BF16 equations; `check_query_index.py` checks causal scores/selections; `check_query_run.py` compares complete logits/state, chunk plans and observer-free paired timings. `attribute_query_projection.py` maps actual query work, and the existing attention attribution tool verifies unchanged pipeline work. Fifteen original-source teacher tests and nine heatmap identity tests pass.
+
+See [complete measurements and identities](tools/attention/evidence/indexer-query.json). Protected refs, accepted evidence and installed binaries are preserved. No weights were downloaded; nothing was released or pushed.
