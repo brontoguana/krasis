@@ -46533,6 +46533,17 @@ impl PrefillEngine {
             format!("DSA MLA gathered-GEMM layer {layer_idx} output stride exceeds i64")
         })?;
 
+        // cuBLAS stream changes reset its workspace; bind the owned bank last.
+        unsafe {
+            cublas_result::set_stream(
+                self.cublas_handle,
+                self.stream as cublas_sys::cudaStream_t,
+            )
+            .map_err(|error| {
+                format!("DSA MLA gathered-GEMM layer {layer_idx} set_stream: {error:?}")
+            })?;
+        }
+
         let lib = unsafe { cublas_sys::lib() };
         let mut previous_math = cublas_sys::cublasMath_t::CUBLAS_DEFAULT_MATH;
         unsafe {
@@ -46565,15 +46576,6 @@ impl PrefillEngine {
         }
 
         let run_result = (|| -> Result<(), String> {
-            unsafe {
-                cublas_result::set_stream(
-                    self.cublas_handle,
-                    self.stream as cublas_sys::cudaStream_t,
-                )
-                .map_err(|error| {
-                    format!("DSA MLA gathered-GEMM layer {layer_idx} set_stream: {error:?}")
-                })?;
-            }
 
             let alpha_score = sm_scale;
             let beta_score = 1.0f32;
@@ -47064,6 +47066,17 @@ impl PrefillEngine {
             })?)
             .map_err(|_| format!("DSA MLA WVC GEMM layer {layer_idx} weight stride exceeds i64"))?;
 
+        // cuBLAS stream changes reset its workspace; bind the owned bank last.
+        unsafe {
+            cublas_result::set_stream(
+                self.cublas_handle,
+                self.stream as cublas_sys::cudaStream_t,
+            )
+            .map_err(|error| {
+                format!("DSA MLA WVC GEMM layer {layer_idx} set_stream: {error:?}")
+            })?;
+        }
+
         let lib = unsafe { cublas_sys::lib() };
         let mut previous_math = cublas_sys::cublasMath_t::CUBLAS_DEFAULT_MATH;
         unsafe {
@@ -47096,15 +47109,6 @@ impl PrefillEngine {
         }
 
         let run_result = (|| -> Result<(), String> {
-            unsafe {
-                cublas_result::set_stream(
-                    self.cublas_handle,
-                    self.stream as cublas_sys::cudaStream_t,
-                )
-                .map_err(|error| {
-                    format!("DSA MLA WVC GEMM layer {layer_idx} set_stream: {error:?}")
-                })?;
-            }
             let alpha = 1.0f32;
             let beta = 0.0f32;
             let mut tile_start = 0usize;

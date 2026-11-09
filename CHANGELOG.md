@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-09: Select the cuBLAS stream before binding owned gathered-attention and value-projection workspace. Selecting a stream resets the workspace binding; preserve explicit ownership, math modes and cleanup. Complete real-operand workspace-order replays match bitwise.
+
 - 2026-11-07: Add eligible GLM phase reuse for Q/K/V/attention-output and MoE work buffers with four Arc-owned allocations, fixed logical chunks and exact budget rebates. Selected KDA prefix owners and unsupported paths retain independent buffers. `KRASIS_PREFILL_PHASE_ARENA=0` opts out; heatmaps bind policy version 4. Targeted235458 validation: complete3K/65K state/logits and48saved operator arrays match control bitwise; live reset/cancel/session tests pass. Protected experts60→435; expert staging314.98→305.06GiB, complete-request H2D448.96→429.14GiB. Ordinary prefill stays~113s. Relative storage evidence does not clear inherited absolute qualification failures.
 
 - 2026-11-06: Pack eligible HQQ runtime components into one fixed-offset VMM arena only when both stages save physical bytes, with independent mapping fallback and explicit opt-out. Preserve pointers and layouts across phase swaps; reject extent-changing restaging. Account for arena physical mappings once. Bind storage policies into heatmap identity; keep reclaimed capacity in the protected expert budget. Matched startup headroom improves1062MiB beyond source reclamation; eligible packed arm retains210experts. Pointer/lifecycle and full-state comparisons pass in235458.
