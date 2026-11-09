@@ -13442,3 +13442,5 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
 - Live +5% post-fix validation completed two exact deterministic replays with
   zero Dynamic-HCS budget skips, no-slot events, or copy failures; request VRAM
   lows were 625/649 MiB against the 600 MiB policy.
+
+- Screened globally prepared four-product TF32 attention with bounded operand ownership; rejected a2.69x full-pipeline cost despite passing complete independent operator equations. Preserved exact serving settings and added no model-quality or request-gain claim.
