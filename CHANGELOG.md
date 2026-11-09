@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased: natural routed execution investigation
+
+- Add a bounded offline M64/K64 N256/N128 replay using actual distinct token operands and routing. Reject N128 at 1.319 vs 0.844 ms despite bit-identical projected outputs; map the remaining 6.156-second dense family to actual KDA/MLA/MLP dispatches. Keep serving arithmetic, accepted attention/indexer controls and disabled value reassociation unchanged.
+
 ## Unreleased: routed attribution and experimental value plans
 
 - Map routed gate/up, down, activation, staging windows and natural expert occupancies from retained source/trace/diagnostics. Preserve rejected block32 and vector-gather replays with complete outputs and unchanged thresholds.
