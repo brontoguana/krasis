@@ -1,3 +1,8 @@
+## 2026-11-09 — Bounded causal index-score feasibility
+
+- Reconstruct accepted FP32 row-band headroom and review the existing BF16 causal mode separately.
+- Reject uniform FP32 causal-prefix trimming after mixed complete-pipeline replay results, including a late-history regression. No serving changes or model startup; preserve the accepted experimental profile and closed recurrence screen.
+
 ## 2026-11-09 — Bounded recurrence lifetime screen
 
 - Correct the 4.059-second scope to recurrent state updates, separate from 0.346-second BF16 preparation.
