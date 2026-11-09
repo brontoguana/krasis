@@ -1,3 +1,13 @@
+## 2026-11-09 — Scale-factored K6 value screen
+
+- Added one offline 64-head by 16-feature CUDA tile with two TF32 products,
+  explicit FP32 probability scaling and no global partial-output buffer.
+- Rejected the tile: full pipeline 1.050→2.036 ms, graph 1.028→1.943 ms.
+  All 17 retained fixtures pass complete independent 2e-4 checks; no serving
+  arithmetic, profile, model admission or request gain changes.
+- Added exhaustive BF16-scale/integer-code finite-range checks and retained
+  reproducible controllers, raw diagnostics and preservation evidence.
+
 # Changelog
 
 ## Unreleased: contraction-local tensor value screen
