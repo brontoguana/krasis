@@ -13473,3 +13473,9 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Migrate seven cumulative exact defaults to build selection; restore the earlier recurrence body when disabled.
 - Add `dev build-variant` while retaining existing build memory limits and incremental cache.
 - Validated default/all-off builds against retained complete proofs at 3K/16K/65K: all 59,473,920 logits and 2,835,609,472 state bytes match. Both short cache lifecycle suites pass; 30/30 preservation checks pass. No ADQ or release qualification is claimed.
+
+## 2026-11-09 — Current-model cold pruning qualification
+
+- Add COLD_EXPERT_PRUNING as a compile-time approximation, initially off for paired qualification. Enable the retained 75/10 policy only in supported GLM registration with host-visible routes and an established HCS resident set; preserve unpruned calibration and other-mode fallbacks.
+- Retire production runtime activation of the legacy cold-pruning selector. Keep its standalone diagnostic parser and pure shadow observations. Existing packed weights, K6 cache, GPU kernels and allocation ownership remain unchanged.
+- Five native policy component tests pass. Complete-request speed and fast-tier quality remain pending; no ADQ or release claim.

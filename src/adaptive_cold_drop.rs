@@ -169,6 +169,15 @@ pub struct AdaptiveColdDropRuntime {
 }
 
 impl AdaptiveColdDropRuntime {
+    /// Fixed build-selected policy. Production activation is restricted to the
+    /// supported GLM registration path; runtime environment cannot change it.
+    pub(crate) fn from_compiled_policy() -> Self {
+        Self { stats: Some(ShadowPolicyStats::new(ColdDropPolicy {
+            protect_rank_fraction: 0.75,
+            max_mass_fraction: 0.10,
+        })) }
+    }
+
     pub fn from_env(shadow_enabled: bool) -> Result<Self, String> {
         let enabled = parse_flag(RUNTIME_ENABLE_ENV)?;
         let mass_is_set = env_value_is_set(RUNTIME_MASS_ENV);
@@ -534,5 +543,21 @@ mod tests {
             Some(value) => std::env::set_var(name, value),
             None => std::env::remove_var(name),
         }
+    }
+}
+
+#[cfg(test)]
+mod compiled_policy_tests {
+    use super::*;
+    #[test]
+    fn compiled_policy_preserves_rank_and_mass_guards() {
+        let mut policy = AdaptiveColdDropRuntime::from_compiled_policy();
+        assert!(policy.enabled());
+        // Uniform routes cannot lose a 12.5% expert under a 10% mass budget.
+        assert!(policy.plan_and_record(&[1.0; 8], &[100; 8]).positions.is_empty());
+        let plan = policy.plan_and_record(&[0.5,0.2,0.1,0.08,0.05,0.03,0.025,0.015], &[100; 8]);
+        assert_eq!(plan.positions, vec![6,7]);
+        assert_eq!(plan.dropped_bytes,200);
+        assert!((plan.dropped_mass_fraction-0.04).abs()<1e-7);
     }
 }

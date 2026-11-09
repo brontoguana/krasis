@@ -32060,9 +32060,9 @@ impl GpuDecodeStore {
         self.sequence_state_registry.clear();
         let adaptive_cold_drop_shadow =
             AdaptiveColdDropShadow::from_env().map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let adaptive_cold_drop =
-            AdaptiveColdDropRuntime::from_env(adaptive_cold_drop_shadow.enabled())
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        // Production treatment selection is compile-time. The legacy parser
+        // remains available to standalone diagnostic/unit-test callers only.
+        let adaptive_cold_drop = AdaptiveColdDropRuntime::default();
         if (self.draft.is_some() || self.dspark.is_some())
             && (adaptive_cold_drop.enabled() || adaptive_cold_drop_shadow.enabled())
         {
@@ -39339,10 +39339,17 @@ impl GpuDecodeStore {
             d_topk_indices_a: None,
             d_topk_indices_b: None,
         };
-        self.graph
-            .as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?
-            .deepseek_v4_decode_workspace = Some(workspace);
+        // Keep device-only routing and speculative modes on their established
+        // GPU path. This intervention requires existing host-visible routes.
+        let pruning_supported = self.draft.is_none() && self.dspark.is_none()
+            && !env_truthy("KRASIS_GPU_ROUTE_SYNC");
+        let graph = self.graph.as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        graph.deepseek_v4_decode_workspace = Some(workspace);
+        if crate::optimisations::COLD_EXPERT_PRUNING && pruning_supported {
+            graph.adaptive_cold_drop = AdaptiveColdDropRuntime::from_compiled_policy();
+            log::info!("Compiled cold-expert pruning: protect_rank_pct=75 max_mass_pct=10 renormalize=false");
+        }
         log::info!(
             "GpuDecodeStore: finalized GLM-5.3 mHC workspace layers={} HC={} hidden={} capacity={}",
             layer_count,
@@ -43393,7 +43400,7 @@ impl GpuDecodeStore {
             .graph
             .as_ref()
             .map(|graph| {
-                graph.adaptive_cold_drop.enabled() || graph.adaptive_cold_drop_shadow.enabled()
+                (crate::optimisations::COLD_EXPERT_PRUNING && graph.adaptive_cold_drop.enabled()) || graph.adaptive_cold_drop_shadow.enabled()
             })
             .unwrap_or(false)
         {
@@ -43462,7 +43469,7 @@ impl GpuDecodeStore {
                 graph.vocab_size,
                 graph.group_size,
                 graph.expert_bits,
-                graph.adaptive_cold_drop.enabled() || graph.adaptive_cold_drop_shadow.enabled(),
+                (crate::optimisations::COLD_EXPERT_PRUNING && graph.adaptive_cold_drop.enabled()) || graph.adaptive_cold_drop_shadow.enabled(),
             )
         };
         if adaptive_cold_drop {
@@ -67097,7 +67104,7 @@ impl GpuDecodeStore {
                             || graph.gpu_route_sync_hot_nosync
                             || !graph.peer_experts.is_empty()
                             || !graph.cpu_tail_workers.is_empty()
-                            || graph.adaptive_cold_drop.enabled()
+                            || (crate::optimisations::COLD_EXPERT_PRUNING && graph.adaptive_cold_drop.enabled())
                             || graph.hcs_cold_swap.enabled
                             || graph.synthetic_repack.is_some()
                             || graph.expert_compression.is_some()
@@ -70015,7 +70022,7 @@ impl GpuDecodeStore {
                     .to_string(),
             );
         }
-        if graph.adaptive_cold_drop.enabled() && gpu_rs {
+        if (crate::optimisations::COLD_EXPERT_PRUNING && graph.adaptive_cold_drop.enabled()) && gpu_rs {
             return Err(
                 "KRASIS_ADAPTIVE_COLD_DROP=1 is not supported together with KRASIS_GPU_ROUTE_SYNC; adaptive drop requires host-visible router weights"
                     .to_string(),
@@ -71068,7 +71075,9 @@ impl GpuDecodeStore {
                         )
                     };
 
-                    let adaptive_cold_drop_active = graph.adaptive_cold_drop.enabled();
+                    let adaptive_cold_drop_active = crate::optimisations::COLD_EXPERT_PRUNING
+            && graph.adaptive_cold_drop.enabled()
+            && graph.hcs.as_ref().is_some_and(|hcs| !hcs.cache.is_empty());
                     let mut adaptive_cold_drop_count = 0usize;
                     if graph.adaptive_cold_drop_shadow.enabled() || adaptive_cold_drop_active {
                         let mut demand_cold_bytes = vec![0u64; topk];
@@ -90738,7 +90747,7 @@ impl GpuDecodeStore {
             && self
                 .graph
                 .as_ref()
-                .map(|graph| graph.adaptive_cold_drop.enabled())
+                .map(|graph| (crate::optimisations::COLD_EXPERT_PRUNING && graph.adaptive_cold_drop.enabled()))
                 .unwrap_or(false)
         {
             let failure = "KRASIS_ADAPTIVE_COLD_DROP=1 is not supported with speculative decode; refusing to run an unimplemented approximate path".to_string();
@@ -98690,7 +98699,9 @@ impl GpuDecodeStore {
             }
         }
 
-        let adaptive_cold_drop_active = graph.adaptive_cold_drop.enabled();
+        let adaptive_cold_drop_active = crate::optimisations::COLD_EXPERT_PRUNING
+            && graph.adaptive_cold_drop.enabled()
+            && graph.hcs.as_ref().is_some_and(|hcs| !hcs.cache.is_empty());
         let mut adaptive_cold_drop_positions = Vec::new();
         if graph.adaptive_cold_drop_shadow.enabled() || adaptive_cold_drop_active {
             let mut demand_cold_bytes = vec![0u64; topk];
@@ -103770,7 +103781,7 @@ impl GpuDecodeStore {
         let gpu_rs_hot_full_graph = !env_false("KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH")
             && (env_truthy("KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH") || auto_hot_hcs_graph);
         if gpu_rs
-            && (graph.adaptive_cold_drop.enabled() || graph.adaptive_cold_drop_shadow.enabled())
+            && ((crate::optimisations::COLD_EXPERT_PRUNING && graph.adaptive_cold_drop.enabled()) || graph.adaptive_cold_drop_shadow.enabled())
         {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "adaptive cold drop is not supported with KRASIS_GPU_ROUTE_SYNC=1 because it requires host-visible router weights",
