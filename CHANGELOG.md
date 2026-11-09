@@ -13460,3 +13460,9 @@ After: 119.0 ms/tok (8.40 tok/s) — 22% latency reduction, 28% throughput impro
 - Guard offline tie fixtures with fewer than seven rows and malformed captured producer extents; valid measured launch bodies remain unchanged.
 
 - Add opt-in passive host HCS placement receipts at normal request boundaries, deferring serialization and file writes until decode/response delivery ends. Record slot ownership, capacity and actual promotion policy without CUDA observation.
+
+## 2026-11-09 — Cumulative exact performance defaults
+
+Enable supported exact sparse attention, ordered absorption, FP32 prefill attention, tiled indexer projection, index-score row bands and radix selection by default, preserving explicit controls and geometry fallbacks. Integrate arithmetic-preserving recurrence partial-array lifetime simplification. Bind effective defaults into heatmap identity. Approximate paths remain under active qualification; no release or ADQ claim.
+
+Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: complete medians 21.665/41.255/125.337 → 20.633/35.363/100.466 seconds. All 29,736,960 logits and 1,417,804,736 registered-state bytes match; existing lifecycle smoke checks pass. Sampled reserve floors are 938/920 MiB. This is relative regression evidence, not new ADQ/model admission; installed binaries remain preserved.

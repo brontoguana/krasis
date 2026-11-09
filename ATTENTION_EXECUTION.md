@@ -1,12 +1,12 @@
 # Sparse attention execution
 
-The exact execution profile passes complete relative request validation on an RTX A6000. It remains opt-in; tensor arithmetic remains experimental. Independent absolute model qualification is not established.
+The supported exact execution profile is now the cumulative default. Explicit controls remain available for diagnosis; tensor arithmetic is under separate quality qualification. Historical measurements below retain their original control settings. Independent absolute model qualification is not established. Follow the Krasis Optimisation Guide under Performance Qualification in Lore.
 
 ## Contract and ownership
 
 The K6 packed cache and selected token indices are unchanged. Sparse attention unpacks existing BF16 scales and signed six-bit codes into FP32 once per selected row, then shares that data across heads. On Ampere and newer devices, the tensor candidate decomposes both operands into TF32 high and residual parts and accumulates all four products in FP32. Scores use 128-feature accumulation bands; values use 128-selection splits. Softmax masks the actual live indices, including sentinel tails.
 
-`KRASIS_MLA_K6_SPLIT=5` opts into qualified tensor geometry: 512 latent dimensions, zero rotary dimensions, head count divisible by 16, and at most 4,096 selections. Other geometries retain existing paths. Modes 1, 2 and 3 retain scalar split, exact score, and exact score plus unpacked-value experiments. Default 0 retains ordinary execution. Compressed pooled-index eager execution conservatively retains the existing kernel; CUDA graph execution uses the qualified candidate. Direct eager and graph operator replay are both checked.
+`KRASIS_MLA_K6_SPLIT=5` opts into qualified tensor geometry: 512 latent dimensions, zero rotary dimensions, head count divisible by 16, and at most 4,096 selections. Other geometries retain existing paths. Modes 1, 2 and 3 retain scalar split, exact score, and exact score plus unpacked-value experiments. Default 3 selects the supported exact score/unpacked-value path; explicit 0 retains the prior execution. Compressed pooled-index eager execution conservatively retains the existing kernel; CUDA graph execution uses the qualified candidate. Direct eager and graph operator replay are both checked.
 
 Decode workspace is owned by the graph, allocated before calibration and capture, and reused only by serial main-stream operations. The tested 64-head/2,051-selection geometry uses 7,512,064 additional bytes. Captured pointers remain owned until graph teardown.
 

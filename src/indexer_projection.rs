@@ -10,7 +10,7 @@ pub(crate) const ELEMENTS: usize = TILE * (K + N);
 
 pub(crate) fn enabled() -> Result<bool,String> {
     match std::env::var("KRASIS_INDEXER_QUERY_TILE") {
-        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotPresent) => Ok(true),
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "1"|"true"|"yes"|"on" => Ok(true),
             "0"|"false"|"no"|"off" => Ok(false),

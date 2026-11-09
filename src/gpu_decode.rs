@@ -23972,7 +23972,7 @@ impl DeepseekV4DecodePolicy {
             )?,
             int4_w13_n32,
             int4_w2_n32,
-            index_radix_topk: resolve_bool_env("KRASIS_DECODE_V4_INDEX_RADIX_TOPK", false)?,
+            index_radix_topk: resolve_bool_env("KRASIS_DECODE_V4_INDEX_RADIX_TOPK", true)?,
             parallel_wkv: resolve_bool_env(
                 "KRASIS_DECODE_V4_PARALLEL_WKV",
                 deepseek_specific_default,
@@ -40292,12 +40292,13 @@ impl GpuDecodeStore {
     fn finalize_dsa_indexer_resources(&mut self) -> PyResult<usize> {
         // Allocate before calibration/capture. One owner is shared by serial
         // main-stream MLA layers; no graph replay may outlive this graph.
-        if matches!(std::env::var("KRASIS_MLA_K6_SPLIT").as_deref(), Ok("1" | "2" | "3" | "5" | "6")) {
+        let split_mode = std::env::var("KRASIS_MLA_K6_SPLIT").unwrap_or_else(|_| "3".into());
+        if matches!(split_mode.as_str(), "1" | "2" | "3" | "5" | "6") {
             let graph = self.graph.as_ref().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
             if graph.dsa_indexer_resources_finalized {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err("DSA resources already finalized"));
             }
-            let tensor = matches!(std::env::var("KRASIS_MLA_K6_SPLIT").as_deref(), Ok("5" | "6"));
+            let tensor = matches!(split_mode.as_str(), "5" | "6");
             self.device.bind_to_thread().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("MLA CUDA context: {e:?}")))?;
             let mut device = 0;
             let mut major = 0;
@@ -40309,8 +40310,8 @@ impl GpuDecodeStore {
                 }
             }
             let tensor = tensor && major >= 8;
-            let unpack = std::env::var("KRASIS_MLA_K6_SPLIT").as_deref() == Ok("3");
-            let exact = unpack || std::env::var("KRASIS_MLA_K6_SPLIT").as_deref() == Ok("2");
+            let unpack = split_mode == "3";
+            let exact = unpack || split_mode == "2";
             let mut elements = 0usize;
             if graph.kv_format == 7 {
                 for layer in &graph.layers {
@@ -40337,7 +40338,7 @@ impl GpuDecodeStore {
                 self.graph.as_mut().unwrap().mla_tensor = tensor;
                 log::info!("MLA K6 split graph-owned workspace: {} bytes", elements * 4);
             }
-            if std::env::var("KRASIS_MLA_K6_SPLIT").as_deref() == Ok("6") {
+            if split_mode == "6" {
                 if !tensor || std::env::var("KRASIS_MLA_STAGE_SELECTED_KV").as_deref() != Ok("1")
                     || std::env::var_os("KRASIS_MATCHED_PROBE_CONFIG").is_none() {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err("paired MLA graph proof requires Ampere+, staged K6 and explicit matched-probe diagnostics"));
@@ -55597,7 +55598,9 @@ impl GpuDecodeStore {
             prefill_cancel_signal: None,
             dsa_prefill_workspace: None,
             prefill_mla_lt: std::cell::RefCell::new(crate::prefill_mla_lt::Cache::default()),
-            indexer_query_tile: crate::indexer_projection::Tile::create(&self.device)?,
+            indexer_query_tile: if graph.layers.iter().any(|layer| layer.dsa_indexer.is_some()) {
+                crate::indexer_projection::Tile::create(&self.device)?
+            } else { None },
             dsa_mla_gather_autotune: std::cell::RefCell::new(std::collections::HashMap::new()),
             prefill_prescan_accuracy_enabled: false,
             prefill_prescan_accuracy_stats: Vec::new(),

@@ -671,7 +671,7 @@ def _prefill_mla_f32_enabled() -> bool:
     """Match the native boolean parser for startup sealing and identity."""
     raw = os.environ.get("KRASIS_PREFILL_MLA_F32")
     if raw is None:
-        return False
+        return True
     value = raw.strip().lower()
     if value in {"1", "true", "yes", "on"}:
         return True
@@ -730,7 +730,8 @@ def _actual_runtime_heatmap_capture_config(model: KrasisModel, args) -> dict[str
             "compact_pure_kda": os.environ.get("KRASIS_PREFILL_COMPACT_KDA_SCRATCH", "1"),
             "shared_overlap_eligible": os.environ.get("KRASIS_PREFILL_SHARED_OVERLAP_DMA", "1"),
         }
-        controls = {name: os.environ.get(name) for name in names}
+        defaults = {"KRASIS_MLA_K6_SPLIT": "3", "KRASIS_DECODE_V4_INDEX_RADIX_TOPK": "1", "KRASIS_PREFILL_MLA_ABSORB": "2"}
+        controls = {name: os.environ.get(name, defaults.get(name)) for name in names}
         calibration = controls.get("KRASIS_CPU_TAIL_CALIBRATION_JSON")
         if calibration:
             with open(calibration, "rb") as artifact:
@@ -741,16 +742,17 @@ def _actual_runtime_heatmap_capture_config(model: KrasisModel, args) -> dict[str
     if store is None:
         raise RuntimeError("Heatmap arithmetic identity requires the configured GPU decode store")
     # Bind this treatment for every architecture, including fallback geometry.
-    indexer_control = os.environ.get("KRASIS_INDEXER_QUERY_TILE")
+    indexer_control = os.environ.get("KRASIS_INDEXER_QUERY_TILE", "1")
     if indexer_control is not None:
         runtime["indexer_query_tile_control"] = indexer_control
+    runtime["index_score_row_bands_control"] = os.environ.get("KRASIS_PREFILL_INDEX_SCORE_ROW_BANDS", "1")
     value_control = os.environ.get("KRASIS_PREFILL_MLA_VALUE_REASSOC")
     if value_control is not None:
         normalized = value_control.strip().lower()
         if normalized not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
             raise RuntimeError("Invalid KRASIS_PREFILL_MLA_VALUE_REASSOC; expected a boolean")
         runtime["prefill_mla_value_reassociation_control"] = value_control
-    prefill_control = os.environ.get("KRASIS_PREFILL_MLA_F32")
+    prefill_control = os.environ.get("KRASIS_PREFILL_MLA_F32", "1")
     if prefill_control is not None:
         runtime["prefill_mla_f32_control"] = prefill_control
     if _prefill_mla_f32_enabled():
@@ -808,7 +810,7 @@ def _runtime_matches_approved_heatmap_policy(
     if not isinstance(ignored, list) or not all(isinstance(item, str) for item in ignored):
         return False, "invalid ignored_runtime_fields policy"
     ignored_fields = set(ignored)
-    if {"experimental_glm53_controls", "prefill_transfer_policy", "indexer_query_tile_control", "prefill_mla_value_reassociation_control", "prefill_mla_f32_identity"} & ignored_fields:
+    if {"experimental_glm53_controls", "prefill_transfer_policy", "indexer_query_tile_control", "index_score_row_bands_control", "prefill_mla_value_reassociation_control", "prefill_mla_f32_identity"} & ignored_fields:
         return False, "GLM arithmetic controls and prefill transfer policy cannot be ignored"
 
     comparable_current = {

@@ -8570,7 +8570,7 @@ fn launch_dsa_prefill_gemm_scores(
             && match crate::matched_teacher::active_index_score_execution() {
                 Some(mode) => mode == 1,
                 None => std::env::var("KRASIS_PREFILL_INDEX_SCORE_ROW_BANDS")
-                    .map(|v| v == "1").unwrap_or(false),
+                    .map(|v| v == "1").unwrap_or(true),
             };
         let band_row_limit = if causal_bands_enabled {
             causal_band_rows.min(rows)
@@ -46296,7 +46296,7 @@ impl PrefillEngine {
         heads: usize, qk: usize, nope: usize, cache: usize,
     ) -> Result<bool, String> {
         let mode = std::env::var("KRASIS_PREFILL_MLA_ABSORB")
-            .or_else(|_| std::env::var("KRASIS_PREFILL_MLA_TENSOR_ABSORB")).unwrap_or_default();
+            .or_else(|_| std::env::var("KRASIS_PREFILL_MLA_TENSOR_ABSORB")).unwrap_or_else(|_| "2".into());
         if !matches!(mode.as_str(), "1" | "2") || rows < 128
             || (heads, qk, nope, cache) != (64, 256, 256, 512)
         { return Ok(false); }
@@ -46453,7 +46453,7 @@ impl PrefillEngine {
         }
 
         let requested=match crate::matched_teacher::active_prefill_attention_execution(){
-            Some(mode)=>mode>=1,None=>optional_bool_env("KRASIS_PREFILL_MLA_F32")?.unwrap_or(false),
+            Some(mode)=>mode>=1,None=>optional_bool_env("KRASIS_PREFILL_MLA_F32")?.unwrap_or(true),
         };
         let reassociated_value = match crate::matched_teacher::active_prefill_attention_execution() {
             Some(mode) => mode == 2,
