@@ -1,3 +1,8 @@
+## 2026-11-09 — Bounded recurrence lifetime screen
+
+- Correct the 4.059-second scope to recurrent state updates, separate from 0.346-second BF16 preparation.
+- Reject separate recall/readout partial storage after only 2.2–2.4% replay gains; complete real-layer outputs/state match bitwise, independent equations and graph/chunk checks pass. Preserve serving defaults, opt-in row bands and disabled value reassociation.
+
 ## 2026-11-09 — Scale-factored K6 value screen
 
 - Added one offline 64-head by 16-feature CUDA tile with two TF32 products,
