@@ -48,7 +48,7 @@ pub(crate) struct PrefillAttentionGuard {
 }
 impl PrefillAttentionGuard {
     pub(crate) fn enter(mode: Option<u8>) -> Result<Self, String> {
-        if mode.is_some_and(|v| v > 1) { return Err("prefill attention permits modes 0 and 1 only".into()); }
+        if mode.is_some_and(|v| v > 2) { return Err("prefill attention permits modes 0, 1 and 2 only".into()); }
         let previous=PREFILL_ATTENTION_EXECUTION.with(|v|v.replace(mode));
         Ok(Self{previous,previous_stats:PREFILL_ATTENTION_STATS.with(|v|v.replace((0,0,0))),_not_send:std::marker::PhantomData})
     }
@@ -212,9 +212,9 @@ fn parse(raw: &[u8]) -> Result<Plan, String> {
             || (t.indexer_projection_execution.is_some() && (!t.raw_input || !matches!(p.arithmetic,Arithmetic::NativeServingDecode))) {
             return Err("indexer intervention requires modes 0/1 and native serving raw history".into());
         }
-        if t.prefill_attention_execution.is_some_and(|v|v>1)
+        if t.prefill_attention_execution.is_some_and(|v|v>2)
             || (t.prefill_attention_execution.is_some() && (!t.raw_input || !matches!(p.arithmetic,Arithmetic::NativeServingDecode))) {
-            return Err("prefill intervention requires admitted raw native-serving trials and modes 0/1".into());
+            return Err("prefill intervention requires admitted raw native-serving trials and modes 0/1/2".into());
         }
         if t.attention_execution.is_some_and(|v| !matches!(v, 0 | 2 | 3))
             || (t.attention_execution.is_some() && (!t.raw_input || !matches!(p.arithmetic, Arithmetic::NativeServingDecode))) {
@@ -591,10 +591,10 @@ mod tests {
         let base=json!({"schema":2,"arithmetic":"native_serving_decode","defer_step_proofs":true,"directory":"/tmp/replay","loaded_native":{"path":"/tmp/native","sha256":"a".repeat(64)},"identities":[{"path":"/tmp/config","sha256":"b".repeat(64)}],"trials":[{"raw_input":true,"label":"fixed","logical_tokens":2,"expected_sequence_start":0,"max_tokens":3,"input_ids_sha256":"c".repeat(64),"forced_inputs":[4,5]}]});
         assert!(parse(&serde_json::to_vec(&base).unwrap()).is_ok());
         for key in ["defer_step_proofs","raw_input"] {let mut p=base.clone();if key=="raw_input"{p["trials"][0][key]=json!(false);}else{p[key]=json!(false);}assert!(parse(&serde_json::to_vec(&p).unwrap()).is_err());}
-        for mode in [0,1] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
+        for mode in [0,1,2] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
         for mode in [0,1] { let mut q=base.clone();q["trials"][0]["indexer_projection_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
         for mode in [2,3,255] { let mut q=base.clone();q["trials"][0]["indexer_projection_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
-        for mode in [2,3,255] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
+        for mode in [3,255] { let mut q=base.clone();q["trials"][0]["prefill_attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
         for mode in [0,2,3] { let mut q=base.clone();q["trials"][0]["attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
         for mode in [1,5,6,255] { let mut q=base.clone();q["trials"][0]["attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
         let mut q=base.clone();q["arithmetic"]=json!("native");q["trials"][0]["attention_execution"]=json!(3);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err());
@@ -674,7 +674,8 @@ mod tests {
             assert_eq!(active_prefill_attention_execution(),Some(1));
             assert_eq!(PREFILL_ATTENTION_STATS.with(|v|v.get()),(0,0,0));
             record_prefill_attention(64,2,200);
-            assert!(PrefillAttentionGuard::enter(Some(2)).is_err());
+            assert!(PrefillAttentionGuard::enter(Some(3)).is_err());
+            { let _candidate=PrefillAttentionGuard::enter(Some(2)).unwrap(); assert_eq!(active_prefill_attention_execution(),Some(2)); }
           }
           assert_eq!(active_prefill_attention_execution(),Some(0));
           assert_eq!(PREFILL_ATTENTION_STATS.with(|v|v.get()),(32,1,100));

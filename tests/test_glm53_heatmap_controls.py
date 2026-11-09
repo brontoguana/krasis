@@ -16,6 +16,27 @@ class Glm53HeatmapControlsTest(unittest.TestCase):
         with patch.object(server, '_runtime_heatmap_capture_config', return_value={'base': 1}):
             return server._actual_runtime_heatmap_capture_config(model, SimpleNamespace())
 
+    def test_value_reassociation_treatment_is_bound_and_cannot_be_ignored(self):
+        with patch.dict(os.environ, {}, clear=True):
+            baseline = self.capture(False)
+        with patch.dict(os.environ, {"KRASIS_PREFILL_MLA_VALUE_REASSOC": "1"}, clear=True):
+            actual = self.capture(False)
+            self.assertEqual(actual["prefill_mla_value_reassociation_control"], "1")
+            self.assertFalse(server._runtime_matches_approved_heatmap_policy(
+                actual, [baseline], {"ignored_runtime_fields": ["prefill_mla_value_reassociation_control"]})[0])
+        with patch.dict(os.environ, {"KRASIS_PREFILL_MLA_VALUE_REASSOC": "invalid"}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "Invalid KRASIS_PREFILL_MLA_VALUE_REASSOC"):
+                self.capture(False)
+
+    def test_prepared_attention_plan_identity_cannot_be_ignored(self):
+        identity = {"format": "prefill_mla_f32_v1", "sealed": True, "plans": []}
+        with patch.dict(os.environ, {"KRASIS_PREFILL_MLA_F32": "1"}, clear=True):
+            actual = self.capture(False, identity)
+        self.assertTrue(server._runtime_matches_approved_heatmap_policy(actual, [actual], {})[0])
+        changed = {**actual, "prefill_mla_f32_identity": {**identity, "plans": [{"plan": "different"}]}}
+        self.assertFalse(server._runtime_matches_approved_heatmap_policy(
+            changed, [actual], {"ignored_runtime_fields": ["prefill_mla_f32_identity"]})[0])
+
     def test_indexer_treatment_identity_is_bound_and_cannot_be_ignored(self):
         with patch.dict(os.environ, {}, clear=True):
             baseline = self.capture(False)

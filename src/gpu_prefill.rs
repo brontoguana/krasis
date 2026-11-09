@@ -46441,7 +46441,11 @@ impl PrefillEngine {
         }
 
         let requested=match crate::matched_teacher::active_prefill_attention_execution(){
-            Some(mode)=>mode==1,None=>optional_bool_env("KRASIS_PREFILL_MLA_F32")?.unwrap_or(false),
+            Some(mode)=>mode>=1,None=>optional_bool_env("KRASIS_PREFILL_MLA_F32")?.unwrap_or(false),
+        };
+        let reassociated_value = match crate::matched_teacher::active_prefill_attention_execution() {
+            Some(mode) => mode == 2,
+            None => optional_bool_env("KRASIS_PREFILL_MLA_VALUE_REASSOC")?.unwrap_or(false),
         };
         let fused_mask=requested&&rows>=32&&prefill_mla_f32_geometry(self.kv_format,num_heads,nope_dim,rope_dim,ckv_cache_dim,selected.selected_per_row,sm_scale)
             &&dsa_mla_gathered_compute_mode()?==DsaMlaGatheredComputeMode::Pedantic;
@@ -46955,7 +46959,7 @@ impl PrefillEngine {
                         b:Matrix{rows:combined_dim,cols:num_heads,leading:combined_dim,batch:tile_rows,stride:query_elements_per_row},
                         c:Matrix{rows:selected.selected_per_row,cols:num_heads,leading:selected.selected_per_row,batch:tile_rows,stride:score_elements_per_row},transpose_a:true,transpose_b:false};
                     unsafe{self.prefill_mla_lt.borrow_mut().enqueue(self.device.clone(),shape,&a,&b,&out,&work,
-                        alpha_score,beta_score,self.stream,max_context.saturating_sub(rows)+tile_start>=selected.selected_per_row,&mut score_classic)?}
+                        alpha_score,beta_score,self.stream,false,max_context.saturating_sub(rows)+tile_start>=selected.selected_per_row,&mut score_classic)?}
                 }else{false};
                 if !score_lt{score_classic()?;}
                 if let Some(started) = score_started {
@@ -47092,7 +47096,7 @@ impl PrefillEngine {
                         b:Matrix{rows:selected.selected_per_row,cols:num_heads,leading:selected.selected_per_row,batch:tile_rows,stride:score_elements_per_row},
                         c:Matrix{rows:ckv_cache_dim,cols:num_heads,leading:ckv_cache_dim,batch:tile_rows,stride:output_elements_per_row},transpose_a:false,transpose_b:false};
                     unsafe{self.prefill_mla_lt.borrow_mut().enqueue(self.device.clone(),shape,&a,&b,&out,&work,
-                        alpha_output,beta_output,self.stream,max_context.saturating_sub(rows)+tile_start>=selected.selected_per_row,&mut value_classic)?}
+                        alpha_output,beta_output,self.stream,reassociated_value,max_context.saturating_sub(rows)+tile_start>=selected.selected_per_row,&mut value_classic)?}
                 }else{false};
                 if !value_lt{value_classic()?;}
                 if let Some(started) = output_started {

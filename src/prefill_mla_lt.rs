@@ -9,7 +9,7 @@ use std::{collections::HashMap, ffi::c_void, sync::Arc};
 pub(crate) const WORKSPACE_CAP: usize = 16 << 20;
 #[derive(Default)]
 pub(crate) struct Cache {
-    plans: HashMap<Shape, Option<Prepared>>,
+    plans: HashMap<(Shape, bool), Option<Prepared>>,
     reports: Vec<Value>,
     sealed: bool,
 }
@@ -18,8 +18,14 @@ impl Cache {
         self.sealed = true;
     }
     pub(crate) fn identity(&self) -> Value {
-        let mut plans:Vec<_>=self.plans.iter().map(|(shape,plan)|json!({"shape":format!("{shape:?}"),"plan":plan.as_ref().map(|p|p.identity.as_str())})).collect();
-        plans.sort_by_key(|p| p["shape"].as_str().unwrap_or("").to_owned());
+        let mut plans:Vec<_>=self.plans.iter().map(|((shape,reassociated),plan)| {
+            // Keep the existing exact-only identity byte-compatible. The new
+            // treatment is explicit only when its additional plan is prepared.
+            let mut entry=json!({"shape":format!("{shape:?}"),"plan":plan.as_ref().map(|p|p.identity.as_str())});
+            if *reassociated { entry["reassociated"]=json!(true); }
+            entry
+        }).collect();
+        plans.sort_by_key(|p| (p["shape"].as_str().unwrap_or("").to_owned(),p["reassociated"].as_bool()));
         json!({"format":"prefill_mla_f32_v1","sealed":self.sealed,"plans":plans})
     }
     /// The caller owns every real span until main-stream completion, including
@@ -36,10 +42,24 @@ impl Cache {
         alpha: f32,
         beta: f32,
         stream: sys::CUstream,
+        allow_value_reassociation: bool,
         can_select: bool,
-        mut reference: impl FnMut() -> Result<(), String>,
+        reference: &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<bool, String> {
-        if !self.plans.contains_key(&shape) {
+        if allow_value_reassociation && (shape.transpose_a || shape.transpose_b
+            || shape.a.rows != 512 || shape.a.cols != 2051 || shape.b.cols != 64
+            || shape.a.batch != 32) {
+            return Err("reassociated prefill plan requires the admitted value shape".into());
+        }
+        let key = (shape, allow_value_reassociation);
+        // Prepare the exact control in the same cold process, so later paired
+        // requests never tune or allocate after the cache has been sealed.
+        if allow_value_reassociation && !self.sealed && can_select
+            && !self.plans.contains_key(&(shape, false)) {
+            self.enqueue(device.clone(), shape, a, b, output, workspace, alpha, beta,
+                stream, false, can_select, reference)?;
+        }
+        if !self.plans.contains_key(&key) {
             if self.sealed || !can_select {
                 return Ok(false);
             }
@@ -53,7 +73,7 @@ impl Cache {
             let Some(candidates) =
                 Candidates::discover_bounded(device.clone(), shape, WORKSPACE_CAP, align, 4)?
             else {
-                self.plans.insert(shape, None);
+                self.plans.insert(key, None);
                 return Ok(false);
             };
             // beta=0 for both stages: repetitions never consume prior output.
@@ -70,6 +90,7 @@ impl Cache {
             let baseline = clock.measure(|| reference())?;
             let mut best = baseline * 0.95;
             let mut selected = None;
+            let mut selected_exact = true;
             let mut rows = Vec::new();
             for candidate in candidates.values.iter() {
                 let plan = match candidate.admit(shape, WORKSPACE_CAP)? {
@@ -92,25 +113,32 @@ impl Cache {
                         .iter()
                         .zip(&expected)
                         .all(|(a, b)| a.to_bits() == b.to_bits());
-                if !exact {
-                    rows.push(json!({"identity":plan.identity,"exact":false}));
+                let finite = actual.iter().all(|v| v.is_finite());
+                let maximum = actual.iter().zip(&expected)
+                    .map(|(a,b)| (*a as f64-*b as f64).abs()).fold(0.0f64,f64::max);
+                let admitted = exact || (allow_value_reassociation && finite
+                    && actual.len() == expected.len() && maximum <= 2e-4);
+                if !admitted {
+                    rows.push(json!({"identity":plan.identity,"exact":exact,"finite":finite,"max_abs":maximum}));
                     continue;
                 }
                 let ms = clock.measure(|| {
                     plan.enqueue(a, b, output, output, Some(workspace), alpha, beta, stream)
                 })?;
-                rows.push(json!({"identity":plan.identity,"exact":true,"median_ms":ms,"workspace":plan.workspace_bytes}));
-                if ms < best {
+                rows.push(json!({"identity":plan.identity,"exact":exact,"max_abs":maximum,"median_ms":ms,"workspace":plan.workspace_bytes}));
+                if (ms < best && (exact || !selected_exact || ms < best * 0.95))
+                    || (exact && !selected_exact && ms <= best * 1.05 && ms < baseline * 0.95) {
                     best = ms;
                     selected = Some(plan);
+                    selected_exact = exact;
                 }
             }
-            let report = json!({"shape":format!("{shape:?}"),"baseline_ms":baseline,"selected_ms":selected.as_ref().map(|_|best),"selected":selected.as_ref().map(|p|p.identity.as_str()),"candidates":rows,"reference_values":elements,"criterion":"complete actual-output bitwise equality; at least five percent timing margin"});
+            let report = json!({"shape":format!("{shape:?}"),"baseline_ms":baseline,"selected_ms":selected.as_ref().map(|_|best),"selected":selected.as_ref().map(|p|p.identity.as_str()),"candidates":rows,"reference_values":elements,"reassociated_value":allow_value_reassociation,"criterion":if allow_value_reassociation {"complete finite actual-output error <=2e-4; prefer exact within five percent; at least five percent baseline timing margin"} else {"complete actual-output bitwise equality; at least five percent timing margin"}});
             eprintln!("[prefill-mla-lt] {report}");
             self.reports.push(report);
-            self.plans.insert(shape, selected);
+            self.plans.insert(key, selected);
         }
-        let Some(plan) = self.plans.get(&shape).and_then(Option::as_ref) else {
+        let Some(plan) = self.plans.get(&key).and_then(Option::as_ref) else {
             return Ok(false);
         };
         plan.enqueue(a, b, output, output, Some(workspace), alpha, beta, stream)?;

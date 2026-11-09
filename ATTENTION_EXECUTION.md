@@ -213,3 +213,28 @@ Grouped strided-64 arithmetic changed outputs and remains unselected. Those diff
 `src/indexer_projection.rs` owns dispatch and tail storage. `replay_query_projection.cu` reproduces default exact replay; `--diagnostics`, `--force-tiny` and `--repeat-row` reproduce the separate probes. `check_query_equations.py` reconstructs BF16 equations; `check_query_index.py` checks causal scores/selections; `check_query_run.py` compares complete logits/state, chunk plans and observer-free paired timings. `attribute_query_projection.py` maps actual query work, and the existing attention attribution tool verifies unchanged pipeline work. Fifteen original-source teacher tests and nine heatmap identity tests pass.
 
 See [complete measurements and identities](tools/attention/evidence/indexer-query.json). Protected refs, accepted evidence and installed binaries are preserved. No weights were downloaded; nothing was released or pushed.
+
+
+## Experimental FP32 value-plan reassociation
+
+`KRASIS_PREFILL_MLA_VALUE_REASSOC=1` is an **off-by-default experiment**, outside the accepted exact profile. It uses the existing FP32 attention path and 32-row tiles; the campaign keeps `KRASIS_PREFILL_MLA_F32=1` and `KRASIS_INDEXER_QUERY_TILE=1` enabled in both arms. Separate exact/candidate pedantic-FP32 plans are prepared before sealing. Complete finite cold outputs must satisfy the established 2e-4 operator gate, with a timing margin and preference for exact arithmetic within 5%. Tails, unsupported geometry and unavailable plans retain existing execution. No hot tuning, representation change or additional explicit GPU workspace is introduced. Exact-only heatmap identities keep their previous schema; the new treatment is explicit and cannot be ignored.
+
+Same-process capture-free ABBA, frozen native IDs and 64 forced outputs:
+
+| Nominal history | Exact seconds | Experimental seconds | Reduction |
+|---|---:|---:|---:|
+| 3,072 | 19.005 | 18.894 | 0.58% |
+| 16,384 | 33.782 | 33.382 | 1.18% |
+| 65,536 | 100.439 | 98.726 | 1.71% |
+
+Native value-kernel time falls **9.113→7.286 seconds**, and the attention pipeline **25.431→23.808 seconds**. Copy-only time remains about 13.47 seconds. Independent 18K operator replay compares 589,824,000 outputs, maximum error 1.18e-5 under the unchanged 2e-4 gate, with eager/graph and tail checks. Against the active exact plan the full operator pipeline improves 6.2–6.6%; earlier classic-control figures are excluded from the incremental claim.
+
+The exact control preserves all 192 logit vectors and 1.42 GB of registered state against accepted captures bitwise. The candidate changes states, logits and likelihoods. At the first modified layer, queries/cache/selections/weights match; a maximum 1.31e-6 output difference changes seven BF16 rounding decisions and 49 downstream WVC values. Both operators satisfy independent equations. This is arithmetic reassociation crossing a typed boundary, not a demonstrated packing or ownership defect. The first registered-state change is at layer 4. No full-continuation substitution proof or absolute model admission is claimed.
+
+All four held-out pass/fail outcomes are preserved, including the source-only coding failure. Mean selected-token NLL changes are +0.05095/+0.00342/−0.03687 at the three histories. Witness first-decision failure remains, with selected-token discrepancy 2.88260→1.86038. The candidate stays experimental; the accepted profile retains exact value arithmetic. No narrow repair preserving the faster reduction and original typed-boundary outputs was demonstrated.
+
+Minimum free VRAM is 926 MiB sampled/925 MiB native; added explicit workspace and host-weight copies are zero. Lifecycle/session checks pass; restoration probability equality remains unestablished. Long-prefill cancellation followed by an isolated short request takes 45.56 seconds, within the recorded 46.25 seconds. Shutdown exits normally and releases the GPU. Only SM86 hardware is measured. Fifteen teacher and eleven heatmap-policy tests pass. A final identity compatibility/safety correction is rebuilt; measured arithmetic/dispatch are unchanged and the full GPU cohort is not repeated for that metadata-only change.
+
+Routed attribution maps 11.03 seconds gate/up and 6.80 seconds down. Actual full-prefix counts cover 22,020,096 assignments: only 0.86% have occupancy≤32, while 66.74% exceed 256. The exact-output block32 replay regresses representative larger occupancies and remains unselected; the whole tiny-tail family is only 73.7 ms. The vector-gather prototype is exact but offers only ~5% gather gain and remains outside serving dispatch. No further indexer micro-optimisation is included.
+
+An initial added 2e-6 startup screen rejected 4.17e-6 error and selected exact arithmetic. That rejected startup remains preserved and receives no candidate speed claim; the subsequent screening-policy correction uses the established 2e-4 operator gate. Initial classic-control overstatement, parser/build/test failures and invalid attribution-analysis receipts remain retained. Ordinary streaming first-content data are secondary comparisons against a prior process; primary complete-request results use the same-process pair. The overall performance objective remains unfinished. See [measurements and limits](tools/attention/evidence/value-plan.json).

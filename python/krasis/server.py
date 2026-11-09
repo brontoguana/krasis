@@ -744,6 +744,12 @@ def _actual_runtime_heatmap_capture_config(model: KrasisModel, args) -> dict[str
     indexer_control = os.environ.get("KRASIS_INDEXER_QUERY_TILE")
     if indexer_control is not None:
         runtime["indexer_query_tile_control"] = indexer_control
+    value_control = os.environ.get("KRASIS_PREFILL_MLA_VALUE_REASSOC")
+    if value_control is not None:
+        normalized = value_control.strip().lower()
+        if normalized not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
+            raise RuntimeError("Invalid KRASIS_PREFILL_MLA_VALUE_REASSOC; expected a boolean")
+        runtime["prefill_mla_value_reassociation_control"] = value_control
     prefill_control = os.environ.get("KRASIS_PREFILL_MLA_F32")
     if prefill_control is not None:
         runtime["prefill_mla_f32_control"] = prefill_control
@@ -802,7 +808,7 @@ def _runtime_matches_approved_heatmap_policy(
     if not isinstance(ignored, list) or not all(isinstance(item, str) for item in ignored):
         return False, "invalid ignored_runtime_fields policy"
     ignored_fields = set(ignored)
-    if {"experimental_glm53_controls", "prefill_transfer_policy", "indexer_query_tile_control"} & ignored_fields:
+    if {"experimental_glm53_controls", "prefill_transfer_policy", "indexer_query_tile_control", "prefill_mla_value_reassociation_control", "prefill_mla_f32_identity"} & ignored_fields:
         return False, "GLM arithmetic controls and prefill transfer policy cannot be ignored"
 
     comparable_current = {

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased: routed attribution and experimental value plans
+
+- Map routed gate/up, down, activation, staging windows and natural expert occupancies from retained source/trace/diagnostics. Preserve rejected block32 and vector-gather replays with complete outputs and unchanged thresholds.
+- Add off-by-default `KRASIS_PREFILL_MLA_VALUE_REASSOC=1`, separate cold exact/candidate plans, owned existing workspace, capability/geometry fallbacks and non-ignorable treatment identity. Preserve exact-only identity compatibility and the accepted default arithmetic.
+- Measure 65K complete requests 100.439→98.726 seconds (1.71%) and value kernels 9.113→7.286 seconds. Independent operator equations pass; full model states/likelihoods change after BF16 rounding boundaries. Preserve all held-out outcomes and inherited coding/witness failures; retain experimental status without absolute model admission.
+- Compare all 192 control logit vectors and 1.42 GB registered state bitwise against accepted evidence. Lifecycle/session gates pass; cancellation follow-up 45.56 seconds, minimum native free 925 MiB, zero added explicit GPU workspace. Preserve all failed receipts, controls, source/binary identities and protected refs; no release or publication.
+
 ## Unreleased: indexer query projection
 
 - Add opt-in `KRASIS_INDEXER_QUERY_TILE=1` fixed 64-row BF16 index-query GEMMs with owned, stream-ordered tail storage, capability/geometry/math fallbacks and preserved small-chunk arithmetic. Reuse existing weights without host duplication; add 704 KiB of explicit GPU scratch.
