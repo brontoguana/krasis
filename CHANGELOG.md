@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased: register and bandwidth headroom screening
+
+- Reject a 192-register M64/N256/K64 replay after complete natural-output checks, including a 691-token expert. Preserve invalid 512-thread feasibility evidence separately.
+- Reject cooperative K6 gather loading as flat with complete bank, independent equations and graph checks. Measure same-shape dense throughput to avoid tuning a near-ceiling dispatch. Serving and accepted exact controls remain unchanged.
+
 ## Unreleased: natural routed execution investigation
 
 - Add a bounded offline M64/K64 N256/N128 replay using actual distinct token operands and routing. Reject N128 at 1.319 vs 0.844 ms despite bit-identical projected outputs; map the remaining 6.156-second dense family to actual KDA/MLA/MLP dispatches. Keep serving arithmetic, accepted attention/indexer controls and disabled value reassociation unchanged.
