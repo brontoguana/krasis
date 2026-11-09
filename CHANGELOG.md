@@ -1,6 +1,7 @@
 ## 2026-11-09 — Calibrated native CPU lane under qualification
 
 - Add separate compile-time switches for a group-banded AVX2 Marlin reader and an upfront CPU/GPU cold-expert split. Both remain off during this pass until fast-tier qualification.
+- Price bandwidth contention only while CPU work remains active, rather than penalising the whole GPU queue after CPU completion.
 - Reuse existing host weights with disjoint discovered core teams; measure complete expert calls under concurrent transfers, then choose zero/one/two CPU experts by cold count. Keep unsupported modes on GPU execution.
 - Use stream-ordered activation snapshots, graph-owned CUDA events and explicit reader teardown. Retire production CPU environment selectors; preserve standalone diagnostics.
 - Correct an experimental confound: earlier startup heatmaps sampled at temperature 0.6, so residency differed across cohorts. Preserve those observed timings, but remeasure attribution using one recorded placement fixture.

@@ -274,24 +274,15 @@ pub(crate) fn calibrate(
     // Include an explicit activation/result handoff allowance. Measured CPU
     // time already includes dispatch and result visibility, not only GEMV.
     let handoff_ms = 0.1;
-    let mut counts = vec![0usize; maximum_cold + 1];
-    let mut predictions = Vec::new();
-    for cold in 1..=maximum_cold {
-        let mut best = cold as f64 * baseline_ms;
-        let mut selected = 0usize;
-        for &(count, cpu_ms, dma_ms) in &costs {
-            if count >= cold {
-                continue;
-            }
-            let proposed = cpu_ms.max((cold - count) as f64 * dma_ms) + handoff_ms;
-            if proposed < best {
-                best = proposed;
-                selected = count;
-            }
-        }
-        counts[cold] = selected;
-        predictions.push(json!({"cold":cold,"cpu_count":selected,"predicted_ms":best,"gpu_only_copy_ms":cold as f64*baseline_ms}));
-    }
+    let estimates = crate::cpu_cold_plan::choose(maximum_cold, baseline_ms, &costs, handoff_ms);
+    let counts = estimates.iter().map(|p| p.cpu_count).collect::<Vec<_>>();
+    let predictions = estimates
+        .iter()
+        .map(|p| {
+            json!({"cold":p.cold,"cpu_count":p.cpu_count,
+        "predicted_ms":p.critical_ms,"gpu_only_copy_ms":p.gpu_only_ms})
+        })
+        .collect::<Vec<_>>();
     Ok(Plan {
         counts: counts.clone(),
         receipt: json!({
