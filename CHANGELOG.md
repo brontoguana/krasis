@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased: attention execution
+
+- Add opt-in exact sparse K6 decode attention with once-unpacked values and existing FP32 accumulation order, and reuse exact radix/linear index selection within supported geometry. Preserve packed cache semantics and legacy fallbacks.
+- Add a native 32-row ordered latent-query absorption tile that shares query rows and reuses head weights while preserving each FP32 FMA chain. Complete 18K-row outputs and tested tails match bitwise; full request logits/state comparisons and lifecycle checks pass.
+- Retain separate, unqualified tensor attention and tensor absorption experiments. Short continuation comparisons exposed arithmetic propagation differences; preserve their failed receipts and do not enable them by default.
+- Add admitted complete-logit/state captures and paired native graph attention snapshots with original-output substitution. Ordinary timing trials retain deferred proof behavior. Bind execution controls into heatmap identity and account for graph-owned workspace.
+- Bind trusted per-trial exact attention controls into graph reuse identity with scoped restoration; default serving execution and CUDA arithmetic are unchanged by these diagnostic controls.
+- Validate the exact profile with 29,736,960 bit-identical logits, 2,495,217,216 state bytes, ordinary responses and lifecycle checks. Same-process decode latency falls 2.69%; repeated 65K complete requests improve about 3%. Retain cross-process short regressions and inherited absolute quality limits; sampled candidate reserve is 928 MiB.
+- Add complete actual-operand equations, eager/graph replays, selection and row tails, disjoint trace analysis and request summaries. Raw debug evidence and private controllers remain uncommitted.
+
 - 2026-11-09: Select the cuBLAS stream before binding owned gathered-attention and value-projection workspace. Selecting a stream resets the workspace binding; preserve explicit ownership, math modes and cleanup. Complete real-operand workspace-order replays match bitwise.
 
 - 2026-11-07: Add eligible GLM phase reuse for Q/K/V/attention-output and MoE work buffers with four Arc-owned allocations, fixed logical chunks and exact budget rebates. Selected KDA prefix owners and unsupported paths retain independent buffers. `KRASIS_PREFILL_PHASE_ARENA=0` opts out; heatmaps bind policy version 4. Targeted235458 validation: complete3K/65K state/logits and48saved operator arrays match control bitwise; live reset/cancel/session tests pass. Protected experts60→435; expert staging314.98→305.06GiB, complete-request H2D448.96→429.14GiB. Ordinary prefill stays~113s. Relative storage evidence does not clear inherited absolute qualification failures.

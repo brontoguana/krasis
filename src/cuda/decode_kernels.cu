@@ -4231,6 +4231,9 @@ extern "C" __global__ void mla_sparse_attention_k6_g(
 }
 
 
+#include "mla_sparse_split.cuh"
+#include "mla_sparse_tensor.cuh"
+
 // MLA de-interleave kernel: [re0, im0, re1, im1, ...] → [re0, re1, ..., im0, im1, ...]
 // Applied to q_pe and k_pe before RoPE when rope_interleave=true.
 extern "C" __global__ void mla_deinterleave(

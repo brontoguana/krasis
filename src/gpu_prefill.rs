@@ -6504,6 +6504,8 @@ pub struct PrefillKernels {
     mla_cache_append_k4: RawCuFunc,
     mla_cache_append_k6: RawCuFunc,
     mla_prefill_absorb_wkc: RawCuFunc,
+    mla_prefill_absorb_wkc_ordered: RawCuFunc,
+    mla_prefill_pack_absorbed_f32: RawCuFunc,
     mla_prefill_sparse_attention_k4: RawCuFunc,
     mla_prefill_sparse_attention_k6: RawCuFunc,
     glm53_fused_mla_k4_candidate: RawCuFunc,
@@ -46256,6 +46258,106 @@ impl PrefillEngine {
         Ok(())
     }
 
+    fn try_run_mla_fast_absorb(
+        &self, output: u64, query: u64, weight: u64, rows: usize,
+        heads: usize, qk: usize, nope: usize, cache: usize,
+    ) -> Result<bool, String> {
+        let mode = std::env::var("KRASIS_PREFILL_MLA_ABSORB")
+            .or_else(|_| std::env::var("KRASIS_PREFILL_MLA_TENSOR_ABSORB")).unwrap_or_default();
+        if !matches!(mode.as_str(), "1" | "2") || rows < 128
+            || (heads, qk, nope, cache) != (64, 256, 256, 512)
+        { return Ok(false); }
+        let mut device = 0;
+        let mut major = 0;
+        let cuda = unsafe { cuda_sys::lib() };
+        unsafe {
+            if cuda.cuCtxGetDevice(&mut device) != cuda_sys::CUresult::CUDA_SUCCESS
+                || cuda.cuDeviceGetAttribute(&mut major, cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device) != cuda_sys::CUresult::CUDA_SUCCESS
+            { return Err("MLA absorption compute capability query failed".into()); }
+        }
+        if major < 8 { return Ok(false); }
+        if mode == "2" {
+            if rows > i32::MAX as usize || rows.div_ceil(32) > 65535 { return Ok(false); }
+            let mut out = output;
+            let mut q = query;
+            let mut w = weight;
+            let mut count = rows as i32;
+            unsafe {
+                launch(self.kernels.mla_prefill_absorb_wkc_ordered,
+                    (4, rows.div_ceil(32) as u32, heads as u32), (128, 1, 1), 0, self.stream,
+                    &mut [&mut out as *mut _ as *mut _, &mut q as *mut _ as *mut _,
+                        &mut w as *mut _ as *mut _, &mut count as *mut _ as *mut _])?;
+            }
+            return Ok(true);
+        }
+        let workspace = self.dsa_prefill_workspace.as_ref().ok_or("MLA tensor absorption workspace is absent")?;
+        const BLAS_BYTES: usize = 16 * 1024 * 1024;
+        let row_bytes = heads.checked_mul(cache).and_then(|x| x.checked_mul(4)).ok_or("MLA absorption row extent overflow")?;
+        let capacity = workspace.selection_workspace_capacity_bytes;
+        let band = capacity.saturating_sub(BLAS_BYTES + 255).checked_div(row_bytes).unwrap_or(0).min(1024).min(rows);
+        if band < 128 { return Ok(false); }
+        let scratch_bytes = band.checked_mul(row_bytes).ok_or("MLA absorption scratch overflow")?;
+        let blas_offset = scratch_bytes.checked_add(255).ok_or("MLA absorption alignment overflow")? & !255;
+        if blas_offset.checked_add(BLAS_BYTES).map_or(true, |x| x > capacity) { return Err("MLA absorption exceeds owned workspace".into()); }
+        let scratch = *workspace.d_selection_workspace.device_ptr();
+        let blas_workspace = scratch.checked_add(blas_offset as u64).ok_or("MLA absorption workspace pointer overflow")?;
+        let lib = unsafe { cublas_sys::lib() };
+        let mut previous_math = cublas_sys::cublasMath_t::CUBLAS_DEFAULT_MATH;
+        unsafe {
+            // Select the stream before binding the owned workspace.
+            cublas_result::set_stream(self.cublas_handle, self.stream as cublas_sys::cudaStream_t).map_err(|e| format!("MLA absorption stream: {e:?}"))?;
+            if lib.cublasGetMathMode(self.cublas_handle, &mut previous_math) != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                return Err("MLA absorption could not read cuBLAS math mode".into());
+            }
+            if lib.cublasSetWorkspace_v2(self.cublas_handle, blas_workspace as *mut std::ffi::c_void, BLAS_BYTES) != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                return Err("MLA absorption could not bind owned cuBLAS workspace".into());
+            }
+        }
+        let result = (|| -> Result<(), String> {
+            unsafe {
+                if lib.cublasSetMathMode(self.cublas_handle, cublas_sys::cublasMath_t::CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION) != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                    return Err("MLA absorption FP32 reduction mode unavailable".into());
+                }
+            }
+            let one = 1.0f32;
+            let zero = 0.0f32;
+            for start in (0..rows).step_by(band) {
+                let count = band.min(rows - start);
+                let input = query.checked_add((start * heads * qk * 2) as u64).ok_or("MLA absorption query pointer overflow")?;
+                unsafe {
+                    cublas_result::gemm_strided_batched_ex(
+                        self.cublas_handle, cublas_sys::cublasOperation_t::CUBLAS_OP_N, cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                        cache as i32, count as i32, nope as i32,
+                        &one as *const f32 as *const std::ffi::c_void,
+                        weight as *const std::ffi::c_void, cublas_sys::cudaDataType::CUDA_R_16BF, cache as i32, (nope * cache) as i64,
+                        input as *const std::ffi::c_void, cublas_sys::cudaDataType::CUDA_R_16BF, (heads * qk) as i32, qk as i64,
+                        &zero as *const f32 as *const std::ffi::c_void,
+                        scratch as *mut std::ffi::c_void, cublas_sys::cudaDataType::CUDA_R_32F, cache as i32, (count * cache) as i64,
+                        heads as i32, cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F, cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+                    ).map_err(|e| format!("MLA tensor absorption GEMM: {e:?}"))?;
+                    let elements = count * heads * cache;
+                    let mut a0 = output.checked_add((start * row_bytes) as u64).ok_or("MLA absorption output pointer overflow")?;
+                    let mut a1 = scratch;
+                    let mut a2 = count as i32;
+                    let mut a3 = heads as i32;
+                    let mut a4 = cache as i32;
+                    launch(self.kernels.mla_prefill_pack_absorbed_f32,
+                        (elements.div_ceil(256) as u32, 1, 1), (256, 1, 1), 0, self.stream,
+                        &mut [&mut a0 as *mut _ as *mut _, &mut a1 as *mut _ as *mut _, &mut a2 as *mut _ as *mut _, &mut a3 as *mut _ as *mut _, &mut a4 as *mut _ as *mut _])?;
+                }
+            }
+            Ok(())
+        })();
+        let (math, workspace_status) = unsafe {
+            (lib.cublasSetMathMode(self.cublas_handle, previous_math), lib.cublasSetWorkspace_v2(self.cublas_handle, std::ptr::null_mut(), 0))
+        };
+        if math != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS || workspace_status != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+            return Err(format!("MLA absorption cuBLAS restore failed: math={math:?} workspace={workspace_status:?} operation={result:?}"));
+        }
+        result?;
+        Ok(true)
+    }
+
     fn run_dsa_mla_gathered_gemm_attention(
         &self,
         layer_idx: usize,
@@ -49164,7 +49266,9 @@ impl PrefillEngine {
                         self.stream,
                     )?;
                 }
-            } else {
+            } else if !self.try_run_mla_fast_absorb(
+                *workspace.d_mla_q_absorbed.device_ptr(), q, mla.w_kc_ptr, m, nh, qk_dim, nope, ccd,
+            )? {
                 unsafe {
                     launch(
                         self.kernels.mla_prefill_absorb_wkc,
@@ -81910,6 +82014,8 @@ impl PrefillKernels {
                     "mla_cache_append_k4_kernel",
                     "mla_cache_append_k6_kernel",
                     "mla_prefill_absorb_wkc_kernel",
+                    "mla_prefill_absorb_wkc_ordered_kernel",
+                    "mla_prefill_pack_absorbed_f32_kernel",
                     "mla_prefill_sparse_attention_k4_kernel",
                     "mla_prefill_sparse_attention_k6_kernel",
                     "glm53_fused_mla_k4_candidate",
@@ -82429,6 +82535,8 @@ impl PrefillKernels {
             mla_cache_append_k4: get("mla_cache_append_k4_kernel")?,
             mla_cache_append_k6: get("mla_cache_append_k6_kernel")?,
             mla_prefill_absorb_wkc: get("mla_prefill_absorb_wkc_kernel")?,
+            mla_prefill_absorb_wkc_ordered: get("mla_prefill_absorb_wkc_ordered_kernel")?,
+            mla_prefill_pack_absorbed_f32: get("mla_prefill_pack_absorbed_f32_kernel")?,
             mla_prefill_sparse_attention_k4: get("mla_prefill_sparse_attention_k4_kernel")?,
             mla_prefill_sparse_attention_k6: get("mla_prefill_sparse_attention_k6_kernel")?,
             glm53_fused_mla_k4_candidate: get("glm53_fused_mla_k4_candidate")?,
@@ -86376,6 +86484,8 @@ mod kernel_tests {
                     "mla_cache_append_k4_kernel",
                     "mla_cache_append_k6_kernel",
                     "mla_prefill_absorb_wkc_kernel",
+                    "mla_prefill_absorb_wkc_ordered_kernel",
+                    "mla_prefill_pack_absorbed_f32_kernel",
                     "mla_prefill_sparse_attention_k4_kernel",
                     "mla_prefill_sparse_attention_k6_kernel",
                     "glm53_fused_mla_k4_candidate",

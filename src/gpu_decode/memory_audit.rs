@@ -8,6 +8,9 @@ fn push<T:DeviceRepr>(rows:&mut Vec<serde_json::Value>,label:String,b:&CudaSlice
 pub(super) fn snapshot(store:&GpuDecodeStore)->serde_json::Value {
     let mut rows=Vec::new();
     let mut hcs=serde_json::Value::Null;
+    let active_attention=crate::matched_teacher::active_attention_execution();
+    let captured_attention=store.graph.as_ref().and_then(|g|g.captured_attention_execution);
+
     if let Some(g)=&store.graph {
     if let Some(b)=&g.d_common_moe_accum{push(&mut rows,"graph.d_common_moe_accum".into(),b);}
     if let Some(b)=&g.d_mixed_expert_bits{push(&mut rows,"graph.d_mixed_expert_bits".into(),b);}
@@ -50,6 +53,14 @@ pub(super) fn snapshot(store:&GpuDecodeStore)->serde_json::Value {
     push(&mut rows,"graph.d_mla_q_absorbed".into(),&g.d_mla_q_absorbed);
     push(&mut rows,"graph.d_mla_kv".into(),&g.d_mla_kv);
     push(&mut rows,"graph.d_mla_attn_out".into(),&g.d_mla_attn_out);
+    if let Some(workspace)=&g.mla_split_workspace{push(&mut rows,"graph.mla_split_workspace".into(),workspace);}
+    if let Some(pairs)=&g.mla_pair_capture { for p in pairs {
+        let prefix=format!("graph.mla_pair.layer{}",p.layer);
+        push(&mut rows,format!("{prefix}.q"),&p.q); push(&mut rows,format!("{prefix}.cache"),&p.cache);
+        push(&mut rows,format!("{prefix}.indices"),&p.indices); push(&mut rows,format!("{prefix}.count"),&p.count);
+        push(&mut rows,format!("{prefix}.sequence"),&p.sequence); push(&mut rows,format!("{prefix}.candidate"),&p.candidate);
+        push(&mut rows,format!("{prefix}.baseline"),&p.baseline);
+    } }
     if let Some((p,i,c))=&g.mla_selected_stage{push(&mut rows,"graph.mla_selected_stage.packed".into(),p);push(&mut rows,"graph.mla_selected_stage.indices".into(),i);push(&mut rows,"graph.mla_selected_stage.count".into(),c);}
     if let Some(b)=&g.d_gqa_tiled_o{push(&mut rows,"graph.d_gqa_tiled_o".into(),b);}
     if let Some(b)=&g.d_gqa_tiled_lse{push(&mut rows,"graph.d_gqa_tiled_lse".into(),b);}
@@ -99,5 +110,5 @@ pub(super) fn snapshot(store:&GpuDecodeStore)->serde_json::Value {
         for (i,entry) in g.shared_expert_vram.iter().enumerate(){if let Some(entry)=entry{if let Some(b)=&entry.d_buf{push(&mut rows,format!("shared_expert[{i}]"),b);}}}
     }
     let hqq:Vec<serde_json::Value>=store.hqq_runtime_slots.iter().filter_map(|slot|slot.device_buffers.as_ref().map(|b|serde_json::json!({"layer":slot.layer_idx,"tensor":slot.tensor_name,"stage":slot.current_stage,"logical_bytes":slot.device_bytes(),"mapped_bytes":b.mapped_bytes(),"virtual_reserved_bytes":b.reserved_bytes()}))).collect();
-    serde_json::json!({"scope":"direct graph-owned CudaSlice extents, shared expert owned buffers and HQQ VMM mappings. HCS nominal residency is separate; external Torch tensors, nested attention/indexer/state owners, graph/BLAS/module/driver allocations remain separately accounted. Do not sum aliases as physical allocations.","graph_owned_extents":rows,"hqq":hqq,"hcs":hcs})
+    serde_json::json!({"active_attention_execution":active_attention,"captured_attention_execution":captured_attention,"scope":"direct graph-owned CudaSlice extents, shared expert owned buffers and HQQ VMM mappings. HCS nominal residency is separate; external Torch tensors, nested attention/indexer/state owners, graph/BLAS/module/driver allocations remain separately accounted. Do not sum aliases as physical allocations.","graph_owned_extents":rows,"hqq":hqq,"hcs":hcs})
 }

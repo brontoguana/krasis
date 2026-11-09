@@ -4488,6 +4488,15 @@ const KERNEL_NAMES: &[&str] = &[
     "mla_kv_cache_write_k6",
     "mla_attention_k6_g",
     "mla_attention_k6",
+    "mla_sparse_k6_split",
+    "mla_sparse_k6_combine",
+    "mla_sparse_k6_scores",
+    "mla_sparse_k6_scored_output",
+    "mla_sparse_k6_unpack_values",
+    "mla_sparse_k6_tensor_scores",
+    "mla_sparse_k6_tensor_softmax",
+    "mla_sparse_k6_tensor_values",
+    "mla_sparse_k6_tensor_combine",
     "mla_sparse_attention_k6_g",
     "mla_stage_selected_packed_g",
     "mla_sparse_attention_k6",
@@ -18141,6 +18150,15 @@ struct CachedKernels {
     mla_kv_cache_write_k6: cudarc::driver::CudaFunction,
     mla_attention_k6_g: cudarc::driver::CudaFunction,
     mla_attention_k6: cudarc::driver::CudaFunction,
+    mla_sparse_k6_split: cudarc::driver::CudaFunction,
+    mla_sparse_k6_combine: cudarc::driver::CudaFunction,
+    mla_sparse_k6_scores: cudarc::driver::CudaFunction,
+    mla_sparse_k6_scored_output: cudarc::driver::CudaFunction,
+    mla_sparse_k6_unpack_values: cudarc::driver::CudaFunction,
+    mla_sparse_k6_tensor_scores: cudarc::driver::CudaFunction,
+    mla_sparse_k6_tensor_softmax: cudarc::driver::CudaFunction,
+    mla_sparse_k6_tensor_values: cudarc::driver::CudaFunction,
+    mla_sparse_k6_tensor_combine: cudarc::driver::CudaFunction,
     mla_sparse_attention_k6_g: cudarc::driver::CudaFunction,
     mla_stage_selected_packed_g: cudarc::driver::CudaFunction,
     mla_sparse_attention_k6: cudarc::driver::CudaFunction,
@@ -18529,6 +18547,15 @@ impl CachedKernels {
             mla_kv_cache_write_k6: "mla_kv_cache_write_k6",
             mla_attention_k6_g: "mla_attention_k6_g",
             mla_attention_k6: "mla_attention_k6",
+            mla_sparse_k6_split: "mla_sparse_k6_split",
+            mla_sparse_k6_combine: "mla_sparse_k6_combine",
+            mla_sparse_k6_scores: "mla_sparse_k6_scores",
+            mla_sparse_k6_scored_output: "mla_sparse_k6_scored_output",
+            mla_sparse_k6_unpack_values: "mla_sparse_k6_unpack_values",
+            mla_sparse_k6_tensor_scores: "mla_sparse_k6_tensor_scores",
+            mla_sparse_k6_tensor_softmax: "mla_sparse_k6_tensor_softmax",
+            mla_sparse_k6_tensor_values: "mla_sparse_k6_tensor_values",
+            mla_sparse_k6_tensor_combine: "mla_sparse_k6_tensor_combine",
             mla_sparse_attention_k6_g: "mla_sparse_attention_k6_g",
             mla_stage_selected_packed_g: "mla_stage_selected_packed_g",
             mla_sparse_attention_k6: "mla_sparse_attention_k6",
@@ -18555,6 +18582,48 @@ impl CachedKernels {
 }
 
 // ── Main GPU decode graph ──────────────────────────────────────────────
+
+// Diagnostic graph-owned snapshots. Mode 6 substitutes the original attention
+// output for continuation while retaining both outputs on identical operands.
+struct MlaPairCapture {
+    layer: usize,
+    heads: usize,
+    capacity: usize,
+    scale: f32,
+    q: CudaSlice<f32>,
+    cache: CudaSlice<u8>,
+    indices: CudaSlice<i32>,
+    count: CudaSlice<i32>,
+    sequence: CudaSlice<i32>,
+    candidate: CudaSlice<f32>,
+    baseline: CudaSlice<f32>,
+}
+impl MlaPairCapture {
+    fn allocate(device: &Arc<CudaDevice>, layer: usize, heads: usize, capacity: usize, scale: f32) -> Result<Self, String> {
+        if heads != 64 || capacity == 0 || capacity > 4096 || !scale.is_finite() || scale <= 0.0 {
+            return Err("paired MLA capture requires qualified 64-head K6 geometry".into());
+        }
+        macro_rules! alloc { ($t:ty, $n:expr) => { device.alloc_zeros::<$t>($n).map_err(|e| format!("paired MLA allocation: {e:?}"))? }; }
+        Ok(Self { layer, heads, capacity, scale,
+            q: alloc!(f32, heads * 512), cache: alloc!(u8, capacity * 448),
+            indices: alloc!(i32, capacity), count: alloc!(i32, 1), sequence: alloc!(i32, 1),
+            candidate: alloc!(f32, heads * 512), baseline: alloc!(f32, heads * 512) })
+    }
+    fn inputs(&self, query: u64, cache: u64, indices: u64, count: u64, sequence: u64,
+        candidate: u64, stream: cuda_sys::CUstream) -> Result<(), String> {
+        for (to, from, bytes) in [
+            (*self.q.device_ptr(), query, self.heads * 512 * 4),
+            (*self.cache.device_ptr(), cache, self.capacity * 448),
+            (*self.indices.device_ptr(), indices, self.capacity * 4),
+            (*self.count.device_ptr(), count, 4), (*self.sequence.device_ptr(), sequence, 4),
+            (*self.candidate.device_ptr(), candidate, self.heads * 512 * 4),
+        ] {
+            let status = unsafe { cuda_sys::lib().cuMemcpyDtoDAsync_v2(to, from, bytes, stream) };
+            if status != cuda_sys::CUresult::CUDA_SUCCESS { return Err(format!("paired MLA stream copy: {status:?}")); }
+        }
+        Ok(())
+    }
+}
 
 struct GpuDecodeGraph {
     native_bf16_projection: Option<Arc<crate::bf16_row_projection::Program>>,
@@ -18746,6 +18815,11 @@ struct GpuDecodeGraph {
     d_mla_attn_out: cudarc::driver::CudaSlice<f32>, // [num_heads * kv_lora_rank] attention output
     // Packed rows, compact indices and count; allocated before graph capture.
     mla_selected_stage: Option<(CudaSlice<u8>, CudaSlice<i32>, CudaSlice<i32>)>,
+    mla_split_workspace: Option<CudaSlice<f32>>,
+    mla_split_exact: bool,
+    mla_split_unpack: bool,
+    mla_tensor: bool,
+    mla_pair_capture: Option<Vec<MlaPairCapture>>,
     mla_sparse_attention_threads: u32,
     mla_sparse_attention_threads_forced: bool,
     mla_sparse_attention_threads_autotuned: bool,
@@ -19340,6 +19414,7 @@ struct GpuDecodeGraph {
     /// graph can still bake request-length-dependent launch geometry and shared-memory
     /// choices. Reuse is therefore valid only for the same request start position.
     captured_decode_start_position: Option<usize>,
+    captured_attention_execution: Option<u8>,
     /// Whether the currently captured graph set includes metadata-only GPU route sync.
     captured_gpu_route_sync: bool,
     /// Whether a hot-HCS full decode graph was captured for this graph set.
@@ -25180,6 +25255,47 @@ impl GpuDecodeStore {
 
     pub fn discard_active_sequence_checkpoint_rust(&mut self) {
         self.active_sequence_device_checkpoint = None;
+    }
+
+    fn capture_mla_pair_rust(&self, logical_tokens: usize, generated: usize, root: std::path::PathBuf) -> Result<(), String> {
+        if crate::matched_teacher::active_attention_execution().is_some() { return Ok(()); }
+        let graph = self.graph.as_ref().ok_or("paired MLA graph owner absent")?;
+        let Some(pairs) = graph.mla_pair_capture.as_ref() else { return Ok(()); };
+        self.device.bind_to_thread().map_err(|e| e.to_string())?;
+        for pair in pairs {
+            let sequence = self.device.dtoh_sync_copy(&pair.sequence).map_err(|e| e.to_string())?;
+            let count = self.device.dtoh_sync_copy(&pair.count).map_err(|e| e.to_string())?;
+            if generated < 2 || sequence[0] <= 0 || sequence[0] as usize != logical_tokens
+                || count[0] <= 0 || count[0] as usize > pair.capacity {
+                return Err("paired MLA graph snapshot is stale or lacks a graph forward".into());
+            }
+            let directory = root.join(format!("layer-{}", pair.layer));
+            std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+            for (name, data) in [("q.f32", &pair.q), ("candidate-graph.f32", &pair.candidate), ("baseline-graph.f32", &pair.baseline)] {
+                let values = self.device.dtoh_sync_copy(data).map_err(|e| e.to_string())?;
+                if values.iter().any(|v| !v.is_finite()) { return Err(format!("paired MLA nonfinite {name}")); }
+                std::fs::write(directory.join(name), values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>()).map_err(|e| e.to_string())?;
+            }
+            let cache = self.device.dtoh_sync_copy(&pair.cache).map_err(|e| e.to_string())?;
+            std::fs::write(directory.join("cache.bin"), cache).map_err(|e| e.to_string())?;
+            for (name, data) in [("indices.i32", &pair.indices), ("count.i32", &pair.count), ("sequence.i32", &pair.sequence)] {
+                let values = self.device.dtoh_sync_copy(data).map_err(|e| e.to_string())?;
+                std::fs::write(directory.join(name), values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>()).map_err(|e| e.to_string())?;
+            }
+            let (w_vc, value_dim, nope) = match &graph.layers[pair.layer].attn {
+                GpuAttnConfig::MLA { w_vc_ptr, v_head_dim, qk_nope_dim, .. } => (*w_vc_ptr, *v_head_dim, *qk_nope_dim),
+                _ => return Err("paired MLA layer changed type".into()),
+            };
+            let bytes = pair.heads.checked_mul(value_dim).and_then(|n| n.checked_mul(512 * 2)).ok_or("paired WVC extent overflow")?;
+            let target = crate::matched_probe::Target { row: 0, directory: directory.clone() };
+            target.device("w_vc.bf16", w_vc, bytes, *self.device.cu_stream())?;
+            let descriptor = serde_json::json!({"operation":"paired_native_graph_attention", "layer":pair.layer,
+                "heads":pair.heads,"capacity":pair.capacity,"cache_dim":512,"rope":0,"nope":nope,"value_dim":value_dim,"scale":pair.scale,
+                "logical_tokens":logical_tokens,"context":pair.capacity,"cache_layout":"staged signed K6 with BF16 scales; 448 bytes per row",
+                "continuation_output":"original kernel substitution; tensor result retained separately", "diagnostic_only":true});
+            target.write("descriptor.json", &serde_json::to_vec_pretty(&descriptor).map_err(|e| e.to_string())?)?;
+        }
+        Ok(())
     }
 
     pub fn capture_matched_sequence_state_rust(
@@ -32346,6 +32462,11 @@ impl GpuDecodeStore {
             d_mla_kv,
             d_mla_attn_out,
             mla_selected_stage: None,
+            mla_split_workspace: None,
+            mla_split_exact: false,
+            mla_split_unpack: false,
+            mla_tensor: false,
+            mla_pair_capture: None,
             mla_sparse_attention_threads,
             mla_sparse_attention_threads_forced,
             mla_sparse_attention_threads_autotuned: false,
@@ -32800,6 +32921,7 @@ impl GpuDecodeStore {
             per_layer_graphs_valid: false,
             graphs_ever_captured: false,
             captured_decode_start_position: None,
+            captured_attention_execution: None,
             captured_gpu_route_sync: false,
             captured_hot_hcs_full_graph: false,
             captured_route_sync_classifies: 0,
@@ -40124,6 +40246,75 @@ impl GpuDecodeStore {
     }
 
     fn finalize_dsa_indexer_resources(&mut self) -> PyResult<usize> {
+        // Allocate before calibration/capture. One owner is shared by serial
+        // main-stream MLA layers; no graph replay may outlive this graph.
+        if matches!(std::env::var("KRASIS_MLA_K6_SPLIT").as_deref(), Ok("1" | "2" | "3" | "5" | "6")) {
+            let graph = self.graph.as_ref().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+            if graph.dsa_indexer_resources_finalized {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("DSA resources already finalized"));
+            }
+            let tensor = matches!(std::env::var("KRASIS_MLA_K6_SPLIT").as_deref(), Ok("5" | "6"));
+            self.device.bind_to_thread().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("MLA CUDA context: {e:?}")))?;
+            let mut device = 0;
+            let mut major = 0;
+            unsafe {
+                let ctx = cuda_sys::lib().cuCtxGetDevice(&mut device);
+                let attr = cuda_sys::lib().cuDeviceGetAttribute(&mut major, cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
+                if ctx != cuda_sys::CUresult::CUDA_SUCCESS || attr != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err("MLA compute capability query failed"));
+                }
+            }
+            let tensor = tensor && major >= 8;
+            let unpack = std::env::var("KRASIS_MLA_K6_SPLIT").as_deref() == Ok("3");
+            let exact = unpack || std::env::var("KRASIS_MLA_K6_SPLIT").as_deref() == Ok("2");
+            let mut elements = 0usize;
+            if graph.kv_format == 7 {
+                for layer in &graph.layers {
+                    if let (Some(reg), GpuAttnConfig::MLA { num_heads, ckv_cache_dim, qk_rope_dim, .. }) = (&layer.dsa_indexer, &layer.attn) {
+                        if *ckv_cache_dim != 512 || !matches!(*qk_rope_dim, 0 | 64) || (tensor && (*qk_rope_dim != 0 || num_heads % 16 != 0)) { continue; }
+                        let cap = graph.dsa_indexer_owners.iter().filter(|x| x.owner_layer_idx == reg.owner_layer_idx).map(|x| x.topk_capacity)
+                            .chain(graph.dsa_indexshare_replicas.iter().filter(|x| x.owner_layer_idx == reg.owner_layer_idx).map(|x| x.topk_capacity)).max().unwrap_or(0);
+                        if tensor && cap > 4096 { continue; }
+                        let required = if tensor {
+                            let padded = cap.checked_add(15).map(|x| x / 16 * 16).ok_or_else(|| pyo3::exceptions::PyOverflowError::new_err("MLA padding overflow"))?;
+                            num_heads.checked_mul(2).and_then(|x| x.checked_add(512)).and_then(|x| x.checked_mul(padded))
+                                .and_then(|x| num_heads.checked_mul(cap.div_ceil(128)).and_then(|n| n.checked_mul(512)).and_then(|n| x.checked_add(n)))
+                        } else if exact { num_heads.checked_add(if unpack { *ckv_cache_dim } else { 0 }).and_then(|x| x.checked_mul(cap)) } else { num_heads.checked_mul(cap.div_ceil(128)).and_then(|x| x.checked_mul(ckv_cache_dim + 2)) }
+                            .ok_or_else(|| pyo3::exceptions::PyOverflowError::new_err("MLA split workspace overflow"))?;
+                        elements = elements.max(required);
+                    }
+                }
+            }
+            if elements > 0 {
+                let workspace = self.device.alloc_zeros::<f32>(elements).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("MLA split workspace: {e:?}")))?;
+                self.graph.as_mut().unwrap().mla_split_workspace = Some(workspace);
+                self.graph.as_mut().unwrap().mla_split_exact = exact;
+                self.graph.as_mut().unwrap().mla_split_unpack = unpack;
+                self.graph.as_mut().unwrap().mla_tensor = tensor;
+                log::info!("MLA K6 split graph-owned workspace: {} bytes", elements * 4);
+            }
+            if std::env::var("KRASIS_MLA_K6_SPLIT").as_deref() == Ok("6") {
+                if !tensor || std::env::var("KRASIS_MLA_STAGE_SELECTED_KV").as_deref() != Ok("1")
+                    || std::env::var_os("KRASIS_MATCHED_PROBE_CONFIG").is_none() {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err("paired MLA graph proof requires Ampere+, staged K6 and explicit matched-probe diagnostics"));
+                }
+                let g = self.graph.as_ref().unwrap();
+                let geometry: Vec<_> = g.layers.iter().enumerate().filter_map(|(layer, l)| {
+                    let reg = l.dsa_indexer.as_ref()?;
+                    if let GpuAttnConfig::MLA { num_heads: 64, ckv_cache_dim: 512, qk_rope_dim: 0, sm_scale, .. } = &l.attn {
+                        let cap = g.dsa_indexer_owners.iter().filter(|o| o.owner_layer_idx == reg.owner_layer_idx).map(|o| o.topk_capacity)
+                            .chain(g.dsa_indexshare_replicas.iter().filter(|o| o.owner_layer_idx == reg.owner_layer_idx).map(|o| o.topk_capacity)).max()?;
+                        if cap > 0 && cap <= 4096 { return Some((layer, cap, *sm_scale)); }
+                    }
+                    None
+                }).collect();
+                if geometry.is_empty() { return Err(pyo3::exceptions::PyRuntimeError::new_err("paired MLA graph proof has no qualified layer")); }
+                let captures = geometry.into_iter().map(|(layer, cap, scale)| MlaPairCapture::allocate(&self.device, layer, 64, cap, scale))
+                    .collect::<Result<Vec<_>, String>>().map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                self.graph.as_mut().unwrap().mla_pair_capture = Some(captures);
+            }
+        }
+
         if std::env::var("KRASIS_MLA_STAGE_SELECTED_KV").as_deref() == Ok("1") {
             let graph = self.graph.as_ref().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
             if graph.dsa_indexer_resources_finalized {
@@ -50745,7 +50936,9 @@ impl GpuDecodeStore {
                 .d_topk_indices_b
                 .as_ref()
                 .map(|buffer| *buffer.device_ptr()),
-            false,
+            self.deepseek_v4_decode_policy.index_radix_topk
+                && plan.selected <= DSA_TOPK_RADIX_CAPACITY
+                && plan.sort_width <= DSA_TOPK_RADIX_CAPACITY,
         )?;
         if registration.index_kpool_compress {
             let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
@@ -51043,6 +51236,95 @@ impl GpuDecodeStore {
         }
     }
 
+    fn launch_mla_k6_split(
+        &self, graph: &GpuDecodeGraph, heads: usize, dim: usize, rope: usize,
+        capacity: usize, seq_len: i32, seq_pointer: u64,
+        ckv: u64, kpe: u64, indices: u64, scale: f32,
+    ) -> Result<bool, String> {
+        let intervention = crate::matched_teacher::active_attention_execution();
+        if intervention == Some(0) { return Ok(false); }
+        let tensor = intervention.map(|_| false).unwrap_or(graph.mla_tensor);
+        let unpack = intervention.map(|m| m == 3).unwrap_or(graph.mla_split_unpack);
+        let exact = intervention.map(|m| matches!(m, 2 | 3)).unwrap_or(graph.mla_split_exact);
+        if graph.kv_format != 7 || dim != 512 || !matches!(rope, 0 | 64) || capacity == 0 {
+            return Ok(false);
+        }
+        let Some(workspace) = &graph.mla_split_workspace else { return Ok(false); };
+        let splits = capacity.div_ceil(128);
+        if tensor && (rope != 0 || heads % 16 != 0 || capacity > 4096) { return Ok(false); }
+        let padded = capacity.checked_add(15).ok_or("MLA padded capacity overflow")? / 16 * 16;
+        let required = if tensor {
+            heads.checked_mul(2).and_then(|x| x.checked_add(512)).and_then(|x| x.checked_mul(padded))
+                .and_then(|x| heads.checked_mul(splits).and_then(|n| n.checked_mul(512)).and_then(|n| x.checked_add(n)))
+        } else if exact { heads.checked_add(if unpack { dim } else { 0 }).and_then(|x| x.checked_mul(capacity)) } else { heads.checked_mul(splits).and_then(|x| x.checked_mul(dim + 2)) }.ok_or("MLA split workspace extent overflow")?;
+        if required > workspace.len() || heads > i32::MAX as usize || capacity > i32::MAX as usize || splits > 65535 {
+            return Err("MLA split launch exceeds owned workspace or launch limits".into());
+        }
+        let k = graph.kernels.as_ref().ok_or("kernels not cached")?;
+        if tensor {
+            let dense = *workspace.device_ptr();
+            let scores = dense + (512 * padded * 4) as u64;
+            let probabilities = scores + (heads * padded * 4) as u64;
+            let partial = probabilities + (heads * padded * 4) as u64;
+            unsafe {
+                k.mla_sparse_k6_unpack_values.clone().launch(
+                    LaunchConfig { grid_dim: (padded as u32, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 },
+                    (dense, ckv, indices, 512i32, capacity as i32, seq_len, seq_pointer),
+                ).map_err(|e| format!("MLA tensor unpack: {e:?}"))?;
+                k.mla_sparse_k6_tensor_scores.clone().launch(
+                    LaunchConfig { grid_dim: (heads as u32 / 16, padded.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 },
+                    (scores, *graph.d_mla_q_absorbed.device_ptr(), dense, padded as i32),
+                ).map_err(|e| format!("MLA tensor scores: {e:?}"))?;
+                k.mla_sparse_k6_tensor_softmax.clone().launch(
+                    LaunchConfig { grid_dim: (heads as u32, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: ((padded + 8) * 4) as u32 },
+                    (probabilities, scores, indices, scale, capacity as i32, padded as i32, seq_len, seq_pointer),
+                ).map_err(|e| format!("MLA tensor softmax: {e:?}"))?;
+                k.mla_sparse_k6_tensor_values.clone().launch(
+                    LaunchConfig { grid_dim: (heads as u32 / 16, splits as u32, 8), block_dim: (128, 1, 1), shared_mem_bytes: 0 },
+                    (partial, probabilities, dense, capacity as i32, padded as i32),
+                ).map_err(|e| format!("MLA tensor values: {e:?}"))?;
+                k.mla_sparse_k6_tensor_combine.clone().launch(
+                    LaunchConfig { grid_dim: (heads as u32, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 },
+                    (*graph.d_mla_attn_out.device_ptr(), partial, splits as i32),
+                ).map_err(|e| format!("MLA tensor combine: {e:?}"))?;
+            }
+            return Ok(true);
+        }
+        if exact {
+            let values = if unpack { *workspace.device_ptr() + (heads * capacity * 4) as u64 } else { 0 };
+            unsafe {
+                if values != 0 {
+                    k.mla_sparse_k6_unpack_values.clone().launch(
+                        LaunchConfig { grid_dim: (capacity as u32, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 },
+                        (values, ckv, indices, dim as i32, capacity as i32, seq_len, seq_pointer),
+                    ).map_err(|e| format!("MLA K6 unpack values: {e:?}"))?;
+                }
+                k.mla_sparse_k6_scores.clone().launch(
+                    LaunchConfig { grid_dim: (heads as u32, capacity.div_ceil(256) as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: ((dim + rope) * 4) as u32 },
+                    (*workspace.device_ptr(), *graph.d_mla_q_absorbed.device_ptr(), *graph.d_gqa_v.device_ptr(), ckv, kpe, indices,
+                     scale, dim as i32, rope as i32, capacity as i32, seq_len, seq_pointer),
+                ).map_err(|e| format!("MLA K6 scores: {e:?}"))?;
+                k.mla_sparse_k6_scored_output.clone().launch(
+                    LaunchConfig { grid_dim: (heads as u32, 1, 1), block_dim: (graph.mla_sparse_attention_threads, 1, 1), shared_mem_bytes: ((4096 + graph.mla_sparse_attention_threads as usize / 32) * 4) as u32 },
+                    (*graph.d_mla_attn_out.device_ptr(), *workspace.device_ptr(), ckv, indices, values, dim as i32, capacity as i32, seq_len, seq_pointer),
+                ).map_err(|e| format!("MLA K6 scored output: {e:?}"))?;
+            }
+            return Ok(true);
+        }
+        unsafe {
+            k.mla_sparse_k6_split.clone().launch(
+                LaunchConfig { grid_dim: (heads as u32, splits as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: ((dim + rope + 128) * 4) as u32 },
+                (*workspace.device_ptr(), *graph.d_mla_q_absorbed.device_ptr(), *graph.d_gqa_v.device_ptr(), ckv, kpe, indices,
+                 scale, dim as i32, rope as i32, capacity as i32, seq_len, seq_pointer),
+            ).map_err(|e| format!("MLA K6 split: {e:?}"))?;
+            k.mla_sparse_k6_combine.clone().launch(
+                LaunchConfig { grid_dim: (heads as u32, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 },
+                (*graph.d_mla_attn_out.device_ptr(), *workspace.device_ptr(), dim as i32, splits as i32),
+            ).map_err(|e| format!("MLA K6 split combine: {e:?}"))?;
+        }
+        Ok(true)
+    }
+
     fn launch_mla_sparse_attention_graphable_for_layer(
         &self,
         graph: &GpuDecodeGraph,
@@ -51153,6 +51435,18 @@ impl GpuDecodeStore {
                 ).map_err(|e| format!("stage selected packed KV: {e:?}"))?; }
                 (c, p, *indices.device_ptr(), *count.device_ptr())
             } else { (ckv_cache_ptr, kpe_cache_ptr, selected.d_indices_ptr, d_seq_len_ptr) };
+        let optimized = self.launch_mla_k6_split(graph, num_heads, ckv_cache_dim, qk_rope_dim, selected.topk_capacity, 0, attention_seq_len,
+            attention_ckv, attention_kpe, attention_indices, sm_scale)?;
+        let paired = crate::matched_teacher::active_attention_execution().is_none() && graph.mla_pair_capture.is_some();
+        if optimized && !paired { return Ok(selected); }
+        let pair = graph.mla_pair_capture.as_ref().filter(|_| paired).and_then(|pairs| pairs.iter().find(|p| p.layer == layer_idx));
+        if let Some(pair) = pair {
+            if !optimized || pair.capacity != selected.topk_capacity || pair.heads != num_heads || graph.mla_selected_stage.is_none() {
+                return Err("paired MLA graph snapshot geometry/staging mismatch".into());
+            }
+            pair.inputs(*graph.d_mla_q_absorbed.device_ptr(), attention_ckv, attention_indices,
+                attention_seq_len, d_seq_len_ptr, *graph.d_mla_attn_out.device_ptr(), *self.device.cu_stream())?;
+        }
         unsafe {
             attention_kernel
                 .launch(
@@ -51188,6 +51482,11 @@ impl GpuDecodeStore {
                         layer_idx, selected.owner_layer_idx, graph.kv_format, error
                     )
                 })?;
+        }
+        if let Some(pair) = pair {
+            let status = unsafe { cuda_sys::lib().cuMemcpyDtoDAsync_v2(*pair.baseline.device_ptr(),
+                *graph.d_mla_attn_out.device_ptr(), num_heads * 512 * 4, *self.device.cu_stream()) };
+            if status != cuda_sys::CUresult::CUDA_SUCCESS { return Err(format!("paired MLA baseline copy: {status:?}")); }
         }
         Ok(selected)
     }
@@ -51300,6 +51599,8 @@ impl GpuDecodeStore {
                 ))
             }
         };
+        if !kpool_compressed && (graph.mla_pair_capture.is_none() || crate::matched_teacher::active_attention_execution().is_some()) && self.launch_mla_k6_split(graph, num_heads, ckv_cache_dim, qk_rope_dim, selected_count, seq_len_i32, 0,
+            ckv_cache_ptr, kpe_cache_ptr, selected.d_indices_ptr, sm_scale)? { return Ok(selected); }
         unsafe {
             attention_kernel
                 .launch(
@@ -57236,6 +57537,7 @@ impl GpuDecodeStore {
             graph.per_layer_graphs_valid = false;
             graph.captured_hot_hcs_full_graph = false;
             graph.captured_decode_start_position = None;
+            graph.captured_attention_execution = None;
             // NOTE: graphs_ever_captured stays true -- we keep the snapshot for diagnostics
         }
     }
@@ -57257,6 +57559,9 @@ impl GpuDecodeStore {
             return false;
         }
 
+        if graph.captured_attention_execution != crate::matched_teacher::active_attention_execution() {
+            return false;
+        }
         if graph.captured_decode_start_position != Some(decode_start_position) {
             trace_emit_global_mark(
                 trace_cfg.as_ref(),
@@ -60185,6 +60490,7 @@ impl GpuDecodeStore {
         graph.per_layer_graphs_valid = true;
         graph.graphs_ever_captured = true;
         graph.captured_decode_start_position = Some(decode_start_position);
+        graph.captured_attention_execution = crate::matched_teacher::active_attention_execution();
         graph.captured_gpu_route_sync = graph.gpu_route_sync;
         graph.captured_hot_hcs_full_graph = graph.hot_hcs_full_graph.is_some();
 
@@ -89654,6 +89960,15 @@ impl GpuDecodeStore {
         }
         // BEGIN explicit teacher-forced decode start
         let mut teacher_forcing = self.matched_teacher_once.take();
+        let attention_execution = teacher_forcing.as_ref().and_then(|t| t.attention_execution());
+        if attention_execution.is_some() && (self.common_mla.is_some() || self.graph.as_ref().map_or(true, |g|
+            g.kv_format != 7 || g.decode_layer_start != 0 || g.decode_layer_end != g.num_layers
+                || (attention_execution != Some(0) && g.mla_split_workspace.is_none()))) {
+            self.last_stream_failure=Some("exact attention intervention requires a complete single-GPU staged K6 owner and preallocated workspace".into());return 0;
+        }
+        let _attention_execution_guard = match crate::matched_teacher::AttentionExecutionGuard::enter(attention_execution) {
+            Ok(scope) => scope, Err(error) => { self.last_stream_failure=Some(error);return 0; }
+        };
         if let Some(teacher) = teacher_forcing.as_ref() {
             let result = teacher.validate_start(start_position, first_token, max_tokens);
             if self.cuda_graphs_disabled()
@@ -91997,6 +92312,14 @@ impl GpuDecodeStore {
             }
             if let Err(error)=route_audit.finish(teacher.evidence_directory()) {self.last_stream_failure=Some(error);}
 
+            if teacher.capture_full_logits() {
+                if let Err(error)=self.capture_matched_sequence_state_rust(start_position + generated, teacher.evidence_directory().join("final-state")) {
+                    self.last_stream_failure=Some(error);
+                }
+                if let Err(error)=self.capture_mla_pair_rust(start_position + generated, generated, teacher.evidence_directory().join("mla-paired-graph")) {
+                    self.last_stream_failure=Some(error);
+                }
+            }
             if let Err(error)=teacher.flush_deferred() { self.last_stream_failure=Some(error); }
         }
 

@@ -2440,6 +2440,39 @@ extern "C" __global__ void mla_prefill_absorb_wkc_kernel(
     }
 }
 
+// Reuse one head's weights across 32 rows, retaining each original FP32 FMA chain.
+extern "C" __global__ void mla_prefill_absorb_wkc_ordered_kernel(float* output,const __nv_bfloat16* q,const __nv_bfloat16* w,int rows) {
+    const int head=blockIdx.z,start=blockIdx.y*32,dim=blockIdx.x*128+threadIdx.x;
+    __shared__ __nv_bfloat16 query[32][256];
+    for(int i=threadIdx.x;i<32*256;i+=128) {
+        const int r=i/256,k=i%256;
+        query[r][k]=start+r<rows?q[((long long)(start+r)*64+head)*256+k]:__float2bfloat16_rn(0.0f);
+    }
+    __syncthreads();
+    float acc[32]={};
+    #pragma unroll 1
+    for(int k=0;k<256;k++) {
+        const float weight=bf16_to_float(w[((long long)head*256+k)*512+dim]);
+        #pragma unroll
+        for(int r=0;r<32;r++) acc[r]+=bf16_to_float(query[r][k])*weight;
+    }
+    #pragma unroll
+    for(int r=0;r<32;r++) if(start+r<rows) output[((long long)(start+r)*64+head)*512+dim]=acc[r];
+}
+
+// Reorder the head-major GEMM result into the persistent row-major query bank.
+// This is a bit-preserving copy on the same stream as the GEMM.
+extern "C" __global__ void mla_prefill_pack_absorbed_f32_kernel(
+    float* output, const float* head_major, int rows, int heads, int dim
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= rows * heads * dim) return;
+    const int d = i % dim;
+    const int head = (i / dim) % heads;
+    const int row = i / (heads * dim);
+    output[i] = head_major[((int64_t)head * rows + row) * dim + d];
+}
+
 /*
  * Sparse causal MLA prefill over one chunk-local selected-index matrix.
  * Grid=(heads, rows). Every row may have a different causal sequence length;

@@ -44,6 +44,9 @@ fn main() {
         println!("cargo:warning=libnuma not found — NUMA support disabled (will use fallback)");
     }
 
+    println!("cargo:rerun-if-changed=src/cuda/mla_sparse_split.cuh");
+    println!("cargo:rerun-if-changed=src/cuda/mla_sparse_tensor.cuh");
+
     // Compile CUDA decode kernels to PTX if nvcc is available.
     // The PTX is embedded as a string constant via include_str!.
     timed_phase("decode PTX", compile_cuda_kernels);
@@ -308,6 +311,7 @@ fn compile_expert_codec_kernels() {
 
 fn compile_cuda_kernels() {
     let cu_src = "src/cuda/decode_kernels.cu";
+    let mla_sparse_split_header = "src/cuda/mla_sparse_split.cuh";
     let expert_codec_src = "src/cuda/expert_codec_kernels.cu";
     let deepseek_v4_hc_header = "src/cuda/deepseek_v4_hc.cuh";
     let deepseek_v4_attention_header = "src/cuda/deepseek_v4_attention.cuh";
@@ -339,6 +343,8 @@ fn compile_cuda_kernels() {
     if is_output_fresh(
         &[
             cu_src,
+            mla_sparse_split_header,
+            "src/cuda/mla_sparse_tensor.cuh",
             expert_codec_src,
             "src/cuda/kda_relay.cuh",
             deepseek_v4_hc_header,

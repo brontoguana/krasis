@@ -11,6 +11,26 @@ use std::{
     sync::OnceLock,
 };
 
+thread_local! {
+    static ATTENTION_EXECUTION: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+}
+pub(crate) fn active_attention_execution() -> Option<u8> { ATTENTION_EXECUTION.with(|v| v.get()) }
+// This guard stays on the capture thread and restores nested/failed requests.
+pub(crate) struct AttentionExecutionGuard {
+    previous: Option<u8>,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+impl AttentionExecutionGuard {
+    pub(crate) fn enter(mode: Option<u8>) -> Result<Self, String> {
+        if mode.is_some_and(|v| !matches!(v, 0 | 2 | 3)) { return Err("attention intervention permits exact modes 0, 2 and 3 only".into()); }
+        let previous = ATTENTION_EXECUTION.with(|v| v.replace(mode));
+        Ok(Self { previous, _not_send: std::marker::PhantomData })
+    }
+}
+impl Drop for AttentionExecutionGuard {
+    fn drop(&mut self) { ATTENTION_EXECUTION.with(|v| v.set(self.previous)); }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CheckedFile {
@@ -49,6 +69,10 @@ fn default_audit_routes() -> bool { true }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Trial {
+    #[serde(default)]
+    attention_execution: Option<u8>,
+    #[serde(default)]
+    capture_full_logits: bool,
     #[serde(default = "default_audit_routes")]
     audit_routes: bool,
     #[serde(default)]
@@ -127,6 +151,10 @@ fn parse(raw: &[u8]) -> Result<Plan, String> {
     if matches!(p.arithmetic,Arithmetic::CenteredNativeProjection) != p.centered_module.is_some() || (p.centered_module.is_some() && p.schema!=1) { return Err("centered projection teacher requires schema1 and explicit center identity; older modes forbid it".into()); }
     let mut labels = HashSet::new();
     for t in &p.trials {
+        if t.attention_execution.is_some_and(|v| !matches!(v, 0 | 2 | 3))
+            || (t.attention_execution.is_some() && (!t.raw_input || !matches!(p.arithmetic, Arithmetic::NativeServingDecode))) {
+            return Err("exact attention intervention requires admitted raw native-serving trials and modes 0/2/3".into());
+        }
         if (p.schema==1 && t.raw_input) || (p.schema==2 && !t.raw_input) { return Err("teacher plan schema/input contract mismatch".into()); }
         if t.label.is_empty()
             || t.label.len() > 40
@@ -285,7 +313,7 @@ impl Session {
         // Timing-only serving replay preserves finite/vocabulary validation but
         // omits all numerical dumps, including the first distribution. Legacy
         // numerical contracts still persist their authentic proofs below.
-        if self.defer_step_proofs && matches!(self.arithmetic, Arithmetic::NativeServingDecode) {
+        if self.defer_step_proofs && matches!(self.arithmetic, Arithmetic::NativeServingDecode) && !self.trial.capture_full_logits {
             self.first_logits_len = Some(logits.len());
             return Ok(());
         }
@@ -349,7 +377,7 @@ impl Session {
         {
             return Err("teacher-forcing step/input/logits admission failed".into());
         }
-        if self.defer_step_proofs { self.raw_step_seen=Some(step);return Ok(()); }
+        if self.defer_step_proofs && !self.trial.capture_full_logits { self.raw_step_seen=Some(step);return Ok(()); }
         let bytes: Vec<u8> = logits.iter().flat_map(|x| x.to_le_bytes()).collect();
         persist(
             &self.directory.join(format!("step-{step}-logits.f32")),
@@ -390,6 +418,8 @@ impl Session {
         }
         Ok(())
     }
+    pub(crate) fn attention_execution(&self)->Option<u8> {self.trial.attention_execution}
+    pub(crate) fn capture_full_logits(&self)->bool {self.trial.capture_full_logits}
     pub(crate) fn deferred_proofs(&self)->bool {self.defer_step_proofs}
     pub(crate) fn audit_routes(&self)->bool {self.trial.audit_routes}
     pub(crate) fn evidence_directory(&self)->&Path {&self.directory}
@@ -398,8 +428,8 @@ impl Session {
         json!({"diagnostic_only":true,"qualifies_candidate":false,"label":self.trial.label,"arithmetic":self.arithmetic,
         "history":"explicit_teacher_forced_saved_tokens","ordinary_cache_equality_evidence":false,"forced_inputs":self.trial.forced_inputs,
         "defer_step_proofs":self.defer_step_proofs,"audit_routes":self.trial.audit_routes,
-        "first_logit_proof_saved":!(self.defer_step_proofs && matches!(self.arithmetic,Arithmetic::NativeServingDecode)),"step_receipts":self.deferred_steps,
-        "completed_decode_steps":self.next_step,"decode_elapsed_seconds":self.decode_elapsed_seconds,"logit_proofs_saved":!self.defer_step_proofs})
+        "attention_execution":self.trial.attention_execution,"capture_full_logits":self.trial.capture_full_logits,"first_logit_proof_saved":self.trial.capture_full_logits || !(self.defer_step_proofs && matches!(self.arithmetic,Arithmetic::NativeServingDecode)),"step_receipts":self.deferred_steps,
+        "completed_decode_steps":self.next_step,"decode_elapsed_seconds":self.decode_elapsed_seconds,"logit_proofs_saved":self.trial.capture_full_logits || !self.defer_step_proofs})
     }
 }
 fn validate_inputs(t: &Trial, ids: &[u32], start: usize, max: usize) -> Result<(), String> {
@@ -496,6 +526,9 @@ mod tests {
         let base=json!({"schema":2,"arithmetic":"native_serving_decode","defer_step_proofs":true,"directory":"/tmp/replay","loaded_native":{"path":"/tmp/native","sha256":"a".repeat(64)},"identities":[{"path":"/tmp/config","sha256":"b".repeat(64)}],"trials":[{"raw_input":true,"label":"fixed","logical_tokens":2,"expected_sequence_start":0,"max_tokens":3,"input_ids_sha256":"c".repeat(64),"forced_inputs":[4,5]}]});
         assert!(parse(&serde_json::to_vec(&base).unwrap()).is_ok());
         for key in ["defer_step_proofs","raw_input"] {let mut p=base.clone();if key=="raw_input"{p["trials"][0][key]=json!(false);}else{p[key]=json!(false);}assert!(parse(&serde_json::to_vec(&p).unwrap()).is_err());}
+        for mode in [0,2,3] { let mut q=base.clone();q["trials"][0]["attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_ok()); }
+        for mode in [1,5,6,255] { let mut q=base.clone();q["trials"][0]["attention_execution"]=json!(mode);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err()); }
+        let mut q=base.clone();q["arithmetic"]=json!("native");q["trials"][0]["attention_execution"]=json!(3);assert!(parse(&serde_json::to_vec(&q).unwrap()).is_err());
         assert!(Arithmetic::NativeServingDecode.validate_environment(None,None).is_ok());
         assert!(Arithmetic::NativeServingDecode.validate_environment(Some(OsStr::new("1")),None).is_err());
     }
@@ -527,6 +560,34 @@ mod tests {
         }
     }
     #[test]
+    fn exact_attention_scope_restores_nested_and_failed_interventions() {
+        assert_eq!(active_attention_execution(),None);
+        {
+            let _outer=AttentionExecutionGuard::enter(Some(0)).unwrap();
+            assert_eq!(active_attention_execution(),Some(0));
+            { let _inner=AttentionExecutionGuard::enter(Some(3)).unwrap();assert_eq!(active_attention_execution(),Some(3)); }
+            assert_eq!(active_attention_execution(),Some(0));
+            { let _ordinary=AttentionExecutionGuard::enter(None).unwrap();assert_eq!(active_attention_execution(),None); }
+            assert!(AttentionExecutionGuard::enter(Some(5)).is_err());
+            assert_eq!(active_attention_execution(),Some(0));
+        }
+        assert_eq!(active_attention_execution(),None);
+    }
+    #[test]
+    fn numerical_serving_capture_keeps_complete_logits_separate_from_timing() {
+        let dir=std::env::temp_dir().join(format!("attention-full-logits-{}",std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let mut t=trial(); t.raw_input=true; t.capture_full_logits=true;
+        let mut s=Session{trial:t,arithmetic:Arithmetic::NativeServingDecode,directory:dir.clone(),next_step:0,decode_elapsed_seconds:None,raw_step_seen:None,first_logits_len:None,defer_step_proofs:true,deferred_steps:Vec::new()};
+        s.raw_first(&[-1.,0.,1.]).unwrap();
+        s.raw_step(0,4,&[1.,2.,3.]).unwrap();
+        assert_eq!(fs::read(dir.join("first-logits.f32")).unwrap().len(),12);
+        assert_eq!(fs::read(dir.join("step-0-logits.f32")).unwrap().len(),12);
+        assert!(s.capture_full_logits());
+        assert_eq!(s.metadata()["logit_proofs_saved"],true);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn route_observation_control_is_explicit_and_defaults_to_legacy_enabled() {
         let t:Trial=serde_json::from_value(json!({"raw_input":true,"label":"observer","logical_tokens":2,"expected_sequence_start":0,"max_tokens":3,"input_ids_sha256":"a".repeat(64),"forced_inputs":[4,5]})).unwrap();
         assert!(t.audit_routes);
@@ -537,6 +598,8 @@ mod tests {
     }
     fn trial() -> Trial {
         Trial {
+            attention_execution: None,
+            capture_full_logits: false,
             audit_routes: true,
             raw_input: false,
             label: "control".into(),
