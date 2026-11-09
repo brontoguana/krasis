@@ -26,7 +26,7 @@ use cudarc::driver::{CudaDevice, CudaSlice, DevicePtr, DeviceSlice, LaunchAsync,
 
 use crate::adaptive_cold_drop::{AdaptiveColdDropRuntime, AdaptiveColdDropShadow};
 use crate::cpu_tail::{
-    configured_worker_count, CpuTailExpertRef, CpuTailRuntime, CpuTailTransposedSource,
+    CpuTailExpertRef, CpuTailRuntime, CpuTailTransposedSource,
     CpuTailTransposedTier, CpuTailWeightFormat,
 };
 
@@ -19291,6 +19291,8 @@ struct GpuDecodeGraph {
     /// allocation as demand H2D unless the separately gated transposed-tier
     /// experiment supplies a CPU-format duplicate for the claimed expert.
     cpu_tail_workers: Vec<CpuTailRuntime>,
+    cpu_tail_planned_counts: Vec<usize>,
+    cpu_tail_calibration: Option<serde_json::Value>,
     cpu_tail_transposed_requested: bool,
     cpu_tail_transposed_tier: Option<CpuTailTransposedTier>,
     cpu_tail_attempts: u64,
@@ -19496,10 +19498,11 @@ struct GpuDecodeGraph {
     /// Replay-stream prerequisite completion for the CPU-tail deadline race.
     /// Recorded after split-hot launch (or pointer upload when there is no hot
     /// work); a tail misses only once both this and front demand H2D complete.
-    cpu_tail_replay_ready_event: Option<CudaEvent>,
+    cpu_tail_input_ready_event: Option<CpuLaneEvent>,
+    cpu_tail_replay_ready_event: Option<CpuLaneEvent>,
     /// Recorded after an accepted CPU-tail output upload on replay_stream.
     /// Protects the single pinned host output buffer from early reuse.
-    cpu_tail_output_copy_event: Option<CudaEvent>,
+    cpu_tail_output_copy_event: Option<CpuLaneEvent>,
     /// Event used to keep dynamic-HCS D2D promotion copies ordered before the
     /// cold staging buffers they read from are reused on copy_stream.
     graph_dynamic_promotion_event: Option<CudaEvent>,
@@ -20602,6 +20605,20 @@ impl Drop for SequenceStatePinnedBuffer {
     }
 }
 
+// These events belong to the decode graph and survive every queued use.
+// Graph teardown completes CUDA and joins readers before field destruction.
+struct CpuLaneEvent(cuda_sys::CUevent, std::sync::Arc<cudarc::driver::CudaDevice>);
+unsafe impl Send for CpuLaneEvent {}
+unsafe impl Sync for CpuLaneEvent {}
+impl Drop for CpuLaneEvent {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            if let Err(error)=self.1.bind_to_thread() {log::error!("CPU event release context: {error}");return;}
+            unsafe{let _=cuda_sys::lib().cuEventDestroy_v2(self.0);}
+        }
+    }
+}
+
 struct CudaEvent(cuda_sys::CUevent);
 unsafe impl Send for CudaEvent {}
 unsafe impl Sync for CudaEvent {}
@@ -21526,6 +21543,7 @@ impl Drop for GpuDecodeGraph {
                     &format!("{completed:?}"),
                 );
             }
+            if crate::optimisations::CPU_COLD_LANE {self.cpu_tail_workers.clear();}
             self.per_layer_graphs.clear();
             drop(self.hot_hcs_full_graph.take());
         }
@@ -32085,73 +32103,14 @@ impl GpuDecodeStore {
         } else {
             moe_inter
         };
-        let cpu_tail_enabled = env_truthy("KRASIS_CPU_TAIL_RACE");
-        let cpu_tail_transposed_enabled = env_truthy("KRASIS_CPU_TAIL_TRANSPOSED");
-        crate::cpu_tail::validate_calibration_mode(cpu_tail_enabled,cpu_tail_transposed_enabled,
-            std::env::var_os("KRASIS_CPU_TAIL_CALIBRATION_JSON").is_some())
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        // Production CPU execution is a build-selected, GLM-registered lane.
+        // Legacy runtime parsing remains confined to standalone diagnostics.
+        let cpu_tail_transposed_enabled = false;
         let synthetic_repack_enabled = crate::synthetic_repack::synthetic_repack_enabled();
-        if cpu_tail_transposed_enabled && !cpu_tail_enabled {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "KRASIS_CPU_TAIL_TRANSPOSED=1 requires KRASIS_CPU_TAIL_RACE=1",
-            ));
-        }
-        if !cpu_tail_enabled && std::env::var_os("KRASIS_CPU_TAIL_WORKERS").is_some() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "KRASIS_CPU_TAIL_WORKERS requires KRASIS_CPU_TAIL_RACE=1",
-            ));
-        }
-        if synthetic_repack_enabled && cpu_tail_enabled {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "KRASIS_SYNTH_REPACK=1 is an isolated cache-format cost probe and cannot be combined with KRASIS_CPU_TAIL_RACE=1",
-            ));
-        }
         if synthetic_repack_enabled && expert_bits != 4 {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "KRASIS_SYNTH_REPACK=1 requires INT4 routed experts; got expert_bits={expert_bits}"
-            )));
+            return Err(pyo3::exceptions::PyValueError::new_err("synthetic repack requires INT4 routed experts"));
         }
-        let cpu_tail_workers = if cpu_tail_enabled {
-            if self.draft.is_some() || self.dspark.is_some() {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "KRASIS_CPU_TAIL_RACE=1 is not supported with speculative decode",
-                ));
-            }
-            if expert_bits != 4 {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "KRASIS_CPU_TAIL_RACE=1 requires INT4 routed experts; got expert_bits={expert_bits}"
-                )));
-            }
-            let worker_count =
-                configured_worker_count().map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-            let mut runtimes = Vec::with_capacity(worker_count);
-            for worker_index in 0..worker_count {
-                runtimes.push(
-                    CpuTailRuntime::new_for_worker(
-                        hidden_size,
-                        moe_inter,
-                        group_size,
-                        env_truthy("KRASIS_DECODE_TIMING") || env_truthy("KRASIS_CPU_TAIL_HOST_TIMING"),
-                        worker_index,
-                        worker_count,
-                    )
-                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
-                );
-            }
-            log::warn!(
-                "CPU tail race ENABLED: workers={} at most {} surviving demand-cold tail expert(s) may execute on persistent Rust workers; Marlin CPU math uses INT16 activation quantization and requires explicit quality validation",
-                worker_count,
-                worker_count,
-            );
-            if cpu_tail_transposed_enabled {
-                log::warn!(
-                    "CPU tail transposed tier REQUESTED: startup must build a complete CPU-format duplicate for every expert outside the selected HCS resident set; partial population and silent fallback are forbidden"
-                );
-            }
-            runtimes
-        } else {
-            Vec::new()
-        };
+        let cpu_tail_workers = Vec::<CpuTailRuntime>::new();
         let qkv_size = if max_qkv_size > 0 {
             max_qkv_size
         } else {
@@ -32866,6 +32825,8 @@ impl GpuDecodeStore {
             adaptive_cold_drop,
             adaptive_cold_drop_shadow,
             cpu_tail_workers,
+            cpu_tail_planned_counts: Vec::new(),
+            cpu_tail_calibration: None,
             cpu_tail_transposed_requested: cpu_tail_transposed_enabled,
             cpu_tail_transposed_tier: None,
             cpu_tail_attempts: 0,
@@ -32977,6 +32938,7 @@ impl GpuDecodeStore {
             per_layer_moe_indices: Vec::new(),
             d_cublas_workspace: None,
             graph_replay_dma_event: None,
+            cpu_tail_input_ready_event: None,
             cpu_tail_replay_ready_event: None,
             cpu_tail_output_copy_event: None,
             graph_dynamic_promotion_event: None,
@@ -33076,7 +33038,15 @@ impl GpuDecodeStore {
             log::info!("GpuDecodeStore: pre-allocated graph replay DMA event");
         }
 
-        if !self.graph.as_ref().unwrap().cpu_tail_workers.is_empty() {
+        if crate::optimisations::CPU_COLD_LANE || !self.graph.as_ref().unwrap().cpu_tail_workers.is_empty() {
+            let mut input_event = std::ptr::null_mut();
+            unsafe {
+                let rc = cuda_sys::lib().cuEventCreate(&mut input_event,cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32);
+                if rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("CPU lane input event: {rc:?}")));
+                }
+            }
+            let input_event = CpuLaneEvent(input_event,self.device.clone());
             let mut replay_ready_ev: cuda_sys::CUevent = std::ptr::null_mut();
             unsafe {
                 let flags = cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32;
@@ -33101,8 +33071,9 @@ impl GpuDecodeStore {
                 }
             }
             let graph = self.graph.as_mut().unwrap();
-            graph.cpu_tail_replay_ready_event = Some(CudaEvent(replay_ready_ev));
-            graph.cpu_tail_output_copy_event = Some(CudaEvent(output_copy_ev));
+            graph.cpu_tail_input_ready_event = Some(input_event);
+            graph.cpu_tail_replay_ready_event = Some(CpuLaneEvent(replay_ready_ev,self.device.clone()));
+            graph.cpu_tail_output_copy_event = Some(CpuLaneEvent(output_copy_ev,self.device.clone()));
             log::info!(
                 "GpuDecodeStore: pre-allocated CPU tail replay-ready and output-copy events"
             );
@@ -45200,7 +45171,27 @@ impl GpuDecodeStore {
                 ))
             })?;
         {
-            let graph = self.graph.as_ref().unwrap();
+            let graph = self.graph.as_mut().unwrap();
+            if crate::optimisations::CPU_COLD_LANE && !graph.cpu_tail_workers.is_empty() {
+                self.device.bind_to_thread().map_err(|e|pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                let rc=unsafe{cuda_sys::lib().cuCtxSynchronize()};
+                if rc!=cuda_sys::CUresult::CUDA_SUCCESS {return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("CPU lane peer fallback completion: {rc:?}")));}
+                graph.cpu_tail_workers.clear();
+                graph.cpu_tail_planned_counts.fill(0);
+                graph.cpu_tail_output_copy_pending=false;
+                graph.per_layer_graphs.clear();
+                drop(graph.hot_hcs_full_graph.take());
+                graph.per_layer_graphs_valid=false;
+                if let Some(receipt)=graph.cpu_tail_calibration.as_mut() {
+                    receipt["fallback"]=serde_json::json!("peer execution configured");
+                    receipt["counts"]=serde_json::json!(graph.cpu_tail_planned_counts);
+                    eprintln!("[cpu-cold-lane-fallback] {}",receipt);
+                    if let Some(directory)=std::env::var_os("KRASIS_RUN_DIR") {
+                        let path=std::path::PathBuf::from(directory).join("cpu-cold-lane.json");
+                        if let Err(error)=std::fs::write(path,serde_json::to_vec_pretty(receipt).unwrap()) {log::warn!("CPU lane fallback receipt: {error}");}
+                    }
+                }
+            }
             if !graph.cpu_tail_workers.is_empty() || graph.synthetic_repack.is_some() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "peer expert serving is incompatible with CPU-tail races and synthetic repack diagnostics",
@@ -59845,8 +59836,9 @@ impl GpuDecodeStore {
         // compute with cold-expert DMA. Other architectures remain default-off,
         // and an explicit environment value preserves diagnostic A/B control.
         let split_override = std::env::var("KRASIS_SPLIT_EXPERT_LAUNCH").ok();
-        let split_requested =
-            split_expert_launch_enabled(graph.dsa_runtime_registered, split_override.as_deref())?;
+        let split_requested = if crate::optimisations::CPU_COLD_LANE && !graph.cpu_tail_workers.is_empty() {
+            true // The compiled CPU lane owns its split-launch prerequisite.
+        } else {split_expert_launch_enabled(graph.dsa_runtime_registered, split_override.as_deref())?};
         graph.split_expert_launch = split_requested;
         log::info!("Decode expert batch slot order: canonical router order");
         if graph.gpu_route_sync {
@@ -71110,7 +71102,7 @@ impl GpuDecodeStore {
                     // Apply the exact same cold-mass pruning plan as the
                     // ordinary path before peer admission.  The peer then
                     // handles only surviving demand-cold routes, preserving
-                    // the 75/8 contract used by the benchmark controls.
+                    // the declared cold-mass contract.
                     if !graph.peer_experts.is_empty() && !cold_experts.is_empty() {
                         let candidates = cold_experts
                             .iter()
@@ -71237,7 +71229,8 @@ impl GpuDecodeStore {
 
                     let mut cpu_tail_worker_by_index: Vec<Option<usize>> =
                         vec![None; cold_experts.len()];
-                    if !graph.cpu_tail_workers.is_empty() {
+                    if !graph.cpu_tail_workers.is_empty()
+                        && (!crate::optimisations::CPU_COLD_LANE || graph.hcs.as_ref().is_some_and(|h|!h.cache.is_empty())) {
                         // Reap canceled attempts from earlier layers without
                         // waiting. A still-running worker is simply unavailable
                         // for this layer; GPU scheduling is unchanged.
@@ -71329,8 +71322,10 @@ impl GpuDecodeStore {
                         } else if available_workers.is_empty() {
                             graph.cpu_tail_busy_skips += 1;
                         } else {
-                            let claim_count = available_workers
-                                .len()
+                            let planned = if crate::optimisations::CPU_COLD_LANE {
+                                graph.cpu_tail_planned_counts.get(cold_experts.len()).copied().unwrap_or(0)
+                            } else {available_workers.len()};
+                            let claim_count = planned.min(available_workers.len())
                                 .min(cold_experts.len().saturating_sub(1));
                             let eligible_workers: Vec<usize> = available_workers
                                 .iter()
@@ -71346,6 +71341,7 @@ impl GpuDecodeStore {
                                     admitted
                                 })
                                 .collect();
+                            let mut activation_snapshot: Option<*const u8> = None;
                             for (claim_ordinal, &worker_index) in
                                 eligible_workers.iter().enumerate()
                             {
@@ -71392,13 +71388,21 @@ impl GpuDecodeStore {
                                 let input_bytes = graph.hidden_size * std::mem::size_of::<u16>();
                                 let input_ptr = graph.cpu_tail_workers[worker_index].input_ptr();
                                 let t_input = (graph.timing_enabled || graph.cpu_tail_host_timing_enabled).then(std::time::Instant::now);
-                                let copy_err = unsafe {
-                                    cuda_sys::lib().cuMemcpyDtoH_v2(
-                                        input_ptr as *mut std::ffi::c_void,
-                                        expert_input_ptr,
-                                        input_bytes,
-                                    )
-                                };
+                                let copy_err = if crate::optimisations::CPU_COLD_LANE {
+                                    if let Some(source)=activation_snapshot {
+                                        unsafe {std::ptr::copy_nonoverlapping(source,input_ptr,input_bytes);}
+                                        cuda_sys::CUresult::CUDA_SUCCESS
+                                    } else {
+                                        let event=graph.cpu_tail_input_ready_event.as_ref().ok_or("CPU lane input event is absent")?.0;
+                                        let mut rc=unsafe{cuda_sys::lib().cuMemcpyDtoHAsync_v2(input_ptr as *mut std::ffi::c_void,expert_input_ptr,input_bytes,replay_stream)};
+                                        if rc==cuda_sys::CUresult::CUDA_SUCCESS {rc=unsafe{cuda_sys::lib().cuEventRecord(event,replay_stream)};}
+                                        if rc==cuda_sys::CUresult::CUDA_SUCCESS {rc=unsafe{cuda_sys::lib().cuEventSynchronize(event)};}
+                                        if rc==cuda_sys::CUresult::CUDA_SUCCESS {activation_snapshot=Some(input_ptr as *const u8);}
+                                        rc
+                                    }
+                                } else {unsafe {
+                                    cuda_sys::lib().cuMemcpyDtoH_v2(input_ptr as *mut std::ffi::c_void,expert_input_ptr,input_bytes)
+                                }};
                                 if let Some(t_input) = t_input {
                                     let elapsed_s = t_input.elapsed().as_secs_f64();
                                     graph.cpu_tail_input_d2h_s += elapsed_s;
@@ -72164,7 +72168,12 @@ impl GpuDecodeStore {
                     let race_started = (graph.timing_enabled || graph.cpu_tail_host_timing_enabled).then(std::time::Instant::now);
                     let mut cpu_result = None;
                     let cpu_won = loop {
-                        if let Some(result) = graph.cpu_tail_workers[worker_index].try_result()? {
+                        let result = if crate::optimisations::CPU_COLD_LANE {
+                            // This expert has one owner; await its result while
+                            // the already-enqueued GPU front continues.
+                            Some(graph.cpu_tail_workers[worker_index].wait_result()?)
+                        } else {graph.cpu_tail_workers[worker_index].try_result()?};
+                        if let Some(result) = result {
                             if let Some(error) = result.error.as_ref() {
                                 graph.cpu_tail_errors += 1;
                                 return Err(error.clone());
@@ -103931,6 +103940,69 @@ impl GpuDecodeStore {
             );
         }
 
+        if crate::optimisations::CPU_COLD_LANE && graph.glm5_hc_mean_mult.is_some()
+            && graph.cpu_tail_calibration.is_none() && self.draft.is_none() && self.dspark.is_none() {
+            let supported = graph.expert_bits == 4 && !graph.gpu_route_sync
+                && graph.prefetch_depth == 0
+                && graph.apfl.is_none() && graph.peer_experts.is_empty()
+                && graph.synthetic_repack.is_none() && graph.expert_compression.is_none()
+                && graph.moe_layers.iter().flatten().all(|moe| {
+                    moe.activation_type == 0 && moe.gated_experts && moe.moe_input_size == 0
+                        && !moe.deepseek_v4_activation && moe.latent_down_wid.is_none()
+                        && moe.latent_up_wid.is_none()
+                });
+            if supported {
+                let attempt = (|| -> Result<_, String> {
+                    if crate::kda_prefix_owner::shared_kda_requested()? {
+                        return Err("selected KDA experiment retains its GPU-only admission".into());
+                    }
+                    let mut sources = Vec::new();
+                    for (layer, moe) in graph.moe_layers.iter().enumerate().filter_map(|(i,m)|m.as_ref().map(|m|(i,m))) {
+                        if moe.experts.is_empty() {continue;}
+                        let id = (layer * 37 + 11) % moe.experts.len();
+                        let expert = &moe.experts[id];
+                        if [expert.w13_packed_ptr,expert.w13_scales_ptr,expert.w2_packed_ptr,expert.w2_scales_ptr].contains(&0){continue;}
+                        sources.push(CpuTailExpertRef {
+                            format:CpuTailWeightFormat::Marlin,
+                            w13_packed_ptr:expert.w13_packed_ptr,w13_packed_len:expert.w13_packed_bytes/4,
+                            w13_scales_ptr:expert.w13_scales_ptr,w13_scales_len:expert.w13_scales_bytes/2,
+                            w2_packed_ptr:expert.w2_packed_ptr,w2_packed_len:expert.w2_packed_bytes/4,
+                            w2_scales_ptr:expert.w2_scales_ptr,w2_scales_len:expert.w2_scales_bytes/2,
+                            hidden_size:graph.hidden_size,intermediate_size:graph.moe_intermediate_size,
+                            group_size:graph.group_size,swiglu_limit:moe.swiglu_limit,activation_alpha:1.0,
+                        });
+                    }
+                    let mut workers=Vec::new();
+                    for index in 0..2 {
+                        workers.push(CpuTailRuntime::new_compiled(graph.hidden_size,
+                            graph.moe_intermediate_size,graph.group_size,index,2)?);
+                    }
+                    let mut plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,graph.max_experts_per_tok)?;
+                    let affinities=(0..2).map(|i|crate::cpu_tail::compiled_lane_cpu_ids(i,2)).collect::<Result<Vec<_>,_>>()?;
+                    plan.receipt["cpu_ids"]=serde_json::json!(affinities);
+                    plan.receipt["optimisations"]=serde_json::from_str(crate::optimisations::manifest()).map_err(|e|e.to_string())?;
+                    Ok((workers,plan))
+                })();
+                match attempt {
+                    Ok((workers,plan))=>{
+                        eprintln!("[cpu-cold-lane-calibration] {}",plan.receipt);
+                        if let Some(directory)=std::env::var_os("KRASIS_RUN_DIR") {
+                            let path=std::path::PathBuf::from(directory).join("cpu-cold-lane.json");
+                            if let Err(error)=std::fs::write(&path,serde_json::to_vec_pretty(&plan.receipt).unwrap()) {
+                                log::warn!("CPU lane calibration receipt could not be saved: {error}");
+                            }
+                        }
+                        let profitable=plan.counts.iter().any(|&n|n>0);
+                        graph.cpu_tail_planned_counts=plan.counts;
+                        graph.cpu_tail_calibration=Some(plan.receipt);
+                        if profitable {graph.cpu_tail_workers=workers;}
+                        else {log::info!("CPU cold lane uses GPU fallback after startup cost calibration");}
+                    }
+                    Err(error)=>log::info!("CPU cold lane retains GPU execution: {error}"),
+                }
+            } else {log::info!("CPU cold lane retains GPU execution for unsupported execution mode");}
+        }
+
         let mapped_reads = graph.mapped_reads_active;
         let msg = format!(
             "HCS pool: {}/{} experts loaded in {:.2}s ({:.1}% coverage), {:.1} MB VRAM, \
@@ -105891,6 +105963,7 @@ impl Drop for GpuDecodeStore {
             );
         }
         if let Some(graph) = self.graph.as_mut() {
+            if crate::optimisations::CPU_COLD_LANE {graph.cpu_tail_workers.clear();}
             graph.per_layer_graphs.clear();
             drop(graph.hot_hcs_full_graph.take());
             graph.per_layer_graphs_valid = false;
@@ -105935,19 +106008,7 @@ impl Drop for GpuDecodeStore {
             if let Some(ref events) = graph.graph_timing_events {
                 events.destroy();
             }
-            unsafe {
-                for event in [
-                    graph.cpu_tail_replay_ready_event.as_ref(),
-                    graph.cpu_tail_output_copy_event.as_ref(),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    if !event.0.is_null() {
-                        let _ = cuda_sys::lib().cuEventDestroy_v2(event.0);
-                    }
-                }
-            }
+            // CPU lane events are graph-owned RAII handles, also on replacement/unwind.
         }
         unsafe {
             if let Some(event) = self.peer_service_ready_event.as_ref() {

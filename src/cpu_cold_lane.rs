@@ -1,0 +1,306 @@
+//! Cold-start calibration for an upfront CPU/GPU split over existing host weights.
+use crate::cpu_tail::{CpuTailExpertRef, CpuTailRuntime};
+use cudarc::driver::sys as cuda;
+use serde_json::{json, Value};
+use std::time::Instant;
+
+pub(crate) struct Plan {
+    pub counts: Vec<usize>,
+    pub receipt: Value,
+}
+
+fn checked(result: cuda::CUresult, label: &str) -> Result<(), String> {
+    if result == cuda::CUresult::CUDA_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!("CPU lane calibration {label}: {result:?}"))
+    }
+}
+fn sizes(expert: &CpuTailExpertRef) -> Result<[usize; 4], String> {
+    Ok([
+        expert
+            .w13_packed_len
+            .checked_mul(4)
+            .ok_or("CPU lane W13 extent overflow")?,
+        expert
+            .w13_scales_len
+            .checked_mul(2)
+            .ok_or("CPU lane W13 scale extent overflow")?,
+        expert
+            .w2_packed_len
+            .checked_mul(4)
+            .ok_or("CPU lane W2 extent overflow")?,
+        expert
+            .w2_scales_len
+            .checked_mul(2)
+            .ok_or("CPU lane W2 scale extent overflow")?,
+    ])
+}
+struct Scratch {
+    stream: cuda::CUstream,
+    begin: cuda::CUevent,
+    end: cuda::CUevent,
+    pointer: u64,
+    bytes: usize,
+}
+impl Scratch {
+    fn new(bytes: usize) -> Result<Self, String> {
+        let mut out = Self {
+            stream: std::ptr::null_mut(),
+            begin: std::ptr::null_mut(),
+            end: std::ptr::null_mut(),
+            pointer: 0,
+            bytes,
+        };
+        unsafe {
+            checked(
+                cuda::lib().cuStreamCreate(
+                    &mut out.stream,
+                    cuda::CUstream_flags::CU_STREAM_NON_BLOCKING as u32,
+                ),
+                "create stream",
+            )?;
+            checked(
+                cuda::lib().cuEventCreate(&mut out.begin, 0),
+                "create begin event",
+            )?;
+            checked(
+                cuda::lib().cuEventCreate(&mut out.end, 0),
+                "create end event",
+            )?;
+            let (mut free, mut total) = (0usize, 0usize);
+            checked(
+                cuda::lib().cuMemGetInfo_v2(&mut free, &mut total),
+                "query reserve",
+            )?;
+            let required = bytes
+                .checked_add(600 * 1024 * 1024)
+                .ok_or("CPU lane reserve overflow")?;
+            if free < required {
+                return Err("CPU lane scratch would violate 600 MiB reserve".into());
+            }
+            checked(
+                cuda::lib().cuMemAlloc_v2(&mut out.pointer, bytes),
+                "allocate scratch",
+            )?;
+        }
+        Ok(out)
+    }
+    fn enqueue(&self, expert: &CpuTailExpertRef, timed: bool) -> Result<(), String> {
+        let lengths = sizes(expert)?;
+        let hosts = [
+            expert.w13_packed_ptr,
+            expert.w13_scales_ptr,
+            expert.w2_packed_ptr,
+            expert.w2_scales_ptr,
+        ];
+        let mut offset = 0usize;
+        unsafe {
+            if timed {
+                checked(
+                    cuda::lib().cuEventRecord(self.begin, self.stream),
+                    "record begin",
+                )?;
+            }
+            for (host, bytes) in hosts.into_iter().zip(lengths) {
+                if host == 0 || bytes == 0 {
+                    return Err("CPU lane source is absent".into());
+                }
+                let next = offset
+                    .checked_add(bytes)
+                    .ok_or("CPU lane copy extent overflow")?;
+                if next > self.bytes {
+                    return Err("CPU lane scratch extent exceeded".into());
+                }
+                checked(
+                    cuda::lib().cuMemcpyHtoDAsync_v2(
+                        self.pointer + offset as u64,
+                        host as *const std::ffi::c_void,
+                        bytes,
+                        self.stream,
+                    ),
+                    "weight copy",
+                )?;
+                offset = next;
+            }
+            if timed {
+                checked(
+                    cuda::lib().cuEventRecord(self.end, self.stream),
+                    "record end",
+                )?;
+            }
+        }
+        Ok(())
+    }
+    fn drain(&self) -> Result<f64, String> {
+        let mut ms = 0f32;
+        unsafe {
+            checked(
+                cuda::lib().cuStreamSynchronize(self.stream),
+                "drain owned stream",
+            )?;
+            checked(
+                cuda::lib().cuEventElapsedTime(&mut ms, self.begin, self.end),
+                "copy duration",
+            )?;
+        }
+        if !ms.is_finite() || ms <= 0.0 {
+            return Err("CPU lane invalid copy duration".into());
+        }
+        Ok(ms as f64)
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        unsafe {
+            // The stream is private and all host/model sources outlive this owner.
+            if !self.stream.is_null() {
+                let _ = cuda::lib().cuStreamSynchronize(self.stream);
+            }
+            if self.pointer != 0 {
+                let _ = cuda::lib().cuMemFree_v2(self.pointer);
+            }
+            if !self.begin.is_null() {
+                let _ = cuda::lib().cuEventDestroy_v2(self.begin);
+            }
+            if !self.end.is_null() {
+                let _ = cuda::lib().cuEventDestroy_v2(self.end);
+            }
+            if !self.stream.is_null() {
+                let _ = cuda::lib().cuStreamDestroy_v2(self.stream);
+            }
+        }
+    }
+}
+fn percentile(values: &[f64], fraction: f64) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[((sorted.len() - 1) as f64 * fraction).ceil() as usize]
+}
+/// Inputs are immutable registered model allocations, sampled across layers.
+/// Worker pools are already bound to discovered, disjoint allowed cores.
+/// There is no extra CPU weight representation or persistent GPU scratch.
+pub(crate) fn calibrate(
+    workers: &mut [CpuTailRuntime],
+    experts: &[CpuTailExpertRef],
+    maximum_cold: usize,
+) -> Result<Plan, String> {
+    if workers.is_empty()
+        || workers.len() > 2
+        || experts.len() < 24
+        || maximum_cold == 0
+        || maximum_cold > 64
+    {
+        return Err("CPU lane calibration lacks supported workers/geometry/sources".into());
+    }
+    for worker in workers.iter_mut() {
+        if !worker.is_idle()? {
+            return Err("CPU lane calibration worker is busy".into());
+        }
+        let pointer = worker.input_ptr() as *mut u16;
+        for index in 0..worker.hidden_size() {
+            let value = ((index * 197 + 31) % 2048) as f32 / 1024.0 - 1.0;
+            unsafe {
+                *pointer.add(index) = crate::weights::marlin::f32_to_bf16(value);
+            }
+        }
+    }
+    let bytes = sizes(&experts[0])?.into_iter().try_fold(0usize, |a, b| {
+        a.checked_add(b).ok_or("CPU lane size overflow")
+    })?;
+    if experts
+        .iter()
+        .any(|e| sizes(e).ok().map(|x| x.into_iter().sum::<usize>()) != Some(bytes))
+    {
+        return Err("CPU lane calibration needs equal loaded expert geometry".into());
+    }
+    let scratch = Scratch::new(bytes)?;
+    let samples = experts.len().min(40);
+    let mut dma_baseline = Vec::new();
+    for expert in experts.iter().take(samples) {
+        scratch.enqueue(expert, true)?;
+        dma_baseline.push(scratch.drain()?);
+    }
+    let baseline_ms = percentile(&dma_baseline, 0.5);
+    let mut measurements = Vec::new();
+    let mut costs = Vec::new();
+    for count in 1..=workers.len() {
+        let mut cpu_times = Vec::new();
+        let mut dma_times = Vec::new();
+        let mut details = Vec::new();
+        for index in 0..samples {
+            let mut sequences = Vec::new();
+            for (ordinal, worker) in workers.iter_mut().take(count).enumerate() {
+                let expert = experts[(index + ordinal * 19) % experts.len()];
+                sequences.push(worker.submit(expert, 0, Some(Instant::now()))?);
+            }
+            // Keep H2D active throughout useful CPU calls. The first complete
+            // copy is timed while the workers are already processing, retaining
+            // host-bandwidth contention in the split cost model.
+            for copy in 0..16 {
+                scratch.enqueue(&experts[(index + copy + 11) % experts.len()], copy == 0)?;
+            }
+            let mut critical = 0f64;
+            let mut worker_rows = Vec::new();
+            for (ordinal, worker) in workers.iter_mut().take(count).enumerate() {
+                let result = worker.wait_result()?;
+                if result.sequence != sequences[ordinal] || !result.completed {
+                    return Err("CPU lane calibration sequence/cancellation mismatch".into());
+                }
+                if let Some(error) = result.error {
+                    return Err(error);
+                }
+                let ms =
+                    (result.dispatch_lag_s + result.elapsed_s + result.compute_to_result_visible_s)
+                        * 1000.0;
+                if !ms.is_finite() || ms <= 0.0 {
+                    return Err("CPU lane worker timing is absent/invalid".into());
+                }
+                critical = critical.max(ms);
+                worker_rows.push(ms);
+                worker.finish(result.sequence)?;
+            }
+            let dma = scratch.drain()?;
+            cpu_times.push(critical);
+            dma_times.push(dma);
+            details
+                .push(json!({"source_sample":index,"worker_ms":worker_rows,"first_copy_ms":dma}));
+        }
+        let cpu_p95 = percentile(&cpu_times, 0.95);
+        let dma_p95 = percentile(&dma_times, 0.95).max(baseline_ms);
+        costs.push((count, cpu_p95, dma_p95));
+        measurements.push(json!({"cpu_experts":count,"cpu_p95_ms":cpu_p95,"contended_copy_p95_ms":dma_p95,"samples":details}));
+    }
+    // Include an explicit activation/result handoff allowance. Measured CPU
+    // time already includes dispatch and result visibility, not only GEMV.
+    let handoff_ms = 0.1;
+    let mut counts = vec![0usize; maximum_cold + 1];
+    let mut predictions = Vec::new();
+    for cold in 1..=maximum_cold {
+        let mut best = cold as f64 * baseline_ms;
+        let mut selected = 0usize;
+        for &(count, cpu_ms, dma_ms) in &costs {
+            if count >= cold {
+                continue;
+            }
+            let proposed = cpu_ms.max((cold - count) as f64 * dma_ms) + handoff_ms;
+            if proposed < best {
+                best = proposed;
+                selected = count;
+            }
+        }
+        counts[cold] = selected;
+        predictions.push(json!({"cold":cold,"cpu_count":selected,"predicted_ms":best,"gpu_only_copy_ms":cold as f64*baseline_ms}));
+    }
+    Ok(Plan {
+        counts: counts.clone(),
+        receipt: json!({
+            "schema":1,"source_experts":experts.len(),"expert_bytes":bytes,"samples":samples,
+            "geometry":{"hidden":experts[0].hidden_size,"intermediate":experts[0].intermediate_size,"group_size":experts[0].group_size},
+            "dma_baseline_ms":dma_baseline,"baseline_copy_median_ms":baseline_ms,
+            "handoff_allowance_ms":handoff_ms,"measurements":measurements,"predictions":predictions,"counts":counts,
+            "ownership":"existing immutable host weights; private startup scratch drained before destruction",
+            "adq":false
+        }),
+    })
+}

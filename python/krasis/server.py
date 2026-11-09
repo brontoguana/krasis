@@ -477,6 +477,11 @@ def _krasis_runtime_code_hash() -> dict[str, Any]:
         "python/krasis/tokenizer.py",
         "src/server.rs",
         "src/gpu_decode.rs",
+        "src/optimisations.rs",
+        "src/cpu_tail.rs",
+        "src/cpu_cold_lane.rs",
+        "src/kernel/avx2.rs",
+        "src/weights/marlin.rs",
         "src/gpu_prefill.rs",
         "src/prefill_transfer.rs",
         "src/prefill_mla_lt.rs",
@@ -706,10 +711,6 @@ def _actual_runtime_heatmap_capture_config(model: KrasisModel, args) -> dict[str
             "KRASIS_MLA_STAGE_SELECTED_KV",
             "KRASIS_CPU_TAIL_HOST_TIMING",
             "KRASIS_MLA_HOST_BACKED_BACKEND",
-            "KRASIS_CPU_TAIL_RACE",
-            "KRASIS_CPU_TAIL_TRANSPOSED",
-            "KRASIS_CPU_TAIL_WORKERS",
-            "KRASIS_CPU_TAIL_CALIBRATION_JSON",
             "KRASIS_SPLIT_EXPERT_LAUNCH",
             "KRASIS_GPU_ROUTE_SYNC",
             "KRASIS_PREFETCH",
@@ -726,10 +727,6 @@ def _actual_runtime_heatmap_capture_config(model: KrasisModel, args) -> dict[str
             "shared_overlap_eligible": os.environ.get("KRASIS_PREFILL_SHARED_OVERLAP_DMA", "1"),
         }
         controls = {name: os.environ.get(name) for name in names}
-        calibration = controls.get("KRASIS_CPU_TAIL_CALIBRATION_JSON")
-        if calibration:
-            with open(calibration, "rb") as artifact:
-                controls["cpu_tail_calibration_sha256"] = hashlib.sha256(artifact.read()).hexdigest()
         if any(value is not None for value in controls.values()):
             runtime["experimental_glm53_controls"] = controls
     store = getattr(model, "_gpu_decode_store", None)
@@ -5102,15 +5099,6 @@ def main():
 
     heatmap_timing_enabled = _heatmap_substage_timing_enabled()
     heatmap_to_ready_start_s = None
-    cpu_tail_transposed_requested = os.environ.get(
-        "KRASIS_CPU_TAIL_TRANSPOSED", ""
-    ).strip().lower() in ("1", "true", "yes", "on")
-    if cpu_tail_transposed_requested and not args.hcs:
-        raise RuntimeError(
-            "KRASIS_CPU_TAIL_TRANSPOSED=1 requires HCS so the startup resident "
-            "set is known before building the complete non-resident duplicate tier"
-        )
-
     if not args.hcs:
         _status("GPU decode (no HCS)")
         _warn("All experts streamed via DMA per token (slow for decode)")
@@ -5735,20 +5723,6 @@ def main():
                     "Diagnostic HCS soft clamp: requested=%d MB loaded=%d MB applied=%d MB",
                     clamp_soft_mb, loaded_soft_mb, applied_soft_mb,
                 )
-            if cpu_tail_transposed_requested:
-                _status("Building CPU-tail transposed non-resident tier")
-                log_ram_ledger("before-cpu-tail-transposed-tier")
-                tier_t0 = time.time()
-                tier_result = store.cpu_tail_build_transposed_tier()
-                tier_elapsed = time.time() - tier_t0
-                _detail(tier_result)
-                _dim(f"CPU-tail transposed tier built in {tier_elapsed:.1f}s")
-                logger.warning(
-                    "CPU-tail transposed tier: %s (%.3fs)",
-                    tier_result,
-                    tier_elapsed,
-                )
-                log_ram_ledger("after-cpu-tail-transposed-tier")
             hcs_elapsed = time.time() - t_hcs
 
             vram_monitor.report_event("hcs_init_end")

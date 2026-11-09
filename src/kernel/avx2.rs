@@ -2114,6 +2114,10 @@ pub unsafe fn expert_matmul_int4_marlin(
     _tile_map: &MarlinTileMap,
     _scale_map: &MarlinScaleMap,
 ) {
+    if crate::optimisations::CPU_MARLIN_READER {
+        return expert_matmul_int4_marlin_paired(packed, scales, act_int16, act_scales,
+            output, k, n_stride, n_start, n_out, group_size);
+    }
     let out_cols = 2 * n_stride;
     let tiles_per_group = group_size / 16;
     let num_groups = k / group_size;
@@ -2228,6 +2232,121 @@ pub unsafe fn expert_matmul_int4_marlin(
             output.add(nc_local * 64),
             float_acc.len(),
         );
+    }
+}
+
+/// Read the existing packed host layout in adjacent row pairs, retaining
+/// integer accumulation and applying scales in the original group order.
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn expert_matmul_int4_marlin_paired(
+    packed: *const u32,
+    scales: *const u16,
+    act: *const i16,
+    act_scales: *const f32,
+    output: *mut f32,
+    k: usize,
+    n: usize,
+    n_start: usize,
+    n_out: usize,
+    gs: usize,
+) {
+    use std::arch::x86_64::*;
+    let mask = _mm256_set1_epi32(15);
+    let zero = _mm256_setzero_si256();
+    macro_rules! pair {
+        ($w:expr,$l:expr,$h:expr) => {
+            _mm256_or_si256(
+                _mm256_and_si256(_mm256_srli_epi32($w, $l), mask),
+                _mm256_slli_epi32(_mm256_and_si256(_mm256_srli_epi32($w, $h), mask), 16),
+            )
+        };
+    }
+    for i in 0..n_out {
+        *output.add(i) = 0.0;
+    }
+    for g in 0..k / gs {
+        for nc in 0..n_out / 64 {
+            let base = n_start + nc * 64;
+            let mut accum = [0.0f32; 64];
+            std::ptr::copy_nonoverlapping(output.add(nc * 64), accum.as_mut_ptr(), 64);
+            // Traverse a quantisation band before revisiting the next one.
+            for stripe in [0usize, 4] {
+                let mut low = [zero; 4];
+                let mut high = [zero; 4];
+                for t in 0..gs / 16 {
+                    let kt = g * (gs / 16) + t;
+                    let wb = kt * (2 * n) + (base / 64) * 128;
+                    let ab = kt * 16;
+                    for r in [0usize, 2] {
+                        let mut a08 = [0i32; 2];
+                        let mut a19 = [0i32; 2];
+                        let mut biases = [0i32; 2];
+                        for j in 0..2 {
+                            let p = ab + 2 * (r + j);
+                            let a0 = *act.add(p);
+                            let a8 = *act.add(p + 8);
+                            let a1 = *act.add(p + 1);
+                            let a9 = *act.add(p + 9);
+                            a08[j] = (a0 as u16 as u32 | ((a8 as u16 as u32) << 16)) as i32;
+                            a19[j] = (a1 as u16 as u32 | ((a9 as u16 as u32) << 16)) as i32;
+                            biases[j] = 8 * (a0 as i32 + a8 as i32 + a1 as i32 + a9 as i32);
+                        }
+                        let aa = _mm256_set_m128i(_mm_set1_epi32(a08[1]), _mm_set1_epi32(a08[0]));
+                        let bb = _mm256_set_m128i(_mm_set1_epi32(a19[1]), _mm_set1_epi32(a19[0]));
+                        let bias =
+                            _mm256_set_m128i(_mm_set1_epi32(biases[1]), _mm_set1_epi32(biases[0]));
+                        for c in 0..4 {
+                            let w = _mm256_loadu_si256(
+                                packed.add(wb + ((stripe + c) * 4 + r) * 4) as *const __m256i
+                            );
+                            let l = _mm256_sub_epi32(
+                                _mm256_add_epi32(
+                                    _mm256_madd_epi16(pair!(w, 0, 4), aa),
+                                    _mm256_madd_epi16(pair!(w, 16, 20), bb),
+                                ),
+                                bias,
+                            );
+                            let h = _mm256_sub_epi32(
+                                _mm256_add_epi32(
+                                    _mm256_madd_epi16(pair!(w, 8, 12), aa),
+                                    _mm256_madd_epi16(pair!(w, 24, 28), bb),
+                                ),
+                                bias,
+                            );
+                            low[c] = _mm256_add_epi32(low[c], l);
+                            high[c] = _mm256_add_epi32(high[c], h);
+                        }
+                    }
+                }
+                let a_scale = *act_scales.add(g);
+                for c in 0..4 {
+                    let l = _mm_add_epi32(
+                        _mm256_castsi256_si128(low[c]),
+                        _mm256_extracti128_si256(low[c], 1),
+                    );
+                    let h = _mm_add_epi32(
+                        _mm256_castsi256_si128(high[c]),
+                        _mm256_extracti128_si256(high[c], 1),
+                    );
+                    let mut ll = [0i32; 4];
+                    let mut hh = [0i32; 4];
+                    _mm_storeu_si128(ll.as_mut_ptr() as *mut __m128i, l);
+                    _mm_storeu_si128(hh.as_mut_ptr() as *mut __m128i, h);
+                    for s in 0..4 {
+                        let a = s * 16 + stripe + c;
+                        let b = a + 8;
+                        let si = g * n + base;
+                        let ls =
+                            f32::from_bits((*scales.add(si + (a % 8) * 8 + a / 8) as u32) << 16);
+                        let hs =
+                            f32::from_bits((*scales.add(si + (b % 8) * 8 + b / 8) as u32) << 16);
+                        accum[a] = (ll[s] as f32).mul_add(ls * a_scale, accum[a]);
+                        accum[b] = (hh[s] as f32).mul_add(hs * a_scale, accum[b]);
+                    }
+                }
+            }
+            std::ptr::copy_nonoverlapping(accum.as_ptr(), output.add(nc * 64), 64);
+        }
     }
 }
 

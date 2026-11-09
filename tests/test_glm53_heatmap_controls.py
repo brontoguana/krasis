@@ -19,7 +19,8 @@ class Glm53HeatmapControlsTest(unittest.TestCase):
             return server._actual_runtime_heatmap_capture_config(model, SimpleNamespace())
 
     def setUp(self):
-        self.compiled = dict(EXACT_ATTENTION=True, ORDERED_ABSORPTION=True,
+        self.compiled = dict(COLD_EXPERT_PRUNING=True, CPU_MARLIN_READER=False,
+            CPU_COLD_LANE=False, EXACT_ATTENTION=True, ORDERED_ABSORPTION=True,
             PREFILL_F32=True, INDEXER_QUERY_TILE=True, INDEX_SCORE_ROW_BANDS=True,
             INDEX_RADIX_TOPK=True, KDA_RELAY=True,
             VALUE_REASSOCIATION=False, TENSOR_DECODE_ATTENTION=False, TENSOR_ABSORPTION=False)
@@ -73,9 +74,6 @@ class Glm53HeatmapControlsTest(unittest.TestCase):
                            ('KRASIS_GLM53_FUSED_MLA_REUSE_CANDIDATE', '1'),
                            ('KRASIS_MLA_STAGE_SELECTED_KV', '1'),
                            ('KRASIS_CPU_TAIL_HOST_TIMING', '1'),
-                           ('KRASIS_CPU_TAIL_RACE', '1'),
-                           ('KRASIS_CPU_TAIL_TRANSPOSED', '1'),
-                           ('KRASIS_CPU_TAIL_WORKERS', '2'),
                            ('KRASIS_SPLIT_EXPERT_LAUNCH', '1'),
                            ('KRASIS_GPU_ROUTE_SYNC', '0'),
                            ('KRASIS_PREFETCH', '0')]:
@@ -95,21 +93,30 @@ class Glm53HeatmapControlsTest(unittest.TestCase):
             self.assertFalse(server._runtime_matches_approved_heatmap_policy(
                 current, [old], {'ignored_runtime_fields': ['prefill_transfer_policy']})[0])
 
-    def test_cpu_calibration_content_changes_invalidate_same_path(self):
+    def test_retired_cpu_calibration_cannot_select_or_spoof_native_build(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+            baseline = self.capture()
             artifact = Path(directory) / 'calibration.json'
             artifact.write_text('{"team_threads":[8,8]}')
             os.environ['KRASIS_CPU_TAIL_CALIBRATION_JSON'] = str(artifact)
-            original = self.capture()
-            artifact.write_text('{"team_threads":[16,16]}')
+            os.environ['KRASIS_CPU_TAIL_RACE'] = '1'
+            os.environ['KRASIS_CPU_TAIL_TRANSPOSED'] = '1'
+            os.environ['KRASIS_CPU_TAIL_WORKERS'] = '2'
+            self.assertEqual(self.capture(), baseline)
+            artifact.unlink()  # Production must not read a retired calibration path.
+            self.assertEqual(self.capture(), baseline)
+            self.compiled['CPU_COLD_LANE'] = True
             current = self.capture()
-            self.assertNotEqual(current, original)
+            self.assertNotEqual(current, baseline)
             self.assertFalse(server._runtime_matches_approved_heatmap_policy(
-                current, [original], {'ignored_runtime_fields':['experimental_glm53_controls']})[0])
+                current, [baseline], {'ignored_runtime_fields':['compiled_optimisations']})[0])
 
     def test_runtime_code_fingerprint_includes_parameter_loader(self):
         files=server._krasis_runtime_code_hash()['files']
         self.assertIn('python/krasis/weight_loader.py',files)
         self.assertIn('src/prefill_transfer.rs',files)
+        for path in ['src/optimisations.rs','src/cpu_tail.rs','src/cpu_cold_lane.rs',
+                     'src/kernel/avx2.rs','src/weights/marlin.rs']:
+            self.assertIn(path, files)
 
 if __name__=='__main__':unittest.main()

@@ -758,6 +758,7 @@ struct PersistentMatmulJob {
     n: usize,
     group_size: usize,
     spin_after: bool,
+    format: CpuTailWeightFormat,
 }
 
 struct PersistentTeamState {
@@ -809,6 +810,8 @@ impl PersistentTransposedTeam {
                     if !pinned {
                         return;
                     }
+                    let tile_map = crate::kernel::avx2::build_marlin_tile_map();
+                    let scale_map = crate::kernel::avx2::build_marlin_scale_map();
                     let mut observed_generation = 0u64;
                     loop {
                         let generation = worker_shared.generation.load(Ordering::Acquire);
@@ -832,11 +835,24 @@ impl PersistentTransposedTeam {
                         };
                         observed_generation = generation;
                         let outcome = std::panic::catch_unwind(|| unsafe {
-                            let chunk_n = 256usize;
+                            let chunk_n = if matches!(job.format, CpuTailWeightFormat::Marlin) {
+                                job.n.div_ceil(worker_count * 64).max(1) * 64
+                            } else { 256usize };
                             let chunks = job.n.div_ceil(chunk_n);
                             for chunk_index in (worker_index..chunks).step_by(worker_count) {
                                 let n_start = chunk_index * chunk_n;
                                 let n_count = (job.n - n_start).min(chunk_n);
+                                if matches!(job.format, CpuTailWeightFormat::Marlin) {
+                                    crate::kernel::avx2::expert_matmul_int4_marlin(
+                                        job.packed_addr as *const u32,
+                                        job.scales_addr as *const u16,
+                                        job.act_addr as *const i16,
+                                        job.act_scales_addr as *const f32,
+                                        (job.output_addr as *mut f32).add(n_start),
+                                        job.k, job.n, n_start, n_count, job.group_size,
+                                        &tile_map, &scale_map,
+                                    );
+                                } else {
                                 expert_matmul_int4_transposed_integer(
                                     job.packed_addr as *const u32,
                                     job.scales_addr as *const u16,
@@ -849,6 +865,7 @@ impl PersistentTransposedTeam {
                                     n_count,
                                     job.group_size,
                                 );
+                                }
                             }
                         });
                         let mut state = worker_shared.state.lock().unwrap();
@@ -935,6 +952,24 @@ impl PersistentTransposedTeam {
         group_size: usize,
         spin_after: bool,
     ) -> Result<(), String> {
+        self.matmul_with_format(packed,scales,act_int16,act_scales,output,k,n,group_size,
+            spin_after,CpuTailWeightFormat::Transposed)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_with_format(
+        &self,
+        packed: &[u32],
+        scales: &[u16],
+        act_int16: &[i16],
+        act_scales: &[f32],
+        output: &mut [f32],
+        k: usize,
+        n: usize,
+        group_size: usize,
+        spin_after: bool,
+        format: CpuTailWeightFormat,
+    ) -> Result<(), String> {
         let mut state = self.shared.state.lock().unwrap();
         state.job = Some(PersistentMatmulJob {
             packed_addr: packed.as_ptr() as usize,
@@ -946,6 +981,7 @@ impl PersistentTransposedTeam {
             n,
             group_size,
             spin_after,
+            format,
         });
         state.completed_workers = 0;
         state.error = None;
@@ -972,6 +1008,7 @@ impl PersistentTransposedTeam {
             n: 0,
             group_size: 1,
             spin_after: false,
+            format: CpuTailWeightFormat::Transposed,
         });
         state.completed_workers = 0;
         state.error = None;
@@ -1016,6 +1053,28 @@ pub(crate) fn expert_forward_transposed_persistent(
     cancel_sequence: &AtomicU64,
     sequence: u64,
 ) -> Result<bool, String> {
+    expert_forward_persistent(team, w13_packed, w13_scales, w2_packed, w2_scales, activation_bf16, output_bf16, hidden_size, intermediate_size, group_size, swiglu_limit, activation_alpha, scratch, cancel_sequence, sequence, CpuTailWeightFormat::Transposed)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn expert_forward_persistent(
+    team: &PersistentTransposedTeam,
+    w13_packed: &[u32],
+    w13_scales: &[u16],
+    w2_packed: &[u32],
+    w2_scales: &[u16],
+    activation_bf16: &[u16],
+    output_bf16: &mut [u16],
+    hidden_size: usize,
+    intermediate_size: usize,
+    group_size: usize,
+    swiglu_limit: f32,
+    activation_alpha: f32,
+    scratch: &mut ExpertScratch,
+    cancel_sequence: &AtomicU64,
+    sequence: u64,
+    format: CpuTailWeightFormat,
+) -> Result<bool, String> {
     quantize_activation_int16(
         activation_bf16,
         group_size,
@@ -1025,7 +1084,7 @@ pub(crate) fn expert_forward_transposed_persistent(
     if cancel_sequence.load(Ordering::Acquire) == sequence {
         return Ok(false);
     }
-    team.matmul(
+    team.matmul_with_format(
         w13_packed,
         w13_scales,
         &scratch.input_act_int16,
@@ -1035,6 +1094,7 @@ pub(crate) fn expert_forward_transposed_persistent(
         2 * intermediate_size,
         group_size,
         true,
+        format,
     )?;
     if cancel_sequence.load(Ordering::Acquire) == sequence {
         team.park_after_w13()?;
@@ -1080,7 +1140,7 @@ pub(crate) fn expert_forward_transposed_persistent(
         team.park_after_w13()?;
         return Ok(false);
     }
-    team.matmul(
+    team.matmul_with_format(
         w2_packed,
         w2_scales,
         &scratch.hidden_int16,
@@ -1090,6 +1150,7 @@ pub(crate) fn expert_forward_transposed_persistent(
         hidden_size,
         group_size,
         false,
+        format,
     )?;
     if cancel_sequence.load(Ordering::Acquire) == sequence {
         return Ok(false);
@@ -1112,6 +1173,55 @@ pub struct CpuTailRuntime {
     worker: Option<JoinHandle<()>>,
     next_sequence: u64,
     busy_sequence: Option<u64>,
+}
+
+/// Discover distinct allowed physical cores, spreading each small team across
+/// cache domains. Startup calibration decides whether the team is useful.
+pub(crate) fn compiled_lane_cpu_ids(worker: usize, workers: usize) -> Result<Vec<usize>, String> {
+    if workers == 0 || workers > 2 || worker >= workers {
+        return Err("invalid compiled CPU lane team index".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut domains = std::collections::BTreeMap::<(i64, i64), Vec<usize>>::new();
+    for cpu in process_allowed_cpus() {
+        let base = std::path::PathBuf::from(format!("/sys/devices/system/cpu/cpu{cpu}"));
+        let number = |path: &str| -> Option<i64> {
+            std::fs::read_to_string(base.join(path))
+                .ok()?
+                .trim()
+                .parse()
+                .ok()
+        };
+        let Some(package) = number("topology/physical_package_id") else {
+            continue;
+        };
+        let Some(core) = number("topology/core_id") else {
+            continue;
+        };
+        let Some(cache) = number("cache/index3/id") else {
+            continue;
+        };
+        if seen.insert((package, core)) {
+            domains.entry((package, cache)).or_default().push(cpu);
+        }
+    }
+    let mut selected = Vec::new();
+    let depth = domains.values().map(Vec::len).max().unwrap_or(0);
+    for rank in 0..depth {
+        for cores in domains.values() {
+            if let Some(&cpu) = cores.get(rank) {
+                selected.push(cpu);
+            }
+        }
+    }
+    let needed = workers * 4;
+    if selected.len() < needed {
+        return Err(format!(
+            "compiled CPU lane needs {needed} distinct allowed cores; found {}",
+            selected.len()
+        ));
+    }
+    Ok(selected[worker * 4..worker * 4 + 4].to_vec())
 }
 
 impl CpuTailRuntime {
@@ -1138,6 +1248,26 @@ impl CpuTailRuntime {
         timing_enabled: bool,
         worker_index: usize,
         worker_count: usize,
+    ) -> Result<Self, String> {
+        Self::new_inner(hidden_size, intermediate_size, group_size, timing_enabled,
+            worker_index, worker_count, false)
+    }
+
+    pub(crate) fn new_compiled(hidden_size:usize, intermediate_size:usize, group_size:usize,
+        worker_index:usize,worker_count:usize)->Result<Self,String>{
+        if !crate::optimisations::CPU_COLD_LANE {return Err("compiled CPU lane is disabled".into());}
+        compiled_lane_cpu_ids(worker_index,worker_count)?;
+        Self::new_inner(hidden_size,intermediate_size,group_size,true,worker_index,worker_count,true)
+    }
+
+    fn new_inner(
+        hidden_size: usize,
+        intermediate_size: usize,
+        group_size: usize,
+        timing_enabled: bool,
+        worker_index: usize,
+        worker_count: usize,
+        compiled: bool,
     ) -> Result<Self, String> {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         if !std::is_x86_feature_detected!("avx2") || !std::is_x86_feature_detected!("fma") {
@@ -1172,13 +1302,13 @@ impl CpuTailRuntime {
         let (result_tx, result_rx) = mpsc::sync_channel::<CpuTailResult>(1);
         let cancel_sequence = Arc::new(AtomicU64::new(0));
         let worker_cancel = Arc::clone(&cancel_sequence);
-        let calibrated_config = calibrated_cpu_tail_config(
-            worker_index,
-            worker_count,
-            hidden_size,
-            intermediate_size,
-            group_size,
-        )?;
+        let calibrated_config = if compiled {
+            Some(CalibratedCpuTailConfig {
+                artifact: "native-startup".into(), placement: "discovered-cache-domains".into(),
+                cpu_ids: compiled_lane_cpu_ids(worker_index,worker_count)?,
+                minimum_queue_depth: 2, worker_index, worker_count,
+            })
+        } else {calibrated_cpu_tail_config(worker_index,worker_count,hidden_size,intermediate_size,group_size)?};
         let minimum_queue_depth = calibrated_config
             .as_ref()
             .map_or(2, |config| config.minimum_queue_depth);
@@ -1296,6 +1426,11 @@ impl CpuTailRuntime {
                         let mut execute = || -> Result<bool, String> {
                             match expert.format {
                             CpuTailWeightFormat::Marlin => {
+                                if crate::optimisations::CPU_COLD_LANE {
+                                    if let Some(team) = persistent_team.as_ref() {
+                                        return expert_forward_persistent(team, w13_packed, w13_scales, w2_packed, w2_scales, activation, output, hidden_size, intermediate_size, group_size, expert.swiglu_limit, expert.activation_alpha, &mut scratch, &worker_cancel, job.sequence, CpuTailWeightFormat::Marlin);
+                                    }
+                                }
                                 Ok(expert_forward_marlin_int4_cpu_tail(
                                     w13_packed,
                                     w13_scales,
@@ -1491,6 +1626,19 @@ impl CpuTailRuntime {
                 Err("CPU tail worker result channel disconnected".to_string())
             }
         }
+    }
+
+    pub(crate) fn wait_result(&mut self) -> Result<CpuTailResult, String> {
+        let result_rx = self.result_rx.lock().map_err(|_| "CPU tail result channel mutex was poisoned".to_string())?;
+        let mut result = result_rx.recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|error| format!("CPU lane result wait failed: {error}"))?;
+        if self.busy_sequence != Some(result.sequence) {
+            return Err("CPU lane result sequence mismatch".into());
+        }
+        if let Some(completed_at) = result.completed_at.take() {
+            result.compute_to_result_visible_s = completed_at.elapsed().as_secs_f64();
+        }
+        Ok(result)
     }
 
     pub fn cancel(&self, sequence: u64) {

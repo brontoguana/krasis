@@ -1,3 +1,10 @@
+## 2026-11-09 — Calibrated native CPU lane under qualification
+
+- Add separate compile-time switches for a group-banded AVX2 Marlin reader and an upfront CPU/GPU cold-expert split. Both remain off during this pass until fast-tier qualification.
+- Reuse existing host weights with disjoint discovered core teams; measure complete expert calls under concurrent transfers, then choose zero/one/two CPU experts by cold count. Keep unsupported modes on GPU execution.
+- Use stream-ordered activation snapshots, graph-owned CUDA events and explicit reader teardown. Retire production CPU environment selectors; preserve standalone diagnostics.
+- Correct an experimental confound: earlier startup heatmaps sampled at temperature 0.6, so residency differed across cohorts. Preserve those observed timings, but remeasure attribution using one recorded placement fixture.
+
 ## 2026-11-09 — Adopt current-model cold-expert pruning
 
 - Enable the isolated 75/10 GLM host-route pruning policy by default after the fast tier: paired 65K decode improves 175.3→156.2 ms/token, with no new held-out failures and improved long-coding output.

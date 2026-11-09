@@ -6,6 +6,7 @@ mod capture_window;
 pub mod chat_template;
 pub mod checkpoint_identity;
 pub mod cpu_tail;
+pub(crate) mod cpu_cold_lane;
 pub mod cpu_tail_calibrate;
 pub mod decode;
 pub mod draft_model;
