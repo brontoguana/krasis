@@ -70617,7 +70617,7 @@ impl GpuDecodeStore {
 
                             // Queue compressed-copy/decode or ordinary DMA with no
                             // per-expert host synchronization.
-                            if let Some(tier) = graph.streamed_cold.as_ref() {
+                            if let Some(tier) = graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3) {
                                 let bytes=tier.enqueue(expert.w13_packed_ptr,base,copy_stream)? as u64;
                                 graph.dma_bytes_total+=bytes; graph.dma_call_count+=1;
                                 boundary_dma_bytes+=bytes; boundary_dma_calls+=1;
@@ -71575,7 +71575,7 @@ impl GpuDecodeStore {
                             continue;
                         }
 
-                        if let Some(tier) = graph.streamed_cold.as_ref() {
+                        if let Some(tier) = graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3) {
                             let bytes=tier.enqueue(expert.w13_packed_ptr,base,copy_stream)? as u64;
                             graph.dma_bytes_total+=bytes; graph.dma_call_count+=1;
                             boundary_dma_bytes+=bytes; boundary_dma_calls+=1;
@@ -72906,7 +72906,7 @@ impl GpuDecodeStore {
             }
             // Keep resident payloads at their original precision. Compact cold
             // staging must never become a resident source through promotion.
-            if graph.streamed_cold.is_some() { dynamic_promotions.clear(); }
+            if crate::optimisations::STREAMED_COLD_INT3 && graph.streamed_cold.is_some() { dynamic_promotions.clear(); }
             if !dynamic_promotions.is_empty() {
                 let mut promoted = 0usize;
                 if let Some(ref mut hcs) = graph.hcs {
