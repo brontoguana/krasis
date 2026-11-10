@@ -724,6 +724,8 @@ fn generate_optimisations() {
     assert!(disabled.is_disjoint(&enabled), "optimisation is both enabled and disabled");
     let effective: std::collections::BTreeMap<_, _> = optimisation_registry::ENTRIES.iter()
         .map(|e| (e.0, if disabled.contains(e.0) { false } else { e.1 || enabled.contains(e.0) })).collect();
+    assert!(!(effective["STREAMED_COLD_NF3"] && effective["STREAMED_COLD_INT3"]),
+        "choose one streamed cold quantizer");
     let mut json = Vec::new();
     let mut header = String::from("// Generated compile-time optimisation configuration.\n");
     for &(name, default, kind, description, requires) in optimisation_registry::ENTRIES {

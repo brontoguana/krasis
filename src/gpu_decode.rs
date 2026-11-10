@@ -70617,7 +70617,7 @@ impl GpuDecodeStore {
 
                             // Queue compressed-copy/decode or ordinary DMA with no
                             // per-expert host synchronization.
-                            if let Some(tier) = graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3) {
+                            if let Some(tier) = graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3) {
                                 let bytes=tier.enqueue(expert.w13_packed_ptr,base,copy_stream)? as u64;
                                 graph.dma_bytes_total+=bytes; graph.dma_call_count+=1;
                                 boundary_dma_bytes+=bytes; boundary_dma_calls+=1;
@@ -71478,7 +71478,7 @@ impl GpuDecodeStore {
                                 let submitted_at =
                                     (graph.timing_enabled || graph.cpu_tail_host_timing_enabled).then(std::time::Instant::now);
                                 let base = graph_buf_base[candidate_index];
-                                let compact_tier=graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3);
+                                let compact_tier=graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3);
                                 let dma_bytes = if let Some(tier)=compact_tier {
                                     tier.payload_bytes() as u64
                                 } else if expert.contiguous_ptr != 0 {
@@ -71578,7 +71578,7 @@ impl GpuDecodeStore {
                             continue;
                         }
 
-                        if let Some(tier) = graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3) {
+                        if let Some(tier) = graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3) {
                             let bytes=tier.enqueue(expert.w13_packed_ptr,base,copy_stream)? as u64;
                             graph.dma_bytes_total+=bytes; graph.dma_call_count+=1;
                             boundary_dma_bytes+=bytes; boundary_dma_calls+=1;
@@ -72404,7 +72404,7 @@ impl GpuDecodeStore {
                                 )
                             })?;
                         unsafe {
-                            if let Some(tier)=graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3) {
+                            if let Some(tier)=graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3) {
                                 tier.enqueue(expert.w13_packed_ptr,pending.staging_base,copy_stream)?;
                             } else if expert.contiguous_ptr != 0 {
                                 let copy_err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
@@ -72911,7 +72911,7 @@ impl GpuDecodeStore {
             }
             // Keep resident payloads at their original precision. Compact cold
             // staging must never become a resident source through promotion.
-            if crate::optimisations::STREAMED_COLD_INT3 && graph.streamed_cold.is_some() { dynamic_promotions.clear(); }
+            if (crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3) && graph.streamed_cold.is_some() { dynamic_promotions.clear(); }
             if !dynamic_promotions.is_empty() {
                 let mut promoted = 0usize;
                 if let Some(ref mut hcs) = graph.hcs {
@@ -102760,7 +102760,7 @@ impl GpuDecodeStore {
     }
 
     fn setup_streamed_cold(&mut self, store: &crate::weights::WeightStore) -> PyResult<()> {
-        if !crate::optimisations::STREAMED_COLD_INT3 { return Ok(()); }
+        if !crate::optimisations::STREAMED_COLD_INT3 && !crate::optimisations::STREAMED_COLD_NF3 { return Ok(()); }
         let graph=self.graph.as_mut().ok_or_else(||pyo3::exceptions::PyRuntimeError::new_err("cold tier requires graph"))?;
         if graph.glm5_hc_mean_mult.is_none() || graph.expert_bits!=4
             || graph.synthetic_repack.is_some() || graph.expert_compression.is_some()
@@ -102786,7 +102786,7 @@ impl GpuDecodeStore {
             let count=store.config.num_moe_layers()*store.config.n_routed_experts;
             let function=self.device.get_func(MODULE_NAME,"streamed_cold_int3_expand").ok_or("cold tier expansion kernel absent")?;
             let function=unsafe{function.cu_function()};
-            crate::streamed_cold::Runtime::new(&self.device,identity,geometry.ok_or("cold tier has no experts")?,ordinals,count,function)
+            crate::streamed_cold::Runtime::new(&self.device,identity,geometry.ok_or("cold tier has no experts")?,ordinals,count,function,crate::optimisations::STREAMED_COLD_NF3)
         })();
         // An explicitly enabled experimental treatment must fail visibly when
         // its artifact is missing; never mislabel fallback as a measured tier.

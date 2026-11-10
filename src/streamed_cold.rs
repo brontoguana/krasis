@@ -19,23 +19,39 @@ pub(crate) struct Runtime {
     device:Arc<CudaDevice>, segments:Vec<Segment>,
     locations:Vec<(usize,usize)>, ordinals:HashMap<usize,usize>,
     scratch:CudaSlice<u8>, function:cu::CUfunction,
-    words:[u32;4], compact_bytes:usize,
+    words:[u32;4], compact_bytes:usize, codebooks:Vec<u32>, experts_per_layer:usize,
 }
 unsafe impl Send for Runtime {}
 unsafe impl Sync for Runtime {}
 impl Runtime {
     pub(crate) fn new(device:&Arc<CudaDevice>, identity:&GpuCacheIdentity,
         sizes:[usize;4], ordinals:HashMap<usize,usize>, count:usize,
-        function:cu::CUfunction)->Result<Self,String>{
+        function:cu::CUfunction,nf3:bool)->Result<Self,String>{
         device.bind_to_thread().map_err(|e|e.to_string())?;
-        let mut name=identity.path.as_os_str().to_os_string();name.push(".cold3");
+        let mut name=identity.path.as_os_str().to_os_string();name.push(if nf3 {".coldnf3"}else{".cold3"});
         let mut file=File::open(std::path::PathBuf::from(name)).map_err(|e|format!("cold tier sidecar: {e}"))?;
         let mut header=[0u8;4096];file.read_exact(&mut header).map_err(|e|e.to_string())?;
-        if &header[..8]!=b"KRCOLD3\0" || header[8..16]!=[1,0,0,0,3,0,0,0]
+        if &header[..8]!=(if nf3 {b"KRCLNF3\0"}else{b"KRCOLD3\0"}) || header[8..16]!=[1,0,0,0,3,0,0,0]
             || word(&header,16)? as u64!=identity.source_bytes || header[24..88]!=identity.header
             || Some(header[88..120].try_into().unwrap())!=identity.routed_expert_sha256 {
             return Err("cold tier source identity/format mismatch".into());
         }
+        let experts_per_layer=word(&identity.header,24)?;
+        let layers=word(&identity.header,32)?;
+        let codebooks=if nf3 {
+            if layers>256 || experts_per_layer.checked_mul(layers)!=Some(count)
+                || Sha256::digest(&header[..4064]).as_slice()!=&header[4064..] {
+                return Err("cold NF3 codebook identity mismatch".into());
+            }
+            (0..layers).map(|i| {
+                let lut=u32::from_le_bytes(header[200+i*4..204+i*4].try_into().unwrap());
+                let levels=(0..8).map(|j|(lut>>(j*4))&15).collect::<Vec<_>>();
+                if !levels.contains(&8) || levels.windows(2).any(|w|w[0]>=w[1]) {
+                    return Err("cold NF3 codebook is invalid".to_string());
+                }
+                Ok(lut)
+            }).collect::<Result<Vec<_>,String>>()?
+        }else{vec![0xeca86420;layers]};
         let compact_bytes=(sizes[0]+sizes[2])*3/4+sizes[1]+sizes[3];
         for (i,n) in sizes.into_iter().chain([count,compact_bytes]).enumerate(){
             if word(&header,152+i*8)?!=n {return Err("cold tier component geometry mismatch".into());}
@@ -72,8 +88,8 @@ impl Runtime {
         // default-stream zeroing operation racing the nonblocking copy stream.
         let scratch=unsafe{device.alloc::<u8>(compact_bytes)}.map_err(|e|e.to_string())?;
         let mut words=[0u32;4];for i in 0..4 {words[i]=u32::try_from(sizes[i]/4).map_err(|_|"cold tier word count overflow")?;}
-        eprintln!("STREAMED COLD INT3 experts={count} raw_bytes={} compact_bytes={compact_bytes} resident=original cpu=original promotions=frozen",sizes.iter().sum::<usize>());
-        Ok(Self{device:Arc::clone(device),segments,locations,ordinals,scratch,function,words,compact_bytes})
+        eprintln!("STREAMED COLD INT3 experts={count} raw_bytes={} compact_bytes={compact_bytes} resident=original cpu=original promotions=frozen nf3={nf3}",sizes.iter().sum::<usize>());
+        Ok(Self{device:Arc::clone(device),segments,locations,ordinals,scratch,function,words,compact_bytes,codebooks,experts_per_layer})
     }
     pub(crate) fn payload_bytes(&self) -> usize { self.compact_bytes }
 
@@ -83,13 +99,13 @@ impl Runtime {
         let ordinal=*self.ordinals.get(&source).ok_or("cold tier source absent")?;
         let (segment,offset)=self.locations[ordinal];
         let host=unsafe{self.segments[segment].mapping.as_ptr().add(offset)};
-        let mut input=*self.scratch.device_ptr();let mut out=output;let mut words=self.words;
+        let mut input=*self.scratch.device_ptr();let mut out=output;let mut words=self.words;let mut codebook=self.codebooks[ordinal/self.experts_per_layer];
         unsafe{
             check(cu::lib().cuMemcpyHtoDAsync_v2(input,host.cast(),self.compact_bytes,stream),"payload copy")?;
             let total=words.iter().map(|v|*v as usize).sum::<usize>();
             let mut params=[&mut input as *mut _ as *mut std::ffi::c_void,&mut out as *mut _ as *mut std::ffi::c_void,
                 &mut words[0] as *mut _ as *mut std::ffi::c_void,&mut words[1] as *mut _ as *mut std::ffi::c_void,
-                &mut words[2] as *mut _ as *mut std::ffi::c_void,&mut words[3] as *mut _ as *mut std::ffi::c_void];
+                &mut words[2] as *mut _ as *mut std::ffi::c_void,&mut words[3] as *mut _ as *mut std::ffi::c_void,&mut codebook as *mut _ as *mut std::ffi::c_void];
             check(cu::lib().cuLaunchKernel(self.function,total.div_ceil(256) as u32,1,1,256,1,1,0,stream,params.as_mut_ptr(),std::ptr::null_mut()),"expand launch")?;
         }
         Ok(self.compact_bytes)

@@ -89,7 +89,7 @@ impl<'a> Scratch<'a> {
         Ok(out)
     }
     fn enqueue(&self, expert: &CpuTailExpertRef, timed: bool) -> Result<(), String> {
-        if let Some(tier) = self.tier.filter(|_| crate::optimisations::STREAMED_COLD_INT3) {
+        if let Some(tier) = self.tier.filter(|_| crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3) {
             unsafe { if timed { checked(cuda::lib().cuEventRecord(self.begin,self.stream),"compact begin")?; } }
             tier.enqueue(expert.w13_packed_ptr,self.pointer,self.stream)?;
             unsafe { if timed { checked(cuda::lib().cuEventRecord(self.end,self.stream),"compact end")?; } }

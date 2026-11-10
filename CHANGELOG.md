@@ -1,3 +1,8 @@
+## 2026-11-10 — Prepare layer-fitted compact cold codebooks
+
+- Add default-off STREAMED_COLD_NF3 as an alternative to the uniform three-bit cold tier. Keep the same three-bit payload sizes, unchanged original resident/CPU weights and frozen promotion policy; fit eight original integer levels per layer while preserving zero.
+- Bind codebooks into the artifact checksum and expand them with a small integer lookup. This targets the observed held-out regression without spending more transfer bytes. No adoption or model-quality verdict yet.
+
 ## 2026-11-10 — Screen compact streamed cold experts
 
 - Add default-off STREAMED_COLD_INT3 and an offline builder from existing Marlin weights. Round packed cold codes onto an even three-bit lattice, keep BF16 scales, original resident experts and original CPU sources unchanged, and expand directly into existing decode staging with one CUDA kernel.
