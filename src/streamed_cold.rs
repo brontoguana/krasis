@@ -68,7 +68,9 @@ impl Runtime {
         let (mut free,mut total)=(0usize,0usize);
         unsafe{check(cu::lib().cuMemGetInfo_v2(&mut free,&mut total),"reserve query")?;}
         if free<compact_bytes+600*1024*1024 {return Err("cold tier scratch would violate 600 MiB reserve".into());}
-        let scratch=device.alloc_zeros::<u8>(compact_bytes).map_err(|e|e.to_string())?;
+        // Every byte is supplied by the ordered H2D before expansion. Avoid a
+        // default-stream zeroing operation racing the nonblocking copy stream.
+        let scratch=unsafe{device.alloc::<u8>(compact_bytes)}.map_err(|e|e.to_string())?;
         let mut words=[0u32;4];for i in 0..4 {words[i]=u32::try_from(sizes[i]/4).map_err(|_|"cold tier word count overflow")?;}
         eprintln!("STREAMED COLD INT3 experts={count} raw_bytes={} compact_bytes={compact_bytes} resident=original cpu=original promotions=frozen",sizes.iter().sum::<usize>());
         Ok(Self{device:Arc::clone(device),segments,locations,ordinals,scratch,function,words,compact_bytes})
