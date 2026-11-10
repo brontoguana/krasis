@@ -1,5 +1,5 @@
 // Expand a complete expert into its normal Marlin staging layout. Weight
-// codes use an even INT4 lattice; BF16 scales are copied without conversion.
+// codes select eight original INT4 levels; BF16 scales copy without conversion.
 extern "C" __global__ void streamed_cold_int3_expand(
     const unsigned char* src, unsigned int* dst,
     unsigned int w13_words, unsigned int w13_scale_words,
