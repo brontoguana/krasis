@@ -97,5 +97,11 @@ impl Runtime {
 }
 impl Drop for Runtime {fn drop(&mut self){
     // Finish consumers before host unregister/unmap or scratch destruction.
-    if self.device.bind_to_thread().is_ok(){unsafe{let _=cu::lib().cuCtxSynchronize();}}
+    if let Err(error)=self.device.bind_to_thread() {
+        crate::vram_monitor::fatal_cuda_context_error("cold tier teardown context",&error.to_string());
+    }
+    let rc=unsafe{cu::lib().cuCtxSynchronize()};
+    if rc!=cu::CUresult::CUDA_SUCCESS {
+        crate::vram_monitor::fatal_cuda_context_error("cold tier teardown completion",&format!("{rc:?}"));
+    }
 }}
