@@ -52,7 +52,7 @@ fn pack(src: &[u8], out: &mut Vec<u8>, map:&[u8;32]) {
 fn main() -> Result<(),Box<dyn std::error::Error>> {
     build_optimisations::print_startup();
     let args=std::env::args().skip(1).collect::<Vec<_>>();
-    if args.len()!=2 {return Err("usage: streamed-cold-build cache.bin output.cold3".into());}
+    if args.len()!=2 {return Err("usage: streamed-cold-nf3-build cache.bin output.coldnf3".into());}
     let source=File::open(&args[0])?; let mmap=unsafe{Mmap::map(&source)?};
     assert_eq!(&mmap[..8],b"KRAS\x07\0\0\0");
     let (h,m,e,l,g)=(word(&mmap,8),word(&mmap,16),word(&mmap,24),word(&mmap,32),word(&mmap,40));
