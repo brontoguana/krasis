@@ -71057,13 +71057,14 @@ impl GpuDecodeStore {
                     // h_batch_hot_flags so canonical router order is preserved.
                     hot_batch_count = batch_count;
 
-                    let (moe_input_size, moe_gated_experts, moe_activation_type, moe_swiglu_limit) = {
+                    let (moe_input_size, moe_gated_experts, moe_activation_type, moe_swiglu_limit, cpu_deepseek_clamp) = {
                         let moe = graph.moe_layers[moe_layer_idx].as_ref().unwrap();
                         (
                             moe.moe_input_size,
                             moe.gated_experts,
                             moe.activation_type,
                             moe.swiglu_limit,
+                            crate::optimisations::CPU_COLD_LANE && moe.deepseek_v4_activation,
                         )
                     };
 
@@ -71435,6 +71436,7 @@ impl GpuDecodeStore {
                                         group_size: graph.group_size,
                                         swiglu_limit: moe_swiglu_limit,
                                         activation_alpha: 1.0,
+                                        deepseek_clamp: cpu_deepseek_clamp,
                                     }
                                 } else {
                                     CpuTailExpertRef {
@@ -71456,6 +71458,7 @@ impl GpuDecodeStore {
                                         group_size: graph.group_size,
                                         swiglu_limit: moe_swiglu_limit,
                                         activation_alpha: 1.0,
+                                        deepseek_clamp: cpu_deepseek_clamp,
                                     }
                                 };
                                 let cpu_format = cpu_expert.format;
@@ -103947,7 +103950,7 @@ impl GpuDecodeStore {
                 graph.prefetch_depth, graph.apfl.is_some(), graph.peer_experts.len(),
                 graph.synthetic_repack.is_some(), graph.expert_compression.is_some(),
                 graph.moe_layers.iter().enumerate().filter_map(|(i,m)| m.as_ref().filter(|m|
-                    m.activation_type != 0 || !m.gated_experts || m.moe_input_size != 0 || m.deepseek_v4_activation
+                    m.activation_type != 0 || !m.gated_experts || m.moe_input_size != 0
                     || m.latent_down_wid.is_some() || m.latent_up_wid.is_some()).map(|_|i)).collect::<Vec<_>>());
         }
         if crate::optimisations::CPU_COLD_LANE && graph.glm5_hc_mean_mult.is_some()
@@ -103958,7 +103961,7 @@ impl GpuDecodeStore {
                 && graph.synthetic_repack.is_none() && graph.expert_compression.is_none()
                 && graph.moe_layers.iter().flatten().all(|moe| {
                     moe.activation_type == 0 && moe.gated_experts && moe.moe_input_size == 0
-                        && !moe.deepseek_v4_activation && moe.latent_down_wid.is_none()
+                        && moe.latent_down_wid.is_none()
                         && moe.latent_up_wid.is_none()
                 });
             if supported {
@@ -103980,6 +103983,7 @@ impl GpuDecodeStore {
                             w2_scales_ptr:expert.w2_scales_ptr,w2_scales_len:expert.w2_scales_bytes/2,
                             hidden_size:graph.hidden_size,intermediate_size:graph.moe_intermediate_size,
                             group_size:graph.group_size,swiglu_limit:moe.swiglu_limit,activation_alpha:1.0,
+                            deepseek_clamp:moe.deepseek_v4_activation,
                         });
                     }
                     let mut workers=Vec::new();

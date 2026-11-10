@@ -1,3 +1,9 @@
+## 2026-11-10 — Support the GLM clamp in the native CPU lane
+
+- The activation probe identifies all 42 routed layers as rejected because the registered model uses the capped raw-gate/symmetric-up clamp contract. The previous CPU lane supported the older limited activation with an up-projection offset, so removing its guard alone would be incorrect.
+- Carry the activation contract explicitly in CPU expert jobs, implement the clamp without that offset in the persistent native executor, and admit the supported standard-width gated layers. Existing standard and limited activation paths retain their equations; unsupported alternate activations and widths retain GPU execution.
+- Keep both CPU switches off pending actual execution, transfer reduction, paired speed and fast-quality screening. Record the number of clamped calibration sources to prove the intended path was exercised.
+
 ## 2026-11-10 — Adopt pruning after paired family screening
 
 - Enable protected 75/10 cold-expert pruning by default on the supported GLM host-route path. Controlled 65K decode improves 173.091→149.700 ms/token (5.777→6.680 tokens/s); short and 16K decode improve similarly.

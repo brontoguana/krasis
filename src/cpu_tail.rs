@@ -54,6 +54,7 @@ pub struct CpuTailExpertRef {
     pub group_size: usize,
     pub swiglu_limit: f32,
     pub activation_alpha: f32,
+    pub deepseek_clamp: bool,
 }
 
 unsafe impl Send for CpuTailExpertRef {}
@@ -1053,7 +1054,20 @@ pub(crate) fn expert_forward_transposed_persistent(
     cancel_sequence: &AtomicU64,
     sequence: u64,
 ) -> Result<bool, String> {
-    expert_forward_persistent(team, w13_packed, w13_scales, w2_packed, w2_scales, activation_bf16, output_bf16, hidden_size, intermediate_size, group_size, swiglu_limit, activation_alpha, scratch, cancel_sequence, sequence, CpuTailWeightFormat::Transposed)
+    expert_forward_persistent(team, w13_packed, w13_scales, w2_packed, w2_scales, activation_bf16, output_bf16, hidden_size, intermediate_size, group_size, swiglu_limit, activation_alpha, scratch, cancel_sequence, sequence, CpuTailWeightFormat::Transposed, false)
+}
+
+// The two limited activations share clamps but have different equations.
+// Standard/legacy jobs retain their original order and up-projection offset.
+#[inline]
+fn cold_lane_limited_glu(mut gate: f32, mut up: f32, limit: f32, alpha: f32, deepseek: bool) -> f32 {
+    if limit > 0.0 {
+        if gate > limit { gate = limit; }
+        if up > limit { up = limit; }
+        if up < -limit { up = -limit; }
+    }
+    let glu = gate * fast_sigmoid(if deepseek { gate } else { gate * alpha });
+    if deepseek { glu * up } else { (up + 1.0) * glu }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1074,6 +1088,7 @@ pub(crate) fn expert_forward_persistent(
     cancel_sequence: &AtomicU64,
     sequence: u64,
     format: CpuTailWeightFormat,
+    deepseek_clamp: bool,
 ) -> Result<bool, String> {
     quantize_activation_int16(
         activation_bf16,
@@ -1103,19 +1118,9 @@ pub(crate) fn expert_forward_persistent(
 
     if swiglu_limit > 0.0 {
         for i in 0..intermediate_size {
-            let mut gate = scratch.w13_out[i];
-            let mut up = scratch.w13_out[intermediate_size + i];
-            if gate > swiglu_limit {
-                gate = swiglu_limit;
-            }
-            if up > swiglu_limit {
-                up = swiglu_limit;
-            }
-            if up < -swiglu_limit {
-                up = -swiglu_limit;
-            }
-            let glu = gate * fast_sigmoid(gate * activation_alpha);
-            scratch.w13_out[i] = (up + 1.0) * glu;
+            scratch.w13_out[i] = cold_lane_limited_glu(scratch.w13_out[i],
+                scratch.w13_out[intermediate_size + i], swiglu_limit,
+                activation_alpha, deepseek_clamp);
         }
         quantize_activation_int16_f32(
             &scratch.w13_out[..intermediate_size],
@@ -1424,11 +1429,22 @@ impl CpuTailRuntime {
                             )
                         };
                         let mut execute = || -> Result<bool, String> {
+                            if expert.deepseek_clamp {
+                                if !crate::optimisations::CPU_COLD_LANE {
+                                    return Err("clamped CPU expert requires the compiled cold lane".into());
+                                }
+                                let team = persistent_team.as_ref()
+                                    .ok_or("clamped CPU expert requires its persistent team")?;
+                                return expert_forward_persistent(team, w13_packed, w13_scales,
+                                    w2_packed, w2_scales, activation, output, hidden_size,
+                                    intermediate_size, group_size, expert.swiglu_limit, 1.0,
+                                    &mut scratch, &worker_cancel, job.sequence, expert.format, true);
+                            }
                             match expert.format {
                             CpuTailWeightFormat::Marlin => {
                                 if crate::optimisations::CPU_COLD_LANE {
                                     if let Some(team) = persistent_team.as_ref() {
-                                        return expert_forward_persistent(team, w13_packed, w13_scales, w2_packed, w2_scales, activation, output, hidden_size, intermediate_size, group_size, expert.swiglu_limit, expert.activation_alpha, &mut scratch, &worker_cancel, job.sequence, CpuTailWeightFormat::Marlin);
+                                        return expert_forward_persistent(team, w13_packed, w13_scales, w2_packed, w2_scales, activation, output, hidden_size, intermediate_size, group_size, expert.swiglu_limit, expert.activation_alpha, &mut scratch, &worker_cancel, job.sequence, CpuTailWeightFormat::Marlin, false);
                                     }
                                 }
                                 Ok(expert_forward_marlin_int4_cpu_tail(

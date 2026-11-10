@@ -288,6 +288,7 @@ pub(crate) fn calibrate(
         receipt: json!({
             "schema":1,"source_experts":experts.len(),"expert_bytes":bytes,"samples":samples,
             "geometry":{"hidden":experts[0].hidden_size,"intermediate":experts[0].intermediate_size,"group_size":experts[0].group_size},
+            "deepseek_clamped_sources":experts.iter().filter(|e|e.deepseek_clamp).count(),
             "dma_baseline_ms":dma_baseline,"baseline_copy_median_ms":baseline_ms,
             "handoff_allowance_ms":handoff_ms,"measurements":measurements,"predictions":predictions,"counts":counts,
             "ownership":"existing immutable host weights; private startup scratch drained before destruction",
