@@ -72169,6 +72169,9 @@ impl GpuDecodeStore {
                 for pending in std::mem::take(&mut cpu_tail_pending) {
                     let worker_index = pending.worker_index;
                     let race_started = (graph.timing_enabled || graph.cpu_tail_host_timing_enabled).then(std::time::Instant::now);
+                    let cpu_wait_epoch = graph.cpu_tail_host_timing_enabled.then(||
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default().as_nanos());
                     let mut cpu_result = None;
                     let cpu_won = loop {
                         let result = if crate::optimisations::CPU_COLD_LANE {
@@ -72224,6 +72227,17 @@ impl GpuDecodeStore {
                     };
                     if let Some(race_started) = race_started {
                         graph.cpu_tail_race_wait_s += race_started.elapsed().as_secs_f64();
+                    }
+
+                    if let Some(start_ns) = cpu_wait_epoch {
+                        let end_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default().as_nanos();
+                        if let Some(result) = cpu_result.as_ref() {
+                            let service_end = end_ns.saturating_sub((result.compute_to_result_visible_s * 1e9) as u128);
+                            let service_start = service_end.saturating_sub((result.elapsed_s * 1e9) as u128);
+                            eprintln!("[cpu-lane-host-range] layer={} worker={} wait_start_ns={} wait_end_ns={} service_start_ns={} service_end_ns={} expert_bytes={}",
+                                pending.layer_idx, worker_index, start_ns, end_ns, service_start, service_end, pending.dma_bytes);
+                        }
                     }
 
                     if cpu_won {

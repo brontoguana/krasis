@@ -13535,3 +13535,5 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Add independently switchable eight-core CPU expert teams, retaining four-core fallback on smaller allowed CPU sets. Record startup CPU compute, dispatch and result handoff separately for contention diagnosis. Pending paired serving qualification.
 
 - Add a switchable four-worker CPU partition, including capacity-safe counters and calibrated two-worker fallback; pending serving and fast-tier qualification.
+
+- In explicit CPU host-timing diagnostics, retain wait ranges and reconstructed worker-service ranges for intersection with GPU activity; ordinary runs do not collect them.
