@@ -12,6 +12,7 @@ macro_rules! registry {
     }
 }
 registry! {
+    COLD_EXPERT_PRUNING_FIVE, false, "approximation", "Protect five of eight routes with a 25 percent cold-mass ceiling", &["COLD_EXPERT_PRUNING_20"];
     CPU_FULL_QUEUE_PLANNER, true, "approximation", "Calibrate complete CPU and GPU cold queues for partition selection", &["CPU_COLD_LANE"];
     CPU_VECTOR_SCALES, true, "exact", "Vector scale FMA for 1024-output CPU reader bands", &["CPU_MARLIN_READER"];
     CPU_K_MAJOR_READER, true, "exact", "Contiguous packed K traversal for 1024-output AVX2 bands", &["CPU_MARLIN_READER"];

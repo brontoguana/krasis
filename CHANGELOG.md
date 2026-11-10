@@ -1,3 +1,8 @@
+## 2026-11-10 — Screen the five-route cold pruning policy
+
+- Add default-off COLD_EXPERT_PRUNING_FIVE, refining the accepted cold-only policy to protect five of eight leading routes and cap dropped mass at 25% per layer. Resident routes remain protected by the existing cold-only test.
+- Keep the accepted six-route/20% fallback unchanged; extend the existing policy boundary test to the new rank/mass configuration. Qualify end-to-end decode and the unchanged fast tier before adoption.
+
 ## 2026-11-10 — Adopt the native CPU cold lane on the cumulative development stack
 
 - Enable the native CPU lane and exact paired-row Marlin reader by default, stacked on protected pruning and the seven exact defaults. Paired GLM-5.3 65K decode improves 154.121→126.071 ms/token (6.488→7.932 tokens/s); 3K and 16K improve to 124.507 and 124.766 ms/token. Both 65K ordinary repeats are below the requested 129 ms checkpoint.
