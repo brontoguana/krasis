@@ -6,6 +6,40 @@ pub(crate) struct Prediction {
     pub gpu_only_ms: f64,
 }
 
+/// Use directly observed complete-queue wall time; CPU and DMA already overlap
+/// within each sample. Keep one GPU cold route and fail closed on invalid data.
+pub(crate) fn choose_observed_queues(
+    maximum_cold: usize,
+    gpu_only_ms: &[f64],
+    observations: &[(usize, usize, Vec<f64>)],
+    handoff_ms: f64,
+) -> Result<Vec<Prediction>, String> {
+    if gpu_only_ms.len() != maximum_cold + 1 || gpu_only_ms.first()!=Some(&0.0)
+        || !handoff_ms.is_finite() || handoff_ms < 0.0
+        || gpu_only_ms.iter().enumerate().any(|(n, &v)| !v.is_finite() || v < 0.0 || (n > 0 && v == 0.0))
+    {
+        return Err("invalid complete-queue baseline/handoff measurements".into());
+    }
+    for (cpu, gpu, samples) in observations {
+        if *cpu == 0 || *gpu == 0 || cpu + gpu > maximum_cold || samples.is_empty()
+            || samples.iter().any(|v| !v.is_finite() || *v <= 0.0)
+        {
+            return Err("invalid complete-queue CPU/GPU observations".into());
+        }
+    }
+    Ok((0..=maximum_cold).map(|cold| {
+        let baseline = gpu_only_ms[cold];
+        let mut best = baseline;
+        let mut selected = 0;
+        for (cpu, gpu, samples) in observations {
+            if cpu + gpu != cold { continue; }
+            let expected = samples.iter().sum::<f64>() / samples.len() as f64 + handoff_ms;
+            if expected < best { best = expected; selected = *cpu; }
+        }
+        Prediction { cold, cpu_count: selected, critical_ms: best, gpu_only_ms: baseline }
+    }).collect())
+}
+
 /// Minimise expected layer latency using paired CPU/copy observations. Tail
 /// measurements remain diagnostics; independently combining their tails is not
 /// an expected-throughput estimate.
@@ -74,6 +108,25 @@ pub(crate) fn choose(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_queue_measurements_select_the_useful_partition() {
+        let costs = vec![(1,1,vec![0.9,1.0]),(1,2,vec![1.7,1.5]),(2,1,vec![1.2,1.3])];
+        let result = choose_observed_queues(3, &[0.0,0.6,1.2,1.8], &costs, 0.1).unwrap();
+        assert_eq!(result[1].cpu_count, 0);
+        assert_eq!(result[2].cpu_count, 1);
+        assert_eq!(result[3].cpu_count, 2);
+        assert!((result[3].critical_ms-1.35).abs()<1e-12);
+        // The constant-contention estimate misses the observed speed after
+        // the short GPU queue drains and CPU work can use the bandwidth.
+        assert_eq!(choose_expected(2,0.6,&[(1,vec![(1.3,0.65)])],0.1)[2].cpu_count,0);
+        assert_eq!(choose_observed_queues(3, &[0.0,0.6,1.2,1.8], &[(2,1,vec![20.0])],0.1).unwrap()[3].cpu_count,0);
+    }
+    #[test]
+    fn full_queue_measurements_reject_invalid_or_cpu_only_assignments() {
+        assert!(choose_observed_queues(2,&[0.0,0.6,1.2],&[(2,0,vec![0.1])],0.1).is_err());
+        assert!(choose_observed_queues(2,&[0.0,0.6,1.2],&[(1,1,vec![f64::NAN])],0.1).is_err());
+        assert!(choose_observed_queues(2,&[0.0,0.6],&[],0.1).is_err());
+    }
     #[test]
     fn expected_cost_does_not_combine_independent_tail_events() {
         // CPU and DMA slowdowns occur on different observations. Combining

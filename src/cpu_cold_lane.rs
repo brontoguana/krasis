@@ -149,6 +149,13 @@ impl Scratch {
         }
         Ok(ms as f64)
     }
+    fn enqueue_queue(&self, experts: &[CpuTailExpertRef]) -> Result<(), String> {
+        if experts.is_empty() { return Err("CPU lane GPU queue is empty".into()); }
+        unsafe { checked(cuda::lib().cuEventRecord(self.begin,self.stream),"queue begin")?; }
+        for expert in experts { self.enqueue(expert,false)?; }
+        unsafe { checked(cuda::lib().cuEventRecord(self.end,self.stream),"queue end")?; }
+        Ok(())
+    }
 }
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -176,6 +183,106 @@ fn percentile(values: &[f64], fraction: f64) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
     sorted[((sorted.len() - 1) as f64 * fraction).ceil() as usize]
+}
+
+/// Measure the queue that will actually remain on the GPU. In particular,
+/// CPU service may accelerate after a short DMA queue has finished.
+fn calibrate_full_queues(
+    workers: &mut [CpuTailRuntime],
+    experts: &[CpuTailExpertRef],
+    maximum_cold: usize,
+    scratch: &Scratch,
+    bytes: usize,
+) -> Result<Plan, String> {
+    let samples = experts.len().min(40);
+    let mut baseline_samples = vec![Vec::new(); maximum_cold + 1];
+    let mut baselines = vec![0.0; maximum_cold + 1];
+    for gpu in 1..=maximum_cold {
+        for sample in 0..samples {
+            let queue = (0..gpu).map(|i| experts[(sample+i)%experts.len()]).collect::<Vec<_>>();
+            let start = Instant::now();
+            scratch.enqueue_queue(&queue)?;
+            scratch.drain()?;
+            baseline_samples[gpu].push(start.elapsed().as_secs_f64()*1000.0);
+        }
+        baselines[gpu] = baseline_samples[gpu].iter().sum::<f64>()/samples as f64;
+    }
+    let mut measurements = Vec::new();
+    let mut costs = Vec::new();
+    for cpu in 1..=workers.len().min(maximum_cold.saturating_sub(1)) {
+        for gpu in 1..=maximum_cold-cpu {
+            let mut walls = Vec::new();
+            let mut details = Vec::new();
+            for sample in 0..samples {
+                let mut cpu_indices = Vec::new();
+                for ordinal in 0..cpu {
+                    let mut index = (sample+ordinal*19)%experts.len();
+                    while cpu_indices.contains(&index) { index = (index+1)%experts.len(); }
+                    cpu_indices.push(index);
+                }
+                let gpu_indices = (0..experts.len())
+                    .map(|i| (sample+11+i)%experts.len())
+                    .filter(|i| !cpu_indices.contains(i))
+                    .take(gpu).collect::<Vec<_>>();
+                if gpu_indices.len()!=gpu { return Err("CPU lane lacks distinct GPU queue sources".into()); }
+                let queue = gpu_indices.iter().map(|&i| experts[i]).collect::<Vec<_>>();
+                let mut sequences = Vec::with_capacity(cpu);
+                let mut offsets = Vec::with_capacity(cpu);
+                let mut raw_worker_rows = Vec::with_capacity(cpu);
+                let start = Instant::now();
+                for (ordinal, worker) in workers.iter_mut().take(cpu).enumerate() {
+                    offsets.push(start.elapsed().as_secs_f64()*1000.0);
+                    sequences.push(worker.submit(experts[cpu_indices[ordinal]],0,Some(Instant::now()))?);
+                }
+                let gpu_offset = start.elapsed().as_secs_f64()*1000.0;
+                scratch.enqueue_queue(&queue)?;
+                let mut cpu_max = 0.0f64;
+                for (ordinal, worker) in workers.iter_mut().take(cpu).enumerate() {
+                    let result = worker.wait_result()?;
+                    if result.sequence!=sequences[ordinal] || !result.completed {
+                        return Err("CPU queue calibration sequence/cancellation mismatch".into());
+                    }
+                    if let Some(error) = result.error { return Err(error); }
+                    let total = (result.dispatch_lag_s+result.elapsed_s+result.compute_to_result_visible_s)*1000.0;
+                    if !total.is_finite() || total<=0.0 { return Err("CPU queue timing is absent/invalid".into()); }
+                    cpu_max = cpu_max.max(offsets[ordinal]+total);
+                    raw_worker_rows.push((total,offsets[ordinal],result.elapsed_s*1000.0,
+                        result.dispatch_lag_s*1000.0,result.compute_to_result_visible_s*1000.0));
+                    worker.finish(result.sequence)?;
+                }
+                let gpu_elapsed = scratch.drain()?;
+                // Both lanes and all result handoffs have completed. Never
+                // add overlapping CPU and DMA service intervals together.
+                let wall = start.elapsed().as_secs_f64()*1000.0;
+                if !wall.is_finite() || wall<=0.0 { return Err("CPU queue wall time is invalid".into()); }
+                walls.push(wall);
+                let worker_rows = raw_worker_rows.into_iter().map(|(total,offset,compute,dispatch,visible)|
+                    json!({"total_ms":total,"dispatch_offset_ms":offset,"compute_ms":compute,
+                        "dispatch_ms":dispatch,"result_visible_ms":visible})).collect::<Vec<_>>();
+                details.push(json!({"source_sample":sample,"cpu_source_indices":cpu_indices,
+                    "gpu_source_indices":gpu_indices,"worker_ms":worker_rows,"cpu_max_ms":cpu_max,
+                    "gpu_dispatch_offset_ms":gpu_offset,"gpu_queue_ms":gpu_elapsed,"paired_wall_ms":wall}));
+            }
+            costs.push((cpu,gpu,walls));
+            measurements.push(json!({"cpu_experts":cpu,"gpu_experts":gpu,"samples":details}));
+        }
+    }
+    let handoff_ms = 0.1;
+    let estimates = crate::cpu_cold_plan::choose_observed_queues(maximum_cold,&baselines,&costs,handoff_ms)?;
+    let counts = estimates.iter().map(|p|p.cpu_count).collect::<Vec<_>>();
+    let predictions = estimates.iter().map(|p|json!({"cold":p.cold,"cpu_count":p.cpu_count,
+        "predicted_ms":p.critical_ms,"gpu_only_copy_ms":p.gpu_only_ms})).collect::<Vec<_>>();
+    Ok(Plan { counts:counts.clone(), receipt:json!({
+        "schema":3,"cost_model":"complete_cpu_gpu_queues","source_experts":experts.len(),
+        "expert_bytes":bytes,"samples":samples,
+        "geometry":{"hidden":experts[0].hidden_size,"intermediate":experts[0].intermediate_size,"group_size":experts[0].group_size},
+        "deepseek_clamped_sources":experts.iter().filter(|e|e.deepseek_clamp).count(),
+        "gpu_only_queue_samples_ms":baseline_samples,"gpu_only_queue_mean_ms":baselines,
+        "selection_objective":"mean paired complete-queue wall time","handoff_allowance_ms":handoff_ms,
+        "measurements":measurements,"predictions":predictions,"counts":counts,
+        "ownership":"existing immutable host weights; private startup scratch drained before destruction",
+        "adq":false
+    }) })
 }
 /// Inputs are immutable registered model allocations, sampled across layers.
 /// Worker pools are already bound to discovered, disjoint allowed cores.
@@ -215,6 +322,9 @@ pub(crate) fn calibrate(
         return Err("CPU lane calibration needs equal loaded expert geometry".into());
     }
     let scratch = Scratch::new(bytes)?;
+    if crate::optimisations::CPU_FULL_QUEUE_PLANNER && maximum_cold <= 8 {
+        return calibrate_full_queues(workers,experts,maximum_cold,&scratch,bytes);
+    }
     let samples = experts.len().min(40);
     let mut dma_baseline = Vec::new();
     for expert in experts.iter().take(samples) {
