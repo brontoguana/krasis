@@ -174,7 +174,7 @@ impl AdaptiveColdDropRuntime {
     pub(crate) fn from_compiled_policy() -> Self {
         Self { stats: Some(ShadowPolicyStats::new(ColdDropPolicy {
             protect_rank_fraction: 0.75,
-            max_mass_fraction: 0.10,
+            max_mass_fraction: if crate::optimisations::COLD_EXPERT_PRUNING_15 {0.15} else {0.10},
         })) }
     }
 
@@ -553,8 +553,15 @@ mod compiled_policy_tests {
     fn compiled_policy_preserves_rank_and_mass_guards() {
         let mut policy = AdaptiveColdDropRuntime::from_compiled_policy();
         assert!(policy.enabled());
-        // Uniform routes cannot lose a 12.5% expert under a 10% mass budget.
-        assert!(policy.plan_and_record(&[1.0; 8], &[100; 8]).positions.is_empty());
+        // One uniform expert has 12.5% mass; two have 25%. Rank protection
+        // and the configured ceiling therefore permit at most one here.
+        let uniform = policy.plan_and_record(&[1.0; 8], &[100; 8]);
+        if crate::optimisations::COLD_EXPERT_PRUNING_15 {
+            assert_eq!(uniform.positions, vec![7]);
+            assert_eq!(uniform.dropped_mass_fraction, 0.125);
+        } else {
+            assert!(uniform.positions.is_empty());
+        }
         let plan = policy.plan_and_record(&[0.5,0.2,0.1,0.08,0.05,0.03,0.025,0.015], &[100; 8]);
         assert_eq!(plan.positions, vec![6,7]);
         assert_eq!(plan.dropped_bytes,200);

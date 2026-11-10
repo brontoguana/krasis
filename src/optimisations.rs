@@ -12,6 +12,7 @@ macro_rules! registry {
     }
 }
 registry! {
+    COLD_EXPERT_PRUNING_15, true, "approximation", "Protect six of eight routes with a 15 percent cold-mass ceiling", &["COLD_EXPERT_PRUNING"];
     CPU_MORE_WORKERS, true, "approximation", "Calibrated four-expert CPU partition with two-worker fallback", &[];
     CPU_MARLIN_READER, true, "exact", "Group-banded paired-row AVX2 Marlin reader", &[];
     CPU_COLD_LANE, true, "approximation", "Planned direct-host CPU cold expert lane", &[];
