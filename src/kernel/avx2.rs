@@ -2239,6 +2239,22 @@ pub unsafe fn expert_matmul_int4_marlin(
 /// integer accumulation and applying scales in the original group order.
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn expert_matmul_int4_marlin_paired(
+    packed: *const u32, scales: *const u16, act: *const i16,
+    act_scales: *const f32, output: *mut f32,
+    k: usize, n: usize, n_start: usize, n_out: usize, gs: usize,
+) {
+    if crate::optimisations::CPU_K_MAJOR_READER && n_out == 1024 {
+        expert_matmul_int4_marlin_k_major(
+            packed, scales, act, act_scales, output, k, n, n_start, n_out, gs,
+        );
+    } else {
+        expert_matmul_int4_marlin_paired_baseline(
+            packed, scales, act, act_scales, output, k, n, n_start, n_out, gs,
+        );
+    }
+}
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn expert_matmul_int4_marlin_paired_baseline(
     packed: *const u32,
     scales: *const u16,
     act: *const i16,
@@ -3958,5 +3974,132 @@ mod tests {
             max_diff == 0.0,
             "Marlin parallel should be bit-identical to serial"
         );
+    }
+}
+
+// Visit each packed K tile's adjacent output bands before
+// advancing K. Keep integer partials in private L1-sized scratch; apply scales
+// in the established group order. Wider and narrower bands retain the baseline.
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn expert_matmul_int4_marlin_k_major(
+    packed: *const u32, scales: *const u16, act: *const i16,
+    act_scales: *const f32, output: *mut f32,
+    k: usize, n: usize, n_start: usize, n_out: usize, gs: usize,
+) {
+    use std::arch::x86_64::*;
+    if n_out > 1024 {
+        return expert_matmul_int4_marlin_paired_baseline(
+            packed, scales, act, act_scales, output, k, n, n_start, n_out, gs,
+        );
+    }
+    assert!(n_out % 64 == 0 && gs > 0 && gs % 16 == 0);
+    let zero = _mm256_setzero_si256();
+    let mask = _mm256_set1_epi32(15);
+    let chunks = n_out / 64;
+    // 16 bands * 2 stripes * (4 low + 4 high vectors) = 8 KiB.
+    let mut partials = [zero; 256];
+    let partial = partials.as_mut_ptr();
+    macro_rules! pair {
+        ($w:expr, $l:expr, $h:expr) => {
+            _mm256_or_si256(
+                _mm256_and_si256(_mm256_srli_epi32($w, $l), mask),
+                _mm256_slli_epi32(_mm256_and_si256(_mm256_srli_epi32($w, $h), mask), 16),
+            )
+        };
+    }
+    std::ptr::write_bytes(output, 0, n_out);
+    for g in 0..k / gs {
+        for i in 0..chunks * 16 { *partial.add(i) = zero; }
+        for t in 0..gs / 16 {
+            let kt = g * (gs / 16) + t;
+            let ab = kt * 16;
+            let mut aa = [zero; 2];
+            let mut bb = [zero; 2];
+            let mut bias = [zero; 2];
+            for ri in 0..2 {
+                let r = ri * 2;
+                let mut a08 = [0i32; 2];
+                let mut a19 = [0i32; 2];
+                let mut biases = [0i32; 2];
+                for j in 0..2 {
+                    let p = ab + 2 * (r + j);
+                    let a0 = *act.add(p);
+                    let a8 = *act.add(p + 8);
+                    let a1 = *act.add(p + 1);
+                    let a9 = *act.add(p + 9);
+                    a08[j] = (a0 as u16 as u32 | ((a8 as u16 as u32) << 16)) as i32;
+                    a19[j] = (a1 as u16 as u32 | ((a9 as u16 as u32) << 16)) as i32;
+                    biases[j] = 8 * (a0 as i32 + a8 as i32 + a1 as i32 + a9 as i32);
+                }
+                aa[ri] = _mm256_set_m128i(_mm_set1_epi32(a08[1]), _mm_set1_epi32(a08[0]));
+                bb[ri] = _mm256_set_m128i(_mm_set1_epi32(a19[1]), _mm_set1_epi32(a19[0]));
+                bias[ri] = _mm256_set_m128i(_mm_set1_epi32(biases[1]), _mm_set1_epi32(biases[0]));
+            }
+            for nc in 0..chunks {
+                let base = n_start + nc * 64;
+                let wb = kt * (2 * n) + (base / 64) * 128;
+                for si in 0..2 {
+                    let stripe = si * 4;
+                    let off = (nc * 2 + si) * 8;
+                    let mut low = [zero; 4];
+                    let mut high = [zero; 4];
+                    for c in 0..4 {
+                        low[c] = *partial.add(off + c);
+                        high[c] = *partial.add(off + 4 + c);
+                    }
+                    for ri in 0..2 {
+                        let r = ri * 2;
+                        for c in 0..4 {
+                            let w = _mm256_loadu_si256(
+                                packed.add(wb + ((stripe + c) * 4 + r) * 4) as *const __m256i,
+                            );
+                            let lo = _mm256_sub_epi32(_mm256_add_epi32(
+                                _mm256_madd_epi16(pair!(w, 0, 4), aa[ri]),
+                                _mm256_madd_epi16(pair!(w, 16, 20), bb[ri]),
+                            ), bias[ri]);
+                            let hi = _mm256_sub_epi32(_mm256_add_epi32(
+                                _mm256_madd_epi16(pair!(w, 8, 12), aa[ri]),
+                                _mm256_madd_epi16(pair!(w, 24, 28), bb[ri]),
+                            ), bias[ri]);
+                            low[c] = _mm256_add_epi32(low[c], lo);
+                            high[c] = _mm256_add_epi32(high[c], hi);
+                        }
+                    }
+                    for c in 0..4 {
+                        *partial.add(off + c) = low[c];
+                        *partial.add(off + 4 + c) = high[c];
+                    }
+                }
+            }
+        }
+        let a_scale = *act_scales.add(g);
+        for nc in 0..chunks {
+            let base = n_start + nc * 64;
+            for si in 0..2 {
+                let stripe = si * 4;
+                let off = (nc * 2 + si) * 8;
+                for c in 0..4 {
+                    let lo = *partial.add(off + c);
+                    let hi = *partial.add(off + 4 + c);
+                    let lo = _mm_add_epi32(_mm256_castsi256_si128(lo), _mm256_extracti128_si256(lo, 1));
+                    let hi = _mm_add_epi32(_mm256_castsi256_si128(hi), _mm256_extracti128_si256(hi, 1));
+                    let mut ll = [0i32; 4];
+                    let mut hh = [0i32; 4];
+                    _mm_storeu_si128(ll.as_mut_ptr() as *mut __m128i, lo);
+                    _mm_storeu_si128(hh.as_mut_ptr() as *mut __m128i, hi);
+                    for s in 0..4 {
+                        let a = s * 16 + stripe + c;
+                        let b = a + 8;
+                        let scale_base = g * n + base;
+                        let ls = f32::from_bits((*scales.add(scale_base + (a % 8) * 8 + a / 8) as u32) << 16);
+                        let hs = f32::from_bits((*scales.add(scale_base + (b % 8) * 8 + b / 8) as u32) << 16);
+                        let dst_a = output.add(nc * 64 + a);
+                        let dst_b = output.add(nc * 64 + b);
+                        *dst_a = (ll[s] as f32).mul_add(ls * a_scale, *dst_a);
+                        *dst_b = (hh[s] as f32).mul_add(hs * a_scale, *dst_b);
+                    }
+                }
+            }
+        }
     }
 }
