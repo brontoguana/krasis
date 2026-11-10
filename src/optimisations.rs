@@ -12,8 +12,8 @@ macro_rules! registry {
     }
 }
 registry! {
-    CPU_MARLIN_READER, false, "exact", "Group-banded paired-row AVX2 Marlin reader", &[];
-    CPU_COLD_LANE, false, "approximation", "Planned direct-host CPU cold expert lane", &[];
+    CPU_MARLIN_READER, true, "exact", "Group-banded paired-row AVX2 Marlin reader", &[];
+    CPU_COLD_LANE, true, "approximation", "Planned direct-host CPU cold expert lane", &[];
     COLD_EXPERT_PRUNING, true, "approximation", "GLM-5.3 host-route 75/10 cold-expert pruning", &[];
     EXACT_ATTENTION, true, "exact", "K6 exact scores and shared unpacked values", &[];
     ORDERED_ABSORPTION, true, "exact", "Ordered sparse MLA query absorption", &[];

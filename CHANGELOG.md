@@ -1,3 +1,10 @@
+## 2026-11-10 — Adopt the native CPU cold lane on the cumulative development stack
+
+- Enable the native CPU lane and exact paired-row Marlin reader by default, stacked on protected pruning and the seven exact defaults. Paired GLM-5.3 65K decode improves 154.121→126.071 ms/token (6.488→7.932 tokens/s); 3K and 16K improve to 124.507 and 124.766 ms/token. Both 65K ordinary repeats are below the requested 129 ms checkpoint.
+- The revised fast tier passes: mean KL 0.00583, 189/192 greedy choices agree; JSON stays 1/5 and retrieval 5/5. Coding changes 2/5→1/5, within the frozen one-pass allowance. Record that loss; this is incremental screening, not an absolute quality or ADQ pass.
+- Ownership/session-cache smoke passes, sampled free VRAM stays at least 926 MiB, and cleanup restores the protected test binary and releases the GPU. Startup shared-W2 dispatch differs between these arms, so the speed figures describe whole binaries rather than an isolated CPU operator effect.
+- Retain build-time opt-outs and supported-mode/CPU-capability GPU fallbacks. The qualified explicit-enable artifact selects the same effective constants as these new defaults; only the defaults/manifest metadata change here. No main merge, release, push or ADQ campaign.
+
 ## 2026-11-10 — Plan CPU work from expected critical-path cost
 
 - Rank the native CPU/GPU split using the mean of paired CPU-duration/copy observations and mean uncontended copy cost. The previous estimator combined independent 95th-percentile CPU/copy costs against a median GPU baseline, disabling an exercised promising lane after small startup timing changes.
