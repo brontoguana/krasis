@@ -13546,3 +13546,5 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Correct the startup pruning message to report the effective compiled 10% or 15% cap; runtime policy and measured arithmetic are unchanged.
 
 - Adopt CPU_CACHE_LOCAL_TEAMS as a default: same-source paired GLM-5.3 decode improves 121.941/122.081/124.917 to 114.682/115.795/118.714 ms/token at 3K/16K/65K. All 192 likelihood distributions match exactly (KL 0, greedy 100%); held-out rates remain JSON 1/5, retrieval 5/5, coding 2/5. Worker count and ownership remain unchanged; expert-weight transfer volume is unchanged. Full ADQ remains deferred.
+
+- Adopt COLD_EXPERT_PRUNING_20 as a default after same-source paired gains at 3K/16K/65K and the fast tier: KL 0.0080, greedy agreement 97.4%, JSON 1/5 unchanged, retrieval 5/5 unchanged, coding 3/5 to 2/5 without a clear drop. Preserve six protected ranks, no renormalisation and the compile-time 15-percent fallback. No ownership change; full ADQ remains deferred.

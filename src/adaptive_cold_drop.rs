@@ -174,7 +174,7 @@ impl AdaptiveColdDropRuntime {
     pub(crate) fn from_compiled_policy() -> Self {
         Self { stats: Some(ShadowPolicyStats::new(ColdDropPolicy {
             protect_rank_fraction: 0.75,
-            max_mass_fraction: if crate::optimisations::COLD_EXPERT_PRUNING_15 {0.15} else {0.10},
+            max_mass_fraction: if crate::optimisations::COLD_EXPERT_PRUNING_20 {0.20} else if crate::optimisations::COLD_EXPERT_PRUNING_15 {0.15} else {0.10},
         })) }
     }
 
@@ -566,5 +566,12 @@ mod compiled_policy_tests {
         assert_eq!(plan.positions, vec![6,7]);
         assert_eq!(plan.dropped_bytes,200);
         assert!((plan.dropped_mass_fraction-0.04).abs()<1e-7);
+        // Both low ranks total 18%: only the larger compiled ceiling can omit both.
+        let boundary = policy.plan_and_record(
+            &[0.20,0.16,0.13,0.12,0.11,0.10,0.10,0.08], &[100; 8],
+        );
+        assert_eq!(boundary.positions, if crate::optimisations::COLD_EXPERT_PRUNING_20 {
+            vec![6, 7]
+        } else { vec![7] });
     }
 }

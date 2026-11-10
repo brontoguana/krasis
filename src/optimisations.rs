@@ -12,6 +12,7 @@ macro_rules! registry {
     }
 }
 registry! {
+    COLD_EXPERT_PRUNING_20, true, "approximation", "Protect six of eight routes with a 20 percent cold-mass ceiling", &["COLD_EXPERT_PRUNING_15"];
     CPU_CACHE_LOCAL_TEAMS, true, "approximation", "Group expert workers within discovered last-level cache domains", &["CPU_COLD_LANE"];
     COLD_EXPERT_PRUNING_15, true, "approximation", "Protect six of eight routes with a 15 percent cold-mass ceiling", &["COLD_EXPERT_PRUNING"];
     CPU_MORE_WORKERS, true, "approximation", "Calibrated four-expert CPU partition with two-worker fallback", &[];

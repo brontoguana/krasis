@@ -39320,7 +39320,7 @@ impl GpuDecodeStore {
         if crate::optimisations::COLD_EXPERT_PRUNING && pruning_supported {
             graph.adaptive_cold_drop = AdaptiveColdDropRuntime::from_compiled_policy();
             log::info!("Compiled cold-expert pruning: protect_rank_pct=75 max_mass_pct={} renormalize=false",
-                if crate::optimisations::COLD_EXPERT_PRUNING_15 {15} else {10});
+                if crate::optimisations::COLD_EXPERT_PRUNING_20 {20} else if crate::optimisations::COLD_EXPERT_PRUNING_15 {15} else {10});
         }
         log::info!(
             "GpuDecodeStore: finalized GLM-5.3 mHC workspace layers={} HC={} hidden={} capacity={}",
