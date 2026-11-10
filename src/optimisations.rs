@@ -12,6 +12,7 @@ macro_rules! registry {
     }
 }
 registry! {
+    CPU_WIDE_TEAM, false, "exact", "Eight-core direct-host CPU expert teams with four-core fallback", &[];
     CPU_MARLIN_READER, true, "exact", "Group-banded paired-row AVX2 Marlin reader", &[];
     CPU_COLD_LANE, true, "approximation", "Planned direct-host CPU cold expert lane", &[];
     COLD_EXPERT_PRUNING, true, "approximation", "GLM-5.3 host-route 75/10 cold-expert pruning", &[];

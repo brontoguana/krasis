@@ -258,7 +258,9 @@ pub(crate) fn calibrate(
                     return Err("CPU lane worker timing is absent/invalid".into());
                 }
                 critical = critical.max(ms);
-                worker_rows.push(ms);
+                worker_rows.push(json!({"total_ms":ms,"compute_ms":result.elapsed_s*1000.0,
+                    "dispatch_ms":result.dispatch_lag_s*1000.0,
+                    "result_visible_ms":result.compute_to_result_visible_s*1000.0}));
                 worker.finish(result.sequence)?;
             }
             let dma = scratch.drain()?;

@@ -13529,3 +13529,7 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Add COLD_EXPERT_PRUNING as a compile-time approximation, initially off for paired qualification. Enable the retained 75/10 policy only in supported GLM registration with host-visible routes and an established HCS resident set; preserve unpruned calibration and other-mode fallbacks.
 - Retire production runtime activation of the legacy cold-pruning selector. Keep its standalone diagnostic parser and pure shadow observations. Existing packed weights, K6 cache, GPU kernels and allocation ownership remain unchanged.
 - Five native policy component tests pass. Complete-request speed and fast-tier quality remain pending; no ADQ or release claim.
+
+## 2026-11-10
+
+- Add independently switchable eight-core CPU expert teams, retaining four-core fallback on smaller allowed CPU sets. Record startup CPU compute, dispatch and result handoff separately for contention diagnosis. Pending paired serving qualification.

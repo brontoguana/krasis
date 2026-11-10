@@ -1219,14 +1219,19 @@ pub(crate) fn compiled_lane_cpu_ids(worker: usize, workers: usize) -> Result<Vec
             }
         }
     }
-    let needed = workers * 4;
+    let team_size = if crate::optimisations::CPU_WIDE_TEAM && selected.len() >= workers * 8 {
+        8
+    } else {
+        4
+    };
+    let needed = workers * team_size;
     if selected.len() < needed {
         return Err(format!(
             "compiled CPU lane needs {needed} distinct allowed cores; found {}",
             selected.len()
         ));
     }
-    Ok(selected[worker * 4..worker * 4 + 4].to_vec())
+    Ok(selected[worker * team_size..(worker + 1) * team_size].to_vec())
 }
 
 impl CpuTailRuntime {
