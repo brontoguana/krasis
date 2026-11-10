@@ -1,3 +1,9 @@
+## 2026-11-10 — Plan CPU work from expected critical-path cost
+
+- Rank the native CPU/GPU split using the mean of paired CPU-duration/copy observations and mean uncontended copy cost. The previous estimator combined independent 95th-percentile CPU/copy costs against a median GPU baseline, disabling an exercised promising lane after small startup timing changes.
+- Keep the full raw observations and tail diagnostics. Retain GPU execution when no expected improvement is predicted, the existing handoff allowance, and the requirement that at least one cold expert stays on GPU. No expert equations, buffer ownership or supported model modes change; CPU defaults remain off pending the paired speed and quality screen.
+- Five planner tests cover concurrent critical-path accounting, independently occurring slow samples and GPU fallback.
+
 ## 2026-11-10 — Support the GLM clamp in the native CPU lane
 
 - The activation probe identifies all 42 routed layers as rejected because the registered model uses the capped raw-gate/symmetric-up clamp contract. The previous CPU lane supported the older limited activation with an up-projection offset, so removing its guard alone would be incorrect.

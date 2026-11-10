@@ -6,6 +6,33 @@ pub(crate) struct Prediction {
     pub gpu_only_ms: f64,
 }
 
+/// Minimise expected layer latency using paired CPU/copy observations. Tail
+/// measurements remain diagnostics; independently combining their tails is not
+/// an expected-throughput estimate.
+pub(crate) fn choose_expected(
+    maximum_cold: usize,
+    baseline_copy_ms: f64,
+    costs: &[(usize, Vec<(f64, f64)>)],
+    handoff_ms: f64,
+) -> Vec<Prediction> {
+    (0..=maximum_cold).map(|cold| {
+        let baseline = cold as f64 * baseline_copy_ms;
+        let mut best = baseline;
+        let mut selected = 0;
+        for (count, samples) in costs {
+            if *count == 0 || *count >= cold || samples.is_empty() { continue; }
+            let expected = samples.iter().map(|&(cpu_ms, copy_ms)| {
+                let transferred = cpu_ms / copy_ms.max(baseline_copy_ms);
+                cpu_ms + ((cold - *count) as f64 - transferred).max(0.0)
+                    * baseline_copy_ms + handoff_ms
+            }).sum::<f64>() / samples.len() as f64;
+            if expected < best { best = expected; selected = *count; }
+        }
+        Prediction { cold, cpu_count: selected, critical_ms: best, gpu_only_ms: baseline }
+    }).collect()
+}
+
+#[cfg(test)]
 pub(crate) fn choose(
     maximum_cold: usize,
     baseline_copy_ms: f64,
@@ -47,6 +74,22 @@ pub(crate) fn choose(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expected_cost_does_not_combine_independent_tail_events() {
+        // CPU and DMA slowdowns occur on different observations. Combining
+        // their maxima incorrectly rejects useful concurrent work.
+        let observations = vec![(2, vec![(1.0, 3.0), (3.0, 1.0)])];
+        let result = choose_expected(4, 1.0, &observations, 0.1);
+        assert_eq!(result[3].cpu_count, 2);
+        assert!((result[3].critical_ms - 73.0 / 30.0).abs() < 1e-12);
+        assert_eq!(choose(4, 1.0, &[(2, 3.0, 3.0)], 0.1)[3].cpu_count, 0);
+    }
+    #[test]
+    fn expected_cost_retains_gpu_for_slow_or_unavailable_cpu() {
+        let result = choose_expected(8, 0.5, &[(2, vec![(20.0, 1.0)])], 0.1);
+        assert!(result.iter().all(|p| p.cpu_count == 0));
+        assert!(choose_expected(8, 0.5, &[], 0.1).iter().all(|p| p.cpu_count == 0));
+    }
     #[test]
     fn contention_ends_when_cpu_finishes() {
         // One CPU expert takes 1 ms. During it, half a GPU expert transfers;

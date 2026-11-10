@@ -222,6 +222,7 @@ pub(crate) fn calibrate(
         dma_baseline.push(scratch.drain()?);
     }
     let baseline_ms = percentile(&dma_baseline, 0.5);
+    let baseline_mean_ms = dma_baseline.iter().sum::<f64>() / dma_baseline.len() as f64;
     let mut measurements = Vec::new();
     let mut costs = Vec::new();
     for count in 1..=workers.len() {
@@ -268,13 +269,13 @@ pub(crate) fn calibrate(
         }
         let cpu_p95 = percentile(&cpu_times, 0.95);
         let dma_p95 = percentile(&dma_times, 0.95).max(baseline_ms);
-        costs.push((count, cpu_p95, dma_p95));
+        costs.push((count, cpu_times.iter().copied().zip(dma_times.iter().copied()).collect()));
         measurements.push(json!({"cpu_experts":count,"cpu_p95_ms":cpu_p95,"contended_copy_p95_ms":dma_p95,"samples":details}));
     }
     // Include an explicit activation/result handoff allowance. Measured CPU
     // time already includes dispatch and result visibility, not only GEMV.
     let handoff_ms = 0.1;
-    let estimates = crate::cpu_cold_plan::choose(maximum_cold, baseline_ms, &costs, handoff_ms);
+    let estimates = crate::cpu_cold_plan::choose_expected(maximum_cold, baseline_mean_ms, &costs, handoff_ms);
     let counts = estimates.iter().map(|p| p.cpu_count).collect::<Vec<_>>();
     let predictions = estimates
         .iter()
@@ -286,10 +287,11 @@ pub(crate) fn calibrate(
     Ok(Plan {
         counts: counts.clone(),
         receipt: json!({
-            "schema":1,"source_experts":experts.len(),"expert_bytes":bytes,"samples":samples,
+            "schema":2,"source_experts":experts.len(),"expert_bytes":bytes,"samples":samples,
             "geometry":{"hidden":experts[0].hidden_size,"intermediate":experts[0].intermediate_size,"group_size":experts[0].group_size},
             "deepseek_clamped_sources":experts.iter().filter(|e|e.deepseek_clamp).count(),
             "dma_baseline_ms":dma_baseline,"baseline_copy_median_ms":baseline_ms,
+            "baseline_copy_mean_ms":baseline_mean_ms,"selection_objective":"mean paired critical-path latency",
             "handoff_allowance_ms":handoff_ms,"measurements":measurements,"predictions":predictions,"counts":counts,
             "ownership":"existing immutable host weights; private startup scratch drained before destruction",
             "adq":false
