@@ -1,3 +1,8 @@
+## 2026-11-10 — Expose CPU-lane startup fallback
+
+- Print the selected CPU-lane setup conditions and fallback reason when its compile-time switch is enabled. The first fixed-placement cohort produced no calibration receipt, no H2D reduction and no useful speed gain, so it does not establish that CPU work ran. Keep the feature off pending an exercised fast-tier check.
+- Startup diagnostics only; scheduling, arithmetic, ownership and other model paths are unchanged.
+
 ## 2026-11-09 — Correct pruning adoption after controlled placement check
 
 - Withdraw the 75/10 default: with one identical recorded residency fixture, the baseline passes the unchanged JSON task and pruning fails it. Earlier independently sampled startup maps confounded the original adoption evidence; preserve those observations without isolated attribution.

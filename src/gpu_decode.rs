@@ -103940,6 +103940,16 @@ impl GpuDecodeStore {
             );
         }
 
+        if crate::optimisations::CPU_COLD_LANE {
+            eprintln!("[cpu-cold-lane-setup] glm={} calibrated={} draft={} speculative={} bits={} device_routes={} prefetch={} predictor={} peers={} repack={} compression={} unsupported_layers={:?}",
+                graph.glm5_hc_mean_mult.is_some(), graph.cpu_tail_calibration.is_some(),
+                self.draft.is_some(), self.dspark.is_some(), graph.expert_bits, graph.gpu_route_sync,
+                graph.prefetch_depth, graph.apfl.is_some(), graph.peer_experts.len(),
+                graph.synthetic_repack.is_some(), graph.expert_compression.is_some(),
+                graph.moe_layers.iter().enumerate().filter_map(|(i,m)| m.as_ref().filter(|m|
+                    m.activation_type != 0 || !m.gated_experts || m.moe_input_size != 0 || m.deepseek_v4_activation
+                    || m.latent_down_wid.is_some() || m.latent_up_wid.is_some()).map(|_|i)).collect::<Vec<_>>());
+        }
         if crate::optimisations::CPU_COLD_LANE && graph.glm5_hc_mean_mult.is_some()
             && graph.cpu_tail_calibration.is_none() && self.draft.is_none() && self.dspark.is_none() {
             let supported = graph.expert_bits == 4 && !graph.gpu_route_sync
@@ -103998,9 +104008,9 @@ impl GpuDecodeStore {
                         if profitable {graph.cpu_tail_workers=workers;}
                         else {log::info!("CPU cold lane uses GPU fallback after startup cost calibration");}
                     }
-                    Err(error)=>log::info!("CPU cold lane retains GPU execution: {error}"),
+                    Err(error)=>eprintln!("[cpu-cold-lane-fallback] {error}"),
                 }
-            } else {log::info!("CPU cold lane retains GPU execution for unsupported execution mode");}
+            } else {eprintln!("[cpu-cold-lane-fallback] unsupported execution mode");}
         }
 
         let mapped_reads = graph.mapped_reads_active;
