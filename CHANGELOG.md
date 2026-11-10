@@ -1,3 +1,9 @@
+## 2026-11-10 — Adopt pruning after paired family screening
+
+- Enable protected 75/10 cold-expert pruning by default on the supported GLM host-route path. Controlled 65K decode improves 173.091→149.700 ms/token (5.777→6.680 tokens/s); short and 16K decode improve similarly.
+- Revised fast tier retains identical family totals: JSON 1/5, retrieval 5/5, coding 2/5. One coding case regresses and another improves; preserve both rather than vetoing on one prompt. Mean KL is 0.01056 with 187/192 greedy choices agreeing. These are incremental results; inherited task weaknesses remain unqualified.
+- Restore the measured 10% mass ceiling from the unadopted 5% retry. The new default selects the same policy already measured in the explicit-enable binary. No ownership or allocation change; retain the compile-time opt-out, model/mode guards and 600 MiB floor. Full ADQ remains deferred and must pass before main or shipping.
+
 ## 2026-11-10 — Expose CPU-lane startup fallback
 
 - Print the selected CPU-lane setup conditions and fallback reason when its compile-time switch is enabled. The first fixed-placement cohort produced no calibration receipt, no H2D reduction and no useful speed gain, so it does not establish that CPU work ran. Keep the feature off pending an exercised fast-tier check.
