@@ -186,7 +186,7 @@ pub(crate) fn calibrate(
     maximum_cold: usize,
 ) -> Result<Plan, String> {
     if workers.is_empty()
-        || workers.len() > 2
+        || workers.len() > 4
         || experts.len() < 24
         || maximum_cold == 0
         || maximum_cold > 64

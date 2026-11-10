@@ -19332,15 +19332,15 @@ struct GpuDecodeGraph {
     /// Always-on race histograms by cold-queue depth (2..=9+).
     cpu_tail_attempts_by_depth: [u64; 8],
     cpu_tail_wins_by_depth: [u64; 8],
-    /// Per-worker attribution for the opt-in two-team experiment.
-    cpu_tail_worker_attempts: [u64; 2],
-    cpu_tail_worker_wins: [u64; 2],
-    cpu_tail_worker_deadline_misses: [u64; 2],
-    cpu_tail_worker_results: [u64; 2],
-    cpu_tail_worker_compute_s: [f64; 2],
-    cpu_tail_worker_saved_weight_bytes: [u64; 2],
-    cpu_tail_worker_attempts_by_depth: [[u64; 8]; 2],
-    cpu_tail_worker_wins_by_depth: [[u64; 8]; 2],
+    /// Per-worker attribution for the calibrated native CPU lane.
+    cpu_tail_worker_attempts: [u64; 4],
+    cpu_tail_worker_wins: [u64; 4],
+    cpu_tail_worker_deadline_misses: [u64; 4],
+    cpu_tail_worker_results: [u64; 4],
+    cpu_tail_worker_compute_s: [f64; 4],
+    cpu_tail_worker_saved_weight_bytes: [u64; 4],
+    cpu_tail_worker_attempts_by_depth: [[u64; 8]; 4],
+    cpu_tail_worker_wins_by_depth: [[u64; 8]; 4],
     /// Timing-only stage attribution by cold-queue depth (2..=9+).
     cpu_tail_stage_results_by_depth: [u64; 8],
     cpu_tail_input_d2h_s_by_depth: [f64; 8],
@@ -32859,14 +32859,14 @@ impl GpuDecodeStore {
             cpu_tail_dispatch_lag_s: 0.0,
             cpu_tail_attempts_by_depth: [0; 8],
             cpu_tail_wins_by_depth: [0; 8],
-            cpu_tail_worker_attempts: [0; 2],
-            cpu_tail_worker_wins: [0; 2],
-            cpu_tail_worker_deadline_misses: [0; 2],
-            cpu_tail_worker_results: [0; 2],
-            cpu_tail_worker_compute_s: [0.0; 2],
-            cpu_tail_worker_saved_weight_bytes: [0; 2],
-            cpu_tail_worker_attempts_by_depth: [[0; 8]; 2],
-            cpu_tail_worker_wins_by_depth: [[0; 8]; 2],
+            cpu_tail_worker_attempts: [0; 4],
+            cpu_tail_worker_wins: [0; 4],
+            cpu_tail_worker_deadline_misses: [0; 4],
+            cpu_tail_worker_results: [0; 4],
+            cpu_tail_worker_compute_s: [0.0; 4],
+            cpu_tail_worker_saved_weight_bytes: [0; 4],
+            cpu_tail_worker_attempts_by_depth: [[0; 8]; 4],
+            cpu_tail_worker_wins_by_depth: [[0; 8]; 4],
             cpu_tail_stage_results_by_depth: [0; 8],
             cpu_tail_input_d2h_s_by_depth: [0.0; 8],
             cpu_tail_submit_to_pickup_s_by_depth: [0.0; 8],
@@ -90419,14 +90419,14 @@ impl GpuDecodeStore {
             g.cpu_tail_dispatch_lag_s = 0.0;
             g.cpu_tail_attempts_by_depth = [0; 8];
             g.cpu_tail_wins_by_depth = [0; 8];
-            g.cpu_tail_worker_attempts = [0; 2];
-            g.cpu_tail_worker_wins = [0; 2];
-            g.cpu_tail_worker_deadline_misses = [0; 2];
-            g.cpu_tail_worker_results = [0; 2];
-            g.cpu_tail_worker_compute_s = [0.0; 2];
-            g.cpu_tail_worker_saved_weight_bytes = [0; 2];
-            g.cpu_tail_worker_attempts_by_depth = [[0; 8]; 2];
-            g.cpu_tail_worker_wins_by_depth = [[0; 8]; 2];
+            g.cpu_tail_worker_attempts = [0; 4];
+            g.cpu_tail_worker_wins = [0; 4];
+            g.cpu_tail_worker_deadline_misses = [0; 4];
+            g.cpu_tail_worker_results = [0; 4];
+            g.cpu_tail_worker_compute_s = [0.0; 4];
+            g.cpu_tail_worker_saved_weight_bytes = [0; 4];
+            g.cpu_tail_worker_attempts_by_depth = [[0; 8]; 4];
+            g.cpu_tail_worker_wins_by_depth = [[0; 8]; 4];
             g.cpu_tail_stage_results_by_depth = [0; 8];
             g.cpu_tail_input_d2h_s_by_depth = [0.0; 8];
             g.cpu_tail_submit_to_pickup_s_by_depth = [0.0; 8];
@@ -103986,13 +103986,15 @@ impl GpuDecodeStore {
                             deepseek_clamp:moe.deepseek_v4_activation,
                         });
                     }
+                    let worker_count = if crate::optimisations::CPU_MORE_WORKERS
+                        && crate::cpu_tail::compiled_lane_cpu_ids(3,4).is_ok() {4} else {2};
                     let mut workers=Vec::new();
-                    for index in 0..2 {
+                    for index in 0..worker_count {
                         workers.push(CpuTailRuntime::new_compiled(graph.hidden_size,
-                            graph.moe_intermediate_size,graph.group_size,index,2)?);
+                            graph.moe_intermediate_size,graph.group_size,index,worker_count)?);
                     }
                     let mut plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,graph.max_experts_per_tok)?;
-                    let affinities=(0..2).map(|i|crate::cpu_tail::compiled_lane_cpu_ids(i,2)).collect::<Result<Vec<_>,_>>()?;
+                    let affinities=(0..worker_count).map(|i|crate::cpu_tail::compiled_lane_cpu_ids(i,worker_count)).collect::<Result<Vec<_>,_>>()?;
                     plan.receipt["cpu_ids"]=serde_json::json!(affinities);
                     plan.receipt["optimisations"]=serde_json::from_str(crate::optimisations::manifest()).map_err(|e|e.to_string())?;
                     Ok((workers,plan))

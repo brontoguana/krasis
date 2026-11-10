@@ -12,6 +12,7 @@ macro_rules! registry {
     }
 }
 registry! {
+    CPU_MORE_WORKERS, false, "approximation", "Calibrated four-expert CPU partition with two-worker fallback", &[];
     CPU_WIDE_TEAM, false, "exact", "Eight-core direct-host CPU expert teams with four-core fallback", &[];
     CPU_MARLIN_READER, true, "exact", "Group-banded paired-row AVX2 Marlin reader", &[];
     CPU_COLD_LANE, true, "approximation", "Planned direct-host CPU cold expert lane", &[];

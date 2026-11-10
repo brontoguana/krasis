@@ -1183,7 +1183,7 @@ pub struct CpuTailRuntime {
 /// Discover distinct allowed physical cores, spreading each small team across
 /// cache domains. Startup calibration decides whether the team is useful.
 pub(crate) fn compiled_lane_cpu_ids(worker: usize, workers: usize) -> Result<Vec<usize>, String> {
-    if workers == 0 || workers > 2 || worker >= workers {
+    if workers == 0 || workers > 4 || worker >= workers {
         return Err("invalid compiled CPU lane team index".into());
     }
     let mut seen = std::collections::HashSet::new();
