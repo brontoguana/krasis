@@ -1180,8 +1180,8 @@ pub struct CpuTailRuntime {
     busy_sequence: Option<u64>,
 }
 
-/// Discover distinct allowed physical cores, spreading each small team across
-/// cache domains. Startup calibration decides whether the team is useful.
+/// Discover distinct allowed physical cores using the compiled cache-placement
+/// policy. Startup calibration decides whether each CPU partition is useful.
 pub(crate) fn compiled_lane_cpu_ids(worker: usize, workers: usize) -> Result<Vec<usize>, String> {
     if workers == 0 || workers > 4 || worker >= workers {
         return Err("invalid compiled CPU lane team index".into());
@@ -1211,11 +1211,15 @@ pub(crate) fn compiled_lane_cpu_ids(worker: usize, workers: usize) -> Result<Vec
         }
     }
     let mut selected = Vec::new();
-    let depth = domains.values().map(Vec::len).max().unwrap_or(0);
-    for rank in 0..depth {
-        for cores in domains.values() {
-            if let Some(&cpu) = cores.get(rank) {
-                selected.push(cpu);
+    if crate::optimisations::CPU_CACHE_LOCAL_TEAMS {
+        // Adjacent allowed physical cores from one cache domain form a team
+        // where available. Partial domains still retain distinct-core safety.
+        for cores in domains.values() { selected.extend_from_slice(cores); }
+    } else {
+        let depth = domains.values().map(Vec::len).max().unwrap_or(0);
+        for rank in 0..depth {
+            for cores in domains.values() {
+                if let Some(&cpu) = cores.get(rank) { selected.push(cpu); }
             }
         }
     }
