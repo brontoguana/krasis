@@ -12,6 +12,7 @@ macro_rules! registry {
     }
 }
 registry! {
+    STREAMED_COLD_INT3, false, "approximation", "Three-bit streamed cold weights with unchanged resident and CPU weights", &[];
     CPU_FULL_QUEUE_PLANNER, true, "approximation", "Calibrate complete CPU and GPU cold queues for partition selection", &["CPU_COLD_LANE"];
     CPU_VECTOR_SCALES, true, "exact", "Vector scale FMA for 1024-output CPU reader bands", &["CPU_MARLIN_READER"];
     CPU_K_MAJOR_READER, true, "exact", "Contiguous packed K traversal for 1024-output AVX2 bands", &["CPU_MARLIN_READER"];

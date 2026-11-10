@@ -4269,6 +4269,7 @@ const DEEPSEEK_V4_DECODE_FP8_QAT_BLOCK_SIZE: usize = 64;
 const DEEPSEEK_V4_DECODE_FP4_QAT_BLOCK_SIZE: usize = 32;
 
 const KERNEL_NAMES: &[&str] = &[
+    "streamed_cold_int3_expand",
     "embedding_lookup",
     "fused_add_rmsnorm",
     "rmsnorm",
@@ -19358,6 +19359,7 @@ struct GpuDecodeGraph {
     synthetic_repack: Option<Arc<std::sync::Mutex<crate::synthetic_repack::SyntheticRepackRing>>>,
     /// Opt-in bit-exact expert sidecar and pipelined GPU decoder.
     expert_compression: Option<ExpertCompressionRuntime>,
+    streamed_cold: Option<crate::streamed_cold::Runtime>,
     route_locality: RouteLocalityStats,
     route_shadow_logits: Vec<f32>,
     route_shadow_bias: Vec<f32>,
@@ -32877,6 +32879,7 @@ impl GpuDecodeStore {
             cpu_tail_output_copy_pending: false,
             synthetic_repack: None,
             expert_compression: None,
+            streamed_cold: None,
             route_locality: RouteLocalityStats::from_env(),
             route_shadow_logits: Vec::new(),
             route_shadow_bias: Vec::new(),
@@ -70614,7 +70617,11 @@ impl GpuDecodeStore {
 
                             // Queue compressed-copy/decode or ordinary DMA with no
                             // per-expert host synchronization.
-                            if let Some(codec) = graph.expert_compression.as_mut() {
+                            if let Some(tier) = graph.streamed_cold.as_ref() {
+                                let bytes=tier.enqueue(expert.w13_packed_ptr,base,copy_stream)? as u64;
+                                graph.dma_bytes_total+=bytes; graph.dma_call_count+=1;
+                                boundary_dma_bytes+=bytes; boundary_dma_calls+=1;
+                            } else if let Some(codec) = graph.expert_compression.as_mut() {
                                 let copy_calls = codec.copy_calls_per_expert() as u64;
                                 codec.enqueue(miss_count - 1, &expert, base, copy_stream)?;
                                 graph.dma_bytes_total += expert.compressed_bytes as u64;
@@ -71568,7 +71575,11 @@ impl GpuDecodeStore {
                             continue;
                         }
 
-                        if let Some(codec) = graph.expert_compression.as_mut() {
+                        if let Some(tier) = graph.streamed_cold.as_ref() {
+                            let bytes=tier.enqueue(expert.w13_packed_ptr,base,copy_stream)? as u64;
+                            graph.dma_bytes_total+=bytes; graph.dma_call_count+=1;
+                            boundary_dma_bytes+=bytes; boundary_dma_calls+=1;
+                        } else if let Some(codec) = graph.expert_compression.as_mut() {
                             let copy_calls = codec.copy_calls_per_expert() as u64;
                             codec.enqueue(ci, &expert, base, copy_stream)?;
                             graph.dma_bytes_total += expert.compressed_bytes as u64;
@@ -72893,6 +72904,9 @@ impl GpuDecodeStore {
                     graph.t_moe_apfl += t.elapsed().as_secs_f64();
                 }
             }
+            // Keep resident payloads at their original precision. Compact cold
+            // staging must never become a resident source through promotion.
+            if graph.streamed_cold.is_some() { dynamic_promotions.clear(); }
             if !dynamic_promotions.is_empty() {
                 let mut promoted = 0usize;
                 if let Some(ref mut hcs) = graph.hcs {
@@ -102332,6 +102346,7 @@ impl GpuDecodeStore {
             return Ok(());
         }
         self.setup_expert_compression(&store)?;
+        self.setup_streamed_cold(&store)?;
 
         // Step 4: Pin expert weight memory for async DMA (page-lock for full PCIe bandwidth)
         // Without pinning, CUDA must bounce through a staging buffer, halving effective bandwidth.
@@ -102736,6 +102751,41 @@ impl GpuDecodeStore {
             layer.gate.grid_rows,
             layer.gate.grid_cols,
         );
+        Ok(())
+    }
+
+    fn setup_streamed_cold(&mut self, store: &crate::weights::WeightStore) -> PyResult<()> {
+        if !crate::optimisations::STREAMED_COLD_INT3 { return Ok(()); }
+        let graph=self.graph.as_mut().ok_or_else(||pyo3::exceptions::PyRuntimeError::new_err("cold tier requires graph"))?;
+        if graph.glm5_hc_mean_mult.is_none() || graph.expert_bits!=4
+            || graph.synthetic_repack.is_some() || graph.expert_compression.is_some()
+            || !graph.peer_experts.is_empty() || graph.apfl.is_some()
+            || graph.gpu_route_sync || graph.prefetch_depth!=0
+            || self.draft.is_some() || self.dspark.is_some() {
+            eprintln!("STREAMED COLD INT3 fallback: unsupported execution mode"); return Ok(());
+        }
+        let attempt=(||->Result<_,String>{
+            let identity=store.gpu_cache_identity.as_ref().ok_or("cold tier requires source identity")?;
+            let mut ordinals=std::collections::HashMap::new();let mut geometry=None;
+            for (local,_) in store.experts_gpu.iter().enumerate(){
+                let global=store.moe_layer_start+local;
+                let layer=store.config.moe_abs_layer(global);
+                let moe=graph.moe_layers[layer].as_ref().ok_or("cold tier layer absent")?;
+                for (e,expert) in moe.experts.iter().enumerate(){
+                    let sizes=[expert.w13_packed_bytes,expert.w13_scales_bytes,expert.w2_packed_bytes,expert.w2_scales_bytes];
+                    if expert.bits!=4 || geometry.is_some_and(|previous|previous!=sizes){return Err("cold tier requires homogeneous standard INT4 experts".into());}
+                    geometry=Some(sizes);
+                    if ordinals.insert(expert.w13_packed_ptr,global*store.config.n_routed_experts+e).is_some(){return Err("cold tier source alias".into());}
+                }
+            }
+            let count=store.config.num_moe_layers()*store.config.n_routed_experts;
+            let function=self.device.get_func(MODULE_NAME,"streamed_cold_int3_expand").ok_or("cold tier expansion kernel absent")?;
+            let function=unsafe{function.cu_function()};
+            crate::streamed_cold::Runtime::new(&self.device,identity,geometry.ok_or("cold tier has no experts")?,ordinals,count,function)
+        })();
+        // An explicitly enabled experimental treatment must fail visibly when
+        // its artifact is missing; never mislabel fallback as a measured tier.
+        graph.streamed_cold=Some(attempt.map_err(pyo3::exceptions::PyRuntimeError::new_err)?);
         Ok(())
     }
 
@@ -104008,7 +104058,7 @@ impl GpuDecodeStore {
                         workers.push(CpuTailRuntime::new_compiled(graph.hidden_size,
                             graph.moe_intermediate_size,graph.group_size,index,worker_count)?);
                     }
-                    let mut plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,graph.max_experts_per_tok)?;
+                    let mut plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,graph.max_experts_per_tok,graph.streamed_cold.as_ref())?;
                     let affinities=(0..worker_count).map(|i|crate::cpu_tail::compiled_lane_cpu_ids(i,worker_count)).collect::<Result<Vec<_>,_>>()?;
                     plan.receipt["cpu_ids"]=serde_json::json!(affinities);
                     plan.receipt["optimisations"]=serde_json::from_str(crate::optimisations::manifest()).map_err(|e|e.to_string())?;

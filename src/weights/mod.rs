@@ -6109,7 +6109,8 @@ impl WeightStore {
         let per_routed_expert = w13pb + w13sb + w2pb + w2sb;
         let per_routed_layer = config.n_routed_experts * per_routed_expert;
         let routed_expert_sha256 =
-            if std::env::var_os("KRASIS_EXPERT_COMPRESSION_SIDECAR").is_some() {
+            if std::env::var_os("KRASIS_EXPERT_COMPRESSION_SIDECAR").is_some()
+                || crate::optimisations::STREAMED_COLD_INT3 {
                 let routed_expert_count = total_moe_layers
                     .checked_mul(config.n_routed_experts)
                     .ok_or_else(|| "routed expert identity count overflow".to_string())?;

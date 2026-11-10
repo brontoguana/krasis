@@ -36,16 +36,18 @@ fn sizes(expert: &CpuTailExpertRef) -> Result<[usize; 4], String> {
             .ok_or("CPU lane W2 scale extent overflow")?,
     ])
 }
-struct Scratch {
+struct Scratch<'a> {
+    tier: Option<&'a crate::streamed_cold::Runtime>,
     stream: cuda::CUstream,
     begin: cuda::CUevent,
     end: cuda::CUevent,
     pointer: u64,
     bytes: usize,
 }
-impl Scratch {
-    fn new(bytes: usize) -> Result<Self, String> {
+impl<'a> Scratch<'a> {
+    fn new(bytes: usize, tier: Option<&'a crate::streamed_cold::Runtime>) -> Result<Self, String> {
         let mut out = Self {
+            tier,
             stream: std::ptr::null_mut(),
             begin: std::ptr::null_mut(),
             end: std::ptr::null_mut(),
@@ -87,6 +89,12 @@ impl Scratch {
         Ok(out)
     }
     fn enqueue(&self, expert: &CpuTailExpertRef, timed: bool) -> Result<(), String> {
+        if let Some(tier) = self.tier {
+            unsafe { if timed { checked(cuda::lib().cuEventRecord(self.begin,self.stream),"compact begin")?; } }
+            tier.enqueue(expert.w13_packed_ptr,self.pointer,self.stream)?;
+            unsafe { if timed { checked(cuda::lib().cuEventRecord(self.end,self.stream),"compact end")?; } }
+            return Ok(());
+        }
         let lengths = sizes(expert)?;
         let hosts = [
             expert.w13_packed_ptr,
@@ -157,7 +165,7 @@ impl Scratch {
         Ok(())
     }
 }
-impl Drop for Scratch {
+impl Drop for Scratch<'_> {
     fn drop(&mut self) {
         unsafe {
             // The stream is private and all host/model sources outlive this owner.
@@ -291,6 +299,7 @@ pub(crate) fn calibrate(
     workers: &mut [CpuTailRuntime],
     experts: &[CpuTailExpertRef],
     maximum_cold: usize,
+    tier: Option<&crate::streamed_cold::Runtime>,
 ) -> Result<Plan, String> {
     if workers.is_empty()
         || workers.len() > 4
@@ -321,7 +330,7 @@ pub(crate) fn calibrate(
     {
         return Err("CPU lane calibration needs equal loaded expert geometry".into());
     }
-    let scratch = Scratch::new(bytes)?;
+    let scratch = Scratch::new(bytes,tier)?;
     if crate::optimisations::CPU_FULL_QUEUE_PLANNER && maximum_cold <= 8 {
         return calibrate_full_queues(workers,experts,maximum_cold,&scratch,bytes);
     }

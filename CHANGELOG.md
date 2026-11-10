@@ -1,3 +1,9 @@
+## 2026-11-10 — Screen compact streamed cold experts
+
+- Add default-off STREAMED_COLD_INT3 and an offline builder from existing Marlin weights. Round packed cold codes onto an even three-bit lattice, keep BF16 scales, original resident experts and original CPU sources unchanged, and expand directly into existing decode staging with one CUDA kernel.
+- Bind the artifact to exact source and compact-payload hashes. Bound writable-private pinned mappings, retain an explicit 600 MiB reserve before scratch allocation, join CUDA work before teardown, and recalibrate CPU admission with the actual compact copy/expand pipeline.
+- Freeze decode promotions while the tier is active to prevent approximate staging from replacing original resident weights. Include the lost promotion benefit in normal serving comparisons; unsupported execution modes use the established path. No adoption or quality verdict yet.
+
 ## 2026-11-10 — Adopt the native CPU cold lane on the cumulative development stack
 
 - Enable the native CPU lane and exact paired-row Marlin reader by default, stacked on protected pruning and the seven exact defaults. Paired GLM-5.3 65K decode improves 154.121→126.071 ms/token (6.488→7.932 tokens/s); 3K and 16K improve to 124.507 and 124.766 ms/token. Both 65K ordinary repeats are below the requested 129 ms checkpoint.
