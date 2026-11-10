@@ -173,8 +173,8 @@ impl AdaptiveColdDropRuntime {
     /// supported GLM registration path; runtime environment cannot change it.
     pub(crate) fn from_compiled_policy() -> Self {
         Self { stats: Some(ShadowPolicyStats::new(ColdDropPolicy {
-            protect_rank_fraction: 0.75,
-            max_mass_fraction: if crate::optimisations::COLD_EXPERT_PRUNING_20 {0.20} else if crate::optimisations::COLD_EXPERT_PRUNING_15 {0.15} else {0.10},
+            protect_rank_fraction: if crate::optimisations::COLD_EXPERT_PRUNING_FIVE {0.625}else{0.75},
+            max_mass_fraction: if crate::optimisations::COLD_EXPERT_PRUNING_FIVE {0.25}else if crate::optimisations::COLD_EXPERT_PRUNING_20 {0.20} else if crate::optimisations::COLD_EXPERT_PRUNING_15 {0.15} else {0.10},
         })) }
     }
 
@@ -554,18 +554,27 @@ mod compiled_policy_tests {
         let mut policy = AdaptiveColdDropRuntime::from_compiled_policy();
         assert!(policy.enabled());
         // One uniform expert has 12.5% mass; two have 25%. Rank protection
-        // and the configured ceiling therefore permit at most one here.
+        // and the configured ceiling permit one, or two at the 25% ceiling.
         let uniform = policy.plan_and_record(&[1.0; 8], &[100; 8]);
-        if crate::optimisations::COLD_EXPERT_PRUNING_15 {
+        if crate::optimisations::COLD_EXPERT_PRUNING_FIVE {
+            assert_eq!(uniform.positions, vec![6,7]);
+            assert_eq!(uniform.dropped_mass_fraction,0.25);
+        } else if crate::optimisations::COLD_EXPERT_PRUNING_15 {
             assert_eq!(uniform.positions, vec![7]);
             assert_eq!(uniform.dropped_mass_fraction, 0.125);
         } else {
             assert!(uniform.positions.is_empty());
         }
         let plan = policy.plan_and_record(&[0.5,0.2,0.1,0.08,0.05,0.03,0.025,0.015], &[100; 8]);
-        assert_eq!(plan.positions, vec![6,7]);
-        assert_eq!(plan.dropped_bytes,200);
-        assert!((plan.dropped_mass_fraction-0.04).abs()<1e-7);
+        if crate::optimisations::COLD_EXPERT_PRUNING_FIVE {
+            assert_eq!(plan.positions, vec![5,6,7]);
+            assert_eq!(plan.dropped_bytes,300);
+            assert!((plan.dropped_mass_fraction-0.07).abs()<1e-7);
+        } else {
+            assert_eq!(plan.positions, vec![6,7]);
+            assert_eq!(plan.dropped_bytes,200);
+            assert!((plan.dropped_mass_fraction-0.04).abs()<1e-7);
+        }
         // Both low ranks total 18%: only the larger compiled ceiling can omit both.
         let boundary = policy.plan_and_record(
             &[0.20,0.16,0.13,0.12,0.11,0.10,0.10,0.08], &[100; 8],

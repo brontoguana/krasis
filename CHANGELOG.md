@@ -1,3 +1,7 @@
+## 2026-11-10 — Prepare cumulative cold-tier comparison
+
+- Include independently switched five-route pruning in the fitted cold-tier source for testing on the cumulative stack if pruning qualifies. Both pending switches remain default-off; no quality or serving claim.
+
 ## 2026-11-10 — Prepare layer-fitted compact cold codebooks
 
 - Add default-off STREAMED_COLD_NF3 as an alternative to the uniform three-bit cold tier. Keep the same three-bit payload sizes, unchanged original resident/CPU weights and frozen promotion policy; fit eight original integer levels per layer while preserving zero.
