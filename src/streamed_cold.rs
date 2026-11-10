@@ -75,6 +75,8 @@ impl Runtime {
         eprintln!("STREAMED COLD INT3 experts={count} raw_bytes={} compact_bytes={compact_bytes} resident=original cpu=original promotions=frozen",sizes.iter().sum::<usize>());
         Ok(Self{device:Arc::clone(device),segments,locations,ordinals,scratch,function,words,compact_bytes})
     }
+    pub(crate) fn payload_bytes(&self) -> usize { self.compact_bytes }
+
     /// One ordered copy+expand pair. The existing copy-stream completion event
     /// makes the normal graph pointers ready; scratch is reused on that stream.
     pub(crate) fn enqueue(&self, source:usize, output:u64, stream:cu::CUstream)->Result<usize,String>{

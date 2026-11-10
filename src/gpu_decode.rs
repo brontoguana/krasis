@@ -71478,7 +71478,10 @@ impl GpuDecodeStore {
                                 let submitted_at =
                                     (graph.timing_enabled || graph.cpu_tail_host_timing_enabled).then(std::time::Instant::now);
                                 let base = graph_buf_base[candidate_index];
-                                let dma_bytes = if expert.contiguous_ptr != 0 {
+                                let compact_tier=graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3);
+                                let dma_bytes = if let Some(tier)=compact_tier {
+                                    tier.payload_bytes() as u64
+                                } else if expert.contiguous_ptr != 0 {
                                     expert.contiguous_bytes as u64
                                 } else {
                                     (expert.w13_packed_bytes
@@ -71487,7 +71490,7 @@ impl GpuDecodeStore {
                                         + expert.w2_scales_bytes)
                                         as u64
                                 };
-                                let dma_calls = if expert.contiguous_ptr != 0 { 1 } else { 4 };
+                                let dma_calls = if compact_tier.is_some() || expert.contiguous_ptr != 0 { 1 } else { 4 };
                                 let promotion =
                                     graph.hcs.as_ref().filter(|h| h.dynamic_enabled).map(|_| {
                                         DynamicHcsPromotion {
@@ -72401,7 +72404,9 @@ impl GpuDecodeStore {
                                 )
                             })?;
                         unsafe {
-                            if expert.contiguous_ptr != 0 {
+                            if let Some(tier)=graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3) {
+                                tier.enqueue(expert.w13_packed_ptr,pending.staging_base,copy_stream)?;
+                            } else if expert.contiguous_ptr != 0 {
                                 let copy_err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                                     pending.staging_base,
                                     expert.contiguous_ptr as *const std::ffi::c_void,

@@ -2,6 +2,7 @@
 
 - Add default-off STREAMED_COLD_INT3 and an offline builder from existing Marlin weights. Round packed cold codes onto an even three-bit lattice, keep BF16 scales, original resident experts and original CPU sources unchanged, and expand directly into existing decode staging with one CUDA kernel.
 - Bind the artifact to exact source and compact-payload hashes. Bound writable-private pinned mappings, retain an explicit 600 MiB reserve before scratch allocation, join CUDA work before teardown, and recalibrate CPU admission with the actual compact copy/expand pipeline.
+- Count CPU-avoided transfer bytes using the actual compact payload and retain compact fallback copies. Initialise the staging buffer exclusively on its owning copy stream.
 - Freeze decode promotions while the tier is active to prevent approximate staging from replacing original resident weights. Include the lost promotion benefit in normal serving comparisons; unsupported execution modes use the established path. No adoption or quality verdict yet.
 
 ## 2026-11-10 — Adopt the native CPU cold lane on the cumulative development stack
