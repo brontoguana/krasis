@@ -13542,3 +13542,5 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Retire the wider-team selector after its repeated serving regression; the tested four-core path remains unchanged. Existing native binaries and protected release/model refs are preserved.
 
 - 10 November 2026: Adopt COLD_EXPERT_PRUNING_15 after compiler-clean request repeats and the unchanged fast tier (KL 0.0108734, 97.9167% greedy agreement; JSON 1/5, retrieval 5/5, coding 3/5). Protect six of eight route ranks and cap omitted demand-cold mass at 15%. Candidate decode medians: 117.708 / 118.270 / 120.150 ms at 3K / 16K / 65K. Record startup-tuning variability and exclude contended measurements; full ADQ remains deferred.
+
+- Correct the startup pruning message to report the effective compiled 10% or 15% cap; runtime policy and measured arithmetic are unchanged.
