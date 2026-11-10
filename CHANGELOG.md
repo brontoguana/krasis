@@ -13537,3 +13537,6 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Add a switchable four-worker CPU partition, including capacity-safe counters and calibrated two-worker fallback; pending serving and fast-tier qualification.
 
 - In explicit CPU host-timing diagnostics, retain wait ranges and reconstructed worker-service ranges for intersection with GPU activity; ordinary runs do not collect them.
+
+- Adopt calibrated four-worker CPU partitioning as a development default after paired 3K/16K/65K decode improves 124.103/124.002/126.644 to 120.477/119.351/121.888 ms/token. Fast tier passes (KL 0.003872, 98.44% greedy agreement; JSON/retrieval unchanged, coding 2/5 to 3/5). Session-cache ownership checks pass. Full ADQ remains deferred.
+- Retire the wider-team selector after its repeated serving regression; the tested four-core path remains unchanged. Existing native binaries and protected release/model refs are preserved.

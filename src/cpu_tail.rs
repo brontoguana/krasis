@@ -1219,11 +1219,7 @@ pub(crate) fn compiled_lane_cpu_ids(worker: usize, workers: usize) -> Result<Vec
             }
         }
     }
-    let team_size = if crate::optimisations::CPU_WIDE_TEAM && selected.len() >= workers * 8 {
-        8
-    } else {
-        4
-    };
+    let team_size = 4;
     let needed = workers * team_size;
     if selected.len() < needed {
         return Err(format!(
