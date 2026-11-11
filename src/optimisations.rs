@@ -13,7 +13,7 @@ macro_rules! registry {
 }
 registry! {
     COLD_EXPERT_PRUNING_FIVE, true, "approximation", "Protect five of eight routes with a 25 percent cold-mass ceiling", &["COLD_EXPERT_PRUNING_20"];
-    STREAMED_COLD_NF3, false, "approximation", "Layer-fitted three-bit codebooks for streamed cold experts", &[];
+    STREAMED_COLD_NF3, true, "approximation", "Layer-fitted three-bit codebooks for streamed cold experts", &[];
     STREAMED_COLD_INT3, false, "approximation", "Three-bit streamed cold weights with unchanged resident and CPU weights", &[];
     CPU_FULL_QUEUE_PLANNER, true, "approximation", "Calibrate complete CPU and GPU cold queues for partition selection", &["CPU_COLD_LANE"];
     CPU_VECTOR_SCALES, true, "exact", "Vector scale FMA for 1024-output CPU reader bands", &["CPU_MARLIN_READER"];

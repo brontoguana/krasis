@@ -13579,3 +13579,8 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Enable COLD_EXPERT_PRUNING_FIVE by default within the existing supported GLM registration guard; protect five of eight routes and cap omitted cold mass at25%. Other model/mode guards remain unchanged.
 - Interleaved5/3/3 ordinary samples:3K97.730->91.648,16K98.596->93.392,65K100.072->94.069ms/token; all paired signs improve. At65K9.993->10.631tok/s and inferred expert-demandH2D.932->.747GB/forward.
 - Expanded paired short screen passes with zero task losses/one gain,KL.01620,95.83%agreement; fullADQ remains deferred. Correct startup logging to show actual rank/mass policy. No release.
+
+## 2026-11-11 — adopted fitted streamed cold tier
+- Enable STREAMED_COLD_NF3 after interleaved 5/3/3 ordinary samples improve at every history: 3K 91.359→88.066, 16K 91.530→89.719, 65K 94.930→91.018 ms/token; all paired signs improve.
+- Expanded fast tier passes near its limits (KL 0.028228, 94.79% greedy agreement; coding 3/12→1/12). This is the first switch to disable if final ADQ requires bisection. Full ADQ remains deferred.
+- Retain original resident/CPU weights; fitted staging adds about 143–155 seconds of measured startup time. Active/RAM restoration and cancellation pass, sampled free VRAM ≥912 MiB.
