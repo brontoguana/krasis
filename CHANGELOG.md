@@ -13602,3 +13602,5 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 
 ## 2026-11-11 — retain capability and mode fallbacks
 - Preserve accepted exact K6 attention when tensor geometry is unsupported: allocate per-layer fallback workspace and select tensor launches only for admitted rope/head/capacity shapes. The qualified GLM tensor branch is unchanged. Retain original shared execution for unqualified peer/predictor/repacking/compression modes. Candidate defaults remain off pending the running fast tier; no new speed gain claimed.
+
+- Complete diagnostic ownership teardown: join cached CPU worker pools alongside the active pool before graph buffers are released. Reject live control when the ordinary sequence-state readiness guard reports pending recovery. These control/teardown guards leave normal builds and measured hot arithmetic unchanged.

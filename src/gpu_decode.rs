@@ -21552,6 +21552,8 @@ impl Drop for GpuDecodeGraph {
                 );
             }
             if crate::optimisations::CPU_COLD_LANE {self.cpu_tail_workers.clear();}
+            #[cfg(feature = "live-switches")]
+            self.live_calibrations.clear();
             self.per_layer_graphs.clear();
             drop(self.hot_hcs_full_graph.take());
         }
