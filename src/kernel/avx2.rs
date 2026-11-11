@@ -4243,3 +4243,142 @@ pub unsafe fn expert_matmul_int4_marlin_vector_scales(
     }}}
 
 }
+
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn expert_matmul_int4_marlin_int8_k_major(
+    packed: *const u32, scales: *const u16, act: *const i16,
+    act_scales: *const f32, output: *mut f32,
+    k: usize, n: usize, n_start: usize, n_out: usize, gs: usize,
+) {
+    use std::arch::x86_64::*;
+    if n_out > 1024 {
+        return expert_matmul_int4_marlin_paired_baseline(
+            packed, scales, act, act_scales, output, k, n, n_start, n_out, gs,
+        );
+    }
+    assert!(n_out % 64 == 0 && gs > 0 && gs % 16 == 0);
+    let zero = _mm256_setzero_si256();
+    let nibble = _mm256_set1_epi32(0x000f000f);
+    let ones = _mm256_set1_epi16(1);
+    let chunks = n_out / 64;
+    let mut scaled = [0.0f32; 1024];
+    let mut partials = [zero; 256];
+    let partial = partials.as_mut_ptr();
+    macro_rules! dot {
+        ($w:expr,$a:expr) => {{
+            let bytes = _mm256_or_si256(_mm256_and_si256($w,nibble),
+                _mm256_and_si256(_mm256_slli_epi32($w,4),_mm256_slli_epi32(nibble,8)));
+            _mm256_madd_epi16(_mm256_maddubs_epi16(bytes,$a),ones)
+        }};
+    }
+    std::ptr::write_bytes(output, 0, n_out);
+    for g in 0..k / gs {
+        for i in 0..chunks * 16 { *partial.add(i) = zero; }
+        for t in 0..gs / 16 {
+            let kt = g * (gs / 16) + t;
+            let ab = kt * 16;
+            let mut aa = [zero; 2];
+            let mut bias = [zero; 2];
+            for ri in 0..2 {
+                let mut words = [0i32;2]; let mut biases = [0i32;2];
+                for j in 0..2 {
+                    let p=ab+2*(ri*2+j);
+                    let values=[*act.add(p),*act.add(p+8),*act.add(p+1),*act.add(p+9)]
+                        .map(|x| ((x as i32+128)>>8).clamp(-128,127));
+                    words[j]=values.iter().enumerate().fold(0u32,|w,(i,&x)|w|((x as u8 as u32)<<(8*i))) as i32;
+                    biases[j]=8*values.iter().sum::<i32>();
+                }
+                aa[ri]=_mm256_set_m128i(_mm_set1_epi32(words[1]),_mm_set1_epi32(words[0]));
+                bias[ri]=_mm256_set_m128i(_mm_set1_epi32(biases[1]),_mm_set1_epi32(biases[0]));
+            }
+            for nc in 0..chunks {
+                let base = n_start + nc * 64;
+                let wb = kt * (2 * n) + (base / 64) * 128;
+                for si in 0..2 {
+                    let stripe = si * 4;
+                    let off = (nc * 2 + si) * 8;
+                    let mut low = [zero; 4];
+                    let mut high = [zero; 4];
+                    for c in 0..4 {
+                        low[c] = *partial.add(off + c);
+                        high[c] = *partial.add(off + 4 + c);
+                    }
+                    for ri in 0..2 {
+                        let r = ri * 2;
+                        for c in 0..4 {
+                            let w = _mm256_loadu_si256(
+                                packed.add(wb + ((stripe + c) * 4 + r) * 4) as *const __m256i,
+                            );
+                            // Unsigned nibble pairs sum to at most 3840 in
+                            // magnitude before the second integer reduction.
+                            let lo = _mm256_sub_epi32(dot!(w, aa[ri]), bias[ri]);
+                            let hi = _mm256_sub_epi32(dot!(_mm256_srli_epi32(w,8), aa[ri]), bias[ri]);
+                            low[c] = _mm256_add_epi32(low[c], lo);
+                            high[c] = _mm256_add_epi32(high[c], hi);
+                        }
+                    }
+                    for c in 0..4 {
+                        *partial.add(off + c) = low[c];
+                        *partial.add(off + 4 + c) = high[c];
+                    }
+                }
+            }
+        }
+        let a_scale = *act_scales.add(g) * 256.0;
+        for nc in 0..chunks {
+            let base = n_start + nc * 64;
+            for si in 0..2 {
+                let stripe = si * 4;
+                let off = (nc * 2 + si) * 8;
+                for c in 0..4 {
+                    let lo = *partial.add(off + c);
+                    let hi = *partial.add(off + 4 + c);
+                    let lo = _mm_add_epi32(_mm256_castsi256_si128(lo), _mm256_extracti128_si256(lo, 1));
+                    let hi = _mm_add_epi32(_mm256_castsi256_si128(hi), _mm256_extracti128_si256(hi, 1));
+                    if crate::optimisations::CPU_VECTOR_SCALES {
+                        let sum = _mm256_set_m128i(
+                            _mm_unpackhi_epi32(lo, hi), _mm_unpacklo_epi32(lo, hi),
+                        );
+                        let scale = _mm256_castsi256_ps(_mm256_slli_epi32(
+                            _mm256_cvtepu16_epi32(_mm_loadu_si128(
+                                scales.add(g * n + base + (stripe + c) * 8) as *const __m128i,
+                            )), 16,
+                        ));
+                        let dst = scaled.as_mut_ptr().add(nc * 64 + (stripe + c) * 8);
+                        let prior = _mm256_loadu_ps(dst);
+                        _mm256_storeu_ps(dst, _mm256_fmadd_ps(
+                            _mm256_cvtepi32_ps(sum),
+                            _mm256_mul_ps(scale, _mm256_set1_ps(a_scale)), prior,
+                        ));
+                    } else {
+                        let mut ll = [0i32; 4];
+                        let mut hh = [0i32; 4];
+                        _mm_storeu_si128(ll.as_mut_ptr() as *mut __m128i, lo);
+                        _mm_storeu_si128(hh.as_mut_ptr() as *mut __m128i, hi);
+                        for s in 0..4 {
+                            let a = s * 16 + stripe + c;
+                            let b = a + 8;
+                            let scale_base = g * n + base;
+                            let ls = f32::from_bits((*scales.add(scale_base + (a % 8) * 8 + a / 8) as u32) << 16);
+                            let hs = f32::from_bits((*scales.add(scale_base + (b % 8) * 8 + b / 8) as u32) << 16);
+                            let dst_a = output.add(nc * 64 + a);
+                            let dst_b = output.add(nc * 64 + b);
+                            *dst_a = (ll[s] as f32).mul_add(ls * a_scale, *dst_a);
+                            *dst_b = (hh[s] as f32).mul_add(hs * a_scale, *dst_b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if crate::optimisations::CPU_VECTOR_SCALES {
+        for nc in 0..n_out / 64 {
+            for c in 0..8 {
+                for subtile in 0..4 {
+                    *output.add(nc * 64 + subtile * 16 + c) = scaled[nc * 64 + c * 8 + subtile * 2];
+                    *output.add(nc * 64 + subtile * 16 + c + 8) = scaled[nc * 64 + c * 8 + subtile * 2 + 1];
+                }
+            }
+        }
+    }
+}

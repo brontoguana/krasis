@@ -783,6 +783,17 @@ pub(crate) struct PersistentTransposedTeam {
 
 impl PersistentTransposedTeam {
     pub(crate) fn new(cpu_ids: &[usize]) -> Result<Self, String> {
+        Self::new_precision::<false>(cpu_ids)
+    }
+
+    fn new_compiled_lane(cpu_ids: &[usize], int8: bool) -> Result<Self, String> {
+        #[cfg(feature = "live-switches")]
+        { if int8 {Self::new_precision::<true>(cpu_ids)}else{Self::new_precision::<false>(cpu_ids)} }
+        #[cfg(not(feature = "live-switches"))]
+        { let _ = int8; Self::new_precision::<{crate::optimisations::CPU_INT8_K_MAJOR}>(cpu_ids) }
+    }
+
+    fn new_precision<const INT8: bool>(cpu_ids: &[usize]) -> Result<Self, String> {
         if cpu_ids.is_empty() {
             return Err("persistent CPU-tail team requires at least one CPU".to_string());
         }
@@ -843,7 +854,16 @@ impl PersistentTransposedTeam {
                             for chunk_index in (worker_index..chunks).step_by(worker_count) {
                                 let n_start = chunk_index * chunk_n;
                                 let n_count = (job.n - n_start).min(chunk_n);
-                                if matches!(job.format, CpuTailWeightFormat::Marlin) {
+                                if INT8 && matches!(job.format, CpuTailWeightFormat::Marlin) && n_count == 1024 {
+                                    crate::kernel::avx2::expert_matmul_int4_marlin_int8_k_major(
+                                        job.packed_addr as *const u32,
+                                        job.scales_addr as *const u16,
+                                        job.act_addr as *const i16,
+                                        job.act_scales_addr as *const f32,
+                                        (job.output_addr as *mut f32).add(n_start),
+                                        job.k, job.n, n_start, n_count, job.group_size,
+                                    );
+                                } else if matches!(job.format, CpuTailWeightFormat::Marlin) {
                                     crate::kernel::avx2::expert_matmul_int4_marlin(
                                         job.packed_addr as *const u32,
                                         job.scales_addr as *const u16,
@@ -1260,14 +1280,21 @@ impl CpuTailRuntime {
         worker_count: usize,
     ) -> Result<Self, String> {
         Self::new_inner(hidden_size, intermediate_size, group_size, timing_enabled,
-            worker_index, worker_count, false)
+            worker_index, worker_count, false, false)
     }
 
     pub(crate) fn new_compiled(hidden_size:usize, intermediate_size:usize, group_size:usize,
         worker_index:usize,worker_count:usize)->Result<Self,String>{
         if !crate::optimisations::CPU_COLD_LANE {return Err("compiled CPU lane is disabled".into());}
         compiled_lane_cpu_ids(worker_index,worker_count)?;
-        Self::new_inner(hidden_size,intermediate_size,group_size,true,worker_index,worker_count,true)
+        Self::new_inner(hidden_size,intermediate_size,group_size,true,worker_index,worker_count,true,crate::optimisations::CPU_INT8_K_MAJOR)
+    }
+
+    #[cfg(feature = "live-switches")]
+    pub(crate) fn new_live_compiled(hidden:usize, intermediate:usize, group:usize, index:usize, count:usize, int8:bool)->Result<Self,String> {
+        if !crate::optimisations::CPU_COLD_LANE {return Err("compiled CPU lane is disabled".into());}
+        compiled_lane_cpu_ids(index,count)?;
+        Self::new_inner(hidden,intermediate,group,true,index,count,true,int8)
     }
 
     fn new_inner(
@@ -1278,6 +1305,7 @@ impl CpuTailRuntime {
         worker_index: usize,
         worker_count: usize,
         compiled: bool,
+        int8: bool,
     ) -> Result<Self, String> {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         if !std::is_x86_feature_detected!("avx2") || !std::is_x86_feature_detected!("fma") {
@@ -1324,7 +1352,9 @@ impl CpuTailRuntime {
             .map_or(2, |config| config.minimum_queue_depth);
         let persistent_team = calibrated_config
             .as_ref()
-            .map(|config| PersistentTransposedTeam::new(&config.cpu_ids))
+            .map(|config| if compiled {
+                PersistentTransposedTeam::new_compiled_lane(&config.cpu_ids,int8)
+            } else { PersistentTransposedTeam::new(&config.cpu_ids) })
             .transpose()?;
         if let Some(config) = calibrated_config.as_ref() {
             eprintln!(

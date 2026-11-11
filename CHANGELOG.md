@@ -13587,3 +13587,5 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 
 ## 2026-11-11 — single-startup diagnostic dispatch
 - Prepare live-switches test build with per-engine selections, between-request control, graph/cache invalidation and calibration bound to effective manifests. Retain compile-time constants and compile-out overrides in normal builds. Startup reserves both attention launch workspaces; load-time weight layouts remain fixed. Speed parity, logits parity and lifecycle validation pending.
+
+- Add current-reader CPU_INT8_K_MAJOR behind a default-off switch, with live control dispatch once when constructing monomorphised persistent worker teams. Cache separate worker pools/calibration for each effective set; no per-dot runtime branch. Model speed and quality qualification pending.

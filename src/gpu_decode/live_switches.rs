@@ -45,7 +45,7 @@ impl GpuDecodeStore {
                 else {
                     // New selection gets its own calibration, never an arm's cached costs.
                     let attempt=(|| -> Result<(),String> {
-                        self.calibrate_live_cpu(&mut g)?;
+                        self.calibrate_live_cpu(&mut g,next)?;
                         g.ksplit_autotune_complete=false;g.int4_n32_autotune_complete=false;
                         g.ksplit_autotune.clear();g.shared_w2_ksplit_autotune.clear();
                         g.int4_w13_n32_autotune.clear();g.int4_w2_n32_autotune.clear();
@@ -73,7 +73,7 @@ impl GpuDecodeStore {
         self.graph=Some(g);
         result
     }
-    fn calibrate_live_cpu(&self,g:&mut GpuDecodeGraph)->Result<(),String> {
+    fn calibrate_live_cpu(&self,g:&mut GpuDecodeGraph,next:crate::optimisations::Selection)->Result<(),String> {
         let mut sources=Vec::new();
         for (layer,moe) in g.moe_layers.iter().enumerate().filter_map(|(i,m)|m.as_ref().map(|m|(i,m))) {
             if moe.experts.is_empty(){continue;}
@@ -88,7 +88,7 @@ impl GpuDecodeStore {
                 group_size:g.group_size,swiglu_limit:moe.swiglu_limit,activation_alpha:1.,deepseek_clamp:moe.deepseek_v4_activation});
         }
         let count=if crate::optimisations::CPU_MORE_WORKERS && crate::cpu_tail::compiled_lane_cpu_ids(3,4).is_ok(){4}else{2};
-        let mut workers=(0..count).map(|i|CpuTailRuntime::new_compiled(g.hidden_size,g.moe_intermediate_size,g.group_size,i,count)).collect::<Result<Vec<_>,_>>()?;
+        let mut workers=(0..count).map(|i|CpuTailRuntime::new_live_compiled(g.hidden_size,g.moe_intermediate_size,g.group_size,i,count,next.CPU_INT8_K_MAJOR())).collect::<Result<Vec<_>,_>>()?;
         let plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,g.max_experts_per_tok,g.streamed_cold.as_ref())?;
         g.cpu_tail_planned_counts=plan.counts;g.cpu_tail_calibration=Some(plan.receipt);g.cpu_tail_workers=workers;
         Ok(())
