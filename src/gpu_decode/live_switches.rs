@@ -55,6 +55,7 @@ impl GpuDecodeStore {
                 h.soft_ranking[slot]=canonical[slot];repacked+=1;
             }
             h.soft_ranking=canonical.clone();
+            h.soft_pressure_cap_chunks=None;
             let ranking_hash=format!("{:x}",Sha256::digest(serde_json::to_vec(&canonical).map_err(|e|e.to_string())?));
             g.prompt_hcs_counts.clear();
             (repacked,before-h.soft_chunks_loaded,ranking_hash)
