@@ -72943,13 +72943,17 @@ impl GpuDecodeStore {
                     graph.t_moe_apfl += t.elapsed().as_secs_f64();
                 }
             }
-            // Keep resident payloads at their original precision. Compact cold
-            // staging must never become a resident source through promotion.
+            // Original-host promotion preserves resident precision. The fitted
+            // device-copy alternative is an explicit approximation and only
+            // supports source-backed reloads, never inconsistent host mirrors.
             let compact_source = (crate::optimisations::STREAMED_COLD_INT3
                 || crate::optimisations::STREAMED_COLD_NF3) && graph.streamed_cold.is_some();
-            let original_host_promotions = graph.live_switches.STREAMED_COLD_PROMOTIONS()
-                && compact_source;
-            if compact_source && !original_host_promotions { dynamic_promotions.clear(); }
+            let fitted_payload=graph.live_switches.STREAMED_COLD_PROMOTION_FITTED_PAYLOAD();
+            let source_backed=graph.hcs.as_ref().is_some_and(|h|h.soft_host_mode==HcsSoftHostMode::Source);
+            let allow_compact_promotions=graph.live_switches.STREAMED_COLD_PROMOTIONS()
+                && compact_source && (!fitted_payload || source_backed);
+            let original_host_promotions=allow_compact_promotions && !fitted_payload;
+            if compact_source && !allow_compact_promotions { dynamic_promotions.clear(); }
             if !dynamic_promotions.is_empty() {
                 let mut promoted = 0usize;
                 if let Some(ref mut hcs) = graph.hcs {

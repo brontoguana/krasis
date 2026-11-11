@@ -156,8 +156,13 @@ impl GpuDecodeStore {
                 || next.COLD_EXPERT_PRUNING_FOUR()!=previous.COLD_EXPERT_PRUNING_FOUR() {
                 g.adaptive_cold_drop=AdaptiveColdDropRuntime::from_selection(next);
             }
+            let promotion_payload=if next.STREAMED_COLD_PROMOTIONS() && g.streamed_cold.is_some() {
+                if next.STREAMED_COLD_PROMOTION_FITTED_PAYLOAD() {
+                    if g.hcs.as_ref().is_some_and(|h|h.soft_host_mode==HcsSoftHostMode::Source) {"fitted_device"}else{"disabled_host_mode"}
+                }else{"original_host"}
+            }else{"disabled"};
             Ok(serde_json::json!({"switch_set_sha256":hash,"optimisations":crate::live_switches::manifest(next),
-                "calibration_reused":reused,"calibration_seconds":start.elapsed().as_secs_f64(),"residency_reset":residency_reset,
+                "compact_promotion_payload":promotion_payload,"calibration_reused":reused,"calibration_seconds":start.elapsed().as_secs_f64(),"residency_reset":residency_reset,
                 "cpu_calibration":g.cpu_tail_calibration,"actual_cpu_counts":g.cpu_tail_planned_counts,"shared_w13":format!("{:?}",g.ksplit_autotune),
                 "shared_w2":format!("{:?}",g.shared_w2_ksplit_autotune)}))
         })();
