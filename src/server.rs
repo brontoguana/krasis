@@ -11468,7 +11468,10 @@ fn handle_live_switches(stream:&mut TcpStream,body:&str,state:&mut ServerState) 
         state.session_cache.prefill_samples.clear();state.session_cache.restore_samples.clear();
         let store=unsafe {&mut *(state.gpu_store_addr as *mut GpuDecodeStore)};
         let request:serde_json::Value=serde_json::from_str(body).map_err(|e|e.to_string())?;
-        let receipt=store.switch_live(next,request.get("execution_plan"))?;
+        let reset_residency=match request.get("reset_residency") {
+            Some(v)=>v.as_bool().ok_or("reset_residency must be a Boolean")?,None=>false,
+        };
+        let receipt=store.switch_live(next,request.get("execution_plan"),reset_residency)?;
         engine.live_switches=next;
         crate::live_switches::set_active(next);
         Ok(receipt)
