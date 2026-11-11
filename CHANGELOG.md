@@ -13597,3 +13597,5 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Request a compact-tier routed-source hash only for a selected four-bit cache with its matching companion artifact present. Preserve full original-source hashing/verification for the active GLM tier and explicit expert-compression sidecars. Other models without compact artifacts retain their previous load path; missing or concurrently added compact artifacts still fail closed at runtime. No inference arithmetic changes.
 
 - Preserve normal GLM startup when its optional compact companion has not been prepared: retain original weights and explicitly report inactive compact staging. Existing but invalid companions still fail integrity validation. Benchmark launchers must require actual compact activation before scoring that treatment. Automatic companion preparation remains outside this development qualification.
+
+- Apply the same availability fallback to supported GLM loads without a persistent cache identity; keep non-cache modes usable. Clarify that existing companion integrity failures remain fatal and benchmark activation is mandatory.

@@ -102790,7 +102790,10 @@ impl GpuDecodeStore {
             || self.draft.is_some() || self.dspark.is_some() {
             eprintln!("STREAMED COLD INT3 fallback: unsupported execution mode"); return Ok(());
         }
-        let identity=store.gpu_cache_identity.as_ref().ok_or_else(||pyo3::exceptions::PyRuntimeError::new_err("cold tier requires source identity"))?;
+        let Some(identity)=store.gpu_cache_identity.as_ref() else {
+            eprintln!("STREAMED COLD inactive: no cache identity; retaining original weights");
+            return Ok(());
+        };
         let mut companion=identity.path.as_os_str().to_os_string();
         companion.push(if crate::optimisations::STREAMED_COLD_NF3 {".coldnf3"}else{".cold3"});
         if !std::path::Path::new(&companion).exists() {
@@ -102816,8 +102819,8 @@ impl GpuDecodeStore {
             let function=unsafe{function.cu_function()};
             crate::streamed_cold::Runtime::new(&self.device,identity,geometry.ok_or("cold tier has no experts")?,ordinals,count,function,crate::optimisations::STREAMED_COLD_NF3)
         })();
-        // An explicitly enabled experimental treatment must fail visibly when
-        // its artifact is missing; never mislabel fallback as a measured tier.
+        // Existing companions must pass integrity checks. Availability
+        // fallbacks above are explicit; benchmarks require actual activation.
         graph.streamed_cold=Some(attempt.map_err(pyo3::exceptions::PyRuntimeError::new_err)?);
         Ok(())
     }
