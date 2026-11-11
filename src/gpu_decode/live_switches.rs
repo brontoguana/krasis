@@ -36,6 +36,7 @@ impl GpuDecodeStore {
         let hash=crate::live_switches::hash(next);
         let start=std::time::Instant::now();
         let result=(|| -> Result<serde_json::Value,String> {
+            if execution_plan.is_some() && hash!=previous_hash {return Err("select the switch set before replaying its execution decisions".into());}
             if g.glm5_hc_mean_mult.is_none() || g.cpu_tail_calibration.is_none() {
                 return Err("live harness requires the calibrated supported GLM profile".into());
             }
