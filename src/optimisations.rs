@@ -32,7 +32,7 @@ macro_rules! registry {
     }
 }
 registry! {
-    CPU_INT8_K_MAJOR, false, "approximation", "INT8 activation dots in contiguous CPU cold reader bands", &["CPU_K_MAJOR_READER", "CPU_COLD_LANE"];
+    CPU_INT8_K_MAJOR, true, "approximation", "INT8 activation dots in contiguous CPU cold reader bands", &["CPU_K_MAJOR_READER", "CPU_COLD_LANE"];
     SHARED_EXPERT_COPY_OVERLAP, true, "exact", "Overlap shared expert projections with demand transfers", &[];
     COLD_EXPERT_PRUNING_FIVE, true, "approximation", "Protect five of eight routes with a 25 percent cold-mass ceiling", &["COLD_EXPERT_PRUNING_20"];
     STREAMED_COLD_NF3, true, "approximation", "Layer-fitted three-bit codebooks for streamed cold experts", &[];

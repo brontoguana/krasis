@@ -13612,3 +13612,7 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 ## 2026-11-11 — adopt shared-expert copy overlap
 - Enable SHARED_EXPERT_COPY_OVERLAP as a cumulative development default after interleaved3K85.503→77.870,16K86.526→78.777,65K89.324→80.390ms/token; all paired samples favour it. Preserve existing capability/mode fallbacks and final reduction ordering.
 - Fast tier passes:KL0.006101,96.875%greedy agreement; JSON1/12 unchanged,retrieval12/12 unchanged,coding2/12→3/12. The candidate planner admits one additional CPU expert at queue depth six, so timings describe the whole build. Batched normal-build confirmation remains pending; no ADQ or release.
+
+## 2026-11-11 — adopt INT8 CPU expert dots
+- Enable CPU_INT8_K_MAJOR after interleaved3K78.915→75.958,16K80.025→76.402,65K82.581→78.374ms/token; all paired samples favour it. Preserve the existing supported Marlin/1024-output-band guard and unchanged readers for other formats/band sizes. Native compile-time dispatch and diagnostic per-call monomorphised workers retain no per-dot flag read.
+- Fast tier passes:KL0.009119,97.396%greedy agreement;JSON1/12 unchanged,retrieval12/12 unchanged,coding1/12→2/12. Whole-build planner selects2rather than3CPUexperts at depth five, increasing inferred expert demand0.75070→0.79923GB/forward despite5.1%lower decode time. Keep the gain and target payload reduction next. Batched normal-build confirmation and full ADQ remain pending; no release.
