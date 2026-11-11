@@ -177,8 +177,8 @@ impl AdaptiveColdDropRuntime {
 
     pub(crate) fn from_selection(selection: crate::optimisations::Selection) -> Self {
         Self { stats: Some(ShadowPolicyStats::new(ColdDropPolicy {
-            protect_rank_fraction: if selection.COLD_EXPERT_PRUNING_FIVE() {0.625}else{0.75},
-            max_mass_fraction: if selection.COLD_EXPERT_PRUNING_FIVE() {0.25}else if selection.COLD_EXPERT_PRUNING_20() {0.20} else if selection.COLD_EXPERT_PRUNING_15() {0.15} else {0.10},
+            protect_rank_fraction: if selection.COLD_EXPERT_PRUNING_FOUR() {0.5}else if selection.COLD_EXPERT_PRUNING_FIVE() {0.625}else{0.75},
+            max_mass_fraction: if selection.COLD_EXPERT_PRUNING_FOUR() {0.30}else if selection.COLD_EXPERT_PRUNING_FIVE() {0.25}else if selection.COLD_EXPERT_PRUNING_20() {0.20} else if selection.COLD_EXPERT_PRUNING_15() {0.15} else {0.10},
         })) }
     }
 
@@ -570,7 +570,11 @@ mod compiled_policy_tests {
             assert!(uniform.positions.is_empty());
         }
         let plan = policy.plan_and_record(&[0.5,0.2,0.1,0.08,0.05,0.03,0.025,0.015], &[100; 8]);
-        if crate::optimisations::COLD_EXPERT_PRUNING_FIVE {
+        if crate::optimisations::COLD_EXPERT_PRUNING_FOUR {
+            assert_eq!(plan.positions, vec![4,5,6,7]);
+            assert_eq!(plan.dropped_bytes,400);
+            assert!((plan.dropped_mass_fraction-0.12).abs()<1e-7);
+        } else if crate::optimisations::COLD_EXPERT_PRUNING_FIVE {
             assert_eq!(plan.positions, vec![5,6,7]);
             assert_eq!(plan.dropped_bytes,300);
             assert!((plan.dropped_mass_fraction-0.07).abs()<1e-7);
@@ -583,7 +587,9 @@ mod compiled_policy_tests {
         let boundary = policy.plan_and_record(
             &[0.20,0.16,0.13,0.12,0.11,0.10,0.10,0.08], &[100; 8],
         );
-        assert_eq!(boundary.positions, if crate::optimisations::COLD_EXPERT_PRUNING_20 {
+        assert_eq!(boundary.positions, if crate::optimisations::COLD_EXPERT_PRUNING_FOUR {
+            vec![5,6,7]
+        } else if crate::optimisations::COLD_EXPERT_PRUNING_20 {
             vec![6, 7]
         } else { vec![7] });
     }

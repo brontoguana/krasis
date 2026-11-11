@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 // Load-time layouts remain frozen in this bounded harness.
 pub(crate) const SWITCHABLE: &[&str] = &[
     "TENSOR_DECODE_ATTENTION", "TENSOR_ABSORPTION", "VALUE_REASSOCIATION",
-    "STREAMED_COLD_PROMOTIONS", "CPU_INT8_K_MAJOR", "SHARED_EXPERT_COPY_OVERLAP", "COLD_EXPERT_PRUNING_FIVE",
+    "COLD_EXPERT_PRUNING_FOUR", "STREAMED_COLD_PROMOTIONS", "CPU_INT8_K_MAJOR", "SHARED_EXPERT_COPY_OVERLAP", "COLD_EXPERT_PRUNING_FIVE",
 ];
 
 pub(crate) fn manifest(selection: Selection) -> serde_json::Value {

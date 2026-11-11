@@ -13616,3 +13616,7 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Restack the unqualified promotion/live-format prototype on current cumulative defaults and capability/teardown guards. Request diagnostic compact identity only when its companion exists; leave normal unrelated cache loading unchanged. Native build and serving qualification remain pending.
 
 - Narrow the unqualified follow-up to original-precision promotions only; keep the already adopted fitted representation fixed at load time. Avoid adding unneeded format-switch ownership/calibration branches to this experiment. Existing resident and CPU weights provide the promotion source; no extra representation is allocated.
+
+## 2026-11-11 — prepare bounded four-route cold pruning
+- Add default-off COLD_EXPERT_PRUNING_FOUR, requiring the existing five-route policy. Protect four leading routes and permit at most30%of routed mass to be omitted from cold experts; retain resident experts, no renormalisation, nonfinite guards and existing unsupported-mode fallbacks. Select policy once between requests in diagnostic builds.
+- Extend existing policy guard assertions for the new parameter set. Serving speed/quality and native compilation are pending; no adoption or saving claimed.
