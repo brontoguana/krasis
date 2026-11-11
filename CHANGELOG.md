@@ -13592,3 +13592,5 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 
 ## 2026-11-11 — original-precision promotions with fitted staging
 - Prepare default-off STREAMED_COLD_PROMOTIONS on the cumulative fitted/pruning stack. Read original host payloads for resident upgrades, retain fitted demand staging, and count the extra promotion traffic. Live test dispatch is supported without additional loaded representations. End-to-end speed, fast tier and lifecycle qualification pending; no gain claimed.
+
+- Prepare live fitted/original selection using representations already required for original CPU/resident weights and fitted demand staging. No extra model backing is loaded. Change transfer dispatch and queue calibration together and invalidate cached model state; normal builds retain compile-out paths. This extension is not yet compiled or measured. Host repacking still requires a separate loaded layout.

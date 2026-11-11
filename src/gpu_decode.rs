@@ -70646,7 +70646,7 @@ impl GpuDecodeStore {
 
                             // Queue compressed-copy/decode or ordinary DMA with no
                             // per-expert host synchronization.
-                            if let Some(tier) = graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3) {
+                            if let Some(tier) = graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3 || graph.live_switches.STREAMED_COLD_NF3()) {
                                 let bytes=tier.enqueue(expert.w13_packed_ptr,base,copy_stream)? as u64;
                                 graph.dma_bytes_total+=bytes; graph.dma_call_count+=1;
                                 boundary_dma_bytes+=bytes; boundary_dma_calls+=1;
@@ -71507,7 +71507,7 @@ impl GpuDecodeStore {
                                 let submitted_at =
                                     (graph.timing_enabled || graph.cpu_tail_host_timing_enabled).then(std::time::Instant::now);
                                 let base = graph_buf_base[candidate_index];
-                                let compact_tier=graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3);
+                                let compact_tier=graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3 || graph.live_switches.STREAMED_COLD_NF3());
                                 let dma_bytes = if let Some(tier)=compact_tier {
                                     tier.payload_bytes() as u64
                                 } else if expert.contiguous_ptr != 0 {
@@ -71607,7 +71607,7 @@ impl GpuDecodeStore {
                             continue;
                         }
 
-                        if let Some(tier) = graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3) {
+                        if let Some(tier) = graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3 || graph.live_switches.STREAMED_COLD_NF3()) {
                             let bytes=tier.enqueue(expert.w13_packed_ptr,base,copy_stream)? as u64;
                             graph.dma_bytes_total+=bytes; graph.dma_call_count+=1;
                             boundary_dma_bytes+=bytes; boundary_dma_calls+=1;
@@ -72436,7 +72436,7 @@ impl GpuDecodeStore {
                                 )
                             })?;
                         unsafe {
-                            if let Some(tier)=graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3) {
+                            if let Some(tier)=graph.streamed_cold.as_ref().filter(|_| crate::optimisations::STREAMED_COLD_INT3 || graph.live_switches.STREAMED_COLD_NF3()) {
                                 tier.enqueue(expert.w13_packed_ptr,pending.staging_base,copy_stream)?;
                             } else if expert.contiguous_ptr != 0 {
                                 let copy_err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
@@ -72944,7 +72944,7 @@ impl GpuDecodeStore {
             // Keep resident payloads at their original precision. Compact cold
             // staging must never become a resident source through promotion.
             let compact_source = (crate::optimisations::STREAMED_COLD_INT3
-                || crate::optimisations::STREAMED_COLD_NF3) && graph.streamed_cold.is_some();
+                || graph.live_switches.STREAMED_COLD_NF3()) && graph.streamed_cold.is_some();
             let original_host_promotions = graph.live_switches.STREAMED_COLD_PROMOTIONS()
                 && compact_source;
             if compact_source && !original_host_promotions { dynamic_promotions.clear(); }
@@ -102805,7 +102805,7 @@ impl GpuDecodeStore {
     }
 
     fn setup_streamed_cold(&mut self, store: &crate::weights::WeightStore) -> PyResult<()> {
-        if !crate::optimisations::STREAMED_COLD_INT3 && !crate::optimisations::STREAMED_COLD_NF3 { return Ok(()); }
+        if !cfg!(feature = "live-switches") && !crate::optimisations::STREAMED_COLD_INT3 && !crate::optimisations::STREAMED_COLD_NF3 { return Ok(()); }
         let graph=self.graph.as_mut().ok_or_else(||pyo3::exceptions::PyRuntimeError::new_err("cold tier requires graph"))?;
         if graph.glm5_hc_mean_mult.is_none() || graph.expert_bits!=4
             || graph.synthetic_repack.is_some() || graph.expert_compression.is_some()
@@ -102831,7 +102831,7 @@ impl GpuDecodeStore {
             let count=store.config.num_moe_layers()*store.config.n_routed_experts;
             let function=self.device.get_func(MODULE_NAME,"streamed_cold_int3_expand").ok_or("cold tier expansion kernel absent")?;
             let function=unsafe{function.cu_function()};
-            crate::streamed_cold::Runtime::new(&self.device,identity,geometry.ok_or("cold tier has no experts")?,ordinals,count,function,crate::optimisations::STREAMED_COLD_NF3)
+            crate::streamed_cold::Runtime::new(&self.device,identity,geometry.ok_or("cold tier has no experts")?,ordinals,count,function,cfg!(feature = "live-switches") || crate::optimisations::STREAMED_COLD_NF3)
         })();
         // An explicitly enabled experimental treatment must fail visibly when
         // its artifact is missing; never mislabel fallback as a measured tier.
@@ -104108,7 +104108,7 @@ impl GpuDecodeStore {
                         workers.push(CpuTailRuntime::new_compiled(graph.hidden_size,
                             graph.moe_intermediate_size,graph.group_size,index,worker_count)?);
                     }
-                    let mut plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,graph.max_experts_per_tok,graph.streamed_cold.as_ref())?;
+                    let mut plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,graph.max_experts_per_tok,graph.streamed_cold.as_ref().filter(|_| graph.live_switches.STREAMED_COLD_NF3() || crate::optimisations::STREAMED_COLD_INT3))?;
                     let affinities=(0..worker_count).map(|i|crate::cpu_tail::compiled_lane_cpu_ids(i,worker_count)).collect::<Result<Vec<_>,_>>()?;
                     plan.receipt["cpu_ids"]=serde_json::json!(affinities);
                     plan.receipt["optimisations"]=serde_json::from_str(crate::optimisations::manifest()).map_err(|e|e.to_string())?;
