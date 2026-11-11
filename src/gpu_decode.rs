@@ -102790,6 +102790,13 @@ impl GpuDecodeStore {
             || self.draft.is_some() || self.dspark.is_some() {
             eprintln!("STREAMED COLD INT3 fallback: unsupported execution mode"); return Ok(());
         }
+        let identity=store.gpu_cache_identity.as_ref().ok_or_else(||pyo3::exceptions::PyRuntimeError::new_err("cold tier requires source identity"))?;
+        let mut companion=identity.path.as_os_str().to_os_string();
+        companion.push(if crate::optimisations::STREAMED_COLD_NF3 {".coldnf3"}else{".cold3"});
+        if !std::path::Path::new(&companion).exists() {
+            eprintln!("STREAMED COLD inactive: compact companion is absent; retaining original weights");
+            return Ok(());
+        }
         let attempt=(||->Result<_,String>{
             let identity=store.gpu_cache_identity.as_ref().ok_or("cold tier requires source identity")?;
             let mut ordinals=std::collections::HashMap::new();let mut geometry=None;
