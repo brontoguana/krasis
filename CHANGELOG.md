@@ -13620,3 +13620,5 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 ## 2026-11-11 — prepare bounded four-route cold pruning
 - Add default-off COLD_EXPERT_PRUNING_FOUR, requiring the existing five-route policy. Protect four leading routes and permit at most30%of routed mass to be omitted from cold experts; retain resident experts, no renormalisation, nonfinite guards and existing unsupported-mode fallbacks. Select policy once between requests in diagnostic builds.
 - Extend existing policy guard assertions for the new parameter set. Serving speed/quality and native compilation are pending; no adoption or saving claimed.
+
+- Emit a request-end expert-DMA counter in diagnostic live builds, including explicitly counted original-host promotion upgrades. Preserve zero normal-build logging overhead and all hot kernels. Profile totals remain separate because these counters exclude activation/metadata and out-of-boundary reload traffic.

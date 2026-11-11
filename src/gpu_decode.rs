@@ -92906,6 +92906,9 @@ impl GpuDecodeStore {
                         .collect::<Vec<_>>()
                         .join(",")
                 };
+                #[cfg(feature = "live-switches")]
+                eprintln!("LIVE EXPERT DMA SUMMARY generated={} bytes={} calls={}",
+                    generated, graph.dma_bytes_total, graph.dma_call_count);
                 // eprintln (not log::) so the line reaches captured run logs.
                 eprintln!(
                     "CPU TAIL SUMMARY generated={} attempts={} wins={} win_rate_pct={:.6} deadline_misses={} busy_skips={} short_queue_skips={} depth_admission_skips={} errors={} saved_weight_bytes={} saved_mib_per_token={:.6} output_bytes={} input_d2h_ms_per_token={:.6} worker_elapsed_ms_per_token={:.6} worker_elapsed_ms_per_attempt={:.6} race_wait_ms_per_token={:.6} win_compute_ms_avg={:.6} miss_compute_ms_avg={:.6} deadline_ms_avg={:.6} win_total_ms_avg={:.6} dispatch_lag_ms_avg={:.6} attempts_by_depth_2_to_9plus={} wins_by_depth_2_to_9plus={} marlin_attempts={} marlin_wins={} marlin_win_rate_pct={:.6} marlin_results={} marlin_worker_ms_per_attempt={:.6} marlin_saved_weight_bytes={} marlin_saved_mib_per_token={:.6} transposed_attempts={} transposed_wins={} transposed_win_rate_pct={:.6} transposed_coverage_pct={:.6} transposed_results={} transposed_worker_ms_per_attempt={:.6} transposed_saved_weight_bytes={} transposed_saved_mib_per_token={:.6} tier_experts={} tier_selected_residents={} tier_bytes={} tier_gib={:.6} tier_conversion_s={:.6} stage_results_by_depth_2_to_9plus={} activation_d2h_ms_by_depth_2_to_9plus={} submit_to_pickup_ms_by_depth_2_to_9plus={} pickup_to_worker_start_ms_by_depth_2_to_9plus={} claim_to_worker_start_ms_by_depth_2_to_9plus={} kernel_compute_ms_by_depth_2_to_9plus={} compute_to_result_visible_ms_by_depth_2_to_9plus={} cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate",
