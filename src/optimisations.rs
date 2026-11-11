@@ -34,8 +34,8 @@ macro_rules! registry {
 registry! {
     CPU_INT8_DEPTH5_THREE, false, "approximation", "Try a guarded third INT8 CPU expert at five-cold depth", &["CPU_INT8_K_MAJOR", "SHARED_EXPERT_COPY_OVERLAP", "CPU_FULL_QUEUE_PLANNER"];
     COLD_EXPERT_PRUNING_FOUR, false, "approximation", "Protect four routes with a 30 percent cold-mass ceiling", &["COLD_EXPERT_PRUNING_FIVE"];
-    STREAMED_COLD_PROMOTION_FITTED_PAYLOAD, false, "approximation", "Promote fitted staging by device copy in source-backed HCS", &["STREAMED_COLD_PROMOTIONS"];
-    STREAMED_COLD_PROMOTIONS, false, "approximation", "Enable residency updates while retaining fitted cold staging", &["STREAMED_COLD_NF3"];
+    STREAMED_COLD_PROMOTION_FITTED_PAYLOAD, true, "approximation", "Promote fitted staging by device copy in source-backed HCS", &["STREAMED_COLD_PROMOTIONS"];
+    STREAMED_COLD_PROMOTIONS, true, "approximation", "Enable residency updates while retaining fitted cold staging", &["STREAMED_COLD_NF3"];
     CPU_INT8_K_MAJOR, true, "approximation", "INT8 activation dots in contiguous CPU cold reader bands", &["CPU_K_MAJOR_READER", "CPU_COLD_LANE"];
     SHARED_EXPERT_COPY_OVERLAP, true, "exact", "Overlap shared expert projections with demand transfers", &[];
     COLD_EXPERT_PRUNING_FIVE, true, "approximation", "Protect five of eight routes with a 25 percent cold-mass ceiling", &["COLD_EXPERT_PRUNING_20"];
