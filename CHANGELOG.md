@@ -2,6 +2,21 @@
 
 - Add default-off COLD_EXPERT_PRUNING_FIVE, refining the accepted cold-only policy to protect five of eight leading routes and cap dropped mass at 25% per layer. Resident routes remain protected by the existing cold-only test.
 - Keep the accepted six-route/20% fallback unchanged; extend the existing policy boundary test to the new rank/mass configuration. Qualify end-to-end decode and the unchanged fast tier before adoption.
+## 2026-11-10 — Prepare cumulative cold-tier comparison
+
+- Include independently switched five-route pruning in the fitted cold-tier source for testing on the cumulative stack if pruning qualifies. Both pending switches remain default-off; no quality or serving claim.
+
+## 2026-11-10 — Prepare layer-fitted compact cold codebooks
+
+- Add default-off STREAMED_COLD_NF3 as an alternative to the uniform three-bit cold tier. Keep the same three-bit payload sizes, unchanged original resident/CPU weights and frozen promotion policy; fit eight original integer levels per layer while preserving zero.
+- Bind codebooks into the artifact checksum and expand them with a small integer lookup. This targets the observed held-out regression without spending more transfer bytes. No adoption or model-quality verdict yet.
+
+## 2026-11-10 — Screen compact streamed cold experts
+
+- Add default-off STREAMED_COLD_INT3 and an offline builder from existing Marlin weights. Round packed cold codes onto an even three-bit lattice, keep BF16 scales, original resident experts and original CPU sources unchanged, and expand directly into existing decode staging with one CUDA kernel.
+- Bind the artifact to exact source and compact-payload hashes. Bound writable-private pinned mappings, retain an explicit 600 MiB reserve before scratch allocation, join CUDA work before teardown, and recalibrate CPU admission with the actual compact copy/expand pipeline.
+- Count CPU-avoided transfer bytes using the actual compact payload and retain compact fallback copies. Initialise the staging buffer exclusively on its owning copy stream; stop teardown on context/completion failure before releasing pinned mappings.
+- Freeze decode promotions while the tier is active to prevent approximate staging from replacing original resident weights. Include the lost promotion benefit in normal serving comparisons; unsupported execution modes use the established path. No adoption or quality verdict yet.
 
 ## 2026-11-10 — Adopt the native CPU cold lane on the cumulative development stack
 

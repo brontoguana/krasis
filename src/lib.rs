@@ -8,6 +8,7 @@ pub mod checkpoint_identity;
 pub mod cpu_tail;
 pub(crate) mod cpu_cold_lane;
 pub(crate) mod cpu_cold_plan;
+pub(crate) mod streamed_cold;
 pub mod cpu_tail_calibrate;
 pub mod decode;
 pub mod draft_model;

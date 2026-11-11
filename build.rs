@@ -318,6 +318,7 @@ fn compile_cuda_kernels() {
     let cu_src = "src/cuda/decode_kernels.cu";
     let mla_sparse_split_header = "src/cuda/mla_sparse_split.cuh";
     let expert_codec_src = "src/cuda/expert_codec_kernels.cu";
+    let streamed_cold_src = "src/cuda/streamed_cold.cuh";
     let deepseek_v4_hc_header = "src/cuda/deepseek_v4_hc.cuh";
     let deepseek_v4_attention_header = "src/cuda/deepseek_v4_attention.cuh";
     let deepseek_v4_compressor_header = "src/cuda/deepseek_v4_compressor.cuh";
@@ -327,6 +328,7 @@ fn compile_cuda_kernels() {
     // reuse a stale decode cubin.
     println!("cargo:rerun-if-changed={expert_codec_src}");
     println!("cargo:rerun-if-changed=src/cuda/kda_relay.cuh");
+    println!("cargo:rerun-if-changed={streamed_cold_src}");
     println!("cargo:rerun-if-changed={deepseek_v4_hc_header}");
     println!("cargo:rerun-if-changed={deepseek_v4_attention_header}");
     println!("cargo:rerun-if-changed={deepseek_v4_compressor_header}");
@@ -354,6 +356,7 @@ fn compile_cuda_kernels() {
             "src/cuda/mla_sparse_tensor.cuh",
             expert_codec_src,
             "src/cuda/kda_relay.cuh",
+            streamed_cold_src,
             deepseek_v4_hc_header,
             deepseek_v4_attention_header,
             deepseek_v4_compressor_header,
@@ -721,6 +724,8 @@ fn generate_optimisations() {
     assert!(disabled.is_disjoint(&enabled), "optimisation is both enabled and disabled");
     let effective: std::collections::BTreeMap<_, _> = optimisation_registry::ENTRIES.iter()
         .map(|e| (e.0, if disabled.contains(e.0) { false } else { e.1 || enabled.contains(e.0) })).collect();
+    assert!(!(effective["STREAMED_COLD_NF3"] && effective["STREAMED_COLD_INT3"]),
+        "choose one streamed cold quantizer");
     let mut json = Vec::new();
     let mut header = String::from("// Generated compile-time optimisation configuration.\n");
     for &(name, default, kind, description, requires) in optimisation_registry::ENTRIES {
