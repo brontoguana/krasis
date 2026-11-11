@@ -6108,9 +6108,22 @@ impl WeightStore {
         let (w13pb, w13sb, w2pb, w2sb) = marlin_expert_byte_sizes(config, group_size, gpu_bits);
         let per_routed_expert = w13pb + w13sb + w2pb + w2sb;
         let per_routed_layer = config.n_routed_experts * per_routed_expert;
+        // Unrelated model caches must not acquire a full routed-payload hash
+        // just because a guarded compact-tier default is enabled globally.
+        // Presence only requests verification: the original bytes are still
+        // hashed, and Runtime rejects a missing or mismatched sidecar.
+        let compact_identity_needed = gpu_bits == 4 && [
+            (crate::optimisations::STREAMED_COLD_INT3, ".cold3"),
+            (crate::optimisations::STREAMED_COLD_NF3, ".coldnf3"),
+        ].into_iter().any(|(enabled, suffix)| {
+            if !enabled {return false;}
+            let mut companion = path.as_os_str().to_os_string();
+            companion.push(suffix);
+            std::path::PathBuf::from(companion).is_file()
+        });
         let routed_expert_sha256 =
             if std::env::var_os("KRASIS_EXPERT_COMPRESSION_SIDECAR").is_some()
-                || crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3 {
+                || compact_identity_needed {
                 let routed_expert_count = total_moe_layers
                     .checked_mul(config.n_routed_experts)
                     .ok_or_else(|| "routed expert identity count overflow".to_string())?;
