@@ -13604,3 +13604,7 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Preserve accepted exact K6 attention when tensor geometry is unsupported: allocate per-layer fallback workspace and select tensor launches only for admitted rope/head/capacity shapes. The qualified GLM tensor branch is unchanged. Retain original shared execution for unqualified peer/predictor/repacking/compression modes. Candidate defaults remain off pending the running fast tier; no new speed gain claimed.
 
 - Complete diagnostic ownership teardown: join cached CPU worker pools alongside the active pool before graph buffers are released. Reject live control when the ordinary sequence-state readiness guard reports pending recovery. These control/teardown guards leave normal builds and measured hot arithmetic unchanged.
+
+## 2026-11-11 — adopt tensor/value bundle
+- Enable TENSOR_DECODE_ATTENTION, TENSOR_ABSORPTION and VALUE_REASSOCIATION as cumulative development defaults after request-interleaved paired speed gains:3K88.710→84.263,16K89.165→85.408,65K90.414→88.093ms/token; every paired sign improves. These are joint bundle measurements, not per-switch additive gains.
+- Fast tier passes:KL0.018079,94.79%greedy agreement; JSON1/12→2/12,retrieval12/12 unchanged,coding3/12→1/12; pooled netloss1. Retain explicit switches and capability fallbacks. Batched normal-build confirmation is pending; full ADQ remains deferred.
